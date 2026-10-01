@@ -30,6 +30,7 @@ import { WorkerBindingStore } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
 import { loadSupervisedToolRuntimeAt, type DaemonToolAgentSession } from "../supervised-tool-runtime.js";
 import { productionSupervisorGrantHttp } from "../cloud-http.js";
+import { ConvergencePacer, ConvergencePacerClosedError, INTERACTIVE_RESERVED_AUTHORITY_SLOTS, SERVER_AUTHORITY_CONCURRENCY } from "../convergence-pacer.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt",
@@ -4727,6 +4728,35 @@ test("new turn-control admissions are bounded per agent while recovery retries r
     assert.doesNotThrow(() => internals.admitNewTurnControl("other-agent"), "one agent cannot consume another agent's budget");
     nowMs += 60_001;
     assert.doesNotThrow(() => internals.admitNewTurnControl("agent-rate"), "the bounded window recovers without deleting lifetime tombstones");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("retirement cancels queued paced work at once instead of admitting it during the retire window", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "pace.lock"), socketPath: join(env.root, "pace.sock"),
+    manifestPath: join(env.root, "pace.sqlite"), auditPath: join(env.root, "pace-audit.jsonl"),
+    attemptsPath: join(env.root, "pace-attempts.sqlite"), attemptsRoot: join(env.root, "pace-attempts"),
+    workspaceRoot: env.root, workerBindingsPath: join(env.root, "pace-bindings.json"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, { random: () => 0 });
+  const internals = daemon as unknown as {
+    convergencePacer: ConvergencePacer;
+    handoff: { options: { beginRetirement(): void } };
+  };
+  try {
+    const holders = await Promise.all(Array.from({ length: SERVER_AUTHORITY_CONCURRENCY - INTERACTIVE_RESERVED_AUTHORITY_SLOTS },
+      (_, index) => internals.convergencePacer.acquire("authority", `holder-${index}`)));
+    const queued = internals.convergencePacer.acquire("authority", "queued-mint");
+    await new Promise((resolve) => setImmediate(resolve));
+    internals.handoff.options.beginRetirement();
+    await within(assert.rejects(queued, ConvergencePacerClosedError, "a queued mint is cancelled, not admitted"),
+      "queued work cancelled at retirement", 1_000);
+    await assert.rejects(internals.convergencePacer.acquire("launch", "late-launch"), ConvergencePacerClosedError);
+    for (const release of holders) release();
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();

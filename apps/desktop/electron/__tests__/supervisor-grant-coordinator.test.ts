@@ -5,7 +5,15 @@ import { Buffer } from "node:buffer";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SupervisorGrantCoordinator, type SupervisorGrantCoordinatorOperations } from "../main/supervisor-grant-coordinator.js";
+import {
+  GRANT_RECONCILE_CONCURRENCY,
+  GRANT_RECONCILE_SLOT_LEASE_MS,
+  GRANT_RECONCILE_START_JITTER_MS,
+  GRANT_RECONCILE_USER_RESERVED_SLOTS,
+  SupervisorGrantCoordinator,
+  type SupervisorGrantCoordinatorOperations,
+} from "../main/supervisor-grant-coordinator.js";
+import { PacedQueue } from "../../../../shared/paced-queue.mjs";
 import {
   DesktopSecureStorageUnavailableError,
   desktopSupervisorGrantInstallationId,
@@ -1353,6 +1361,203 @@ test("daemon successor rotates then persists the replacement before exact-genera
   }, async () => "room_1");
   await c.reconcileDesiredRunning();
   assert.deepEqual(replacementHarness.events.filter((event) => event.startsWith("replace") || event.startsWith("install")), ["replace:none", "install:7", "replace:7"]);
+});
+
+/**
+ * A startup sweep of running agents whose saved grants belong to an older
+ * daemon generation, so each one first rotates its grant on the server. The
+ * fake server holds every handoff request until the test answers it.
+ */
+function pacedSweepHarness(runningCount: number, stoppedCount = 0) {
+  const h = harness();
+  const running = Array.from({ length: runningCount }, (_, index) => entry(`supervised_paced_run_${String(index).padStart(2, "0")}`));
+  const stopped = Array.from({ length: stoppedCount }, (_, index) => ({
+    ...entry(`supervised_paced_stop_${String(index).padStart(2, "0")}`),
+    desiredState: "stopped" as const, observedState: "stopped" as const, providerPid: null,
+  }));
+  for (const candidate of [...running, ...stopped]) {
+    const key = `owner/${candidate.id}`;
+    h.grants.set(key, { metadata: metadata(key, `grant_${candidate.id}`), authority, token: "secret_old", entryId: candidate.id, lastInstalledDaemonGeneration: 6 });
+  }
+  const started: string[] = [];
+  const pending = new Map<string, () => void>();
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const request = (async (path: string) => {
+    const grantId = decodeURIComponent(path.split("/")[2]!);
+    const entryId = grantId.slice("grant_".length);
+    started.push(entryId);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise<void>((resolve) => pending.set(entryId, resolve));
+    inFlight -= 1;
+    return {
+      grant_id: grantId, host_id: "host_1", installation_id: "install_1", allowed_room_ids: ["room_1"],
+      allowed_agent_keys: [`owner/${entryId}`], current_generation: 2, expires_at: "2099-01-01T00:00:00.000Z",
+      supervisor_grant: "secret_successor", owner_account_id: authority.ownerAccountId, scope_key: authority.scopeKey,
+    };
+  }) as never;
+  const settle = async () => { for (let turn = 0; turn < 30; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  const until = async (condition: () => boolean, label: string) => {
+    for (let wait = 0; wait < 200 && !condition(); wait += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(condition(), label);
+  };
+  /** Answer held server requests one at a time until `work` settles. */
+  const drain = async (work: Promise<unknown>) => {
+    let done = false;
+    void work.then(() => { done = true; }, () => { done = true; });
+    for (let turn = 0; turn < 2_000 && !done; turn += 1) {
+      const next = pending.keys().next();
+      if (!next.done) { pending.get(next.value)!(); pending.delete(next.value); }
+      await new Promise((resolve) => setTimeout(resolve, next.done ? 5 : 0));
+    }
+    await work;
+  };
+  return {
+    ...h, running, stopped, started, pending, request, settle, until, drain,
+    get maxInFlight() { return maxInFlight; },
+  };
+}
+
+/** Reconciliation slots the startup sweep may use; the rest wait for a user's action. */
+const SWEEP_SLOTS = GRANT_RECONCILE_CONCURRENCY - GRANT_RECONCILE_USER_RESERVED_SLOTS;
+
+test("the startup sweep reconciles at most three agents at once, and a queued agent sends nothing until admitted", async () => {
+  const sweep = pacedSweepHarness(10);
+  sweep.daemon.list = async () => sweep.running;
+  const coordinator = new SupervisorGrantCoordinator(sweep.daemon as never, sweep.request, () => "host_1", sweep.operations, async () => "room_1");
+
+  const reconciliation = coordinator.reconcileDesiredRunning();
+  await sweep.until(() => sweep.started.length === SWEEP_SLOTS, "the first agents start at once");
+  await sweep.settle();
+  assert.equal(sweep.started.length, SWEEP_SLOTS,
+    "queued agents have sent no server request, so none of their request timeouts is running");
+  assert.equal(sweep.events.filter((event) => event.startsWith("read-key:")).length, SWEEP_SLOTS,
+    "a queued agent has not even started its reconciliation");
+  await sweep.drain(reconciliation);
+  assert.equal(GRANT_RECONCILE_CONCURRENCY, 4);
+  assert.equal(GRANT_RECONCILE_USER_RESERVED_SLOTS, 1);
+  assert.equal(sweep.maxInFlight, SWEEP_SLOTS, "the sweep leaves the reserved slot to the user");
+  assert.deepEqual([...sweep.started].sort(), sweep.running.map((candidate) => candidate.id));
+  assert.equal(sweep.events.filter((event) => event === "install:7").length, sweep.running.length);
+});
+
+test("one failed agent still lets every other queued agent get its grant, and the sweep reports the failure", async () => {
+  for (const failingCount of [1, 2]) {
+    const sweep = pacedSweepHarness(SWEEP_SLOTS + 4);
+    sweep.daemon.list = async () => sweep.running;
+    const failing = new Set(sweep.running.slice(0, failingCount).map((candidate) => candidate.id));
+    const failure = (id: string) => new Error(`grant storage rejected ${id}`);
+    const operations: SupervisorGrantCoordinatorOperations = {
+      ...sweep.operations,
+      async readEntryAgentKey(id) {
+        if (failing.has(id)) throw failure(id);
+        return sweep.operations.readEntryAgentKey(id);
+      },
+    };
+    const coordinator = new SupervisorGrantCoordinator(sweep.daemon as never, sweep.request, () => "host_1", operations, async () => "room_1");
+
+    const reconciliation = coordinator.reconcileDesiredRunning().then(() => "succeeded", (error: unknown) => error);
+    await sweep.drain(reconciliation);
+    const outcome = await reconciliation;
+    const healthy = sweep.running.filter((candidate) => !failing.has(candidate.id));
+    assert.deepEqual([...sweep.started].sort(), healthy.map((candidate) => candidate.id),
+      `${failingCount}: every other agent, queued ones included, rotated its grant`);
+    assert.equal(sweep.events.filter((event) => event === "install:7").length, healthy.length, String(failingCount));
+    if (failingCount === 1) {
+      assert.ok(outcome instanceof Error && outcome.message === `grant storage rejected ${sweep.running[0]!.id}`,
+        "a single failure is reported as itself");
+    } else {
+      assert.ok(outcome instanceof AggregateError, "several failures are reported together");
+      assert.equal(outcome.errors.length, failingCount);
+      assert.match(outcome.message, /2 saved agents could not get their room authority back/);
+    }
+    assert.equal(coordinator.getReconciliationObservation()?.status, "failed", "the failure is still observed");
+  }
+});
+
+test("a newer daemon generation drops the queued remainder of the old sweep", async () => {
+  const sweep = pacedSweepHarness(SWEEP_SLOTS + 3);
+  sweep.daemon.list = async () => sweep.running;
+  const [, finishing, , paused, ...queued] = sweep.running as DesktopSupervisorManifestEntry[];
+  const pauses: Array<() => void> = [];
+  const queue = new PacedQueue({
+    capacity: GRANT_RECONCILE_CONCURRENCY, reservedForUrgent: GRANT_RECONCILE_USER_RESERVED_SLOTS,
+    leaseMs: GRANT_RECONCILE_SLOT_LEASE_MS, startJitterMs: GRANT_RECONCILE_START_JITTER_MS, random: () => 0.5,
+    setTimeout: ((callback: () => void, delay: number) => {
+      if (delay < 1_000) { pauses.push(callback); return { unref() {} }; }
+      const timer = setTimeout(callback, delay);
+      timer.unref();
+      return timer;
+    }) as unknown as typeof setTimeout,
+  });
+  const coordinator = new SupervisorGrantCoordinator(sweep.daemon as never, sweep.request, () => "host_1", sweep.operations,
+    async () => "room_1", undefined, undefined, queue);
+
+  const reconciliation = coordinator.reconcileDesiredRunning().then(() => "settled", (error: unknown) => error);
+  await sweep.until(() => sweep.started.length === SWEEP_SLOTS, "the old sweep fills its slots");
+  sweep.pending.get(finishing!.id)!();
+  sweep.pending.delete(finishing!.id);
+  await sweep.until(() => pauses.length === 1, "the next agent is admitted and waits out its start pause");
+  // The successor daemon has nothing left for this desktop to restore.
+  sweep.daemon.ensureRunning = async () => ({ generation: 8 });
+  sweep.daemon.list = async () => [];
+  coordinator.scheduleReconciliation({ generation: 8 });
+  pauses.shift()!();
+  await sweep.drain(reconciliation);
+  assert.equal(await reconciliation, "settled", "a superseded pass reports nothing; its successor owns the outcome");
+  const readKeys = sweep.events.filter((event) => event.startsWith("read-key:"));
+  assert.equal(readKeys.includes(`read-key:${paused!.id}`), false, "admitted before the new generation, but never started");
+  for (const candidate of queued) assert.equal(readKeys.includes(`read-key:${candidate.id}`), false, candidate.id);
+  assert.equal(sweep.started.length, SWEEP_SLOTS, "no grant rotation started for the replaced daemon");
+});
+
+test("Reconnect, Restart and new agents go ahead of the startup sweep, and running agents ahead of stopped history", async () => {
+  const sweep = pacedSweepHarness(7, 2);
+  const [first, second, third, fourth, ...queuedRunning] = sweep.running;
+  const [r4, r5, r6] = queuedRunning as [DesktopSupervisorManifestEntry, DesktopSupervisorManifestEntry, DesktopSupervisorManifestEntry];
+  // Stopped history is listed first; ranking, not list order, decides who waits.
+  sweep.daemon.list = async () => [first!, second!, third!, fourth!, ...sweep.stopped, ...queuedRunning];
+  const order: string[] = [];
+  const operations: SupervisorGrantCoordinatorOperations = {
+    ...sweep.operations,
+    async readEntryAgentKey(id) { order.push(id); return sweep.operations.readEntryAgentKey(id); },
+    async readRevocationAttestation(id) { order.push(id); return null; },
+    async resolveIdentity(input) { order.push(input.entryId); return sweep.operations.resolveIdentity(input); },
+  };
+  const queue = new PacedQueue({
+    capacity: GRANT_RECONCILE_CONCURRENCY, reservedForUrgent: GRANT_RECONCILE_USER_RESERVED_SLOTS, leaseMs: GRANT_RECONCILE_SLOT_LEASE_MS,
+    startJitterMs: GRANT_RECONCILE_START_JITTER_MS, random: () => 0,
+  });
+  const coordinator = new SupervisorGrantCoordinator(sweep.daemon as never, sweep.request, () => "host_1", operations,
+    async () => "room_1", undefined, undefined, queue);
+
+  const reconciliation = coordinator.reconcileDesiredRunning();
+  await sweep.until(() => sweep.started.length === SWEEP_SLOTS, "the sweep fills every slot it may use");
+  await sweep.settle();
+  const reconnect = coordinator.reconnectEntry(r6);
+  await sweep.until(() => sweep.started.includes(r6.id), "Reconnect takes the reserved slot at once");
+  const restart = coordinator.prepareEntryForRuntimeRecovery(r4);
+  await sweep.settle();
+  const created = coordinator.createPausedAndInstall({
+    creationRequestId: "launch_new_agent_1", roomIdentifier: "room_1", displayName: "New agent", providerId: "codex",
+    charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
+  });
+  await sweep.settle();
+  assert.deepEqual(queue.snapshot().queued, [
+    r4.id, "supervised_launch_new_agent_1", // the user's Restart and new agent, behind the full cap
+    fourth!.id, r4.id, r5.id, r6.id, // queued running agents (their sweep pass is an idempotent reinstall)
+    ...sweep.stopped.map((candidate) => candidate.id),
+  ]);
+
+  await sweep.drain(Promise.all([reconciliation, reconnect, restart, created]));
+  assert.deepEqual(order.slice(SWEEP_SLOTS, SWEEP_SLOTS + 3),
+    [r6.id, r4.id, "supervised_launch_new_agent_1"],
+    "the user's Reconnect, Restart and new agent start before any queued sweep work");
+  const firstStarts = sweep.running.map((candidate) => order.indexOf(candidate.id));
+  const stoppedStarts = sweep.stopped.map((candidate) => order.indexOf(candidate.id));
+  assert.ok(Math.min(...stoppedStarts) > Math.max(...firstStarts),
+    `stopped history waits for every running agent: ${order.join(", ")}`);
 });
 
 test("daemon successor preserves delegation-ineligible rental provenance", async () => {

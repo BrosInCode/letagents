@@ -1,4 +1,4 @@
-import { publishWorkerNativeActivity } from "./cloud-http.js";
+import { NativeActivityRejectedError, publishWorkerNativeActivity } from "./cloud-http.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import type { DaemonManifestEntry } from "./types.js";
@@ -56,7 +56,7 @@ export class NativeActivityPublicationCoordinator {
     );
     if (!publication) return false;
     if (!publication.accepted) {
-      throw new Error("Native activity endpoint rejected a stale daemon observation.");
+      throw new NativeActivityRejectedError("Native activity endpoint rejected a stale daemon observation.", null);
     }
     const verifiedBinding = await this.ports.bindings.get(entryId);
     if (verifiedBinding

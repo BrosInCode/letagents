@@ -1,4 +1,4 @@
-import { SupervisorGrantRequestError } from "./cloud-http.js";
+import { NativeActivityRejectedError, SupervisorGrantRequestError } from "./cloud-http.js";
 import { redactCredentialText } from "./credential-redaction.js";
 
 export function schedulerErrorDetail(error: unknown, depth = 0): string {
@@ -13,6 +13,31 @@ export function retryableWorkerMintFailure(error: unknown): boolean {
   if (!(error instanceof SupervisorGrantRequestError)) return true;
   return error.status >= 500 || [408, 425, 429].includes(error.status);
 }
+
+/**
+ * A native-activity announcement that a later heartbeat can make instead:
+ * the request timed out, never reached the server, or the server reported
+ * itself unavailable. Everything else fails the bind as before: a server
+ * that refused the bearer or the observation, and any local failure (store,
+ * credential custody, shutdown, malformed response).
+ */
+export function deferrableNativeActivityFailure(error: unknown): boolean {
+  if (error instanceof NativeActivityRejectedError) {
+    return error.status !== null && (error.status >= 500 || [408, 425, 429].includes(error.status));
+  }
+  if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return true;
+  // fetch reports a server it could not reach this way.
+  if (error instanceof TypeError && error.message === "fetch failed") return true;
+  // A connection dropped or stalled mid-response (undici's "terminated", or
+  // a socket error) names the transport failure in its cause.
+  const code = (error as { cause?: { code?: unknown } } | null)?.cause?.code
+    ?? (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && DEFERRABLE_TRANSPORT_CODES.has(code);
+}
+
+const DEFERRABLE_TRANSPORT_CODES = new Set([
+  "UND_ERR_SOCKET", "ECONNRESET", "ETIMEDOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT",
+]);
 
 export function authoritativeRoomJoinRejection(error: unknown): boolean {
   return error instanceof SupervisorGrantRequestError

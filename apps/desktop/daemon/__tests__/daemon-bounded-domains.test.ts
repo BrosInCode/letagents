@@ -189,7 +189,11 @@ test("daemon policy and projection domains remain extracted", () => {
   // composition; retries, storage ownership and handoff policy remain extracted.
   // 1657 -> 1660: automatic permission review composition; the rules, the
   // edit and command decisions, and the server call stay in their own modules.
-  assert.ok(mainSource.split("\n").length < 1_660, "main.ts must remain a thin composition root");
+  // 1660 -> 1662: exact-binding confirmation ports; the bind latch and its
+  // retry policy stay in worker-authority-coordinator.ts.
+  // 1662 -> 1677: daemon-wide convergence pacer composition and user-action
+  // priority marks; limits, queueing and priority stay in convergence-pacer.ts.
+  assert.ok(mainSource.split("\n").length < 1_677, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

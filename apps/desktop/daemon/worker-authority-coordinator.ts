@@ -2,6 +2,7 @@ import { roomApiOrigin, isLocalRoomApi } from "../../../shared/room-api-origin.m
 import {
   hostGrantApiOrigin,
   lastRoomMessageId,
+  NativeActivityRejectedError,
   SupervisorGrantRequestError,
   type SupervisorGrantHttp,
   type CloudWorkLease,
@@ -24,6 +25,7 @@ import type { SelectDelegatedApproval } from "./execution-delegated-approval.js"
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 import type { ManifestStore } from "./manifest-store.js";
 import {
+  deferrableNativeActivityFailure,
   exhaustedTransientWorkerMint,
   retryableWorkerMintFailure,
   schedulerErrorDetail,
@@ -36,6 +38,7 @@ import type { SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
 import type { DaemonAgentConfiguration, DaemonManifestEntry, TaskWorkAttempt, Transition } from "./types.js";
 import type { WorkerBindingStore, WorkerSessionBinding } from "./worker-binding-store.js";
 import type { ConvergenceRequestKind } from "./provider-execution-coordinator.js";
+import type { ConvergencePacing } from "./convergence-pacer.js";
 import {
   WORKER_BEARER_ROTATION_LEAD_MS,
   type BoundWorkerAuthorization,
@@ -48,6 +51,14 @@ import {
 const HOST_GRANT_TTL_MS = 24 * 60 * 60 * 1_000;
 const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
 const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 40_000;
+/**
+ * The desktop gives up on a bootstrap request 45 s after sending it
+ * (BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS in electron/main/supervisor-daemon.ts)
+ * and then treats the new agent's claim as failed. Whatever the queue did,
+ * the daemon finishes or fails the bootstrap this long after receiving it,
+ * so it never commits a room boundary for a claim the desktop has abandoned.
+ */
+export const BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS = 43_000;
 // Time kept for reading the room tail after the mint, so a late mint fails
 // with its own error instead of being cancelled halfway through the tail read.
 const BOOTSTRAP_ROOM_TAIL_RESERVE_MS = 8_000;
@@ -75,6 +86,22 @@ class InvalidSupervisorGrantRenewalError extends Error {}
  * the lease and task so the owner can.
  */
 class UnprovenLeasePredecessorError extends Error {}
+
+/**
+ * When a bind announces the worker as bound: only when the workplace is not
+ * already known reachable, on every confirmation, or on every confirmation
+ * with the room's acceptance required.
+ */
+type BoundAnnouncement = "when_needed" | "repeat" | "require_accepted";
+
+/** A caller's time budget for minting, measured from the first admitted request. */
+export type WorkerMintBudget = {
+  budgetMs: number;
+  /** An absolute limit the budget never runs past, whenever admission happens. */
+  notAfterMs?: number;
+  /** Called once, when the first mint request is admitted. */
+  admitted?: () => void;
+};
 
 export type BootstrapOperation = {
   controller: AbortController;
@@ -257,6 +284,8 @@ export type WorkerAuthorityCoordinatorOptions = {
   random?: (() => number) | undefined;
   audit?: { append(transition: Transition): Promise<void> } | undefined;
   sleep?: ((delayMs: number) => Promise<void>) | undefined;
+  /** Daemon-wide pacing of server requests; each request's timeout starts once it is admitted. */
+  pacing?: ConvergencePacing | undefined;
 };
 
 export type SyncInstalledExecutionDelegationInput = {
@@ -283,6 +312,12 @@ export class WorkerAuthorityCoordinator {
   private readonly bindingRecoveryAttempts = new Map<string, {
     executionGenerationId: string;
     attempts: number;
+    /**
+     * The room refused the bound announcement during this generation's
+     * recovery. It stays set until a bind completes with an accepted
+     * announcement, so a later timeout cannot hide the refusal.
+     */
+    refused: boolean;
   }>();
 
   constructor(private readonly options: WorkerAuthorityCoordinatorOptions) {}
@@ -522,6 +557,7 @@ export class WorkerAuthorityCoordinator {
     input: BindWorkerSessionInput,
     mayPublish: () => boolean = () => true,
     authorization?: MintedWorkerAuthorization,
+    announcement: BoundAnnouncement = "when_needed",
   ): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
     await this.assertRuntimeAdmission(input.entry_id);
     const entry = await this.options.store.getEntry(input.entry_id);
@@ -615,9 +651,24 @@ export class WorkerAuthorityCoordinator {
       executionGenerationId: binding.execution_generation_id,
       updatedAt: binding.updated_at,
     });
-    if (mayPublish() && (!activation || activation.phase === "active")
-      && (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
-      await this.options.activity.publishNative(input.entry_id, "native_harness.bound", "working");
+    const publishes = mayPublish() && (!activation || activation.phase === "active");
+    if (announcement === "require_accepted" && !publishes) {
+      throw new Error("Worker binding cannot be confirmed without its bound announcement.");
+    }
+    if (publishes && (announcement !== "when_needed" || !exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
+      try {
+        const accepted = await this.pacedAuthority(input.entry_id, normalizedApiUrl,
+          () => this.options.activity.publishNative(input.entry_id, "native_harness.bound", "working"));
+        if (announcement === "require_accepted" && !accepted) throw new Error("The room did not accept the bound announcement.");
+      } catch (error) {
+        // The binding is already durable and the checks below still decide
+        // readiness. A slow or unreachable server delays only this
+        // announcement; the regular heartbeat publishes liveness instead.
+        // Failing here left the agent latched in recovery behind a binding
+        // that every retry then found exact and skipped. After the room
+        // refused the bearer, only an accepted announcement proves it again.
+        if (announcement === "require_accepted" || !deferrableNativeActivityFailure(error)) throw error;
+      }
     }
     await assertAuthorityCurrent();
     const confirmed = await this.options.bindings.get(input.entry_id);
@@ -810,6 +861,25 @@ export class WorkerAuthorityCoordinator {
     }, grant, this.options.nowMs());
   }
 
+  /**
+   * Requests to the room server share the daemon-wide pacer so a handoff
+   * cannot send every agent's mint and announcement at once. The local room
+   * runtime is not that bottleneck and is never queued.
+   */
+  private async authoritySlot(entryId: string, apiUrl: string, signal?: AbortSignal): Promise<() => void> {
+    if (!this.options.pacing || isLocalRoomApi(apiUrl)) return () => {};
+    return this.options.pacing.acquire("authority", entryId, signal);
+  }
+
+  private async pacedAuthority<T>(entryId: string, apiUrl: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const release = await this.authoritySlot(entryId, apiUrl, signal);
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   private jittered(delayMs: number): number {
     return delayMs - Math.floor((this.options.random ?? Math.random)() * delayMs * RETRY_JITTER_RATIO);
   }
@@ -831,9 +901,10 @@ export class WorkerAuthorityCoordinator {
     entry: DaemonManifestEntry,
     grant: InstalledHostGrant,
     signal?: AbortSignal,
-    deadlineAtMs?: number,
+    budget?: WorkerMintBudget,
   ): Promise<Awaited<ReturnType<SupervisorGrantHttp["createWorkerSession"]>>> {
     let lastError: unknown = null;
+    let deadlineAtMs: number | undefined;
     let attempts = 0;
     let lastRetryable = false;
     const agentInstanceId = `daemon:${entry.id}`;
@@ -845,6 +916,23 @@ export class WorkerAuthorityCoordinator {
     });
     for (let attempt = 1; attempt <= WORKER_MINT_MAX_ATTEMPTS; attempt += 1) {
       if (signal?.aborted) throw new Error("Worker credential mint was cancelled.");
+      // Time queued behind other agents is not part of this attempt, nor of
+      // a caller's budget: both start once the daemon-wide pacer admits it.
+      let releaseSlot: () => void;
+      try {
+        releaseSlot = await this.authoritySlot(entry.id, grant.apiUrl, signal);
+      } catch (error) {
+        if (signal?.aborted) throw new Error("Worker credential mint was cancelled.");
+        throw error;
+      }
+      if (signal?.aborted) {
+        releaseSlot();
+        throw new Error("Worker credential mint was cancelled.");
+      }
+      if (budget && deadlineAtMs === undefined) {
+        deadlineAtMs = Math.min(this.options.nowMs() + budget.budgetMs, budget.notAfterMs ?? Infinity);
+        budget.admitted?.();
+      }
       // A caller deadline shortens the attempt so it ends with its own error
       // rather than being cancelled mid-request. The backoff check below
       // leaves every retry at least the minimum attempt time.
@@ -884,6 +972,7 @@ export class WorkerAuthorityCoordinator {
         } finally {
           this.options.clearTimeout(timeout);
           signal?.removeEventListener("abort", abort);
+          releaseSlot();
         }
         await this.options.bindings.recordExactSupervisedWorkerSessionMint({
           agent_id: entry.id,
@@ -1028,7 +1117,7 @@ export class WorkerAuthorityCoordinator {
     entry: DaemonManifestEntry,
     signal?: AbortSignal,
     forceFresh = false,
-    deadlineAtMs?: number,
+    budget?: WorkerMintBudget,
   ): Promise<MintedWorkerAuthorization | null> {
     await this.assertRuntimeAdmission(entry.id);
     const grant = this.currentHostGrant(entry);
@@ -1049,7 +1138,7 @@ export class WorkerAuthorityCoordinator {
       agentSession: cached.agentSession,
       authority,
     };
-    const minted = await this.mintWorkerSessionWithRetry(entry, grant, signal, deadlineAtMs);
+    const minted = await this.mintWorkerSessionWithRetry(entry, grant, signal, budget);
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
       || !this.options.custody.hostGrantIsCurrent(entry.id, grant)) {
       this.revokeHostGrantIfCurrent(entry.id, grant);
@@ -1057,7 +1146,7 @@ export class WorkerAuthorityCoordinator {
     }
     const current = await this.options.store.getEntry(entry.id);
     if (!current || current.work_attempt_id !== entry.work_attempt_id || this.currentHostGrant(current) !== grant) return null;
-    await this.restoreWorkerLeaseContinuity(entry, grant, minted, signal);
+    await this.pacedAuthority(entry.id, grant.apiUrl, () => this.restoreWorkerLeaseContinuity(entry, grant, minted, signal), signal);
     this.options.custody.installWorkerAuthorization({
       entryId: entry.id,
       roomId: entry.room_id,
@@ -1180,6 +1269,57 @@ export class WorkerAuthorityCoordinator {
     }, mayPublish, session);
   }
 
+  /** True while a failed bind of this exact execution waits for its recovery retry. */
+  awaitsBindingConfirmation(entryId: string, executionGenerationId: string): boolean {
+    return this.bindingRecoveryAttempts.get(entryId)?.executionGenerationId === executionGenerationId;
+  }
+
+  /**
+   * Finish a bind whose binding was saved but whose bookkeeping never ran.
+   * The recovery retry finds that binding exact, so there is nothing to mint,
+   * but it must still clear the recovery latch; otherwise the agent stays
+   * recovering with no retry left to run. The bound announcement is repeated
+   * so a server that refuses the bearer still fails the confirmation, and it
+   * must be accepted when the recorded failure was such a refusal. Callers
+   * hold the entry's convergence lock, as for bindMintedHostWorkerSession,
+   * and pass the same publication guard.
+   */
+  async confirmExactBinding(entryId: string, mayPublish: () => boolean): Promise<void> {
+    const entry = await this.options.store.getEntry(entryId);
+    const binding = await this.options.bindings.get(entryId);
+    const credential = binding ? await this.options.bindings.credentialFor(binding) : null;
+    if (!entry?.work_attempt_id || !binding || !credential) {
+      throw new Error("Provider is running; its exact worker authority is not yet bound.");
+    }
+    let authorization: MintedWorkerAuthorization | undefined;
+    if (await this.pollingContract(entry)) {
+      const grant = this.currentHostGrant(entry);
+      const cached = grant ? this.cachedWorkerAuthorization(entry, grant) : null;
+      if (!grant || !cached || cached.agentSessionId !== binding.agent_session_id || cached.bearer !== credential) {
+        throw new Error("Provider is running; its exact worker authority is not yet bound.");
+      }
+      authorization = {
+        agentSessionId: cached.agentSessionId,
+        bearer: cached.bearer,
+        bearerId: cached.bearerId,
+        expiresAt: cached.expiresAt,
+        apiUrl: cached.apiUrl,
+        agentSession: cached.agentSession,
+        authority: { entryId: entry.id, roomId: entry.room_id, workAttemptId: entry.work_attempt_id, grant },
+      };
+    }
+    await this.bindWorkerSessionLocked({
+      entry_id: entry.id,
+      room_id: entry.room_id,
+      work_attempt_id: entry.work_attempt_id,
+      execution_generation_id: binding.execution_generation_id,
+      agent_session_id: binding.agent_session_id,
+      agent_session_token: credential,
+      credential_ref: binding.credential_ref,
+      api_url: binding.api_url,
+    }, mayPublish, authorization, this.bindingRecoveryAttempts.get(entryId)?.refused ? "require_accepted" : "repeat");
+  }
+
   async recordWorkerBindingRecoveryFailure(
     entryId: string,
     executionGenerationId: string,
@@ -1194,8 +1334,11 @@ export class WorkerAuthorityCoordinator {
       || handle.workAttemptId !== entry.work_attempt_id
       || handle.providerContinuationId !== entry.provider_ref.provider_continuation_id) return;
     const previous = this.bindingRecoveryAttempts.get(entryId);
-    const attempts = previous?.executionGenerationId === executionGenerationId ? previous.attempts + 1 : 1;
-    this.bindingRecoveryAttempts.set(entryId, { executionGenerationId, attempts });
+    const sameGeneration = previous?.executionGenerationId === executionGenerationId;
+    const attempts = sameGeneration ? previous.attempts + 1 : 1;
+    const refused = (sameGeneration && previous.refused)
+      || (error instanceof NativeActivityRejectedError && !deferrableNativeActivityFailure(error));
+    this.bindingRecoveryAttempts.set(entryId, { executionGenerationId, attempts, refused });
     const safeError = schedulerErrorDetail(error);
     const transient = exhaustedTransientWorkerMint(error)
       || (error instanceof SupervisorGrantRequestError && retryableWorkerMintFailure(error));
@@ -1405,6 +1548,7 @@ export class WorkerAuthorityCoordinator {
     input: { entry_id: string; daemon_generation: number; initial_message?: string },
     operation: BootstrapOperation,
   ): Promise<{ status: "bootstrapped" | "existing" | "stale"; last_observed_message_id: string | null }> {
+    const receivedAtMs = this.options.nowMs();
     return this.options.serializeEntry(input.entry_id, async () => {
       await this.assertRuntimeAdmission(input.entry_id);
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale", last_observed_message_id: null };
@@ -1440,14 +1584,33 @@ export class WorkerAuthorityCoordinator {
       const grant = this.currentHostGrant(entry);
       const latest = this.options.deliveryHttp.latest;
       if (!grant || !latest) throw new Error("A supervised room tail reader is required before activation.");
-      const timeout = setTimeout(() => {
-        if (operation.phase === "observing") operation.controller.abort();
-      }, BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS);
-      timeout.unref();
-      const mintDeadlineAtMs = this.options.nowMs() + BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS - BOOTSTRAP_ROOM_TAIL_RESERVE_MS;
+      // The bootstrap ends at whichever comes first: its own budget, which
+      // starts when its first server request is admitted so queue time does
+      // not spend it, or the desktop's patience, measured from receipt. A
+      // bootstrap still queued at that point gives up its place.
+      const requestDeadlineAtMs = receivedAtMs + BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS;
+      let abortAtMs = Infinity;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const abortBy = (atMs: number) => {
+        if (atMs >= abortAtMs) return;
+        abortAtMs = atMs;
+        if (timeout !== undefined) clearTimeout(timeout);
+        timeout = setTimeout(() => {
+          if (operation.phase === "observing") operation.controller.abort();
+        }, Math.max(0, atMs - this.options.nowMs()));
+        timeout.unref();
+      };
+      abortBy(requestDeadlineAtMs);
+      const startBudget = () => abortBy(this.options.nowMs() + BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS);
       let tail: { messages?: Array<Record<string, unknown>> };
       try {
-        const authorization = await this.mintHostWorkerAuthorization(entry, operation.controller.signal, false, mintDeadlineAtMs);
+        const authorization = await this.mintHostWorkerAuthorization(entry, operation.controller.signal, false, {
+          budgetMs: BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS - BOOTSTRAP_ROOM_TAIL_RESERVE_MS,
+          notAfterMs: requestDeadlineAtMs - BOOTSTRAP_ROOM_TAIL_RESERVE_MS,
+          admitted: startBudget,
+        });
+        // A cached credential needed no server request.
+        startBudget();
         if (!authorization) throw new Error("Room ingress bootstrap lost host grant authority before minting a worker credential.");
         if (operation.controller.signal.aborted) throw new Error("Room ingress bootstrap was cancelled before a room tail was observed.");
         tail = await latest({
@@ -1458,7 +1621,7 @@ export class WorkerAuthorityCoordinator {
         });
         if (operation.controller.signal.aborted) throw new Error("Room ingress bootstrap was cancelled before a room tail was observed.");
       } finally {
-        clearTimeout(timeout);
+        if (timeout !== undefined) clearTimeout(timeout);
       }
       const tailId = lastRoomMessageId(tail.messages ?? []);
       operation.phase = "committing";
