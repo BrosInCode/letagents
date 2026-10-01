@@ -13,6 +13,7 @@ import { getProjectAccessRoomId, isRepoBackedRoomId } from "../../../rooms/acces
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import { workflowEffectBroker } from "../../../workflow-effects/runtime.js";
 import type { GitHubReviewVerdict } from "../../../workflow-effects/github-review-provider.js";
+import { REVIEW_LEASE_ACTIVE_STATUSES } from "./lease-helpers.js";
 import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import type { RoomTaskRouteDeps } from "./types.js";
 
@@ -103,9 +104,12 @@ export function registerTaskReviewVerdictRoute(app: Express, deps: RoomTaskRoute
       res.status(404).json({ error: "Task not found" });
       return;
     }
-    if (task.status !== "in_review") {
+    // A task blocked by requested changes is still under review: its review
+    // lease stays active, and a re-review is published only at the exact head
+    // it names (expected_head_sha), so it cannot approve code it did not see.
+    if (!REVIEW_LEASE_ACTIVE_STATUSES.has(task.status)) {
       res.status(409).json({
-        error: `Review verdicts require an in_review task; ${task.id} is ${task.status}.`,
+        error: `Review verdicts require a task that is in review or blocked; ${task.id} is ${task.status}.`,
         code: "coordination_invalid_task_status",
       });
       return;

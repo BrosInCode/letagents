@@ -743,6 +743,13 @@
       "when": 1790808976596,
       "tag": "0105_room_agent_presence_notify",
       "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1790830000000,
+      "tag": "0106_wake_rule_retirement",
+      "breakpoints": true
     }
   ]
 }

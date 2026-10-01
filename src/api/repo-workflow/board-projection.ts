@@ -56,6 +56,12 @@ export function projectPullRequestReviewEvent(input: {
     return { newStatus: "blocked", reason: "review_changes_requested" };
   }
 
+  // An approval of the re-review settles the requested changes, so the task
+  // is back in review and its merge can move it on.
+  if (input.reviewState === "approved" && input.currentStatus === "blocked") {
+    return { newStatus: "in_review", reason: "review_approved" };
+  }
+
   return null;
 }
 

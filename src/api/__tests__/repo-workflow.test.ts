@@ -20,6 +20,7 @@ import {
   projectPullRequestReviewEvent,
   shouldAutoPromptForBoardProjection,
   synchronizeTaskWorkflowArtifactsWithPrUrl,
+  upsertTaskPullRequestArtifact,
   validateTaskWorkflowArtifactsInput,
 } from "../repo-workflow.js";
 
@@ -658,6 +659,42 @@ test("projectPullRequestReviewEvent: changes_requested transitions in_review →
 test("projectPullRequestReviewEvent: approved review does NOT transition", () => {
   const result = projectPullRequestReviewEvent({ action: "submitted", reviewState: "approved", currentStatus: "in_review" });
   assert.equal(result, null);
+});
+
+test("projectPullRequestReviewEvent: an approving re-review moves blocked → in_review; other reviews leave it blocked", () => {
+  assert.deepEqual(
+    projectPullRequestReviewEvent({ action: "submitted", reviewState: "approved", currentStatus: "blocked" }),
+    { newStatus: "in_review", reason: "review_approved" },
+  );
+  for (const reviewState of ["changes_requested", "commented"]) {
+    assert.equal(projectPullRequestReviewEvent({ action: "submitted", reviewState, currentStatus: "blocked" }), null);
+  }
+  assert.equal(shouldAutoPromptForBoardProjection({ newStatus: "in_review", reason: "review_approved" }), false);
+});
+
+test("buildTaskWorkflowRefs shows an open follow-up pull request on a shipped task", () => {
+  const artifacts = [
+    { provider: "github" as const, kind: "pull_request" as const, number: 7, url: "https://github.com/o/r/pull/7", state: "merged" },
+    { provider: "github" as const, kind: "pull_request" as const, number: 8, url: "https://github.com/o/r/pull/8", state: "open" },
+  ];
+  const labels = (status: string, followUpState = "open") => buildTaskWorkflowRefs({
+    artifacts: [artifacts[0]!, { ...artifacts[1]!, state: followUpState }],
+    prUrl: "https://github.com/o/r/pull/7",
+    status,
+  }).map((ref) => ref.label);
+  assert.deepEqual(labels("merged"), ["PR #7", "Follow-up PR #8 in review"]);
+  assert.deepEqual(labels("done"), ["PR #7", "Follow-up PR #8 in review"]);
+  assert.deepEqual(labels("done", "merged"), ["PR #7", "PR #8"], "a merged follow-up is no longer in review");
+  assert.deepEqual(labels("in_review"), ["PR #7", "PR #8"], "only a shipped task has follow-ups");
+});
+
+test("upsertTaskPullRequestArtifact adds a pull request once and keeps its state current", () => {
+  const shipped = { provider: "github" as const, kind: "pull_request" as const, number: 7, url: "https://github.com/o/r/pull/7" };
+  const followUp = { provider: "github" as const, kind: "pull_request" as const, number: 8, url: "https://github.com/o/r/pull/8", state: "open" };
+  const added = upsertTaskPullRequestArtifact([shipped], followUp);
+  assert.deepEqual(added, [shipped, followUp]);
+  assert.equal(upsertTaskPullRequestArtifact(added!, followUp), null, "an unchanged redelivery writes nothing");
+  assert.deepEqual(upsertTaskPullRequestArtifact(added!, { ...followUp, state: "merged" }), [shipped, { ...followUp, state: "merged" }]);
 });
 
 test("projectIssueEvent: issue closed transitions merged → done", () => {

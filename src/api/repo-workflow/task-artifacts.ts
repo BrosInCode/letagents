@@ -241,18 +241,52 @@ export function normalizeTaskWorkflowArtifacts(input: {
   return merged.slice(-MAX_TASK_WORKFLOW_ARTIFACTS);
 }
 
+/**
+ * An open pull request on a task that already shipped, other than the one it
+ * shipped with: a follow-up still waiting for review.
+ */
+function isOpenFollowUpPullRequest(
+  artifact: TaskWorkflowArtifact,
+  input: { prUrl?: string | null; status?: string | null }
+): boolean {
+  return (input.status === "merged" || input.status === "done")
+    && (artifact.kind === "pull_request" || artifact.kind === "merge_request")
+    && artifact.state === "open"
+    && Boolean(artifact.url)
+    && artifact.url !== input.prUrl;
+}
+
 export function buildTaskWorkflowRefs(input: {
   artifacts?: TaskWorkflowArtifact[] | null;
   prUrl?: string | null;
+  status?: string | null;
 }): TaskWorkflowRef[] {
   return normalizeTaskWorkflowArtifacts(input)
     .filter((artifact): artifact is TaskWorkflowArtifact & { url: string } => Boolean(artifact.url))
     .map((artifact) => ({
       provider: artifact.provider,
       kind: artifact.kind,
-      label: buildTaskWorkflowRefLabel(artifact),
+      label: isOpenFollowUpPullRequest(artifact, input)
+        ? `Follow-up ${buildTaskWorkflowRefLabel(artifact)} in review`
+        : buildTaskWorkflowRefLabel(artifact),
       url: artifact.url,
     }));
+}
+
+/**
+ * Record a pull request on a task without making it the task's own, or bring
+ * its state up to date. Null when nothing changed.
+ */
+export function upsertTaskPullRequestArtifact(
+  artifacts: TaskWorkflowArtifact[],
+  pullRequest: TaskWorkflowArtifact & { url: string }
+): TaskWorkflowArtifact[] | null {
+  const index = artifacts.findIndex((artifact) => artifact.url === pullRequest.url);
+  if (index === -1) return [...artifacts, pullRequest];
+  const existing = artifacts[index]!;
+  const updated = { ...existing, ...pullRequest };
+  if (JSON.stringify(updated) === JSON.stringify(existing)) return null;
+  return artifacts.map((artifact, position) => (position === index ? updated : artifact));
 }
 
 function asOptionalString(

@@ -10,6 +10,7 @@ import {
   getDueWakeRules,
   getNextWakeRuleCheckAt,
   recordWakeRuleFiredTx,
+  retireWakeRule,
   scheduleWakeRuleCheck,
   wakeRuleEvaluationDeps,
   type WakeRuleRow,
@@ -39,11 +40,13 @@ export async function deliverWakeRule(
 ): Promise<boolean> {
   const outcome = evaluation.kind === "fire" ? "fired" : "expired";
   const facts = evaluation.kind === "fire" ? evaluation.facts : {};
+  const endedReason = evaluation.kind === "fire" ? evaluation.endedReason ?? null : null;
   const notice = formatWakeNotice({
     rule: { ...rule, expires_at: new Date(rule.expires_at).toISOString() },
     outcome,
     facts,
     agentName: rule.agent_name,
+    endedReason,
   });
   try {
     await emitProjectMessage(rule.room_id, "letagents", notice.text, {
@@ -60,6 +63,7 @@ export async function deliverWakeRule(
           cursorAt: evaluation.kind === "fire" ? evaluation.cursorAt : now.toISOString(),
           baseline: evaluation.kind === "fire" ? evaluation.baseline : rule.baseline,
           now: now.toISOString(),
+          endedReason,
         });
         if (!recorded) throw new WakeRuleFenceLost();
       },
@@ -81,7 +85,9 @@ export async function checkWakeRules(
     try {
       const evaluation = await evaluateWakeRule(rule, now, deps);
       if (evaluation.kind === "wait") await scheduleWakeRuleCheck(rule, evaluation.nextCheckAt, { cursorAt: evaluation.cursorAt });
-      else await deliverWakeRule(rule, evaluation, now);
+      else if (evaluation.kind === "retire") {
+        if (await retireWakeRule(rule, evaluation.reason, now)) queueWakeRuleInvalidation(rule.room_id);
+      } else await deliverWakeRule(rule, evaluation, now);
     } catch (error) {
       console.error(`[wake rules] check failed for ${rule.id}`, error);
       // Push a failing rule back so it neither spins nor crowds out the others.

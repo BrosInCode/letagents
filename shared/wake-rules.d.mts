@@ -4,7 +4,7 @@ export type WakeRuleEvent =
   | "github.check_completed"
   | "github.review_submitted"
   | "github.pr_closed";
-export type WakeRuleStatus = "active" | "fired" | "expired" | "cancelled";
+export type WakeRuleStatus = "active" | "fired" | "expired" | "cancelled" | "retired";
 export type WakeTaskStatus =
   | "proposed" | "accepted" | "assigned" | "in_progress" | "blocked" | "in_review" | "merged" | "done" | "cancelled";
 export type WakeCheckConclusion =
@@ -55,12 +55,14 @@ export interface WakeRule extends ParsedWakeRuleInput {
   /** The room message that last woke the agent, when it fired or expired. */
   wake_message_id: string | null;
   cancelled_by: WakeRuleActor | null;
+  /** Why the rule ended before its expiry, e.g. "#7 was merged" or "task_4 is done". */
+  ended_reason: string | null;
 }
 
 export interface WakeRulePage {
   room_id: string;
   active: WakeRule[];
-  /** Rules that fired, expired or were cancelled in the last 7 days, newest first. */
+  /** Rules that fired, expired, were cancelled or retired in the last 7 days, newest first. */
   recent: WakeRule[];
 }
 
@@ -124,6 +126,8 @@ export function formatWakeNotice(input: {
   outcome: WakeNoticeOutcome;
   facts: WakeOccurrenceFacts;
   agentName: string | null | undefined;
+  /** This wake is the rule's last: what it watched is over. */
+  endedReason?: string | null;
 }): { text: string; display_text: string };
 
 export function formatWakeClock(iso: string, now?: Date, locale?: string): string;

@@ -42,6 +42,7 @@ export function toWakeRule(row: WakeRuleRow): WakeRule {
     last_fired_at: row.last_fired_at ? new Date(row.last_fired_at).toISOString() : null,
     wake_message_id: row.wake_message_number ? `msg_${row.wake_message_number}` : null,
     cancelled_by: row.cancelled_by ?? null,
+    ended_reason: row.ended_reason ?? null,
   };
 }
 
@@ -237,8 +238,11 @@ export async function recordWakeRuleFiredTx(tx: Executor, rule: WakeRuleRow, inp
   cursorAt: string;
   baseline: WakeRuleRow["baseline"];
   now: string;
+  /** Set when this wake is the rule's last because what it watched is over. */
+  endedReason?: string | null;
 }): Promise<boolean> {
-  const keepsWatching = input.outcome === "fired" && rule.repeat && Date.parse(rule.expires_at) > Date.parse(input.now);
+  const keepsWatching = input.outcome === "fired" && rule.repeat && !input.endedReason
+    && Date.parse(rule.expires_at) > Date.parse(input.now);
   const nextCheckAt = keepsWatching
     ? new Date(Math.min(Date.parse(input.now) + WAKE_RULE_LIMITS.repeatDebounceMs, Date.parse(rule.expires_at))).toISOString()
     : rule.next_check_at;
@@ -252,8 +256,23 @@ export async function recordWakeRuleFiredTx(tx: Executor, rule: WakeRuleRow, inp
       baseline: input.baseline,
       next_check_at: nextCheckAt,
       ended_at: keepsWatching ? null : input.now,
+      ended_reason: keepsWatching ? null : input.endedReason ?? null,
       updated_at: input.now,
     })
+    .where(and(eq(agent_wake_rules.id, rule.id), eq(agent_wake_rules.status, "active"), eq(agent_wake_rules.fire_count, rule.fire_count)))
+    .returning({ id: agent_wake_rules.id });
+  return updated.length === 1;
+}
+
+/**
+ * End a rule whose pull request closed or whose task finished, without waking
+ * the agent: nothing it waits for can happen any more. Fenced like a wake, so
+ * a concurrent wake wins and the next look decides again.
+ */
+export async function retireWakeRule(rule: WakeRuleRow, reason: string, now = new Date()): Promise<boolean> {
+  const nowIso = now.toISOString();
+  const updated = await db.update(agent_wake_rules)
+    .set({ status: "retired", ended_reason: reason, ended_at: nowIso, updated_at: nowIso })
     .where(and(eq(agent_wake_rules.id, rule.id), eq(agent_wake_rules.status, "active"), eq(agent_wake_rules.fire_count, rule.fire_count)))
     .returning({ id: agent_wake_rules.id });
   return updated.length === 1;
@@ -330,6 +349,19 @@ export const wakeRuleEvaluationDeps: WakeRuleEvaluationDeps = {
          AND room_id IN ${repositoryRoomIds(ruleRoomId)}
     `);
     return result.rows.map((row) => row.head_ref);
+  },
+  async pullRequestClosed(ruleRoomId, pr) {
+    // The newest close or reopen decides, in GitHub's own order.
+    const result = await db.execute<{ action: string; state: string | null }>(sql`
+      SELECT action, state FROM github_room_events
+       WHERE event_type = 'pull_request' AND github_object_id = ${String(pr)}
+         AND action IN ('closed', 'reopened')
+         AND room_id IN ${repositoryRoomIds(ruleRoomId)}
+       ORDER BY event_order_at DESC, created_at DESC, id DESC
+       LIMIT 1
+    `);
+    const latest = result.rows[0];
+    return latest?.action === "closed" ? { merged: latest.state === "merged" } : null;
   },
   async githubEventsAfter(input) {
     // CI can record hundreds of checks between looks: keep the newest. Reviews

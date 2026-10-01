@@ -13,8 +13,11 @@ import type { WakeRuleRow } from "../db/wake-rules.js";
 export const WAKE_RULE_FALLBACK_CHECK_MS = 5 * 60 * 1000;
 
 export type WakeRuleEvaluation =
-  | { kind: "fire"; facts: WakeOccurrenceFacts; cursorAt: string; baseline: WakeRuleRow["baseline"] }
+  /** `endedReason`: this wake is the rule's last, because what it watched is over. */
+  | { kind: "fire"; facts: WakeOccurrenceFacts; cursorAt: string; baseline: WakeRuleRow["baseline"]; endedReason?: string }
   | { kind: "expire" }
+  /** What the rule watched is over and nothing it waits for happened: end it without a wake. */
+  | { kind: "retire"; reason: string }
   /** `cursorAt` moves the rule past events that settled without qualifying. */
   | { kind: "wait"; nextCheckAt: string; cursorAt?: string };
 
@@ -27,6 +30,8 @@ export interface WakeRuleEvaluationDeps {
   readTaskStatus(roomId: string, taskNumber: number): Promise<string | null>;
   ownedWork(agentKey: string, ruleRoomId: string): Promise<{ branches: string[]; pullRequests: number[] }>;
   pullRequestBranches(ruleRoomId: string, pr: number): Promise<string[]>;
+  /** How the pull request ended, or null while it is open (or was reopened). */
+  pullRequestClosed(ruleRoomId: string, pr: number): Promise<{ merged: boolean } | null>;
   githubEventsAfter(input: {
     ruleRoomId: string;
     eventType: "check_run" | "pull_request_review" | "pull_request";
@@ -71,6 +76,7 @@ export async function evaluateWakeRule(
   if (nowMs < quietUntilMs && quietUntilMs < expiresMs) return { kind: "wait", nextCheckAt: iso(quietUntilMs) };
   const occurrence = await findOccurrence(rule, nowMs, deps);
   if (occurrence.kind === "fire") return occurrence;
+  if (occurrence.endedReason) return { kind: "retire", reason: occurrence.endedReason };
   if (nowMs >= expiresMs) return { kind: "expire" };
   const fallback = nowMs + WAKE_RULE_FALLBACK_CHECK_MS;
   return {
@@ -81,10 +87,27 @@ export async function evaluateWakeRule(
 }
 
 type Occurrence =
-  | { kind: "fire"; facts: WakeOccurrenceFacts; cursorAt: string; baseline: WakeRuleRow["baseline"] }
-  | { kind: "none"; nextCheckMs?: number; cursorAt?: string };
+  | { kind: "fire"; facts: WakeOccurrenceFacts; cursorAt: string; baseline: WakeRuleRow["baseline"]; endedReason?: string }
+  | { kind: "none"; nextCheckMs?: number; cursorAt?: string; endedReason?: string };
+
+/** A task that reaches one of these has nothing more to wait for. */
+const FINISHED_TASK_STATUSES = new Set(["done", "cancelled"]);
+
+function taskEndedReason(taskId: string, status: string): string {
+  return status === "done" ? `${taskId} is done` : `${taskId} was cancelled`;
+}
 
 async function findOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeRuleEvaluationDeps): Promise<Occurrence> {
+  const occurrence = await findWatchedOccurrence(rule, nowMs, deps);
+  // A rule on one pull request ends with it. A rule that waits for the close
+  // itself still gets that wake first; anything else ends quietly.
+  const pr = rule.event.startsWith("github.") ? rule.arguments.pr : undefined;
+  if (!pr || occurrence.endedReason) return occurrence;
+  const closed = await deps.pullRequestClosed(rule.room_id, pr);
+  return closed ? { ...occurrence, endedReason: `#${pr} was ${closed.merged ? "merged" : "closed"}` } : occurrence;
+}
+
+async function findWatchedOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeRuleEvaluationDeps): Promise<Occurrence> {
   const args = rule.arguments;
   switch (rule.event) {
     case "timer": {
@@ -97,12 +120,17 @@ async function findOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeRuleEv
       const taskRoomId = rule.baseline?.room_id ?? rule.room_id;
       const previous = rule.baseline?.status ?? null;
       const status = await deps.readTaskStatus(taskRoomId, Number(args.task_id!.slice("task_".length)));
-      if (!status || status === previous || (args.to && !args.to.includes(status as never))) return { kind: "none" };
+      if (!status || status === previous) return { kind: "none" };
+      // Reaching done or cancelled since the rule last looked ends it: with a
+      // wake when it waits for that status, quietly when it waits for another.
+      const endedReason = FINISHED_TASK_STATUSES.has(status) ? taskEndedReason(args.task_id!, status) : undefined;
+      if (args.to && !args.to.includes(status as never)) return { kind: "none", ...(endedReason ? { endedReason } : {}) };
       return {
         kind: "fire",
         facts: { task_id: args.task_id, status, previous_status: previous ?? "unknown" },
         cursorAt: iso(nowMs),
         baseline: { room_id: taskRoomId, status },
+        ...(endedReason ? { endedReason } : {}),
       };
     }
     case "github.check_completed":

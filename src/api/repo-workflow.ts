@@ -23,6 +23,7 @@ export {
   buildTaskWorkflowRefs,
   normalizeTaskWorkflowArtifacts,
   synchronizeTaskWorkflowArtifactsWithPrUrl,
+  upsertTaskPullRequestArtifact,
   validateTaskWorkflowArtifactsInput,
 } from "./repo-workflow/task-artifacts.js";
 export {

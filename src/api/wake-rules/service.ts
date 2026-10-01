@@ -12,6 +12,7 @@ import {
   getWakeRule,
   restoreWakeRule,
   roomHasRepository,
+  wakeRuleEvaluationDeps,
   type WakeRuleRow,
 } from "../db/wake-rules.js";
 import { db } from "../db/client.js";
@@ -50,6 +51,13 @@ export async function addWakeRuleForAgent(input: {
   }
   if (rule.event.startsWith("github.") && !(await roomHasRepository(input.roomId))) {
     throw new WakeRuleError("This room is not connected to a GitHub repository, so GitHub activity cannot wake you here.", 409);
+  }
+  // A rule on one pull request ends when it closes, so one made after that would end at its first look.
+  const closed = rule.event.startsWith("github.") && rule.arguments.pr
+    ? await wakeRuleEvaluationDeps.pullRequestClosed(input.roomId, rule.arguments.pr)
+    : null;
+  if (closed) {
+    throw new WakeRuleError(`#${rule.arguments.pr} is already ${closed.merged ? "merged" : "closed"}. There is nothing to wait for.`, 409);
   }
   const result = await createWakeRule({ roomId: input.roomId, agent: input.agent, rule, baseline });
   if (result.created) queueWakeRuleInvalidation(input.roomId);
