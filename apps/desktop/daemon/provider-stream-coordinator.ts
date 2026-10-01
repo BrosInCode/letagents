@@ -76,6 +76,8 @@ type PendingTypedOperationalActivation = {
 
 const TYPED_OPERATIONAL_RETRY_BASE_MS = 250;
 const TYPED_OPERATIONAL_RETRY_MAX_MS = 30_000;
+/** How long the read model holds a Cursor lane's readiness through one turn boundary. */
+export const CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS = 60_000;
 
 export type ProviderRecoveryDiagnostics = {
   daemon_inbox_wait_evidence_dependency: number;
@@ -246,6 +248,7 @@ export type ProviderStreamCoordinatorOptions = {
   clearInterval?: typeof clearInterval;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
+  nowMs?: () => number;
 };
 
 /**
@@ -266,6 +269,11 @@ export class ProviderStreamCoordinator {
   private readonly pendingTypedOperationalActivations = new Map<string, PendingTypedOperationalActivation>();
   private readonly typedDaemonInboxInstallations = new WeakSet<ProviderInstallationToken>();
   private readonly typedOperationalInstallations = new WeakSet<ProviderInstallationToken>();
+  /** Display-only: a Cursor lane's readiness before its current turn boundary, and when that boundary began. */
+  private readonly cursorBoundaryAdmissions = new WeakMap<ProviderListenerLease, {
+    admission: "ready" | null;
+    boundarySinceMs: number;
+  }>();
   private daemonInboxWaitEvidenceDependencies = 0;
   private readonly publishWorkerActivity: typeof publishWorkerNativeActivity;
   private readonly setHeartbeat: typeof setInterval;
@@ -308,6 +316,9 @@ export class ProviderStreamCoordinator {
     }
     if (installation.authorityMode !== "typed") return;
     if (!capture || !effects) throw new Error("Typed Cursor lifecycle settlement is unavailable.");
+    // The child is about to leave the handle before its idle checkpoint lands.
+    const lease = this.listenerLeases.get(agent.agentId);
+    if (lease?.handle === agent.handle) this.beginCursorTurnBoundary(lease, installation);
     capture.flush(installation);
     await effects.settle(agent.agentId);
   }
@@ -531,6 +542,50 @@ export class ProviderStreamCoordinator {
 
   /** Read-model witness from the same exact-birth latch that owns delivery. */
   deliveryAdmission(entry: DaemonManifestEntry): LifecycleCaptureAdmissionStatus | null {
+    return this.holdCursorTurnBoundary(entry, this.exactDeliveryAdmission(entry));
+  }
+
+  /**
+   * Cursor re-arms readiness for every per-turn child: a new birth waits for
+   * typed promotion, and a finished child leaves the handle just before its
+   * idle checkpoint lands. Delivery still gates on the exact latch above. The
+   * read model only holds the same lane's last settled readiness through that
+   * boundary, for a bounded time, instead of flashing it as unavailable.
+   */
+  private holdCursorTurnBoundary(
+    entry: DaemonManifestEntry,
+    admission: LifecycleCaptureAdmissionStatus | null,
+  ): LifecycleCaptureAdmissionStatus | null {
+    const lease = this.listenerLeases.get(entry.id);
+    if (!lease || entry.provider !== "cursor" || entry.desired_state !== "running"
+      || !["working", "idle"].includes(entry.observed_state)
+      || !this.isCurrentListenerLease(lease)
+      || lease.executionGenerationId !== entry.provider_ref?.execution_generation_id
+      || lease.handle.workAttemptId !== entry.work_attempt_id) return admission;
+    if (admission === "ready" || admission === null) return admission;
+    const boundary = this.cursorBoundaryAdmissions.get(lease);
+    return boundary && this.nowMs() - boundary.boundarySinceMs < CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS
+      ? boundary.admission
+      : admission;
+  }
+
+  /** A turn boundary starts from the readiness of the birth it replaces; an unsettled one is not held. */
+  private beginCursorTurnBoundary(lease: ProviderListenerLease, previous: ProviderInstallationToken | undefined): void {
+    if (this.cursorBoundaryAdmissions.has(lease)) return;
+    const admission = !previous ? undefined
+      : !this.typedDaemonInboxInstallations.has(previous) ? null
+      : this.typedOperationalInstallations.has(previous) ? "ready" as const
+      : undefined;
+    if (admission !== undefined) {
+      this.cursorBoundaryAdmissions.set(lease, { admission, boundarySinceMs: this.nowMs() });
+    }
+  }
+
+  private nowMs(): number {
+    return this.options.nowMs?.() ?? Date.now();
+  }
+
+  private exactDeliveryAdmission(entry: DaemonManifestEntry): LifecycleCaptureAdmissionStatus | null {
     const installation = this.latestInstallations.get(entry.id);
     if (!installation || !this.typedDaemonInboxInstallations.has(installation)) return null;
     if (!this.isCurrentInstallation(installation)
@@ -575,6 +630,7 @@ export class ProviderStreamCoordinator {
           || this.pendingTypedOperationalActivations.get(installation.entryId) !== pending
           || !await this.typedInstallationCanActivate(installation)) return false;
         this.typedOperationalInstallations.add(installation);
+        this.cursorBoundaryAdmissions.delete(lease);
         return true;
       });
       if (!admitted) {
@@ -806,6 +862,7 @@ export class ProviderStreamCoordinator {
       this.clearPendingTypedOperationalActivation(entry.id, priorPending);
     }
     if (frozenAuthorityMode === "typed" && entry.delivery_mode === "daemon_inbox") {
+      this.beginCursorTurnBoundary(lease, prior);
       this.typedDaemonInboxInstallations.add(installation);
       this.pendingTypedOperationalActivations.set(entry.id, {
         installation,
@@ -821,6 +878,9 @@ export class ProviderStreamCoordinator {
         retryTimer: null,
       });
       this.typedLifecycleAdmissionChanged(entry.id);
+    } else {
+      // The processless lane is settled again; its turn boundary is over.
+      this.cursorBoundaryAdmissions.delete(lease);
     }
     return installation;
   }

@@ -53,6 +53,7 @@ import {
   CURSOR_SESSION_ID_PATTERN,
 } from "./cursor-provider-constants.js";
 import { createCursorRuntimeCustodyReader, safeCursorTerminalErrorDetail } from "./cursor-provider-evidence.js";
+import { checkpointCursorTurnBeforeLaneRetires, cursorAttemptEndingResult, CursorRoomTurnTerminalError } from "./cursor-turn-settlement.js";
 import { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 import {
@@ -531,10 +532,6 @@ class CursorPostDispatchCheckpointError extends Error {}
 
 class CursorRoomTurnObservationDetachedError extends Error {}
 
-class CursorRoomTurnTerminalError extends Error {
-  readonly roomTurnRecoveryOutcome = "terminal_failure" as const;
-}
-
 class CursorRecordedTurnInProgressError extends Error {
   readonly providerAttachOutcome = "in_progress" as const;
 }
@@ -992,15 +989,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
         if (turn.lifecycleSettlementDeferred && !handle.liveTurn) handle.liveTurn = turn;
         throw error;
       }
-      if (turn.lifecycleSettlementDeferred && terminal.state === "attempt_terminal") {
-        terminal = {
-          ...terminal,
-          attemptTerminal: this.commitAttemptTerminal(handle,
-            terminal.attemptTerminal ?? this.synthesizeAttemptTerminal(handle, terminal.exit)),
-        };
-      }
-      const result = this.providerRoomTurnResult(turnId, terminal, handle.providerContinuationId!);
-      const disposition = await options.checkpointTerminalResult?.(result);
+      const deferredAttemptDeath = turn.lifecycleSettlementDeferred && terminal.state === "attempt_terminal"
+        ? terminal.attemptTerminal ?? this.synthesizeAttemptTerminal(handle, terminal.exit)
+        : null;
+      if (deferredAttemptDeath) terminal = { ...terminal, attemptTerminal: deferredAttemptDeath };
+      const { result, disposition, attemptTerminal } = await checkpointCursorTurnBeforeLaneRetires({
+        attemptDeath: deferredAttemptDeath, checkpoint: options.checkpointTerminalResult,
+        result: () => this.providerRoomTurnResult(turnId, terminal, handle.providerContinuationId!, handle.protocolError),
+        retire: (death) => this.commitAttemptTerminal(handle, death),
+      });
+      if (attemptTerminal) terminal = { ...terminal, attemptTerminal };
       const acceptedResult = disposition?.acceptedResult ?? result;
       const cleanupRecoveryEvidence = options.checkpointTerminalResult
         ? disposition === undefined
@@ -1187,21 +1185,22 @@ export class CursorProviderAdapter implements ProviderAdapter {
         `Cursor terminal recovery could not checkpoint its exact continuation: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    if (terminal.state === "attempt_terminal") {
-      // Recovery has the same attempt-level semantics as live completion. A
-      // trusted wrapper terminal with init but no result proves this native
-      // lane ended. Commit attempt death only after continuation settlement
-      // and the live->idle compensation both succeed; a failed recovery must
-      // retain the immutable child birth for an idempotent retry.
-      const attemptTerminal = this.finishAttempt(
-        handle,
-        terminal.exit,
-        terminal.attemptTerminal?.terminalCause,
-      );
-      terminal = { ...terminal, attemptTerminal };
-    }
-    const result = this.providerRoomTurnResult(turnId, terminal, handle.providerContinuationId!);
-    const disposition = await options.checkpointTerminalResult?.(result);
+    // Recovery has the same attempt-level semantics as live completion. A
+    // trusted wrapper terminal with init but no result proves this native
+    // lane ended. Commit attempt death only after continuation settlement
+    // and the live->idle compensation both succeed; a failed recovery must
+    // retain the immutable child birth for an idempotent retry. As in live
+    // completion, the turn's own terminal is recorded before the lane retires.
+    const attemptDeath = terminal.state === "attempt_terminal"
+      ? handle.terminal ?? this.synthesizeAttemptTerminal(handle, terminal.exit, terminal.attemptTerminal?.terminalCause)
+      : null;
+    if (attemptDeath) terminal = { ...terminal, attemptTerminal: attemptDeath };
+    const { result, disposition, attemptTerminal } = await checkpointCursorTurnBeforeLaneRetires({
+      attemptDeath, checkpoint: options.checkpointTerminalResult,
+      result: () => this.providerRoomTurnResult(turnId, terminal!, handle.providerContinuationId!, handle.protocolError),
+      retire: (death) => this.commitAttemptTerminal(handle, death),
+    });
+    if (attemptTerminal) terminal = { ...terminal, attemptTerminal };
     const acceptedResult = disposition?.acceptedResult ?? result;
     const cleanupRecoveryEvidence = options.checkpointTerminalResult
       ? disposition === undefined
@@ -3169,19 +3168,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
     turnId: string,
     terminal: CursorTurnTerminal,
     providerContinuationId: string,
+    protocolError = false,
   ): ProviderRoomTurnResult {
     if (terminal.state === "interrupted") {
       return { turnId, providerContinuationId, outcome: "interrupted", text: null, evidence: "stream" };
     }
     if (terminal.state === "attempt_terminal") {
-      const cause = terminal.attemptTerminal?.terminalCause;
-      throw new CursorRoomTurnTerminalError(
-        cause === "provider_quota"
-          ? "Cursor could not complete this turn because the provider usage limit was reached."
-          : terminal.terminalError
-            ? `Cursor supervised turn failed: ${terminal.terminalError}`
-          : "Cursor ended before the bounded room turn produced a terminal result.",
-      );
+      return cursorAttemptEndingResult({ turnId, providerContinuationId, protocolError,
+        cause: terminal.attemptTerminal?.terminalCause, terminalError: terminal.terminalError });
     }
     if (terminal.isError) {
       if (!terminal.nativeFailure) throw new CursorRoomTurnTerminalError("Cursor returned an unproven error result for the bounded room turn.");

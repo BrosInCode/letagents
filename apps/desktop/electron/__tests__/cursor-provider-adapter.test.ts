@@ -3377,22 +3377,29 @@ test("a successor materializes a trusted durable no-result terminal on the recov
     const terminals: ProviderTerminalPayload[] = [];
     adapter.onExit(handle, (terminal) => terminals.push(terminal));
 
-    await assert.rejects(
-      adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-terminal-restart", providerTurnId: turnId }, {
-        checkpointProviderState: async () => {
-          assert.equal(terminals.length, 0, "recovered continuation checkpoints before onExit retires the live handle");
-        },
-      }),
-      (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "terminal_failure",
-    );
+    const settled: string[] = [];
+    const recovered = await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-terminal-restart", providerTurnId: turnId }, {
+      checkpointProviderState: async () => {
+        assert.equal(terminals.length, 0, "recovered continuation checkpoints before onExit retires the live handle");
+      },
+      checkpointTerminalResult: async (result) => {
+        assert.equal(terminals.length, 0, "the crashed turn settles before onExit retires the live handle");
+        settled.push(result.outcome);
+        return { acceptedResult: result, cleanupRecoveryEvidence: false };
+      },
+    });
+    assert.equal(recovered.outcome, "interrupted", "a proven crash settles the turn instead of blocking delivery");
+    assert.equal(recovered.providerContinuationId, "sess-terminal-restart");
+    assert.match(recovered.error ?? "", /ended before the bounded room turn produced a terminal result/);
+    assert.deepEqual(settled, ["interrupted"]);
     assert.equal(handle.observedState(), "failed");
     assert.equal(terminals.length, 1);
     assert.equal(terminals[0]!.terminalCause, "crashed");
     assert.equal(terminals[0]!.exitCode, 9);
     assert.equal(harness.launches.length, 0, "terminal recovery never launches another native turn");
-    await assert.rejects(
-      adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-terminal-restart", providerTurnId: turnId }),
-      (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "terminal_failure",
+    assert.equal(
+      (await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-terminal-restart", providerTurnId: turnId })).outcome,
+      "interrupted",
     );
     assert.equal(terminals.length, 1, "repeated recovery never emits a duplicate exit");
   } finally {
@@ -4596,10 +4603,9 @@ function value(flag) { const index = args.indexOf(flag); return index >= 0 ? arg
       }),
     });
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root, workAttemptId: "wa-cursor-live-lease-close" }));
-    await assert.rejects(
-      withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-lease-close" }))),
-      /supervised turn failed: Cursor's live MCP connector ended before the turn became terminal/,
-    );
+    const ended = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-lease-close" })));
+    assert.equal(ended.outcome, "interrupted");
+    assert.match(ended.error ?? "", /supervised turn failed: Cursor's live MCP connector ended before the turn became terminal/);
     assert.equal(await waitForPath(attackerPidPath), true);
     attackerPid = Number(readFileSync(attackerPidPath, "utf8"));
     assert.equal(await waitForPath(attemptPath), true, "the escaped late Run probe observed the retired proxy");
@@ -6644,13 +6650,11 @@ setInterval(() => {}, 1_000);
     assert.ok(handle.providerConnection?.processIdentity, "failed recovery retains the exact exited child birth");
     assert.equal(terminals.length, 0);
 
-    await assert.rejects(
-      withLoopAlive(adapter.recoverRoomTurn(handle, {
-        inboxItemId: "checkpoint-terminal",
-        providerTurnId: persistedTurnId,
-      }, { checkpointProviderState, settleLifecycleBeforeIdle })),
-      (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "terminal_failure",
-    );
+    const recovered = await withLoopAlive(adapter.recoverRoomTurn(handle, {
+      inboxItemId: "checkpoint-terminal",
+      providerTurnId: persistedTurnId,
+    }, { checkpointProviderState, settleLifecycleBeforeIdle }));
+    assert.equal(recovered.outcome, "interrupted");
     assert.equal(realSessionCheckpoints, 4, "retry checkpoints the live birth, then its processless continuation");
     assert.equal(lifecycleSettlements, 2);
     assert.equal(handle.observedState(), "failed");
@@ -8003,6 +8007,9 @@ test("Cursor typed child loss differs from an exact user interruption", async ()
     const handle = await spawnDaemonLane(adapter, harness);
     const events: NativeExecutionObservation[] = [];
     adapter.onExecution(handle, (event) => events.push(event));
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, (terminal) => terminals.push(terminal));
+    const exitsAtSettlement: number[] = [];
     let settlementCalls = 0;
     const running = adapter.runRoomTurn(handle, roomTurnRequest(), {
       settleLifecycleBeforeIdle: async () => {
@@ -8010,10 +8017,17 @@ test("Cursor typed child loss differs from an exact user interruption", async ()
         assert.ok(handle.providerConnection?.processIdentity, "the terminal effect settles against the exact child birth");
         assert.ok(events.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"));
       },
+      checkpointTerminalResult: async () => { exitsAtSettlement.push(terminals.length); },
     });
     const rejected = interrupted
       ? running.then(result => { assert.equal(result.outcome, "interrupted"); })
-      : assert.rejects(running, /ended before.*terminal result/);
+      : exitKind === "exit"
+        // A child that exits without its result is a proven turn ending.
+        ? running.then(result => {
+          assert.equal(result.outcome, "interrupted");
+          assert.match(result.error ?? "", /ended before.*terminal result/);
+        })
+        : assert.rejects(running, /ended before.*terminal result/);
     await flush();
     const child = harness.children[0]!;
     child.emit({ type: "tool_call", subtype: "started", call_id: "shell", session_id: "sess-cursor-1",
@@ -8034,6 +8048,10 @@ test("Cursor typed child loss differs from an exact user interruption", async ()
     assert.equal(settlementCalls, 1);
     assert.equal(handle.providerConnection?.processIdentity, null);
     if (!interrupted) assert.deepEqual(harness.signals, []);
+    // The turn's ending is recorded while the lane is still live; only then
+    // does a crash retire the lane (and with it the daemon's live handle).
+    assert.deepEqual(exitsAtSettlement, exitKind === "error" ? [] : [0]);
+    assert.equal(terminals.length, interrupted ? 0 : 1);
   }
 });
 

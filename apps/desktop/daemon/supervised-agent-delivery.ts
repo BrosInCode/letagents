@@ -155,10 +155,16 @@ export class SupervisedAgentDelivery {
   private readonly pollOperations = new Map<string, Promise<void>>();
   private readonly loops = new Map<string, Promise<void>>();
   private readonly loopEpochs = new Map<string, number>();
-  /** Immutable, memory-only registration identity; the bearer is never logged or persisted. */
-  private readonly loopOwners = new Map<string, { context: string; bearer: string }>();
+  /** Memory-only registration identity; only a same-session bearer rotation
+   * changes it in place. The bearer is never logged or persisted. */
+  private readonly loopOwners = new Map<string, { context: string; bearer: string; agent: SupervisedIngressAgent }>();
   private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
+  /** The live agent object each pump (and its admitted turn) authorizes with. */
+  private readonly pumpAgents = new Map<string, SupervisedIngressAgent>();
+  /** Orders refreshes that await authority, so only the newest decides the lane. */
+  private readonly refreshCalls = new Map<string, number>();
+  private nextRefreshCall = 1;
   private readonly pumpWakeups = new Map<string, Promise<void>>();
   /** Delivery demand survives internal ingress restart on the same handle. */
   private readonly admissionDemands = new WeakMap<ProviderActionHandle, object>();
@@ -369,7 +375,7 @@ export class SupervisedAgentDelivery {
       const operation = this.trackAgentWork(agent.agentId, this.track(controller, lifecycle));
       this.loops.set(agent.agentId, operation);
       this.loopEpochs.set(agent.agentId, expectedEpoch);
-      const owner = { context: this.recoveryContext(agent), bearer: agent.bearer };
+      const owner = { context: this.recoveryContext(agent), bearer: agent.bearer, agent };
       this.loopOwners.set(agent.agentId, owner);
       void operation.then(() => {
         if (this.loops.get(agent.agentId) === operation) this.loops.delete(agent.agentId);
@@ -405,13 +411,34 @@ export class SupervisedAgentDelivery {
   /** Preserve repeated readiness for the exact owner; drain only a stale binding. */
   async refresh(agent: SupervisedIngressAgent): Promise<void> {
     const owner = this.loopOwners.get(agent.agentId);
-    if (!this.fenced && !this.isStopping(agent.agentId)
+    const exactLiveOwner = () => !this.fenced && !this.isStopping(agent.agentId)
       && this.daemonIngressAllowed(agent)
       && this.loops.has(agent.agentId)
       && this.loopEpochs.get(agent.agentId) === this.currentRefreshEpoch(agent.agentId)
       && this.loopControllers.get(agent.agentId)?.signal.aborted === false
-      && owner?.context === this.recoveryContext(agent)
-      && owner.bearer === agent.bearer) return;
+      && this.loopOwners.get(agent.agentId) === owner
+      && owner?.context === this.recoveryContext(agent);
+    if (exactLiveOwner() && owner!.bearer === agent.bearer) return;
+    const call = this.nextRefreshCall++;
+    this.refreshCalls.set(agent.agentId, call);
+    // A periodic rotation mints a new bearer for the same worker session; the
+    // recovery context (generation, binding, workspace, API origin, handle) is
+    // unchanged. Tearing the lane down for it would detach an in-flight turn
+    // and drop the active turn its approvals and effects match against. Adopt
+    // the new bearer in place once it is proven current. Any other change, or
+    // a bearer the binding no longer holds, still replaces the lane below.
+    if (exactLiveOwner()) {
+      const epoch = this.currentRefreshEpoch(agent.agentId);
+      const current = await this.hasIngressAuthority(agent);
+      // A newer refresh, a stop, or a pause arrived while this one awaited;
+      // that caller now decides the lane, so this stale call must not act.
+      if (this.refreshCalls.get(agent.agentId) !== call
+        || this.currentRefreshEpoch(agent.agentId) !== epoch) return;
+      if (current && exactLiveOwner()) {
+        this.adoptRotatedBearer(agent.agentId, owner!, agent.bearer);
+        return;
+      }
+    }
     const refreshEpoch = this.nextRefreshEpoch(agent.agentId);
     await this.stopForRefresh(agent.agentId);
     // Multiple callers may share one drain. Only the most recent binding may
@@ -419,6 +446,48 @@ export class SupervisedAgentDelivery {
     // deliberately no-ops instead of stealing the active loop slot.
     if (!this.fenced && refreshEpoch === this.currentRefreshEpoch(agent.agentId)) {
       await this.start(agent, refreshEpoch);
+    }
+  }
+
+  private adoptRotatedBearer(
+    agentId: string,
+    owner: { bearer: string; agent: SupervisedIngressAgent },
+    bearer: string,
+  ): void {
+    owner.bearer = bearer;
+    owner.agent.bearer = bearer;
+    const pumpAgent = this.pumpAgents.get(agentId);
+    if (pumpAgent) pumpAgent.bearer = bearer;
+    // Interrupt reservations share the active turn's agent object.
+    const active = this.activeTurns.get(agentId);
+    if (active) active.agent.bearer = bearer;
+    const paused = this.pausedDispatchAgents.get(agentId);
+    if (paused) paused.bearer = bearer;
+    // A turn that ended before this adoption could not record its result with
+    // the revoked bearer and returned, leaving its row in flight with no owner.
+    // Teardown used to re-run startup recovery for it; keep that, without the
+    // teardown: the next pump (after any running one settles) recovers it.
+    this.startupRecovered.delete(agentId);
+    this.wake(owner.agent);
+  }
+
+  /**
+   * The server revokes the old bearer at a same-session rotation. A lookup
+   * that was already in flight then fails although the agent now holds a
+   * valid bearer, so retry it once with the adopted one before treating the
+   * ownership as unverifiable.
+   */
+  private async ownedTasks(
+    agent: SupervisedIngressAgent,
+    input: { taskIds?: readonly string[]; heldBefore?: string; signal: AbortSignal },
+  ): Promise<ContinuityTask[]> {
+    if (!this.http.ownedTasks) throw new Error("Task ownership lookup is unavailable.");
+    const bearer = agent.bearer;
+    try {
+      return await this.http.ownedTasks({ ...agent, ...input });
+    } catch (error) {
+      if (agent.bearer === bearer || input.signal.aborted) throw error;
+      return this.http.ownedTasks({ ...agent, ...input });
     }
   }
 
@@ -520,6 +589,7 @@ export class SupervisedAgentDelivery {
       await Promise.resolve();
     }
     this.startupRecovered.delete(agentId);
+    this.refreshCalls.delete(agentId);
     this.activeTurns.delete(agentId);
     this.activeTurnAborts.delete(agentId);
     const health = await this.inbox.ingressHealth(agentId);
@@ -1106,13 +1176,13 @@ export class SupervisedAgentDelivery {
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.recoveringPumpOperation(agent, controller)));
     this.pumping.set(agent.agentId, operation);
     this.pumpControllers.set(agent.agentId, controller);
-    void operation.then(() => {
+    this.pumpAgents.set(agent.agentId, agent);
+    const settle = () => {
       if (this.pumping.get(agent.agentId) === operation) this.pumping.delete(agent.agentId);
       if (this.pumpControllers.get(agent.agentId) === controller) this.pumpControllers.delete(agent.agentId);
-    }, () => {
-      if (this.pumping.get(agent.agentId) === operation) this.pumping.delete(agent.agentId);
-      if (this.pumpControllers.get(agent.agentId) === controller) this.pumpControllers.delete(agent.agentId);
-    });
+      if (this.pumpAgents.get(agent.agentId) === agent && !this.pumping.has(agent.agentId)) this.pumpAgents.delete(agent.agentId);
+    };
+    void operation.then(settle, settle);
     return operation;
   }
 
@@ -1165,7 +1235,7 @@ export class SupervisedAgentDelivery {
             const policy = taskFailurePolicy(failed.last_error, attempt);
             let tasks: ContinuityTask[] = [];
             let lookupError: string | null = null;
-            try { tasks = await this.http.ownedTasks({ ...agent, taskIds: prior?.tasks?.map((task) => task.id), heldBefore: prior?.heldBefore ?? String(failed.activation.task_continuity_failed_at), signal: controller.signal }); }
+            try { tasks = await this.ownedTasks(agent, { taskIds: prior?.tasks?.map((task) => task.id), heldBefore: prior?.heldBefore ?? String(failed.activation.task_continuity_failed_at), signal: controller.signal }); }
             catch { lookupError = "Task ownership could not be verified. Check the room connection before continuing work."; }
             if (!await this.hasExecutionAuthority(agent, controller)) return;
             const queued = await this.inbox.enqueueTaskContinuation({ parentId: failed.inbox_item_id,
@@ -1201,8 +1271,7 @@ export class SupervisedAgentDelivery {
             if (!await this.hasExecutionAuthority(agent, controller)) return;
             let tasks: ContinuityTask[];
             try {
-              if (!this.http.ownedTasks) throw new Error("Task ownership lookup is unavailable.");
-              tasks = await this.http.ownedTasks({ ...agent, taskIds: continuation.tasks?.map((task) => task.id), heldBefore: continuation.heldBefore, signal: controller.signal });
+              tasks = await this.ownedTasks(agent, { taskIds: continuation.tasks?.map((task) => task.id), heldBefore: continuation.heldBefore, signal: controller.signal });
             } catch {
               if (await this.hasExecutionAuthority(agent, controller)) await this.inbox.transition(head.inbox_item_id, "blocked", { last_error: "Task ownership could not be verified. Check the room connection and use Retry delivery." });
               return;
@@ -1421,11 +1490,20 @@ export class SupervisedAgentDelivery {
         ? []
         : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
       if (!await hasProviderAuthority()) return;
+      // A crashed Cursor lane can already be failed when it reports its turn's
+      // exact ending. The lane lease and the turn checks still prove that this
+      // owner may record that ending and settle the row instead of blocking it.
+      const hasTerminalAuthority = (result: ProviderRoomTurnResult): Promise<boolean> =>
+        agent.provider === "cursor" && (result.outcome === "failed" || result.outcome === "interrupted")
+          ? this.hasLaneAuthority(agent, turnController)
+          : this.hasExecutionAuthority(agent, turnController);
       // Handoff may abandon observation only after the provider has committed
       // an exact, recoverable native turn boundary. Before then, the provider
       // promise owns preflight/helper cleanup and must settle before drain can
       // release this daemon generation.
+      let settledCursorEnding: ProviderRoomTurnCheckpointDisposition | null = null;
       const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<ProviderRoomTurnCheckpointDisposition> => {
+        if (settledCursorEnding) return settledCursorEnding;
         const providerContinuationId = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
         if (result.outcome === "failed" || result.outcome === "interrupted") {
           // Failure is exact native evidence, never an exception classifier or
@@ -1446,7 +1524,7 @@ export class SupervisedAgentDelivery {
           result,
           providerTurnOriginExecutionGenerationId,
         );
-        if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
+        if (!await hasTerminalAuthority(result)) throw new AuthorityLostError();
         // New turns already checkpoint through checkpointTurnStarted. This
         // idempotent edge keeps provider-neutral adapters equally strict.
         if (admittedProviderTurnId && admittedProviderTurnId !== publicationResult.turnId) {
@@ -1500,10 +1578,23 @@ export class SupervisedAgentDelivery {
             outcome: saved.kind, text: null, evidence: saved.evidence,
             ...(checkpointed.last_error?.trim() ? { error: checkpointed.last_error } : {}) };
         }
-        return {
+        const disposition = {
           acceptedResult,
           cleanupRecoveryEvidence: acceptedResult.outcome !== "unreadable",
         };
+        if (agent.provider === "cursor"
+          && (acceptedResult.outcome === "failed" || acceptedResult.outcome === "interrupted")) {
+          // Settle the row while this lane lease still holds. Right after this
+          // callback the adapter retires the crashed lane, and its exit
+          // notification removes the live handle the lease depends on.
+          await observeWorkspace(null);
+          if (await hasTerminalAuthority(acceptedResult)) {
+            await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
+            await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+            settledCursorEnding = disposition;
+          }
+        }
+        return disposition;
       };
       const checkpointProviderState = async (state: {
         providerContinuationId: string;
@@ -1591,7 +1682,9 @@ export class SupervisedAgentDelivery {
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         const continuation = await this.inbox.taskContinuation(item.inbox_item_id);
         if (continuation) {
-          const tasks = await this.http.ownedTasks?.({ ...agent, taskIds: continuation.tasks?.map((task) => task.id), heldBefore: continuation.heldBefore, signal: turnController.signal });
+          const tasks = this.http.ownedTasks
+            ? await this.ownedTasks(agent, { taskIds: continuation.tasks?.map((task) => task.id), heldBefore: continuation.heldBefore, signal: turnController.signal })
+            : undefined;
           if (!tasks || continuation.agentSessionId !== agent.agentSessionId || continuation.workAttemptId !== agent.workAttemptId
             || continuation.providerContinuationId !== agent.providerContinuationId
             || !continuation.tasks?.length || !continuation.tasks.every((old) => tasks.some((task) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch))
@@ -1674,7 +1767,8 @@ export class SupervisedAgentDelivery {
         providerTurnDurable,
       );
       if (!providerResult) throw new Error("Provider does not support bounded room turns.");
-      if (!await hasProviderAuthority()) return;
+      if (settledCursorEnding) return;
+      if (!await (recovering ? hasProviderAuthority() : hasTerminalAuthority(providerResult))) return;
       // Real provider adapters invoke this before releasing their in-memory
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
@@ -1684,7 +1778,7 @@ export class SupervisedAgentDelivery {
       await observeWorkspace(result.text);
       const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
       const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
-      if (!await this.hasExecutionAuthority(agent, turnController)) return;
+      if (!await hasTerminalAuthority(result)) return;
       if (result.outcome === "failed" || result.outcome === "interrupted") {
         await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
