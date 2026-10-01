@@ -188,7 +188,7 @@ export function assertProjectKeepsLetAgentsServer(inProject, outsideProject) {
 /**
  * Every override a LetAgents launch adds: the features, each personal skill,
  * and every MCP server but LetAgents. `cwd` is where the app-server starts and
- * `configOverrides` are the launch's own (for example project trust), used to
+ * `configOverrides` are the launch's own (for example the room's server), used to
  * list servers as the launch will see them. A launch that cannot list its
  * servers, or whose project changes the LetAgents server, fails here.
  */

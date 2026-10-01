@@ -86,6 +86,8 @@ class FakeRpc implements CodexAdapterRpc {
       threadReadTimesOut: boolean;
       threadReadUnmaterialized: boolean;
       reviewerFromOwnSettings: string | null;
+      /** The folder a new thread reports: where its app-server was launched, unless a test says otherwise. */
+      threadDirectory: string | null;
     },
   ) {
     this.reviewerFromOwnSettings = options.reviewerFromOwnSettings;
@@ -130,6 +132,7 @@ class FakeRpc implements CodexAdapterRpc {
             : `${this.threadId}-replacement-${this.threadStartCount - 1}`,
         },
         approvalsReviewer: this.appliedReviewer(params),
+        ...(this.options.threadDirectory === null ? {} : { cwd: this.options.threadDirectory }),
       } as T;
     }
     if (method === "thread/resume") {
@@ -273,6 +276,8 @@ function createHarness(options: {
   exitOnSignal?: boolean;
   /** Set when the app-server ignores the requested reviewer and reports this one. */
   reviewerFromOwnSettings?: string;
+  /** The folder new threads report instead of the launch folder; null reports none. */
+  threadDirectory?: string | null;
 } = {}) {
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
@@ -316,8 +321,10 @@ function createHarness(options: {
       return { pid: launch.pid, exited: launch.exited };
     },
     waitForServer: async () => true,
-    createRpcClient: (_serverUrl, notify) => {
+    createRpcClient: (serverUrl, notify) => {
       const client = new FakeRpc(`thread-${nextThread++}`, notify, {
+        threadDirectory: options.threadDirectory !== undefined ? options.threadDirectory
+          : launchOptions.find((entry) => entry.serverUrl === serverUrl)?.options.trustedProjectPath ?? null,
         resumeSupported: options.resumeSupported ?? true,
         placeholderResumeIsFatal: options.placeholderResumeIsFatal ?? false,
         workplacePresent: options.workplacePresent ?? true,
@@ -1074,7 +1081,7 @@ test("Codex adapter launches app-server, maps attested thread policy, and boots 
   assert.equal(threadParams.approvalPolicy, policy.approvalPolicy);
   assert.equal(threadParams.sandbox, "danger-full-access");
   assert.equal(Object.hasOwn(threadParams, "sandboxPolicy"), false);
-  assert.equal(threadParams.cwd, "/tmp/letagents-work-attempt");
+  assert.equal(Object.hasOwn(threadParams, "cwd"), false, "a thread started in a named folder makes Codex trust the project");
   assert.equal(
     harness.clients[0]!.requests.some((entry) => entry.method === "thread/resume"),
     false,
@@ -1212,7 +1219,7 @@ test("Codex continuation repair keeps the access level the runtime was launched 
   // An agent created in Add Agent stores an empty policy until its settings are edited.
   const result = await adapter.repairContinuation!(handle, {
     workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
-    forceReplacement: true, cwd: "/repo", launchPolicy: {}, model: null, reasoningEffort: null,
+    forceReplacement: true, cwd: spawnRequest().cwd, launchPolicy: {}, model: null, reasoningEffort: null,
   }, { checkpointReplacement: async () => {} });
   assert.equal(result.outcome, "replaced");
   const replacement = client.requests.slice(before).find(request => request.method === "thread/start")!.params as Record<string, unknown>;
@@ -1237,10 +1244,91 @@ test("Codex continuation repair refuses a thread that would not review the way t
       let checkpointed = false;
       await assert.rejects(adapter.repairContinuation!(handle, {
         workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
-        forceReplacement, cwd: "/repo", launchPolicy: {}, model: null, reasoningEffort: null,
+        forceReplacement, cwd: spawnRequest().cwd, launchPolicy: {}, model: null, reasoningEffort: null,
       }, { checkpointReplacement: async () => { checkpointed = true; } }), reason);
       assert.equal(checkpointed, false, "a refused thread never becomes the agent's conversation");
     }
+  }
+});
+
+test("a new Codex thread names no folder, and one that starts outside the work attempt's folder is refused", async () => {
+  // Codex records a project as trusted, and loads its .codex config, when a
+  // thread starts in a named folder with a writable sandbox.
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  assert.equal(harness.launchOptions[0]?.options.trustedProjectPath, spawnRequest().cwd, "the app-server starts in the folder");
+  assert.equal(Object.hasOwn(requestByMethod(client, "thread/start").params as object, "cwd"), false);
+
+  const repair = (cwd: string, checkpointReplacement: () => Promise<void> = async () => {}) => adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+    forceReplacement: true, cwd, launchPolicy: spawnRequest().launchPolicy, model: null, reasoningEffort: null,
+  }, { checkpointReplacement });
+  let checkpointed = false;
+  const conversation = handle.providerContinuationId;
+  // The live app-server runs in the folder it was launched in, not this one.
+  await assert.rejects(repair("/tmp/letagents-another-attempt", async () => { checkpointed = true; }),
+    /^Error: Codex opened this conversation in \/tmp\/letagents-work-attempt, not in the agent's folder \/tmp\/letagents-another-attempt, so LetAgents will not use it\. Restart the agent\.$/);
+  assert.equal(checkpointed, false, "a thread in the wrong folder never becomes the agent's conversation");
+  // A refused repair uses nothing and stops nothing: the running app-server keeps its conversation.
+  assert.equal(handle.providerContinuationId, conversation);
+  assert.equal(handle.observedState(), "idle");
+  assert.deepEqual(harness.signals, []);
+  assert.equal((await repair(`${spawnRequest().cwd}/`)).outcome, "replaced");
+  // A request that names no folder has none to compare.
+  assert.equal((await repair("")).outcome, "replaced");
+  const starts = client.requests.filter((request) => request.method === "thread/start");
+  assert.equal(starts.length, 4);
+  for (const start of starts) assert.equal(Object.hasOwn(start.params as object, "cwd"), false);
+
+  for (const [threadDirectory, reason] of [
+    ["/tmp/letagents-elsewhere", /Codex opened this conversation in \/tmp\/letagents-elsewhere, not in the agent's folder \/tmp\/letagents-work-attempt, so LetAgents will not use it/],
+    [null, /Codex did not report the folder this conversation opened in, so LetAgents will not use it/],
+  ] as const) {
+    const elsewhere = createHarness({ threadDirectory });
+    const refused = new CodexProviderAdapter({ dependencies: elsewhere.dependencies });
+    await assert.rejects(refused.spawn(spawnRequest({ deliveryMode: "daemon_inbox" })), reason);
+    assert.deepEqual(elsewhere.signals, [{ pid: 4100, signal: "SIGTERM" }], "a refused launch stops its app-server");
+    assert.equal(elsewhere.clients[0]!.requests.some((request) => request.method === "turn/start"), false);
+  }
+});
+
+test("a Codex thread's folder is compared by where it really is", async (t) => {
+  const real = await realpath(await mkdtemp(join(tmpdir(), "letagents-codex-thread-folder-")));
+  const link = `${real}-link`;
+  await symlink(real, link);
+  t.after(async () => {
+    await rm(link, { force: true });
+    await rm(real, { recursive: true, force: true });
+  });
+  // The work attempt names the link; Codex reports the folder it resolves to.
+  const harness = createHarness({ threadDirectory: real });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", cwd: link }));
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("a Codex thread's folder matches under its macOS data-volume path", {
+  skip: process.platform === "darwin" ? false : "macOS firmlinks only",
+}, async (t) => {
+  const real = await realpath(await mkdtemp(join(tmpdir(), "letagents-codex-thread-folder-")));
+  t.after(() => rm(real, { recursive: true, force: true }));
+  // The same folder, by a path that does not resolve to the one Codex reports.
+  const dataVolumePath = join("/System/Volumes/Data", real);
+  assert.equal(await realpath(dataVolumePath), dataVolumePath);
+  const harness = createHarness({ threadDirectory: real });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", cwd: dataVolumePath }));
+  assert.equal(handle.observedState(), "idle");
+
+  // Another folder is still refused, as is one that cannot be read.
+  const other = await realpath(await mkdtemp(join(tmpdir(), "letagents-codex-thread-folder-")));
+  t.after(() => rm(other, { recursive: true, force: true }));
+  for (const cwd of [join("/System/Volumes/Data", other), join(real, "missing")]) {
+    const refused = createHarness({ threadDirectory: real });
+    await assert.rejects(new CodexProviderAdapter({ dependencies: refused.dependencies })
+      .spawn(spawnRequest({ deliveryMode: "daemon_inbox", cwd })), /not in the agent's folder/);
   }
 });
 

@@ -31,6 +31,11 @@ export interface CodexAppServerLaunch {
 }
 
 interface CodexAppServerLaunchOptions {
+  /**
+   * Where the app-server starts, and the project whose Git config decides
+   * the commit identity. The name is historical: the launch passes Codex no
+   * project trust.
+   */
   trustedProjectPath?: string | null;
   configOverrides?: string[];
   env?: Record<string, string>;
@@ -423,17 +428,12 @@ function childExitPromise(
   });
 }
 
-function codexTrustedProjectOverrides(trustedProjectPath?: string | null): string[] {
-  const path = trustedProjectPath?.trim();
-  return path ? [`projects.${JSON.stringify(path)}.trust_level="trusted"`] : [];
-}
-
 export function codexAppServerLaunchArgs(
   serverUrl: string,
   options: CodexAppServerLaunchOptions = {},
 ): string[] {
   const args = ["app-server"];
-  for (const override of [...codexTrustedProjectOverrides(options.trustedProjectPath), ...(options.configOverrides ?? [])]) {
+  for (const override of options.configOverrides ?? []) {
     args.push("-c", override);
   }
   args.push("--listen", serverUrl);
@@ -518,8 +518,9 @@ export function launchCodexAppServer(
  * no plugins, app connectors, computer or browser use, hooks, memories,
  * notifier or personal skills, and no MCP server but the room's own, like
  * Claude's --strict-mcp-config. Codex itself names the servers, from the
- * owner's config and any trusted project config; a launch that cannot get
- * that list, or whose project changes the LetAgents server, fails. A project
+ * owner's config and the config of any project that config trusts; a launch
+ * that cannot get that list, or whose project changes the LetAgents server,
+ * fails. The launch passes no project trust of its own. A project
  * that would commit as the host's global Git identity commits as the owner's
  * GitHub noreply identity instead.
  */
@@ -531,11 +532,11 @@ export async function launchManagedCodexAppServer(
   const { env, rental } = codexAppServerEnvironment(options);
   const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
   const [isolation, commitEnvironment] = await Promise.all([
-    // The launch's own trust and overrides, so the server list matches.
+    // The launch's own directory and overrides, so the server list matches.
     codexOwnerIsolationOverrides(codexBin, {
       cwd: trustedProjectPath,
       env,
-      configOverrides: [...codexTrustedProjectOverrides(trustedProjectPath), ...(options.configOverrides ?? [])],
+      configOverrides: options.configOverrides ?? [],
     }),
     rental ? {} : managedAgentCommitEnvironment(trustedProjectPath),
   ]);

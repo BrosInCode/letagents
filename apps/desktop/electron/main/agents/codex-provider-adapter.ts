@@ -3,7 +3,8 @@ import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-hi
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { isAbsolute } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
@@ -92,7 +93,7 @@ import {
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
-type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown };
+type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown; cwd?: unknown };
 
 /**
  * The reviewer Codex reports must be the one this launch named. The owner's
@@ -107,6 +108,40 @@ function assertCodexReviewerApplied(policy: Record<string, unknown>, result: Cod
   }
   if (result.approvalsReviewer !== undefined && result.approvalsReviewer !== null && result.approvalsReviewer !== "user") {
     throw new Error("Codex would review approvals itself instead of asking you. Choose Auto to allow that, or remove the reviewer from your Codex settings.");
+  }
+}
+
+/**
+ * thread/start names no `cwd`. Codex takes a new thread in a named folder with
+ * a writable sandbox as the owner trusting that project: it records the trust
+ * in the owner's own config and loads the project's `.codex` config, its MCP
+ * servers included. Without `cwd` the thread starts where its app-server
+ * runs, which is the work attempt's folder; one that starts anywhere else is
+ * refused. thread/resume does none of this and still names the folder.
+ *
+ * A refused thread is never used. A launch stops its app-server; a repair
+ * leaves its running one alone, with the refused thread idle and unowned.
+ */
+function assertCodexThreadDirectory(cwd: string, result: CodexThreadResult): void {
+  if (!cwd.trim()) return;
+  const started = typeof result.cwd === "string" ? result.cwd : "";
+  if (!started) {
+    throw new Error("Codex did not report the folder this conversation opened in, so LetAgents will not use it. Update Codex.");
+  }
+  if (sameDirectory(started, cwd)) return;
+  throw new Error(`Codex opened this conversation in ${started}, not in the agent's folder ${cwd}, so LetAgents will not use it. Restart the agent.`);
+}
+
+function sameDirectory(left: string, right: string): boolean {
+  if (resolve(left) === resolve(right)) return true;
+  try {
+    if (realpathSync.native(left) === realpathSync.native(right)) return true;
+    // One folder can resolve to two paths (macOS firmlinks: /Users and
+    // /System/Volumes/Data/Users), but it has one device and inode.
+    const [first, second] = [statSync(left, { bigint: true }), statSync(right, { bigint: true })];
+    return first.dev === second.dev && first.ino === second.ino;
+  } catch {
+    return false;
   }
 }
 
@@ -1611,13 +1646,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
     assertAttached();
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
-      cwd: request.cwd,
       ...policy,
       historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
       ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
     });
     assertCodexReviewerApplied(policy, started);
+    assertCodexThreadDirectory(request.cwd, started);
     const replacement = started.thread?.id?.trim();
     if (!replacement || replacement === expected) {
       throw new Error("Codex continuation repair did not return a distinct replacement thread.");
@@ -2004,12 +2039,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
         }
       } else {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
-          cwd: req.cwd,
           ...policy,
           historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
           ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
         });
+        assertCodexThreadDirectory(req.cwd, threadResult);
       }
       assertCodexReviewerApplied(policy, threadResult);
       const threadId = threadResult.thread?.id;
