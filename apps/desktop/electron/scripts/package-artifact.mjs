@@ -244,6 +244,7 @@ const required = [
     manifestPath: "Contents/Resources/app-update.yml",
   },
   ...[
+    "shared/agent-branch.mjs",
     "shared/agent-codenames.mjs",
     "shared/message-contracts.mjs",
     "shared/paced-queue.mjs",

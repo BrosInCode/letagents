@@ -2166,7 +2166,7 @@ test("supervised Claude exposes one-time native approval without enabling its le
   const supervised = supervisedPermissionProfilePresentation("claude-code", legacy);
   assert.equal(supervised.status, "available");
   assert.match(supervised.description, /Claude.*change files/);
-  assert.match(supervised.detail!, /Each approval allows one action.*Other Claude settings do not apply/);
+  assert.match(supervised.detail!, /only read the project, its history, or its pull requests run without asking\. Each approval allows one action.*Other Claude settings do not apply/);
   assert.equal(legacy.status, "gated");
 });
 
@@ -2181,7 +2181,7 @@ test("supervised Claude, Codex, and Open Model expose Auto, and Cursor leaves it
   assert.match(codex.detail!, /Anything a room message asks for counts as approved/);
   const openModel = supervisedPermissionProfilePresentation("open-model", legacy);
   assert.equal(openModel.status, "available");
-  assert.match(openModel.detail!, /Each command is sent to LetAgents and to Jev.*Reading project files and looking things up on the web are not reviewed\..*cannot open files outside the project\./);
+  assert.match(openModel.detail!, /Reading and checking commands are sent to LetAgents and to Jev.*pushing to the agent's own LetAgents branch run without asking.*Reading project files and looking things up on the web are not reviewed\..*cannot open files outside the project\./);
   assert.equal(supervisedPermissionProfilePresentation("cursor", legacy).status, "gated");
   assert.match(autoReviewNotice("Open Model", "open-model"), /sends each command to LetAgents and Jev.*run the project's own scripts/);
   assert.doesNotMatch(autoReviewNotice("Open Model", "open-model"), /room message/);

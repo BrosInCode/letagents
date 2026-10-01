@@ -1,8 +1,9 @@
-import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { lstat, readFile, realpath } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
 
-import { commandNeedsPerson, PERMISSION_REVIEW_MAX_COMMANDS } from "../../../shared/permission-review.mjs";
-import type { OpenCodeNativePermissionRequest } from "../shared/provider-permissions.js";
+import { isAgentBranch } from "../../../shared/agent-branch.mjs";
+import { commandOnlyReads, partsAreInCommand, PERMISSION_REVIEW_MAX_COMMANDS, routineCommandReview } from "../../../shared/permission-review.mjs";
+import type { ClaudeNativePermissionRequest, OpenCodeNativePermissionRequest } from "../shared/provider-permissions.js";
 import { executionApprovalProjectionPathsAreSafe } from "./execution-approval-projection-policy.js";
 import { resolveWorkspaceRelativePath } from "./execution-approval-projection.js";
 import { requestCommandReview } from "./command-review-http.js";
@@ -20,6 +21,17 @@ const CONTROL_FILES = new Set([
   "package.json", "makefile", "gnumakefile", "justfile", "taskfile.yml", "taskfile.yaml",
   "conftest.py", "pytest.ini", "tox.ini", "setup.py", "setup.cfg", "pyproject.toml", "cargo.toml", "build.rs",
   "go.mod", "go.work", "jsconfig.json",
+]);
+
+/**
+ * The names Git runs a hook by. `core.hooksPath` may name any folder, so a
+ * file with one of these names runs at the next commit, merge, checkout, or
+ * push wherever it is. Hooks have no extension.
+ */
+const GIT_HOOKS = new Set([
+  "applypatch-msg", "pre-applypatch", "pre-commit", "pre-merge-commit", "prepare-commit-msg", "commit-msg", "pre-rebase",
+  "pre-push", "pre-auto-gc", "reference-transaction", "push-to-checkout", "pre-receive", "proc-receive", "sendemail-validate",
+  "fsmonitor-watchman", "p4-changelist", "p4-prepare-changelist", "p4-pre-submit",
 ]);
 
 /**
@@ -47,6 +59,7 @@ function changesWhatRuns(path: string): boolean {
       // Installed packages are what `node` and every tool in them will run.
       || part === "node_modules")
     || CONTROL_FILES.has(name) || name.endsWith(".mk")
+    || GIT_HOOKS.has(name) || /^post-[a-z0-9-]+$/.test(name)
     // What a test runner, compiler, linter, or bundler loads and runs before anything else.
     || /[.-](?:config|workspace)\.(?:[cm]?[jt]s|json|ya?ml)$/.test(name)
     || /^tsconfig(?:\.[a-z0-9_.-]+)?\.json$/.test(name)
@@ -87,44 +100,97 @@ export type AutomaticReviewVerdict = "allow" | "ask";
 
 export type AutomaticReviewInput = {
   entry: DaemonManifestEntry;
-  request: OpenCodeNativePermissionRequest;
+  /** The agent's own native request, in the shape its provider sends. */
+  request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest;
   signal: AbortSignal;
 };
 
 export type AutomaticPermissionReviewerOptions = {
   /** Null when this agent has no current authority to ask the server. */
   reviewCommands(input: { entry: DaemonManifestEntry; commands: readonly string[]; project: string; signal: AbortSignal }): Promise<AutomaticReviewVerdict>;
+  /** The agent's key while it has current authority. Its branches are named for it. */
+  agentKey?(entry: DaemonManifestEntry): string | null;
 };
 
-function isAutomaticallyReviewed(entry: DaemonManifestEntry): boolean {
-  return entry.provider === "open-model" && entry.permission_profile_id === AUTOMATIC_REVIEW_PROFILE_ID
-    && entry.delivery_mode === "daemon_inbox" && !entry.id.startsWith("supervised_rental_");
+/** Claude access levels under which Claude asks before a command it cannot show only reads. */
+const CLAUDE_ASKING_PROFILES = new Set(["ask_before_write", "auto_review"]);
+
+function reviewedProvider(entry: DaemonManifestEntry): "open-model" | "claude-code" | null {
+  if (entry.delivery_mode !== "daemon_inbox" || entry.id.startsWith("supervised_rental_")) return null;
+  if (entry.provider === "open-model" && entry.permission_profile_id === AUTOMATIC_REVIEW_PROFILE_ID) return "open-model";
+  return entry.provider === "claude-code" && CLAUDE_ASKING_PROFILES.has(entry.permission_profile_id ?? "") ? "claude-code" : null;
 }
 
 /**
- * Decides an Open Model agent's own permission requests when its owner chose
- * Auto. A file edit is decided here, by where the file is. A command is
- * decided by the fixed rules and then by the server's review. Every other
- * request, and every failure, is left for a person.
+ * The branch `origin` names as its default, as Git recorded it in the
+ * repository, or null when it cannot be read. Nothing is run.
+ */
+async function originDefaultBranch(project: string): Promise<string | null> {
+  try {
+    const dotGit = join(project, ".git");
+    const found = await lstat(dotGit);
+    let gitDir = dotGit;
+    if (found.isFile()) {
+      // A linked worktree names its own Git folder, which names the repository's shared one.
+      const named = /^gitdir: ([^\n]+)\n?$/.exec(await readFile(dotGit, "utf8"));
+      if (!named) return null;
+      gitDir = resolve(project, named[1]!);
+      const common = await readFile(join(gitDir, "commondir"), "utf8").catch(() => null);
+      if (common !== null) gitDir = resolve(gitDir, common.trim());
+    } else if (!found.isDirectory()) return null;
+    const head = /^ref: refs\/remotes\/origin\/([^\n]+)\n?$/.exec(await readFile(join(gitDir, "refs", "remotes", "origin", "HEAD"), "utf8"));
+    return head ? head[1]! : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Decides an agent's own permission requests where its owner's choice allows
+ * it. Under Auto, an Open Model agent's file edit is decided here, by where
+ * the file is, and a command by the fixed rules and then by the server's
+ * review. Under Ask before writes and Auto, a Claude command that only reads
+ * runs. Every other request, and every failure, is left for a person.
  */
 export class AutomaticPermissionReviewer {
   constructor(private readonly options: AutomaticPermissionReviewerOptions) {}
 
   applies(entry: DaemonManifestEntry | undefined): boolean {
-    return Boolean(entry && isAutomaticallyReviewed(entry));
+    return Boolean(entry && reviewedProvider(entry));
   }
 
   async review(input: AutomaticReviewInput): Promise<AutomaticReviewVerdict> {
     try {
-      const { entry, request } = input;
+      const { entry } = input;
       const workspace = entry.workspace_path;
-      if (!isAutomaticallyReviewed(entry) || !workspace || !isAbsolute(workspace)) return "ask";
+      const provider = reviewedProvider(entry);
+      if (!provider || !workspace || !isAbsolute(workspace)) return "ask";
+      if (provider === "claude-code") return await this.reviewClaudeCommand(input.request as ClaudeNativePermissionRequest, workspace);
+      const request = input.request as OpenCodeNativePermissionRequest;
       if (request.permission === "edit") return await this.reviewEdit(request, workspace);
-      if (request.permission === "bash") return await this.reviewCommand(input, workspace);
+      if (request.permission === "bash") return await this.reviewCommand(input, request, workspace);
       return "ask";
     } catch {
       return "ask";
     }
+  }
+
+  /**
+   * Claude runs a command that it can show only reads, and asks about the
+   * rest, often because commands are joined. One the fixed rules show only
+   * reads project files, history, or pull requests runs: Ask before writes
+   * promises that. Claude names a path outside the project when a command
+   * would reach one, or runs in another folder, and that always asks.
+   */
+  private async reviewClaudeCommand(native: ClaudeNativePermissionRequest, workspace: string): Promise<AutomaticReviewVerdict> {
+    const request = native?.request;
+    if (!request || request.subtype !== "can_use_tool" || request.tool_name !== "Bash"
+      || (Object.hasOwn(request, "blocked_path") && request.blocked_path != null)) return "ask";
+    const { input } = request;
+    // A command run in the background, or outside Claude's own limits, is not only a read.
+    if (!input || typeof input !== "object" || Array.isArray(input)
+      || !Object.keys(input).every((key) => key === "command" || key === "description" || key === "timeout")) return "ask";
+    return commandOnlyReads(input.command, await realpath(workspace)) ? "allow" : "ask";
   }
 
   /** An edit may run when every file is inside the workspace and none holds credentials or history. */
@@ -172,17 +238,25 @@ export class AutomaticPermissionReviewer {
     return "allow";
   }
 
-  private async reviewCommand(input: AutomaticReviewInput, workspace: string): Promise<AutomaticReviewVerdict> {
-    const command = input.request.metadata?.command;
-    const parts = input.request.patterns;
+  private async reviewCommand(input: AutomaticReviewInput, request: OpenCodeNativePermissionRequest, workspace: string): Promise<AutomaticReviewVerdict> {
+    const command = request.metadata?.command;
+    const parts = request.patterns;
     if (typeof command !== "string" || !Array.isArray(parts) || parts.length === 0
       || parts.length > PERMISSION_REVIEW_MAX_COMMANDS || !parts.every((part) => typeof part === "string")) return "ask";
-    // The whole command is what runs. Its parsed parts are checked as well,
-    // so neither reading of it can hide something from the rules.
+    // The whole command is what runs. Its parsed parts must each be a part the
+    // rules found in it, so neither reading of it can hide something from them.
+    if (!partsAreInCommand(command, parts)) return "ask";
     // The shell sees the workspace by its real path, so that is the project a path is judged against.
     const project = await realpath(workspace);
-    if ([command, ...parts].some((text) => commandNeedsPerson(text, project))) return "ask";
-    return this.options.reviewCommands({ entry: input.entry, commands: [command], project, signal: input.signal });
+    // A push goes only to one of the agent's own branches, which are named for its key.
+    const agentKey = this.options.agentKey?.(input.entry) ?? null;
+    const review = routineCommandReview(command, project, {
+      ownBranch: (branch) => isAgentBranch(branch, agentKey), defaultBranch: await originDefaultBranch(project),
+    });
+    if (review === null) return "ask";
+    // Routine work on the agent's own branches that the rules decide alone is sent nowhere.
+    if (review.length === 0) return "allow";
+    return this.options.reviewCommands({ entry: input.entry, commands: review, project, signal: input.signal });
   }
 }
 
@@ -195,6 +269,10 @@ export function createAutomaticPermissionReviewer(options: {
   requestReview?: typeof requestCommandReview;
 }): AutomaticPermissionReviewer {
   return new AutomaticPermissionReviewer({
+    agentKey: (entry) => {
+      const authority = currentWorkerPublicationAuthority(options.custody, entry.id, options.daemonGeneration(), options.nowMs());
+      return authority && authority.origin.roomId === entry.room_id ? authority.origin.agentKey : null;
+    },
     reviewCommands: async ({ entry, commands, project, signal }) => {
       const authority = currentWorkerPublicationAuthority(options.custody, entry.id, options.daemonGeneration(), options.nowMs());
       // An agent with no current authority has nobody to ask, so a person decides.

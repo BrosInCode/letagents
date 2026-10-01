@@ -383,7 +383,8 @@ export class HostApprovalBroker {
         if (!entry || !reviewer.applies(entry)) continue;
         for (const native of [...lane.requests]) {
           if (!this.current(lane)) break;
-          if (native.provider !== "open-model" || lane.reviewed.has(native.native)) continue;
+          // A request is reviewed as its own provider's request, and never one from Codex.
+          if (native.provider === "codex" || native.provider !== entry.provider || lane.reviewed.has(native.native)) continue;
           lane.reviewing.add(native.native);
           try {
             // A request that cannot be prepared yet is tried again when it is next listed.
