@@ -19,6 +19,7 @@ import {
   boardOwnerOptions,
   boardOwnerValue,
   boardStatusOptions,
+  canManageRoomBoard,
   deriveTaskTitle,
   visibleBoardGroups,
 } from "../src/components/desktop/content/room-board/board-presentation";
@@ -34,6 +35,7 @@ import {
 } from "../src/components/desktop/content/room-board/governance-presentation";
 import { reviewAssignmentCandidates } from "../src/components/desktop/content/room-board/review-candidates";
 import { useBoardGovernance } from "../src/components/desktop/content/room-board/useBoardGovernance";
+import { useRoomBoardController } from "../src/components/desktop/content/room-board/useRoomBoardController";
 import {
   useGovernanceDenyForm,
   type DenyFormFocusTarget,
@@ -271,6 +273,77 @@ describe("board manager panel", () => {
       else delete (globalThis as { window?: unknown }).window;
     }
     assert.deepEqual(decisions, [{ intentId: "intent_a", input: { decision: "deny", reason: "Already merged." } }]);
+  });
+});
+
+describe("board task actions", () => {
+  it("lets the owner release each reviewer's lease by name, including one a recovered agent left behind", async () => {
+    const reviewed = task({
+      status: "in_review",
+      activeLeases: [
+        lease({ id: "lease_work", kind: "work", agentKey: "owner/lunar-amber", agentSessionId: "session_lunar", holderLabel: "LunarAmber | Owner's agent | Open Model" }),
+        lease({ id: "lease_review_retired", kind: "review", agentKey: "owner/field-trail", agentSessionId: "session_retired", holderLabel: "FieldTrail | Owner's agent | Cursor" }),
+        lease({ id: "lease_review_harbor", kind: "review", agentKey: "owner/harbor-marsh", agentSessionId: "session_harbor", holderLabel: "HarborMarsh | Owner's agent | Codex" }),
+      ],
+    });
+    const board = useRoomBoardController({ roomIdentifier: "room_1", tasks: [reviewed], presence: [], workers: [], canEditTasks: true }, () => undefined);
+    const releases = board.actionsFor(reviewed).filter((action) => action.id.startsWith("release-review"));
+    assert.deepEqual(releases.map((action) => action.label), ["Release FieldTrail's review", "Release HarborMarsh's review"]);
+    assert.ok(board.actionsFor(reviewed).some((action) => action.id === "release-work"));
+
+    const released: unknown[] = [];
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        letagentsDesktop: {
+          room: {
+            updateTaskReviewLease: async (room: string, taskId: string, input: { action: string; lease_id: string }) => {
+              released.push({ room, taskId, action: input.action, leaseId: input.lease_id });
+              return { task: reviewed };
+            },
+          },
+        },
+      },
+    });
+    try {
+      await board.runTaskAction(reviewed, releases[0]!);
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "window", previous);
+      else delete (globalThis as { window?: unknown }).window;
+    }
+    assert.equal(board.errorMessage.value, null);
+    assert.deepEqual(released, [{ room: "room_1", taskId: "task_1", action: "release", leaseId: "lease_review_retired" }]);
+  });
+
+  it("offers someone who is not a room admin only the release of their own worker's review", () => {
+    const reviewed = task({
+      status: "in_review",
+      activeLeases: [
+        lease({ id: "lease_work", kind: "work", agentKey: "owner/lunar-amber", agentSessionId: "session_lunar", holderLabel: "LunarAmber" }),
+        lease({ id: "lease_review_blake", kind: "review", agentKey: "codex/blake", agentSessionId: "session_blake", holderLabel: "Blake | Codex" }),
+        lease({ id: "lease_review_harbor", kind: "review", agentKey: "owner/harbor-marsh", agentSessionId: "session_harbor", holderLabel: "HarborMarsh" }),
+      ],
+    });
+    const releases = (workers: WorkerSnapshot[]) => useRoomBoardController(
+      { roomIdentifier: "room_1", tasks: [reviewed], presence: [], workers, canEditTasks: false }, () => undefined,
+    ).actionsFor(reviewed).filter((action) => action.id.startsWith("release-")).map((action) => action.id);
+    assert.deepEqual(releases([]), []);
+    assert.deepEqual(releases([worker()]), ["release-review:lease_review_blake"]);
+  });
+
+  it("lets the owner of a local room manage its board, as a room admin does", () => {
+    assert.equal(canManageRoomBoard("admin"), true);
+    assert.equal(canManageRoomBoard("local"), true);
+    for (const role of ["participant", "anonymous", null, undefined]) assert.equal(canManageRoomBoard(role), false);
+    const held = task({ status: "in_review", activeLeases: [
+      lease({ id: "lease_work", kind: "work", agentKey: "local/agent", holderLabel: "Local agent" }),
+      lease({ id: "lease_review", kind: "review", agentKey: "local/reviewer", holderLabel: "Reviewer" }),
+    ] });
+    const board = useRoomBoardController({ roomIdentifier: "local_room", tasks: [held], presence: [], workers: [],
+      canEditTasks: canManageRoomBoard("local") }, () => undefined);
+    assert.deepEqual(board.actionsFor(held).filter((action) => action.id.startsWith("release-")).map((action) => action.id),
+      ["release-work", "release-review:lease_review"]);
   });
 });
 

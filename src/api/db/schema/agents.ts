@@ -105,6 +105,9 @@ export const room_agent_sessions = pgTable(
     // lease after the agent has gone, so it cannot say the agent was there.
     agent_heard_at: timestamp("agent_heard_at", { mode: "string", withTimezone: true }),
     ended_at: timestamp("ended_at", { mode: "string", withTimezone: true }),
+    // Set only when a room admin disconnected the session: its work stays
+    // behind to be released rather than passing to the agent's next session.
+    end_reason: text("end_reason").$type<"room_admin">(),
   },
   (table) => ({
     room_idx: index("room_agent_sessions_room_id_idx").on(table.room_id),

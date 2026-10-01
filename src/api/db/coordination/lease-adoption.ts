@@ -85,15 +85,28 @@ const OPEN_ASSIGNED_STATUSES = ["assigned", "in_progress", "blocked", "in_review
  * back, so silence moves none.
  *
  * Nothing passes from a session that is still live, from another owner's
- * agent, or from a supervised worker, whose leases move only on its
- * supervisor's attested word. A review passes only within one identity:
- * another identity asks to review in its own right, and the two do not
- * contend for one lease.
+ * agent, or from a session a room admin disconnected: that takes the work
+ * away from the agent, and it stays behind for the admin to release. A
+ * review passes only within one identity: another identity asks to review
+ * in its own right, and the two do not contend for one lease.
+ *
+ * A supervised worker is started by its supervisor, which registers each
+ * process it starts for the agent under the grant it holds, and runs one
+ * process per agent at a time. Its work passes only when that supervisor
+ * registers the same agent again: the same grant, the same identity and the
+ * same agent instance, from an ended session created before the receiving
+ * one. The ended session's credentials were revoked with it, so the work has
+ * one holder. A registration keeps the oldest live session and ends any
+ * newer duplicate, so a session still live when it began passes nothing,
+ * even one it ends itself. Creation order, unlike end times, outlasts any
+ * difference between the clocks of the servers that wrote it. A name never
+ * carries work from one supervised agent to another.
  *
  * Runs inside the registration's transaction. A lease that something else is
  * writing to is skipped, not waited for, and is adopted at the agent's next
  * registration: waiting here could hold a registration behind a task write
- * that is itself waiting on this registration's sessions.
+ * that is itself waiting on this registration's sessions, or past the
+ * deadline of a supervisor waiting for its worker's credentials.
  */
 export async function adoptTaskLeasesFromEndedSessionsTx(
   tx: any,
@@ -101,16 +114,22 @@ export async function adoptTaskLeasesFromEndedSessionsTx(
     room_id: string;
     agent_key: string;
     owner_account_id: string;
+    /** Set when the supervisor holding this grant registers the successor. */
+    supervisor_grant_id?: string | null;
     successor: {
       session_id: string;
       agent_instance_id: string | null;
       actor_label: string;
       display_name: string;
       process_host_id: string | null;
+      /** When the receiving session was created. Required with a grant. */
+      created_at?: string;
     };
     now: string;
   },
 ): Promise<AdoptedTaskLease[]> {
+  const supervisedBy = input.supervisor_grant_id ?? null;
+  if (supervisedBy && (!input.successor.agent_instance_id || !input.successor.created_at)) return [];
   const held = await tx
     .select({
       id: task_leases.id,
@@ -142,8 +161,17 @@ export async function adoptTaskLeasesFromEndedSessionsTx(
       eq(room_agent_sessions.agent_key, task_leases.agent_key),
       eq(room_agent_sessions.owner_account_id, input.owner_account_id),
       eq(room_agent_sessions.session_kind, "worker"),
-      isNull(room_agent_sessions.supervisor_grant_id),
       isNotNull(room_agent_sessions.ended_at),
+      sql`${room_agent_sessions.end_reason} IS DISTINCT FROM 'room_admin'`,
+      ...(supervisedBy ? [
+        // Only this agent, started again by the same supervisor, and only
+        // what an older session held. With the two above, these are the
+        // whole test for a supervised worker.
+        eq(room_agent_sessions.supervisor_grant_id, supervisedBy),
+        eq(task_leases.agent_key, input.agent_key),
+        eq(room_agent_sessions.agent_instance_id, input.successor.agent_instance_id!),
+        sql`${room_agent_sessions.created_at} < ${input.successor.created_at!}::timestamptz`,
+      ] : [isNull(room_agent_sessions.supervisor_grant_id)]),
     ))
     .orderBy(asc(task_leases.id)) as Array<{
       id: string; task_id: string; kind: TaskLeaseKind; epoch: number;
@@ -171,6 +199,7 @@ export async function adoptTaskLeasesFromEndedSessionsTx(
   const observer = { now_ms: Date.parse(input.now), process_host_id: input.successor.process_host_id };
   const nameKey = agentDisplayNameKey(input.successor.display_name);
   const carriedOn = (lease: (typeof held)[number]): boolean => {
+    if (supervisedBy) return true;
     const sameIdentity = lease.agent_key === input.agent_key;
     if (sameIdentity && Boolean(input.successor.agent_instance_id)
       && lease.holder.agent_instance_id === input.successor.agent_instance_id) return true;
@@ -190,6 +219,28 @@ export async function adoptTaskLeasesFromEndedSessionsTx(
       sql`SELECT pg_try_advisory_xact_lock(hashtextextended(${`task_lease:${lease.id}`}, 0)) AS locked`,
     );
     if (!(locked.rows?.[0] as { locked?: boolean } | undefined)?.locked) continue;
+    // Not every writer takes that lock first: an expiry sweep, a plain task
+    // update and a review verdict's effect journal lock these rows directly.
+    // Lock them in the usual order, lease then task, and skip the lease if
+    // either is held, rather than wait.
+    const [leaseRow] = await tx.select({ id: task_leases.id })
+      .from(task_leases)
+      .where(and(
+        eq(task_leases.id, lease.id),
+        eq(task_leases.status, "active" as TaskLeaseStatus),
+        eq(task_leases.epoch, lease.epoch),
+        eq(task_leases.agent_session_id, lease.agent_session_id),
+      ))
+      .for("no key update", { skipLocked: true });
+    if (!leaseRow) continue;
+    const taskNumber = /^task_(\d+)$/.exec(lease.task_id)?.[1];
+    if (lease.kind === "work" && taskNumber) {
+      const [taskRow] = await tx.select({ number: tasks.number })
+        .from(tasks)
+        .where(and(eq(tasks.room_id, input.room_id), eq(tasks.number, Number(taskNumber))))
+        .for("no key update", { skipLocked: true });
+      if (!taskRow) continue;
+    }
     const [moved] = await tx.update(task_leases)
       .set({
         agent_key: input.agent_key,
@@ -215,7 +266,6 @@ export async function adoptTaskLeasesFromEndedSessionsTx(
       lease_id: lease.id, task_id: lease.task_id, kind: lease.kind,
       from_agent_session_id: lease.agent_session_id, from_agent_key: lease.agent_key,
     });
-    const taskNumber = /^task_(\d+)$/.exec(lease.task_id)?.[1];
     if (lease.kind === "work" && taskNumber) {
       // The task is assigned to the identity and the label that held the
       // lease. It goes where the lease went, or the agent could hold the
@@ -241,11 +291,14 @@ export async function adoptTaskLeasesFromEndedSessionsTx(
       actor_label: input.successor.actor_label,
       actor_key: input.agent_key,
       actor_instance_id: input.successor.agent_instance_id,
-      reason: "The session that held this lease ended; it passed to the session that carries its agent on.",
+      reason: supervisedBy
+        ? "The session that held this lease ended; its supervisor started the agent again, and the lease passed to the new session."
+        : "The session that held this lease ended; it passed to the session that carries its agent on.",
       metadata: {
         from_agent_session_id: lease.agent_session_id,
         from_agent_key: lease.agent_key,
         to_agent_session_id: input.successor.session_id,
+        ...(supervisedBy ? { supervisor_grant_id: supervisedBy } : {}),
       },
       created_at: input.now,
     });

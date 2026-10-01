@@ -24,6 +24,7 @@ import type {
   RoomAgentRegistrationLiveness,
   RoomAgentSession,
   RoomAgentSessionBearer,
+  RoomAgentSessionEndReason,
   RoomAgentSessionRow,
 } from "../types.js";
 import {
@@ -347,6 +348,7 @@ async function rotateRoomAgentSessionTx(
     process_host_id: input.process_host_id ?? null,
     agent_heard_at: now,
     ended_at: null,
+    end_reason: null,
   }).where(and(
     eq(room_agent_sessions.session_id, current.session_id),
     ...(isMcpWorkerId(input.agent_instance_id) ? [] : [isNull(room_agent_sessions.ended_at)]),
@@ -710,7 +712,8 @@ export async function createFencedRoomAgentSession(
         ...await markUnresolvedReceiptsUnavailableTx(tx, holder, endedAt),
       );
     }
-    // A supervised worker's leases move only on its supervisor's word.
+    // A supervised worker's leases move only when its supervisor starts it
+    // again (createOrRotateSupervisorWorkerSession).
     const adoptedTaskLeases = input.supervisor_grant_id ? [] : await adoptTaskLeasesFromEndedSessionsTx(tx, {
       room_id: input.room_id,
       agent_key: input.agent_key,
@@ -896,7 +899,12 @@ export async function createOrRotateSupervisorWorkerSession(
     resolve_display_name?: (holders: readonly RoomWorkerNameHolderRow[]) =>
       { display_name: string; actor_label: string } | null;
   },
-): Promise<{ session: CreatedRoomAgentSession; bearer: RoomAgentSessionBearer }> {
+): Promise<{
+  session: CreatedRoomAgentSession;
+  bearer: RoomAgentSessionBearer;
+  /** Leases this agent's ended sessions held, which this session now holds. */
+  adopted_task_leases: AdoptedTaskLease[];
+}> {
   const instanceId = input.agent_instance_id.trim();
   if (!instanceId) throw new Error("Supervisor worker agent_instance_id is required.");
 
@@ -987,6 +995,28 @@ export async function createOrRotateSupervisorWorkerSession(
       isNull(room_agent_session_bearers.revoked_at),
     )).limit(1);
     if (!bearer) throw new Error("Worker bearer was not persisted.");
+    // A supervisor that starts its agent again after the agent's session
+    // ended (a crash, a restart, a recovery) gets a new session. The work the
+    // ended session held is this agent's, and it passes to this session now,
+    // or the agent could not finish or release it and nobody but a room admin
+    // could clear it. The duplicates ended above are newer than the session
+    // kept and were live when this mint began: they keep what they held. So
+    // does a session a room admin disconnected.
+    const adoptedTaskLeases = await adoptTaskLeasesFromEndedSessionsTx(tx, {
+      room_id: input.room_id,
+      agent_key: input.agent_key,
+      owner_account_id: input.owner_account_id,
+      supervisor_grant_id: input.supervisor_grant_id,
+      successor: {
+        session_id: session.session_id,
+        agent_instance_id: instanceId,
+        actor_label: session.actor_label,
+        display_name: session.display_name,
+        process_host_id: null,
+        created_at: session.created_at,
+      },
+      now: new Date().toISOString(),
+    });
     const invalidations = (existing as RoomAgentSessionRow[]).map((previous) => ({
       room_id: previous.room_id,
       agent_session_id: previous.session_id,
@@ -995,7 +1025,7 @@ export async function createOrRotateSupervisorWorkerSession(
     }));
     await queueRoomAgentCredentialInvalidationsTx(tx, invalidations);
     return {
-      result: { session, bearer: toRoomAgentSessionBearer(bearer) },
+      result: { session, bearer: toRoomAgentSessionBearer(bearer), adopted_task_leases: adoptedTaskLeases },
       invalidations,
     };
   });
@@ -1324,6 +1354,8 @@ export async function endRoomAgentSession(input: {
   supervisor_grant_id?: string | null;
   supervisor_grant_fence?: SupervisorGrantFence;
   credential_fence?: RoomAgentDeliveryCredentialFence | null;
+  /** Recorded on the session; see RoomAgentSessionEndReason. */
+  end_reason?: RoomAgentSessionEndReason | null;
 }): Promise<RoomAgentSession | null> {
   const unavailableReceiptTargets: number[] = [];
   let unavailableReceiptRoom: string | null = null;
@@ -1387,6 +1419,7 @@ export async function endRoomAgentSession(input: {
       ended_at: now,
       updated_at: now,
       last_seen_at: now,
+      ...(input.end_reason ? { end_reason: input.end_reason } : {}),
     })
       .where(and(...conditions))
       .returning();

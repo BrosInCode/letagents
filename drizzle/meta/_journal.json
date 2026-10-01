@@ -750,6 +750,13 @@
       "when": 1790830000000,
       "tag": "0106_wake_rule_retirement",
       "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1790850000000,
+      "tag": "0107_room_agent_session_end_reason",
+      "breakpoints": true
     }
   ]
 }
