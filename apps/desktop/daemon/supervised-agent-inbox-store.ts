@@ -1346,7 +1346,7 @@ export class SupervisedAgentInboxStore {
             run(database.prepare(`UPDATE supervised_agent_effects
               SET state='prepared',error=?,updated_at=? WHERE effect_id=? AND state='executing'`),
             effect.tool_name === "complete_room_turn"
-              ? "The daemon restarted while committing the local completion proposal; its durable request is safe to commit again."
+              ? "Room delivery restarted while committing the local completion proposal; its durable request is safe to commit again."
               : "The prior read-only execution ended without a durable result and is safe to execute again.", timestamp, effect.effect_id);
           }
           return { created: false, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effect.effect_id) as Row) };
@@ -2167,7 +2167,10 @@ export class SupervisedAgentInboxStore {
 
   /**
    * Normalize work interrupted by a daemon crash before a new runtime is
-   * allowed to pump it. A persisted reply is authoritative terminal evidence:
+   * allowed to pump it. Delivery also runs this whenever it restarts one
+   * agent's room delivery (a changed worker credential, provider handle or
+   * binding), so the details say the delivery restarted, not the daemon.
+   * A persisted reply is authoritative terminal evidence:
    * it may be published again with its stable client id, but must never invoke
    * the provider again. Everything else that was in-flight is ambiguous and
    * remains visible as blocked rather than being accidentally acknowledged.
@@ -2198,12 +2201,12 @@ export class SupervisedAgentInboxStore {
             // consider runRoomTurn, so a recovered provider turn is impossible.
             next = "pending";
             error = item.state === "dispatching"
-              ? "Daemon restarted after a durable provider reply; publishing it without rerunning the provider."
+              ? "Room delivery restarted after a durable provider reply; publishing it without rerunning the provider."
               : item.state === "publishing"
-              ? "Daemon restarted during publication; retrying the durable reply."
+              ? "Room delivery restarted during publication; retrying the durable reply."
               : item.state === "retryable"
                 ? "Retrying the durable reply after a recoverable failure."
-                : "Daemon restarted after a durable provider reply; publishing it."
+                : "Room delivery restarted after a durable provider reply; publishing it."
           } else if (terminal?.kind === "no_reply") {
             next = "acknowledged_no_reply";
             error = null;
@@ -2214,7 +2217,7 @@ export class SupervisedAgentInboxStore {
             // This is not a retry: delivery will ask the provider to inspect
             // precisely this persisted turn id and will block if it cannot.
             next = "pending";
-            error = "Daemon restarted while awaiting the exact persisted provider turn; recovering it without rerunning.";
+            error = "Room delivery restarted while awaiting the exact persisted provider turn; recovering it without rerunning.";
           } else if (policy.resetCheckpointGatedUnstartedDispatch
             && item.state === "dispatching"
             && item.attempt_count === 0
@@ -2228,7 +2231,7 @@ export class SupervisedAgentInboxStore {
             error = "Recovered an unstarted checkpoint-gated Cursor delivery; retrying without duplicate provider work.";
           } else {
             next = "blocked";
-            error = `Daemon restarted during ${item.state} without authoritative terminal or publication evidence; acknowledgement is unsafe.`;
+            error = `Room delivery restarted during ${item.state} without authoritative terminal or publication evidence; acknowledgement is unsafe.`;
           }
         }
         if (!next) continue;
@@ -2534,7 +2537,7 @@ export class SupervisedAgentInboxStore {
   private normalizeInterruptedEffectsInTransaction(database: DatabaseSync, agentId: string | undefined, interruptedAt: string): void {
     const scope = agentId ? " AND agent_id=?" : "";
     const readArgs = [
-      "The daemon restarted before this read-only tool result was checkpointed. The exact request may be executed again safely.",
+      "Room delivery restarted before this read-only tool result was checkpointed. The exact request may be executed again safely.",
       interruptedAt,
       ...(agentId ? [agentId] : []),
     ];
@@ -2542,7 +2545,7 @@ export class SupervisedAgentInboxStore {
       SET state='prepared',error=?,updated_at=?
       WHERE state='executing' AND mutation=0 AND tool_name<>'join_room'${scope}`), ...readArgs);
     const mutationArgs = [
-      "The daemon restarted after this mutating tool crossed its execution boundary. It may have completed; verify external state before repeating it.",
+      "Room delivery restarted after this mutating tool crossed its execution boundary. It may have completed; verify external state before repeating it.",
       interruptedAt,
       ...(agentId ? [agentId] : []),
     ];
@@ -2550,7 +2553,7 @@ export class SupervisedAgentInboxStore {
       SET state='uncertain',error=?,updated_at=?
       WHERE state='executing' AND mutation=1 AND tool_name NOT IN ('join_room','complete_room_turn')${scope}`), ...mutationArgs);
     const completionArgs = [
-      "The daemon restarted while committing the local completion proposal; its durable request is safe to commit again.",
+      "Room delivery restarted while committing the local completion proposal; its durable request is safe to commit again.",
       interruptedAt,
       ...(agentId ? [agentId] : []),
     ];
