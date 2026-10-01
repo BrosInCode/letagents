@@ -1161,6 +1161,302 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a worker bearer rotation after Cursor native release keeps the turn alive through its init checkpoint", async () => {
+  // A periodic bearer rotation used to land between Cursor's native release
+  // and its stream-json init. The init checkpoint then saw a stale bearer, so
+  // the adapter reaped the live wrapper (exit 143) and the turn was lost.
+  // Delivery adopts the new bearer only when it is refreshed, which comes
+  // after the bind's announcement and waits for the turn birth's admission,
+  // so the init checkpoint can still run against the old in-memory bearer.
+  const root = await mkdtemp(join(tmpdir(), "la-cursor-rotation-"));
+  const bounded = async <T>(operation: Promise<T>, label: string): Promise<T> => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${label}.`)), 5_000);
+        }),
+      ]);
+    } finally { if (timeout) clearTimeout(timeout); }
+  };
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
+    attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
+    workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
+  };
+  const agentId = "cursor-rotation";
+  const workAttemptId = "00000000-0000-4000-8000-000000000081";
+  const executionGenerationId = "00000000-0000-4000-8000-000000000082";
+  const providerTurnId = "cursor:rotation-init";
+  const continuation = "cursor-session:rotation";
+  const idle = { kind: "cursor_cli" as const, pid: null as number | null, processIdentity: null as string | null };
+  let connection = idle;
+  const liveHandle = {
+    workAttemptId,
+    get pid() { return connection.pid; },
+    get providerContinuationId() { return continuation; },
+    get providerConnection() { return connection; },
+    appliedConfigurationRevision: 1,
+    observedState: () => connection.pid === null ? "idle" as const : "working" as const,
+  };
+  const nativeReleased = deferred<void>();
+  const releaseInit = deferred<void>();
+  const initCheckpoint = deferred<string>();
+  const lateResult = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+  const published: string[] = [];
+  let recoveries = 0;
+  let internals!: { supervisedInbox: SupervisedAgentInboxStore };
+  const port = provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.();
+    connection = { kind: "cursor_cli", pid: 93_001, processIdentity: "wrapper:rotation" };
+    await options?.checkpointPreparedTurn?.({
+      providerTurnId,
+      providerContinuationId: continuation,
+      providerConnection: connection,
+    });
+    options?.markDurableTurnStarted?.();
+    nativeReleased.resolve();
+    await releaseInit.promise;
+    try {
+      await options?.checkpointProviderState?.({ providerContinuationId: continuation, providerConnection: connection });
+      initCheckpoint.resolve("accepted");
+    } catch (error) {
+      // The production adapter reaps the released wrapper on this failure.
+      initCheckpoint.resolve(`rejected: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+    const raw = await lateResult.promise;
+    connection = idle;
+    await options?.checkpointProviderState?.({ providerContinuationId: continuation, providerConnection: connection });
+    await seedCursorRoomTurnCompletion(internals.supervisedInbox, {
+      agentId, roomId: "room", executionGenerationId, workAttemptId,
+      providerContinuationId: continuation, providerTurnId, outcome: "reply", text: "after rotation",
+    });
+    return (await options?.checkpointTerminalResult?.(raw))?.acceptedResult ?? raw;
+  }, async (_handle, request, options) => {
+    recoveries += 1;
+    assert.equal(request.providerTurnId, providerTurnId, "the successor reattaches the exact released turn");
+    const raw = await lateResult.promise;
+    connection = idle;
+    await options?.checkpointProviderState?.({ providerContinuationId: continuation, providerConnection: connection });
+    await seedCursorRoomTurnCompletion(internals.supervisedInbox, {
+      agentId, roomId: "room", executionGenerationId, workAttemptId,
+      providerContinuationId: continuation, providerTurnId, outcome: "reply", text: "after rotation",
+    });
+    return (await options?.checkpointTerminalResult?.(raw))?.acceptedResult ?? raw;
+  });
+  const daemon = new SupervisorDaemon(paths, "darwin", port, false, 60_000, undefined, {}, {
+    // A long poll, as in production: the loop does not re-check its bearer
+    // until the poll returns, so the refresh adopts it rather than replacing it.
+    poll: ({ signal }) => new Promise((resolve) => {
+      if (signal.aborted) resolve({});
+      else signal.addEventListener("abort", () => resolve({}), { once: true });
+    }),
+    publish: async (input) => {
+      published.push(input.text);
+      return { messageId: `published:${published.length}`, roomId: input.roomId };
+    },
+  });
+  try {
+    const daemonInternals = daemon as unknown as {
+      liveHandles: Map<string, typeof liveHandle>;
+      workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
+      supervisedInbox: SupervisedAgentInboxStore;
+      startSupervisedDelivery(entryId: string): Promise<void>;
+      store: ManifestStore;
+      manifestGeneration: number;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: ProviderActionHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+        isDeliveryAdmitted(entryId: string): boolean;
+      };
+    };
+    internals = daemonInternals;
+    await daemon.start();
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      id: agentId, room_id: "room", display_name: "Cursor Rotation", provider: "cursor", model: null,
+      charter: "test", desired_state: "running", observed_state: "idle", condition: "none",
+      permission_profile_id: "read_only", delivery_mode: "daemon_inbox", created_by: "test",
+      created_at: new Date().toISOString(), workspace_path: root, work_attempt_id: workAttemptId,
+      provider_ref: {
+        work_attempt_id: workAttemptId, provider_continuation_id: continuation,
+        provider_connection: connection, execution_generation_id: executionGenerationId,
+      },
+    } });
+    assert.equal(put.ok, true, put.error);
+    await installExactTestProviderBirth(daemonInternals, agentId, liveHandle, executionGenerationId);
+    const binding = {
+      entry_id: agentId, room_id: "room", work_attempt_id: workAttemptId,
+      execution_generation_id: executionGenerationId, agent_session_id: "session:rotation",
+      api_url: "https://letagents.test",
+    };
+    await daemonInternals.workerBindings.bind({ ...binding, agent_session_token: "bearer:before", credential_ref: "credential:before" });
+    await daemonInternals.supervisedInbox.bootstrapCursor({ agent_id: agentId, room_id: "room", last_observed_message_id: null });
+    await daemonInternals.supervisedInbox.ingestPoll({
+      agent_id: agentId, room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { id: "1", text: "large relay" },
+        activation: { for_current_agent: { decision: "activate" } } }],
+    });
+    await daemonInternals.startSupervisedDelivery(agentId);
+    await bounded(nativeReleased.promise, "native release");
+
+    // The same worker session gets a fresh bearer before delivery hears of it.
+    await daemonInternals.workerBindings.bind({ ...binding, agent_session_token: "bearer:rotated", credential_ref: "credential:rotated" });
+    releaseInit.resolve();
+    assert.equal(await bounded(initCheckpoint.promise, "init checkpoint"), "accepted",
+      "a bearer rotation must not fence the released turn's init identity");
+    const durable = await daemonInternals.store.getEntry(agentId);
+    assert.deepEqual(durable?.provider_ref?.provider_connection, connection, "the released wrapper stays the live runtime");
+
+    // Production refreshes once the typed turn birth is admitted; this fixture
+    // has no execution capture, so admit it directly. The refresh adopts the
+    // rotated bearer in place instead of detaching the live turn.
+    daemonInternals.providerStreams.isDeliveryAdmitted = () => true;
+    await bounded(daemonInternals.startSupervisedDelivery(agentId), "delivery refresh");
+    lateResult.resolve({ turnId: providerTurnId, outcome: "reply", text: "ignored aggregate" });
+    await waitForAsync(async () => published.length === 1
+      && (await daemonInternals.supervisedInbox.receipts(agentId))[0]?.state === "acknowledged", 5_000);
+    assert.deepEqual(published, ["after rotation"]);
+    assert.equal(recoveries, 0, "the original delivery finishes the turn; nothing had to re-attach");
+  } finally {
+    releaseInit.resolve();
+    lateResult.resolve({ turnId: providerTurnId, outcome: "reply", text: "cleanup" });
+    await daemon.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a crashed Cursor turn settles as interrupted instead of blocking the FIFO after its lane fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "la-cursor-crash-"));
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
+    attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
+    workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
+  };
+  const agentId = "cursor-crash";
+  const workAttemptId = "00000000-0000-4000-8000-000000000091";
+  const executionGenerationId = "00000000-0000-4000-8000-000000000092";
+  const providerTurnId = "cursor:crashed-turn";
+  const continuation = "cursor-session:crash";
+  const idle = { kind: "cursor_cli" as const, pid: null as number | null, processIdentity: null as string | null };
+  let connection = idle;
+  const liveHandle = {
+    workAttemptId,
+    get pid() { return connection.pid; },
+    get providerContinuationId() { return continuation; },
+    get providerConnection() { return connection; },
+    appliedConfigurationRevision: 1,
+    observedState: () => connection.pid === null ? "idle" as const : "working" as const,
+  };
+  const ending = deferred<string>();
+  let daemon!: SupervisorDaemon;
+  let retireLane!: () => void;
+  const port = provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.();
+    connection = { kind: "cursor_cli", pid: 94_001, processIdentity: "wrapper:crash" };
+    await options?.checkpointPreparedTurn?.({
+      providerTurnId,
+      providerContinuationId: continuation,
+      providerConnection: connection,
+    });
+    options?.markDurableTurnStarted?.();
+    await options?.checkpointProviderState?.({ providerContinuationId: continuation, providerConnection: connection });
+    // The wrapper exits 143 without a result. Typed lifecycle marks the lane
+    // failed before the adapter reports the turn's exact ending.
+    await daemon.transition(agentId, "failed", "none", "provider runtime exited", "test");
+    connection = idle;
+    await options?.checkpointProviderState?.({ providerContinuationId: continuation, providerConnection: connection });
+    const raw = {
+      turnId: providerTurnId, providerContinuationId: continuation, outcome: "interrupted" as const,
+      text: null, evidence: "stream" as const,
+      error: "Cursor ended before the bounded room turn produced a terminal result.",
+    };
+    try {
+      const disposition = await options?.checkpointTerminalResult?.(raw);
+      ending.resolve("recorded");
+      return disposition?.acceptedResult ?? raw;
+    } catch (error) {
+      ending.resolve(`rejected: ${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    } finally {
+      // As in production: the adapter then commits lane death, and the exit
+      // notification removes the daemon's live handle before delivery resumes.
+      retireLane();
+    }
+  });
+  daemon = new SupervisorDaemon(paths, "darwin", port, false, 60_000, undefined, {}, {
+    poll: async () => ({}),
+    publish: async () => { throw new Error("an interrupted turn publishes nothing"); },
+  });
+  try {
+    const internals = daemon as unknown as {
+      liveHandles: Map<string, typeof liveHandle>;
+      workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
+      supervisedInbox: SupervisedAgentInboxStore;
+      startSupervisedDelivery(entryId: string): Promise<void>;
+      store: ManifestStore;
+      manifestGeneration: number;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: ProviderActionHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+        currentInstallation(entryId: string): ProviderInstallationToken | undefined;
+        remove(installation: ProviderInstallationToken): boolean;
+      };
+    };
+    retireLane = () => {
+      const installation = internals.providerStreams.currentInstallation(agentId);
+      assert.ok(installation, "the crashed lane is still installed when its ending is recorded");
+      internals.providerStreams.remove(installation);
+    };
+    await daemon.start();
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      id: agentId, room_id: "room", display_name: "Cursor Crash", provider: "cursor", model: null,
+      charter: "test", desired_state: "running", observed_state: "idle", condition: "none",
+      permission_profile_id: "read_only", delivery_mode: "daemon_inbox", created_by: "test",
+      created_at: new Date().toISOString(), workspace_path: root, work_attempt_id: workAttemptId,
+      provider_ref: {
+        work_attempt_id: workAttemptId, provider_continuation_id: continuation,
+        provider_connection: connection, execution_generation_id: executionGenerationId,
+      },
+    } });
+    assert.equal(put.ok, true, put.error);
+    await installExactTestProviderBirth(internals, agentId, liveHandle, executionGenerationId);
+    await internals.workerBindings.bind({
+      entry_id: agentId, room_id: "room", work_attempt_id: workAttemptId,
+      execution_generation_id: executionGenerationId, agent_session_id: "session:crash",
+      agent_session_token: "bearer:crash", credential_ref: "credential:crash", api_url: "https://letagents.test",
+    });
+    await internals.supervisedInbox.bootstrapCursor({ agent_id: agentId, room_id: "room", last_observed_message_id: null });
+    await internals.supervisedInbox.ingestPoll({
+      agent_id: agentId, room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { id: "1", text: "relay" },
+        activation: { for_current_agent: { decision: "activate" } } }],
+    });
+    await internals.startSupervisedDelivery(agentId);
+
+    assert.equal(await ending.promise, "recorded", "the failed lane's lease still records its turn's exact ending");
+    assert.equal(internals.liveHandles.has(agentId), false, "the crashed lane was retired");
+    await waitForAsync(async () => (await internals.supervisedInbox.receipts(agentId))[0]?.state === "acknowledged_failed", 5_000);
+    const [receipt] = await internals.supervisedInbox.receipts(agentId);
+    assert.match(receipt!.last_error ?? "", /Cursor ended before/);
+    assert.equal(await internals.supervisedInbox.nativeFailure(receipt!.inbox_item_id), "interrupted");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function enqueue(store: SupervisedAgentInboxStore, id = "1") {
   await ingest(store, id);
   return (await store.claimHead(agent.agentId))!;
@@ -2956,7 +3252,7 @@ for (const phase of ["preflight", "admitted"] as const) {
   });
 }
 
-test("refresh still replaces changed ownership, including mutated credentials and provider-less lanes", async (t) => {
+test("refresh still replaces changed ownership, including provider-less lanes, but adopts a rotated bearer in place", async (t) => {
   for (const coordinate of ["handle", "agentSessionId", "executionGenerationId", "daemonGeneration", "bearer", "no-provider-api", "no-provider-workspace"] as const) {
     await t.test(coordinate, async () => {
       const root = await mkdtemp(join(tmpdir(), "letagents-delivery-owner-change-"));
@@ -2982,6 +3278,15 @@ test("refresh still replaces changed ownership, including mutated credentials an
         if (coordinate === "no-provider-api") original.apiUrl = "https://other.letagents.test";
         if (coordinate === "no-provider-workspace") original.workAttemptId = "new-attempt";
         await delivery.refresh(original);
+        if (coordinate === "bearer") {
+          // Same worker session, new memory-only bearer: the lane is kept.
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          assert.equal(pollSignals.length, 1, "a rotated bearer of the same session keeps the registered lane");
+          assert.equal(pollSignals[0]?.aborted, false);
+          await delivery.refresh({ ...original });
+          assert.equal(pollSignals.length, 1, "the rotated owner is idempotent too");
+          return;
+        }
         await waitFor(() => pollSignals.length === 2);
         assert.equal(pollSignals[0]?.aborted, true, "changed owner must retire the registered lane");
         assert.equal(pollSignals[1]?.aborted, false);
@@ -2992,6 +3297,276 @@ test("refresh still replaces changed ownership, including mutated credentials an
         await rm(root, { recursive: true, force: true });
       }
     });
+  }
+});
+
+test("a same-session bearer rotation keeps the in-flight turn, its approvals and the pump; a new session still tears down", async (t) => {
+  for (const change of ["rotation", "new-session", "stale-bearer"] as const) {
+    await t.test(change, async () => {
+      const root = await mkdtemp(join(tmpdir(), "letagents-delivery-rotation-"));
+      const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+      let currentBearer = "bearer-before";
+      let authorityGate: Promise<void> = Promise.resolve();
+      const entered = deferred<void>();
+      const release = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+      let detachSignal: AbortSignal | undefined;
+      const publishedWith: string[] = [];
+      const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+        await options?.beforeNativeDispatch?.();
+        await options?.checkpointTurnStarted?.("turn:rotation");
+        detachSignal = options?.detachSignal;
+        entered.resolve();
+        return release.promise;
+      }), {
+        poll: ({ signal }) => new Promise((resolve) => {
+          if (signal.aborted) resolve({});
+          else signal.addEventListener("abort", () => resolve({}), { once: true });
+        }),
+        publish: async (input) => {
+          publishedWith.push(input.bearer);
+          return { messageId: "reply:rotation", roomId: input.roomId };
+        },
+      }, async (authority) => { await authorityGate; return authority.bearer === currentBearer; });
+      const before = { ...agent, bearer: "bearer-before" };
+      try {
+        await ingest(store);
+        await delivery.start(before);
+        await entered.promise;
+        const successor = change === "rotation"
+          ? { ...agent, bearer: "bearer-after" }
+          : change === "stale-bearer"
+            // Same session, but not the bearer the binding now holds.
+            ? { ...agent, bearer: "bearer-stale" }
+            : { ...agent, agentSessionId: "session-2", bearer: "bearer-after" };
+        currentBearer = "bearer-after";
+        const gate = deferred<void>();
+        authorityGate = gate.promise;
+        const refreshed = delivery.refresh(successor);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (change === "rotation") {
+          assert.equal(delivery.activeTurn(successor)?.inboxItemId !== undefined, true,
+            "an approval arriving during the rotation still matches the bounded turn");
+        }
+        gate.resolve();
+        authorityGate = Promise.resolve();
+        await refreshed;
+        if (change !== "rotation") {
+          assert.equal(detachSignal?.aborted, true, change === "new-session"
+            ? "a different worker session still replaces the lane"
+            : "a bearer the binding no longer holds is never adopted");
+          return;
+        }
+        assert.equal(detachSignal?.aborted, false, "rotation never detaches the in-flight provider turn");
+        assert.ok(delivery.activeTurn(successor), "the active turn survives for approvals and bounded effects");
+        assert.notEqual((await store.ingressHealth(agent.agentId))?.state, "stopped");
+        release.resolve({ turnId: "turn:rotation", outcome: "reply", text: "Done." });
+        await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged");
+        assert.deepEqual(publishedWith, ["bearer-after"], "the live turn publishes with the rotated bearer");
+        const timeline = (await store.receipts(agent.agentId))[0]!.timeline;
+        assert.equal(timeline.filter((event) => event.phase === "queued").length, 1,
+          "no restart recovery was written onto the in-flight row");
+        assert.equal(timeline.some((event) => /restarted/i.test(event.detail ?? "")), false);
+      } finally {
+        authorityGate = Promise.resolve();
+        release.resolve({ turnId: "turn:rotation", outcome: "reply", text: "cleanup" });
+        await delivery.fenceAndDrain(); await store.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("a turn that ends before delivery adopts a rotated bearer is recovered instead of stranding the FIFO", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-rotation-window-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let currentBearer = "bearer-before";
+  const entered = deferred<void>();
+  const release = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+  const publishedWith: string[] = [];
+  let recovers = 0;
+  let runError = "";
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("turn:rotation");
+    entered.resolve();
+    const raw = await release.promise;
+    try { return (await options?.checkpointTerminalResult?.(raw))?.acceptedResult ?? raw; }
+    catch (error) { runError = String(error); throw error; }
+  }, async (_handle, _request, options) => {
+    recovers += 1;
+    const raw = { turnId: "turn:rotation", outcome: "reply" as const, text: "Done." };
+    return (await options?.checkpointTerminalResult?.(raw))?.acceptedResult ?? raw;
+  }), {
+    poll: ({ signal }) => new Promise((resolve) => {
+      if (signal.aborted) resolve({});
+      else signal.addEventListener("abort", () => resolve({}), { once: true });
+    }),
+    publish: async (input) => {
+      publishedWith.push(input.bearer);
+      return { messageId: "reply:rotation", roomId: input.roomId };
+    },
+  }, async (authority) => authority.bearer === currentBearer);
+  try {
+    await ingest(store);
+    await delivery.start({ ...agent, bearer: "bearer-before" });
+    await entered.promise;
+    // The binding rotates before delivery hears of it, and the turn ends then.
+    currentBearer = "bearer-after";
+    release.resolve({ turnId: "turn:rotation", outcome: "reply", text: "Done." });
+    await waitFor(() => runError !== "");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "dispatching",
+      "the revoked bearer could not record the result, so the row has no owner");
+    await delivery.refresh({ ...agent, bearer: "bearer-after" });
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged", 3_000);
+    assert.deepEqual(publishedWith, ["bearer-after"]);
+    assert.equal(recovers, 1, "the saved turn is re-read once and never rerun");
+  } finally {
+    release.resolve({ turnId: "turn:rotation", outcome: "reply", text: "cleanup" });
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an older rotation that finishes its authority check last cannot replace a newer adopted bearer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-rotation-order-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const entered = deferred<void>();
+  const release = deferred<{ turnId: string; outcome: "reply"; text: string }>();
+  const firstCheck = deferred<void>();
+  let detachSignal: AbortSignal | undefined;
+  const publishedWith: string[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("turn:rotation-order");
+    detachSignal = options?.detachSignal;
+    entered.resolve();
+    return release.promise;
+  }), {
+    poll: ({ signal }) => new Promise((resolve) => {
+      if (signal.aborted) resolve({});
+      else signal.addEventListener("abort", () => resolve({}), { once: true });
+    }),
+    publish: async (input) => {
+      publishedWith.push(input.bearer);
+      return { messageId: "reply:rotation-order", roomId: input.roomId };
+    },
+  }, async (authority) => {
+    // The first rotation's check passed before the second rotation landed.
+    if (authority.bearer === "bearer-1") await firstCheck.promise;
+    return ["bearer-before", "bearer-1", "bearer-2"].includes(authority.bearer);
+  });
+  try {
+    await ingest(store);
+    await delivery.start({ ...agent, bearer: "bearer-before" });
+    await entered.promise;
+    const older = delivery.refresh({ ...agent, bearer: "bearer-1" });
+    await delivery.refresh({ ...agent, bearer: "bearer-2" });
+    firstCheck.resolve();
+    await older;
+    assert.equal(detachSignal?.aborted, false);
+    release.resolve({ turnId: "turn:rotation-order", outcome: "reply", text: "Done." });
+    await waitForAsync(async () => (await store.receipts(agent.agentId))[0]?.state === "acknowledged");
+    assert.deepEqual(publishedWith, ["bearer-2"], "the newest rotation's bearer stays adopted");
+  } finally {
+    firstCheck.resolve();
+    release.resolve({ turnId: "turn:rotation-order", outcome: "reply", text: "cleanup" });
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stop or ingress pause during a refresh's authority check is not undone by that refresh", async (t) => {
+  for (const interruption of ["stop", "pause"] as const) {
+    await t.test(interruption, async () => {
+      const root = await mkdtemp(join(tmpdir(), "letagents-delivery-refresh-interrupted-"));
+      const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+      const pollSignals: AbortSignal[] = [];
+      const checking = deferred<void>();
+      const gate = deferred<void>();
+      const delivery = new SupervisedAgentDelivery(store, provider(async () => { throw new Error("no work queued"); }), {
+        poll: ({ signal }) => new Promise((resolve) => {
+          pollSignals.push(signal);
+          if (signal.aborted) resolve({});
+          else signal.addEventListener("abort", () => resolve({}), { once: true });
+        }),
+        publish: async () => { throw new Error("no reply expected"); },
+      }, async (authority) => {
+        if (authority.bearer === "bearer-after") { checking.resolve(); await gate.promise; }
+        return true;
+      });
+      try {
+        await delivery.start({ ...agent, bearer: "bearer-before" });
+        await waitFor(() => pollSignals.length === 1);
+        const refreshed = delivery.refresh({ ...agent, bearer: "bearer-after" });
+        await checking.promise;
+        const interrupted = interruption === "stop" ? delivery.stop(agent.agentId) : delivery.pauseIngress(agent.agentId);
+        gate.resolve();
+        await refreshed; await interrupted;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        assert.equal(pollSignals.length, 1, `the ${interruption} owns the lane; the stale refresh must not restart it`);
+        assert.equal(pollSignals[0]?.aborted, true);
+      } finally {
+        gate.resolve();
+        await delivery.fenceAndDrain(); await store.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("a task ownership lookup revoked by a same-session rotation is retried with the adopted bearer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-rotation-lookup-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let currentBearer = "bearer-before";
+  let runs = 0;
+  let completed = false;
+  const lookups: string[] = [];
+  const lookupInFlight = deferred<void>();
+  const rotated = deferred<void>();
+  const task = { id: "task_1", title: "Finish the existing change", leaseId: "lease-1", epoch: 0 };
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    const turnId = `turn-${runs}`;
+    await options?.checkpointTurnStarted?.(turnId);
+    if (runs === 1) {
+      return { turnId, providerContinuationId: "thread", outcome: "failed", text: null,
+        evidence: "stream", error: "HTTP 503 Service Unavailable" };
+    }
+    completed = true;
+    return { turnId, outcome: "reply", text: "The remaining work is finished." };
+  }), {
+    poll: ({ signal }) => new Promise((resolve) => {
+      if (signal.aborted) resolve({});
+      else signal.addEventListener("abort", () => resolve({}), { once: true });
+    }),
+    ownedTasks: async (input) => {
+      lookups.push(input.bearer);
+      if (input.bearer === "bearer-before") {
+        lookupInFlight.resolve();
+        await rotated.promise;
+        throw new Error("HTTP 401 Unauthorized");
+      }
+      return completed ? [] : [task];
+    },
+    publish: async () => ({ roomId: agent.roomId, messageId: "msg_2" }),
+  }, async (authority) => authority.bearer === currentBearer, 0, async () => {});
+  try {
+    await ingest(store);
+    await delivery.start({ ...agent, bearer: "bearer-before" });
+    await lookupInFlight.promise;
+    currentBearer = "bearer-after";
+    await delivery.refresh({ ...agent, bearer: "bearer-after" });
+    rotated.resolve();
+    await waitFor(() => completed, 3_000);
+    assert.equal(runs, 2, "the unfinished task continues after the rotation");
+    assert.deepEqual(lookups.slice(0, 2), ["bearer-before", "bearer-after"]);
+    assert.equal((await store.receipts(agent.agentId)).some((receipt) => receipt.state === "blocked"), false);
+  } finally {
+    rotated.resolve();
+    await delivery.fenceAndDrain(); await store.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 

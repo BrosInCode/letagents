@@ -1359,6 +1359,35 @@ test("a crashed Cursor generation with a blocked FIFO head cannot recover as a h
   assert.equal(runtime.entry().provider_ref?.provider_continuation_id, "replacement-continuation");
 });
 
+test("a crashed Cursor lane whose failed turn already settled resumes its conversation without manual recovery", async () => {
+  const runtime = ownedRecoveryHarness();
+  const crash = { ...terminal(returnedHandle), exitCode: 143, terminalCause: "crashed" as const };
+  runtime.executionGenerations[0]!.terminal = runtime.options.terminalPayload(crash, "test");
+  const idle = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
+  runtime.setEntry({
+    ...runtime.entry(), provider: "cursor", observed_state: "failed", condition: "none",
+    provider_ref: { ...runtime.entry().provider_ref!, provider_connection: idle },
+  });
+  // Delivery recorded the crashed turn as interrupted, so no blocked head remains.
+  runtime.options.inbox.head = async () => null;
+  runtime.options.host.requiresGrant = () => false;
+  const capabilities = runtime.options.provider.capabilities;
+  runtime.options.provider.capabilities = async (...args) => ({ ...await capabilities(...args), resume: true });
+  const resumed: Array<string | null> = [];
+  runtime.options.provider.resume = async (ref) => {
+    resumed.push(ref.providerContinuationId);
+    return { ...returnedHandle, pid: null, observedState: "idle", providerConnection: idle };
+  };
+  runtime.options.provider.spawn = async () => { throw new Error("a settled crash keeps its conversation"); };
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.deepEqual(resumed, ["continuation-1"], "the lane restarts on the same Cursor conversation");
+  assert.equal(runtime.installed.length, 1);
+  assert.equal(runtime.executionGenerations.length, 2);
+  assert.notEqual(runtime.entry().condition, "coordination_blocked");
+});
+
 test("a live generation without an attachable handle re-checks with capped backoff and one durable write", async () => {
   const runtime = ownedRecoveryHarness();
   let attaches = 0;

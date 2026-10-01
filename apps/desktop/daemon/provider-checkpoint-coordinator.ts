@@ -259,6 +259,11 @@ export class ProviderCheckpointCoordinator {
         providerContinuationId,
         providerConnection,
       );
+    // A periodic bearer rotation keeps the same worker session, so it must not
+    // fence a wrapper this lane already admitted. Refusing that wrapper's init
+    // or idle checkpoint makes the adapter reap a released native turn.
+    const credentialAuthorizes = (credential: string | null): boolean => credential === agent.bearer
+      || (completingAdmittedCursorState && Boolean(credential));
     await this.serializeEntry(agent.agentId, () => this.serializeManifest(async () => {
       if (this.authority.isHandoffScheduled() && !completingAdmittedCursorState) {
         throw new DaemonFenceLostError("Cursor provider state changed during daemon handoff.");
@@ -302,7 +307,7 @@ export class ProviderCheckpointCoordinator {
         || binding.work_attempt_id !== agent.workAttemptId
         || binding.execution_generation_id !== agent.executionGenerationId
         || binding.agent_session_id !== agent.agentSessionId
-        || currentCredential !== agent.bearer
+        || !credentialAuthorizes(currentCredential)
         || live.workAttemptId !== agent.workAttemptId
         || live.providerContinuationId !== providerContinuationId
         || !sameProviderActionConnectionSnapshot(live.providerConnection, providerConnection)
@@ -398,7 +403,7 @@ export class ProviderCheckpointCoordinator {
           && recoveredBinding.work_attempt_id === agent.workAttemptId
           && recoveredBinding.execution_generation_id === agent.executionGenerationId
           && recoveredBinding.agent_session_id === agent.agentSessionId
-          && recoveredCredential === agent.bearer
+          && credentialAuthorizes(recoveredCredential)
           && recoveredLive === agent.handle
           && recoveredLive.workAttemptId === agent.workAttemptId
           && recoveredLive.providerContinuationId === providerContinuationId
