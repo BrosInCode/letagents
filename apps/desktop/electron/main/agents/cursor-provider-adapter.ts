@@ -112,7 +112,8 @@ import {
   cursorMcpInspectionEnv,
 } from "./cursor-mcp-authority.js";
 import { resolveLetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
-import { buildCursorChildEnv, buildManagedCursorChildEnv } from "./cursor-runner.js";
+import { buildCursorChildEnv } from "./cursor-runner.js";
+import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { cursorPermissionProfileInstructionLines } from "./cursor-permission-profile.js";
 import {
   createSupervisedWorkspaceGeneration,
@@ -334,12 +335,11 @@ export function cursorLaunchPolicyArgs(value: unknown): string[] {
 }
 
 export function cursorDaemonChildEnv(
-  profileEnv: Record<string, string>,
-  commitRequest: Pick<ProviderSpawnRequest, "cwd" | "supervisorEntryId"> | null = null,
+  profileEnv: Record<string, string>, commitEnvironment: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
   // Supervised children get the Cursor runtime allowlist plus the commit identity;
   // Electron often carries unrelated GitHub/cloud/npm/database credentials.
-  const env = buildManagedCursorChildEnv(profileEnv, commitRequest);
+  const env = buildCursorChildEnv(profileEnv);
   // A bounded provider turn borrows only the daemon's exact-generation tool
   // authority. Ambient desktop owner/fixed-worker credentials and stale
   // supervisor coordinates must never leak into the Cursor child or its MCPs.
@@ -359,7 +359,7 @@ export function cursorDaemonChildEnv(
       delete env[key];
     }
   }
-  return env;
+  return { ...env, ...commitEnvironment };
 }
 
 function cursorSupervisorMcpEnv(
@@ -1883,7 +1883,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
             mcpConnectorSocketPath,
           });
           this.deps.bindPersonalIdentity(profile, personalIdentity);
-          childEnv = cursorDaemonChildEnv(profile.env, handle.spawnRequest);
+          childEnv = cursorDaemonChildEnv(profile.env, await managedCommitEnvironmentFor(handle.spawnRequest));
           const toolchainPath = cursorSandboxToolchainBinPaths();
           if (toolchainPath.length > 0) {
             // Apple's /usr/bin compiler drivers are xcrun shims, which require

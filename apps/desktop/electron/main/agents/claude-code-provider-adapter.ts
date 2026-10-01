@@ -47,7 +47,7 @@ import {
   type NativeLifecycleCheckpoint,
 } from "./provider-execution-observer.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
-import { managedAgentCommitEnvironment, type ManagedAgentCommitEnvironmentReader } from "./managed-agent-commit-identity.js";
+import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import {
   isRentalCredentialIsolationRequested,
   rentalCredentialIsolationMarker,
@@ -125,6 +125,8 @@ export interface ClaudeCodeProviderAdapterDependencies {
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<ProviderProcessExit>;
   readSessionRows(sessionId: string): Promise<ClaudeEvidenceRecord[]>;
+  /** The managed commit identity for this work attempt, or none. */
+  resolveCommitEnvironment(req: ProviderSpawnRequest): Promise<Record<string, string>>;
   now(): string;
 }
 
@@ -537,16 +539,9 @@ class ClaudeRoomTurnObservationDetachedError extends Error {}
  * session"), so a supervisor that itself runs under Claude Code must not leak
  * that marker into the worker. Daemon-owned turns borrow exact-generation
  * authority, so ambient owner and fixed worker credentials are also removed
- * before Claude or provider-started shell commands can inherit them. A
- * workspace that would commit as the host's global Git identity gets the
- * owner's GitHub noreply identity instead.
+ * before Claude or provider-started shell commands can inherit them.
  */
-export function claudeCliEnv(
-  base: NodeJS.ProcessEnv = desktopRuntimeEnvironment(),
-  overrides: NodeJS.ProcessEnv = {},
-  commitWorkspace: string | null = null,
-  readCommitEnvironment: ManagedAgentCommitEnvironmentReader = managedAgentCommitEnvironment,
-): NodeJS.ProcessEnv {
+export function claudeCliEnv(base: NodeJS.ProcessEnv = desktopRuntimeEnvironment(), overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const combined = { ...base, ...overrides };
   if (isRentalCredentialIsolationRequested(combined)) return rentalIsolatedChildEnvironment(combined);
   const {
@@ -554,7 +549,7 @@ export function claudeCliEnv(
     LETAGENTS_TOKEN: _ownerToken,
     LETAGENTS_AGENT_SESSION_BEARER: _fixedWorkerBearer,
     ...env
-  } = { ...base, ...readCommitEnvironment(commitWorkspace), ...overrides };
+  } = combined;
   return env;
 }
 
@@ -586,7 +581,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     detached: process.platform !== "win32",
     // The strict launch config supplies the API endpoint; these coordinates
     // make every LetAgents MCP effect borrow the exact daemon generation.
-    env: claudeCliEnv(desktopRuntimeEnvironment(), input.env, input.cwd),
+    env: claudeCliEnv(desktopRuntimeEnvironment(), input.env),
   });
 
   const lineListeners = new Set<(line: string) => void>();
@@ -754,6 +749,7 @@ async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidence
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   readVersion: defaultReadVersion,
   launchChild: defaultLaunchChild,
+  resolveCommitEnvironment: managedCommitEnvironmentFor,
   createLetAgentsMcpConfig: req => createManagedClaudeMcpConfig(
     req.supervisorWorkerSession?.apiUrl ?? desktopApiUrl, tmpdir(), req.devMcpServerEntryPath,
   ),
@@ -1387,6 +1383,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     requireSupportedClaudeCodeVersion(versionOutput, approvalProfileLabel);
 
     const policyArgs = claudeLaunchPolicyArgs(attestProviderSpawnPolicy("claude-code", req));
+    // A workspace that would commit as the host's global Git identity commits
+    // as the owner's GitHub noreply identity instead; rentals never get one.
+    const commitEnvironment = await this.deps.resolveCommitEnvironment(req);
     const managedMcpConfig = await this.deps.createLetAgentsMcpConfig(req);
     // Use an explicit strict config so a repo-tracked .mcp.json cannot shadow
     // the managed room workplace. The short-lived 0600 config lives outside
@@ -1429,9 +1428,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         ...(req.permissionProfileId ? { LETAGENTS_PERMISSION_PROFILE_ID: req.permissionProfileId } : {}),
       }
       : undefined;
+    const launchEnv = Object.keys(commitEnvironment).length ? { ...commitEnvironment, ...supervisorEnv } : supervisorEnv;
     let child: ClaudeCliChild;
     try {
-      child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd, env: supervisorEnv });
+      child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd, env: launchEnv });
     } catch (error) {
       await managedMcpConfig.dispose();
       throw error;

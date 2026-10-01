@@ -31,7 +31,7 @@ const {
   codexPersonalSkillFiles,
   codexSkillDisableOverride,
   listCodexMcpServerNames,
-} = await import("../main/agents/codex-launch-isolation.js");
+} = await import("../../../../shared/codex-owner-isolation.mjs");
 const {
   codexAppServerEnvironment,
   codexCommitIdentityOverrides,
@@ -75,7 +75,8 @@ function fakeCodex(): { bin: string; report: string; calls: () => Array<{ args: 
     "const { appendFileSync } = require('node:fs');",
     "const args = process.argv.slice(2);",
     "const pick = (key) => process.env[key] ?? null;",
-    "appendFileSync(process.env.FAKE_CODEX_REPORT, JSON.stringify({ args, cwd: process.cwd(), env: {",
+    "const report = process.env.FAKE_CODEX_REPORT || require('node:path').join(process.env.HOME, 'codex-calls.jsonl');",
+    "appendFileSync(report, JSON.stringify({ args, cwd: process.cwd(), env: {",
     "  CODEX_HOME: pick('CODEX_HOME'), GIT_AUTHOR_NAME: pick('GIT_AUTHOR_NAME'), GIT_AUTHOR_EMAIL: pick('GIT_AUTHOR_EMAIL'),",
     "  GIT_COMMITTER_NAME: pick('GIT_COMMITTER_NAME'), GIT_COMMITTER_EMAIL: pick('GIT_COMMITTER_EMAIL'),",
     "} }) + '\\n');",
@@ -107,7 +108,7 @@ async function waitForExit(launch: { exited: Promise<unknown> }): Promise<void> 
   }
 }
 
-test("personal Codex skills are found in CODEX_HOME and ~/.agents, but not Codex's bundled ones", () => {
+test("personal Codex skills are found in CODEX_HOME and ~/.agents, but not Codex's bundled ones", async () => {
   const home = fixture("home");
   const codexHome = join(home, ".codex");
   const personal = writeSkill(join(codexHome, "skills", "scope-guard"), "scope-guard");
@@ -117,7 +118,7 @@ test("personal Codex skills are found in CODEX_HOME and ~/.agents, but not Codex
   const linkedTarget = writeSkill(join(fixture("elsewhere"), "linked"), "linked");
   symlinkSync(join(linkedTarget, ".."), join(codexHome, "skills", "linked"));
 
-  const files = codexPersonalSkillFiles({ HOME: home, CODEX_HOME: codexHome });
+  const files = await codexPersonalSkillFiles({ HOME: home, CODEX_HOME: codexHome });
 
   assert.ok(files.includes(personal));
   assert.ok(files.includes(grouped));
@@ -127,10 +128,10 @@ test("personal Codex skills are found in CODEX_HOME and ~/.agents, but not Codex
   assert.equal(files.some((file) => file.includes(".system")), false);
   const deepest = writeSkill(join(codexHome, "skills", "d1", "d2", "d3", "d4", "d5", "d6"), "deepest");
   const tooDeep = writeSkill(join(codexHome, "skills", "e1", "e2", "e3", "e4", "e5", "e6", "e7"), "too-deep");
-  const deepFiles = codexPersonalSkillFiles({ HOME: home, CODEX_HOME: codexHome });
+  const deepFiles = await codexPersonalSkillFiles({ HOME: home, CODEX_HOME: codexHome });
   assert.ok(deepFiles.includes(deepest), "Codex still finds a skill six directories down");
   assert.equal(deepFiles.includes(tooDeep), false, "Codex stops looking below that");
-  assert.deepEqual(codexPersonalSkillFiles({ HOME: fixture("empty-home") }), []);
+  assert.deepEqual(await codexPersonalSkillFiles({ HOME: fixture("empty-home") }), []);
 });
 
 test("Codex override builders disable named skills and every MCP server but LetAgents", () => {
@@ -199,12 +200,12 @@ test("a managed Codex launch turns off the owner's extensions and commits as the
   assert.equal(server!.args[0], "app-server");
   assert.deepEqual(overridesOf(server!.args), [
     `projects.${JSON.stringify(project)}.trust_level="trusted"`,
-    ...CODEX_OWNER_FEATURE_OVERRIDES,
-    codexSkillDisableOverride([...new Set([personal, realpathSync(personal)])]),
     'shell_environment_policy.set.GIT_AUTHOR_NAME="octo-fake"',
     `shell_environment_policy.set.GIT_AUTHOR_EMAIL=${JSON.stringify(FAKE_NOREPLY)}`,
     'shell_environment_policy.set.GIT_COMMITTER_NAME="octo-fake"',
     `shell_environment_policy.set.GIT_COMMITTER_EMAIL=${JSON.stringify(FAKE_NOREPLY)}`,
+    ...CODEX_OWNER_FEATURE_OVERRIDES,
+    codexSkillDisableOverride([...new Set([personal, realpathSync(personal)])]),
     'mcp_servers={ "owner.dotted" = { enabled = false }, "owner_browser" = { enabled = false } }',
     'model="caller-model"',
   ]);
@@ -229,25 +230,38 @@ test("a managed Codex launch does not start when its MCP servers cannot be liste
   assert.deepEqual(codex.calls().map((call) => call.args[0]), ["mcp"]);
 });
 
-test("rental Codex launches keep their isolated environment without the owner's commit identity", () => {
-  const repo = githubRepo("environment-project");
-  const ordinary = codexAppServerEnvironment({ trustedProjectPath: repo, env: { FAKE_CANARY: "kept" } });
+test("rental Codex launches keep their isolated environment without the owner's commit identity", async () => {
+  const identity = { GIT_AUTHOR_EMAIL: FAKE_NOREPLY, GIT_COMMITTER_EMAIL: FAKE_NOREPLY };
+  const ordinary = codexAppServerEnvironment({ commitEnvironment: identity, env: { FAKE_CANARY: "kept" } });
   assert.equal(ordinary.env.GIT_AUTHOR_EMAIL, FAKE_NOREPLY);
   assert.equal(ordinary.env.FAKE_CANARY, "kept");
   assert.deepEqual(codexCommitIdentityOverrides(ordinary.commitEnvironment), [
-    'shell_environment_policy.set.GIT_AUTHOR_NAME="octo-fake"',
     `shell_environment_policy.set.GIT_AUTHOR_EMAIL=${JSON.stringify(FAKE_NOREPLY)}`,
-    'shell_environment_policy.set.GIT_COMMITTER_NAME="octo-fake"',
     `shell_environment_policy.set.GIT_COMMITTER_EMAIL=${JSON.stringify(FAKE_NOREPLY)}`,
   ]);
-
   const rental = codexAppServerEnvironment({
-    trustedProjectPath: repo,
+    commitEnvironment: identity,
     env: { LETAGENTS_RENTAL_CREDENTIAL_ISOLATION: "1", FAKE_CANARY: "dropped" },
   });
+  assert.equal(rental.rental, true);
   assert.deepEqual(rental.commitEnvironment, {});
   assert.equal(rental.env.GIT_AUTHOR_EMAIL, undefined);
   assert.equal(rental.env.FAKE_CANARY, undefined);
+
+  // A real rental launch into a qualifying repository: the rental boundary keeps only
+  // HOME among the test's variables, so the stand-in reports there.
+  const codex = fakeCodex();
+  const home = fixture("rental-home");
+  const launch = await launchManagedCodexAppServer("ws://127.0.0.1:1", codex.bin, {
+    trustedProjectPath: githubRepo("rental-project"),
+    env: { HOME: home, LETAGENTS_RENTAL_CREDENTIAL_ISOLATION: "1" },
+  });
+  await waitForExit(launch);
+  const calls = readFileSync(join(home, "codex-calls.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const server = calls.find((call) => call.args[0] === "app-server");
+  assert.ok(server);
+  assert.equal(overridesOf(server.args).some((override) => override.includes("GIT_")), false);
+  assert.equal(server.env.GIT_AUTHOR_EMAIL, null);
 });
 
 test("the Codex provider adapter launches its app-server through the managed launch", async () => {

@@ -122,6 +122,8 @@ interface HarnessOptions {
   dieOnSigterm?: boolean;
   versionOutput?: string;
   sessionRows?: Array<Record<string, unknown>>;
+  /** The managed commit identity the work attempt resolves to. */
+  commitEnvironment?: Record<string, string>;
 }
 
 function argValue(args: string[], flag: string): string | null {
@@ -142,6 +144,7 @@ function createHarness(options: HarnessOptions = {}) {
   let nextPid = 4100;
   let mcpConfigDisposals = 0;
   let versionReads = 0;
+  const commitRequests: ProviderSpawnRequest[] = [];
 
   const dependencies: ClaudeCodeProviderAdapterDependencies = {
     async readVersion(claudeBin) {
@@ -236,6 +239,10 @@ function createHarness(options: HarnessOptions = {}) {
     async readSessionRows() {
       return options.sessionRows ?? [];
     },
+    async resolveCommitEnvironment(req) {
+      commitRequests.push(req);
+      return options.commitEnvironment ?? {};
+    },
     now: () => new Date(1_700_000_000_000).toISOString(),
   };
 
@@ -246,6 +253,7 @@ function createHarness(options: HarnessOptions = {}) {
     signals,
     identities,
     dependencies,
+    commitRequests,
     get mcpConfigDisposals() { return mcpConfigDisposals; },
     get versionReads() { return versionReads; },
   };
@@ -552,6 +560,27 @@ test("Claude supervised launch passes the exact daemon generation bridge to its 
   assert.equal(argValue(args, "--mcp-config"), "/private/tmp/letagents-claude-mcp-test/mcp.json");
   assert.equal(JSON.stringify(args).includes("test-worker-token"), false, "worker auth never enters process argv");
   assert.equal(harness.mcpConfigDisposals, 1, "ephemeral MCP config is removed after init");
+});
+
+test("Claude launches with the managed commit identity for its work attempt", async () => {
+  const identity = {
+    GIT_AUTHOR_NAME: "octo-fake",
+    GIT_AUTHOR_EMAIL: "424242+octo-fake@users.noreply.github.com",
+    GIT_COMMITTER_NAME: "octo-fake",
+    GIT_COMMITTER_EMAIL: "424242+octo-fake@users.noreply.github.com",
+  };
+  const harness = createHarness({ commitEnvironment: identity });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({
+    supervisorEntryId: "manifest_exact",
+    supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact",
+  }));
+  assert.equal(harness.commitRequests[0]?.cwd, spawnRequest().cwd);
+  assert.equal(harness.commitRequests[0]?.supervisorEntryId, "manifest_exact");
+  const env = harness.launches[0]?.env ?? {};
+  for (const [key, value] of Object.entries(identity)) assert.equal(env[key], value, key);
+  assert.equal(env.LETAGENTS_SUPERVISOR_ENTRY_ID, "manifest_exact", "the supervisor coordinates are kept");
 });
 
 test("managed Claude MCP config is private, official-runtime-only, and ephemeral outside the worktree", async () => {

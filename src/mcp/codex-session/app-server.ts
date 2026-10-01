@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
 import { createServer } from "net";
 
-import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../shared/codex-owner-isolation.mjs";
+import { codexOwnerIsolationOverrides } from "../../../shared/codex-owner-isolation.mjs";
 
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -75,18 +75,23 @@ export async function resolveCodexServerUrl(explicitServerUrl?: string): Promise
   return allocateLoopbackServerUrl();
 }
 
-/** The session works for the room: none of the owner's Codex plugins, connectors, hooks or notifier. */
-export function codexAppServerArgs(serverUrl: string): string[] {
-  return [
-    "app-server",
-    ...CODEX_OWNER_FEATURE_OVERRIDES.flatMap((override) => ["-c", override]),
-    "--listen",
-    serverUrl,
-  ];
+export function codexAppServerArgs(serverUrl: string, configOverrides: readonly string[]): string[] {
+  return ["app-server", ...configOverrides.flatMap((override) => ["-c", override]), "--listen", serverUrl];
 }
 
-export function launchAppServer(serverUrl: string, codexBin: string): number | null {
-  const child = spawn(codexBin, codexAppServerArgs(serverUrl), {
+/**
+ * The session works for the room, so its app-server gets none of the owner's
+ * Codex plugins, connectors, hooks, personal skills or MCP servers. It keeps
+ * the owner's LetAgents server, which it joins the room with. A launch that
+ * cannot list the owner's servers fails rather than starting with them.
+ */
+export async function launchAppServer(
+  serverUrl: string,
+  codexBin: string,
+  options: { cwd?: string } = {},
+): Promise<number | null> {
+  const overrides = await codexOwnerIsolationOverrides(codexBin, { cwd: options.cwd, env: process.env });
+  const child = spawn(codexBin, codexAppServerArgs(serverUrl, overrides), {
     detached: true,
     stdio: "ignore",
   });
