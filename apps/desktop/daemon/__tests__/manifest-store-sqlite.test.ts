@@ -6836,3 +6836,54 @@ test("v47 efficiency migration installs exact read indexes atomically and reject
     assert.throws(() => schema.createSchema(database), /read index .* is missing or invalid/);
   } finally { database.close(); }
 });
+
+test("a Cursor prepared turn leaves a claimed notice's batch queued until the turn completes", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath, () => "2026-10-01T07:00:00.000Z");
+  const bindings = new WorkerBindingStore(env.legacyPath, undefined, env.databasePath);
+  const continuation = "cursor-pending:notice-batch";
+  const wrapper = { kind: "cursor_cli" as const, pid: 4813, processIdentity: "cursor-wrapper:4813:birth" };
+  const cursor: DaemonManifestEntry = {
+    ...entry, id: "cursor-notice-batch", room_id: "cursor-notice-room", provider: "cursor", condition: "none", delivery_mode: "daemon_inbox",
+    provider_ref: { work_attempt_id: "cursor-notice-attempt", provider_continuation_id: continuation, provider_connection: null,
+      execution_generation_id: "cursor-notice-generation" },
+    work_attempt_id: "cursor-notice-attempt", turn_control: undefined, last_turn_control_sequence: 0,
+  };
+  const notice = (id: string) => ({ source_message_id: id, activation: { decision: "activate", reason: "explicit_mention", addressed: true },
+    source_message: { id, sender: "letagents", source: "system", agent_identity: null, text: `Board intent bi_${id} was approved.` } });
+  const live = async () => (await inbox.receipts(cursor.id)).filter((item) => !item.acknowledged_at).map((item) => item.source_message_id);
+  try {
+    const generation = (await store.write(0, [cursor])).generation;
+    const worker = await bindings.bind({ entry_id: cursor.id, room_id: cursor.room_id, work_attempt_id: cursor.work_attempt_id!,
+      execution_generation_id: cursor.provider_ref!.execution_generation_id, agent_session_id: "cursor-notice-worker",
+      agent_session_token: "memory-only-test-token", api_url: "https://letagents.test" });
+    await inbox.ingestPoll({ agent_id: cursor.id, room_id: cursor.room_id, last_observed_message_id: "msg_3",
+      messages: [notice("msg_1"), notice("msg_2"), notice("msg_3")] });
+    const head = (await inbox.claimHead(cursor.id))!;
+    assert.deepEqual((head.activation.queued_notices as { notices: Array<{ id: string }> }).notices.map((row) => row.id), ["msg_2", "msg_3"]);
+    await store.checkpointCursorPreparedTurn(generation, {
+      agentId: cursor.id, roomId: cursor.room_id, inboxItemId: head.inbox_item_id, providerTurnId: "cursor-notice-turn",
+      providerContinuationId: continuation, workAttemptId: cursor.work_attempt_id!,
+      executionGenerationId: cursor.provider_ref!.execution_generation_id, agentSessionId: worker.agent_session_id,
+      credentialRef: worker.credential_ref, apiUrl: worker.api_url, expectedProviderContinuationId: continuation,
+      expectedProviderConnection: null, providerConnection: wrapper, configurationRevision: 1,
+      requestedAuthorityMode: "typed_shadow", observedAt: "2026-10-01T07:00:00.000Z",
+    });
+    assert.deepEqual(await live(), ["msg_1", "msg_2", "msg_3"], "a prepared turn can still be reset as not dispatched");
+    // Delivery's terminal checkpoint for every provider: the idempotent turn start, then the normalized result.
+    const authority = { work_attempt_id: cursor.work_attempt_id!, origin_execution_generation_id: cursor.provider_ref!.execution_generation_id,
+      provider_continuation_id: continuation };
+    await inbox.checkpointTurnStarted(head.inbox_item_id, "cursor-notice-turn", authority);
+    await inbox.checkpointNormalizedTerminal({ inbox_item_id: head.inbox_item_id, agent_id: cursor.id,
+      execution_generation_id: cursor.provider_ref!.execution_generation_id, provider_turn_id: "cursor-notice-turn",
+      outcome: "no_reply", text: null, evidence: "stream",
+      terminal_evidence: { turnId: "cursor-notice-turn", providerContinuationId: continuation, outcome: "no_reply", text: null, evidence: "stream" } });
+    assert.deepEqual(await live(), ["msg_1"], "the completed Cursor turn settles the notices it carried");
+  } finally {
+    await inbox.close().catch(() => undefined);
+    await bindings.close().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
