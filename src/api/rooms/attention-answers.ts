@@ -12,7 +12,9 @@ export interface AttentionAnswerDeps {
   heldLeaseIds?: (roomId: string, leaseIds: string[]) => Promise<string[]>;
 }
 
-const LEASE_ID = /\btl_[0-9a-f]{32}\b/g;
+// A lease id wherever it appears, including inside a longer token such as
+// `lease_tl_…`. Reading too much is harmless: only a released id answers.
+const LEASE_ID = /tl_[0-9a-f]{32}(?![0-9a-f])/g;
 
 async function heldLeaseIds(roomId: string, leaseIds: string[]): Promise<string[]> {
   if (leaseIds.length === 0) return [];

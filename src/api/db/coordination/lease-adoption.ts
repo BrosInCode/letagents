@@ -84,19 +84,23 @@ const OPEN_ASSIGNED_STATUSES = ["assigned", "in_progress", "blocked", "in_review
  * loses a name and registers again. Work taken from it could not be given
  * back, so silence moves none.
  *
- * Nothing passes from a session that is still live, or from another owner's
- * agent. A review passes only within one identity: another identity asks to
- * review in its own right, and the two do not contend for one lease.
+ * Nothing passes from a session that is still live, from another owner's
+ * agent, or from a session a room admin disconnected: that takes the work
+ * away from the agent, and it stays behind for the admin to release. A
+ * review passes only within one identity: another identity asks to review
+ * in its own right, and the two do not contend for one lease.
  *
  * A supervised worker is started by its supervisor, which registers each
  * process it starts for the agent under the grant it holds, and runs one
  * process per agent at a time. Its work passes only when that supervisor
  * registers the same agent again: the same grant, the same identity and the
- * same agent instance, from a session that had ended before the receiving
- * session was created. The ended session's credentials were revoked with it,
- * so the work has one holder. A session still live when the registration
- * began passes nothing, even one the registration itself ends, and a name
- * never carries work from one supervised agent to another.
+ * same agent instance, from an ended session created before the receiving
+ * one. The ended session's credentials were revoked with it, so the work has
+ * one holder. A registration keeps the oldest live session and ends any
+ * newer duplicate, so a session still live when it began passes nothing,
+ * even one it ends itself. Creation order, unlike end times, outlasts any
+ * difference between the clocks of the servers that wrote it. A name never
+ * carries work from one supervised agent to another.
  *
  * Runs inside the registration's transaction. A lease that something else is
  * writing to is skipped, not waited for, and is adopted at the agent's next
@@ -157,18 +161,17 @@ export async function adoptTaskLeasesFromEndedSessionsTx(
       eq(room_agent_sessions.agent_key, task_leases.agent_key),
       eq(room_agent_sessions.owner_account_id, input.owner_account_id),
       eq(room_agent_sessions.session_kind, "worker"),
+      isNotNull(room_agent_sessions.ended_at),
+      sql`${room_agent_sessions.end_reason} IS DISTINCT FROM 'room_admin'`,
       ...(supervisedBy ? [
         // Only this agent, started again by the same supervisor, and only
-        // what a session held that had ended before the receiving one began.
-        // These are the whole test for a supervised worker.
+        // what an older session held. With the two above, these are the
+        // whole test for a supervised worker.
         eq(room_agent_sessions.supervisor_grant_id, supervisedBy),
         eq(task_leases.agent_key, input.agent_key),
         eq(room_agent_sessions.agent_instance_id, input.successor.agent_instance_id!),
-        sql`${room_agent_sessions.ended_at} <= ${input.successor.created_at!}::timestamptz`,
-      ] : [
-        isNull(room_agent_sessions.supervisor_grant_id),
-        isNotNull(room_agent_sessions.ended_at),
-      ]),
+        sql`${room_agent_sessions.created_at} < ${input.successor.created_at!}::timestamptz`,
+      ] : [isNull(room_agent_sessions.supervisor_grant_id)]),
     ))
     .orderBy(asc(task_leases.id)) as Array<{
       id: string; task_id: string; kind: TaskLeaseKind; epoch: number;

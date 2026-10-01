@@ -19,6 +19,7 @@ import {
   boardOwnerOptions,
   boardOwnerValue,
   boardStatusOptions,
+  canManageRoomBoard,
   deriveTaskTitle,
   visibleBoardGroups,
 } from "../src/components/desktop/content/room-board/board-presentation";
@@ -329,6 +330,20 @@ describe("board task actions", () => {
     ).actionsFor(reviewed).filter((action) => action.id.startsWith("release-")).map((action) => action.id);
     assert.deepEqual(releases([]), []);
     assert.deepEqual(releases([worker()]), ["release-review:lease_review_blake"]);
+  });
+
+  it("lets the owner of a local room manage its board, as a room admin does", () => {
+    assert.equal(canManageRoomBoard("admin"), true);
+    assert.equal(canManageRoomBoard("local"), true);
+    for (const role of ["participant", "anonymous", null, undefined]) assert.equal(canManageRoomBoard(role), false);
+    const held = task({ status: "in_review", activeLeases: [
+      lease({ id: "lease_work", kind: "work", agentKey: "local/agent", holderLabel: "Local agent" }),
+      lease({ id: "lease_review", kind: "review", agentKey: "local/reviewer", holderLabel: "Reviewer" }),
+    ] });
+    const board = useRoomBoardController({ roomIdentifier: "local_room", tasks: [held], presence: [], workers: [],
+      canEditTasks: canManageRoomBoard("local") }, () => undefined);
+    assert.deepEqual(board.actionsFor(held).filter((action) => action.id.startsWith("release-")).map((action) => action.id),
+      ["release-work", "release-review:lease_review"]);
   });
 });
 

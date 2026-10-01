@@ -24,6 +24,7 @@ import type {
   RoomAgentRegistrationLiveness,
   RoomAgentSession,
   RoomAgentSessionBearer,
+  RoomAgentSessionEndReason,
   RoomAgentSessionRow,
 } from "../types.js";
 import {
@@ -347,6 +348,7 @@ async function rotateRoomAgentSessionTx(
     process_host_id: input.process_host_id ?? null,
     agent_heard_at: now,
     ended_at: null,
+    end_reason: null,
   }).where(and(
     eq(room_agent_sessions.session_id, current.session_id),
     ...(isMcpWorkerId(input.agent_instance_id) ? [] : [isNull(room_agent_sessions.ended_at)]),
@@ -997,8 +999,9 @@ export async function createOrRotateSupervisorWorkerSession(
     // ended (a crash, a restart, a recovery) gets a new session. The work the
     // ended session held is this agent's, and it passes to this session now,
     // or the agent could not finish or release it and nobody but a room admin
-    // could clear it. The duplicates ended above were live when this mint
-    // began, and keep what they held.
+    // could clear it. The duplicates ended above are newer than the session
+    // kept and were live when this mint began: they keep what they held. So
+    // does a session a room admin disconnected.
     const adoptedTaskLeases = await adoptTaskLeasesFromEndedSessionsTx(tx, {
       room_id: input.room_id,
       agent_key: input.agent_key,
@@ -1351,6 +1354,8 @@ export async function endRoomAgentSession(input: {
   supervisor_grant_id?: string | null;
   supervisor_grant_fence?: SupervisorGrantFence;
   credential_fence?: RoomAgentDeliveryCredentialFence | null;
+  /** Recorded on the session; see RoomAgentSessionEndReason. */
+  end_reason?: RoomAgentSessionEndReason | null;
 }): Promise<RoomAgentSession | null> {
   const unavailableReceiptTargets: number[] = [];
   let unavailableReceiptRoom: string | null = null;
@@ -1414,6 +1419,7 @@ export async function endRoomAgentSession(input: {
       ended_at: now,
       updated_at: now,
       last_seen_at: now,
+      ...(input.end_reason ? { end_reason: input.end_reason } : {}),
     })
       .where(and(...conditions))
       .returning();

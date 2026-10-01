@@ -28,10 +28,11 @@ import { coordinationId } from "../utils.js";
 // new session (adoptTaskLeasesFromEndedSessionsTx, called from
 // createOrRotateSupervisorWorkerSession). The mint does not wait for a proof
 // of exit: the supervisor runs one process per agent instance, so a process
-// that outlived its ended session is the one the new session serves (a room
-// admin disconnecting a live supervised worker, then the supervisor minting
-// it fresh credentials, is that case). Rebind stays for a work lease the mint
-// skipped because another write held it, and keeps its own proof rule below.
+// that outlived its ended session is the one the new session serves. A
+// session a room admin disconnected passes nothing: the disconnect takes its
+// work away, and the admin releases it. Rebind stays for a work lease the
+// mint skipped because another write held it, and keeps its own proof rule
+// below.
 
 // The strict terminal vocabulary an attestation may carry, mirroring the
 // daemon adapter's ProviderTerminalCause — every value asserts an OBSERVED

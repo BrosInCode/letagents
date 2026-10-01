@@ -1241,6 +1241,64 @@ test("a supervised mint skips a lease whose rows another write holds, and takes 
   assert.equal((await h.held(review.lease.id)).agent_session_id, recovered.session_id);
 });
 
+test("a supervised mint adopts even when the server that ended the old session runs ahead of this one", { skip: requiresDatabase }, async () => {
+  const lifecycle = await setupLifecycle();
+  const h = await supervisedLeaseHarness(lifecycle);
+  const crashed = await h.mint("daemon:entry-field-trail");
+  const work = await h.give(crashed, "Session log", "work");
+  const review = await h.give(crashed, "Keyboard shortcuts", "review");
+  await h.end(crashed);
+  // Another API server, whose clock is two seconds ahead, ended it.
+  await client!.pool.query("UPDATE room_agent_sessions SET ended_at = NOW() + INTERVAL '2 seconds' WHERE session_id = $1", [crashed.session_id]);
+  const recovered = await h.mint("daemon:entry-field-trail");
+  assert.notEqual(recovered.session_id, crashed.session_id);
+  assert.equal(recovered.adopted_task_leases?.length, 2);
+  assert.equal((await h.held(work.lease.id)).agent_session_id, recovered.session_id);
+  assert.equal((await h.held(review.lease.id)).agent_session_id, recovered.session_id);
+});
+
+test("a supervised mint passes nothing from a session a room admin disconnected", { skip: requiresDatabase }, async () => {
+  const lifecycle = await setupLifecycle();
+  const { room } = lifecycle;
+  const h = await supervisedLeaseHarness(lifecycle);
+  const disconnected = await h.mint("daemon:entry-field-trail");
+  const work = await h.give(disconnected, "Session log", "work");
+  const review = await h.give(disconnected, "Keyboard shortcuts", "review");
+  // What the disconnect route records for a room admin.
+  await authDb!.endRoomAgentSession({ session_id: disconnected.session_id, room_id: room.id, end_reason: "room_admin" });
+  // The supervisor gives the same live agent fresh credentials: its work stays behind.
+  const minted = await h.mint("daemon:entry-field-trail");
+  assert.notEqual(minted.session_id, disconnected.session_id);
+  assert.equal(minted.adopted_task_leases, undefined);
+  assert.equal((await h.held(work.lease.id)).agent_session_id, disconnected.session_id);
+  assert.equal((await h.held(review.lease.id)).agent_session_id, disconnected.session_id);
+});
+
+test("adoption never takes from a live session, even an older one of the same agent instance", { skip: requiresDatabase }, async () => {
+  const lifecycle = await setupLifecycle();
+  const { room, agent, grantResult } = lifecycle;
+  const h = await supervisedLeaseHarness(lifecycle);
+  const { adoptTaskLeasesFromEndedSessionsTx } = await import("../db/coordination/lease-adoption.js");
+  const common = {
+    room_id: room.id, session_kind: "worker" as const, runtime: "cursor", agent_key: agent.canonical_key,
+    agent_instance_id: "daemon:entry-live", owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Cursor",
+    supervisor_grant_id: grantResult.grant.grant_id,
+  };
+  const live = await authDb!.createRoomAgentSession({ ...common, display_name: "Live", actor_label: "Live | Owner's agent | Cursor" });
+  await delay(5);
+  const later = await authDb!.createRoomAgentSession({ ...common, display_name: "Later", actor_label: "Later | Owner's agent | Cursor" });
+  const work = await h.give(live, "Session log", "work");
+  const adopted = await client!.db.transaction((tx) => adoptTaskLeasesFromEndedSessionsTx(tx, {
+    room_id: room.id, agent_key: agent.canonical_key, owner_account_id: "owner_route",
+    supervisor_grant_id: grantResult.grant.grant_id,
+    successor: { session_id: later.session_id, agent_instance_id: "daemon:entry-live", actor_label: later.actor_label,
+      display_name: later.display_name, process_host_id: null, created_at: later.created_at },
+    now: new Date().toISOString(),
+  }));
+  assert.deepEqual(adopted, []);
+  assert.equal((await h.held(work.lease.id)).agent_session_id, live.session_id);
+});
+
 test("stale supervisor worker fence is an explicit conflict, never an internal error", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const session = await authDb!.createRoomAgentSession({
