@@ -4804,7 +4804,7 @@ test("Codex app-server launcher captures spawn errors for the supervisor", async
   assert.match(exit.error.message, /letagents-codex-missing-bin-for-test|ENOENT|spawn/i);
 });
 
-test("Codex app-server launcher uses the trusted worktree as its process cwd", async () => {
+test("Codex app-server launcher uses the managed worktree as its process cwd", async () => {
   const bin = join(tempDir, "codex-reporting-app-server-cwd");
   writeFileSync(
     bin,
@@ -5060,18 +5060,17 @@ test("Codex app-server output line redacts inherited secrets for provider prefli
   assert.doesNotMatch(detail ?? "", new RegExp(secret));
 });
 
-test("Codex app-server launcher trusts the selected managed worktree", () => {
+test("Codex app-server launcher passes its config overrides and no project trust for the managed worktree", () => {
   assert.deepEqual(codexAppServerLaunchArgs("ws://127.0.0.1:4500"), [
     "app-server",
     "--listen",
     "ws://127.0.0.1:4500",
   ]);
+  // A project trust override would make Codex load the worktree's own .codex config.
   assert.deepEqual(codexAppServerLaunchArgs("ws://127.0.0.1:4500", {
     trustedProjectPath: "/tmp/room-worktree",
   }), [
     "app-server",
-    "-c",
-    'projects."/tmp/room-worktree".trust_level="trusted"',
     "--listen",
     "ws://127.0.0.1:4500",
   ]);
@@ -5080,8 +5079,6 @@ test("Codex app-server launcher trusts the selected managed worktree", () => {
     configOverrides: ['model="gpt-5.2-codex-high"', 'model_reasoning_effort="xhigh"'],
   }), [
     "app-server",
-    "-c",
-    'projects."/tmp/room-worktree".trust_level="trusted"',
     "-c",
     'model="gpt-5.2-codex-high"',
     "-c",
