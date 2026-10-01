@@ -2647,6 +2647,41 @@ test("while a turn runs, a person's message overtakes queued work and a notice t
   } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("a notice turn that fails after it starts leaves its listed notices queued, so the lease holder's work continues", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-notice-batch-failure-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const runs: Array<{ id: string; listed: string[] }> = [];
+  let completed = false;
+  const task = { id: "task_1", title: "Finish the existing change", leaseId: "lease-1", epoch: 0 };
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    const listed = (request.activation as { queued_notices?: { notices: Array<{ id: string }> } }).queued_notices?.notices.map((entry) => entry.id) ?? [];
+    runs.push({ id: String((request.sourceMessage as { id?: string }).id), listed });
+    await options?.beforeNativeDispatch?.();
+    const turnId = `turn-${runs.length}`;
+    await options?.checkpointTurnStarted?.(turnId);
+    if (runs.length === 1) {
+      return { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", error: "HTTP 503 Service Unavailable" };
+    }
+    completed = true;
+    return { turnId, outcome: "no_reply", text: null };
+  }), {
+    poll: async () => ({}),
+    ownedTasks: async () => completed ? [] : [task],
+    publish: async () => ({ roomId: agent.roomId, messageId: "msg_9" }),
+  }, currentAuthority, 0, async () => {});
+  try {
+    const notice = (id: string) => ({ source_message_id: id, activation: { decision: "activate", reason: "explicit_mention", addressed: true },
+      source_message: { id, sender: "letagents", source: "system", agent_identity: null, text: `Board intent bi_${id} was approved. Continue the approved action.` } });
+    await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "2", messages: [notice("1"), notice("2")] });
+    await delivery.pump(agent);
+    assert.deepEqual(runs, [{ id: "1", listed: ["2"] }, { id: "2", listed: [] }], "the failed turn's listed notice gets its own turn");
+    assert.equal(completed, true);
+    assert.deepEqual((await store.receipts(agent.agentId)).map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
+  } finally {
+    await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+  }
+});
+
 for (const intakeState of ["observing", "backoff"] as const) {
   test(`delivery recovery preserves ${intakeState} health while room polling hangs`, async (t) => {
     const root = await mkdtemp(join(tmpdir(), "letagents-delivery-independent-recovery-"));

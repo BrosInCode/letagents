@@ -59,7 +59,7 @@ test("a notice batch marks only newer firings of the same rule as superseding, a
 });
 
 test("people pass earlier automated deliveries, FIFO among people, and each delivery is passed a bounded number of times", () => {
-  const entry = (kind: "person" | "automated" | "notice", arrival: number) => ({ kind, arrival: BigInt(arrival), label: `${kind[0]}${arrival}` });
+  const entry = (kind: "person" | "automated" | "notice", arrival: number, passes = 0) => ({ kind, arrival: BigInt(arrival), passes, label: `${kind[0]}${arrival}` });
   const labels = (rows: ReturnType<typeof entry>[]) => peopleFirstOrder(rows).order.map((row) => row.label);
   assert.deepEqual(labels([entry("automated", 1), entry("notice", 2), entry("person", 3), entry("automated", 4), entry("person", 5)]),
     ["p3", "p5", "a1", "n2", "a4"]);
@@ -67,6 +67,7 @@ test("people pass earlier automated deliveries, FIFO among people, and each deli
   const run = [entry("automated", 1), ...Array.from({ length: MAX_PERSON_PASSES + 2 }, (_, index) => entry("person", index + 2))];
   const { order, passed } = peopleFirstOrder(run);
   assert.deepEqual(order.map((row) => row.label), ["p2", "p3", "p4", "p5", "p6", "a1", "p7", "p8"]);
-  assert.deepEqual([...passed.values()], [1, 1, 1, 1, 1]);
-  assert.deepEqual(peopleFirstOrder(order).order.map((row) => row.label), order.map((row) => row.label), "reordering is stable");
+  assert.deepEqual([...passed.values()].map((overtaken) => overtaken.map((row) => row.label)), [["a1"], ["a1"], ["a1"], ["a1"], ["a1"]]);
+  assert.deepEqual(labels([entry("automated", 1, MAX_PERSON_PASSES - 1), entry("person", 9), entry("person", 10)]), ["p9", "a1", "p10"],
+    "passes already recorded on a delivery count toward its budget");
 });

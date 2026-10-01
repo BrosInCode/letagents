@@ -129,18 +129,16 @@ export function queuedNoticeReason(activation: Record<string, unknown>, activati
 
 /**
  * People's messages go ahead of earlier automated deliveries, FIFO among
- * people. An automated delivery already overtaken by `maxPasses` later
- * people's messages is not overtaken again, so a busy room cannot starve it.
- * Returns the new order and how many deliveries each moved person passed.
+ * people. `passes` is how many people already went ahead of a delivery,
+ * durably recorded by the caller; a delivery passed `maxPasses` times is not
+ * passed again, so a busy room cannot starve it. Returns the new order and,
+ * for each moved person, the deliveries it went ahead of.
  */
-export function peopleFirstOrder<T extends { kind: QueuedDeliveryKind; arrival: bigint }>(run: readonly T[],
-  maxPasses = MAX_PERSON_PASSES): { order: T[]; passed: Map<T, number> } {
+export function peopleFirstOrder<T extends { kind: QueuedDeliveryKind; arrival: bigint; passes: number }>(run: readonly T[],
+  maxPasses = MAX_PERSON_PASSES): { order: T[]; passed: Map<T, T[]> } {
   const order = [...run];
-  const passes = new Map<T, number>();
-  order.forEach((entry, index) => {
-    if (entry.kind !== "person") passes.set(entry, order.slice(0, index).filter((other) => other.kind === "person" && other.arrival > entry.arrival).length);
-  });
-  const passed = new Map<T, number>();
+  const passes = new Map<T, number>(order.map((entry) => [entry, entry.passes]));
+  const passed = new Map<T, T[]>();
   for (let index = 0; index < order.length; index += 1) {
     const entry = order[index]!;
     if (entry.kind !== "person") continue;
@@ -148,10 +146,11 @@ export function peopleFirstOrder<T extends { kind: QueuedDeliveryKind; arrival: 
     while (to > 0 && order[to - 1]!.kind !== "person" && order[to - 1]!.arrival < entry.arrival
       && passes.get(order[to - 1]!)! < maxPasses) to -= 1;
     if (to === index) continue;
-    for (const overtaken of order.slice(to, index)) passes.set(overtaken, passes.get(overtaken)! + 1);
+    const overtaken = order.slice(to, index);
+    for (const other of overtaken) passes.set(other, passes.get(other)! + 1);
     order.splice(index, 1);
     order.splice(to, 0, entry);
-    passed.set(entry, index - to);
+    passed.set(entry, overtaken);
   }
   return { order, passed };
 }
