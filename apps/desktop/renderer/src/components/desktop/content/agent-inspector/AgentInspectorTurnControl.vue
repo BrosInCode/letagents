@@ -65,9 +65,10 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type {
-  AgentInspectorCorrectionRequest,
-  AgentInspectorTurnControlProjection,
+import {
+  claimCorrectionPrefill,
+  type AgentInspectorCorrectionRequest,
+  type AgentInspectorTurnControlProjection,
 } from "../../../../domain/agent-inspector";
 
 const props = defineProps<{
@@ -97,14 +98,15 @@ watch(
 );
 
 // Text a person chose to send as a correction from outside the Inspector. It
-// lands in the box for review, and only for the exact turn it was meant for.
+// lands in the box for review, only for the exact turn it was meant for, only
+// once (the box remounts on tab switches), and never over text already typed.
 watch(
   () => props.correctionRequest?.id,
   () => {
     const request = props.correctionRequest;
-    if (!request?.text || request.entryId !== props.entryId) return;
+    if (!request?.text || request.entryId !== props.entryId || draft.value.trim()) return;
     if (props.control?.status !== "ready" || request.providerTurnId !== props.control.providerTurnId) return;
-    draft.value = request.text;
+    if (claimCorrectionPrefill(request)) draft.value = request.text;
   },
   { immediate: true },
 );

@@ -134,6 +134,8 @@ export function visibleBoardGroups(input: {
   ownerFilter?: string;
   statusFilter?: string;
   sort?: BoardSort;
+  /** Statuses a card can be dragged to; focused views keep those stages visible. */
+  dropTargets?: (task: DesktopTaskSummary) => readonly string[];
 }): TaskGroup[] {
   const statuses = input.filter === "closeout"
     ? CLOSEOUT_BOARD_STATUSES
@@ -158,10 +160,11 @@ export function visibleBoardGroups(input: {
   }));
   // Open and Closeout are the full lifecycle, so every stage stays a drop
   // target. A focused view is a short list spread over six 280px columns:
-  // its empty stages pushed the cards it exists to show off-screen.
-  return BOARD_FULL_LIFECYCLE_FILTERS.has(input.filter)
-    ? groups
-    : groups.filter((group) => group.tasks.length > 0);
+  // its empty stages pushed the cards it exists to show off-screen. It keeps
+  // a stage that holds cards, or that one of its cards can be dragged to.
+  if (BOARD_FULL_LIFECYCLE_FILTERS.has(input.filter)) return groups;
+  const dropTargets = new Set(tasks.flatMap((task) => input.dropTargets?.(task) ?? []));
+  return groups.filter((group) => group.tasks.length > 0 || dropTargets.has(group.status));
 }
 
 export function boardEmptyState(input: {

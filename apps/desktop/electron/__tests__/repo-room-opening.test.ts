@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import test from "node:test";
 
@@ -81,23 +81,39 @@ test("opening a fetched repo room preserves its identity without calculating bra
     });
     await t.test("a typed path is checked before any room is created or folder bound", async () => {
       const filePath = join(repoPath, "tracked.txt");
+      const locked = join(repoPath, "..", `${basename(repoPath)}-locked`);
+      mkdirSync(locked);
+      chmodSync(locked, 0o000);
+      const previousHome = process.env.HOME;
       fetchedSnapshot = undefined;
-      for (const [path, error] of [
-        [join(repoPath, "missing-folder"), "No folder exists at that path."],
-        ["relative/project", "Enter the full path to the folder, starting with / or ~/."],
-        [filePath, "That path is a file. Enter the folder that contains it."],
-        ["   ", "Choose a project folder."],
-      ] as const) {
-        const rejected = await openRepoRoomFromPath(path);
-        assert.equal(rejected.error, error, path);
-        assert.equal(rejected.snapshot, null);
-        assert.equal(rejected.projectBinding, null);
+      try {
+        process.env.HOME = join(repoPath, "..");
+        const notAProject = "Choose a project folder, not your home folder or the top of the disk.";
+        for (const [path, error] of [
+          [join(repoPath, "missing-folder"), "No folder exists at that path."],
+          ["relative/project", "Enter the full path to the folder, starting with / or ~/."],
+          [filePath, "That path is a file. Enter the folder that contains it."],
+          ["   ", "Choose a project folder."],
+          ["/", notAProject],
+          ["~", notAProject],
+          ["~/", notAProject],
+          [join(locked, "project"), "LetAgents doesn’t have permission to open that folder."],
+        ] as const) {
+          const rejected = await openRepoRoomFromPath(path);
+          assert.equal(rejected.error, error, path);
+          assert.equal(rejected.snapshot, null);
+          assert.equal(rejected.projectBinding, null);
+        }
+      } finally {
+        chmodSync(locked, 0o700);
+        rmSync(locked, { recursive: true, force: true });
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
       }
       // The local-store mock throws on any room creation, so reaching here
       // also proves no local room was made for the missing folder.
       assert.equal(fetchedSnapshot, undefined);
 
-      const previousHome = process.env.HOME;
       try {
         process.env.HOME = join(repoPath, "..");
         const opened = await openRepoRoomFromPath(`~/${basename(repoPath)}`);

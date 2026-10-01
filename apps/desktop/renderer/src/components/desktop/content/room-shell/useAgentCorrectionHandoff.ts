@@ -1,27 +1,29 @@
-import { computed, ref } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import {
   agentCorrectionTargets,
   type AgentInspectorCorrectionRequest,
   type AgentInspectorProjection,
   type ComposerCorrectionHandoff,
 } from "../../../../domain/agent-inspector";
+import { restoreDesktopMessageDraftText } from "../../../../domain/desktop-message-drafts";
 
 /**
  * Steering a busy agent from the room: an Activity row or the composer opens
  * the agent's Inspector on the correction box for its live turn. Nothing is
  * sent from here; applying still goes through the Inspector's fenced
- * steer_turn action. Composer text moved into the box goes back to the
- * composer if the Inspector closes without applying it.
+ * steer_turn action. Composer text moved into the box goes back to its room's
+ * draft unless it is applied: when the Inspector closes or switches agent,
+ * the room changes, or the room shell unmounts.
  */
 export function useAgentCorrectionHandoff(options: {
+  roomIdentifier(): string;
   projections(): readonly AgentInspectorProjection[];
   openInspector(projection: AgentInspectorProjection): void;
-  restoreComposerDraft(draft: string): void;
 }) {
   const correctionRequest = ref<AgentInspectorCorrectionRequest | null>(null);
   const correctableAgents = computed(() => agentCorrectionTargets(options.projections()));
   let sequence = 0;
-  let composerHandoff: { requestId: number; draft: string } | null = null;
+  let composerHandoff: { requestId: number; draft: string; draftNamespace: string | null } | null = null;
 
   function openCorrection(entryId: string, text = ""): boolean {
     const projection = options.projections().find((candidate) => candidate.entryId === entryId);
@@ -32,10 +34,17 @@ export function useAgentCorrectionHandoff(options: {
     return true;
   }
 
+  /** The Activity row: if the turn ended since it rendered, still show the agent. */
+  function openCorrectionOrInspector(entryId: string): void {
+    if (openCorrection(entryId)) return;
+    const projection = options.projections().find((candidate) => candidate.entryId === entryId);
+    if (projection) options.openInspector(projection);
+  }
+
   function openCorrectionFromComposer(handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void): void {
     const handedOver = openCorrection(handoff.entryId, handoff.text);
     if (handedOver && correctionRequest.value) {
-      composerHandoff = { requestId: correctionRequest.value.id, draft: handoff.draft };
+      composerHandoff = { requestId: correctionRequest.value.id, draft: handoff.draft, draftNamespace: handoff.draftNamespace };
     }
     opened(handedOver);
   }
@@ -45,10 +54,20 @@ export function useAgentCorrectionHandoff(options: {
     const handoff = composerHandoff;
     composerHandoff = null;
     if (release.restoreComposerText && handoff && handoff.requestId === correctionRequest.value?.id) {
-      options.restoreComposerDraft(handoff.draft);
+      restoreDesktopMessageDraftText(handoff.draftNamespace, handoff.draft);
     }
     correctionRequest.value = null;
   }
 
-  return { correctionRequest, correctableAgents, openCorrection, openCorrectionFromComposer, releaseCorrection };
+  watch(options.roomIdentifier, () => releaseCorrection({ restoreComposerText: true }));
+  onScopeDispose(() => releaseCorrection({ restoreComposerText: true }));
+
+  return {
+    correctionRequest,
+    correctableAgents,
+    openCorrection,
+    openCorrectionOrInspector,
+    openCorrectionFromComposer,
+    releaseCorrection,
+  };
 }

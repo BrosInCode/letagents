@@ -64,9 +64,9 @@ test("Activity opens the exact shared projection only after an explicit click", 
 
 test("Mention uses the shared room candidate path and exact durable agent key", () => {
   assert.match(composer, /function focusWithMention\(mentionText: string\)/);
-  assert.match(composer, /defineExpose\(\{ focusWithMention(?:, \w+)* \}\)/);
+  assert.match(composer, /defineExpose\(\{ focusWithMention \}\)/);
   assert.match(chat, /function focusComposerWithMention\(mentionText: string\)/);
-  assert.match(chat, /defineExpose\(\{ openThread, focusComposerWithMention(?:, \w+)* \}\)/);
+  assert.match(chat, /defineExpose\(\{ openThread, focusComposerWithMention \}\)/);
   assert.match(shell, /candidate\.agentKey === projection\.agentKey/);
   assert.match(shell, /roomMentionCandidates\(\s*roomParticipants\.value,/);
   assert.match(shell, /focusComposerWithMention\(mention\.insertText\)/);

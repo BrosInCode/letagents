@@ -1,7 +1,7 @@
 import electron from "electron";
 import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, parse, resolve } from "node:path";
 import type {
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
@@ -144,11 +144,20 @@ function expandHomePath(path: string): string {
 async function projectFolderPathError(path: string): Promise<string | null> {
   if (!path) return "Choose a project folder.";
   if (!isAbsolute(path)) return "Enter the full path to the folder, starting with / or ~/.";
+  // Agents work inside the project folder; the whole disk or home folder is
+  // never a project, even when it happens to be a Git repository.
+  const folder = resolve(path);
+  if (folder === parse(folder).root || folder === resolve(homedir())) {
+    return "Choose a project folder, not your home folder or the top of the disk.";
+  }
   try {
-    const stats = await stat(path);
+    const stats = await stat(folder);
     return stats.isDirectory() ? null : "That path is a file. Enter the folder that contains it.";
-  } catch {
-    return "No folder exists at that path.";
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return "No folder exists at that path.";
+    if (code === "EACCES" || code === "EPERM") return "LetAgents doesn’t have permission to open that folder.";
+    return "LetAgents couldn’t read that folder.";
   }
 }
 

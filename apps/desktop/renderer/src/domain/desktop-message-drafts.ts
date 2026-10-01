@@ -31,9 +31,30 @@ export function setDesktopMessageDraftAccount(accountId: string | null): void {
   account.value = accountId;
 }
 
+function messageDraftKey(namespace: string | null, threadRootId: string | null): string {
+  return JSON.stringify([account.value, normalizeRoomIdentifier(namespace), threadRootId]);
+}
+
+const emptyDraft = (): MessageDraft => ({ text: "", textRevision: 0, quote: null, selectedQuoteText: null });
+
+/**
+ * Put text back into a room's composer draft. The room's composer may be gone
+ * (its room was switched away from), so this writes the shared draft store.
+ */
+export function restoreDesktopMessageDraftText(namespace: string | null, text: string): void {
+  if (!text.trim()) return;
+  const key = messageDraftKey(namespace, null);
+  const saved = drafts.get(key) ?? emptyDraft();
+  drafts.set(key, {
+    ...saved,
+    text: saved.text.trim() ? `${saved.text}\n\n${text}` : text,
+    textRevision: ++revision,
+  });
+}
+
 export function useDesktopMessageDraft(namespace: () => string | null, threadRootId: () => string | null = () => null) {
-  const key = computed(() => JSON.stringify([account.value, normalizeRoomIdentifier(namespace()), threadRootId()]));
-  const empty = (): MessageDraft => ({ text: "", textRevision: 0, quote: null, selectedQuoteText: null });
+  const key = computed(() => messageDraftKey(namespace(), threadRootId()));
+  const empty = emptyDraft;
   const current = () => drafts.get(key.value) ?? empty();
   function update(patch: Partial<MessageDraft>, draftKey = key.value): void {
     const next = { ...(drafts.get(draftKey) ?? empty()), ...patch };

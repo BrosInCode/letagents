@@ -13,6 +13,7 @@
       v-if="correctionOffer"
       class="desktop-composer-correction-offer"
       data-testid="desktop-composer-correction-offer"
+      aria-live="polite"
     >
       <span>
         <strong>{{ correctionOffer.target.displayName }}</strong> is in the middle of a turn. A room message waits until it ends.
@@ -552,7 +553,13 @@ function sendAsCorrection(): void {
   const offer = correctionOffer.value;
   if (!offer || props.sending) return;
   const handedOver = draft.value;
-  emit("open-agent-correction", { entryId: offer.target.entryId, text: offer.text, draft: handedOver }, (opened) => {
+  const handoff = {
+    entryId: offer.target.entryId,
+    text: offer.text,
+    draft: handedOver,
+    draftNamespace: props.messageNamespace || props.roomIdentifier,
+  };
+  emit("open-agent-correction", handoff, (opened) => {
     // Opening may have restored an earlier, abandoned hand-over; keep that.
     if (opened) draft.value = draft.value.replace(handedOver, "").trim();
   });
@@ -642,12 +649,5 @@ function openEventPreview(event: ComposerEventPreview): void {
   emit("open-event-preview", event);
 }
 
-/** Text handed to a correction that was never applied comes back here. */
-function restoreDraft(text: string): void {
-  if (!text.trim()) return;
-  draft.value = draft.value.trim() ? `${draft.value}\n\n${text}` : text;
-  void nextTick(syncTextareaHeight);
-}
-
-defineExpose({ focusWithMention, restoreDraft });
+defineExpose({ focusWithMention });
 </script>

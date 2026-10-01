@@ -217,7 +217,7 @@
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetailRequest"
-        @open-agent-correction="openAgentCorrection"
+        @open-agent-correction="openAgentCorrectionOrInspector"
         @refresh-room="emit('refresh-room')"
         @reveal-message="revealRecordedWorkMessage"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
@@ -670,15 +670,15 @@ const agentInspectorProjections = computed(() => {
 const {
   correctionRequest: agentInspectorCorrectionRequest,
   correctableAgents,
-  openCorrection: openAgentCorrection,
+  openCorrectionOrInspector: openAgentCorrectionOrInspector,
   openCorrectionFromComposer: openAgentCorrectionFromComposer,
   releaseCorrection: releaseAgentCorrectionRequest,
 } = useAgentCorrectionHandoff({
+  roomIdentifier: () => props.room.identifier,
   projections: () => agentInspectorProjections.value,
   openInspector: (projection) => openAgentDetailRequest(supervisedAgentInspectorRequest(projection.entry, {
     ownerAttribution: ownerAttributionLabel(projection.entry.createdBy),
   })),
-  restoreComposerDraft: (draft) => roomChatView.value?.restoreComposerDraft(draft),
 });
 const selectedAgentDetailProjection = computed(() => {
   const target = selectedAgentDetailTarget.value;
@@ -976,7 +976,6 @@ watch(() => props.room.identifier, () => {
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = null;
   agentInspectorActionState.value = null;
-  releaseAgentCorrectionRequest({ restoreComposerText: false });
   agentInspectorWorkRequestToken += 1;
   agentInspectorBackgroundRefresh.reset();
   agentInspectorDetailRequest.reset();

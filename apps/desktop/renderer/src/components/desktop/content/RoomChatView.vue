@@ -887,11 +887,7 @@ function focusComposerWithMention(mentionText: string): void {
   roomComposer.value?.focusWithMention(mentionText);
 }
 
-function restoreComposerDraft(text: string): void {
-  roomComposer.value?.restoreDraft(text);
-}
-
-defineExpose({ openThread, focusComposerWithMention, restoreComposerDraft });
+defineExpose({ openThread, focusComposerWithMention });
 
 onBeforeUnmount(() => {
   window.removeEventListener("resize", syncThreadLayoutWidth);

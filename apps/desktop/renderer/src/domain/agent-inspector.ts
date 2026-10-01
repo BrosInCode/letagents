@@ -1,3 +1,4 @@
+import { toRaw } from "vue";
 import type {
   DesktopRoomAgentTurnState,
   DesktopSupervisorActivityEvent,
@@ -881,11 +882,25 @@ export interface AgentCorrectionTarget {
   mentionInsertText: string;
 }
 
-/** Composer text handed to a correction, and the draft it came from. */
+/** Composer text handed to a correction, and the draft (and its room) it came from. */
 export interface ComposerCorrectionHandoff {
   entryId: string;
   text: string;
   draft: string;
+  draftNamespace: string | null;
+}
+
+const prefilledCorrectionRequests = new WeakSet<object>();
+
+/**
+ * A handed-over text fills the correction box once. The box remounts when the
+ * person switches Inspector tabs; it must not refill text they cleared or edited.
+ */
+export function claimCorrectionPrefill(request: AgentInspectorCorrectionRequest): boolean {
+  const identity = toRaw(request);
+  if (prefilledCorrectionRequests.has(identity)) return false;
+  prefilledCorrectionRequests.add(identity);
+  return true;
 }
 
 export function agentCorrectionTargets(
@@ -899,8 +914,9 @@ export function agentCorrectionTargets(
 
 /**
  * The one busy agent a draft @-mentions, and the draft without that mention.
- * Several busy agents are ambiguous: a correction goes to one private session,
- * so the composer offers nothing rather than guessing.
+ * A correction reaches one agent's private session, so a draft that also
+ * mentions anyone else (another agent, a person, @everyone) stays a room
+ * message: moving it would hide that part from the people it was for.
  */
 export function mentionedCorrectionTarget(
   draft: string,
@@ -912,7 +928,8 @@ export function mentionedCorrectionTarget(
   // The mention addressed the room; a correction already reaches the agent.
   const mention = new RegExp(`(^|\\s)@${escapeRegExp(target.mentionInsertText)}[,;:]?${MENTION_END}\\s*`, "gi");
   const text = draft.replace(mention, "$1").trim();
-  return text ? { target, text } : null;
+  if (!text || /(^|\s)@[^\s@]/.test(text)) return null;
+  return { target, text };
 }
 
 const MENTION_END = "(?=$|[\\s.,;:!?)])";

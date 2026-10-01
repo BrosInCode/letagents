@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp, h, type Component } from "vue";
+import { createRenderer, createSSRApp, h, nextTick, reactive, ssrContextKey, type Component } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 
@@ -91,6 +91,15 @@ test("a draft that mentions one busy agent becomes that agent's correction witho
   assert.equal(mentionedCorrectionTarget("@LunarAmber @SparrowReef stop", [...targets, second]), null);
 });
 
+test("a draft that also mentions anyone else stays a room message", () => {
+  const targets = agentCorrectionTargets([busy, idle]);
+  // The part meant for HarborMarsh must not vanish into LunarAmber's private session.
+  assert.equal(mentionedCorrectionTarget("@LunarAmber stop and rebase on main @HarborMarsh fyi", targets), null);
+  assert.equal(mentionedCorrectionTarget("@LunarAmber stop @Emmy", targets), null);
+  assert.equal(mentionedCorrectionTarget("@LunarAmber stop, @everyone heads up", targets), null);
+  assert.equal(mentionedCorrectionTarget("@LunarAmber stop @LunarAmber", targets)?.text, "stop");
+});
+
 test("Activity offers Correct on the busy agent's row only", async () => {
   const html = await renderToString(createSSRApp({
     render: () => h(ActivityTab, {
@@ -118,4 +127,45 @@ test("text handed over as a correction lands in the box only for the turn it was
   assert.match(await render("turn_supervised_busy"), /<textarea[^>]*>Stop the write and rebase on main\.<\/textarea>/);
   // A newer turn started since the person chose "Send as correction".
   assert.doesNotMatch(await render("turn_older"), /Stop the write and rebase on main/);
+});
+
+test("handed-over text fills the box once, so a tab switch does not refill it", async () => {
+  const request = { id: 7, entryId: busy.entryId, providerTurnId: "turn_supervised_busy", text: "Rebase on main first." };
+  const render = () => renderToString(createSSRApp({
+    render: () => h(TurnControl, { entryId: busy.entryId, control: busy.turnControl, busy: false, correctionRequest: request }),
+  }));
+  assert.match(await render(), /<textarea[^>]*>Rebase on main first\.<\/textarea>/);
+  // The Overview tab remounts the box with the same hand-over.
+  assert.doesNotMatch(await render(), /Rebase on main first/);
+});
+
+test("a new hand-over never overwrites text the person already typed in the box", async () => {
+  const renderer = createRenderer<any, any>({
+    patchProp() {}, insert(child, parent) { parent.children.push(child); child.parent = parent; }, remove() {},
+    createElement: () => ({ children: [] }), createText: () => ({ children: [] }), createComment: () => ({ children: [] }),
+    setText() {}, setElementText() {}, parentNode: (node) => node.parent, nextSibling: () => null,
+  });
+  const props = reactive({
+    entryId: busy.entryId,
+    control: busy.turnControl,
+    busy: false,
+    correctionRequest: null as null | { id: number; entryId: string; providerTurnId: string | null; text: string },
+  });
+  let vm!: { draft: { value: string } };
+  const app = renderer.createApp({
+    setup() {
+      vm = (TurnControl as unknown as { setup: (p: object, c: object) => typeof vm }).setup(props, { expose() {}, emit() {} });
+      return () => h("div");
+    },
+  });
+  app.provide(ssrContextKey, { modules: new Set() });
+  app.mount({ children: [] });
+  try {
+    vm.draft.value = "My own wording";
+    props.correctionRequest = { id: 9, entryId: busy.entryId, providerTurnId: "turn_supervised_busy", text: "Handed-over text" };
+    await nextTick();
+    assert.equal(vm.draft.value, "My own wording");
+  } finally {
+    app.unmount();
+  }
 });
