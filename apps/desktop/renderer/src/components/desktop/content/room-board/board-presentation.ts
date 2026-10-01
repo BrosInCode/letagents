@@ -34,6 +34,9 @@ export const BOARD_HANDOFF_STAGE_LABELS: ReadonlyArray<string> = [
   "Closeout",
 ];
 
+/** Views that show every lifecycle stage; the rest show only stages with cards. */
+const BOARD_FULL_LIFECYCLE_FILTERS: ReadonlySet<BoardFilter> = new Set(["open", "closeout"]);
+
 export const BOARD_FILTERS: ReadonlyArray<{ id: BoardFilter; label: string }> = [
   { id: "open", label: "Open" },
   { id: "mine", label: "Local agent" },
@@ -148,11 +151,17 @@ export function visibleBoardGroups(input: {
         : timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt);
     return delta || left.id.localeCompare(right.id);
   });
-  return statuses.filter((status) => !input.statusFilter || input.statusFilter === "all" || status === input.statusFilter).map((status) => ({
+  const groups = statuses.filter((status) => !input.statusFilter || input.statusFilter === "all" || status === input.statusFilter).map((status) => ({
     status,
     label: readableStatus(status),
     tasks: tasks.filter((task) => task.status === status),
   }));
+  // Open and Closeout are the full lifecycle, so every stage stays a drop
+  // target. A focused view is a short list spread over six 280px columns:
+  // its empty stages pushed the cards it exists to show off-screen.
+  return BOARD_FULL_LIFECYCLE_FILTERS.has(input.filter)
+    ? groups
+    : groups.filter((group) => group.tasks.length > 0);
 }
 
 export function boardEmptyState(input: {

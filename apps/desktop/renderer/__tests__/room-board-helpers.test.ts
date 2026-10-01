@@ -599,6 +599,24 @@ describe("room board helpers", () => {
     ]);
   });
 
+  it("shows only the stages that hold cards in focused views, so review cards stay on screen", () => {
+    const tasks = [
+      task({ id: "task_review", status: "in_review" }),
+      task({ id: "task_blocked", status: "blocked" }),
+      task({ id: "task_unclaimed" }),
+    ];
+    const statuses = (filter: "open" | "needs-review" | "unclaimed" | "closeout") => visibleBoardGroups({
+      tasks, filter, searchQuery: "", localWorker: null,
+    }).map((group) => group.status);
+
+    // Blocked work needs a follow-up review too; the four empty stages before it are gone.
+    assert.deepEqual(statuses("needs-review"), ["blocked", "in_review"]);
+    assert.deepEqual(statuses("unclaimed"), ["accepted"]);
+    // The full lifecycle views keep every stage as a drop target.
+    assert.deepEqual(statuses("open"), TASK_STATUS_ORDER.slice(0, 6));
+    assert.deepEqual(statuses("closeout"), TASK_STATUS_ORDER.slice(6));
+  });
+
   it("keeps board empty-state copy and actions deterministic", () => {
     assert.deepEqual(boardEmptyState({
       taskCount: 0,

@@ -6,7 +6,7 @@ import {
   normalizeJoinRoomInput,
   validateJoinRoomInput,
 } from "../src/domain/join-room-input";
-import { useDesktopNewRoomModal } from "../src/composables/useDesktopNewRoomModal";
+import { recentProjectFoldersFromRooms, useDesktopNewRoomModal } from "../src/composables/useDesktopNewRoomModal";
 import type { DesktopRoomSnapshot } from "../../electron/ipc-types";
 
 test("normalizeJoinRoomInput uppercases invite codes and strips spaces", () => {
@@ -319,6 +319,86 @@ test("project cancel returns to project step without losing modal", async () => 
   assert.equal(modal.newRoomProjectSelection.value, null);
 });
 
+test("a typed project path opens the same preview as the folder picker", async () => {
+  const requested: string[] = [];
+  stubDesktopBridge({
+    pickRoom: async () => { throw new Error("The native picker must not open for a typed path"); },
+    openRoom: async (path: string) => {
+      requested.push(path);
+      return {
+        canceled: false,
+        repoPath: "/Users/test/code/project",
+        repoStatus: null,
+        roomIdentifier: "github.com/example/project",
+        source: "git_remote",
+        snapshot: snapshotFixture("github.com/example/project", "project"),
+        error: null,
+        warning: null,
+        projectBinding: null,
+      };
+    },
+  });
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: () => undefined, setRepoStatus: () => undefined });
+
+  modal.selectNewRoomEntry();
+  modal.chooseProjectIntent();
+  modal.newRoomProjectPath.value = "  ~/code/project ";
+  await modal.openProjectRoomFromPath();
+
+  assert.deepEqual(requested, ["~/code/project"]);
+  assert.equal(modal.newRoomStep.value, "project");
+  assert.equal(modal.newRoomProjectSelection.value?.folderLabel, "project");
+  assert.equal(modal.newRoomProjectSelection.value?.sourceLabel, "Git remote");
+
+  // A recent folder fills the field with its path and opens it the same way.
+  await modal.openProjectRoomFromPath("/Users/test/code/other");
+  assert.deepEqual(requested, ["~/code/project", "/Users/test/code/other"]);
+  assert.equal(modal.newRoomProjectPath.value, "/Users/test/code/other");
+});
+
+test("a bad project path is a field error that keeps the typed text on the project step", async () => {
+  stubDesktopBridge({
+    openRoom: async () => ({
+      canceled: false, repoPath: null, repoStatus: null, roomIdentifier: null, source: null,
+      snapshot: null, error: "No folder exists at that path.", warning: null, projectBinding: null,
+    }),
+  });
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: () => undefined, setRepoStatus: () => undefined });
+
+  modal.selectNewRoomEntry();
+  modal.chooseProjectIntent();
+  await modal.openProjectRoomFromPath();
+  assert.equal(modal.newRoomProjectPathError.value, "Enter the path to a project folder.");
+
+  modal.newRoomProjectPath.value = "/Users/test/missing";
+  await modal.openProjectRoomFromPath();
+  assert.equal(modal.newRoomStep.value, "project");
+  assert.equal(modal.newRoomProjectPathError.value, "No folder exists at that path.");
+  assert.equal(modal.newRoomProjectPath.value, "/Users/test/missing");
+  assert.equal(modal.newRoomProjectSelection.value, null);
+  assert.equal(modal.newRoomBusy.value, false);
+
+  modal.backFromSubstep();
+  modal.chooseProjectIntent();
+  assert.equal(modal.newRoomProjectPathError.value, null);
+});
+
+test("recent project folders list each project folder once, newest first", () => {
+  const room = (identifier: string, kind: "project" | "room", rootPath: string | null) => ({
+    identifier, kind, rootPath, displayName: identifier, meta: "", updatedAt: "2026-10-01T00:00:00.000Z",
+  });
+  assert.deepEqual(recentProjectFoldersFromRooms([
+    room("github.com/example/app", "project", "/Users/test/code/app"),
+    room("ABCD-1234", "room", null),
+    room("github.com/example/app/branch", "project", "/Users/test/code/app"),
+    room("local:notes", "project", "/Users/test/notes"),
+    room("github.com/example/api", "project", "/Users/test/code/api"),
+  ], 2), [
+    { path: "/Users/test/code/app", label: "app" },
+    { path: "/Users/test/notes", label: "notes" },
+  ]);
+});
+
 function snapshotFixture(
   identifier: string,
   displayName: string,
@@ -356,6 +436,7 @@ function stubDesktopBridge(input: {
   createLocalRoom?: (input?: { displayName?: string | null }) => Promise<unknown>;
   getSnapshot?: (code: string) => Promise<DesktopRoomSnapshot>;
   pickRoom?: () => Promise<unknown>;
+  openRoom?: (path: string) => Promise<unknown>;
   rename?: (roomIdentifier: string, displayName: string) => Promise<unknown>;
 }): void {
   const existing = (globalThis as { window?: unknown }).window as
@@ -376,6 +457,7 @@ function stubDesktopBridge(input: {
   desktop.repos = {
     ...((desktop.repos as object) || {}),
     pickRoom: input.pickRoom,
+    openRoom: input.openRoom,
   };
   root.letagentsDesktop = desktop;
   (globalThis as { window: unknown }).window = root;

@@ -65,12 +65,16 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import type { AgentInspectorTurnControlProjection } from "../../../../domain/agent-inspector";
+import type {
+  AgentInspectorCorrectionRequest,
+  AgentInspectorTurnControlProjection,
+} from "../../../../domain/agent-inspector";
 
 const props = defineProps<{
   entryId: string;
   control: AgentInspectorTurnControlProjection | null;
   busy: boolean;
+  correctionRequest?: AgentInspectorCorrectionRequest | null;
 }>();
 const emit = defineEmits<{
   stop: [];
@@ -90,6 +94,19 @@ const fieldId = computed(() => `agent-inspector-turn-correction-${props.entryId}
 watch(
   () => `${props.entryId}::${props.control?.workAttemptId ?? ""}::${props.control?.executionGenerationId ?? ""}`,
   () => { draft.value = ""; },
+);
+
+// Text a person chose to send as a correction from outside the Inspector. It
+// lands in the box for review, and only for the exact turn it was meant for.
+watch(
+  () => props.correctionRequest?.id,
+  () => {
+    const request = props.correctionRequest;
+    if (!request?.text || request.entryId !== props.entryId) return;
+    if (props.control?.status !== "ready" || request.providerTurnId !== props.control.providerTurnId) return;
+    draft.value = request.text;
+  },
+  { immediate: true },
 );
 
 function applyCorrection(): void {

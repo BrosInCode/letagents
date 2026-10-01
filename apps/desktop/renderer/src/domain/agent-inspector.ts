@@ -860,6 +860,68 @@ export function projectAgentInspectorTurnControl(
 }
 
 /**
+ * A request from outside the Inspector (an Activity row, the composer) to open
+ * the Overview correction box for one exact live turn. It never applies the
+ * correction itself: the person still reviews the text and chooses Apply, so
+ * the Inspector's turn fences stay the only path to the provider.
+ */
+export interface AgentInspectorCorrectionRequest {
+  /** Distinguishes repeated requests for the same agent and turn. */
+  id: number;
+  entryId: string;
+  /** Prefill applies only while this exact provider turn is still the live one. */
+  providerTurnId: string | null;
+  text: string;
+}
+
+/** A busy agent a person can correct now instead of queueing a room message. */
+export interface AgentCorrectionTarget {
+  entryId: string;
+  displayName: string;
+  mentionInsertText: string;
+}
+
+/** Composer text handed to a correction, and the draft it came from. */
+export interface ComposerCorrectionHandoff {
+  entryId: string;
+  text: string;
+  draft: string;
+}
+
+export function agentCorrectionTargets(
+  projections: readonly Pick<AgentInspectorProjection, "entryId" | "displayName" | "mentionInsertText" | "turnControl">[],
+): AgentCorrectionTarget[] {
+  return projections.flatMap((projection) =>
+    projection.turnControl?.status === "ready" && projection.turnControl.canCorrect && projection.mentionInsertText
+      ? [{ entryId: projection.entryId, displayName: projection.displayName, mentionInsertText: projection.mentionInsertText }]
+      : []);
+}
+
+/**
+ * The one busy agent a draft @-mentions, and the draft without that mention.
+ * Several busy agents are ambiguous: a correction goes to one private session,
+ * so the composer offers nothing rather than guessing.
+ */
+export function mentionedCorrectionTarget(
+  draft: string,
+  targets: readonly AgentCorrectionTarget[],
+): { target: AgentCorrectionTarget; text: string } | null {
+  const mentioned = targets.filter((target) => new RegExp(`(^|\\s)@${escapeRegExp(target.mentionInsertText)}${MENTION_END}`, "i").test(draft));
+  if (mentioned.length !== 1) return null;
+  const target = mentioned[0]!;
+  // The mention addressed the room; a correction already reaches the agent.
+  const mention = new RegExp(`(^|\\s)@${escapeRegExp(target.mentionInsertText)}[,;:]?${MENTION_END}\\s*`, "gi");
+  const text = draft.replace(mention, "$1").trim();
+  return text ? { target, text } : null;
+}
+
+const MENTION_END = "(?=$|[\\s.,;:!?)])";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
  * A push or poll may replace the selected entry while an IPC request is away.
  * An idle/null turn is allowed after a successful stop; a different live turn
  * proves that the response belongs to stale work and must not update the UI.

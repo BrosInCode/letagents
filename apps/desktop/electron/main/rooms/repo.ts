@@ -1,5 +1,7 @@
 import electron from "electron";
-import { basename } from "node:path";
+import { stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join } from "node:path";
 import type {
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
@@ -65,8 +67,12 @@ export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
 export async function openRepoRoomFromPath(
   folderPath: string,
 ): Promise<DesktopRepoRoomSelection> {
-  const selectedPath = folderPath.trim();
-  if (!selectedPath) {
+  const selectedPath = expandHomePath(folderPath.trim());
+  // A typed or remembered path is not vetted like a picker result. Check it
+  // before any room is created or folder bound, so a typo or a deleted folder
+  // cannot leave a room pointing at nothing.
+  const pathError = await projectFolderPathError(selectedPath);
+  if (pathError) {
     return {
       canceled: false,
       repoPath: null,
@@ -74,7 +80,7 @@ export async function openRepoRoomFromPath(
       roomIdentifier: null,
       source: null,
       snapshot: null,
-      error: "Choose a project folder.",
+      error: pathError,
       warning: null,
       projectBinding: null,
     };
@@ -128,6 +134,22 @@ export async function openRepoRoomFromPath(
     warning: resolved.warning,
     projectBinding,
   };
+}
+
+function expandHomePath(path: string): string {
+  if (path === "~") return homedir();
+  return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+}
+
+async function projectFolderPathError(path: string): Promise<string | null> {
+  if (!path) return "Choose a project folder.";
+  if (!isAbsolute(path)) return "Enter the full path to the folder, starting with / or ~/.";
+  try {
+    const stats = await stat(path);
+    return stats.isDirectory() ? null : "That path is a file. Enter the folder that contains it.";
+  } catch {
+    return "No folder exists at that path.";
+  }
 }
 
 /** Connect the current room to a folder without turning folder choice into navigation. */

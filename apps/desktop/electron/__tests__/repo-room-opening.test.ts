@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
@@ -77,6 +77,35 @@ test("opening a fetched repo room preserves its identity without calculating bra
         assert.equal(status.connected, true);
         assert.deepEqual(status.reviewSubmission, { permission: permission ?? "unknown",
           recordedAt: permission ? "2026-09-22T12:00:00Z" : null });
+      }
+    });
+    await t.test("a typed path is checked before any room is created or folder bound", async () => {
+      const filePath = join(repoPath, "tracked.txt");
+      fetchedSnapshot = undefined;
+      for (const [path, error] of [
+        [join(repoPath, "missing-folder"), "No folder exists at that path."],
+        ["relative/project", "Enter the full path to the folder, starting with / or ~/."],
+        [filePath, "That path is a file. Enter the folder that contains it."],
+        ["   ", "Choose a project folder."],
+      ] as const) {
+        const rejected = await openRepoRoomFromPath(path);
+        assert.equal(rejected.error, error, path);
+        assert.equal(rejected.snapshot, null);
+        assert.equal(rejected.projectBinding, null);
+      }
+      // The local-store mock throws on any room creation, so reaching here
+      // also proves no local room was made for the missing folder.
+      assert.equal(fetchedSnapshot, undefined);
+
+      const previousHome = process.env.HOME;
+      try {
+        process.env.HOME = join(repoPath, "..");
+        const opened = await openRepoRoomFromPath(`~/${basename(repoPath)}`);
+        assert.equal(opened.error, null);
+        assert.equal(opened.repoPath, repoPath);
+      } finally {
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
       }
     });
   } finally {
