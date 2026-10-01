@@ -38,18 +38,25 @@ function messageDraftKey(namespace: string | null, threadRootId: string | null):
 const emptyDraft = (): MessageDraft => ({ text: "", textRevision: 0, quote: null, selectedQuoteText: null });
 
 /**
- * Put text back into a room's composer draft. The room's composer may be gone
- * (its room was switched away from), so this writes the shared draft store.
+ * Capture a room's composer draft for putting text back later. The room's
+ * composer may be gone by then (its room was switched away from), so the
+ * restore writes the shared draft store; it is dropped if the account changed
+ * or drafts were cleared meanwhile, never landing in another account's draft.
  */
-export function restoreDesktopMessageDraftText(namespace: string | null, text: string): void {
-  if (!text.trim()) return;
+export function captureDesktopMessageDraftRestore(namespace: string | null): (text: string) => boolean {
   const key = messageDraftKey(namespace, null);
-  const saved = drafts.get(key) ?? emptyDraft();
-  drafts.set(key, {
-    ...saved,
-    text: saved.text.trim() ? `${saved.text}\n\n${text}` : text,
-    textRevision: ++revision,
-  });
+  const capturedAccount = account.value;
+  const capturedGeneration = generation;
+  return (text) => {
+    if (!text.trim() || account.value !== capturedAccount || generation !== capturedGeneration) return false;
+    const saved = drafts.get(key) ?? emptyDraft();
+    drafts.set(key, {
+      ...saved,
+      text: saved.text.trim() ? `${saved.text}\n\n${text}` : text,
+      textRevision: ++revision,
+    });
+    return true;
+  };
 }
 
 export function useDesktopMessageDraft(namespace: () => string | null, threadRootId: () => string | null = () => null) {

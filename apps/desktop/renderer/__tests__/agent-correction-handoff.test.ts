@@ -6,7 +6,12 @@ import { createRenderer, effectScope, h, nextTick, reactive, ref, ssrContextKey 
 import { createServer, type ViteDevServer } from "vite";
 
 import type { AgentInspectorProjection } from "../src/domain/agent-inspector";
-import { clearDesktopMessageDrafts, useDesktopMessageDraft } from "../src/domain/desktop-message-drafts";
+import {
+  captureDesktopMessageDraftRestore,
+  clearDesktopMessageDrafts,
+  setDesktopMessageDraftAccount,
+  useDesktopMessageDraft,
+} from "../src/domain/desktop-message-drafts";
 import { useAgentCorrectionHandoff } from "../src/components/desktop/content/room-shell/useAgentCorrectionHandoff";
 
 function projection(entryId: string, canCorrect: boolean): AgentInspectorProjection {
@@ -85,6 +90,33 @@ test("unmounting the room shell keeps an unapplied hand-over in the room's draft
   // The room shell is keyed per room and unmounts when another room opens.
   scope.stop();
   assert.equal(composerText("room-a"), "@busy stop and rebase");
+});
+
+test("a hand-over is dropped, not written into another account's draft, after an account switch", () => {
+  setDesktopMessageDraftAccount("account-a");
+  const { handoff, scope } = shell();
+  handOver(handoff);
+  setDesktopMessageDraftAccount("account-b");
+  handoff.releaseCorrection({ restoreComposerText: true });
+  scope.stop();
+  assert.equal(composerText("room-a"), "");
+  setDesktopMessageDraftAccount(null);
+});
+
+test("a captured draft restore refuses to write once the account or its drafts changed", () => {
+  setDesktopMessageDraftAccount("account-a");
+  const sameAccount = captureDesktopMessageDraftRestore("room-a");
+  assert.equal(sameAccount("kept"), true);
+  assert.equal(composerText("room-a"), "kept");
+
+  const afterSwitch = captureDesktopMessageDraftRestore("room-a");
+  setDesktopMessageDraftAccount("account-b");
+  assert.equal(afterSwitch("lost"), false);
+
+  const afterSignOutClear = captureDesktopMessageDraftRestore("room-a");
+  clearDesktopMessageDrafts();
+  assert.equal(afterSignOutClear("lost"), false);
+  setDesktopMessageDraftAccount(null);
 });
 
 test("an applied correction keeps its text out of the composer", () => {
@@ -217,8 +249,9 @@ test("the composer offers no correction for a reply, attachments, or a draft tha
   });
 });
 
-test("the offer row is announced and its controls are addressable", () => {
+test("the offer is announced by a live region that exists before it, and its controls are addressable", () => {
   const composerSource = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-chat/RoomComposer.vue", import.meta.url)), "utf8");
-  assert.match(composerSource, /data-testid="desktop-composer-correction-offer"\s*aria-live="polite"/);
+  // A live region inserted together with its content is not announced.
+  assert.match(composerSource, /<div class="desktop-composer-correction-live" aria-live="polite"[^>]*>\s*<div\s+v-if="correctionOffer"/);
   assert.match(composerSource, /data-testid="desktop-composer-send-as-correction"\s*@click="sendAsCorrection"/);
 });

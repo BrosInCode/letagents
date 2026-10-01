@@ -398,7 +398,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomFeedback.value = null;
     newRoomFeedbackState.value = "info";
     try {
-      const result = await desktopIpc.repos.openRoom(path);
+      const result = await desktopIpc.repos.openRoom(path, { newProjectRoom: true });
       if (result.error || !result.snapshot) {
         newRoomProjectPathError.value = result.error || "LetAgents could not open a room from that folder.";
         return;

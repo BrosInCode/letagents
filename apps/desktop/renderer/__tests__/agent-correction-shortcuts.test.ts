@@ -129,28 +129,16 @@ test("text handed over as a correction lands in the box only for the turn it was
   assert.doesNotMatch(await render("turn_older"), /Stop the write and rebase on main/);
 });
 
-test("handed-over text fills the box once, so a tab switch does not refill it", async () => {
-  const request = { id: 7, entryId: busy.entryId, providerTurnId: "turn_supervised_busy", text: "Rebase on main first." };
-  const render = () => renderToString(createSSRApp({
-    render: () => h(TurnControl, { entryId: busy.entryId, control: busy.turnControl, busy: false, correctionRequest: request }),
-  }));
-  assert.match(await render(), /<textarea[^>]*>Rebase on main first\.<\/textarea>/);
-  // The Overview tab remounts the box with the same hand-over.
-  assert.doesNotMatch(await render(), /Rebase on main first/);
-});
+type HandOver = { id: number; entryId: string; providerTurnId: string | null; text: string };
 
-test("a new hand-over never overwrites text the person already typed in the box", async () => {
+/** The correction box as the Overview tab mounts it; unmount is a tab switch away. */
+function mountCorrectionBox(correctionRequest: HandOver | null) {
   const renderer = createRenderer<any, any>({
     patchProp() {}, insert(child, parent) { parent.children.push(child); child.parent = parent; }, remove() {},
     createElement: () => ({ children: [] }), createText: () => ({ children: [] }), createComment: () => ({ children: [] }),
     setText() {}, setElementText() {}, parentNode: (node) => node.parent, nextSibling: () => null,
   });
-  const props = reactive({
-    entryId: busy.entryId,
-    control: busy.turnControl,
-    busy: false,
-    correctionRequest: null as null | { id: number; entryId: string; providerTurnId: string | null; text: string },
-  });
+  const props = reactive({ entryId: busy.entryId, control: busy.turnControl, busy: false, correctionRequest });
   let vm!: { draft: { value: string } };
   const app = renderer.createApp({
     setup() {
@@ -160,12 +148,37 @@ test("a new hand-over never overwrites text the person already typed in the box"
   });
   app.provide(ssrContextKey, { modules: new Set() });
   app.mount({ children: [] });
+  return { vm, props, unmount: () => app.unmount() };
+}
+
+test("a new hand-over never overwrites text the person already typed in the box", async () => {
+  const box = mountCorrectionBox(null);
   try {
-    vm.draft.value = "My own wording";
-    props.correctionRequest = { id: 9, entryId: busy.entryId, providerTurnId: "turn_supervised_busy", text: "Handed-over text" };
+    box.vm.draft.value = "My own wording";
+    box.props.correctionRequest = { id: 9, entryId: busy.entryId, providerTurnId: "turn_supervised_busy", text: "Handed-over text" };
     await nextTick();
-    assert.equal(vm.draft.value, "My own wording");
+    assert.equal(box.vm.draft.value, "My own wording");
   } finally {
-    app.unmount();
+    box.unmount();
   }
+});
+
+test("switching Inspector tabs keeps the hand-over's text, edits included, and never refills a cleared box", async () => {
+  const request: HandOver = { id: 11, entryId: busy.entryId, providerTurnId: "turn_supervised_busy", text: "Rebase on main first." };
+  const first = mountCorrectionBox(request);
+  assert.equal(first.vm.draft.value, "Rebase on main first.");
+  first.vm.draft.value = "Rebase on main first, then rerun the tests.";
+  await nextTick();
+  first.unmount();
+
+  // Overview → Work → Overview remounts the box with the same hand-over.
+  const second = mountCorrectionBox(request);
+  assert.equal(second.vm.draft.value, "Rebase on main first, then rerun the tests.");
+  second.vm.draft.value = "";
+  await nextTick();
+  second.unmount();
+
+  const third = mountCorrectionBox(request);
+  assert.equal(third.vm.draft.value, "");
+  third.unmount();
 });

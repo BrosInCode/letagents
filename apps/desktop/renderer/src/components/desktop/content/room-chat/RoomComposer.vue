@@ -9,23 +9,26 @@
       @open-event-preview="openEventPreview"
       @dismiss-event-preview="emit('dismiss-event-preview', $event)"
     />
-    <div
-      v-if="correctionOffer"
-      class="desktop-composer-correction-offer"
-      data-testid="desktop-composer-correction-offer"
-      aria-live="polite"
-    >
-      <span>
-        <strong>{{ correctionOffer.target.displayName }}</strong> is in the middle of a turn. A room message waits until it ends.
-      </span>
-      <button
-        type="button"
-        :disabled="sending"
-        data-testid="desktop-composer-send-as-correction"
-        @click="sendAsCorrection"
+    <!-- The live region exists before the offer does, so the offer is announced.
+      It sits above the approval tray, so the offer never moves the tray's buttons. -->
+    <div class="desktop-composer-correction-live" aria-live="polite" data-testid="desktop-composer-correction-live">
+      <div
+        v-if="correctionOffer"
+        class="desktop-composer-correction-offer"
+        data-testid="desktop-composer-correction-offer"
       >
-        Send as correction…
-      </button>
+        <span>
+          <strong>{{ correctionOffer.target.displayName }}</strong> is in the middle of a turn. A room message waits until it ends.
+        </span>
+        <button
+          type="button"
+          :disabled="sending"
+          data-testid="desktop-composer-send-as-correction"
+          @click="sendAsCorrection"
+        >
+          Send as correction…
+        </button>
+      </div>
     </div>
     <!-- One request at a time. Arrivals join its queue or appear above it, so
       they never move the buttons; details open over the messages on demand. -->

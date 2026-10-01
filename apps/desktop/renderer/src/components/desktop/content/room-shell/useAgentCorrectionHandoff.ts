@@ -5,7 +5,7 @@ import {
   type AgentInspectorProjection,
   type ComposerCorrectionHandoff,
 } from "../../../../domain/agent-inspector";
-import { restoreDesktopMessageDraftText } from "../../../../domain/desktop-message-drafts";
+import { captureDesktopMessageDraftRestore } from "../../../../domain/desktop-message-drafts";
 
 /**
  * Steering a busy agent from the room: an Activity row or the composer opens
@@ -23,7 +23,7 @@ export function useAgentCorrectionHandoff(options: {
   const correctionRequest = ref<AgentInspectorCorrectionRequest | null>(null);
   const correctableAgents = computed(() => agentCorrectionTargets(options.projections()));
   let sequence = 0;
-  let composerHandoff: { requestId: number; draft: string; draftNamespace: string | null } | null = null;
+  let composerHandoff: { requestId: number; draft: string; restore: (text: string) => boolean } | null = null;
 
   function openCorrection(entryId: string, text = ""): boolean {
     const projection = options.projections().find((candidate) => candidate.entryId === entryId);
@@ -44,7 +44,11 @@ export function useAgentCorrectionHandoff(options: {
   function openCorrectionFromComposer(handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void): void {
     const handedOver = openCorrection(handoff.entryId, handoff.text);
     if (handedOver && correctionRequest.value) {
-      composerHandoff = { requestId: correctionRequest.value.id, draft: handoff.draft, draftNamespace: handoff.draftNamespace };
+      composerHandoff = {
+        requestId: correctionRequest.value.id,
+        draft: handoff.draft,
+        restore: captureDesktopMessageDraftRestore(handoff.draftNamespace),
+      };
     }
     opened(handedOver);
   }
@@ -54,7 +58,7 @@ export function useAgentCorrectionHandoff(options: {
     const handoff = composerHandoff;
     composerHandoff = null;
     if (release.restoreComposerText && handoff && handoff.requestId === correctionRequest.value?.id) {
-      restoreDesktopMessageDraftText(handoff.draftNamespace, handoff.draft);
+      handoff.restore(handoff.draft);
     }
     correctionRequest.value = null;
   }

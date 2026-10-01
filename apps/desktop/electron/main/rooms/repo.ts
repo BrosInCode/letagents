@@ -1,5 +1,5 @@
 import electron from "electron";
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, parse, resolve } from "node:path";
 import type {
@@ -61,33 +61,27 @@ export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
     };
   }
 
-  return openRepoRoomFromPath(result.filePaths[0]);
+  return openRepoRoomFromPath(result.filePaths[0], { newProjectRoom: true });
 }
 
 export async function openRepoRoomFromPath(
   folderPath: string,
+  options: { newProjectRoom?: boolean } = {},
 ): Promise<DesktopRepoRoomSelection> {
   const selectedPath = expandHomePath(folderPath.trim());
   // A typed or remembered path is not vetted like a picker result. Check it
   // before any room is created or folder bound, so a typo or a deleted folder
   // cannot leave a room pointing at nothing.
   const pathError = await projectFolderPathError(selectedPath);
-  if (pathError) {
-    return {
-      canceled: false,
-      repoPath: null,
-      repoStatus: null,
-      roomIdentifier: null,
-      source: null,
-      snapshot: null,
-      error: pathError,
-      warning: null,
-      projectBinding: null,
-    };
-  }
+  if (pathError) return repoRoomSelectionError(pathError);
 
   const resolved = await resolveRoomIdentifierFromPath(selectedPath);
   const repoPath = resolved.repoRoot || selectedPath;
+  // Only a new project room is refused for the home folder or the disk root.
+  // A room already bound there keeps reopening exactly as before.
+  if (options.newProjectRoom && await isHomeOrDiskRoot([selectedPath, resolved.repoRoot])) {
+    return repoRoomSelectionError("Choose a project folder, not your home folder or the top of the disk.");
+  }
   const isLocalProjectRoom = resolved.source === "local_git" || resolved.source === "local_folder";
 
   if (isLocalProjectRoom) {
@@ -141,17 +135,42 @@ function expandHomePath(path: string): string {
   return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
+function repoRoomSelectionError(error: string): DesktopRepoRoomSelection {
+  return {
+    canceled: false,
+    repoPath: null,
+    repoStatus: null,
+    roomIdentifier: null,
+    source: null,
+    snapshot: null,
+    error,
+    warning: null,
+    projectBinding: null,
+  };
+}
+
+/**
+ * Agents work inside the project folder, so the whole disk or home folder is
+ * never a new project, even as a Git repository. Both the chosen folder and
+ * the repository it belongs to are checked (a folder inside a home-level
+ * repository opens the home folder), by real path: realpath resolves links
+ * and, on a case-insensitive volume, returns the stored case.
+ */
+async function isHomeOrDiskRoot(paths: readonly (string | null)[]): Promise<boolean> {
+  const home = await realpath(homedir()).catch(() => resolve(homedir()));
+  for (const path of paths) {
+    if (!path) continue;
+    const folder = await realpath(path).catch(() => resolve(path));
+    if (folder === home || folder === parse(folder).root) return true;
+  }
+  return false;
+}
+
 async function projectFolderPathError(path: string): Promise<string | null> {
   if (!path) return "Choose a project folder.";
   if (!isAbsolute(path)) return "Enter the full path to the folder, starting with / or ~/.";
-  // Agents work inside the project folder; the whole disk or home folder is
-  // never a project, even when it happens to be a Git repository.
-  const folder = resolve(path);
-  if (folder === parse(folder).root || folder === resolve(homedir())) {
-    return "Choose a project folder, not your home folder or the top of the disk.";
-  }
   try {
-    const stats = await stat(folder);
+    const stats = await stat(path);
     return stats.isDirectory() ? null : "That path is a file. Enter the folder that contains it.";
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

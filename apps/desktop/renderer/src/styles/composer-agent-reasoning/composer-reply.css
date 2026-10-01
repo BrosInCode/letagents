@@ -66,6 +66,15 @@
   color: var(--text);
 }
 
+/* Empty, the live region stays in the accessibility tree but out of the grid. */
+.desktop-composer-correction-live:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
 .desktop-composer-correction-offer {
   display: flex;
   align-items: center;

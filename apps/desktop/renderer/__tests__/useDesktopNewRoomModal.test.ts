@@ -321,10 +321,12 @@ test("project cancel returns to project step without losing modal", async () => 
 
 test("a typed project path opens the same preview as the folder picker", async () => {
   const requested: string[] = [];
+  const requestedOptions: unknown[] = [];
   stubDesktopBridge({
     pickRoom: async () => { throw new Error("The native picker must not open for a typed path"); },
-    openRoom: async (path: string) => {
+    openRoom: async (path: string, options?: unknown) => {
       requested.push(path);
+      requestedOptions.push(options);
       return {
         canceled: false,
         repoPath: "/Users/test/code/project",
@@ -346,6 +348,8 @@ test("a typed project path opens the same preview as the folder picker", async (
   await modal.openProjectRoomFromPath();
 
   assert.deepEqual(requested, ["~/code/project"]);
+  // Only the creation flow refuses the home folder; reopening a bound room does not.
+  assert.deepEqual(requestedOptions, [{ newProjectRoom: true }]);
   assert.equal(modal.newRoomStep.value, "project");
   assert.equal(modal.newRoomProjectSelection.value?.folderLabel, "project");
   assert.equal(modal.newRoomProjectSelection.value?.sourceLabel, "Git remote");
@@ -436,7 +440,7 @@ function stubDesktopBridge(input: {
   createLocalRoom?: (input?: { displayName?: string | null }) => Promise<unknown>;
   getSnapshot?: (code: string) => Promise<DesktopRoomSnapshot>;
   pickRoom?: () => Promise<unknown>;
-  openRoom?: (path: string) => Promise<unknown>;
+  openRoom?: (path: string, options?: unknown) => Promise<unknown>;
   rename?: (roomIdentifier: string, displayName: string) => Promise<unknown>;
 }): void {
   const existing = (globalThis as { window?: unknown }).window as

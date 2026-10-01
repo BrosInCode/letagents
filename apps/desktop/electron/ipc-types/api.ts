@@ -362,7 +362,8 @@ export interface DesktopApi {
     startStatusWatch: (rootPath: string) => Promise<RepoStatus>;
     stopStatusWatch: () => Promise<void>;
     onStatusChanged: (callback: (status: RepoStatus) => void) => () => void;
-    openRoom: (rootPath: string) => Promise<DesktopRepoRoomSelection>;
+    /** `newProjectRoom` is the creation flow: it refuses the home folder and the disk root. */
+    openRoom: (rootPath: string, options?: { newProjectRoom?: boolean }) => Promise<DesktopRepoRoomSelection>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
     listProjectBindings: () => Promise<DesktopProjectBinding[]>;
     migrateProjectBindings: (

@@ -66,7 +66,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import {
-  claimCorrectionPrefill,
+  correctionBoxText,
+  rememberCorrectionBoxText,
   type AgentInspectorCorrectionRequest,
   type AgentInspectorTurnControlProjection,
 } from "../../../../domain/agent-inspector";
@@ -94,22 +95,28 @@ const fieldId = computed(() => `agent-inspector-turn-correction-${props.entryId}
 // reset on every push — clearing the box out from under the user mid-type.
 watch(
   () => `${props.entryId}::${props.control?.workAttemptId ?? ""}::${props.control?.executionGenerationId ?? ""}`,
-  () => { draft.value = ""; },
+  () => { draft.value = ""; handedOver = null; },
 );
 
 // Text a person chose to send as a correction from outside the Inspector. It
-// lands in the box for review, only for the exact turn it was meant for, only
-// once (the box remounts on tab switches), and never over text already typed.
+// lands in the box for review, only for the exact turn it was meant for and
+// never over text already typed. The box keeps that hand-over's text, edits
+// included, when it remounts on an Inspector tab switch.
+let handedOver: AgentInspectorCorrectionRequest | null = null;
 watch(
   () => props.correctionRequest?.id,
   () => {
     const request = props.correctionRequest;
     if (!request?.text || request.entryId !== props.entryId || draft.value.trim()) return;
     if (props.control?.status !== "ready" || request.providerTurnId !== props.control.providerTurnId) return;
-    if (claimCorrectionPrefill(request)) draft.value = request.text;
+    handedOver = request;
+    draft.value = correctionBoxText(request);
   },
   { immediate: true },
 );
+watch(draft, (text) => {
+  if (handedOver && handedOver === props.correctionRequest) rememberCorrectionBoxText(handedOver, text);
+});
 
 function applyCorrection(): void {
   const correction = draft.value.trim();

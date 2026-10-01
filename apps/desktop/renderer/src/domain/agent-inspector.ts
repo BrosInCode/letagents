@@ -890,17 +890,20 @@ export interface ComposerCorrectionHandoff {
   draftNamespace: string | null;
 }
 
-const prefilledCorrectionRequests = new WeakSet<object>();
+const correctionBoxTexts = new WeakMap<object, string>();
 
 /**
- * A handed-over text fills the correction box once. The box remounts when the
- * person switches Inspector tabs; it must not refill text they cleared or edited.
+ * What the correction box shows for a hand-over: the handed-over text at
+ * first, then whatever the person left in the box. The box remounts on every
+ * Inspector tab switch; that must neither empty it nor undo their edits.
  */
-export function claimCorrectionPrefill(request: AgentInspectorCorrectionRequest): boolean {
+export function correctionBoxText(request: AgentInspectorCorrectionRequest): string {
   const identity = toRaw(request);
-  if (prefilledCorrectionRequests.has(identity)) return false;
-  prefilledCorrectionRequests.add(identity);
-  return true;
+  return correctionBoxTexts.has(identity) ? correctionBoxTexts.get(identity)! : request.text;
+}
+
+export function rememberCorrectionBoxText(request: AgentInspectorCorrectionRequest, text: string): void {
+  correctionBoxTexts.set(toRaw(request), text);
 }
 
 export function agentCorrectionTargets(
