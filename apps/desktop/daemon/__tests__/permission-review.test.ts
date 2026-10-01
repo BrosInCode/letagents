@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { agentBranchSegment, isAgentBranch, leasedBranchRef } from "../../../../shared/agent-branch.mjs";
 import {
   PERMISSION_REVIEW_MAX_COMMANDS,
   PERMISSION_REVIEW_MAX_COMMAND_CHARS,
   buildPermissionReviewRequest,
   commandNeedsPerson,
+  commandOnlyReads,
   decidePermissionReview,
   parsePermissionReviewAnswers,
+  partsAreInCommand,
+  routineCommandReview,
 } from "../../../../shared/permission-review.mjs";
 
 const project = "/Users/dev/shop-api";
@@ -186,6 +190,124 @@ test("a listed program is held to the arguments that only read or check", () => 
     "go run x", "go install x", "go get x", "go generate", "go test -exec x", "cargo run", "cargo install x", "cargo publish", "cargo test --config x", "cargo fix",
     "make", "make -f x.mk", "make -C src", "make -p", "make SHELL=x", "make X=1 test", "make deploy", "make clean-db", "make test -j4",
   ], "argument that runs, writes, or reaches out");
+});
+
+test("an option's quoted value, a range of lines, a separator, and a syntax check are read", () => {
+  readable([
+    "git log -1 --format='%an <%ae>'", "git log --format=\"%h %s\" -3", "grep -rn x --include=\"*.ts\" src", "sed -n '255,300p' src/app.mjs",
+    "sed -n '1,$p' a.txt", "sed -n 40p a.txt", "sed -n '5p' a.txt b.txt", "echo '---'", "echo \"---branch---\"", "git status; echo ---; git diff",
+    "node --check src/app.mjs", "node -c src/app.mjs", "node --check src/app.mjs && node --test 2>&1 | tail -9",
+    "git -C /Users/dev/shop-api log --oneline -5", "ls -la /Users/dev/shop-api && git -C /Users/dev/shop-api/ status -sb",
+  ]);
+  needsPerson([
+    "sed -n '1,5w out.txt' a.txt", "sed -n '1e rm -rf x' a.txt", "sed '1,5p' a.txt", "sed -n 1,5p ../x", "sed -n '1,5p;w x' a.txt", "sed -n -e 1p a.txt",
+    "sed -n 1,5p /etc/passwd", "sed -n 1,5p .env", "echo -x---", "echo --x", "node --check", "node --check -e 1", "node --check src/a.ts --x",
+    "git -C /Users/dev/shop-api/src log", "git -C /Users/dev log", "git -C /tmp log", "git -C . log", "git -C /Users/dev/shop-api -C /tmp log",
+    "git -C /Users/dev/shop-api push", "git -C /Users/dev/shop-api", "git -C", "git -C /Users/dev/shop-api/.. log",
+    "git log --format='%G?'", "ls --color='~/x'", "cat x='../y'", "ls a=\"$HOME\"", "ls a='b'c", "ls a='b\nc'", "ls a='b", "X='1' ls", "='ls'",
+  ], "unreadable option value or script");
+});
+
+const OWN_KEY = "Owner/desktop-open-model-0123";
+const routine = (command: unknown, defaultBranch: string | null = "main") =>
+  routineCommandReview(command, project, { ownBranch: (name) => isAgentBranch(name, OWN_KEY), defaultBranch });
+
+test("a leased branch belongs to the agent whose key names it, for any task", () => {
+  assert.equal(agentBranchSegment("Owner/desktop-open-model-0123"), "owner-desktop-open-model-0123");
+  assert.equal(agentBranchSegment("  "), "agent");
+  for (const task of ["task_1", "task_42", "focus-3"]) assert.equal(isAgentBranch(leasedBranchRef(task, OWN_KEY), OWN_KEY), true, task);
+  for (const branch of ["main", "letagents/task_1/owner-desktop-open-model-01234", "letagents/task_1/owner-desktop-open-model-0123/x",
+    "letagents//owner-desktop-open-model-0123", "letagents/.x/owner-desktop-open-model-0123", "x/task_1/owner-desktop-open-model-0123",
+    leasedBranchRef("task_1", "Owner/other"), 7, null]) {
+    assert.equal(isAgentBranch(branch, OWN_KEY), false, String(branch));
+  }
+  assert.equal(isAgentBranch(leasedBranchRef("task_1", OWN_KEY), ""), false);
+  assert.equal(isAgentBranch(leasedBranchRef("task_1", OWN_KEY), null), false);
+});
+
+test("routine work on the agent's own branches is decided by the rules, and only its other parts are left for review", () => {
+  const own = (task: string) => leasedBranchRef(task, OWN_KEY);
+  assert.deepEqual(routine(`git add src/a.ts && git commit -m 'x' && git push origin HEAD:${own("task_1")}`), []);
+  assert.deepEqual(routine(`git push -u origin HEAD:refs/heads/${own("task_1")}`), []);
+  assert.deepEqual(routine(`git push origin ${own("task_1")}:${own("task_1")}`), []);
+  assert.deepEqual(routine("gh pr view 6 --json state --jq .state && git fetch origin main"), []);
+  assert.deepEqual(routine("git add src/a.ts && npm test 2>&1 | tail -5"), ["npm test 2>&1", "tail -5"]);
+  assert.deepEqual(routine("git fetch origin\n  git log --oneline -3 origin/main  \n"), ["git log --oneline -3 origin/main"]);
+  // A command the rules decide no part of is reviewed whole, as before.
+  assert.deepEqual(routine("git status && npm test"), ["git status && npm test"]);
+  assert.deepEqual(routine("\nls\n\n"), ["\nls\n\n"]);
+  // A merge or a new branch starts from the default branch, the agent's own, or where the agent is.
+  for (const command of ["git merge origin/main --no-edit", `git merge origin/${own("task_2")}`, `git merge ${own("task_2")}`,
+    `git checkout -b ${own("task_2")} origin/main`, `git switch -c ${own("task_2")} HEAD`, `git checkout -b ${own("task_2")}`, `git switch ${own("task_2")}`]) {
+    assert.deepEqual(routine(command), [], command);
+  }
+  assert.deepEqual(routine("git merge origin/trunk", "trunk"), []);
+  for (const command of ["git merge origin/feature", "git merge origin/trunk", `git merge origin/${leasedBranchRef("task_1", "Owner/other")}`,
+    `git checkout -b ${own("task_2")} origin/feature`, `git switch -c ${own("task_2")} origin/feature`, "git merge FETCH_HEAD",
+    // The local default branch holds whatever was committed or merged on it here, not what `origin` has.
+    "git merge main", `git checkout -b ${own("task_2")} main`, `git switch -c ${own("task_2")} main`, "git merge trunk"]) {
+    assert.equal(routine(command), null, command);
+  }
+  assert.equal(routine("git merge origin/main", null), null, "an unknown default branch is no base");
+  assert.equal(routine("git merge origin/main", "main..x"), null);
+  // A push names where it goes, so no branch checked out, upstream, or push setting can send it elsewhere.
+  for (const command of ["git push origin HEAD", `git push origin ${own("task_1")}`, `git push -u origin ${own("task_1")}`, "git push",
+    `git push origin HEAD:${own("task_1")}:x`, "git push origin HEAD:refs/heads/main", `git push origin HEAD:refs/tags/${own("task_1")}`,
+    `git push origin HEAD:refs/heads/refs/heads/${own("task_1")}`, `git push origin :${own("task_1")}`, `git push origin HEAD:${leasedBranchRef("task_1", "Owner/other")}`]) {
+    assert.equal(routine(command), null, command);
+  }
+  // `git checkout <name>` restores a folder of that name when no branch has it, and the branch stays where it was.
+  assert.equal(routine(`git checkout ${own("task_1")}`), null);
+  assert.equal(routine(`git checkout -q ${own("task_1")}`), null);
+  // What a person must see.
+  for (const command of ["git push -f origin HEAD:x", "git checkout main", "git switch main", "git add .", "git commit",
+    "git -c user.name=A -c user.email=1+a@users.noreply.github.com commit -m x", "gh pr merge 1", "git status && rm -rf x",
+    `git checkout -b ${own("task_2")} && cd /tmp`, "echo x | npm test && git add a.ts", 7, "",
+    `git add a.ts && ${Array.from({ length: PERMISSION_REVIEW_MAX_COMMANDS + 1 }, () => "ls").join(" && ")}`]) {
+    assert.equal(routine(command), null, String(command));
+  }
+  assert.equal(routineCommandReview(`git push origin HEAD:${own("task_1")}`, "shop-api", { ownBranch: () => true, defaultBranch: "main" }), null);
+  assert.equal(routineCommandReview(`git push origin HEAD:${own("task_1")}`, project, { ownBranch: () => { throw new Error("hostile"); }, defaultBranch: "main" }), null);
+  assert.equal(routineCommandReview(`git push origin HEAD:${own("task_1")}`, project, { ownBranch: () => "yes" as never, defaultBranch: "main" }), null);
+});
+
+test("a search, which can close the repository scope gh puts around it, is not a read", () => {
+  for (const command of [
+    "gh pr list --search 'repo:victim/private) OR (repo:victim/private' --state all --json number,title,body",
+    "gh issue list -S 'is:private) OR (is:private' --json title,body,url", "gh pr list --search x", "gh issue list -S x",
+    "gh pr list --label 'a\") OR (repo:x/y'", "gh pr list --author 'x repo:y'", "gh pr list --assignee 'x)'",
+  ]) {
+    assert.equal(routine(command), null, command);
+    assert.equal(commandOnlyReads(command, project), false, command);
+  }
+  for (const command of ["gh pr list --label bug --label 'type: docs' --author octo-cat", "gh issue list -l area/ui -a octocat --state open"]) {
+    assert.deepEqual(routine(command), [], command);
+    assert.equal(commandOnlyReads(command, project), true, command);
+  }
+});
+
+test("the parts another parser found must each be a part these rules found, word for word", () => {
+  const command = "git add a.ts && git -c user.name=\"A B\" commit -m 'x y' && npm test 2>&1 | tail -5";
+  assert.equal(partsAreInCommand(command, ["git add a.ts", "git -c user.name=\"A B\" commit -m 'x y'", "npm test 2>&1", "tail -5"]), true);
+  assert.equal(partsAreInCommand(command, ["npm test", "tail   -5"]), true);
+  assert.equal(partsAreInCommand(command, []), true);
+  for (const parts of [["git push origin HEAD"], ["git add a.ts", "rm -rf x"], ["tail -6"], ["git add a.ts b.ts"], ["git commit -m 'x y'"],
+    ["npm test && rm x"], ["'npm' test"], ["$(rm x)"], [""], [7], "git add a.ts"] as unknown[]) {
+    assert.equal(partsAreInCommand(command, parts), false, JSON.stringify(parts));
+  }
+  for (const whole of ["", "ls $(rm x)", 7]) assert.equal(partsAreInCommand(whole, ["ls"]), false, String(whole));
+});
+
+test("a command only reads when each part reads files, history, or this repository's pull requests", () => {
+  for (const command of ["ls -la && git log --oneline -5 && git status", "git status --short; echo ---; git branch -a", "sed -n '1,5p' a.ts | head -2",
+    "gh pr view 8 --json number,state", "gh pr checks 8 && gh issue list --state open", "cat /Users/dev/shop-api/src/a.ts", "git log -1 --format='%an <%ae>'"]) {
+    assert.equal(commandOnlyReads(command, project), true, command);
+  }
+  for (const command of ["npm test", "node --check a.ts", "make lint", "ls && npm test", "git add a.ts", "git push origin HEAD", "gh pr comment 8 --body x",
+    "gh pr view 8 && gh pr comment 8 --body x", "cd src && git log", "git -C src log", "ls &", "ls > x", "cat ../x", "cat .env", "", 7]) {
+    assert.equal(commandOnlyReads(command, project), false, String(command));
+  }
+  assert.equal(commandOnlyReads("ls", "shop-api"), false);
 });
 
 test("only text of a readable size is judged, and hostile input cannot throw", () => {

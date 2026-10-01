@@ -1996,15 +1996,36 @@ test("automatic review runs only for the agents and providers it applies to", as
     assert.equal((await unchosen.broker.list("room"))[0]!.status, "pending");
   } finally { await unchosen.close(); }
 
-  for (const provider of ["codex", "claude-code"] as const) {
-    const other = reviewer("allow");
-    const f = await fixture(provider, { automaticReview: other.automaticReview });
-    try {
-      await new Promise(resolve => setTimeout(resolve, 50));
-      assert.deepEqual(other.reviewed, [], provider);
-      assert.deepEqual(f.sends, []);
-    } finally { await f.close(); }
-  }
+  // Codex reviews its own requests. A request is never reviewed as another provider's.
+  const codex = reviewer("allow");
+  const f = await fixture("codex", { automaticReview: codex.automaticReview });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.deepEqual(codex.reviewed, []);
+    assert.deepEqual(f.sends, []);
+  } finally { await f.close(); }
+  const mismatched = reviewer("ask");
+  const other = await fixture("claude-code", { automaticReview: mismatched.automaticReview });
+  try {
+    other.emit([other.native, { provider: "open-model", native: { id: "other", sessionID: "continuation", permission: "bash", patterns: ["ls"],
+      metadata: { command: "ls" }, always: [], tool: { messageID: "assistant-message", callID: "call" } } }]);
+    await eventually(() => mismatched.reviewed.length === 1, "the Claude request's review");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.deepEqual(mismatched.reviewed, [other.native.native]);
+    assert.deepEqual(other.sends, []);
+  } finally { await other.close(); }
+});
+
+test("automatic review answers a Claude request it allows, once, as itself", async () => {
+  const review = reviewer("allow");
+  const f = await fixture("claude-code", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => f.sends.length === 1, "the reviewed decision to reach Claude");
+    assert.deepEqual(f.sends, ["once"]);
+    assert.deepEqual(review.reviewed, [f.native.native]);
+    const decision = f.db.prepare("SELECT source,actor_id,decision FROM execution_approval_decisions").all();
+    assert.deepEqual(decision.map(row => ({ ...row })), [{ source: "host", actor_id: "automatic-review", decision: "allow_once" }]);
+  } finally { await f.close(); }
 });
 
 test("an allowed review cannot be applied once the agent's authority has changed", async () => {
