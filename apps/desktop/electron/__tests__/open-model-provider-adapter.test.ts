@@ -509,6 +509,15 @@ test("Open Model launches a dedicated OpenCode server without putting the provid
   );
 });
 
+test("Open Model launches OpenCode so a denied tool call does not end the turn", async () => {
+  const { harness } = await spawnAdapter({
+    permissionProfileId: "ask_before_write",
+    launchPolicy: { permission: { "*": "allow", edit: "ask", bash: "ask" } },
+  });
+  const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as Record<string, unknown>;
+  assert.deepEqual(config.experimental, { continue_loop_on_deny: true });
+});
+
 test("Open Model launches ask-before-write with native shell and edit approvals", async () => {
   const { harness } = await spawnAdapter({
     permissionProfileId: "ask_before_write",
@@ -1177,7 +1186,128 @@ test("Open Model does not settle an earlier empty step while the turn's last ste
   });
 });
 
-test("an Open Model turn that hit its output limit settles its room message and the next one is delivered", async () => {
+test("Open Model reads the answer a turn gives after OpenCode compacts it, without streaming the summary", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const streamed: ProviderStreamEvent[] = [];
+  adapter.onStream(handle, (event) => streamed.push(event));
+  harness.setTranscriptFactories([(turnId) => compactedTurnTranscript(turnId, {
+    after: [assistantMessage("msg_continue", "msg_after", 40, "Answer written after the compaction.")],
+  })]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-compacted",
+    sourceMessage: { text: "wire the reviewed modules" },
+    activation: { decision: "activate" },
+    actionId: "compacted",
+  });
+
+  assert.deepEqual(result, { turnId: String(harness.promptBodies[0]?.messageID), outcome: "reply",
+    text: "Answer written after the compaction.", evidence: "transcript" });
+  assert.equal(harness.promptBodies.length, 1);
+  assert.doesNotMatch(JSON.stringify(streamed), /PRIVATE-COMPACTION-SUMMARY/, "the summary is OpenCode's record, not the agent's words");
+  assert.match(JSON.stringify(streamed), /Answer written after the compaction/);
+
+  // With no answer after the compaction, the summary is still not the reply.
+  const unanswered = await spawnAdapter();
+  unanswered.harness.setTranscriptFactories([(turnId) => compactedTurnTranscript(turnId, {
+    after: [assistantWithTool("msg_continue", "msg_denied", 40, { status: "error", input: { filePath: "src/app.mjs" },
+      error: "The user rejected permission to use this specific tool call." }, "call_denied", "write")],
+  })]);
+  const settled = await unanswered.adapter.runRoomTurn(unanswered.handle, {
+    inboxItemId: "inbox-compacted-denied",
+    sourceMessage: { text: "wire the reviewed modules" },
+    activation: { decision: "activate" },
+    actionId: "compacted-denied",
+  });
+  assert.equal(settled.outcome, "failed");
+  assert.equal(settled.error, NO_REPLY_FAILURE.deniedTool);
+});
+
+test("Open Model follows a turn's steps live across an OpenCode compaction", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const session = handle.providerContinuationId!;
+  const toolEvents: Array<Record<string, unknown>> = [];
+  let afterCompletedLive!: () => void;
+  const afterCompleted = new Promise<void>((resolve) => { afterCompletedLive = resolve; });
+  adapter.onStream(handle, (event) => {
+    if (event.kind !== "tool_lifecycle") return;
+    const payload = event.payload as Record<string, unknown>;
+    toolEvents.push(payload);
+    if (payload.callID === "call_after" && payload.status === "completed") afterCompletedLive();
+  });
+  const afterStep = (status: "running" | "completed") => assistantWithTool("msg_continue", "msg_after", 40,
+    { status, input: { filePath: "src/app.mjs" }, ...(status === "completed" ? { output: "written" } : {}) }, "call_after", "write");
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([
+    (turnId) => compactedTurnTranscript(turnId).slice(0, 2),
+    (turnId) => compactedTurnTranscript(turnId, { after: [afterStep("running")] }),
+    (turnId) => compactedTurnTranscript(turnId, { after: [afterStep("completed"),
+      assistantMessage("msg_continue", "msg_final", 50, "Rewired after the compaction.")] }),
+  ]);
+  const initialRead = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-compacting",
+    sourceMessage: { text: "wire the reviewed modules" },
+    activation: { decision: "activate" },
+    actionId: "compacting",
+  });
+  await initialRead;
+  // A step that answers OpenCode's own "continue" message, then its tool finishing.
+  harness.sendEvent({ type: "message.updated", properties: { sessionID: session,
+    info: { id: "msg_after", role: "assistant", parentID: "msg_continue", sessionID: session, time: { created: 40 } } } });
+  harness.sendEvent({ type: "message.part.updated", properties: { sessionID: session, part: {
+    id: "msg_after-tool", messageID: "msg_after", sessionID: session, type: "tool", tool: "write", callID: "call_after",
+    state: { status: "completed", input: { filePath: "src/app.mjs" }, output: "written" } } } });
+  let timer: NodeJS.Timeout | undefined;
+  const live = await Promise.race([afterCompleted.then(() => true),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 2_000); })]);
+  clearTimeout(timer);
+  harness.completeTurn();
+  const result = await turn;
+
+  assert.equal(live, true, "the step after the compaction is followed while the turn runs");
+  assert.deepEqual(toolEvents.filter((event) => event.callID === "call_after").map((event) => event.status), ["running", "completed"]);
+  assert.equal(result.outcome, "reply");
+  assert.equal(result.text, "Rewired after the compaction.");
+});
+
+test("Open Model settles a turn that stopped on a tool call a person denied", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  const checkpointed: ProviderRoomTurnResult[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setTranscriptFactories([(turnId) => [assistantWithTool(turnId, "assistant-denied", 10, {
+    status: "error", input: { command: "gh pr view 4" }, error: "The user rejected permission to use this specific tool call.",
+  })]]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-denied",
+    sourceMessage: { text: "check the pull request" },
+    activation: { decision: "activate" },
+    actionId: "denied",
+  }, { checkpointTerminalResult: async (terminal) => { checkpointed.push(terminal); } });
+
+  const turnId = String(harness.promptBodies[0]?.messageID);
+  const settled = { turnId, providerContinuationId: handle.providerContinuationId, outcome: "failed", text: null,
+    evidence: "transcript", error: NO_REPLY_FAILURE.deniedTool };
+  assert.deepEqual(result, settled);
+  assert.deepEqual(checkpointed, [settled]);
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"
+    && fact.providerTurnId === turnId && fact.turnOutcome === "failed"));
+  assert.deepEqual(await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-denied", providerTurnId: turnId }), settled,
+    "a re-read reaches the same settled answer");
+  assert.equal(harness.promptBodies.length, 1);
+
+  // A tool that failed on its own is not a denial; that turn stays unreadable as before.
+  const failed = await spawnAdapter();
+  failed.harness.setTranscriptFactories([(id) => [assistantWithTool(id, "assistant-failed", 10, {
+    status: "error", input: { command: "npm test" }, error: "Command exited with code 1",
+  })]]);
+  assert.equal((await failed.adapter.runRoomTurn(failed.handle, { inboxItemId: "inbox-failed-tool",
+    sourceMessage: { text: "run tests" }, activation: { decision: "activate" }, actionId: "failed-tool" })).outcome, "unreadable");
+});
+
+for (const ending of ["output limit", "denied tool call"] as const) test(`an Open Model turn that ended on its ${ending} settles its room message and the next one is delivered`, async () => {
   const { SupervisedAgentDelivery } = await import(new URL("../../daemon/supervised-agent-delivery.ts", import.meta.url).href);
   const { SupervisedAgentInboxStore } = await import(new URL("../../daemon/supervised-agent-inbox-store.ts", import.meta.url).href);
   const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
@@ -1192,10 +1322,12 @@ test("an Open Model turn that hit its output limit settles its room message and 
   });
   const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
   const handle = await router.spawn({ provider: "open-model", ...spawnRequest() });
-  // The first room message gets the reasoning-only answer seen in the field;
-  // the second gets an ordinary reply.
+  // The first room message gets the ending seen in the field; the second gets
+  // an ordinary reply.
   harness.setTranscriptFactories([(turnId) => harness.promptBodies.length === 1
-    ? [outputLimitedAssistant(turnId, "assistant-length", 10)]
+    ? [ending === "output limit" ? outputLimitedAssistant(turnId, "assistant-length", 10)
+      : assistantWithTool(turnId, "assistant-denied", 10, { status: "error", input: { command: "gh pr view 4" },
+        error: "The user rejected permission to use this specific tool call." })]
     : [assistantMessage(turnId, "assistant-reply", 20, "Second message answered.")]]);
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
   const published: string[] = [];
@@ -1226,7 +1358,7 @@ test("an Open Model turn that hit its output limit settles its room message and 
 
     const receipts = await store.receipts(agent.agentId);
     assert.deepEqual(receipts.map((item: { state: string }) => item.state), ["acknowledged_failed", "acknowledged"]);
-    assert.equal(receipts[0].last_error, NO_REPLY_FAILURE.outputLimit);
+    assert.equal(receipts[0].last_error, ending === "output limit" ? NO_REPLY_FAILURE.outputLimit : NO_REPLY_FAILURE.deniedTool);
     assert.equal(receipts[0].attempt_count, 1);
     assert.equal(receipts[0].timeline.some((event: { phase: string }) => ["result_unreadable", "blocked"].includes(event.phase)), false);
     assert.deepEqual(published, ["Second message answered."]);
@@ -2966,6 +3098,110 @@ test("OpenCode permission correlation snapshots native request identity before a
   assert.deepEqual(await client.correlatePermissionTurn("ses_a", expected), { outcome: "correlated", requestId: "per_a",
     providerContinuationId: "ses_a", providerTurnId: "msg_user", assistantMessageId: "msg_assistant", callId: "call_a" });
   assert.deepEqual(paths, ["/session/ses_a/message/msg_assistant", "/session/ses_a/message/msg_user"]);
+});
+
+/**
+ * What OpenCode 1.18.20 writes when it compacts a session in the middle of a
+ * turn: its compaction request, the summary step, then either a synthetic
+ * "continue" message or (after an overflow) a replay of the prompt. Later
+ * steps answer that last message, not the prompt that started the turn.
+ */
+function compactedTurnTranscript(turnId: string, options: {
+  replay?: boolean; failedSummary?: boolean; promptBeforeCompaction?: string;
+  after?: TranscriptMessage[]; sessionID?: string;
+} = {}): TranscriptMessage[] {
+  const followUp = options.replay ? "msg_replay" : "msg_continue";
+  const prompt = userMessage(turnId);
+  prompt.parts.push({ type: "text", text: "room prompt" });
+  return [
+    prompt,
+    assistantWithTool(turnId, "msg_before", 10, { status: "completed", input: { command: "git merge" }, output: "merged" }, "call_before"),
+    ...(options.promptBeforeCompaction ? [{ info: { id: options.promptBeforeCompaction, role: "user", time: { created: 15 } },
+      parts: [{ type: "text", text: "a later room prompt" }] }] : []),
+    { info: { id: "msg_compaction", role: "user", time: { created: 20 } },
+      parts: [{ type: "compaction", auto: true, overflow: Boolean(options.replay) }] },
+    { info: { id: "msg_summary", role: "assistant", parentID: "msg_compaction", mode: "compaction", agent: "compaction",
+      summary: true, time: { created: 21, completed: 22 },
+      ...(options.failedSummary ? { error: { name: "ContextOverflowError", data: { message: "too large" } } } : {}) },
+    parts: [{ id: "msg_summary-text", type: "text", text: "PRIVATE-COMPACTION-SUMMARY" },
+      { id: "msg_summary-finish", type: "step-finish", reason: options.failedSummary ? "error" : "stop" }] },
+    { info: { id: followUp, role: "user", time: { created: 30 } },
+      parts: options.replay ? [{ type: "text", text: "room prompt" }]
+        : [{ type: "text", synthetic: true, metadata: { compaction_continue: true }, text: "Continue if you have next steps." }] },
+    ...(options.after ?? []),
+  ].map((message) => {
+    if (options.sessionID) message.info.sessionID = options.sessionID;
+    return message as TranscriptMessage;
+  });
+}
+
+test("OpenCode permission correlation links a step after a compaction to the room turn it continues", async () => {
+  for (const replay of [false, true]) {
+    const followUp = replay ? "msg_replay" : "msg_continue";
+    const assistant = assistantWithTool(followUp, "msg_assistant", 40,
+      { status: "running", input: { filePath: "src/app.mjs" } }, "call_a", "write");
+    assistant.info.sessionID = "ses_a";
+    Object.assign(assistant.parts[0]!, { sessionID: "ses_a", messageID: "msg_assistant" });
+    const transcript = compactedTurnTranscript("msg_user", { replay, sessionID: "ses_a", after: [assistant] });
+    const byId = new Map(transcript.map((message) => [String(message.info.id), message]));
+    const reads: string[] = []; let fences = 0;
+    const client = nativeClient(async (input) => {
+      const url = new URL(input); reads.push(`${url.pathname}${url.search}`);
+      if (url.pathname === "/session/ses_a/message") return json(transcript);
+      const found = byId.get(decodeURIComponent(url.pathname.split("/").at(-1)!));
+      return found ? json(found) : json({ error: "missing" }, 404);
+    });
+    const expected = { ...permissionFixture(), permission: "edit" };
+
+    assert.deepEqual(await client.correlatePermissionTurn("ses_a", expected), { outcome: "correlated", requestId: "per_a",
+      providerContinuationId: "ses_a", providerTurnId: followUp, assistantMessageId: "msg_assistant", callId: "call_a" },
+    "without an expected turn, the parent message is all the linkage there is");
+    assert.equal(reads.length, 2);
+
+    reads.length = 0;
+    assert.deepEqual(await client.correlatePermissionTurn("ses_a", expected, () => { fences += 1; }, "msg_user"), {
+      outcome: "correlated", requestId: "per_a", providerContinuationId: "ses_a", providerTurnId: "msg_user",
+      assistantMessageId: "msg_assistant", callId: "call_a" }, `${followUp} belongs to the prompt it follows`);
+    assert.deepEqual(reads, ["/session/ses_a/message/msg_assistant", `/session/ses_a/message/${followUp}`,
+      "/session/ses_a/message?limit=128"]);
+    assert.equal(fences, 4, "the transcript read is fenced too");
+
+    reads.length = 0;
+    assert.equal((await client.correlatePermissionTurn("ses_a", expected, undefined, followUp) as { providerTurnId?: string }).providerTurnId,
+      followUp, "an exact parent needs no transcript");
+    assert.equal(reads.length, 2);
+  }
+});
+
+test("OpenCode permission correlation does not carry a step across another prompt or a failed compaction", async () => {
+  const cases: Array<[string, Parameters<typeof compactedTurnTranscript>[1]]> = [
+    ["a later prompt", { promptBeforeCompaction: "msg_user_2" }],
+    ["a failed summary", { failedSummary: true }],
+  ];
+  for (const [name, options] of cases) {
+    const assistant = assistantWithTool("msg_continue", "msg_assistant", 40, { status: "running", input: {} }, "call_a", "write");
+    assistant.info.sessionID = "ses_a";
+    Object.assign(assistant.parts[0]!, { sessionID: "ses_a", messageID: "msg_assistant" });
+    const transcript = compactedTurnTranscript("msg_user", { ...options, sessionID: "ses_a", after: [assistant] });
+    const byId = new Map(transcript.map((message) => [String(message.info.id), message]));
+    const client = nativeClient(async (input) => {
+      const url = new URL(input);
+      if (url.pathname === "/session/ses_a/message") return json(transcript);
+      const found = byId.get(decodeURIComponent(url.pathname.split("/").at(-1)!));
+      return found ? json(found) : json({ error: "missing" }, 404);
+    });
+    const correlation = await client.correlatePermissionTurn("ses_a", permissionFixture(), undefined, "msg_user");
+    assert.equal((correlation as { providerTurnId?: string }).providerTurnId, "msg_continue", name);
+  }
+  // A transcript that cannot be read proves nothing.
+  const { assistant, user } = permissionTurnMessages();
+  const client = nativeClient(async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/session/ses_a/message") return json({ error: "gone" }, 500);
+    return json(url.pathname.endsWith("msg_assistant") ? assistant : user);
+  });
+  assert.deepEqual(await client.correlatePermissionTurn("ses_a", permissionFixture(), undefined, "msg_other"),
+    { outcome: "correlation_unproven" });
 });
 
 test("Open Model permission correlation fences process and continuation loss before and during either exact read", async (t) => {

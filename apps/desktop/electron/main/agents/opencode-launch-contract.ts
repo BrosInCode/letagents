@@ -288,6 +288,10 @@ export function openCodeConfig(input: {
     model: `${OPEN_MODEL_OPENCODE_PROVIDER_ID}/${input.model}`,
     plugin: [input.pluginUrl],
     permission: supervisedOpenCodePermissionPolicy(input.permissionProfileId ?? "full_access"),
+    // A denied tool call is an ordinary tool result: the model reads the
+    // refusal and goes on. By default OpenCode ends the turn there, with no
+    // reply, which used to leave the agent's room queue waiting.
+    experimental: { continue_loop_on_deny: true },
     provider: {
       [OPEN_MODEL_OPENCODE_PROVIDER_ID]: {
         id: OPEN_MODEL_OPENCODE_PROVIDER_ID,

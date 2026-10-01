@@ -2046,7 +2046,10 @@ export class SupervisedAgentInboxStore {
 
   /**
    * Normalize work interrupted by a daemon crash before a new runtime is
-   * allowed to pump it. A persisted reply is authoritative terminal evidence:
+   * allowed to pump it. Delivery also runs this whenever it restarts one
+   * agent's room delivery (a changed worker credential, provider handle or
+   * binding), so the details say the delivery restarted, not the daemon.
+   * A persisted reply is authoritative terminal evidence:
    * it may be published again with its stable client id, but must never invoke
    * the provider again. Everything else that was in-flight is ambiguous and
    * remains visible as blocked rather than being accidentally acknowledged.
@@ -2077,12 +2080,12 @@ export class SupervisedAgentInboxStore {
             // consider runRoomTurn, so a recovered provider turn is impossible.
             next = "pending";
             error = item.state === "dispatching"
-              ? "Daemon restarted after a durable provider reply; publishing it without rerunning the provider."
+              ? "Room delivery restarted after a durable provider reply; publishing it without rerunning the provider."
               : item.state === "publishing"
-              ? "Daemon restarted during publication; retrying the durable reply."
+              ? "Room delivery restarted during publication; retrying the durable reply."
               : item.state === "retryable"
                 ? "Retrying the durable reply after a recoverable failure."
-                : "Daemon restarted after a durable provider reply; publishing it."
+                : "Room delivery restarted after a durable provider reply; publishing it."
           } else if (terminal?.kind === "no_reply") {
             next = "acknowledged_no_reply";
             error = null;
@@ -2093,7 +2096,7 @@ export class SupervisedAgentInboxStore {
             // This is not a retry: delivery will ask the provider to inspect
             // precisely this persisted turn id and will block if it cannot.
             next = "pending";
-            error = "Daemon restarted while awaiting the exact persisted provider turn; recovering it without rerunning.";
+            error = "Room delivery restarted while awaiting the exact persisted provider turn; recovering it without rerunning.";
           } else if (policy.resetCheckpointGatedUnstartedDispatch
             && item.state === "dispatching"
             && item.attempt_count === 0
@@ -2107,7 +2110,7 @@ export class SupervisedAgentInboxStore {
             error = "Recovered an unstarted checkpoint-gated Cursor delivery; retrying without duplicate provider work.";
           } else {
             next = "blocked";
-            error = `Daemon restarted during ${item.state} without authoritative terminal or publication evidence; acknowledgement is unsafe.`;
+            error = `Room delivery restarted during ${item.state} without authoritative terminal or publication evidence; acknowledgement is unsafe.`;
           }
         }
         if (!next) continue;

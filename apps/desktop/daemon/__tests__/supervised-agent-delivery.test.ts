@@ -1240,7 +1240,7 @@ async function runNoReplyContinuity(failures: readonly string[], rounds: readonl
   } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 }
 
-for (const kind of ["outputLimit", "emptyAnswer"] as const) {
+for (const kind of ["outputLimit", "emptyAnswer", "deniedTool"] as const) {
   test(`a lease holder's ${kind} failure gets one follow-up turn that says why, without blocking later messages`, async () => {
     const policy = taskFailurePolicy(NO_REPLY_FAILURE[kind], 1);
     assert.equal(policy.automatic, true);
@@ -1250,6 +1250,7 @@ for (const kind of ["outputLimit", "emptyAnswer"] as const) {
     assert.deepEqual(sources, ["1", "continuation", "2"], "the follow-up is a new turn and the next room message still runs");
     assert.equal(prompts.length, 1);
     assert.ok(prompts[0]!.includes(policy.note!), "the follow-up prompt says why the previous turn failed");
+    if (kind === "deniedTool") assert.match(policy.note!, /a person denied one of your tool calls.*Do not run it again/);
   });
 }
 

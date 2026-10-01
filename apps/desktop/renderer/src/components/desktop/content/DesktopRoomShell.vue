@@ -137,6 +137,7 @@
       @reveal-message="revealRoomMessage"
       @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
       @resolve-permission="resolveComposerPermission"
+      @stop-agent-turn="stopAgentTurnForApproval"
       @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
       @open-task="openBoardTask"
@@ -1787,6 +1788,18 @@ async function resolveComposerPermission(
     const { [approval.id]: _ignored, ...remaining } = resolvingComposerPermissionIds.value;
     resolvingComposerPermissionIds.value = remaining;
   }
+}
+
+/**
+ * A permission card that cannot be answered here stops its agent's turn,
+ * which cancels the request. The agent opens where its turn controls are, so
+ * the stop's progress, or why it is not possible yet, is visible.
+ */
+function stopAgentTurnForApproval(entryId: string): void {
+  const entry = supervisorEntries.value.find((candidate) => candidate.id === entryId && candidate.roomId === props.room.identifier);
+  if (!entry) return;
+  openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: ownerAttributionLabel(entry.createdBy) }));
+  void runAgentInspectorAction({ entryId, roomId: props.room.identifier, kind: "stop_turn" });
 }
 
 function openComposerPermissionDetail(approval: ManagedAgentPermissionApproval): void {

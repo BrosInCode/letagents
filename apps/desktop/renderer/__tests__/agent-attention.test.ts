@@ -122,6 +122,31 @@ test("only live tool requests, stuck agents and long-waiting board requests need
   assert.equal(items[0].timestamp, at(60_000), "an approval is dated by when this desktop first listed it");
 });
 
+test("an Open Model request its agent waits on that cannot be decided here needs the owner after the grace", () => {
+  const unanswerable = (id: string, changes: Partial<DesktopHostApproval> = {}) => approval({ id, status: "unavailable",
+    detail: "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified.",
+    presentation: { ...approval().presentation, title: "Approval unavailable",
+      details: JSON.stringify({ id: "per_1", sessionID: "ses_1", permission: "edit", patterns: ["src/app.mjs"], metadata: {}, always: [] }) },
+    ...changes });
+  const blocking = unanswerable("blocking");
+  const record = unanswerable("record", { dismissKey: "record-key" });
+  const observer = unanswerable("observer", { presentation: { ...blocking.presentation,
+    details: "Pending approval requests cannot currently be checked for this agent." } });
+  const codex = unanswerable("codex", { presentation: { ...blocking.presentation, provider: "codex", denyScope: "request",
+    details: JSON.stringify({ method: "item/fileChange/requestApproval", params: {} }) } });
+  const rooms = (seenAt: string) => new Map([["room-a", { approvals: [blocking, record, observer, codex],
+    firstSeenAt: { blocking: seenAt, record: seenAt, observer: seenAt, codex: seenAt }, stale: false }]]);
+
+  assert.deepEqual(buildAgentAttentionItems({ approvalRooms: rooms(at(AGENT_ATTENTION_GRACE_MS - 5_000)), nowMs: NOW }), [],
+    "a request matched to its turn within the grace never reaches the Inbox");
+  const items = buildAgentAttentionItems({ approvalRooms: rooms(at(AGENT_ATTENTION_GRACE_MS)), nowMs: NOW });
+  assert.deepEqual(items.map(item => item.key), [JSON.stringify(["room-a", "approval", "blocking"])]);
+  const [inboxItem] = filterUniversalInbox(buildUniversalInbox(needsYou(), [], items), "needs-you", [], {});
+  assert.equal(inboxItem.title, "CopperRidge · Approval unavailable");
+  assert.deepEqual(inboxNavigationIntent(inboxItem, "room"), { roomIdentifier: "room-a", approvals: true },
+    "it opens the room's approval card, which offers to stop the turn");
+});
+
 test("a stuck agent waits out a brief recovery, and a blocked queue is dated by the message that stopped it", () => {
   const coordinationBlocked = agent({ condition: "coordination_blocked" });
   const firstSeen = { supervised_copper: at(AGENT_ATTENTION_GRACE_MS - 5_000) };

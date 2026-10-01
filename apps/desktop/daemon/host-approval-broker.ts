@@ -483,7 +483,12 @@ export class HostApprovalBroker {
     const entry = await this.options.store.getEntry(lane.agentId);
     if (!entry) throw new ApprovalPreparationUnavailableError("Approval authority changed.");
     await assertAuthority(entry);
-    const correlated = await this.options.provider!.correlatePermissionTurn!(lane.handle, native);
+    // OpenCode answers its own compaction messages inside a turn. The head's
+    // turn lets correlation prove such a step belongs to it; the head is
+    // compared again below.
+    const roomTurnId = (await this.options.inbox.head(lane.agentId))?.provider_turn_id ?? undefined;
+    const correlated = await this.options.provider!.correlatePermissionTurn!(lane.handle, native,
+      roomTurnId ? { roomTurnId } : undefined);
     if (correlated.outcome !== "correlated") throw new ApprovalPreparationUnavailableError("Approval turn is unproven.");
     const requiresEdits = native.provider === "codex" && native.native.method === "item/fileChange/requestApproval";
     const fileChanges = requiresEdits ? correlated.fileChanges : undefined;

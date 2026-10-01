@@ -39,7 +39,9 @@ export function taskFailurePolicy(error: string | null, attempt: number): TaskFa
     return { automatic: true, detail: "The model stopped before writing a reply. Continuing the unfinished task after a short delay.",
       note: noReply === "outputLimit"
         ? "Your previous turn hit the model's output limit before it wrote a reply. Keep replies short and split large tool calls."
-        : "Your previous turn ended without a reply. End this turn with a short reply." };
+        : noReply === "deniedTool"
+          ? "In your previous turn a person denied one of your tool calls, so it did not run, and the turn ended before you replied. Do not run it again. Continue without it, or say in your reply why you need it. End this turn with a short reply."
+          : "Your previous turn ended without a reply. End this turn with a short reply." };
   }
   if (attempt > 3) return { automatic: false, detail: `Automatic task recovery stopped after three continuations. Check the provider, then use Retry delivery. Existing work is preserved.` };
   if (/\b(?:429|500|502|503|504|529)\b|rate.?limit|temporar(?:y|ily)|overloaded|service unavailable|connection reset|ECONNRESET|ETIMEDOUT|socket closed|network error/i.test(error ?? "")) {

@@ -149,3 +149,9 @@ test("Inspector controls keep a 44px minimum interaction target", () => {
   assert.match(styles, /\.agent-inspector-tabs button \{[^}]*min-height: 44px/);
   assert.match(styles, /\.agent-inspector-field input, \.agent-inspector-field select, \.agent-inspector-field textarea \{[^}]*min-height: 44px/);
 });
+
+test("an approval card its agent waits on stops the turn through the inspector's own stop control", () => {
+  assert.match(chat, /@stop-agent-turn="emit\('stop-agent-turn', \$event\)"/);
+  assert.match(shell, /@stop-agent-turn="stopAgentTurnForApproval"/);
+  assert.match(shell, /function stopAgentTurnForApproval\(entryId: string\)[\s\S]{0,500}openAgentDetailRequest\(supervisedAgentInspectorRequest\(entry[\s\S]{0,200}runAgentInspectorAction\(\{ entryId, roomId: props\.room\.identifier, kind: "stop_turn" \}\)/);
+});

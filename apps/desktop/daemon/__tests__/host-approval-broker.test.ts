@@ -87,6 +87,8 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
     : { provider: "open-model", native: { id: "permission", sessionID: "continuation", permission: "bash", patterns: [secret],
       metadata: { command: secret }, always: [], tool: { messageID: "assistant-message", callID: "call" } } };
   const state = { current: true, owned: true, correlation: true, turnId: "native-turn", live: handle as ProviderActionHandle | undefined,
+    /** The turn a provider can prove for the caller's expected turn, if any. */
+    provenTurn: null as ((roomTurnId: string | undefined) => string) | null,
     fileChanges: null as CodexPermissionFileChange[] | null,
     authorityChecks: 0, authorityFailAt: null as number | null,
     failBefore: false, failAfter: false, beforeBefore: null as (() => void | Promise<void>) | null, afterBefore: null as (() => void | Promise<void>) | null,
@@ -106,8 +108,10 @@ async function fixture(providerId: "codex" | "open-model" | "claude-code" = "cod
     observePermissions: async (_handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, abort: AbortSignal) => {
       receive = listener; signal = abort;
     },
-    correlatePermissionTurn: async (_handle: ProviderActionHandle, request: ProviderPermissionRequest) => state.correlation
-      ? { outcome: "correlated" as const, providerContinuationId: "continuation", providerTurnId: state.turnId,
+    correlatePermissionTurn: async (_handle: ProviderActionHandle, request: ProviderPermissionRequest,
+      options?: { roomTurnId?: string }) => state.correlation
+      ? { outcome: "correlated" as const, providerContinuationId: "continuation",
+          providerTurnId: state.provenTurn?.(options?.roomTurnId) ?? state.turnId,
           kind: request.provider === "codex" && request.native.method === "item/fileChange/requestApproval"
             ? "file_change" as const
             : request.provider === "codex" && request.native.method === "item/permissions/requestApproval"
@@ -2069,6 +2073,25 @@ test("a review that does not end is stopped, and the request is shown to its own
     assert.equal(f.db.prepare("SELECT count(*) AS count FROM execution_approval_decisions").get()!.count, 0);
     const [candidate] = await f.broker.list("room");
     assert.equal(await f.broker.decide(decision(candidate!)), "resolved");
+  } finally { await f.close(); }
+});
+
+test("an Open Model request from a step after a compaction is journaled against the room turn it continues", async () => {
+  const f = await fixture("open-model");
+  try {
+    // The step answers a message OpenCode added while compacting. The
+    // provider can link it to a turn only when told which one to check.
+    const hints: Array<string | undefined> = [];
+    f.state.provenTurn = (roomTurnId) => {
+      hints.push(roomTurnId);
+      return roomTurnId === "native-turn" ? "native-turn" : "msg_compaction_continue";
+    };
+    const [candidate] = await f.broker.list("room");
+    assert.equal(candidate?.status, "pending", candidate?.detail ?? "");
+    assert.equal(candidate.reference?.providerTurnId, "native-turn");
+    assert.deepEqual(hints, ["native-turn"], "the head's durable turn is the one checked");
+    assert.equal(await f.broker.decide(decision(candidate)), "resolved");
+    assert.deepEqual(f.sends, ["once"]);
   } finally { await f.close(); }
 });
 

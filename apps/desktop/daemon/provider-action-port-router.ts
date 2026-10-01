@@ -42,7 +42,7 @@ export type NativeProviderAdapter = {
   runtimeCustody?(workAttemptId: string, handle?: NativeHandle): "absent" | "owned" | "unknown";
   observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; connectionId?: string; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | Extract<ClaudePermissionObservation, { type: "request_closed" }> | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
   replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
-  correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
+  correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest, options?: { roomTurnId?: string }): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
   inspectPermissionFileChanges?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null>;
   inspectPermissionProfile?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
   inspectPermissionMcpToolCall?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
@@ -306,7 +306,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     }, signal);
   }
 
-  async correlatePermissionTurn(handle: ProviderActionHandle, request: ProviderPermissionRequest): Promise<ProviderPermissionCorrelation> {
+  async correlatePermissionTurn(handle: ProviderActionHandle, request: ProviderPermissionRequest, options: { roomTurnId?: string } = {}): Promise<ProviderPermissionCorrelation> {
     try {
       const { remembered, current, continuation } = this.permissionBinding(handle);
       if (!current() || request.provider !== remembered.provider) return { outcome: "correlation_unproven" };
@@ -353,7 +353,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       if (!kind) return { outcome: "correlation_unproven" };
       const adapter = await this.adapter(remembered.provider);
       if (!current() || !adapter.correlatePermissionTurn) return { outcome: "correlation_unproven" };
-      const result = await adapter.correlatePermissionTurn(remembered.handle, expected);
+      const result = await adapter.correlatePermissionTurn(remembered.handle, expected,
+        request.provider === "open-model" && options.roomTurnId ? { roomTurnId: options.roomTurnId } : undefined);
       if (!current() || result.outcome !== "correlated" || result.providerContinuationId !== continuation) return { outcome: "correlation_unproven" };
       return { outcome: "correlated", providerContinuationId: result.providerContinuationId, providerTurnId: result.providerTurnId, kind };
     } catch { return { outcome: "correlation_unproven" }; }

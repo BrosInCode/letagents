@@ -3,6 +3,7 @@ import type { DesktopAttentionRoom } from "../../../../../../electron/ipc-types/
 import type { DesktopHostApproval } from "../../../../../../shared/host-approvals";
 import { agentInspectorOverallState, projectAgentInspector } from "../../../../domain/agent-inspector";
 import { isLocalRoomIdentifier } from "../../../../domain/room-urls";
+import { hostApprovalBlocksTurn } from "../room-chat/host-approval-presentation";
 import type { HostApprovalRoomState } from "../room-chat/host-approvals";
 
 /** A board manager answers most intents within its own turn; only a longer wait needs the owner. */
@@ -49,9 +50,13 @@ export function buildAgentAttentionItems(input: AgentAttentionInput): AgentAtten
     // After a failed listing main has dropped these presentations; they can no longer be decided.
     if (room.stale) continue;
     for (const approval of room.approvals) {
-      if (!isActionableHostApproval(approval)) continue;
+      const seenAt = room.firstSeenAt[approval.id] ?? "";
+      // A request its agent waits on that cannot be decided here leaves the
+      // agent stuck once the grace has passed: its owner has to stop the turn.
+      const stuck = hostApprovalBlocksTurn(approval) && input.nowMs - Date.parse(seenAt) >= AGENT_ATTENTION_GRACE_MS;
+      if (!isActionableHostApproval(approval) && !stuck) continue;
       add({ kind: "tool_approval", key: JSON.stringify([roomIdentifier, "approval", approval.id]), roomIdentifier,
-        timestamp: room.firstSeenAt[approval.id] ?? "", approval });
+        timestamp: seenAt, approval });
     }
   }
   for (const entry of input.agents ?? []) {

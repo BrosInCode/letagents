@@ -918,10 +918,14 @@ try {
   assert.deepEqual(await reattached.listPendingPermissions(replacementSessionId), []);
   assert.deepEqual(await reattached.listPendingPermissions(foreignSession.id), foreign, "reject must not affect another session");
   await observation.waitFor((event) => event.type === "session.idle" && eventReferencesSession(event, replacementSessionId), permissionTurnsStart);
-  const rejectedTools = (await reattached.messages(replacementSessionId)).flatMap((message) => message.parts ?? [])
-    .filter((part) => part.type === "tool" && part.tool === "bash");
+  const rejectedTurn = (await reattached.messages(replacementSessionId)).flatMap((message) => message.parts ?? []);
+  const rejectedTools = rejectedTurn.filter((part) => part.type === "tool" && part.tool === "bash");
   assert.equal(rejectedTools.length, 2);
   assert.ok(rejectedTools.every((part) => part.state?.status === "error"), "neither rejected command may complete execution");
+  // continue_loop_on_deny: the model reads the refusal and answers, instead
+  // of the turn ending on the denied call with no reply.
+  assert.ok(rejectedTurn.some((part) => part.type === "text" && part.text === "permission-contract-settled"),
+    "a denied tool call must reach the model as an ordinary tool result");
 
   // Native pending requests are instance-local, not durable session history.
   // Dispose the instance while the foreign request is pending, without exiting

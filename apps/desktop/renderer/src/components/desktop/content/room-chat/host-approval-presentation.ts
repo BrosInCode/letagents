@@ -71,6 +71,17 @@ export function hostApprovalHeading(approval: Pick<DesktopHostApproval, "present
     ? hostApprovalTitle(approval.presentation) : hostApprovalStatusLabel(approval.status)}`;
 }
 
+/**
+ * An Open Model permission still waiting in OpenCode that cannot be decided
+ * here, because no durable request backs it. Its agent's turn waits on it
+ * until the turn is stopped, which cancels the request.
+ */
+export function hostApprovalBlocksTurn(approval: Pick<DesktopHostApproval, "presentation" | "status" | "dismissKey">): boolean {
+  return approval.status === "unavailable" && approval.dismissKey === null
+    && approval.presentation.provider === "open-model"
+    && typeof payloadOf(approval.presentation)?.permission === "string";
+}
+
 export function hostApprovalAllowLabel(presentation: HostApprovalPresentation): string {
   return presentation.title === "Grant for this turn" ? "Grant for this turn" : "Allow once";
 }
