@@ -586,6 +586,12 @@ describe("room board helpers", () => {
       taskId: "task_9",
       payload: { action: "handoff", target_actor_key: "codex/casey" },
     })), "Hand off task_9 to codex/casey");
+    // Approving this lets the worker reopen or accept the task itself.
+    assert.equal(readableIntentBody(intent({
+      actionType: "task_override",
+      taskId: "task_9",
+      payload: { task_id: "task_9", status: "accepted" },
+    })), "Move task_9 to accepted");
   });
 });
 

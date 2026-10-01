@@ -11,6 +11,7 @@ import {
   assertConsumeBoardIntentApproval,
   getBoardIntent,
   markBoardIntentTaskResult,
+  supersedeBoardIntentsForTask,
 } from "./coordination/board-intents.js";
 import { createTaskLeaseRow } from "./coordination/lease-rows.js";
 import { updateTaskLeaseWorkflowRefs } from "./coordination/task-leases.js";
@@ -536,6 +537,16 @@ export async function updateTask(
     if (!writtenTask && expectedContent) throw new TaskContentConflictError();
   };
 
+  // Open intents this write carried out, passed or ruled out: pending requests
+  // would wait for a decision that no longer applies, and approvals granted
+  // for the task as it was must not be replayed against the changed task.
+  const supersedeMootBoardIntents = async (executor: Pick<typeof db, "select" | "update">) => {
+    if (!writtenTask || (writtenTask.status === task.status
+      && writtenTask.assignee_agent_key === task.assignee_agent_key)) return;
+    await supersedeBoardIntentsForTask({ room_id: roomId, task_changed: true, task: { id: taskId,
+      status: writtenTask.status, assignee_agent_key: writtenTask.assignee_agent_key } }, executor);
+  };
+
   const writeWorkLeaseCreation = async (executor: Pick<typeof db, "insert">) => {
     if (!options?.workLeaseCreation) {
       return;
@@ -635,10 +646,18 @@ export async function updateTask(
         }
       }
       if (options.boardIntentApproval) {
-        await assertConsumeBoardIntentApproval(options.boardIntentApproval, tx);
+        // Compare the approval with the task under its row lock, so a change
+        // committed after the approval cannot slip past it.
+        const [locked] = await tx.select({ status: tasks.status, assignee_agent_key: tasks.assignee_agent_key })
+          .from(tasks).where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber))).for("update");
+        await assertConsumeBoardIntentApproval({
+          ...options.boardIntentApproval,
+          ...(locked ? { task_state: locked } : {}),
+        }, tx);
       }
       await writeTaskUpdate(tx);
       await writeWorkLeaseCreation(tx);
+      await supersedeMootBoardIntents(tx);
       // Fenced path: refs + artifact sync inside the same fenced tx.
       if (options.leaseFence) {
         await writeArtifactSideEffects(tx);
@@ -651,7 +670,12 @@ export async function updateTask(
       await writeArtifactSideEffects(executor ?? db);
     }
   } else {
-    await writeTaskUpdate(executor ?? db);
+    // The task change and the intents it supersedes commit together.
+    const writeTaskAndSupersede = async (tx: NonNullable<typeof executor>) => {
+      await writeTaskUpdate(tx);
+      await supersedeMootBoardIntents(tx);
+    };
+    await (executor ? writeTaskAndSupersede(executor) : db.transaction(writeTaskAndSupersede));
     await writeArtifactSideEffects(executor ?? db);
   }
 

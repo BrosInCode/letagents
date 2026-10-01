@@ -66,6 +66,7 @@ export interface RoomBoardRouteDeps {
     body: Record<string, unknown>;
   }): Promise<ResolvedRequestAgentIdentity | null | "responded">;
   getActiveBoardManagerForRoom?(roomId: string): Promise<BoardManagerAssignment | null>;
+  getRoomBoardSettingsForRoom?(roomId: string): Promise<{ manager_mode: string }>;
   getNotificationTask?(roomId: string, taskId: string): Promise<{ title: string } | null>;
   emitProjectMessage?(
     projectId: string,
@@ -300,6 +301,7 @@ export function registerRoomBoardRoutes(
 ): void {
   const resolveBoardWorkerIdentity = deps.resolveOptionalWorkerIdentity ?? resolveOptionalWorkerIdentity;
   const getActiveBoardManagerForRoom = deps.getActiveBoardManagerForRoom ?? getActiveBoardManager;
+  const getRoomBoardSettingsForRoom = deps.getRoomBoardSettingsForRoom ?? getRoomBoardSettings;
 
   app.get(/^\/rooms\/(.+)\/board-governance$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
@@ -440,9 +442,18 @@ export function registerRoomBoardRoutes(
       res.status(400).json({ error: "action_type is invalid" });
       return;
     }
-    const payload = normalizePayload(body.payload);
-    if (!payload) {
+    const submittedPayload = normalizePayload(body.payload);
+    if (!submittedPayload) {
       res.status(400).json({ error: "payload must be an object" });
+      return;
+    }
+    // The payload is what gets approved and executed; the task column must
+    // name the same task so decisions and supersession agree on it.
+    const payloadTaskId = typeof submittedPayload.task_id === "string" ? submittedPayload.task_id.trim() || null : null;
+    const payload = payloadTaskId ? { ...submittedPayload, task_id: payloadTaskId } : submittedPayload;
+    const bodyTaskId = deps.normalizeOptionalString(body.task_id);
+    if (payloadTaskId && bodyTaskId && payloadTaskId !== bodyTaskId) {
+      res.status(400).json({ error: "task_id must match payload.task_id" });
       return;
     }
     if (body.action_type === "task_create") {
@@ -463,7 +474,7 @@ export function registerRoomBoardRoutes(
     const intent = await createBoardIntent({
       room_id: project.id,
       action_type: body.action_type,
-      task_id: deps.normalizeOptionalString(body.task_id),
+      task_id: bodyTaskId ?? payloadTaskId,
       payload,
       proposer_actor_label: requesterLabel(req, body, workerIdentity),
       proposer_actor_key: workerIdentity ? workerIdentity.agent_key : deps.normalizeOptionalString(body.actor_key),
@@ -520,6 +531,42 @@ export function registerRoomBoardRoutes(
       room_id: project.id,
       intent_id: intentId,
     });
+    let approvingManagerAssignmentId: string | null = null;
+    if (workerIdentity) {
+      const approvingManager = await getActiveBoardManagerForRoom(project.id);
+      if (approvingManager?.agent_session_id !== workerIdentity.agent_session_id) {
+        res.status(403).json({ error: "Only the active Board Manager can decide board intents with worker credentials." });
+        return;
+      }
+      // The approval stays usable only while this assignment is the live manager.
+      approvingManagerAssignmentId = approvingManager.id;
+      // With manager mode off, a manager assignment left in place carries no authority.
+      if ((await getRoomBoardSettingsForRoom(project.id)).manager_mode === "off") {
+        res.status(403).json({
+          error: "Board Manager mode is off, so a person must decide board requests.",
+          code: "board_manager_mode_off",
+        });
+        return;
+      }
+      // A manager cannot approve its own request. Task creation is exempt: it
+      // only adds a proposed task, which workers may add directly anyway.
+      if (existingIntent && existingIntent.action_type !== "task_create"
+        && (existingIntent.proposer_agent_session_id === workerIdentity.agent_session_id
+          || existingIntent.proposer_actor_key === workerIdentity.agent_key)) {
+        res.status(403).json({
+          error: "A Board Manager cannot approve its own request; a person must decide it.",
+          code: "board_intent_self_approval",
+        });
+        return;
+      }
+    }
+    if (existingIntent?.status === "superseded") {
+      res.status(409).json({
+        error: `Board intent ${intentId} no longer applies. ${existingIntent.decision_reason ?? ""}`.trim(),
+        code: "board_intent_superseded",
+      });
+      return;
+    }
     if (existingIntent?.action_type === "task_claim") {
       const isolation = await deps.enforceFocusParentBoardWriteIsolation?.({ req, targetProject: project });
       if (isolation?.kind === "deny") {
@@ -629,6 +676,7 @@ export function registerRoomBoardRoutes(
       intent_id: intentId,
       decision_by: decisionBy,
       reason,
+      manager_assignment_id: approvingManagerAssignmentId,
     });
     if (!approved) {
       res.status(404).json({ error: "Pending board intent not found" });
