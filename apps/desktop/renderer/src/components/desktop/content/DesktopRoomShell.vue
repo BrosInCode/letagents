@@ -137,6 +137,7 @@
       @reveal-message="revealRoomMessage"
       @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
       @resolve-permission="resolveComposerPermission"
+      @stop-agent-turn="stopAgentTurnForApproval"
       @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
       @open-task="openBoardTask"
@@ -479,6 +480,8 @@ import {
 } from "./room-shell/useDesktopRoomPreferences";
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../ipc/index.js";
+import { hostApprovalStopsTurn } from "./room-chat/host-approval-presentation";
+import { hostApprovalRoom, refreshHostApprovals } from "./room-chat/host-approvals";
 import { provideRoomWakeRules, useRoomWakeRules } from "../../../composables/useRoomWakeRules";
 
 const props = defineProps<{
@@ -1788,6 +1791,29 @@ async function resolveComposerPermission(
     const { [approval.id]: _ignored, ...remaining } = resolvingComposerPermissionIds.value;
     resolvingComposerPermissionIds.value = remaining;
   }
+}
+
+/**
+ * A permission card that cannot be answered here stops its agent's turn,
+ * which cancels the request. The card can be older than the turn the agent
+ * is running now, so the approvals are read again first: the turn is stopped
+ * only while that same request still waits in the agent's current session,
+ * and otherwise only the card refreshes. The agent opens where its turn
+ * controls are, so the stop's progress, or why it is not possible yet, shows.
+ */
+async function stopAgentTurnForApproval(entryId: string, approvalId: string): Promise<void> {
+  const roomId = props.room.identifier;
+  const firstSeenAt = hostApprovalRoom(roomId).firstSeenAt[approvalId];
+  const snapshot = await desktopIpc.supervisor?.listHostApprovals?.(roomId).catch(() => null);
+  const approval = snapshot?.available ? snapshot.approvals.find((candidate) => candidate.id === approvalId) : undefined;
+  const entry = supervisorEntries.value.find((candidate) => candidate.id === entryId && candidate.roomId === roomId);
+  if (!approval || !entry || approval.presentation.agentId !== entryId
+    || !hostApprovalStopsTurn(approval, firstSeenAt, Date.now(), entry.providerContinuationId)) {
+    void refreshHostApprovals(roomId);
+    return;
+  }
+  openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: ownerAttributionLabel(entry.createdBy) }));
+  void runAgentInspectorAction({ entryId, roomId, kind: "stop_turn" });
 }
 
 function openComposerPermissionDetail(approval: ManagedAgentPermissionApproval): void {
