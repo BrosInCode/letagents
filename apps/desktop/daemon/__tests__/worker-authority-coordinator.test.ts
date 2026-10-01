@@ -9,6 +9,7 @@ import { WorkerCredentialMintError } from "../daemon-error-policy.js";
 import { BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS } from "../../electron/main/supervisor-daemon.js";
 import {
   BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS,
+  boundAnnouncementStatus,
   WorkerAuthorityCoordinator,
   type BindWorkerSessionInput,
   type BootstrapOperation,
@@ -175,7 +176,7 @@ type HarnessOptions = {
   random?: () => number;
   recordExactMint?: () => Promise<void>;
   boundedContextError?: Error;
-  publishNative?: () => Promise<void>;
+  publishNative?: (entryId: string, method: string, status: "working" | "idle") => Promise<void>;
   delegationCommitMutation?: "generation" | "control" | "grant" | "clock" | "native" | "request_expiry";
   pacing?: WorkerAuthorityCoordinatorOptions["pacing"];
 };
@@ -470,7 +471,7 @@ function fixture(options: HarnessOptions = {}) {
       resetMintAttempts: () => { events.push("recovery:reset-mint"); },
     },
     activity: {
-      publishNative: async () => { events.push("activity:publish"); await options.publishNative?.(); return true; },
+      publishNative: async (entryId, method, status) => { events.push("activity:publish"); await options.publishNative?.(entryId, method, status); return true; },
       transition: async (_entryId, _state, _condition, detail) => { events.push(`transition:${detail}`); },
     },
     boundedContext: async () => {
@@ -1361,6 +1362,22 @@ test("worker readiness fails closed when authority changes during the binding pu
     assert.equal(harness.deliveryStarts, 0, mismatch);
     assert.equal(harness.manifestUpdates.length, 0, mismatch);
   }
+});
+
+test("the bound announcement reports what the provider is doing, never work it is not doing", async () => {
+  for (const [observedState, expected] of [["idle", "idle"], ["working", "working"], ["starting", "idle"]] as const) {
+    const published: Array<{ method: string; status: string }> = [];
+    const harness = fixture({
+      handle: providerHandle({ observedState }),
+      publishNative: async (_entryId, method, status) => { published.push({ method, status }); },
+    });
+    await harness.subject.bindWorkerSession({
+      entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+      agent_session_id: "session-1", agent_session_token: "worker-secret", api_url: "https://letagents.test",
+    });
+    assert.deepEqual(published, [{ method: "native_harness.bound", status: expected }], observedState);
+  }
+  assert.equal(boundAnnouncementStatus(undefined), "idle", "no provider, no work");
 });
 
 test("a bound announcement that times out after the binding is saved finishes the bind instead of latching recovery", async () => {

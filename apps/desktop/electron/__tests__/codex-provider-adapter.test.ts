@@ -3599,6 +3599,51 @@ test("fresh attach proves an empty unmaterialized daemon-inbox thread without la
   subscription.dispose();
 });
 
+test("a reattached thread with no turn yet is idle, so it stops reporting work it is not doing", async () => {
+  // Shapes the attach read can take for a thread that has never run a turn.
+  const cases: Array<{ name: string; read: (threadId: string, includeTurns: boolean | undefined) => unknown; expected: "idle" | "working" }> = [
+    { name: "unmaterialized daemon-inbox thread", expected: "idle", read: (threadId, includeTurns) => {
+      if (includeTurns !== false) throw new Error(`thread ${threadId} is not materialized yet; includeTurns is unavailable before first user message`);
+      return { thread: { id: threadId, status: { type: "idle" } } };
+    } },
+    { name: "materialized thread without turns", expected: "idle",
+      read: (threadId) => ({ thread: { id: threadId, status: { type: "idle" }, turns: [] } }) },
+    { name: "thread that still reports itself active", expected: "working", read: (threadId, includeTurns) => {
+      if (includeTurns !== false) throw new Error(`thread ${threadId} is not materialized yet; includeTurns is unavailable before first user message`);
+      return { thread: { id: threadId, status: { type: "active" } } };
+    } },
+    { name: "thread not loaded in the app-server", expected: "idle",
+      read: (threadId) => ({ thread: { id: threadId, status: { type: "notLoaded" }, turns: [] } }) },
+    { name: "thread in a system error", expected: "idle",
+      read: (threadId) => ({ thread: { id: threadId, status: { type: "systemError" }, turns: [] } }) },
+  ];
+  for (const testCase of cases) {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const first = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (serverUrl, notify) => {
+      const client = createRpcClient(serverUrl, notify) as FakeRpc;
+      const request = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        if (method !== "thread/read") return request<T>(method, params);
+        client.requests.push({ method, params });
+        const input = params as { threadId: string; includeTurns?: boolean };
+        return testCase.read(input.threadId, input.includeTurns) as T;
+      };
+      return client;
+    };
+    const attached = await new CodexProviderAdapter({ dependencies: harness.dependencies }).attach({
+      workAttemptId: first.workAttemptId,
+      providerContinuationId: first.providerContinuationId!,
+      providerConnection: first.providerConnection,
+    });
+    assertProviderHandle(attached);
+    assert.equal(attached.observedState(), testCase.expected, testCase.name);
+    assert.equal(harness.launches.length, 1, `${testCase.name}: the existing writer is kept`);
+  }
+});
+
 test("fresh and repaired threads retain empty-thread attachment when native default history is unsupported", async () => {
   for (const repair of [false, true]) {
     const harness = createHarness();
