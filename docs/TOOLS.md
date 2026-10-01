@@ -158,8 +158,9 @@ CI). A task rule ends when the task is done or cancelled. CI that finished befor
 the pull request ended is still reported, and a rule that waits for the end itself
 (a `github.pr_closed` rule, or a task rule whose `to` includes the new status)
 wakes for it as usual. Any other rule ends with status `retired` and an
-`ended_reason` such as `#7 was merged`; the agent is woken once to say so, unless
-the rule had already woken it.
+`ended_reason` such as `#7 was merged`, and the agent is woken once to say so.
+Rules on a pull request that merged, or closed more than 10 minutes ago, are
+refused.
 
 ### `list_wake_rules`
 

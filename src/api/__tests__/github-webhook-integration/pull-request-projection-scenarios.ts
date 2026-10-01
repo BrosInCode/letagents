@@ -301,8 +301,11 @@ async function journalReview(input: {
   pullNumber: number;
   headSha: string;
   reviewId: number;
-  /** Still in flight: GitHub has the review, the journal has not recorded its id. */
-  pending?: boolean;
+  /**
+   * `pending`: in flight, GitHub has the review and the journal not yet its id.
+   * `failed`: never published.
+   */
+  state?: "succeeded" | "pending" | "failed";
 }): Promise<string> {
   const correlationKey = `lae_${crypto.randomBytes(16).toString("hex")}`;
   await pool!.query(`
@@ -310,9 +313,9 @@ async function journalReview(input: {
       request_fingerprint, request_payload, state, attempt_count, max_attempts, external_id, created_by, created_at, updated_at, completed_at)
     VALUES ($1, $2, $3, $4, 'github_review_verdict', 'github', $5, $6, 'fingerprint', $7::jsonb, $8, 1, 3, $9, 'test', now(), now(),
       CASE WHEN $8 = 'succeeded' THEN now() END)
-  `, [`effect_${correlationKey}`, input.roomId, input.taskId, input.leaseId, `verdict-${input.reviewId}`, correlationKey,
+  `, [`effect_${correlationKey}`, input.roomId, input.taskId, input.leaseId, `verdict-${correlationKey}`, correlationKey,
     JSON.stringify({ verdict: input.verdict, pull_number: input.pullNumber, expected_head_sha: input.headSha }),
-    input.pending ? "pending" : "succeeded", input.pending ? null : String(input.reviewId)]);
+    input.state ?? "succeeded", (input.state ?? "succeeded") === "succeeded" ? String(input.reviewId) : null]);
   return `Re-reviewed at ${input.headSha}.\n\n<!-- letagents-effect:${correlationKey} -->`;
 }
 
@@ -339,8 +342,8 @@ webhookIntegrationTest(
       url: pullRequestUrl,
       branchRef: "olive/re-review",
     };
-    const journal = (verdict: "approve" | "request_changes", reviewId: number, headSha: string, pending = false) =>
-      journalReview({ roomId: room.id, taskId: task.id, leaseId: reviewLease.id, verdict, pullNumber: 206, headSha, reviewId, pending });
+    const journal = (verdict: "approve" | "request_changes", reviewId: number, headSha: string, state?: "pending" | "failed") =>
+      journalReview({ roomId: room.id, taskId: task.id, leaseId: reviewLease.id, verdict, pullNumber: 206, headSha, reviewId, state });
     const bot = "letagents-app[bot]";
 
     const reviews = [
@@ -348,7 +351,9 @@ webhookIntegrationTest(
       ["a stranger's approval", 92, "approved", "sha-fixed", "drive-by-stranger", "LGTM", "blocked"],
       ["an approval of an earlier head", 93, "approved", "sha-fixed", bot, await journal("approve", 93, "sha-first"), "blocked"],
       ["a copied journal marker", 94, "approved", "sha-fixed", "drive-by-stranger", await journal("approve", 95, "sha-fixed"), "blocked"],
-      ["a copied in-flight journal marker", 96, "approved", "sha-fixed", "drive-by-stranger", await journal("approve", 0, "sha-fixed", true), "blocked"],
+      ["a copied in-flight journal marker", 96, "approved", "sha-fixed", "drive-by-stranger", await journal("approve", 0, "sha-fixed", "pending"), "blocked"],
+      ["another App's bot carrying an in-flight marker", 97, "approved", "sha-fixed", "github-actions[bot]", await journal("approve", 0, "sha-fixed", "pending"), "blocked"],
+      ["the App's review carrying a never-published approval's marker", 100, "approved", "sha-fixed", bot, await journal("approve", 0, "sha-fixed", "failed"), "blocked"],
       ["a review carrying another review's marker", 98, "approved", "sha-fixed", bot, await journal("approve", 99, "sha-fixed"), "blocked"],
       ["the re-review's approval", 95, "approved", "sha-fixed", bot, null, "in_review"],
     ] as const;
@@ -421,6 +426,44 @@ webhookIntegrationTest(
       roomId: room.id, taskId: task.id, leaseId: reviewLease.id, verdict: "approve", pullNumber: 209, headSha: "sha-209", reviewId: 100,
     }));
     assert.equal((await getTaskById(room.id, task.id))?.status, "in_review", "once the person approved too");
+  }
+);
+
+webhookIntegrationTest(
+  "requested changes from a review lease that ended no longer hold a task blocked",
+  async (context) => {
+    const { createTaskLease, getTaskById, port } = context;
+    const room = await createRepoRoom(context);
+    const pullRequestUrl = "https://github.com/BrosInCode/letagents/pull/210";
+    const task = await createInReviewTaskWithLease(context, {
+      roomId: room.id,
+      title: "Reviewer handoff coverage",
+      prUrl: pullRequestUrl,
+      branchRef: "olive/handoff",
+    });
+    const lease = (agent: string) => createTaskLease({
+      room_id: room.id, task_id: task.id, kind: "review", agent_key: `EmmyMay/${agent}`, actor_label: agent, created_by: "test",
+    });
+    const [first, second] = [await lease("fieldtrail"), await lease("harbormarsh")];
+    const pullRequest = {
+      number: 210, title: `${task.id}: reviewer handoff`, body: "", url: pullRequestUrl, branchRef: "olive/handoff", sha: "sha-210",
+    };
+    const review = async (reviewId: number, leaseId: string, verdict: "approve" | "request_changes") => postGitHubWebhook({
+      port,
+      deliveryId: `delivery-handoff-${reviewId}`,
+      eventName: "pull_request_review",
+      payload: buildPullRequestReviewPayload({
+        ...pullRequest, reviewId, reviewState: verdict === "approve" ? "approved" : "changes_requested", actor: "letagents-app[bot]",
+        reviewBody: await journalReview({ roomId: room.id, taskId: task.id, leaseId, verdict, pullNumber: 210, headSha: "sha-210", reviewId }),
+      }),
+    });
+
+    await review(111, first.id, "request_changes");
+    await review(112, second.id, "approve");
+    assert.equal((await getTaskById(room.id, task.id))?.status, "blocked", "the first reviewer still holds the review");
+    await pool!.query("UPDATE task_leases SET status = 'released' WHERE id = $1", [first.id]);
+    await review(113, second.id, "approve");
+    assert.equal((await getTaskById(room.id, task.id))?.status, "in_review", "once it handed the review off");
   }
 );
 

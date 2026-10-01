@@ -41,6 +41,12 @@ export interface RepoRoomEventTaskProjection {
   authoritative: boolean;
 }
 
+/** The GitHub App's own login, which every review the broker publishes carries. */
+async function githubAppLogin(): Promise<string | null> {
+  const slug = (await getGitHubAppConfig()).appSlug?.trim();
+  return slug ? `${slug}[bot]` : null;
+}
+
 /** A task in one of these already shipped its pull request. */
 const SHIPPED_TASK_STATUSES = new Set<TaskStatus>(["merged", "done"]);
 
@@ -232,6 +238,7 @@ export async function applyRepoRoomEventToTask(
         review_id: event.review.id,
         review_body: event.review.body,
         reviewer_login: event.senderLogin,
+        app_login: await githubAppLogin(),
       }),
   });
 

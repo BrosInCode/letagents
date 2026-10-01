@@ -24,9 +24,9 @@ export type WakeRuleEvaluation =
   | { kind: "fire"; facts: WakeOccurrenceFacts; cursorAt: string; baseline: WakeRuleRow["baseline"]; endedReason?: string }
   | { kind: "expire" }
   /**
-   * What the rule watched is over and nothing it waits for happened. `wake`
-   * when the agent never got what it waited for: it is told once that the
-   * wait ended. A rule that already woke it ends quietly.
+   * What the rule watched is over and nothing it waits for happened. The
+   * agent is told once that the wait ended (`wake`), unless the end itself is
+   * what the rule watches and it already woke the agent for it.
    */
   | { kind: "retire"; reason: string; wake: boolean }
   /** `cursorAt` moves the rule past events that settled without qualifying. */
@@ -87,7 +87,7 @@ export async function evaluateWakeRule(
   if (nowMs < quietUntilMs && quietUntilMs < expiresMs) return { kind: "wait", nextCheckAt: iso(quietUntilMs) };
   const occurrence = await findOccurrence(rule, nowMs, deps);
   if (occurrence.kind === "fire") return occurrence;
-  if (occurrence.endedReason) return { kind: "retire", reason: occurrence.endedReason, wake: rule.fire_count === 0 };
+  if (occurrence.endedReason) return { kind: "retire", reason: occurrence.endedReason, wake: !occurrence.endAlreadyReported };
   if (nowMs >= expiresMs) return { kind: "expire" };
   const fallback = nowMs + WAKE_RULE_FALLBACK_CHECK_MS;
   return {
@@ -99,7 +99,7 @@ export async function evaluateWakeRule(
 
 type Occurrence =
   | { kind: "fire"; facts: WakeOccurrenceFacts; cursorAt: string; baseline: WakeRuleRow["baseline"]; endedReason?: string }
-  | { kind: "none"; nextCheckMs?: number; cursorAt?: string; endedReason?: string };
+  | { kind: "none"; nextCheckMs?: number; cursorAt?: string; endedReason?: string; endAlreadyReported?: boolean };
 
 /** A task that reaches one of these has nothing more to wait for. */
 const FINISHED_TASK_STATUSES = new Set(["done", "cancelled"]);
@@ -117,12 +117,13 @@ async function findPullRequestEnd(
   pr: number,
   nowMs: number,
   deps: WakeRuleEvaluationDeps,
-): Promise<{ reason: string } | { finalAtMs: number } | null> {
+): Promise<{ reason: string; closedAtMs: number } | { finalAtMs: number } | null> {
   const closed = await deps.pullRequestClosed(rule.room_id, pr);
   if (!closed) return null;
-  if (closed.merged) return { reason: `#${pr} was merged` };
-  const finalAtMs = Date.parse(closed.closed_at) + WAKE_RULE_UNMERGED_CLOSE_GRACE_MS;
-  return nowMs >= finalAtMs ? { reason: `#${pr} was closed without merging` } : { finalAtMs };
+  const closedAtMs = Date.parse(closed.closed_at);
+  if (closed.merged) return { reason: `#${pr} was merged`, closedAtMs };
+  const finalAtMs = closedAtMs + WAKE_RULE_UNMERGED_CLOSE_GRACE_MS;
+  return nowMs >= finalAtMs ? { reason: `#${pr} was closed without merging`, closedAtMs } : { finalAtMs };
 }
 
 async function findOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeRuleEvaluationDeps): Promise<Occurrence> {
@@ -131,9 +132,15 @@ async function findOccurrence(rule: WakeRuleRow, nowMs: number, deps: WakeRuleEv
   // before the events, so none recorded before it is missed.
   const pr = rule.event.startsWith("github.") ? rule.arguments.pr : undefined;
   const end = pr ? await findPullRequestEnd(rule, pr, nowMs, deps) : null;
-  const ended = end && "reason" in end ? end.reason : undefined;
+  const ended = end && "reason" in end ? end : null;
   const occurrence = await findWatchedOccurrence(rule, nowMs, deps, { ended: Boolean(ended) });
-  if (ended) return { ...occurrence, endedReason: ended };
+  if (ended) {
+    // A close rule that already woke the agent for this close (inside the
+    // grace for a reopen) has said all there is to say.
+    const endAlreadyReported = rule.event === "github.pr_closed" && !rule.arguments.merged_only
+      && Boolean(rule.last_fired_at) && Date.parse(rule.last_fired_at!) >= ended.closedAtMs;
+    return { ...occurrence, endedReason: ended.reason, ...(endAlreadyReported ? { endAlreadyReported } : {}) };
+  }
   if (end && "finalAtMs" in end && occurrence.kind === "none") {
     return { ...occurrence, nextCheckMs: Math.min(occurrence.nextCheckMs ?? end.finalAtMs, end.finalAtMs) };
   }

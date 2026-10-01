@@ -280,6 +280,8 @@ export async function startServer(): Promise<{ child: ChildProcess; port: number
         HOST: "127.0.0.1",
         PORT: String(port),
         GITHUB_WEBHOOK_SECRET: webhookSecret,
+        // Reviews the effect broker publishes come from this App's bot.
+        GITHUB_APP_SLUG: "letagents-app",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

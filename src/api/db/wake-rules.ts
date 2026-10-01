@@ -267,10 +267,9 @@ export async function recordWakeRuleFiredTx(tx: Executor, rule: WakeRuleRow, inp
 }
 
 /**
- * End a rule whose pull request closed or whose task finished, without waking
- * the agent: it already woke for what it waited for, and nothing more can
- * happen. Fenced like a wake, so a concurrent wake wins and the next look
- * decides again.
+ * End a rule whose pull request closed, without waking the agent: the rule
+ * already woke it for that close. Fenced like a wake, so a concurrent wake
+ * wins and the next look decides again.
  */
 export async function retireWakeRule(rule: WakeRuleRow, reason: string, now = new Date()): Promise<boolean> {
   const nowIso = now.toISOString();

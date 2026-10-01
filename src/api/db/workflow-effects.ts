@@ -438,6 +438,8 @@ const REVIEW_EFFECT_MARKER_SQL = "<!-- letagents-effect:(lae_[0-9a-f]{32}) -->";
  * request for changes still stands. Anyone who can review the repository can
  * approve it on GitHub; that alone must not undo a reviewer's requested
  * changes, nor can a copied journal marker stand in for the journal's review.
+ * Requested changes from a review lease that has since ended or been handed
+ * off no longer stand: that reviewer gave up the review.
  */
 export async function journalApprovalSettlesRequestedChanges(input: {
   room_id: string;
@@ -447,16 +449,18 @@ export async function journalApprovalSettlesRequestedChanges(input: {
   review_id: string;
   review_body: string | null | undefined;
   reviewer_login: string | null | undefined;
+  /** The GitHub App's own login (`<slug>[bot]`): the broker publishes as the App. */
+  app_login: string | null | undefined;
 }): Promise<boolean> {
   const correlationKey = input.review_body?.match(REVIEW_EFFECT_MARKER)?.[1];
-  // The broker publishes as the GitHub App, whose reviews are a bot's.
-  if (!correlationKey || !input.head_sha || !input.reviewer_login?.endsWith("[bot]")) return false;
+  const appLogin = input.app_login?.toLowerCase();
+  if (!correlationKey || !input.head_sha || !appLogin || input.reviewer_login?.toLowerCase() !== appLogin) return false;
   const [effect] = (await db.execute<{ external_id: string | null; request_payload: Record<string, unknown>; agent_key: string }>(sql`
     SELECT effect.external_id, effect.request_payload, lease.agent_key
       FROM workflow_effects AS effect
       JOIN task_leases AS lease ON lease.id = effect.lease_id
      WHERE effect.provider = 'github' AND effect.correlation_key = ${correlationKey}
-       AND effect.kind = 'github_review_verdict'
+       AND effect.kind = 'github_review_verdict' AND effect.state <> 'failed'
        AND effect.room_id = ${input.room_id} AND effect.task_id = ${input.task_id}
        AND lease.kind = 'review' AND lease.room_id = ${input.room_id} AND lease.task_id = ${input.task_id}
      LIMIT 1
@@ -468,15 +472,19 @@ export async function journalApprovalSettlesRequestedChanges(input: {
     || (effect.external_id && effect.external_id !== input.review_id)) return false;
 
   // Each reviewer's latest decisive review. A journal review belongs to the
-  // agent whose lease published it, since every one is posted by the same bot.
-  const standing = await db.execute<{ reviewer: string; state: string }>(sql`
-    SELECT DISTINCT ON (reviewer) reviewer, state FROM (
+  // agent whose lease published it, since the App posts every one.
+  const standing = await db.execute<{ reviewer: string; state: string; lease_active: boolean | null }>(sql`
+    SELECT DISTINCT ON (reviewer) reviewer, state, lease_active FROM (
       SELECT COALESCE(lease.agent_key, 'github:' || lower(COALESCE(review.actor_login, ''))) AS reviewer,
-             lower(review.state) AS state, review.event_order_at, review.created_at, review.id
+             lower(review.state) AS state, review.event_order_at, review.created_at, review.id,
+             CASE WHEN lease.id IS NULL THEN NULL
+               ELSE lease.status = 'active' AND (lease.expires_at IS NULL OR lease.expires_at > now()) END AS lease_active
         FROM github_room_events AS review
         LEFT JOIN workflow_effects AS effect
           ON effect.provider = 'github'
          AND effect.correlation_key = substring(review.metadata->>'body' from ${REVIEW_EFFECT_MARKER_SQL})
+         AND effect.state <> 'failed'
+         AND lower(COALESCE(review.actor_login, '')) = ${appLogin}
          AND (effect.external_id IS NULL
            OR effect.external_id = substring(review.github_object_url from '#pullrequestreview-([0-9]+)$'))
         LEFT JOIN task_leases AS lease ON lease.id = effect.lease_id
@@ -487,5 +495,6 @@ export async function journalApprovalSettlesRequestedChanges(input: {
     ) AS decisive
     ORDER BY reviewer, event_order_at DESC, created_at DESC, id DESC
   `);
-  return !standing.rows.some((row) => row.reviewer !== effect.agent_key && row.state === "changes_requested");
+  return !standing.rows.some((row) => row.reviewer !== effect.agent_key && row.state === "changes_requested"
+    && row.lease_active !== false);
 }

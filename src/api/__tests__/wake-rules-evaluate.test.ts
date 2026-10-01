@@ -238,7 +238,7 @@ test("a review rule reports the reviewer and state; an event on expiry still win
   assert.deepEqual(await evaluateWakeRule(review, at(61), deps()), { kind: "expire" });
 });
 
-test("a rule on a pull request ends with it: one wake to say so, unless it already woke or waits for the end", async () => {
+test("a rule on a pull request ends with it: one wake to say so, or the wake for the end it waits for", async () => {
   let closed: { merged: boolean; closed_at: string } | null = null;
   const reviews: GitHubEventFact[] = [];
   const read = deps({
@@ -253,7 +253,7 @@ test("a rule on a pull request ends with it: one wake to say so, unless it alrea
   assert.deepEqual(await evaluateWakeRule(review, at(6), read), { kind: "retire", reason: "#7 was merged", wake: true },
     "the agent never got its review, so it is told the wait ended");
   assert.deepEqual(await evaluateWakeRule({ ...review, fire_count: 1, last_fired_at: at(1).toISOString() }, at(6), read),
-    { kind: "retire", reason: "#7 was merged", wake: false }, "a rule that already woke the agent ends quietly");
+    { kind: "retire", reason: "#7 was merged", wake: true }, "a review that woke it earlier is not news of the merge");
   assert.deepEqual(await evaluateWakeRule(review, at(24 * 60 + 1), read), { kind: "retire", reason: "#7 was merged", wake: true },
     "an ended rule is not reported as expired");
   const final = await evaluateWakeRule(merge, at(6), read);
@@ -297,6 +297,12 @@ test("a pull request closed without merging ends its rules only once it stays cl
   assert.deepEqual(await evaluateWakeRule(ci, graceEnds, read), { kind: "retire", reason: "#7 was closed without merging", wake: true });
   assert.deepEqual(await evaluateWakeRule(mergeOnly, graceEnds, read), { kind: "retire", reason: "#7 was closed without merging", wake: true },
     "a rule waiting for a merge is told it will not come");
+  // A close rule woke the agent for this close inside the grace; when the close
+  // turns final there is nothing new to say.
+  const closeRule = rule({ event: "github.pr_closed", arguments: { pr: 7 }, repeat: true, fire_count: 1, last_fired_at: at(5.5).toISOString() });
+  assert.deepEqual(await evaluateWakeRule(closeRule, graceEnds, read), { kind: "retire", reason: "#7 was closed without merging", wake: false });
+  assert.deepEqual(await evaluateWakeRule({ ...closeRule, last_fired_at: at(4).toISOString() }, graceEnds, read),
+    { kind: "retire", reason: "#7 was closed without merging", wake: true }, "a wake before this close was not about it");
   closed = null;
   assert.equal((await evaluateWakeRule(ci, graceEnds, read)).kind, "wait", "a reopened pull request keeps its rules");
 });
@@ -312,7 +318,7 @@ test("`mine` and branch rules never end with a pull request", async () => {
   assert.equal(asked, 0);
 });
 
-test("a task rule ends when the task is done or cancelled, and says so when that is not what it waited for", async () => {
+test("a task rule ends when the task is done or cancelled, and says so", async () => {
   let status = "in_review";
   const read = deps({ readTaskStatus: async () => status });
   const baseline = { room_id: "board", status: "in_progress" };
@@ -321,8 +327,8 @@ test("a task rule ends when the task is done or cancelled, and says so when that
   const toDone = rule({ event: "task.status_changed", arguments: { task_id: "task_4", to: ["merged", "done"] }, baseline, repeat: true });
 
   status = "done";
-  assert.deepEqual(await evaluateWakeRule(toReview, at(5), read), { kind: "retire", reason: "task_4 is done", wake: false },
-    "it already woke for the review, so it ends quietly");
+  assert.deepEqual(await evaluateWakeRule(toReview, at(5), read), { kind: "retire", reason: "task_4 is done", wake: true },
+    "it woke for the review earlier; the task finishing is still news");
   for (const watching of [anyChange, toDone]) {
     const fired = await evaluateWakeRule(watching, at(5), read);
     assert.deepEqual(fired.kind === "fire" && [fired.facts.status, fired.endedReason], ["done", "task_4 is done"]);

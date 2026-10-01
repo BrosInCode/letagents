@@ -19,7 +19,8 @@ export const WAKE_RULE_EVENTS = Object.freeze([
 /**
  * `retired`: the rule ended early because what it watched is over (its pull
  * request merged or closed, its task done or cancelled); `ended_reason` says
- * which. The agent is told once, unless the rule already woke it.
+ * which. The agent is told once, unless the rule already woke it for that
+ * very end (a close rule, inside the grace for a reopen).
  */
 export const WAKE_RULE_STATUSES = Object.freeze(["active", "fired", "expired", "cancelled", "retired"]);
 
