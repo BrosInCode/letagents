@@ -5,6 +5,7 @@ import { WAKE_RULE_LIMITS } from "../../../shared/wake-rules.mjs";
 import type { WakeRuleRow } from "../db/wake-rules.js";
 import {
   WAKE_RULE_FALLBACK_CHECK_MS,
+  WAKE_RULE_UNMERGED_CLOSE_GRACE_MS,
   evaluateWakeRule,
   type GitHubEventFact,
   type WakeRuleEvaluationDeps,
@@ -18,7 +19,7 @@ function rule(overrides: Partial<WakeRuleRow>): WakeRuleRow {
     id: "wake_1", room_id: "room", agent_key: "agent", agent_name: "Fable", created_by_session_id: null,
     event: "timer", arguments: {}, identity_key: "k", note: null, repeat: false, status: "active",
     baseline: null, cursor_at: created, next_check_at: created, expires_at: at(24 * 60).toISOString(),
-    fire_count: 0, last_fired_at: null, wake_message_number: null, cancelled_by: null, ended_at: null,
+    fire_count: 0, last_fired_at: null, wake_message_number: null, cancelled_by: null, ended_reason: null, ended_at: null,
     created_at: created, updated_at: created,
     ...overrides,
   };
@@ -36,6 +37,7 @@ function deps(overrides: Partial<WakeRuleEvaluationDeps> = {}): WakeRuleEvaluati
     readTaskStatus: async () => null,
     ownedWork: async () => ({ branches: [], pullRequests: [] }),
     pullRequestBranches: async () => [],
+    pullRequestClosed: async () => null,
     githubEventsAfter: async () => [],
     ...overrides,
   };
@@ -234,4 +236,112 @@ test("a review rule reports the reviewer and state; an event on expiry still win
   const fired = await evaluateWakeRule(review, at(61), read);
   assert.deepEqual(fired.kind === "fire" && fired.facts, { pr: 9, reviewer: "grace", state: "approved", url: "review-url" });
   assert.deepEqual(await evaluateWakeRule(review, at(61), deps()), { kind: "expire" });
+});
+
+test("a rule on a pull request ends with it: one wake to say so, or the wake for the end it waits for", async () => {
+  let closed: { merged: boolean; closed_at: string } | null = null;
+  const reviews: GitHubEventFact[] = [];
+  const read = deps({
+    pullRequestClosed: async (roomId, pr) => (roomId === "room" && pr === 7 ? closed : null),
+    githubEventsAfter: async (input) => (input.eventType === "pull_request" && closed ? [{ ...check(5), action: "closed", state: "merged", pr: 7, url: "pr-url" }] : input.eventType === "pull_request_review" ? reviews : []),
+  });
+  const review = rule({ event: "github.review_submitted", arguments: { pr: 7 }, repeat: true });
+  const merge = rule({ event: "github.pr_closed", arguments: { pr: 7 }, repeat: true });
+  assert.equal((await evaluateWakeRule(review, at(4), read)).kind, "wait", "an open pull request keeps its rules");
+
+  closed = { merged: true, closed_at: at(5).toISOString() };
+  assert.deepEqual(await evaluateWakeRule(review, at(6), read), { kind: "retire", reason: "#7 was merged", wake: true },
+    "the agent never got its review, so it is told the wait ended");
+  assert.deepEqual(await evaluateWakeRule({ ...review, fire_count: 1, last_fired_at: at(1).toISOString() }, at(6), read),
+    { kind: "retire", reason: "#7 was merged", wake: true }, "a review that woke it earlier is not news of the merge");
+  assert.deepEqual(await evaluateWakeRule(review, at(24 * 60 + 1), read), { kind: "retire", reason: "#7 was merged", wake: true },
+    "an ended rule is not reported as expired");
+  const final = await evaluateWakeRule(merge, at(6), read);
+  assert.deepEqual(final.kind === "fire" && [final.facts, final.endedReason], [{ pr: 7, merged: true, url: "pr-url" }, "#7 was merged"],
+    "a rule waiting for the merge wakes for it once, then ends");
+
+  // A review that came in before the merge is still reported, as the rule's last wake.
+  reviews.push({ ...check(4), action: "submitted", state: "APPROVED", pr: 7, actor: "grace" });
+  const lastReview = await evaluateWakeRule(review, at(6), read);
+  assert.deepEqual(lastReview.kind === "fire" && [lastReview.facts.reviewer, lastReview.endedReason], ["grace", "#7 was merged"]);
+});
+
+test("CI that finished just before the pull request merged is reported, not lost", async () => {
+  // A failing check at minute 10, an auto-merge five seconds later: inside the settle window.
+  const ci = rule({ event: "github.check_completed", arguments: { pr: 7 } });
+  const justAfter = new Date(at(10).getTime() + 5_000);
+  const read = (closed: { merged: boolean; closed_at: string } | null) => deps({
+    pullRequestBranches: async () => ["feat"],
+    githubEventsAfter: async () => [check(10, { state: "failure", head_ref: "feat" })],
+    pullRequestClosed: async () => closed,
+  });
+  assert.equal((await evaluateWakeRule(ci, justAfter, read(null))).kind, "wait", "open, the push is still settling");
+  const fired = await evaluateWakeRule(ci, justAfter, read({ merged: true, closed_at: justAfter.toISOString() }));
+  assert.deepEqual(fired.kind === "fire" && [fired.facts.pushes, fired.endedReason], [
+    [{ head_ref: "feat", checks: [{ name: "test", conclusion: "failure", url: null }] }],
+    "#7 was merged",
+  ]);
+});
+
+test("a pull request closed without merging ends its rules only once it stays closed", async () => {
+  // Closing and reopening is a common way to re-run CI.
+  const ci = rule({ event: "github.check_completed", arguments: { pr: 7 } });
+  const mergeOnly = rule({ event: "github.pr_closed", arguments: { pr: 7, merged_only: true } });
+  let closed: { merged: boolean; closed_at: string } | null = { merged: false, closed_at: at(5).toISOString() };
+  const read = deps({ pullRequestClosed: async () => closed });
+  const graceEnds = new Date(at(5).getTime() + WAKE_RULE_UNMERGED_CLOSE_GRACE_MS);
+  assert.deepEqual(await evaluateWakeRule(ci, at(6), read), { kind: "wait", nextCheckAt: at(11).toISOString() },
+    "it looks again within the grace");
+  assert.deepEqual(await evaluateWakeRule(ci, at(14), read), { kind: "wait", nextCheckAt: graceEnds.toISOString() },
+    "and again when the grace ends");
+  assert.deepEqual(await evaluateWakeRule(ci, graceEnds, read), { kind: "retire", reason: "#7 was closed without merging", wake: true });
+  assert.deepEqual(await evaluateWakeRule(mergeOnly, graceEnds, read), { kind: "retire", reason: "#7 was closed without merging", wake: true },
+    "a rule waiting for a merge is told it will not come");
+  // A close rule woke the agent for this close inside the grace; when the close
+  // turns final there is nothing new to say.
+  const closeRule = rule({ event: "github.pr_closed", arguments: { pr: 7 }, repeat: true, fire_count: 1, last_fired_at: at(5.5).toISOString() });
+  assert.deepEqual(await evaluateWakeRule(closeRule, graceEnds, read), { kind: "retire", reason: "#7 was closed without merging", wake: false });
+  assert.deepEqual(await evaluateWakeRule({ ...closeRule, last_fired_at: at(4).toISOString() }, graceEnds, read),
+    { kind: "retire", reason: "#7 was closed without merging", wake: true }, "a wake before this close was not about it");
+  closed = null;
+  assert.equal((await evaluateWakeRule(ci, graceEnds, read)).kind, "wait", "a reopened pull request keeps its rules");
+});
+
+test("`mine` and branch rules never end with a pull request", async () => {
+  let asked = 0;
+  const read = deps({ pullRequestClosed: async () => { asked += 1; return { merged: true, closed_at: at(1).toISOString() }; } });
+  for (const args of [{ mine: true as const }, { branch: "feat" }] as WakeRuleRow["arguments"][]) {
+    for (const event of ["github.check_completed", "github.review_submitted", "github.pr_closed"] as const) {
+      assert.notEqual((await evaluateWakeRule(rule({ event, arguments: args }), at(5), read)).kind, "retire", `${event} ${JSON.stringify(args)}`);
+    }
+  }
+  assert.equal(asked, 0);
+});
+
+test("a task rule ends when the task is done or cancelled, and says so", async () => {
+  let status = "in_review";
+  const read = deps({ readTaskStatus: async () => status });
+  const baseline = { room_id: "board", status: "in_progress" };
+  const toReview = rule({ event: "task.status_changed", arguments: { task_id: "task_4", to: ["in_review"] }, baseline: { room_id: "board", status: "in_review" }, repeat: true, fire_count: 1, last_fired_at: at(1).toISOString() });
+  const anyChange = rule({ event: "task.status_changed", arguments: { task_id: "task_4" }, baseline, repeat: true });
+  const toDone = rule({ event: "task.status_changed", arguments: { task_id: "task_4", to: ["merged", "done"] }, baseline, repeat: true });
+
+  status = "done";
+  assert.deepEqual(await evaluateWakeRule(toReview, at(5), read), { kind: "retire", reason: "task_4 is done", wake: true },
+    "it woke for the review earlier; the task finishing is still news");
+  for (const watching of [anyChange, toDone]) {
+    const fired = await evaluateWakeRule(watching, at(5), read);
+    assert.deepEqual(fired.kind === "fire" && [fired.facts.status, fired.endedReason], ["done", "task_4 is done"]);
+  }
+  status = "cancelled";
+  assert.deepEqual(await evaluateWakeRule(toDone, at(5), read), { kind: "retire", reason: "task_4 was cancelled", wake: true },
+    "waiting for done, the agent is told the task was cancelled instead");
+  status = "merged";
+  const merged = await evaluateWakeRule(toDone, at(5), read);
+  assert.equal(merged.kind === "fire" && merged.endedReason, undefined, "merged is not the end of a task");
+
+  // A rule made on a finished task waits for it to be reopened; it is not ended by the state it began in.
+  status = "done";
+  const reopen = rule({ event: "task.status_changed", arguments: { task_id: "task_4", to: ["accepted"] }, baseline: { room_id: "board", status: "done" } });
+  assert.equal((await evaluateWakeRule(reopen, at(5), read)).kind, "wait");
 });

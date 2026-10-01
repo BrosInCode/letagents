@@ -415,3 +415,113 @@ test(
     );
   }
 );
+
+test(
+  "a Board Manager's own claim goes straight to a person, and the manager is told so",
+  skipOptions,
+  async () => {
+    const {
+      assignBoardManager,
+      createProjectWithName,
+      createRoomAgentSession,
+      createTask,
+      getBoardIntent,
+      listEscalationCandidateBoardIntents,
+      setRoomBoardManagerMode,
+      updateTask,
+      upsertAccount,
+    } = dbModule!;
+    const { registerRoomBoardRoutes, BOARD_MANAGER_OWN_REQUEST_NEXT_STEP } = await import("../routes/rooms/board.js");
+    const project = await createProjectWithName!("manager-own-claim");
+    await setRoomBoardManagerMode!({ room_id: project.id, manager_mode: "intent_required" });
+    const account = await upsertAccount!({ provider: "github", provider_user_id: "manager-own-claim", login: "owner", display_name: "Owner" });
+    const manager = await createRoomAgentSession!({
+      room_id: project.id, session_kind: "worker", runtime: "codex", actor_label: "HarborMarsh | Owner's agent | Codex",
+      agent_key: "owner/harbor-marsh", display_name: "HarborMarsh", owner_account_id: account.id, owner_label: "Owner", ide_label: "Codex",
+    });
+    await assignBoardManager!({ room_id: project.id, agent_session_id: manager.session_id, assigned_by: "owner" });
+    const task = await createTask!(project.id, "Timer state", "owner");
+    await updateTask!(project.id, task.id, { status: "accepted" });
+
+    let actor: { actor_label: string; agent_key: string; session_id: string; runtime: string; display_name: string; ide_label: string } = manager;
+    const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+    const route = (path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) => { handlers.set(path.toString(), handler); };
+    const emitted: Array<{ text: string; options?: { client_message_id?: string | null; display_text?: string | null } }> = [];
+    registerRoomBoardRoutes({ get: route, post: route, patch: route, delete: route } as never, {
+      resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+      resolveRoomOrReply: async () => project,
+      requireParticipant: async () => true,
+      requireAdmin: async () => true,
+      normalizeOptionalString: (value: unknown) => typeof value === "string" ? value.trim() || null : null,
+      resolveOptionalWorkerIdentity: async () => ({
+        actor_label: actor.actor_label, agent_key: actor.agent_key, owner_account_id: account.id,
+        agent_instance_id: null, agent_session_id: actor.session_id, session_kind: "worker", runtime: actor.runtime,
+        display_name: actor.display_name, owner_label: "Owner", ide_label: actor.ide_label, repo_branch: null,
+        credential_fence: { kind: "session_token", token_hash: "unused" },
+      }),
+      getNotificationTask: async () => ({ title: "Timer state" }),
+      emitProjectMessage: async (_room: string, _sender: string, text: string, options?: { client_message_id?: string | null; display_text?: string | null }) => {
+        emitted.push({ text, options });
+        return { id: `msg_${emitted.length}` };
+      },
+    } as never);
+    const respond = () => {
+      const res = { statusCode: 200, body: undefined as unknown,
+        status(code: number) { this.statusCode = code; return this; },
+        json(payload: unknown) { this.body = payload; return this; } };
+      return res;
+    };
+
+    const created = respond();
+    await handlers.get("/^\\/rooms\\/(.+)\\/board-intents$/")!({
+      params: { 0: project.id },
+      body: { action_type: "task_claim", task_id: task.id, payload: { task_id: task.id, status: "assigned", assignee: manager.actor_label, assignee_agent_key: manager.agent_key, pr_url: null } },
+    }, created);
+    assert.equal(created.statusCode, 201);
+    const body = created.body as { intent: { id: string }; decided_by?: string; next_step?: string; manager_notification: { routed_to_person?: boolean; target_manager_agent_session_id: string | null } };
+    assert.equal(body.decided_by, "person");
+    assert.equal(body.next_step, BOARD_MANAGER_OWN_REQUEST_NEXT_STEP);
+    assert.match(body.next_step!, /cannot approve its own request.*Needs you.*do not deny it/);
+    assert.equal(body.manager_notification.routed_to_person, true);
+    assert.equal(body.manager_notification.target_manager_agent_session_id, null);
+    assert.equal(emitted.length, 1);
+    assert.doesNotMatch(emitted[0]!.text, /@agent:/, "the manager is not woken to decide what it cannot decide");
+    assert.match(emitted[0]!.text, /HarborMarsh \| Owner's agent \| Codex is the Board Manager and cannot approve its own request: task claim\. Intent bi_\w+: a room admin needs to approve or deny it/);
+    assert.equal(emitted[0]!.options?.client_message_id, `board_intent:${body.intent.id}:person_notify`);
+    assert.equal(emitted[0]!.options?.display_text, `HarborMarsh (Board Manager) wants to claim ${task.id}: “Timer state”. A Board Manager can't approve its own request, so a person needs to decide it.`);
+
+    // Recorded as routed to people: it stays pending for a person, and the vacancy sweep never announces it again.
+    const stored = await getBoardIntent!({ room_id: project.id, intent_id: body.intent.id });
+    assert.equal(stored?.status, "pending");
+    assert.ok(stored?.escalated_at);
+    await pool!.query("UPDATE board_intents SET escalation_check_at = now() - interval '1 minute' WHERE id = $1", [body.intent.id]);
+    assert.ok(!(await listEscalationCandidateBoardIntents!({})).some((entry) => entry.intent.id === body.intent.id));
+
+    const selfApproval = respond();
+    await handlers.get("/^\\/rooms\\/(.+)\\/board-intents\\/([^/]+)\\/approve$/")!({ params: { 0: project.id, 1: body.intent.id }, body: {} }, selfApproval);
+    assert.equal(selfApproval.statusCode, 403);
+    assert.deepEqual(selfApproval.body, {
+      error: `A Board Manager cannot approve its own request; a person must decide it. ${BOARD_MANAGER_OWN_REQUEST_NEXT_STEP}`,
+      code: "board_intent_self_approval",
+    });
+
+    // Another worker's claim still goes to the manager.
+    const worker = await createRoomAgentSession!({
+      room_id: project.id, session_kind: "worker", runtime: "claude-code", actor_label: "SparrowReef | Owner's agent | Claude Code",
+      agent_key: "owner/sparrow-reef", display_name: "SparrowReef", owner_account_id: account.id, owner_label: "Owner", ide_label: "Claude Code",
+    });
+    actor = worker;
+    const other = await createTask!(project.id, "Tide", "owner");
+    await updateTask!(project.id, other.id, { status: "accepted" });
+    const fromWorker = respond();
+    await handlers.get("/^\\/rooms\\/(.+)\\/board-intents$/")!({
+      params: { 0: project.id },
+      body: { action_type: "task_claim", task_id: other.id, payload: { task_id: other.id, status: "assigned", assignee: worker.actor_label, assignee_agent_key: worker.agent_key, pr_url: null } },
+    }, fromWorker);
+    const workerBody = fromWorker.body as { intent: { id: string }; decided_by?: string; manager_notification: { target_manager_agent_session_id: string | null } };
+    assert.equal(workerBody.decided_by, undefined);
+    assert.equal(workerBody.manager_notification.target_manager_agent_session_id, manager.session_id);
+    assert.match(emitted.at(-1)!.text, /^@agent:owner\/harbor-marsh New board intent from SparrowReef/);
+    assert.equal((await getBoardIntent!({ room_id: project.id, intent_id: workerBody.intent.id }))?.escalated_at, null);
+  }
+);
