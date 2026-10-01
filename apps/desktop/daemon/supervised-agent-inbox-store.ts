@@ -1225,7 +1225,7 @@ export class SupervisedAgentInboxStore {
             run(database.prepare(`UPDATE supervised_agent_effects
               SET state='prepared',error=?,updated_at=? WHERE effect_id=? AND state='executing'`),
             effect.tool_name === "complete_room_turn"
-              ? "The daemon restarted while committing the local completion proposal; its durable request is safe to commit again."
+              ? "Room delivery restarted while committing the local completion proposal; its durable request is safe to commit again."
               : "The prior read-only execution ended without a durable result and is safe to execute again.", timestamp, effect.effect_id);
           }
           return { created: false, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effect.effect_id) as Row) };
@@ -2416,7 +2416,7 @@ export class SupervisedAgentInboxStore {
   private normalizeInterruptedEffectsInTransaction(database: DatabaseSync, agentId: string | undefined, interruptedAt: string): void {
     const scope = agentId ? " AND agent_id=?" : "";
     const readArgs = [
-      "The daemon restarted before this read-only tool result was checkpointed. The exact request may be executed again safely.",
+      "Room delivery restarted before this read-only tool result was checkpointed. The exact request may be executed again safely.",
       interruptedAt,
       ...(agentId ? [agentId] : []),
     ];
@@ -2424,7 +2424,7 @@ export class SupervisedAgentInboxStore {
       SET state='prepared',error=?,updated_at=?
       WHERE state='executing' AND mutation=0 AND tool_name<>'join_room'${scope}`), ...readArgs);
     const mutationArgs = [
-      "The daemon restarted after this mutating tool crossed its execution boundary. It may have completed; verify external state before repeating it.",
+      "Room delivery restarted after this mutating tool crossed its execution boundary. It may have completed; verify external state before repeating it.",
       interruptedAt,
       ...(agentId ? [agentId] : []),
     ];
@@ -2432,7 +2432,7 @@ export class SupervisedAgentInboxStore {
       SET state='uncertain',error=?,updated_at=?
       WHERE state='executing' AND mutation=1 AND tool_name NOT IN ('join_room','complete_room_turn')${scope}`), ...mutationArgs);
     const completionArgs = [
-      "The daemon restarted while committing the local completion proposal; its durable request is safe to commit again.",
+      "Room delivery restarted while committing the local completion proposal; its durable request is safe to commit again.",
       interruptedAt,
       ...(agentId ? [agentId] : []),
     ];

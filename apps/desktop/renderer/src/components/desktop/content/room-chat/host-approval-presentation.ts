@@ -71,15 +71,31 @@ export function hostApprovalHeading(approval: Pick<DesktopHostApproval, "present
     ? hostApprovalTitle(approval.presentation) : hostApprovalStatusLabel(approval.status)}`;
 }
 
+/** A failed match is usually a race (a lane change, a turn not yet checkpointed) that a later listing resolves. */
+export const HOST_APPROVAL_BLOCKED_GRACE_MS = 30_000;
+
 /**
  * An Open Model permission still waiting in OpenCode that cannot be decided
- * here, because no durable request backs it. Its agent's turn waits on it
- * until the turn is stopped, which cancels the request.
+ * here, because no durable request backs it, and that has stayed so past the
+ * grace. Its agent's turn waits on it until the turn is stopped, which
+ * cancels the request.
  */
-export function hostApprovalBlocksTurn(approval: Pick<DesktopHostApproval, "presentation" | "status" | "dismissKey">): boolean {
+export function hostApprovalBlocksTurn(approval: Pick<DesktopHostApproval, "presentation" | "status" | "dismissKey">,
+  firstSeenAt: string | undefined, nowMs: number): boolean {
   return approval.status === "unavailable" && approval.dismissKey === null
     && approval.presentation.provider === "open-model"
-    && typeof payloadOf(approval.presentation)?.permission === "string";
+    && typeof payloadOf(approval.presentation)?.permission === "string"
+    && nowMs - Date.parse(firstSeenAt ?? "") >= HOST_APPROVAL_BLOCKED_GRACE_MS;
+}
+
+/**
+ * Stopping an agent's current turn cancels this request only while the
+ * request waits in the OpenCode session that the agent is running now.
+ */
+export function hostApprovalStopsTurn(approval: Pick<DesktopHostApproval, "presentation" | "status" | "dismissKey">,
+  firstSeenAt: string | undefined, nowMs: number, providerContinuationId: string | null | undefined): boolean {
+  return hostApprovalBlocksTurn(approval, firstSeenAt, nowMs) && Boolean(providerContinuationId)
+    && payloadOf(approval.presentation)?.sessionID === providerContinuationId;
 }
 
 export function hostApprovalAllowLabel(presentation: HostApprovalPresentation): string {

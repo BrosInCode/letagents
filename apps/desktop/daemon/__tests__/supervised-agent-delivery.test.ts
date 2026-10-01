@@ -1250,7 +1250,7 @@ for (const kind of ["outputLimit", "emptyAnswer", "deniedTool"] as const) {
     assert.deepEqual(sources, ["1", "continuation", "2"], "the follow-up is a new turn and the next room message still runs");
     assert.equal(prompts.length, 1);
     assert.ok(prompts[0]!.includes(policy.note!), "the follow-up prompt says why the previous turn failed");
-    if (kind === "deniedTool") assert.match(policy.note!, /a person denied one of your tool calls.*Do not run it again/);
+    if (kind === "deniedTool") assert.match(policy.note!, /a tool call was denied.*Do not run it again/);
   });
 }
 

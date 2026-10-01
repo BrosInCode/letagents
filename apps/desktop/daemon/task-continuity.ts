@@ -40,7 +40,7 @@ export function taskFailurePolicy(error: string | null, attempt: number): TaskFa
       note: noReply === "outputLimit"
         ? "Your previous turn hit the model's output limit before it wrote a reply. Keep replies short and split large tool calls."
         : noReply === "deniedTool"
-          ? "In your previous turn a person denied one of your tool calls, so it did not run, and the turn ended before you replied. Do not run it again. Continue without it, or say in your reply why you need it. End this turn with a short reply."
+          ? "In your previous turn a tool call was denied, so it did not run, and the turn ended before you replied. Do not run it again. Continue without it, or say in your reply why you need it. End this turn with a short reply."
           : "Your previous turn ended without a reply. End this turn with a short reply." };
   }
   if (attempt > 3) return { automatic: false, detail: `Automatic task recovery stopped after three continuations. Check the provider, then use Retry delivery. Existing work is preserved.` };

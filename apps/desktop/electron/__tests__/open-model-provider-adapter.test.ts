@@ -1227,9 +1227,11 @@ test("Open Model follows a turn's steps live across an OpenCode compaction", asy
   const { adapter, handle, harness } = await spawnAdapter();
   const session = handle.providerContinuationId!;
   const toolEvents: Array<Record<string, unknown>> = [];
+  const streamed: ProviderStreamEvent[] = [];
   let afterCompletedLive!: () => void;
   const afterCompleted = new Promise<void>((resolve) => { afterCompletedLive = resolve; });
   adapter.onStream(handle, (event) => {
+    streamed.push(event);
     if (event.kind !== "tool_lifecycle") return;
     const payload = event.payload as Record<string, unknown>;
     toolEvents.push(payload);
@@ -1252,6 +1254,13 @@ test("Open Model follows a turn's steps live across an OpenCode compaction", asy
     actionId: "compacting",
   });
   await initialRead;
+  // The summary step streams while OpenCode compacts; none of it is the agent's.
+  harness.sendEvent({ type: "message.updated", properties: { sessionID: session, info: { id: "msg_summary", role: "assistant",
+    parentID: "msg_compaction", summary: true, mode: "compaction", sessionID: session, time: { created: 21 } } } });
+  harness.sendEvent({ type: "message.part.updated", properties: { sessionID: session, part: {
+    id: "msg_summary-live", messageID: "msg_summary", sessionID: session, type: "text", text: "PRIVATE-LIVE-SUMMARY" } } });
+  harness.sendEvent({ type: "message.part.delta", properties: { sessionID: session, messageID: "msg_summary",
+    partID: "msg_summary-live", field: "text", delta: "PRIVATE-LIVE-DELTA" } });
   // A step that answers OpenCode's own "continue" message, then its tool finishing.
   harness.sendEvent({ type: "message.updated", properties: { sessionID: session,
     info: { id: "msg_after", role: "assistant", parentID: "msg_continue", sessionID: session, time: { created: 40 } } } });
@@ -1266,12 +1275,83 @@ test("Open Model follows a turn's steps live across an OpenCode compaction", asy
   const result = await turn;
 
   assert.equal(live, true, "the step after the compaction is followed while the turn runs");
+  assert.doesNotMatch(JSON.stringify(streamed), /PRIVATE-(LIVE|COMPACTION)-/, "no part of the summary is streamed as the agent's words");
   assert.deepEqual(toolEvents.filter((event) => event.callID === "call_after").map((event) => event.status), ["running", "completed"]);
   assert.equal(result.outcome, "reply");
   assert.equal(result.text, "Rewired after the compaction.");
 });
 
-test("Open Model settles a turn that stopped on a tool call a person denied", async () => {
+/** Steps of one turn whose tool calls finish in order: "denied", "ran", or a final answer. */
+function toolCallEvents(session: string, turnId: string, outcomes: ReadonlyArray<"denied" | "ran">): Array<Record<string, unknown>> {
+  return outcomes.flatMap((outcome, index) => {
+    const id = `assistant-retry-${index}`;
+    return [
+      { type: "message.updated", properties: { sessionID: session, info: { id, role: "assistant", parentID: turnId,
+        sessionID: session, time: { created: 10 + index } } } },
+      { type: "message.part.updated", properties: { sessionID: session, part: { id: `${id}-tool`, messageID: id,
+        sessionID: session, type: "tool", tool: "bash", callID: `call-retry-${index}`,
+        state: outcome === "denied"
+          ? { status: "error", input: { command: "gh pr view 4" }, error: "The user rejected permission to use this specific tool call." }
+          : { status: "completed", input: { command: "git status" }, output: "clean", metadata: { exit: 0 } } } } },
+    ];
+  });
+}
+
+test("Open Model ends a turn whose model keeps retrying denied tool calls", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([() => []]);
+  const initialRead = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-retrying",
+    sourceMessage: { text: "check the pull request" },
+    activation: { decision: "activate" },
+    actionId: "retrying",
+  });
+  await initialRead;
+  const turnId = String(harness.promptBodies[0]?.messageID);
+  for (const event of toolCallEvents(handle.providerContinuationId!, turnId, ["denied", "denied", "denied"])) harness.sendEvent(event);
+  let timer: NodeJS.Timeout | undefined;
+  const ended = await Promise.race([turn.then(() => true),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 2_000); })]);
+  clearTimeout(timer);
+  if (!ended) harness.completeTurn();
+  const result = await turn;
+
+  assert.equal(ended, true, "the third denial in a row ends the turn");
+  assert.deepEqual(harness.aborts, [handle.providerContinuationId]);
+  assert.deepEqual(result, { turnId, providerContinuationId: handle.providerContinuationId, outcome: "failed", text: null,
+    evidence: "transcript", error: NO_REPLY_FAILURE.deniedTool });
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"
+    && fact.providerTurnId === turnId && fact.turnOutcome === "failed"));
+});
+
+test("Open Model lets a turn go on when a tool call runs between its denied ones", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([() => [], (turnId) => [assistantMessage(turnId, "assistant-final", 30, "Checked without the denied call.")]]);
+  const initialRead = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-adapting",
+    sourceMessage: { text: "check the pull request" },
+    activation: { decision: "activate" },
+    actionId: "adapting",
+  });
+  await initialRead;
+  const turnId = String(harness.promptBodies[0]?.messageID);
+  for (const event of toolCallEvents(handle.providerContinuationId!, turnId, ["denied", "denied", "ran", "denied"])) harness.sendEvent(event);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  harness.completeTurn();
+  const result = await turn;
+
+  assert.deepEqual(harness.aborts, []);
+  assert.equal(result.outcome, "reply");
+  assert.equal(result.text, "Checked without the denied call.");
+});
+
+test("Open Model settles a turn that stopped on a denied tool call", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const observations: NativeExecutionObservation[] = [];
   const checkpointed: ProviderRoomTurnResult[] = [];

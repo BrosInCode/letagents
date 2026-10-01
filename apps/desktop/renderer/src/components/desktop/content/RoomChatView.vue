@@ -111,7 +111,7 @@
           @open-event-preview="openEventPreview"
           @dismiss-event-preview="emit('dismiss-event-preview', $event)"
           @resolve-permission="(approval, behavior) => emit('resolve-permission', approval, behavior)"
-          @stop-agent-turn="emit('stop-agent-turn', $event)"
+          @stop-agent-turn="(agentId, approvalId) => emit('stop-agent-turn', agentId, approvalId)"
           @send-message="handleComposerSend"
         />
 
@@ -343,7 +343,7 @@ const emit = defineEmits<{
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
   ];
   "thread-read": [threadRootId: string, summary: DesktopRoomMessageThreadSummary];
-  "stop-agent-turn": [agentId: string];
+  "stop-agent-turn": [agentId: string, approvalId: string];
 }>();
 
 const threadLayoutAnimationMs = 250;

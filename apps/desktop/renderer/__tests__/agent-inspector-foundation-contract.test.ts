@@ -151,7 +151,12 @@ test("Inspector controls keep a 44px minimum interaction target", () => {
 });
 
 test("an approval card its agent waits on stops the turn through the inspector's own stop control", () => {
-  assert.match(chat, /@stop-agent-turn="emit\('stop-agent-turn', \$event\)"/);
+  assert.match(chat, /@stop-agent-turn="\(agentId, approvalId\) => emit\('stop-agent-turn', agentId, approvalId\)"/);
   assert.match(shell, /@stop-agent-turn="stopAgentTurnForApproval"/);
-  assert.match(shell, /function stopAgentTurnForApproval\(entryId: string\)[\s\S]{0,500}openAgentDetailRequest\(supervisedAgentInspectorRequest\(entry[\s\S]{0,200}runAgentInspectorAction\(\{ entryId, roomId: props\.room\.identifier, kind: "stop_turn" \}\)/);
+  const handler = /async function stopAgentTurnForApproval\(entryId: string, approvalId: string\)[\s\S]*?\n\}/.exec(shell)?.[0] ?? "";
+  // The card may predate the agent's current turn: read approvals again, and
+  // stop only while that request still waits in the agent's current session.
+  assert.match(handler, /await desktopIpc\.supervisor\?\.listHostApprovals\?\.\(roomId\)[\s\S]*hostApprovalStopsTurn\(approval, firstSeenAt, Date\.now\(\), entry\.providerContinuationId\)/);
+  assert.match(handler, /hostApprovalStopsTurn[\s\S]*void refreshHostApprovals\(roomId\);\s*return;/, "a card that no longer matches only refreshes");
+  assert.match(handler, /return;[\s\S]*openAgentDetailRequest\(supervisedAgentInspectorRequest\(entry[\s\S]*runAgentInspectorAction\(\{ entryId, roomId, kind: "stop_turn" \}\)/);
 });

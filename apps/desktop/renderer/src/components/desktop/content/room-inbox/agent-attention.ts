@@ -50,13 +50,12 @@ export function buildAgentAttentionItems(input: AgentAttentionInput): AgentAtten
     // After a failed listing main has dropped these presentations; they can no longer be decided.
     if (room.stale) continue;
     for (const approval of room.approvals) {
-      const seenAt = room.firstSeenAt[approval.id] ?? "";
+      const seenAt = room.firstSeenAt[approval.id];
       // A request its agent waits on that cannot be decided here leaves the
       // agent stuck once the grace has passed: its owner has to stop the turn.
-      const stuck = hostApprovalBlocksTurn(approval) && input.nowMs - Date.parse(seenAt) >= AGENT_ATTENTION_GRACE_MS;
-      if (!isActionableHostApproval(approval) && !stuck) continue;
+      if (!isActionableHostApproval(approval) && !hostApprovalBlocksTurn(approval, seenAt, input.nowMs)) continue;
       add({ kind: "tool_approval", key: JSON.stringify([roomIdentifier, "approval", approval.id]), roomIdentifier,
-        timestamp: seenAt, approval });
+        timestamp: seenAt ?? "", approval });
     }
   }
   for (const entry of input.agents ?? []) {

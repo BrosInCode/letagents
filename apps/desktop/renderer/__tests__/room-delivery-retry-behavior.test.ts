@@ -349,7 +349,8 @@ test("composer keeps unresolved approval failures visible and dismisses cards lo
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
-test("composer keeps an Open Model request its agent waits on in view and offers to stop the turn", async () => {
+test("composer keeps an Open Model request its agent waits on in view and offers to stop the turn after the grace", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
   // Shaped like the card the daemon lists for a live OpenCode request it cannot match to a room turn.
   const live = { ...hostApproval(), id: "presentation-live", status: "unavailable" as const,
     detail: "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified.",
@@ -361,16 +362,24 @@ test("composer keeps an Open Model request its agent waits on in view and offers
   Object.assign(window, { letagentsDesktop: { supervisor: {
     listHostApprovals: async () => ({ available: true, approvals: [live, record], error: null }),
   } } });
-  const { root, app } = mount(RoomComposer, { ...composerProps(), onStopAgentTurn: (agentId: string) => { stopped.push(agentId); } });
+  const { root, app } = mount(RoomComposer, { ...composerProps(),
+    onStopAgentTurn: (agentId: string, approvalId: string) => { stopped.push(`${agentId}:${approvalId}`); } });
+  const cardsShown = () => descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval");
   try {
     await flushHostApprovals();
-    const cards = descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval");
+    assert.equal(cardsShown().length, 0, "a failed match is often a race that the next listing resolves");
+    context.mock.timers.tick(27_000);
+    await flushHostApprovals();
+    assert.equal(cardsShown().length, 0);
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    const cards = cardsShown();
     assert.equal(cards.length, 1, "the request its agent waits on stays in view; a durable record stays behind the toggle");
     assert.match(descendants(cards[0]!).map(node => node.text).join("\n"),
       /LunarAmber is waiting on this request, which can't be answered here\. Stopping the turn cancels it\./);
     assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Deny)$/.test(child.text))), false);
     (buttonByText(root, "Stop turn").props.onClick as () => void)();
-    assert.deepEqual(stopped, ["agent-a"]);
+    assert.deepEqual(stopped, ["agent-a:presentation-live"], "the card names its own request, which is checked again before stopping");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 

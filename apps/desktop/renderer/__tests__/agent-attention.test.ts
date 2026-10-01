@@ -10,6 +10,7 @@ import type { DesktopNeedsYou } from "../../electron/ipc-types/knowledge.js";
 import type { DesktopHostApproval, HostApprovalSelection } from "../../shared/host-approvals";
 import { AGENT_ATTENTION_GRACE_MS, BOARD_INTENT_ATTENTION_DELAY_MS, buildAgentAttentionItems, trackAgentAttention, type AgentAttentionItem } from "../src/components/desktop/content/room-inbox/agent-attention";
 import { buildUniversalInbox, filterUniversalInbox, inboxCategoryLabel, inboxNavigationIntent } from "../src/components/desktop/content/room-inbox/universal";
+import { HOST_APPROVAL_BLOCKED_GRACE_MS, hostApprovalStopsTurn } from "../src/components/desktop/content/room-chat/host-approval-presentation";
 import { decideHostApproval, hostApprovalRoom, hostApprovalRooms, refreshHostApprovals, resetHostApprovals } from "../src/components/desktop/content/room-chat/host-approvals";
 import { useAgentAttention } from "../src/composables/useAgentAttention";
 
@@ -137,14 +138,22 @@ test("an Open Model request its agent waits on that cannot be decided here needs
   const rooms = (seenAt: string) => new Map([["room-a", { approvals: [blocking, record, observer, codex],
     firstSeenAt: { blocking: seenAt, record: seenAt, observer: seenAt, codex: seenAt }, stale: false }]]);
 
-  assert.deepEqual(buildAgentAttentionItems({ approvalRooms: rooms(at(AGENT_ATTENTION_GRACE_MS - 5_000)), nowMs: NOW }), [],
+  assert.deepEqual(buildAgentAttentionItems({ approvalRooms: rooms(at(HOST_APPROVAL_BLOCKED_GRACE_MS - 5_000)), nowMs: NOW }), [],
     "a request matched to its turn within the grace never reaches the Inbox");
-  const items = buildAgentAttentionItems({ approvalRooms: rooms(at(AGENT_ATTENTION_GRACE_MS)), nowMs: NOW });
+  const items = buildAgentAttentionItems({ approvalRooms: rooms(at(HOST_APPROVAL_BLOCKED_GRACE_MS)), nowMs: NOW });
   assert.deepEqual(items.map(item => item.key), [JSON.stringify(["room-a", "approval", "blocking"])]);
   const [inboxItem] = filterUniversalInbox(buildUniversalInbox(needsYou(), [], items), "needs-you", [], {});
   assert.equal(inboxItem.title, "CopperRidge · Approval unavailable");
   assert.deepEqual(inboxNavigationIntent(inboxItem, "room"), { roomIdentifier: "room-a", approvals: true },
     "it opens the room's approval card, which offers to stop the turn");
+
+  // Stopping the agent's turn cancels the request only in the session it waits in.
+  const seen = at(HOST_APPROVAL_BLOCKED_GRACE_MS);
+  assert.equal(hostApprovalStopsTurn(blocking, seen, NOW, "ses_1"), true);
+  assert.equal(hostApprovalStopsTurn(blocking, seen, NOW, "ses_after_repair"), false, "the agent moved to another session");
+  assert.equal(hostApprovalStopsTurn(blocking, seen, NOW, null), false);
+  assert.equal(hostApprovalStopsTurn(blocking, at(HOST_APPROVAL_BLOCKED_GRACE_MS - 5_000), NOW, "ses_1"), false, "still within the grace");
+  assert.equal(hostApprovalStopsTurn(record, seen, NOW, "ses_1"), false, "a durable record stops nothing");
 });
 
 test("a stuck agent waits out a brief recovery, and a blocked queue is dated by the message that stopped it", () => {
