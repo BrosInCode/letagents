@@ -264,7 +264,7 @@
         @start-auth="openAccountAuthFlow"
       />
 
-      <InboxView v-else-if="activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" v-model:rooms="inboxRooms" v-model:section="inboxSection" :storage-key="String(authStatus?.account?.id ?? 'local')" :data="needsYouData" :attention="agentAttentionItems" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" @refresh="refreshNeedsYou" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
+      <InboxView v-else-if="activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" :rooms="inboxRooms" @update:rooms="chooseInboxRooms" v-model:section="inboxSection" :storage-key="inboxStorageKey" :data="needsYouData" :attention="agentAttentionItems" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" @refresh="refreshNeedsYou" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
 
       <RentMarketplaceView
         v-else-if="activeEntry.type === 'marketplace'"
@@ -490,6 +490,7 @@ import type { DesktopRentalRequest } from "../../electron/ipc-types.js";
 import { useNeedsYou } from "./composables/useNeedsYou";
 import { useAgentAttention } from "./composables/useAgentAttention";
 import { resetHostApprovals } from "./components/desktop/content/room-chat/host-approvals";
+import { useInboxRoomFilter } from "./composables/useInboxRoomFilter";
 import { desktopIpc } from "./ipc/index.js";
 
 const RentMarketplaceView = defineAsyncComponent(
@@ -543,7 +544,6 @@ const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const rentalRequestCount = ref(0);
 const inboxRentals = ref<DesktopRentalRequest[]>([]);
 const inboxRentalError = ref('');
-const inboxRooms = ref<string[]>([]);
 const messagesUnread = ref(0);
 const openConversationId = ref<string | null>(null);
 const openConversationNonce = ref(0);
@@ -562,7 +562,10 @@ async function openNeedsYouRoom(intent: AttentionNavigationIntent) {
     attentionIntent.value = intent;
   } catch (error) { needsYouError.value = String(error); }
 }
-function openNeedsYou(room?: string) { inboxRooms.value = typeof room === 'string' ? [room] : []; inboxSection.value = 'needs-you'; activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
+const inboxStorageKey = computed(() => String(authStatus.value?.account?.id ?? 'local'));
+const { rooms: inboxRooms, open: openInboxRooms, choose: chooseInboxRooms, reload: reloadInboxRooms, prune: pruneInboxRooms } = useInboxRoomFilter(() => inboxStorageKey.value);
+watch(needsYouData, pruneInboxRooms);
+function openNeedsYou(room?: string) { openInboxRooms(room); inboxSection.value = 'needs-you'; activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
 async function refreshNeedsYou() { await Promise.all([loadNeedsYou(activeEntry.value.type === 'inbox'), refreshRentalRequestCount()]); await refreshAgentApprovals(); }
 const rentMarketplaceRole = ref<"renter" | "provider">("renter");
 const openAddAgentAfterRepoPick = ref(false);
@@ -1410,7 +1413,7 @@ const {
 });
 
 watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
-  if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; inboxRooms.value = []; inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); resetHostApprovals(); if (next) void refreshNeedsYou(); }
+  if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); resetHostApprovals(); if (next) void refreshNeedsYou(); }
 }, { flush: "sync" });
 
 const showSignedOutGate = computed(() => (
