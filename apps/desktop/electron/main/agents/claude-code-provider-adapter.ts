@@ -47,6 +47,7 @@ import {
   type NativeLifecycleCheckpoint,
 } from "./provider-execution-observer.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
+import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import {
   isRentalCredentialIsolationRequested,
   rentalCredentialIsolationMarker,
@@ -124,6 +125,8 @@ export interface ClaudeCodeProviderAdapterDependencies {
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<ProviderProcessExit>;
   readSessionRows(sessionId: string): Promise<ClaudeEvidenceRecord[]>;
+  /** The managed commit identity for this work attempt, or none. */
+  resolveCommitEnvironment(req: ProviderSpawnRequest): Promise<Record<string, string>>;
   now(): string;
 }
 
@@ -746,6 +749,7 @@ async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidence
 const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   readVersion: defaultReadVersion,
   launchChild: defaultLaunchChild,
+  resolveCommitEnvironment: managedCommitEnvironmentFor,
   createLetAgentsMcpConfig: req => createManagedClaudeMcpConfig(
     req.supervisorWorkerSession?.apiUrl ?? desktopApiUrl, tmpdir(), req.devMcpServerEntryPath,
   ),
@@ -1379,6 +1383,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     requireSupportedClaudeCodeVersion(versionOutput, approvalProfileLabel);
 
     const policyArgs = claudeLaunchPolicyArgs(attestProviderSpawnPolicy("claude-code", req));
+    // A workspace that would commit as the host's global Git identity commits
+    // as the owner's GitHub noreply identity instead; rentals never get one.
+    const commitEnvironment = await this.deps.resolveCommitEnvironment(req);
     const managedMcpConfig = await this.deps.createLetAgentsMcpConfig(req);
     // Use an explicit strict config so a repo-tracked .mcp.json cannot shadow
     // the managed room workplace. The short-lived 0600 config lives outside
@@ -1421,9 +1428,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         ...(req.permissionProfileId ? { LETAGENTS_PERMISSION_PROFILE_ID: req.permissionProfileId } : {}),
       }
       : undefined;
+    const launchEnv = Object.keys(commitEnvironment).length ? { ...commitEnvironment, ...supervisorEnv } : supervisorEnv;
     let child: ClaudeCliChild;
     try {
-      child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd, env: supervisorEnv });
+      child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd, env: launchEnv });
     } catch (error) {
       await managedMcpConfig.dispose();
       throw error;

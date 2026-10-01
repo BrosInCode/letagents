@@ -341,6 +341,7 @@ export function openCodeAuthContent(apiKey: string | null): string {
 export function minimalOpenCodeEnvironment(
   source: NodeJS.ProcessEnv,
   extra: Record<string, string>,
+  commitEnvironment: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const key of INHERITED_ENVIRONMENT_KEYS) {
@@ -348,6 +349,8 @@ export function minimalOpenCodeEnvironment(
   }
   return {
     ...environment,
+    // The owner's GitHub noreply identity, when the workspace would commit as the host's global one.
+    ...commitEnvironment,
     // The supervised provider is fully declared in OPENCODE_CONFIG_CONTENT,
     // so OpenCode's models.dev catalog refresh is dead weight: on degraded
     // networks it stalls startup and floods the log with fetch timeouts.

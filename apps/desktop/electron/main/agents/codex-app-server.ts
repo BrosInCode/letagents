@@ -3,6 +3,8 @@ import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
+import { codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
+import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
 
 const DEFAULT_SERVER_HOST = "127.0.0.1";
@@ -32,6 +34,8 @@ interface CodexAppServerLaunchOptions {
   trustedProjectPath?: string | null;
   configOverrides?: string[];
   env?: Record<string, string>;
+  /** GIT_AUTHOR_* and GIT_COMMITTER_* resolved for this project before launch. */
+  commitEnvironment?: Record<string, string>;
 }
 
 function readyUrlFromServerUrl(serverUrl: string): string {
@@ -419,41 +423,42 @@ function childExitPromise(
   });
 }
 
+function codexTrustedProjectOverrides(trustedProjectPath?: string | null): string[] {
+  const path = trustedProjectPath?.trim();
+  return path ? [`projects.${JSON.stringify(path)}.trust_level="trusted"`] : [];
+}
+
 export function codexAppServerLaunchArgs(
   serverUrl: string,
   options: CodexAppServerLaunchOptions = {},
 ): string[] {
   const args = ["app-server"];
-  const trustedProjectPath = options.trustedProjectPath?.trim();
-  if (trustedProjectPath) {
-    args.push(
-      "-c",
-      `projects.${JSON.stringify(trustedProjectPath)}.trust_level="trusted"`,
-    );
-  }
-  for (const override of options.configOverrides ?? []) {
+  for (const override of [...codexTrustedProjectOverrides(options.trustedProjectPath), ...(options.configOverrides ?? [])]) {
     args.push("-c", override);
   }
   args.push("--listen", serverUrl);
   return args;
 }
 
-export function launchCodexAppServer(
-  serverUrl: string,
-  codexBin: string,
-  options: CodexAppServerLaunchOptions = {},
-): CodexAppServerLaunch {
+/**
+ * The exact environment a launch gives the Codex app-server, and the commit
+ * identity it carries. Rental children keep only their isolated variables and
+ * never carry the owner's identity.
+ */
+export function codexAppServerEnvironment(
+  options: Pick<CodexAppServerLaunchOptions, "env" | "commitEnvironment"> = {},
+): { env: NodeJS.ProcessEnv; commitEnvironment: Record<string, string>; rental: boolean } {
   const runtimeEnv = desktopRuntimeEnvironment();
   const configuredEnv = options.env && Object.keys(options.env).length
     ? { ...runtimeEnv, ...options.env }
     : runtimeEnv;
   const custodialPolling = configuredEnv.LETAGENTS_EXECUTION_PROFILE === "supervised_mcp_polling";
-  const env = isRentalCredentialIsolationRequested(configuredEnv)
+  const rental = isRentalCredentialIsolationRequested(configuredEnv);
+  const commitEnvironment = rental ? {} : options.commitEnvironment ?? {};
+  const env = rental
     ? rentalIsolatedChildEnvironment(configuredEnv)
-    : configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1" || custodialPolling
-      ? { ...configuredEnv }
-      : configuredEnv;
-  if (env !== configuredEnv) {
+    : { ...configuredEnv, ...commitEnvironment };
+  if (rental || configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1" || custodialPolling) {
     // A custodial supervised worker borrows exact-generation authority from the
     // daemon. Ambient desktop owner or fixed worker credentials would bypass
     // that fence and would also leak into provider-started shell commands.
@@ -464,6 +469,29 @@ export function launchCodexAppServer(
       delete env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID;
     }
   }
+  return { env, commitEnvironment, rental };
+}
+
+/**
+ * Codex builds each command's environment from its shell policy, which an
+ * owner may set to drop inherited variables. Setting the identity there as
+ * well keeps it on every command the agent runs.
+ */
+export function codexCommitIdentityOverrides(commitEnvironment: Record<string, string>): string[] {
+  return Object.entries(commitEnvironment)
+    .map(([key, value]) => `shell_environment_policy.set.${key}=${JSON.stringify(value)}`);
+}
+
+export function launchCodexAppServer(
+  serverUrl: string,
+  codexBin: string,
+  options: CodexAppServerLaunchOptions = {},
+): CodexAppServerLaunch {
+  const { env, commitEnvironment } = codexAppServerEnvironment(options);
+  options = {
+    ...options,
+    configOverrides: [...codexCommitIdentityOverrides(commitEnvironment), ...(options.configOverrides ?? [])],
+  };
   const outputCapture = createCodexAppServerOutputCapture(
     sensitiveCodexAppServerLaunchValues(env, options),
   );
@@ -483,6 +511,39 @@ export function launchCodexAppServer(
     pid: child.pid ?? null,
     exited,
   };
+}
+
+/**
+ * Launch a managed agent's app-server without the owner's Codex extensions:
+ * no plugins, app connectors, computer or browser use, hooks, memories,
+ * notifier or personal skills, and no MCP server but the room's own, like
+ * Claude's --strict-mcp-config. Codex itself names the servers, from the
+ * owner's config and any trusted project config; a launch that cannot get
+ * that list, or whose project changes the LetAgents server, fails. A project
+ * that would commit as the host's global Git identity commits as the owner's
+ * GitHub noreply identity instead.
+ */
+export async function launchManagedCodexAppServer(
+  serverUrl: string,
+  codexBin: string,
+  options: CodexAppServerLaunchOptions = {},
+): Promise<CodexAppServerLaunch> {
+  const { env, rental } = codexAppServerEnvironment(options);
+  const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
+  const [isolation, commitEnvironment] = await Promise.all([
+    // The launch's own trust and overrides, so the server list matches.
+    codexOwnerIsolationOverrides(codexBin, {
+      cwd: trustedProjectPath,
+      env,
+      configOverrides: [...codexTrustedProjectOverrides(trustedProjectPath), ...(options.configOverrides ?? [])],
+    }),
+    rental ? {} : managedAgentCommitEnvironment(trustedProjectPath),
+  ]);
+  return launchCodexAppServer(serverUrl, codexBin, {
+    ...options,
+    commitEnvironment,
+    configOverrides: [...isolation, ...(options.configOverrides ?? [])],
+  });
 }
 
 export function terminateSpawnedProcess(pid: number): void {

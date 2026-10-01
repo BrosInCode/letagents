@@ -63,6 +63,7 @@ import {
   workspaceOpenCodeEnvironment,
   supervisedOpenCodePermissionProfileId,
 } from "./opencode-launch-contract.js";
+import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
@@ -721,7 +722,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       XDG_STATE_HOME: join(runtimeRoot, "state"),
       BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
       ...workspaceEnvironment,
-    });
+    }, await managedCommitEnvironmentFor(req));
     const launchNotice = req.workspaceKind === "room_scratch"
       ? await this.checkScratchWorkspaceBoundary(req.cwd, runtimeRoot, env)
       : null;
