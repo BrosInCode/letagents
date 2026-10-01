@@ -7,6 +7,8 @@ import { cloudRoomIdentifierForStorage, listLocalRoomEntries, listLocalTasks, lo
 import { listDesktopAccountRooms } from './account-rooms.js';
 import { addLocalChatMessage } from './messages/local-store.js';
 import { getDesktopInboxUpdates } from './inbox.js';
+import { listDesktopPendingBoardIntents } from './board-governance.js';
+import type { DesktopAccountFocusRoomEntry, DesktopAccountRoomEntry } from '../../ipc-types.js';
 
 async function target(roomIdentifier: string) {
   if (!roomIdentifier?.trim()) throw new Error('Choose a room.');
@@ -65,6 +67,14 @@ export async function getDesktopMemoryHistory(roomIdentifier: string, id: string
   const db = await getLocalChatDatabase();
   return { records: localKnowledgeHistory(db, room.id, id), truncated: (getLocalKnowledge(db, room.id, id)?.version ?? 0) > 100 };
 }
+// Registering a board intent always posts a room message, and a pending intent
+// expires after 24 hours on the server. A quieter room cannot hold one.
+const BOARD_INTENT_PENDING_TTL_MS = 24 * 60 * 60 * 1000;
+/** Only room admins decide board intents; skip rooms that cannot hold a live one. */
+export function mayHoldPendingBoardIntents(room: DesktopAccountRoomEntry | DesktopAccountFocusRoomEntry, now: number): boolean {
+  const latest = Date.parse(room.latestMessageAt ?? '');
+  return room.role === 'admin' && (!Number.isFinite(latest) || now - latest < BOARD_INTENT_PENDING_TTL_MS);
+}
 export async function getDesktopNeedsYou(includeUpdates = false): Promise<DesktopNeedsYou> {
   const auth = await readStoredAuth();
   let cloudUnavailable = false;
@@ -74,17 +84,21 @@ export async function getDesktopNeedsYou(includeUpdates = false): Promise<Deskto
   });
   const queue = [...new Map(accountRooms.flatMap(room => [room, ...room.focusRooms]).map(room => [room.roomIdentifier, room])).values()];
   const result: DesktopNeedsYou = { rooms: [], failures: [], cloudUnavailable, limited: accountRooms.length >= 100, signedOut: !auth.token };
+  const now = Date.now();
   // Bound concurrency; never load full room snapshots just to build an inbox.
   await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
     for (let room = queue.shift(); room; room = queue.shift()) {
       try {
-        const [attention, updates] = await Promise.allSettled([
+        const [attention, updates, boardIntents] = await Promise.allSettled([
           getDesktopKnowledge(room.roomIdentifier, 'attention'),
           includeUpdates ? getDesktopInboxUpdates(room.roomIdentifier) : Promise.resolve(undefined),
+          mayHoldPendingBoardIntents(room, now) ? listDesktopPendingBoardIntents(room.roomIdentifier) : Promise.resolve(undefined),
         ]);
-        if (attention.status === 'rejected' || updates.status === 'rejected') result.failures.push({ roomIdentifier: room.roomIdentifier, displayName: room.displayName });
+        if (attention.status === 'rejected' || updates.status === 'rejected' || boardIntents.status === 'rejected') result.failures.push({ roomIdentifier: room.roomIdentifier, displayName: room.displayName });
         const page = attention.status === 'fulfilled' ? attention.value : { records: [], truncated: false, tasks: [] };
-        result.rooms.push({ ...page, tasks: page.tasks ?? [], updates: updates.status === 'fulfilled' ? updates.value : undefined, roomIdentifier: room.roomIdentifier, displayName: room.displayName } satisfies DesktopAttentionRoom);
+        result.rooms.push({ ...page, tasks: page.tasks ?? [], updates: updates.status === 'fulfilled' ? updates.value : undefined,
+          boardIntents: boardIntents.status === 'fulfilled' ? boardIntents.value : undefined,
+          roomIdentifier: room.roomIdentifier, displayName: room.displayName } satisfies DesktopAttentionRoom);
       } catch { result.failures.push({ roomIdentifier: room.roomIdentifier, displayName: room.displayName }); }
     }
   }));

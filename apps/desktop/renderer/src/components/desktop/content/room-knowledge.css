@@ -46,7 +46,7 @@
 .knowledge-queue-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-tertiary); font-size: 10px; }
 .knowledge-queue-top time { flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .knowledge-category { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 10px; font-weight: 550; line-height: 1.4; }
-.knowledge-category[data-kind=blocked], .knowledge-category[data-kind=approval] { color: var(--amber-text); }
+.knowledge-category:is([data-kind=blocked], [data-kind=approval], [data-kind=tool_approval], [data-kind=agent_attention], [data-kind=board_intent]) { color: var(--amber-text); }
 .knowledge-queue-preview { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--text-secondary); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
 .knowledge-room-name { display: flex; align-items: center; gap: 6px; margin-top: 3px; color: var(--text-tertiary); font-size: 10px; overflow-wrap: anywhere; }
 .knowledge-room-name svg { margin-left: auto; }
@@ -183,6 +183,14 @@
 .inbox-activity p { margin: 6px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .inbox-activity time { font-size: 10px; color: var(--text-tertiary); }
 .inbox-pagination { display: flex; flex-wrap: wrap; gap: 8px; }
+/* A tool approval shows the exact proposed action, as the composer card does. */
+.inbox-approval-fields { margin: 0; }
+.inbox-approval-fields dt { color: var(--text-tertiary); font-size: 11px; font-weight: 550; }
+.inbox-approval-fields dd { margin: 6px 0 16px; }
+.inbox-approval-fields pre { max-height: 220px; overflow: auto; margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-subtle); color: var(--text); font: 12px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; direction: ltr; unicode-bidi: plaintext; }
+.inbox-approval-note { margin: 16px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.inbox-approval-error { margin: 0 0 16px; }
+.inbox-approval-result { margin: 20px 0; }
 @media (hover: hover) and (pointer: fine) {
   .knowledge-page :is(.knowledge-button, .knowledge-icon-button, .memory-prompt, .knowledge-segments button):not(:disabled):hover { background: var(--accent-hover); color: var(--text); }
   .knowledge-page .knowledge-primary:not(:disabled):hover { color: var(--bg); background: color-mix(in srgb, var(--text) 90%, var(--bg)); }

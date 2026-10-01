@@ -111,9 +111,14 @@ import {
   updateDesktopRoomTaskReviewLease,
 } from "../rooms.js";
 import { desktopSmokeBoardGovernance, isDesktopSmokeCheck } from "../smoke.js";
+import { liveSupervisorStateEntries } from "../supervisor-daemon.js";
 
 export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
-  targetIpcMain.handle("desktop:room:needs-you", (_event, includeUpdates) => getDesktopNeedsYou(includeUpdates === true));
+  targetIpcMain.handle("desktop:room:needs-you", async (_event, includeUpdates) => {
+    const needsYou = await getDesktopNeedsYou(includeUpdates === true);
+    const agents = liveSupervisorStateEntries();
+    return agents ? { ...needsYou, agents } : needsYou;
+  });
   targetIpcMain.handle("desktop:room:knowledge", (_event, room, type) => getDesktopKnowledge(room, type));
   targetIpcMain.handle("desktop:room:knowledge-create", (_event, room, type, input) => createDesktopKnowledge(room, type, input));
   targetIpcMain.handle("desktop:room:knowledge-revise", (_event, room, type, id, input) => reviseDesktopKnowledge(room, type, id, input));
