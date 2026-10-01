@@ -20,6 +20,7 @@ import type { AgentInspectorActionState } from "../src/domain/agent-inspector";
 import { useAgentPauseRequests } from "../src/domain/agent-pause-requests";
 import { ref } from "vue";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
+import { projectAgentInspectorDiagnostics } from "../src/domain/agent-inspector-diagnostics";
 import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
@@ -202,6 +203,72 @@ test("a Claude usage-limit bootstrap failure explains the automatic retry instea
   });
   const projection = projectAgentInspector(limited, { roomId: "focus_1", deliveryRetryAvailable: false });
   assert.match(projection?.now?.summary ?? "", /usage limit was reached.*retries automatically/);
+});
+
+test("a Claude startup deadline reads as one sentence naming the recovery control on offer", () => {
+  const lastError = "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (deadline). "
+    + "Startup observations: last_line_type=system.init; last_line_ms=1198; init_ms=1198; bootstrap_ms=28803; budget_ms=30000; "
+    + "stdout_lines=3; matched_session_lines=3; stderr_bytes=0; api_retry_count=0; assistant_count=0; result_count=0; "
+    + "line_types=command_lifecycle.unlisted:1,command_lifecycle.started:1,system.init:1.";
+  const stalled = (overrides: Partial<DesktopSupervisorManifestEntry> = {}) => entry({
+    provider: "claude",
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    runtimeGenerationId: "runtime_1",
+    providerPid: null,
+    lastError,
+    ...overrides,
+  });
+  const projection = projectAgentInspector(stalled(), { roomId: "focus_1" });
+  const available = (kind: string) => projection?.actions.find((action) => action.kind === kind)?.available;
+  assert.equal(projection?.now?.kind, "attention");
+  assert.equal(projection?.now?.summary, "Claude didn’t finish starting within 30 seconds. Open Recovery options to restart it.");
+  assert.equal(available("recovery_options"), true, "the copy names a control the header offers");
+  assert.equal(available("restart_runtime"), true);
+  assert.equal(available("fresh_runtime"), true);
+  assert.equal(projectAgentInspectorDiagnostics(projection!).recovery.lastError, lastError, "Diagnostics keeps the raw text");
+
+  const legacy = projectAgentInspector(stalled({ observedState: "failed", runtimeGenerationId: null }), { roomId: "focus_1" });
+  assert.equal(legacy?.now?.summary, "Claude didn’t finish starting within 30 seconds. Recover the agent to try again.");
+  assert.equal(legacy?.actions.find((action) => action.kind === "recover")?.available, true);
+
+  const summary = (detail: string) => projectAgentInspector(stalled({ lastError: detail }), { roomId: "focus_1" })?.now?.summary;
+  assert.equal(
+    summary("convergence scheduler failure: Claude CLI did not report its stream-json init message (deadline). "
+      + "Startup observations: init_ms=1499; bootstrap_ms=not_started; budget_ms=1499."),
+    "Claude didn’t finish starting within 1 second. Open Recovery options to restart it.",
+  );
+  assert.match(
+    summary("convergence scheduler failure: Claude CLI did not report its stream-json init message (deadline). "
+      + "Startup observations: init_ms=400; bootstrap_ms=not_started; budget_ms=400.") ?? "",
+    /^Claude didn’t finish starting within 1 second\./,
+    "a sub-second budget still names a duration",
+  );
+  assert.equal(
+    summary("convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (compaction_deadline). "
+      + "Startup observations: compaction_ms=120000; compaction_budget_ms=120000; init_ms=900; bootstrap_ms=150000; budget_ms=30000."),
+    "Claude didn’t finish starting in time. Open Recovery options to restart it.",
+    "compaction extends the startup budget, so no single duration is claimed",
+  );
+});
+
+test("only a trailing startup observation list is left out of the Now summary", () => {
+  const summary = (lastError: string) => projectAgentInspector(entry({
+    provider: "claude",
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError,
+  }), { roomId: "focus_1" })?.now?.summary;
+  const exited = "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (native_exit; exit code 1; signal none).";
+  assert.equal(
+    summary(`${exited} Startup observations: last_api_retry=overloaded (HTTP 529); init_ms=812; bootstrap_ms=40; `
+      + "budget_ms=30000; line_types=system.init:1,command_lifecycle.exited:1."),
+    exited,
+  );
+  const advice = "OpenCode could not start. Startup observations: none. Reinstall the CLI and try again.";
+  assert.equal(summary(advice), advice, "prose after the label is not a diagnostic list");
+  const trailingAdvice = `${exited} Startup observations: init_ms=812; budget_ms=30000. Reinstall the CLI and try again.`;
+  assert.equal(summary(trailingAdvice), trailingAdvice, "advice after the list keeps the whole message");
 });
 
 test("a stopped provider with retained historical coordinates offers recovery instead of false reconnect or delivery retry", () => {

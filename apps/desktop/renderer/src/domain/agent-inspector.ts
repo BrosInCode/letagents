@@ -391,6 +391,13 @@ function hasValidCredential(entry: DesktopSupervisorManifestEntry): boolean {
     && entry.roomAgentState?.inbox.state !== "waiting_for_desktop_credentials";
 }
 
+/** Only a trailing `Startup observations: key=value; key=value.` list. */
+const STARTUP_OBSERVATION = String.raw`[\w.]+=[^;\s]+(?: \([^)]*\))?`;
+const STARTUP_OBSERVATIONS_TAIL = new RegExp(
+  String.raw`\s*Startup observations:\s*${STARTUP_OBSERVATION}(?:;\s*${STARTUP_OBSERVATION})*\.?\s*$`,
+  "i",
+);
+
 function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   const detail = entry.lastError?.trim() || null;
   if (!detail) return null;
@@ -402,6 +409,22 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   }
   if (/daemon-safe bootstrap turn \(failed_response\).*assistant_error=rate_limit/i.test(detail)) {
     return "Claude's usage limit was reached. LetAgents retries automatically once the limit resets.";
+  }
+  // The daemon deliberately does not retry a startup deadline: a stalled
+  // resume can spend tokens on every attempt.
+  const startupDeadline = /Claude CLI did not (?:report its stream-json init message|complete its daemon-safe bootstrap turn) \((compaction_)?deadline\)/i
+    .exec(detail);
+  if (startupDeadline) {
+    // Compaction extends the startup budget, so only a plain deadline has one
+    // duration to report.
+    const budgetMs = startupDeadline[1] ? 0 : Number(/\bbudget_ms=(\d+)/.exec(detail)?.[1] ?? 0);
+    const seconds = budgetMs > 0 ? Math.max(1, Math.round(budgetMs / 1000)) : 0;
+    const duration = seconds ? `within ${seconds} ${seconds === 1 ? "second" : "seconds"}` : "in time";
+    // Name only the recovery control the header actually offers.
+    const recovery = roomAgentRecoveryAction(entry);
+    const nextStep = recovery === "recovery_options" ? " Open Recovery options to restart it."
+      : recovery === "recover" ? " Recover the agent to try again." : "";
+    return `Claude didn’t finish starting ${duration}.${nextStep}`;
   }
   if (/waiting for desktop credential handoff/i.test(detail)) {
     return "Waiting for the desktop app to restore this agent’s room access.";
@@ -421,7 +444,9 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   if (/could not be authenticated; refusing to start a competing runtime/i.test(detail)) {
     return "LetAgents can’t confirm the previous provider process stopped, so it won’t start a competing one. Recover the agent to relaunch it.";
   }
-  return detail;
+  // Startup key=value observations belong in Diagnostics, which keeps the
+  // retained error verbatim; they are not a headline.
+  return detail.replace(STARTUP_OBSERVATIONS_TAIL, "") || detail;
 }
 
 export function agentInspectorOverallState(entry: DesktopSupervisorManifestEntry): AgentInspectorOverallState {
