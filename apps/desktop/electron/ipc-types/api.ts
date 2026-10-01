@@ -4,7 +4,7 @@ import type { DesktopAccountActivityState } from "./account-activity.js";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
 import type { WakeRule, WakeRulePage } from "../../../../shared/wake-rules.mjs";
 import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
-import type { DesktopNeedsYou } from "./knowledge.js";
+import type { DesktopAttentionRoom, DesktopNeedsYou } from "./knowledge.js";
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
 import type { DesktopNotificationStatus, DesktopNotificationTarget } from "./notifications.js";
 import type {
@@ -176,6 +176,8 @@ export interface DesktopApi {
   };
   room: {
     getNeedsYou?: (includeUpdates?: boolean) => Promise<DesktopNeedsYou>;
+    /** One room's requests and, when asked, its pending board intents. */
+    getNeedsYouRoom?: (room: string, includeBoardIntents: boolean) => Promise<Pick<DesktopAttentionRoom, "records" | "truncated" | "tasks" | "boardIntents">>;
     getKnowledge?: (room: string, type: KnowledgeType) => Promise<KnowledgePage>;
     createKnowledge?: (room: string, type: KnowledgeType, input: KnowledgeInput & { client_id: string }) => Promise<KnowledgeRecord>;
     reviseKnowledge?: (room: string, type: KnowledgeType, id: string, input: KnowledgeRevisionInput) => Promise<KnowledgeRecord>;
@@ -435,6 +437,8 @@ export interface DesktopApi {
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
     /** Optional exact-room projection is applied before crossing contextBridge. */
     onState: (callback: (snapshot: import("./agents.js").DesktopSupervisorStateSnapshot) => void, roomIdentifier?: string) => () => void;
+    /** Each supervisor state push as Needs you reads agents: not retired, without activity history. */
+    onLiveAgents?: (callback: (entries: import("./agents.js").DesktopSupervisorManifestEntry[]) => void) => () => void;
     onRetirement?: (callback: (event: import("./agents.js").DesktopSupervisorRetirementEvent) => void) => () => void;
     /** Subscribe to ordered launch facts (task_84). Fold idempotently by `sequence`. */
     onLaunchEvent: (callback: (event: import("./launch-events.js").DesktopLaunchEvent) => void) => () => void;
