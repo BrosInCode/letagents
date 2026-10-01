@@ -246,6 +246,7 @@ const required = [
   ...[
     "shared/agent-branch.mjs",
     "shared/agent-codenames.mjs",
+    "shared/codex-owner-isolation.mjs",
     "shared/message-contracts.mjs",
     "shared/paced-queue.mjs",
     "shared/permission-review.mjs",
