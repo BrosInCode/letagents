@@ -58,6 +58,7 @@ function realEnforcement(ownerId: string) {
     updateTaskLeaseWorkflowRefs: db!.updateTaskLeaseWorkflowRefs,
     shouldRequireBoardIntent: async () => false,
     verifyBoardIntentApproval: async () => ({ kind: "allow" as const }),
+    getActiveBoardManager: async () => null,
   } as never) as { enforceTaskCoordinationMutation: (input: never) => Promise<{ kind: string; code?: string; leaseFence?: unknown; workLeaseCreation?: NonNullable<Parameters<typeof updateTask>[3]>["workLeaseCreation"] }> };
 }
 
@@ -615,8 +616,13 @@ test("HTTP own assigned work recovers a missing lease only through an approved c
 test("HTTP concurrent manager approvals atomically mint one work lease", { skip: requiresDatabase }, async t => {
   const f = await workflowHttp(t);
   const task = await f.freshTask();
+  // A manager may not approve its own claim, so the competing claim comes
+  // from a second worker.
+  const rival = await db!.createRoomAgentSession({ room_id: f.room.id, session_kind: "worker", runtime: "codex",
+    actor_label: "Rival", agent_key: "owner/rival", agent_instance_id: "rival-instance", display_name: "Rival",
+    owner_account_id: f.ownerId, owner_label: "Owner", ide_label: "Agent" });
   const firstIntent = await f.registerClaim(task.id);
-  const secondIntent = await f.registerClaim(task.id, f.manager);
+  const secondIntent = await f.registerClaim(task.id, rival);
   const results = await Promise.all([f.approveIntent(firstIntent), f.approveIntent(secondIntent)]);
   assert.equal(results.filter(r => r.status === 200).length, 1, JSON.stringify(results));
   assert.equal(results.filter(r => r.status === 409).length, 1, JSON.stringify(results));
@@ -820,7 +826,8 @@ test("HTTP body provenance spoofing and legacy dedupe never activate a verified 
     actor_label: f.from.actor_label, agent_session_id: f.from.session_id });
   assert.equal(legacy.status, 201, JSON.stringify(legacy.body));
   const id = legacy.body.intent.id;
-  assert.equal(await f.registerClaim(task.id), id, "generic dedupe returns the preexisting intent");
+  const verified = await f.registerClaim(task.id);
+  assert.notEqual(verified, id, "a verified registration never merges into an unverified one in its name");
   assert.equal((await client!.pool.query("SELECT proposer_worker_auth_kind FROM board_intents WHERE id = $1", [id])).rows[0].proposer_worker_auth_kind, null);
   const result = await f.approveIntent(id);
   assert.equal(result.status, 200, JSON.stringify(result.body));
@@ -870,7 +877,7 @@ test("HTTP a new same-key worker cannot adopt a deduplicated predecessor claim",
   const replacement = await db!.createRoomAgentSession({ room_id: f.room.id, session_kind: "worker", runtime: "codex",
     actor_label: f.from.actor_label, agent_key: f.from.agent_key, agent_instance_id: "new-incarnation",
     display_name: f.from.display_name, owner_account_id: f.ownerId, owner_label: "Owner", ide_label: "Agent" });
-  assert.equal(await f.registerClaim(task.id, replacement), intent);
+  assert.notEqual(await f.registerClaim(task.id, replacement), intent, "the replacement gets its own request");
   const rejected = await f.approveIntent(intent);
   assert.equal(rejected.status, 409, JSON.stringify(rejected.body));
   assert.equal((await db!.getBoardIntent({ room_id: f.room.id, intent_id: intent }))!.proposer_agent_session_id, f.from.session_id);

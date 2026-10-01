@@ -1,8 +1,8 @@
 import crypto from "crypto";
-import { and, asc, count, eq, sql } from "drizzle-orm";
+import { and, asc, count, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
-import { board_intents } from "../schema.js";
+import { board_intents, task_leases, tasks } from "../schema.js";
 import { toBoardIntent } from "../mappers.js";
 import { coordinationId, hashToken } from "../utils.js";
 import type { BoardIntentPayload } from "../../board-intent-payloads.js";
@@ -58,14 +58,19 @@ export async function createBoardIntent(input: {
     escalated_at: null,
     escalation_check_at: new Date(nowDate.getTime() + 10 * 60_000).toISOString(),
     auto_approved: false,
+    approved_task_status: null,
+    approved_task_assignee_agent_key: null,
+    approved_manager_assignment_id: null,
     created_at: now,
     updated_at: now,
   };
 
+  const proposerWorkerAuthKind = input.proposer_worker_auth_kind ?? null;
   const [created] = (await db
     .insert(board_intents)
-    .values({ ...row, proposer_worker_auth_kind: input.proposer_worker_auth_kind ?? null })
-    // A legacy dedupe collision must never acquire trusted provenance.
+    .values({ ...row, proposer_worker_auth_kind: proposerWorkerAuthKind })
+    // A retry returns the same proposer's pending request. Another proposer,
+    // or the same claimed identity with different provenance, gets its own.
     .onConflictDoNothing()
     .returning()) as BoardIntentRow[];
 
@@ -79,7 +84,10 @@ export async function createBoardIntent(input: {
         eq(board_intents.room_id, input.room_id),
         eq(board_intents.action_type, input.action_type),
         eq(board_intents.payload_hash, row.payload_hash),
-        eq(board_intents.status, "pending")
+        eq(board_intents.status, "pending"),
+        sql`${board_intents.proposer_agent_session_id} IS NOT DISTINCT FROM ${row.proposer_agent_session_id}`,
+        sql`${board_intents.proposer_actor_key} IS NOT DISTINCT FROM ${row.proposer_actor_key}`,
+        sql`${board_intents.proposer_worker_auth_kind} IS NOT DISTINCT FROM ${proposerWorkerAuthKind}`
       )
     )
     .limit(1)) as BoardIntentRow[];
@@ -150,6 +158,8 @@ export async function approveBoardIntent(input: {
   intent_id: string;
   decision_by: string;
   reason?: string | null;
+  /** The approving Board Manager's assignment; omitted when a person approves. */
+  manager_assignment_id?: string | null;
   now?: Date;
 }, executor: BoardIntentExecutor = db): Promise<{ intent: BoardIntent; approval_token: string } | null> {
   const token = approvalToken();
@@ -168,6 +178,15 @@ export async function approveBoardIntent(input: {
       decided_at: now,
       expires_at: expiresAt,
       updated_at: now,
+      // Record the task as approved, read in the same statement, so the
+      // approval can be refused later if the task has changed since.
+      approved_task_status: sql`(SELECT ${tasks.status}::text FROM ${tasks}
+        WHERE ${tasks.room_id} = ${board_intents.room_id}
+          AND 'task_' || ${tasks.number} = ${board_intents.payload}->>'task_id')`,
+      approved_task_assignee_agent_key: sql`(SELECT ${tasks.assignee_agent_key} FROM ${tasks}
+        WHERE ${tasks.room_id} = ${board_intents.room_id}
+          AND 'task_' || ${tasks.number} = ${board_intents.payload}->>'task_id')`,
+      approved_manager_assignment_id: input.manager_assignment_id ?? null,
     })
     .where(
       and(
@@ -236,6 +255,112 @@ export async function denyBoardIntent(input: {
     .returning()) as BoardIntentRow[];
 
   return row ? toBoardIntent(row) : null;
+}
+
+const TASK_PROGRESS_RANK: Record<string, number> = {
+  proposed: 0,
+  accepted: 1,
+  assigned: 2,
+  in_progress: 3,
+  blocked: 3,
+  in_review: 4,
+  merged: 5,
+};
+
+// From a closed status a task can only take these steps; anything else
+// needs a reopen first.
+const CLOSED_STATUS_NEXT_STEPS: Record<string, string[]> = {
+  merged: ["done", "accepted"],
+  done: ["accepted"],
+  cancelled: ["accepted"],
+};
+
+type SupersedeTaskState = { id: string; status: string; assignee_agent_key: string | null };
+
+// Why an open intent no longer applies to its task, or null while it still does.
+function boardIntentSupersedeReason(
+  intent: Pick<BoardIntentRow, "action_type" | "payload" | "proposer_actor_key" | "status" | "decision_by">,
+  task: SupersedeTaskState,
+  activeWorkLeaseId: string | null,
+  taskChanged: boolean
+): string | null {
+  if (intent.action_type === "task_create") return null;
+  // An approval was granted for the task as it stood. Once the task's status
+  // or assignee changes it must not be replayable, for example after a reopen.
+  if (intent.status === "approved" && taskChanged) {
+    return `Superseded: ${task.id} moved to ${task.status} after ${intent.decision_by ?? "the manager"} approved it.`;
+  }
+  const action = typeof intent.payload.action === "string" ? intent.payload.action : null;
+  if (action) {
+    // Lease release/handoff intents are bound to the lease they name.
+    const leaseId = typeof intent.payload.lease_id === "string" ? intent.payload.lease_id : null;
+    return leaseId && leaseId !== activeWorkLeaseId
+      ? `Superseded: the work lease it names is no longer active on ${task.id}.`
+      : null;
+  }
+  const target = typeof intent.payload.status === "string" ? intent.payload.status : null;
+  if (!target || intent.status === "approved") return null;
+  const moved = `Superseded: ${task.id} moved to ${task.status}.`;
+  if (intent.action_type === "task_claim") {
+    // A claim can still run on an accepted task or recover the proposer's own assignment.
+    return task.status !== "accepted"
+      && !(task.status === "assigned" && task.assignee_agent_key === intent.proposer_actor_key)
+      ? moved : null;
+  }
+  // Reopening stays possible from every later state until the task is accepted.
+  if (target === "accepted") return task.status === "accepted" ? moved : null;
+  if (task.status === target) return moved;
+  const closedNextSteps = CLOSED_STATUS_NEXT_STEPS[task.status];
+  if (closedNextSteps) return closedNextSteps.includes(target) ? null : moved;
+  return (TASK_PROGRESS_RANK[task.status] ?? -1) > (TASK_PROGRESS_RANK[target] ?? Number.POSITIVE_INFINITY)
+    ? moved : null;
+}
+
+/**
+ * Resolve open intents that a task change carried out, passed or made
+ * impossible: pending requests managers would otherwise still be asked to
+ * decide, and approvals that must not be replayed against a changed task.
+ */
+export async function supersedeBoardIntentsForTask(input: {
+  room_id: string;
+  task: SupersedeTaskState;
+  /** The task's status or assignee changed (not only its work lease). */
+  task_changed: boolean;
+  now?: Date;
+}, executor: BoardIntentExecutor = db): Promise<BoardIntent[]> {
+  const open = (await executor
+    .select()
+    .from(board_intents)
+    .where(
+      and(
+        eq(board_intents.room_id, input.room_id),
+        inArray(board_intents.status, ["pending", "approved"]),
+        sql`${board_intents.payload}->>'task_id' = ${input.task.id}`
+      )
+    )) as BoardIntentRow[];
+  if (open.length === 0) return [];
+  const [activeWorkLease] = open.some((row) => typeof row.payload.action === "string")
+    ? await executor
+      .select({ id: task_leases.id })
+      .from(task_leases)
+      .where(and(eq(task_leases.room_id, input.room_id), eq(task_leases.task_id, input.task.id),
+        eq(task_leases.kind, "work"), eq(task_leases.status, "active")))
+      .limit(1)
+    : [];
+
+  const now = (input.now ?? new Date()).toISOString();
+  const superseded: BoardIntent[] = [];
+  for (const row of open) {
+    const reason = boardIntentSupersedeReason(row, input.task, activeWorkLease?.id ?? null, input.task_changed);
+    if (!reason) continue;
+    const [updated] = (await executor
+      .update(board_intents)
+      .set({ status: "superseded", decision_by: "LetAgents", decision_reason: reason, decided_at: now, updated_at: now })
+      .where(and(eq(board_intents.room_id, input.room_id), eq(board_intents.id, row.id), eq(board_intents.status, row.status)))
+      .returning()) as BoardIntentRow[];
+    if (updated) superseded.push(toBoardIntent(updated));
+  }
+  return superseded;
 }
 
 export async function expireBoardIntents(input: {

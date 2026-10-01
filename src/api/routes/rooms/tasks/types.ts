@@ -112,6 +112,7 @@ export interface RoomTaskRouteDeps {
     actorSessionId: string | null;
     boardIntentId?: string | null;
     boardApprovalToken?: string | null;
+    authorizeWithApprovedBoardIntent?: boolean;
   }): Promise<TaskCoordinationGuardDecision>;
   enforceFocusParentBoardWriteIsolation(input: {
     req: AuthenticatedRequest;

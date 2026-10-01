@@ -114,6 +114,11 @@ export const board_intents = pgTable(
     escalated_at: timestamp("escalated_at", { mode: "string", withTimezone: true }),
     escalation_check_at: timestamp("escalation_check_at", { mode: "string", withTimezone: true }),
     auto_approved: boolean("auto_approved").notNull().default(false),
+    // What an approval was granted against: the task's status and assignee,
+    // and the manager assignment that approved it (null when a person did).
+    approved_task_status: text("approved_task_status"),
+    approved_task_assignee_agent_key: text("approved_task_assignee_agent_key"),
+    approved_manager_assignment_id: text("approved_manager_assignment_id"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
@@ -130,8 +135,12 @@ export const board_intents = pgTable(
       table.room_id,
       table.proposer_agent_session_id
     ),
+    // One pending request per proposer and provenance, so nobody can occupy
+    // another worker's request by registering the same payload first.
     pending_action_payload_idx: uniqueIndex("board_intents_pending_action_payload_idx")
-      .on(table.room_id, table.action_type, table.payload_hash)
+      .on(table.room_id, table.action_type, table.payload_hash,
+        sql`coalesce(${table.proposer_agent_session_id}, '')`, sql`coalesce(${table.proposer_actor_key}, '')`,
+        sql`coalesce(${table.proposer_worker_auth_kind}, '')`)
       .where(sql`${table.status} = 'pending'`),
     escalation_due_idx: index("board_intents_escalation_due_idx")
       .on(table.escalation_check_at, table.id, table.room_id)
@@ -143,7 +152,7 @@ export const board_intents = pgTable(
       sql`${table.proposer_worker_auth_kind} IN ('bearer', 'session_token')`),
     status_check: check(
       "board_intents_status_check",
-      sql`${table.status} IN ('pending', 'approved', 'denied', 'expired', 'used')`
+      sql`${table.status} IN ('pending', 'approved', 'denied', 'expired', 'used', 'superseded')`
     ),
     action_type_check: check(
       "board_intents_action_type_check",

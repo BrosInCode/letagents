@@ -179,6 +179,7 @@ export function readableIntentBody(intent: DesktopBoardIntentSummary): string {
     const target = payloadText(intent, "target_actor_key");
     if (action === "handoff") return target ? `Hand off ${taskId} to ${target}` : `Hand off ${taskId}`;
     if (action === "release") return `Release work on ${taskId}`;
+    if (status === "accepted") return `Move ${taskId} to accepted`;
     return `Change work assignment for ${taskId}`;
   }
   return "Review the requested board change.";

@@ -15,6 +15,7 @@ import {
   upsertRoomParticipant,
   updateTaskLeaseWorkflowRefs,
   verifyBoardIntentApproval,
+  getActiveBoardManager,
 } from "../db.js";
 import { createGitHubFocusIsolationResolver } from "../github/focus-isolation.js";
 import { createFocusParentBoardWriteIsolationEnforcer } from "../focus-rooms/task-write-isolation.js";
@@ -80,6 +81,7 @@ const taskCoordinationEnforcement = createTaskCoordinationEnforcement({
   updateTaskLeaseWorkflowRefs,
   shouldRequireBoardIntent,
   verifyBoardIntentApproval,
+  getActiveBoardManager,
 });
 
 export const {

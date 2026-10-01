@@ -24,6 +24,7 @@ const { registerRoomPresenceRoutes } = await import("../routes/rooms/presence/in
 const { registerRoomArtifactRoutes } = await import("../routes/rooms/artifacts.js");
 const { requireWorkerRequestAgentIdentity } = await import("../request/agent-identity.js");
 const { registerTaskLeaseActionRoute } = await import("../routes/rooms/tasks/lease-action.js");
+const { hashToken } = await import("../db/utils.js");
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -756,8 +757,15 @@ test("managed board workflow preserves retries, manager authority, and claim lea
     assert.equal(replayDenial.status, 200);
     assert.equal(replayDenial.body.proposer_notification.delivered, true);
     assert.ok(decisionNotifications.includes(`board_intent:${deniedIntent.body.intent.id}:denied:proposer_notify`));
-    const boundApproval = { room_id: room.id, action_type: "task_update" as const,
+    // Reassigning the manager replaced the assignment that approved credentialIntent.
+    const staleManagerApproval = await dbModule!.verifyBoardIntentApproval({ room_id: room.id, action_type: "task_update",
       payload: approvalPayload, intent_id: credentialIntent.body.intent.id,
+      trusted_worker: { agent_session_id: peer.session_id, agent_key: peer.agent_key } });
+    assert.equal(staleManagerApproval.kind === "deny" && staleManagerApproval.code, "board_intent_manager_changed");
+    const boundIntent = await call("POST", "board-intents", { action_type: "task_update", task_id: first.id, payload: approvalPayload }, peer.worker_bearer!);
+    assert.equal((await call("POST", `board-intents/${boundIntent.body.intent.id}/approve`, {})).status, 200);
+    const boundApproval = { room_id: room.id, action_type: "task_update" as const,
+      payload: approvalPayload, intent_id: boundIntent.body.intent.id as string,
       trusted_worker: { agent_session_id: peer.session_id, agent_key: peer.agent_key } };
     assert.equal((await dbModule!.verifyBoardIntentApproval(boundApproval)).kind, "allow");
     for (const invalid of [
@@ -798,5 +806,411 @@ test("managed board workflow preserves retries, manager authority, and claim lea
 
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+async function startBoardRouteServer(room: { id: string }) {
+  const { default: express } = await import("express");
+  const { registerTaskRecordRoutes } = await import("../routes/rooms/tasks/task-record.js");
+  const { registerRoomBoardRoutes } = await import("../routes/rooms/board.js");
+  const { createTaskCoordinationEnforcement } = await import("../tasks/coordination-enforcement.js");
+  const enforcement = createTaskCoordinationEnforcement({
+    getAgentIdentityByCanonicalKey: dbModule!.getAgentIdentityByCanonicalKey,
+    createCoordinationEvent: dbModule!.createCoordinationEvent,
+    getActiveTaskLocks: dbModule!.getActiveTaskLocks,
+    getTasks: dbModule!.getTasks,
+    getFocusRoomsForParent: async () => [],
+    getActiveTaskLeases: dbModule!.getActiveTaskLeases,
+    updateTaskLeaseWorkflowRefs: dbModule!.updateTaskLeaseWorkflowRefs,
+    shouldRequireBoardIntent: dbModule!.shouldRequireBoardIntent,
+    verifyBoardIntentApproval: dbModule!.verifyBoardIntentApproval,
+    getActiveBoardManager: dbModule!.getActiveBoardManager,
+  });
+  const deps = {
+    ...enforcement,
+    emitProjectMessage: async () => ({ id: "msg_notification" }),
+    taskEvents: { emit() {} },
+    getTaskById: dbModule!.getTaskById, getTaskOwnershipState: dbModule!.getTaskOwnershipState,
+    updateTask: dbModule!.updateTask,
+    resolveCanonicalRoomRequestId: async (id: string) => id,
+    resolveRoomOrReply: async (id: string) => id === room.id ? room : null,
+    requireParticipant, requireAdmin,
+    normalizeOptionalString: (value: unknown) => typeof value === "string" ? value.trim() || null : null,
+    enforceFocusParentBoardWriteIsolation: async () => ({ kind: "allow" }),
+    emitTaskLifecycleStatusMessage: async () => {},
+  };
+  const app = express();
+  registerHttpMiddleware(app, { resolveRequestAuth });
+  registerTaskRecordRoutes(app, deps as never);
+  registerTaskLeaseActionRoute(app, deps as never);
+  registerRoomBoardRoutes(app, deps as never);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address() as { port: number };
+  return {
+    async call(method: string, suffix: string, body: unknown, bearer: string | null) {
+      const response = await fetch(`http://127.0.0.1:${address.port}/rooms/${encodeURIComponent(room.id)}/${suffix}`, {
+        method, body: JSON.stringify(body),
+        headers: { ...(bearer ? { authorization: `Bearer ${bearer}` } : {}), "content-type": "application/json" },
+      });
+      return { status: response.status, body: await response.json() as any };
+    },
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
+  };
+}
+
+// A worker's approved closeout was refused as an "owner or admin action", so
+// every task in a Required-mode room waited at merged for a person.
+test("an approved board intent authorizes exactly its transition for the proposing worker", { skip: requiresDatabase }, async () => {
+  const { room, session: manager } = await seed();
+  const workerSession = (name: string) => createRoomAgentSession!({
+    room_id: room.id, session_kind: "worker", runtime: "codex",
+    actor_label: `${name} | Worker Owner's agent | Agent`, agent_key: `WorkerOwner/${name.toLowerCase()}`,
+    display_name: name, owner_account_id: "acct_bearer_test", owner_label: "Worker Owner", ide_label: "Agent",
+  });
+  const worker = await workerSession("Closer");
+  const other = await workerSession("Bystander");
+  await dbModule!.assignBoardManager({ room_id: room.id, agent_session_id: manager.session_id, assigned_by: "owner" });
+  await dbModule!.setRoomBoardManagerMode({ room_id: room.id, manager_mode: "intent_required", updated_by: "owner" });
+  const { call, close } = await startBoardRouteServer(room);
+  const task = await createTask!(room.id, "Render the dots", "owner");
+  const register = async (bearer: string, action_type: string, payload: Record<string, unknown>) => {
+    const reply = await call("POST", "board-intents", { action_type, task_id: task.id, payload }, bearer);
+    assert.equal(reply.status, 201, JSON.stringify(reply.body));
+    return reply.body.intent.id as string;
+  };
+  const approve = async (intentId: string) => {
+    const reply = await call("POST", `board-intents/${intentId}/approve`, {}, manager.worker_bearer!);
+    assert.equal(reply.status, 200, JSON.stringify(reply.body));
+    return reply.body;
+  };
+  const patch = (body: Record<string, unknown>, bearer = worker.worker_bearer!) =>
+    call("PATCH", `tasks/${task.id}`, body, bearer);
+  try {
+    await dbModule!.updateTask(room.id, task.id, { status: "accepted" });
+    const claim = await approve(await register(worker.worker_bearer!, "task_claim", {
+      task_id: task.id, status: "assigned", assignee: worker.actor_label, assignee_agent_key: worker.agent_key, pr_url: null,
+    }));
+    assert.equal(claim.result.kind, "task_claimed");
+    assert.equal((await patch({ status: "in_progress" })).status, 200);
+    assert.equal((await patch({ status: "in_review" })).status, 200);
+    await dbModule!.updateTask(room.id, task.id, { status: "merged" });
+
+    const unapproved = await patch({ status: "done" });
+    assert.equal(unapproved.status, 403);
+    assert.equal(unapproved.body.error, "Worker bearers cannot perform owner or admin actions.");
+
+    const closePayload = { task_id: task.id, status: "done", assignee: null, assignee_agent_key: null, pr_url: null };
+    const closeIntent = await register(worker.worker_bearer!, "task_close", closePayload);
+    const pending = await patch({ status: "done", board_intent_id: closeIntent });
+    assert.equal(pending.status, 403);
+    assert.equal(pending.body.code, "board_intent_not_approved");
+    assert.equal((await approve(closeIntent)).result.requires_follow_up, true);
+
+    const borrowed = await patch({ status: "done", board_intent_id: closeIntent }, other.worker_bearer!);
+    assert.equal(borrowed.status, 403, "another worker cannot use this worker's approval");
+    assert.equal(borrowed.body.code, "board_intent_worker_mismatch");
+    const mismatched = await patch({ status: "cancelled", board_intent_id: closeIntent });
+    assert.equal(mismatched.status, 403, "the approval covers only its own transition");
+    assert.equal(mismatched.body.code, "board_intent_payload_mismatch");
+    const broader = await patch({ status: "done", assignee: null, board_intent_id: closeIntent });
+    assert.equal(broader.status, 403, "the approval is not a general admin grant");
+    assert.equal((await dbModule!.getTaskById(room.id, task.id))!.status, "merged");
+    assert.equal((await dbModule!.getBoardIntent({ room_id: room.id, intent_id: closeIntent }))!.status, "approved");
+
+    const closed = await patch({ status: "done", board_intent_id: closeIntent });
+    assert.equal(closed.status, 200, JSON.stringify(closed.body));
+    assert.equal(closed.body.status, "done");
+    assert.equal((await dbModule!.getBoardIntent({ room_id: room.id, intent_id: closeIntent }))!.status, "used");
+    const replay = await patch({ status: "done", board_intent_id: closeIntent });
+    assert.equal(replay.status, 403, "a used approval cannot be replayed");
+
+    const reopenIntent = await register(other.worker_bearer!, "task_override", { ...closePayload, status: "accepted" });
+    await approve(reopenIntent);
+    const reopened = await patch({ status: "accepted", board_intent_id: reopenIntent }, other.worker_bearer!);
+    assert.equal(reopened.status, 200, JSON.stringify(reopened.body));
+    assert.equal(reopened.body.status, "accepted");
+
+    // A lease release on someone else's work follows the same rule.
+    const reclaim = await approve(await register(worker.worker_bearer!, "task_claim", {
+      task_id: task.id, status: "assigned", assignee: worker.actor_label, assignee_agent_key: worker.agent_key, pr_url: null,
+    }));
+    const leaseId = reclaim.result.task.active_leases[0].id as string;
+    const release = (body: Record<string, unknown> = {}) =>
+      call("POST", `tasks/${task.id}/lease-action`, { action: "release", ...body }, other.worker_bearer!);
+    assert.equal((await release()).status, 403, "releasing another worker's lease still needs authority");
+    const releaseIntent = await register(other.worker_bearer!, "task_override", {
+      task_id: task.id, action: "release", lease_id: leaseId, target_actor_key: null, target_agent_session_id: null,
+    });
+    const pendingRelease = await release({ board_intent_id: releaseIntent });
+    assert.equal(pendingRelease.status, 403);
+    assert.equal(pendingRelease.body.code, "board_intent_not_approved");
+    await approve(releaseIntent);
+    const released = await release({ board_intent_id: releaseIntent });
+    assert.equal(released.status, 200, JSON.stringify(released.body));
+    assert.equal(released.body.task.status, "accepted");
+    assert.equal(released.body.released_lease.status, "revoked");
+    assert.equal((await dbModule!.getBoardIntent({ room_id: room.id, intent_id: releaseIntent }))!.status, "used");
+  } finally {
+    await close();
+  }
+});
+
+test("a manager cannot approve its own changes, and approvals do not outlive the task they were granted for", { skip: requiresDatabase }, async () => {
+  const { room, session: manager } = await seed();
+  const workerSession = (name: string) => createRoomAgentSession!({
+    room_id: room.id, session_kind: "worker", runtime: "codex",
+    actor_label: `${name} | Worker Owner's agent | Agent`, agent_key: `WorkerOwner/${name.toLowerCase()}`,
+    display_name: name, owner_account_id: "acct_bearer_test", owner_label: "Worker Owner", ide_label: "Agent",
+  });
+  const worker = await workerSession("Builder");
+  const other = await workerSession("Other");
+  await dbModule!.assignBoardManager({ room_id: room.id, agent_session_id: manager.session_id, assigned_by: "owner" });
+  await dbModule!.setRoomBoardManagerMode({ room_id: room.id, manager_mode: "intent_required", updated_by: "owner" });
+  const { call, close } = await startBoardRouteServer(room);
+  const task = await createTask!(room.id, "Colour the weekends", "owner");
+  const closePayload = (status: string) => ({ task_id: task.id, status, assignee: null, assignee_agent_key: null, pr_url: null });
+  const register = async (bearer: string, action_type: string, payload: Record<string, unknown>) => {
+    const reply = await call("POST", "board-intents", { action_type, task_id: task.id, payload }, bearer);
+    assert.equal(reply.status, 201, JSON.stringify(reply.body));
+    return reply.body.intent.id as string;
+  };
+  const approve = (intentId: string) => call("POST", `board-intents/${intentId}/approve`, {}, manager.worker_bearer!);
+  const personApproves = async (intentId: string) =>
+    assert.ok(await dbModule!.approveBoardIntent({ room_id: room.id, intent_id: intentId, decision_by: "Worker Owner" }));
+  const patch = (body: Record<string, unknown>, bearer: string) => call("PATCH", `tasks/${task.id}`, body, bearer);
+  const statusOf = async () => (await dbModule!.getTaskById(room.id, task.id))!.status;
+  try {
+    await dbModule!.updateTask(room.id, task.id, { status: "accepted" });
+    const claim = await approve(await register(worker.worker_bearer!, "task_claim", {
+      task_id: task.id, status: "assigned", assignee: worker.actor_label, assignee_agent_key: worker.agent_key, pr_url: null,
+    }));
+    assert.equal(claim.status, 200, JSON.stringify(claim.body));
+    assert.equal((await patch({ status: "in_progress" }, worker.worker_bearer!)).status, 200);
+
+    const mismatched = await call("POST", "board-intents",
+      { action_type: "task_close", task_id: "task_999", payload: closePayload("done") }, worker.worker_bearer!);
+    assert.equal(mismatched.status, 400, "the task column must name the payload's task");
+    const padded = await call("POST", "board-intents",
+      { action_type: "task_close", payload: { ...closePayload("merged"), task_id: ` ${task.id} ` } }, worker.worker_bearer!);
+    assert.equal(padded.status, 201, JSON.stringify(padded.body));
+    assert.equal(padded.body.intent.payload.task_id, task.id, "the payload's task id is stored trimmed");
+    assert.equal(padded.body.intent.task_id, task.id);
+
+    // The manager cannot close someone else's work by approving its own request.
+    assert.equal((await patch({ status: "done" }, manager.worker_bearer!)).status, 403);
+    const managerClose = await register(manager.worker_bearer!, "task_close", closePayload("done"));
+    const selfApproval = await approve(managerClose);
+    assert.equal(selfApproval.status, 403);
+    assert.equal(selfApproval.body.code, "board_intent_self_approval");
+    await personApproves(managerClose);
+    const managerAction = await patch({ status: "done", board_intent_id: managerClose }, manager.worker_bearer!);
+    assert.equal(managerAction.status, 403, "the active manager never carries out its own request");
+    assert.equal(managerAction.body.code, "board_intent_manager_self_action");
+    assert.equal(await statusOf(), "in_progress");
+    const managerTask = await approve(await call("POST", "board-intents", {
+      action_type: "task_create", payload: { title: "Manager follow-up", description: null, source_message_id: null },
+    }, manager.worker_bearer!).then((reply) => reply.body.intent.id as string));
+    assert.equal(managerTask.status, 200, "proposing a task is exempt: it only adds a proposed task");
+    assert.equal(managerTask.body.result.kind, "task_created");
+
+    // An approval is for the task as it stood: a person closing, reopening and
+    // reassigning the task retires it, so it cannot close the new work.
+    const workerClose = await register(worker.worker_bearer!, "task_close", closePayload("done"));
+    assert.equal((await approve(workerClose)).status, 200);
+    const pendingCancel = await register(worker.worker_bearer!, "task_close", closePayload("cancelled"));
+    await dbModule!.updateTask(room.id, task.id, { status: "done" });
+    await dbModule!.updateTask(room.id, task.id, { status: "accepted" });
+    await dbModule!.updateTask(room.id, task.id, { status: "assigned", assignee: other.actor_label, assignee_agent_key: other.agent_key });
+    await dbModule!.updateTask(room.id, task.id, { status: "in_progress" });
+    const replay = await patch({ status: "done", board_intent_id: workerClose }, worker.worker_bearer!);
+    assert.equal(replay.status, 403, JSON.stringify(replay.body));
+    assert.equal(replay.body.code, "board_intent_not_approved");
+    assert.equal((await dbModule!.getBoardIntent({ room_id: room.id, intent_id: workerClose }))!.status, "superseded");
+    assert.equal(await statusOf(), "in_progress");
+    const staleDecision = await approve(pendingCancel);
+    assert.equal(staleDecision.status, 409);
+    assert.equal(staleDecision.body.code, "board_intent_superseded");
+
+    // With manager mode off, a leftover manager decides nothing; a person's
+    // approval is still a person's decision, as for handoffs in off mode.
+    await dbModule!.setRoomBoardManagerMode({ room_id: room.id, manager_mode: "off", updated_by: "owner" });
+    const offClose = await register(other.worker_bearer!, "task_close", closePayload("done"));
+    const offApproval = await approve(offClose);
+    assert.equal(offApproval.status, 403);
+    assert.equal(offApproval.body.code, "board_manager_mode_off");
+    await personApproves(offClose);
+    const offAction = await patch({ status: "done", board_intent_id: offClose }, other.worker_bearer!);
+    assert.equal(offAction.status, 200, JSON.stringify(offAction.body));
+    assert.equal(await statusOf(), "done");
+  } finally {
+    await close();
+  }
+});
+
+test("approvals end with the task state, mode and manager they were granted under", { skip: requiresDatabase }, async () => {
+  const { room, session: manager } = await seed();
+  const workerSession = (name: string, agentKey = `WorkerOwner/${name.toLowerCase()}`) => createRoomAgentSession!({
+    room_id: room.id, session_kind: "worker", runtime: "codex",
+    actor_label: `${name} | Worker Owner's agent | Agent`, agent_key: agentKey, agent_instance_id: `instance_${name.toLowerCase()}`,
+    display_name: name, owner_account_id: "acct_bearer_test", owner_label: "Worker Owner", ide_label: "Agent",
+  });
+  const worker = await workerSession("Holder");
+  const other = await workerSession("Taker");
+  const deputy = await workerSession("Deputy");
+  const managerTwin = await workerSession("ManagerTwin", manager.agent_key);
+  await dbModule!.assignBoardManager({ room_id: room.id, agent_session_id: manager.session_id, assigned_by: "owner" });
+  await dbModule!.setRoomBoardManagerMode({ room_id: room.id, manager_mode: "intent_required", updated_by: "owner" });
+  const { call, close } = await startBoardRouteServer(room);
+  const task = await createTask!(room.id, "Mark the solstices", "owner");
+  const closePayload = { task_id: task.id, status: "done", assignee: null, assignee_agent_key: null, pr_url: null };
+  const register = async (bearer: string, action_type: string, payload: Record<string, unknown>) => {
+    const reply = await call("POST", "board-intents", { action_type, task_id: task.id, payload }, bearer);
+    assert.equal(reply.status, 201, JSON.stringify(reply.body));
+    return reply.body.intent.id as string;
+  };
+  const approve = (intentId: string, bearer = manager.worker_bearer!) =>
+    call("POST", `board-intents/${intentId}/approve`, {}, bearer);
+  const personApproves = async (intentId: string) =>
+    assert.ok(await dbModule!.approveBoardIntent({ room_id: room.id, intent_id: intentId, decision_by: "Worker Owner" }));
+  const closeWith = (intentId: string) =>
+    call("PATCH", `tasks/${task.id}`, { status: "done", board_intent_id: intentId }, worker.worker_bearer!);
+  const leaseAction = (body: Record<string, unknown>, bearer: string) =>
+    call("POST", `tasks/${task.id}/lease-action`, body, bearer);
+  try {
+    await dbModule!.updateTask(room.id, task.id, { status: "accepted" });
+    const claim = await approve(await register(worker.worker_bearer!, "task_claim", {
+      task_id: task.id, status: "assigned", assignee: worker.actor_label, assignee_agent_key: worker.agent_key, pr_url: null,
+    }));
+    const leaseId = claim.body.result.task.active_leases[0].id as string;
+    const leasePayload = (action: "release" | "handoff", target: string | null, targetSessionId: string | null = null) =>
+      ({ task_id: task.id, action, lease_id: leaseId, target_actor_key: target, target_agent_session_id: targetSessionId });
+
+    // Another session under the manager's own agent key is still the manager asking.
+    const twinSelfApproval = await approve(await register(managerTwin.worker_bearer!, "task_close",
+      { ...closePayload, status: "cancelled" }));
+    assert.equal(twinSelfApproval.status, 403);
+    assert.equal(twinSelfApproval.body.code, "board_intent_self_approval");
+
+    // The manager cannot take or release a worker's lease through its own request.
+    // The manager is a real, reachable handoff target, so only the refusal stops this.
+    const [managerOwner, managerName] = manager.agent_key.split("/") as [string, string];
+    await dbModule!.registerAgentIdentity({ owner_account_id: "acct_bearer_test", owner_login: managerOwner,
+      owner_label: "Worker Owner", name: managerName });
+    await dbModule!.markRoomAgentDeliveryConnected({
+      room_id: room.id, actor_label: manager.actor_label, agent_key: manager.agent_key,
+      agent_instance_id: manager.agent_instance_id, agent_session_id: manager.session_id,
+      session_kind: "worker", runtime: manager.runtime, display_name: manager.display_name,
+      owner_label: manager.owner_label, ide_label: manager.ide_label,
+      credential_fence: { kind: "session_token", token_hash: hashToken(manager.session_token) },
+      transport: "long_poll",
+    });
+    const managerHandoff = await register(manager.worker_bearer!, "task_override",
+      leasePayload("handoff", manager.agent_key, manager.session_id));
+    await personApproves(managerHandoff);
+    const takenOver = await leaseAction({ action: "handoff", lease_id: leaseId, target_actor_key: manager.agent_key,
+      target_agent_session_id: manager.session_id, board_intent_id: managerHandoff }, manager.worker_bearer!);
+    assert.equal(takenOver.status, 403, JSON.stringify(takenOver.body));
+    assert.equal(takenOver.body.code, "board_intent_manager_self_action");
+    const managerRelease = await register(manager.worker_bearer!, "task_override", leasePayload("release", null));
+    await personApproves(managerRelease);
+    const released = await leaseAction({ action: "release", lease_id: leaseId, board_intent_id: managerRelease }, manager.worker_bearer!);
+    assert.equal(released.status, 403, JSON.stringify(released.body));
+    assert.equal(released.body.code, "board_intent_manager_self_action");
+
+    // Switching the mode off and on again does not revive an approval.
+    await dbModule!.updateTask(room.id, task.id, { status: "in_progress" });
+    await dbModule!.updateTask(room.id, task.id, { status: "in_review" });
+    await dbModule!.updateTask(room.id, task.id, { status: "merged" });
+    const workerHandoff = await register(worker.worker_bearer!, "task_override", leasePayload("handoff", other.agent_key));
+    assert.equal((await approve(workerHandoff)).status, 200);
+    const beforeToggle = await register(worker.worker_bearer!, "task_close", closePayload);
+    const toggleApproval = await approve(beforeToggle);
+    assert.equal(toggleApproval.status, 200, JSON.stringify(toggleApproval.body));
+    await dbModule!.setRoomBoardManagerMode({ room_id: room.id, manager_mode: "off", updated_by: "owner" });
+    await dbModule!.setRoomBoardManagerMode({ room_id: room.id, manager_mode: "intent_required", updated_by: "owner" });
+    const toggled = await closeWith(beforeToggle);
+    assert.equal(toggled.status, 403);
+    assert.equal(toggled.body.code, "board_intent_not_approved");
+    assert.match((await dbModule!.getBoardIntent({ room_id: room.id, intent_id: beforeToggle }))!.decision_reason ?? "",
+      /mode changed to off/);
+    const staleHandoff = await dbModule!.getBoardIntent({ room_id: room.id, intent_id: workerHandoff });
+    assert.equal(staleHandoff!.status, "superseded", "a handoff approved before the switch is retired with it");
+    assert.match(staleHandoff!.decision_reason ?? "", /mode changed to off/);
+
+    // An approval from a manager who has since been replaced is refused.
+    const beforeTurnover = await register(worker.worker_bearer!, "task_close", closePayload);
+    assert.equal((await approve(beforeTurnover)).status, 200);
+    await dbModule!.assignBoardManager({ room_id: room.id, agent_session_id: deputy.session_id, assigned_by: "owner" });
+    const turnedOver = await closeWith(beforeTurnover);
+    assert.equal(turnedOver.status, 403);
+    assert.equal(turnedOver.body.code, "board_intent_manager_changed");
+
+    // The approval is checked against the task itself, not only against the
+    // write paths that supersede: a change made underneath it still counts.
+    const beforeChange = await register(worker.worker_bearer!, "task_close", closePayload);
+    assert.equal((await approve(beforeChange, deputy.worker_bearer!)).status, 200);
+    await pool!.query("UPDATE tasks SET assignee_agent_key = $1 WHERE room_id = $2 AND number = $3",
+      [other.agent_key, room.id, Number(task.id.replace("task_", ""))]);
+    const changed = await closeWith(beforeChange);
+    assert.equal(changed.status, 403);
+    assert.equal(changed.body.code, "board_intent_task_changed");
+    await assert.rejects(
+      dbModule!.updateTask(room.id, task.id, { status: "done" }, { boardIntentApproval: {
+        room_id: room.id, action_type: "task_close", payload: closePayload, intent_id: beforeChange,
+        trusted_worker: { agent_session_id: worker.session_id, agent_key: worker.agent_key },
+      } }),
+      (error: { code?: string }) => error.code === "board_intent_task_changed",
+      "the write compares the approval with the task under its row lock",
+    );
+    assert.equal((await dbModule!.getTaskById(room.id, task.id))!.status, "merged");
+
+    // Proposer fields sent by an unauthenticated caller prove nothing: a worker
+    // cannot carry out an intent registered that way, even once approved.
+    const spoofed = await call("POST", "board-intents", {
+      action_type: "task_close", task_id: task.id, payload: closePayload,
+      actor_label: worker.actor_label, actor_key: worker.agent_key, agent_session_id: worker.session_id,
+    }, null);
+    assert.equal(spoofed.status, 201, JSON.stringify(spoofed.body));
+    assert.equal(spoofed.body.intent.proposer_agent_session_id, worker.session_id);
+    await pool!.query("UPDATE tasks SET assignee_agent_key = $1 WHERE room_id = $2 AND number = $3",
+      [worker.agent_key, room.id, Number(task.id.replace("task_", ""))]);
+    await personApproves(spoofed.body.intent.id);
+    const unverified = await closeWith(spoofed.body.intent.id);
+    assert.equal(unverified.status, 403);
+    assert.equal(unverified.body.code, "board_intent_worker_unverified");
+
+    // A spoofed registration does not occupy the worker's own request, and two
+    // workers asking for the same change each get their own request.
+    const squatted = await call("POST", "board-intents", {
+      action_type: "task_close", task_id: task.id, payload: { ...closePayload, status: "cancelled" },
+      actor_label: worker.actor_label, actor_key: worker.agent_key, agent_session_id: worker.session_id,
+    }, null);
+    const ownRequest = await register(worker.worker_bearer!, "task_close", { ...closePayload, status: "cancelled" });
+    assert.notEqual(ownRequest, squatted.body.intent.id);
+    assert.equal(await register(worker.worker_bearer!, "task_close", { ...closePayload, status: "cancelled" }), ownRequest,
+      "a retry returns the same proposer's request");
+    assert.notEqual(await register(other.worker_bearer!, "task_close", { ...closePayload, status: "cancelled" }), ownRequest);
+
+    // A manager approval that lands just after the mode was switched off
+    // (after that switch retired the older ones) still cannot be used.
+    const ownClose = await register(worker.worker_bearer!, "task_close", closePayload);
+    await dbModule!.setRoomBoardManagerMode({ room_id: room.id, manager_mode: "off", updated_by: "owner" });
+    const lateManager = await dbModule!.getActiveBoardManager(room.id);
+    assert.ok(await dbModule!.approveBoardIntent({ room_id: room.id, intent_id: ownClose,
+      decision_by: deputy.actor_label, manager_assignment_id: lateManager!.id }));
+    const lateApproval = await closeWith(ownClose);
+    assert.equal(lateApproval.status, 403, JSON.stringify(lateApproval.body));
+    assert.equal(lateApproval.body.code, "board_manager_mode_off");
+    await assert.rejects(
+      dbModule!.updateTask(room.id, task.id, { status: "done" }, { boardIntentApproval: {
+        room_id: room.id, action_type: "task_close", payload: closePayload, intent_id: ownClose,
+        trusted_worker: { agent_session_id: worker.session_id, agent_key: worker.agent_key },
+      } }),
+      (error: { code?: string }) => error.code === "board_manager_mode_off",
+      "the write refuses it too",
+    );
+  } finally {
+    await close();
   }
 });

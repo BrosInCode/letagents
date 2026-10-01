@@ -92,7 +92,7 @@ export async function listBoardGovernanceAudit(
       .where(
         and(
           eq(board_intents.room_id, roomId),
-          inArray(board_intents.status, ["approved", "denied", "used"])
+          inArray(board_intents.status, ["approved", "denied", "used", "superseded"])
         )
       )
       .orderBy(desc(board_intents.decided_at))
@@ -158,6 +158,8 @@ export async function listBoardGovernanceAudit(
       ? "board_intent_used"
       : intent.status === "approved"
       ? "board_intent_approved"
+      : intent.status === "superseded"
+      ? "board_intent_superseded"
       : "board_intent_denied";
     entries.push({
       id: intent.id,

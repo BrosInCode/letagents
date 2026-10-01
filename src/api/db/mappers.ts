@@ -422,6 +422,9 @@ export function toBoardIntent(row: typeof board_intents.$inferSelect | BoardInte
     expires_at: row.expires_at,
     escalated_at: row.escalated_at,
     auto_approved: row.auto_approved,
+    approved_task_status: row.approved_task_status ?? null,
+    approved_task_assignee_agent_key: row.approved_task_assignee_agent_key ?? null,
+    approved_manager_assignment_id: row.approved_manager_assignment_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

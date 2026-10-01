@@ -517,6 +517,7 @@ function registerRoutesForRoom(room: { id: string }, options: { realCoordination
           updateTaskLeaseWorkflowRefs: dbModule!.updateTaskLeaseWorkflowRefs,
           shouldRequireBoardIntent: async () => false,
           verifyBoardIntentApproval: dbModule!.verifyBoardIntentApproval,
+          getActiveBoardManager: dbModule!.getActiveBoardManager,
         } as never).enforceTaskCoordinationMutation
       : async () => ({ kind: "allow" }),
     enforceFocusParentBoardWriteIsolation: async () => ({ kind: "allow" }),
