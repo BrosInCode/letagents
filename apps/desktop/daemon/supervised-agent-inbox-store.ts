@@ -12,6 +12,7 @@ import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateData
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
 import { assertNoPollingActivation } from "./custodial-polling-activation.js";
 import { parseTaskContinuation, type ContinuityTask, type TaskContinuation } from "./task-continuity.js";
+import { foldEarlierNotices, queuedDeliveryKind, type QueuedDeliveryKind } from "./queued-delivery-order.js";
 import {
   cancelInterruptedSupervisedTurn,
   pruneSupervisedAgentHistory,
@@ -344,7 +345,12 @@ export class SupervisedAgentInboxStore {
         historyGrew ||= Number(observed.changes) > 0;
       }
       let sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value);
+      // The head may already be claimed or admitted by delivery; queue ordering never moves it.
+      const head = database.prepare(`SELECT fifo_sequence FROM supervised_agent_inbox WHERE agent_id=?
+        AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+        ORDER BY fifo_sequence LIMIT 1`).get(input.agent_id) as Row | undefined;
       const created: SupervisedInboxItem[] = [];
+      const newItemIds = new Set<string>();
       for (const message of input.messages) {
         this.require(message.source_message_id, "source_message_id");
         const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, message.source_message_id) as Row | undefined;
@@ -365,7 +371,14 @@ export class SupervisedAgentInboxStore {
         // this observation fence does not alter operational ingestion.
         try { if (isNewerCursor(message.source_message_id, currentCursor)) inserted.push(message.source_message_id); }
         catch { /* A nonnumeric source cannot establish new room provenance. */ }
+        newItemIds.add(inboxItemId);
         created.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row));
+      }
+      if (newItemIds.size) {
+        this.orderQueuedDeliveries(database, input.agent_id, input.room_id, head ? Number(head.fifo_sequence) : 0, newItemIds, observedAt);
+        for (const [index, item] of created.entries()) {
+          created[index] = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
+        }
       }
       const timestamp = this.now();
       run(database.prepare(`INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)
@@ -385,6 +398,72 @@ export class SupervisedAgentInboxStore {
     // Missing observation stays local; it must never roll back received work.
     try { if (inserted.length) onInserted?.(inserted); } catch { /* optional observation */ }
     return result;
+  }
+
+  /**
+   * Order the untouched queue behind the head after new room work arrives.
+   * Only rows that are still exactly as ingested move or settle: never the
+   * head, a row with any dispatch, retry, block or turn-control history, a
+   * daemon-authored row, or a row from another room. Such a row is a barrier;
+   * only the run after the last barrier is reordered.
+   *
+   * 1. The newest notice absorbs every older queued notice. Each older row
+   *    settles without a provider turn and records why; its text rides in the
+   *    newest notice's activation so the agent handles them in one turn.
+   * 2. People's messages go ahead of automated deliveries, FIFO among people.
+   */
+  private orderQueuedDeliveries(database: DatabaseSync, agentId: string, roomId: string, headSequence: number,
+    newItemIds: ReadonlySet<string>, timestamp: string): void {
+    const rows = database.prepare(`SELECT i.*,(i.state='pending' AND i.attempt_count=0 AND i.provider_turn_id IS NULL
+        AND i.outcome IS NULL AND i.last_error IS NULL AND i.failure_code IS NULL AND i.blocked_by_inbox_item_id IS NULL
+        AND i.next_attempt_at_ms IS NULL AND i.terminal_reason IS NULL
+        AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e WHERE e.inbox_item_id=i.inbox_item_id
+          AND e.idempotency_key NOT IN ('received:0','queued:0','queued:person_first'))
+        AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
+        AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.inbox_item_id=i.inbox_item_id)) AS untouched
+      FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
+        AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+      ORDER BY i.fifo_sequence`).all(agentId, headSequence) as Row[];
+    let queued: Array<{ item: SupervisedInboxItem; kind: QueuedDeliveryKind }> = [];
+    for (const row of rows) {
+      const item = rowToItem(row);
+      const kind = queuedDeliveryKind(item.source_message_id, item.source_message);
+      if (Number(row.untouched) !== 1 || kind === "fixed" || item.room_id !== roomId) queued = [];
+      else queued.push({ item, kind });
+    }
+    const target = queued.filter((entry) => entry.kind === "notice").at(-1);
+    const folded = target && newItemIds.has(target.item.inbox_item_id)
+      ? queued.filter((entry) => entry.kind === "notice" && entry !== target) : [];
+    if (target && folded.length) {
+      const { earlier, reasons } = foldEarlierNotices(folded.map((entry) => entry.item), target.item);
+      run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
+        JSON.stringify({ ...target.item.activation, earlier_notices: earlier }), target.item.inbox_item_id);
+      for (const { item } of folded) {
+        const reason = reasons.get(item.source_message_id)!;
+        run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',last_error=?,updated_at=?,acknowledged_at=?
+          WHERE inbox_item_id=? AND state='pending'`), reason, timestamp, timestamp, item.inbox_item_id);
+        this.recordEvent(database, item.inbox_item_id, `notice_folded:${target.item.source_message_id}`, "no_reply", timestamp, reason);
+        this.settleTerminalItem(database, item, timestamp);
+      }
+      queued = queued.filter((entry) => !folded.includes(entry));
+    }
+    const slots = queued.map((entry) => entry.item.fifo_sequence);
+    const ordered = [...queued.filter((entry) => entry.kind === "person"), ...queued.filter((entry) => entry.kind !== "person")];
+    const moves = ordered.flatMap((entry, index) => entry.item.fifo_sequence === slots[index] ? [] : [{ entry, slot: slots[index]! }]);
+    if (!moves.length) return;
+    // Permute the existing slots through unused ones above the maximum so
+    // UNIQUE(agent_id,fifo_sequence) holds at every step; settled rows keep theirs.
+    let parked = Number((database.prepare("SELECT MAX(fifo_sequence) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(agentId) as Row).value);
+    const move = database.prepare("UPDATE supervised_agent_inbox SET fifo_sequence=? WHERE inbox_item_id=?");
+    for (const { entry } of moves) run(move, ++parked, entry.item.inbox_item_id);
+    for (const { entry, slot } of moves) run(move, slot, entry.item.inbox_item_id);
+    const automated = queued.filter((entry) => entry.kind !== "person");
+    for (const { entry, slot } of moves) {
+      if (entry.kind !== "person") continue;
+      const passed = automated.filter((other) => other.item.fifo_sequence < entry.item.fifo_sequence && other.item.fifo_sequence >= slot).length;
+      if (passed) this.recordEvent(database, entry.item.inbox_item_id, "queued:person_first", "queued", timestamp,
+        `Queued ahead of ${passed} earlier automated ${passed === 1 ? "delivery" : "deliveries"}.`);
+    }
   }
 
   /**
