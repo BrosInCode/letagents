@@ -194,6 +194,8 @@
 .inbox-approval-note { margin: 16px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
 .inbox-approval-error { margin: 0 0 16px; }
 .inbox-approval-result { margin: 20px 0; }
+.inbox-outcome { margin: 0 0 16px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.inbox-outcome:not(.knowledge-success) { color: var(--text-secondary); }
 @media (hover: hover) and (pointer: fine) {
   .knowledge-page :is(.knowledge-button, .knowledge-icon-button, .memory-prompt, .knowledge-segments button):not(:disabled):hover { background: var(--accent-hover); color: var(--text); }
   .knowledge-page .knowledge-primary:not(:disabled):hover { color: var(--bg); background: color-mix(in srgb, var(--text) 90%, var(--bg)); }

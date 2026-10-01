@@ -293,3 +293,125 @@ test('unknown local managed agents remain visible in Updates only in their own r
   assert.equal(filterUniversalInbox(items, 'updates', ['room'], {})[0].category, 'agent_offline');
   assert.equal(filterUniversalInbox(items, 'updates', ['other-room'], {}).length, 0);
 });
+
+test('a room read on its own activity replaces that room until a newer full read, and a slower older read never undoes it', async () => {
+  const priorWindow = globalThis.window;
+  const fullReads: Array<(value: DesktopNeedsYou) => void> = [];
+  const roomReads: Array<{ room: string; includeBoardIntents: boolean; resolve: (value: unknown) => void }> = [];
+  Object.assign(globalThis, { window: { letagentsDesktop: { room: {
+    getNeedsYou: () => new Promise(resolve => fullReads.push(resolve)),
+    getNeedsYouRoom: (room: string, includeBoardIntents: boolean) => new Promise(resolve => roomReads.push({ room, includeBoardIntents, resolve })),
+  } } } });
+  const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null });
+  let inbox!: ReturnType<typeof useNeedsYou>;
+  const app = renderer.createApp({ setup() { inbox = useNeedsYou(); return () => null; } }); app.mount({});
+  const pendingIntent = { id: 'bi_1', taskId: 'task_1', actionType: 'task_close', status: 'pending', proposerActorLabel: 'LunarAmber', payload: { task_id: 'task_1', status: 'done' }, createdAt: '2026-09-30T05:30:00Z', expiresAt: null };
+  const withRoom = (records: typeof data.rooms[0]['records'], boardIntents = [pendingIntent]): DesktopNeedsYou => ({ ...data, rooms: [{ ...data.rooms[0], records, boardIntents }] });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  try {
+    const first = inbox.refresh(); fullReads[0](withRoom([record])); await first;
+    assert.equal(inbox.count.value, 1);
+    const stale = inbox.refresh();
+    // The manager approves the intent and the room's activity triggers a read of that room.
+    const roomRead = inbox.refreshRoom('ROOM');
+    await settle();
+    assert.deepEqual(roomReads.map(read => [read.room, read.includeBoardIntents]), [['room', true]], 'the room is found by any spelling of its identifier');
+    void inbox.refreshRoom('room');
+    roomReads[0].resolve({ records: [], truncated: false, tasks: [], boardIntents: [] });
+    await roomRead; await settle();
+    assert.equal(inbox.count.value, 0); assert.deepEqual(inbox.data.value?.rooms[0].boardIntents, []);
+    assert.equal(roomReads.length, 2, 'an activity during a read runs one more read afterwards');
+    roomReads[1].resolve({ records: [], truncated: false, tasks: [], boardIntents: [] }); await settle();
+    fullReads[1](withRoom([record])); await stale;
+    assert.equal(inbox.count.value, 0, 'a full read that started before the room read does not bring the request back');
+    assert.deepEqual(inbox.data.value?.rooms[0].boardIntents, []);
+    const newer = inbox.refresh(); fullReads[2](withRoom([record])); await newer;
+    assert.equal(inbox.count.value, 1, 'a full read that started later is newer');
+  } finally { app.unmount(); Object.assign(globalThis, { window: priorWindow }); }
+});
+
+test('Needs you re-reads a room a moment after its activity, at most once per gap per room', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.parse('2026-09-30T06:00:00Z') });
+  const { useNeedsYouRoomActivity } = await import('../src/composables/useNeedsYou');
+  const { effectScope, nextTick, ref } = await import('vue');
+  const reads: string[] = [];
+  const activity = ref({ connected: true, rooms: { room_1: { roomId: 'github.com/acme/app', latestMessageId: 'msg_10', latestMessageAt: null, working: [] } } as Record<string, { roomId: string; latestMessageId: string | null; latestMessageAt: string | null; working: Array<{ displayName: string }> }> });
+  const scope = effectScope();
+  scope.run(() => useNeedsYouRoomActivity(activity, async (room) => { reads.push(room); }, 3_000));
+  const post = async (id: string) => { activity.value = { ...activity.value, rooms: { room_1: { ...activity.value.rooms.room_1, latestMessageId: id } } }; await nextTick(); };
+  try {
+    await post('msg_11');
+    context.mock.timers.tick(0);
+    assert.deepEqual(reads, ['github.com/acme/app'], 'a new message re-reads its room at once');
+    await post('msg_12'); await post('msg_13');
+    context.mock.timers.tick(2_999);
+    assert.equal(reads.length, 1, 'a busy room waits out the gap');
+    context.mock.timers.tick(1);
+    assert.equal(reads.length, 2, 'and is read once for the burst');
+    activity.value = { ...activity.value, connected: false };
+    await nextTick(); context.mock.timers.tick(10_000);
+    assert.equal(reads.length, 2, 'an unchanged latest message reads nothing');
+  } finally { scope.stop(); }
+});
+
+test('Open room from the Inbox switches at once for a room the sidebar lists', async () => {
+  const { openInboxRoom } = await import('../src/domain/desktop-navigation');
+  const calls: string[] = [];
+  let snapshotDone!: () => void;
+  const navigation = {
+    findEntry: (room: string) => room === 'github.com/acme/app' ? { id: 'room:acme' } : null,
+    selectEntry: (entry: { id: string }) => { calls.push(`select ${entry.id}`); },
+    openBySnapshot: (room: string) => { calls.push(`snapshot ${room}`); return new Promise<void>(resolve => { snapshotDone = resolve; }); },
+  };
+  const opened = openInboxRoom('github.com/acme/app', navigation);
+  assert.deepEqual(calls, ['select room:acme'], 'the view changes before any room data loads');
+  await opened;
+  const unlisted = openInboxRoom('github.com/acme/archived', navigation);
+  assert.deepEqual(calls, ['select room:acme', 'snapshot github.com/acme/archived']);
+  snapshotDone(); await unlisted;
+});
+
+test('room re-reads pause while the window is hidden and catch up when it returns', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.parse('2026-09-30T06:00:00Z') });
+  const { useNeedsYouRoomActivity } = await import('../src/composables/useNeedsYou');
+  const { effectScope, nextTick, ref } = await import('vue');
+  const priorDocument = globalThis.document;
+  const listeners = new Set<() => void>();
+  const page = { hidden: true, addEventListener: (_name: string, listener: () => void) => listeners.add(listener),
+    removeEventListener: (_name: string, listener: () => void) => listeners.delete(listener) };
+  Object.assign(globalThis, { document: page });
+  const reads: string[] = [];
+  const activity = ref({ connected: true, rooms: { room_1: { roomId: 'github.com/acme/app', latestMessageId: 'msg_10', latestMessageAt: null, working: [] as Array<{ displayName: string }> } } });
+  const scope = effectScope();
+  scope.run(() => useNeedsYouRoomActivity(activity, async (room) => { reads.push(room); }, 3_000));
+  try {
+    activity.value = { ...activity.value, rooms: { room_1: { ...activity.value.rooms.room_1, latestMessageId: 'msg_11' } } };
+    await nextTick(); context.mock.timers.tick(10_000);
+    assert.deepEqual(reads, [], 'nothing is read while hidden');
+    page.hidden = false;
+    for (const listener of listeners) listener();
+    context.mock.timers.tick(0);
+    assert.deepEqual(reads, ['github.com/acme/app'], 'the room is read once the window is back');
+  } finally {
+    scope.stop();
+    assert.equal(listeners.size, 0, 'the visibility listener ends with the scope');
+    Object.assign(globalThis, { document: priorDocument });
+  }
+});
+
+test('a room an Inbox item opened reports a failed load once; other loads stay quiet', async () => {
+  const { inboxRoomOpenReporter } = await import('../src/domain/desktop-navigation');
+  const reported: unknown[] = [];
+  const opens = inboxRoomOpenReporter((error) => reported.push(error));
+  const fail = () => Promise.reject(new Error('room unavailable'));
+  opens.opened('room:a');
+  await assert.rejects(opens.load('room:a', fail), /room unavailable/, 'the failure still reaches its caller');
+  assert.deepEqual(reported.map(error => (error as Error).message), ['room unavailable']);
+  await assert.rejects(opens.load('room:a', fail));
+  await assert.rejects(opens.load('room:b', fail));
+  assert.equal(reported.length, 1, 'only the load the Inbox started is reported');
+  opens.opened('room:c');
+  assert.equal(await opens.load('room:c', async () => 'loaded'), 'loaded');
+  await assert.rejects(opens.load('room:c', fail));
+  assert.equal(reported.length, 1, 'a later load of the same room is not the Inbox\'s');
+});

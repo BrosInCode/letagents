@@ -50,6 +50,8 @@ export interface BoardGovernanceApiResponse {
     approval_token_hash: string | null;
     decided_at: string | null;
     expires_at: string | null;
+    /** Set once the request is sent to people to decide; absent from older servers. */
+    escalated_at?: string | null;
     created_at: string;
     updated_at: string;
   }>;

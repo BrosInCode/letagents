@@ -39,6 +39,12 @@ export type DesktopHostApproval = {
    * the record's status changes, and is accepted by no main-process operation.
    */
   dismissKey: string | null;
+  /**
+   * Opaque identity of the native request behind this presentation. It stays
+   * the same when main mints a new presentation ID for the same request, so
+   * lists keep one row per request. Null when no request can be referenced.
+   */
+  requestKey: string | null;
 };
 export type DesktopHostApprovalSnapshot = {
   available: boolean; approvals: DesktopHostApproval[]; error: string | null;

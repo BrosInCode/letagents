@@ -38,7 +38,10 @@
     <div v-else-if="!items.length && !selected" class="knowledge-empty"><span class="knowledge-empty-mark"><Inbox v-if="section === 'updates'" :size="26" aria-hidden="true" /><CircleCheck v-else :size="26" aria-hidden="true" /></span><h2>{{ emptyTitle }}</h2><p>{{ emptyDescription }}</p><button v-if="rooms.length && !hiddenByFilter" class="knowledge-button inbox-empty-action" @click="emit('update:rooms', [])">Show all rooms</button></div>
     <div v-else class="knowledge-workspace">
       <nav class="knowledge-queue" aria-label="Inbox items">
-        <TransitionGroup name="knowledge-list">
+        <!-- Rows only move with CSS. A row that leaves goes at once: a CSS leave
+          waits for animation frames, which stop while the window is hidden or
+          occluded, and the decided row would stay listed beside its successor. -->
+        <TransitionGroup name="knowledge-list" :css="false">
           <button v-for="item in items" :key="item.key" class="knowledge-queue-item" :data-selected="selected?.key === item.key" :aria-current="selected?.key === item.key ? 'true' : undefined" @click="selectItem(item)">
             <span class="knowledge-queue-top"><span class="knowledge-category" :data-kind="item.category">{{ inboxCategoryLabel(item.category) }}</span><time :datetime="item.timestamp" :title="date(item.timestamp)">{{ inboxRelativeTime(item.timestamp, now) }}</time></span>
             <strong>{{ item.title }}</strong><span class="knowledge-queue-preview">{{ item.body }}</span><span class="knowledge-room-name"><span class="knowledge-room-dot"></span>{{ item.roomName }}<ChevronRight :size="13" /></span>
@@ -47,6 +50,7 @@
       </nav>
       <article v-if="selected" :key="selected.key" class="knowledge-detail knowledge-enter" aria-labelledby="request-title">
         <div class="knowledge-detail-context">
+        <p v-if="outcome" class="inbox-outcome" :class="{ 'knowledge-success': outcome.sent }" role="status"><CircleCheck v-if="outcome.sent" :size="15" aria-hidden="true" />{{ outcome.text }}</p>
         <div class="knowledge-detail-top"><span class="knowledge-category" :data-kind="selected.category">{{ inboxCategoryLabel(selected.category) }}</span><button v-if="selected.roomIdentifier" class="knowledge-text-button" @click="openRoom(selected, 'room')">Open room <ArrowUpRight :size="14" /></button></div>
         <h2 id="request-title" ref="requestHeading" tabindex="-1">{{ selected.title }}</h2>
         <p class="knowledge-byline"><span>{{ selected.actor }}</span><span>{{ selected.roomName }}</span><time :datetime="selected.timestamp" :title="date(selected.timestamp)">{{ inboxRelativeTime(selected.timestamp, now) === 'Just now' ? 'Just now' : `${inboxRelativeTime(selected.timestamp, now)} ago` }}</time></p>
@@ -87,11 +91,12 @@ import type { DesktopRentalRequest, DesktopRoomThreadInboxPage } from '../../../
 import type { DesktopNeedsYou } from '../../../../../electron/ipc-types/knowledge.js';
 import type { AttentionNavigationIntent } from './room-shell/types';
 import { desktopBridgeUpgradeMessage, desktopIpc } from '../../../ipc/index.js';
-import { buildUniversalInbox, filterUniversalInbox, inboxCategoryLabel, inboxNavigationIntent, inboxRelativeTime, inboxSourceFailureKey, inboxSourceFailures, markInboxUpdatesRead, searchInboxRooms, undoInboxRead, type InboxReadChange, type InboxSection, type UniversalInboxItem } from './room-inbox/universal';
-import type { AgentAttentionItem } from './room-inbox/agent-attention';
+import { buildUniversalInbox, compareUniversalInboxItems, filterUniversalInbox, inboxCategoryLabel, inboxNavigationIntent, inboxRelativeTime, inboxSourceFailureKey, inboxSourceFailures, markInboxUpdatesRead, nextInboxSelection, searchInboxRooms, stableInboxOrder, undoInboxRead, type InboxReadChange, type InboxSection, type UniversalInboxItem } from './room-inbox/universal';
+import { isActionableHostApproval, type AgentAttentionItem } from './room-inbox/agent-attention';
+import type { KnowledgeRecord } from '../../../../../../../shared/room-knowledge.mjs';
 import type { HostApprovalSelection } from '../../../../../shared/host-approvals';
 import { decideHostApproval, hostApprovalRoom, refreshHostApprovals } from './room-chat/host-approvals';
-import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalFields, hostApprovalStatusLabel } from './room-chat/host-approval-presentation';
+import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_SETTLE_MS, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalFields, hostApprovalStatusLabel } from './room-chat/host-approval-presentation';
 import './room-knowledge.css';
 
 const props = withDefaults(defineProps<{ data: DesktopNeedsYou | null; attention?: AgentAttentionItem[]; loading: boolean; error: string; rentals?: DesktopRentalRequest[]; rentalError?: string; rooms?: string[]; section?: InboxSection; storageKey?: string }>(), { attention: () => [], rentals: () => [], rentalError: '', rooms: () => [], section: 'needs-you', storageKey: 'local' });
@@ -136,23 +141,56 @@ function setSourceNoticeDismissal(key: string) {
 function dismissSourceNotice() { setSourceNoticeDismissal(sourceNoticeKey.value); void nextTick(() => showNoticeButton.value?.focus({ preventScroll: true })); }
 function showSourceNotice() { setSourceNoticeDismissal(''); void nextTick(() => { if (sourceNotice.value) { sourceNotice.value.open = true; sourceNotice.value.querySelector('summary')?.focus(); } }); }
 function selectItem(item: UniversalInboxItem) {
-  selectedKey.value = item.key;
+  selectedKey.value = item.key; outcome.value = null;
   if (window.matchMedia('(max-width: 700px)').matches) void nextTick(() => { requestHeading.value?.focus({ preventScroll: true }); requestHeading.value?.scrollIntoView({ block: 'start' }); });
 }
 const sections: { id: InboxSection; label: string }[] = [{ id: 'needs-you', label: 'Needs you' }, { id: 'updates', label: 'Updates' }, { id: 'answered', label: 'Answered' }];
 const selectedKey = ref(''); const drafts = reactive<Record<string, string>>({}); const sending = ref(false); const sendError = ref('');
 const roomMenu = ref<HTMLDetailsElement | null>(null); const dismissals = ref<Record<string, string>>({}); const lastRead = ref<InboxReadChange[]>([]); const loadingOlder = ref(false);
 let alive = true;
-const allItems = computed(() => buildUniversalInbox(props.data, props.rentals, props.attention));
-const items = computed(() => filterUniversalInbox(allItems.value, props.section, props.rooms, dismissals.value));
+// An answer sent from here moves its request to Answered before the next refresh confirms it.
+const sentAnswers = ref<Record<string, KnowledgeRecord>>({});
+const allItems = computed(() => buildUniversalInbox(props.data, props.rentals, props.attention).map(item => {
+  const record = sentAnswers.value[item.key];
+  return record && item.record && record.version > item.record.version
+    ? { ...item, record, section: 'answered' as const, timestamp: record.response?.at || item.timestamp, fingerprint: String(record.version) } : item;
+}).sort(compareUniversalInboxItems));
+// The list as last displayed. Arrivals join around the selected row instead of
+// reshuffling it; a new section, room filter or account starts from the usual order.
+let shown: { scope: string; items: UniversalInboxItem[] } = { scope: '', items: [] };
+const items = computed(() => {
+  const scope = JSON.stringify([props.storageKey, props.section, [...props.rooms].sort()]);
+  const sorted = filterUniversalInbox(allItems.value, props.section, props.rooms, dismissals.value);
+  // Until a row is chosen, the first row is the one on screen.
+  const next = scope === shown.scope ? stableInboxOrder(shown.items.map(item => item.key), sorted, selectedKey.value || shown.items[0]?.key || null) : sorted;
+  shown = { scope, items: next };
+  return next;
+});
 // A decided approval leaves the queue but stays open with its result until you move on.
 const decided = ref<UniversalInboxItem | null>(null);
+// What the last decision did, shown on the item selected after it.
+const outcome = ref<{ text: string; sent: boolean } | null>(null);
 const selected = computed(() => items.value.find(item => item.key === selectedKey.value)
   ?? (decided.value?.key === selectedKey.value ? decided.value : items.value[0]));
+// A selected row that leaves the list (answered elsewhere, or its agent recovered) gives way to the row that took its place.
+watch(items, (list, previous) => {
+  const key = selectedKey.value;
+  if (!key || list.some(item => item.key === key) || decided.value?.key === key) return;
+  const next = previous ? nextInboxSelection(previous, list, key) : list[0];
+  selectedKey.value = next?.key ?? '';
+  holdApprovalDecisions(next);
+});
 // Tool approvals share the composer card's state, so a decision here or there shows on both.
 const selectedApproval = computed(() => selected.value?.attention?.kind === 'tool_approval' ? selected.value.attention.approval : null);
 const approvalState = computed(() => hostApprovalRoom(selected.value?.roomIdentifier));
-const approvalDisabled = computed(() => approvalState.value.busy !== null || approvalState.value.error !== null);
+// A request selected for you opens where the previous one was; its decisions wait until it settles.
+const approvalSettling = ref(false); let settleTimer: ReturnType<typeof setTimeout> | undefined;
+function holdApprovalDecisions(item: UniversalInboxItem | null | undefined) {
+  if (item?.attention?.kind !== 'tool_approval') return;
+  approvalSettling.value = true; clearTimeout(settleTimer);
+  settleTimer = setTimeout(() => { approvalSettling.value = false; }, HOST_APPROVAL_SETTLE_MS);
+}
+const approvalDisabled = computed(() => approvalState.value.busy !== null || approvalState.value.error !== null || approvalSettling.value);
 const sortedRooms = computed(() => [...(props.data?.rooms ?? [])].sort((a, b) => a.displayName.localeCompare(b.displayName)));
 const roomSearch = ref<HTMLInputElement | null>(null); const roomQuery = ref('');
 const matchingRooms = computed(() => searchInboxRooms(sortedRooms.value, roomQuery.value));
@@ -164,13 +202,14 @@ const emptyTitle = computed(() => props.loading ? 'Checking your rooms' : hidden
 const emptyDescription = computed(() => props.section === 'answered' ? 'Answered requests will appear here.' : props.section === 'updates' ? props.error || hasSourceFailure.value ? 'New activity will appear here. Some room data is still unavailable.' : 'Room updates will appear here as work progresses.' : 'Questions, decisions and approvals will appear when someone asks for your input.');
 function count(section: InboxSection) { return filterUniversalInbox(allItems.value, section, props.rooms, dismissals.value).length; }
 watch(() => selected.value?.key, () => { sendError.value = ''; });
+watch([() => props.section, () => props.rooms], () => { outcome.value = null; });
 // Moving to another item or section, or filtering its room out, lets the decided item go.
 watch([selectedKey, () => props.section, () => props.rooms], () => {
   const item = decided.value;
   if (item && (item.key !== selectedKey.value || (props.rooms.length && !props.rooms.includes(item.roomIdentifier ?? '')))) decided.value = null;
 });
 watch(() => props.storageKey, () => {
-  dismissals.value = {}; lastRead.value = []; dismissedSourceNotices.value = {}; selectedKey.value = ''; sendError.value = '';
+  dismissals.value = {}; lastRead.value = []; dismissedSourceNotices.value = {}; selectedKey.value = ''; sendError.value = ''; outcome.value = null; sentAnswers.value = {};
   for (const key of Object.keys(drafts)) delete drafts[key];
   try { const saved = JSON.parse(window.localStorage.getItem(`letagents-desktop:inbox-dismissals:${props.storageKey}`) || '{}'); if (saved && typeof saved === 'object' && !Array.isArray(saved)) dismissals.value = Object.fromEntries(Object.entries(saved).filter((entry): entry is [string, string] => typeof entry[1] === 'string')); } catch { /* Storage is optional. */ }
   try {
@@ -179,6 +218,13 @@ watch(() => props.storageKey, () => {
     const saved: unknown = raw.startsWith('{') ? JSON.parse(raw) : raw ? { '[]': raw } : {};
     if (saved && typeof saved === 'object' && !Array.isArray(saved)) dismissedSourceNotices.value = Object.fromEntries(Object.entries(saved).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
   } catch { /* Storage is optional. */ }
+}, { immediate: true });
+// The row on screen is the selected row, so an arrival can never take its place.
+// A request that appears in an empty list is selected for you, so it waits to settle too.
+watch([() => selected.value?.key, selectedKey], ([key, chosen]) => {
+  if (!key || chosen) return;
+  selectedKey.value = key;
+  holdApprovalDecisions(selected.value);
 }, { immediate: true });
 // A new failure in the current scope brings its notice back.
 watch([sourceNoticeKey, () => props.loading, () => props.storageKey, noticeScope], ([key, loading]) => { const dismissed = dismissedSourceNotices.value[noticeScope.value]; if (!loading && props.data && dismissed && key !== dismissed) setSourceNoticeDismissal(''); }, { immediate: true });
@@ -190,19 +236,30 @@ function roomMenuToggled() { if (roomMenu.value?.open) void nextTick(() => roomS
 function closeRoomMenu() { if (roomMenu.value) { roomMenu.value.open = false; roomMenu.value.querySelector('summary')?.focus(); } }
 function outsideRoomMenu(event: PointerEvent) { if (roomMenu.value?.open && event.target instanceof Node && !roomMenu.value.contains(event.target)) roomMenu.value.open = false; }
 onMounted(() => { document.addEventListener('pointerdown', outsideRoomMenu); clock = setInterval(() => { now.value = Date.now(); }, 30_000); });
-onBeforeUnmount(() => { alive = false; clearInterval(clock); document.removeEventListener('pointerdown', outsideRoomMenu); });
+onBeforeUnmount(() => { alive = false; clearInterval(clock); clearTimeout(settleTimer); document.removeEventListener('pointerdown', outsideRoomMenu); });
 function date(time: string) { return Number.isFinite(Date.parse(time)) ? new Date(time).toLocaleString() : ''; }
 function actionLabel(item: UniversalInboxItem) { if (item.taskId) return 'Open task'; return ({ thread: 'Open thread', github_failure: 'Open check', agent_blocked: 'Open agent', agent_offline: 'Open room activity', rental_request: 'Review rental request', agent_attention: 'Open diagnostics', board_intent: 'Review request' } as Record<string, string>)[item.category] || 'Open room'; }
 function openRoom(item: UniversalInboxItem, mode?: 'room' | 'source') {
   const intent = inboxNavigationIntent(item, mode);
   if (intent) emit('openRoom', intent); else emit('openRental');
 }
+/** After a decision goes through, select the next request in the place this one had; the last one stays open with its result. */
+function moveOnFrom(item: UniversalInboxItem, list: readonly UniversalInboxItem[], result: string, sent: boolean) {
+  const next = selectedKey.value === item.key ? nextInboxSelection(list, items.value, item.key) : null;
+  if (next) { selectedKey.value = next.key; outcome.value = { text: `${result}: ${item.title}`, sent }; holdApprovalDecisions(next); }
+  return Boolean(next);
+}
 async function decideApproval(decision: HostApprovalSelection) {
   const item = selected.value; const approval = selectedApproval.value;
-  if (!item?.roomIdentifier || !approval) return;
-  selectedKey.value = item.key; decided.value = item;
+  if (!item?.roomIdentifier || !approval || approvalSettling.value) return;
+  const list = items.value;
+  selectedKey.value = item.key; decided.value = item; outcome.value = null;
   await decideHostApproval(item.roomIdentifier, approval.id, decision);
-  if (alive) void nextTick(() => requestHeading.value?.focus({ preventScroll: true }));
+  if (!alive) return;
+  const state = hostApprovalRoom(item.roomIdentifier);
+  const status = state.approvals.find(entry => entry.id === approval.id)?.status ?? approval.status;
+  if (!state.error && !isActionableHostApproval({ status })) moveOnFrom(item, list, hostApprovalStatusLabel(status), status === 'decision_sent' || status === 'resolved');
+  void nextTick(() => requestHeading.value?.focus({ preventScroll: true }));
 }
 function refreshApproval() { if (selected.value?.roomIdentifier) void refreshHostApprovals(selected.value.roomIdentifier); }
 async function openSource(url: string) { try { await desktopIpc.app.openExternalUrl(url); } catch (error) { sendError.value = String(error); } }
@@ -219,9 +276,15 @@ async function respond() {
   sending.value = true; sendError.value = '';
   try {
     if (!desktopIpc.room.reviseKnowledge) throw new Error(desktopBridgeUpgradeMessage());
-    await desktopIpc.room.reviseKnowledge(item.roomIdentifier, 'attention', item.record.id, { expected_version: item.record.version, response: drafts[item.key] });
+    const list = items.value;
+    const answered = await desktopIpc.room.reviseKnowledge(item.roomIdentifier, 'attention', item.record.id, { expected_version: item.record.version, response: drafts[item.key] });
     if (!alive) return;
-    delete drafts[item.key]; selectedKey.value = item.key; emit('update:section', 'answered'); emit('refresh'); void nextTick(() => pageHeading.value?.focus({ preventScroll: true }));
+    delete drafts[item.key];
+    if (answered?.response) sentAnswers.value = { ...sentAnswers.value, [item.key]: answered };
+    emit('refresh');
+    if (selectedKey.value !== item.key) return; // Moved on while it was sending.
+    if (moveOnFrom(item, list, 'Answer sent', true)) { void nextTick(() => requestHeading.value?.focus({ preventScroll: true })); return; }
+    emit('update:section', 'answered'); void nextTick(() => pageHeading.value?.focus({ preventScroll: true }));
   } catch (error) { if (alive) sendError.value = error instanceof Error ? error.message : 'Unable to send your response.'; }
   finally { if (alive) sending.value = false; }
 }
