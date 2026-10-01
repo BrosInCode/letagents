@@ -1,10 +1,28 @@
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { formatAttentionResponse, reviseKnowledgeRecord, RoomKnowledgeError, type KnowledgeActor, type KnowledgeRecord } from '../../../shared/room-knowledge.mjs';
+import { db } from '../db/client.js';
 import * as knowledgeStore from '../db/room-knowledge.js';
+import { task_leases } from '../db/schema.js';
 import { emitProjectMessage } from '../server/events.js';
 
 export interface AttentionAnswerDeps {
   store?: Pick<typeof knowledgeStore, 'listRoomKnowledge' | 'getRoomKnowledge' | 'assertKnowledgeSource' | 'reviseRoomKnowledgeInTransaction'>;
   emitMessage?: typeof emitProjectMessage;
+  /** Which of these leases are still held in the room. */
+  heldLeaseIds?: (roomId: string, leaseIds: string[]) => Promise<string[]>;
+}
+
+const LEASE_ID = /\btl_[0-9a-f]{32}\b/g;
+
+async function heldLeaseIds(roomId: string, leaseIds: string[]): Promise<string[]> {
+  if (leaseIds.length === 0) return [];
+  const rows = await db.select({ id: task_leases.id }).from(task_leases).where(and(
+    eq(task_leases.room_id, roomId),
+    inArray(task_leases.id, leaseIds),
+    eq(task_leases.status, 'active'),
+    sql`(${task_leases.expires_at} IS NULL OR ${task_leases.expires_at} > NOW())`,
+  ));
+  return rows.map(row => row.id);
 }
 
 /**
@@ -37,7 +55,8 @@ export async function commitAttentionAnswer(
 /**
  * An agent that cannot clear a lease asks a person to, naming the lease. When
  * a person clears it, that is the answer: each open request in the room that
- * names the lease is answered for them, and the agent that asked is told.
+ * names the lease is answered for them, and the agent that asked is told. A
+ * request that names other leases too stays open until none of them is held.
  *
  * Best effort. The lease is already released; a request that cannot be
  * answered stays open for the person to answer. Returns the ids answered.
@@ -52,8 +71,10 @@ export async function answerRequestsNamingLease(
     const { records } = await store.listRoomKnowledge(input.room_id, 'attention');
     for (const record of records) {
       if (record.response || record.archived) continue;
-      if (![record.title, record.body, record.recommendation, record.unblocks].some(text => text.includes(input.lease_id))) continue;
+      const named = new Set([record.title, record.body, record.recommendation, record.unblocks].join('\n').match(LEASE_ID) ?? []);
+      if (!named.delete(input.lease_id)) continue;
       try {
+        if ((await (deps.heldLeaseIds ?? heldLeaseIds)(input.room_id, [...named])).length > 0) continue;
         const next = reviseKnowledgeRecord(record, { expected_version: record.version, response: input.response }, input.person);
         await store.assertKnowledgeSource(input.room_id, next.source_message_id);
         await commitAttentionAnswer(input.room_id, record, next, input.person, deps);

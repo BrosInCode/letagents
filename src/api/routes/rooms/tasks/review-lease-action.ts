@@ -135,8 +135,9 @@ export function registerTaskReviewLeaseActionRoute(
       // Fence the release on the review lease identity the actor-match above
       // observed: if it moved or is no longer active (concurrent release), the
       // CAS matches 0 rows and we conflict instead of recording a phantom
-      // release. Review leases are non-rebindable, so epoch is the static 0
-      // consistency guard.
+      // release. A review lease keeps its epoch when it follows its reviewer
+      // to a new session, so the session id is what catches that move and the
+      // epoch is a static consistency guard.
       const releasedLease = await releaseTaskLease(project.id, reviewLease.id, {
         kind: "review",
         expected_epoch: reviewLease.epoch,

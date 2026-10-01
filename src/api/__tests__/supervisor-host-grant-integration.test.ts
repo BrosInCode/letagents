@@ -1127,7 +1127,9 @@ test("a supervised agent started again after its runtime ended keeps the work an
   assert.equal((await h.adoptions(work.lease.id)).length, 1);
 });
 
-test("a supervised restart never takes work from another agent, another instance, or another grant", { skip: requiresDatabase }, async () => {
+// Seeds an agent whose session held work and a review and then ended, under
+// a grant that also covers a second agent of the same owner.
+async function endedHolder() {
   const lifecycle = await setupLifecycle();
   const { room, agent } = lifecycle;
   const sibling = await authDb!.registerAgentIdentity({ canonical_key: "owner/route-sibling", name: "route-sibling", display_name: "Route Sibling", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
@@ -1145,21 +1147,98 @@ test("a supervised restart never takes work from another agent, another instance
     assert.equal((await h.held(work.lease.id)).agent_session_id, crashed.session_id);
     assert.equal((await h.held(review.lease.id)).agent_session_id, crashed.session_id);
   };
+  return { h, sibling, pairGrant, crashed, untouched };
+}
 
-  // Another agent of the same owner, started under the same grant and given
-  // the name the ended session had.
-  const namesake = await h.mint("daemon:entry-sibling", { grant: pairGrant, agent_key: sibling.canonical_key, display_name: crashed.display_name });
+test("a supervised mint never takes another agent's work, even under the same instance id and name", { skip: requiresDatabase }, async () => {
+  const { h, sibling, pairGrant, crashed, untouched } = await endedHolder();
+  const namesake = await h.mint("daemon:entry-field-trail", { grant: pairGrant, agent_key: sibling.canonical_key, display_name: crashed.display_name });
   assert.equal(namesake.display_name, crashed.display_name);
   assert.equal(namesake.adopted_task_leases, undefined);
   await untouched();
-  // The same identity in another agent instance on the same host.
+});
+
+test("a supervised mint never takes work from another instance of the same agent", { skip: requiresDatabase }, async () => {
+  const { h, pairGrant, untouched } = await endedHolder();
   const otherInstance = await h.mint("daemon:entry-second-field-trail", { grant: pairGrant });
   assert.equal(otherInstance.adopted_task_leases, undefined);
   await untouched();
-  // The same agent instance started under another grant.
+});
+
+test("a supervised mint never takes work held under another grant", { skip: requiresDatabase }, async () => {
+  const { h, untouched } = await endedHolder();
   const elsewhere = await h.mint("daemon:entry-field-trail");
   assert.equal(elsewhere.adopted_task_leases, undefined);
   await untouched();
+});
+
+test("a supervised mint passes nothing from a session that was live when it began", { skip: requiresDatabase }, async () => {
+  const lifecycle = await setupLifecycle();
+  const { room, agent, grantResult } = lifecycle;
+  const h = await supervisedLeaseHarness(lifecycle);
+  // Two live sessions for one agent instance, as an older release could leave.
+  const common = {
+    room_id: room.id, session_kind: "worker" as const, runtime: "cursor", agent_key: agent.canonical_key,
+    agent_instance_id: "daemon:entry-duplicate", owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Cursor",
+    supervisor_grant_id: grantResult.grant.grant_id,
+  };
+  const older = await authDb!.createRoomAgentSession({ ...common, display_name: "Older", actor_label: "Older | Owner's agent | Cursor" });
+  await delay(5);
+  const newer = await authDb!.createRoomAgentSession({ ...common, display_name: "Newer", actor_label: "Newer | Owner's agent | Cursor" });
+  const work = await h.give(newer, "Session log", "work");
+  const review = await h.give(newer, "Keyboard shortcuts", "review");
+
+  // The mint keeps the older session and ends the newer one. What the newer
+  // one held was held by a live session when the mint began: it stays.
+  const minted = await h.mint("daemon:entry-duplicate");
+  assert.equal(minted.session_id, older.session_id);
+  assert.equal(minted.adopted_task_leases, undefined);
+  assert.equal((await h.held(work.lease.id)).agent_session_id, newer.session_id);
+  assert.equal((await h.held(review.lease.id)).agent_session_id, newer.session_id);
+  // Nor does it pass at a later mint: the receiving session is older than the end.
+  const again = await h.mint("daemon:entry-duplicate");
+  assert.equal(again.session_id, older.session_id);
+  assert.equal(again.adopted_task_leases, undefined);
+});
+
+test("a supervised mint skips a lease whose rows another write holds, and takes it up at the next mint", { skip: requiresDatabase }, async () => {
+  const lifecycle = await setupLifecycle();
+  const { room } = lifecycle;
+  const h = await supervisedLeaseHarness(lifecycle);
+  const crashed = await h.mint("daemon:entry-field-trail");
+  const work = await h.give(crashed, "Session log", "work");
+  const review = await h.give(crashed, "Keyboard shortcuts", "review");
+  await h.end(crashed);
+
+  // A review verdict's effect journal holds the review lease row, and a plain
+  // task update holds the work lease's task row, neither through the lease's
+  // advisory lock.
+  const blocker = await client!.pool.connect();
+  let recovered: any;
+  let elapsedMs = 0;
+  try {
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT 1 FROM task_leases WHERE id = $1 FOR UPDATE", [review.lease.id]);
+    await blocker.query("SELECT 1 FROM tasks WHERE room_id = $1 AND number = $2 FOR UPDATE", [room.id, Number(work.task.id.replace("task_", ""))]);
+    const started = Date.now();
+    recovered = await h.mint("daemon:entry-field-trail");
+    elapsedMs = Date.now() - started;
+  } finally {
+    await blocker.query("ROLLBACK").catch(() => undefined);
+    blocker.release();
+  }
+  assert.ok(elapsedMs < 1500, `the mint answered in ${elapsedMs} ms instead of waiting on the held rows`);
+  assert.notEqual(recovered.session_id, crashed.session_id);
+  assert.equal(recovered.adopted_task_leases, undefined);
+  assert.equal((await h.held(work.lease.id)).agent_session_id, crashed.session_id);
+  assert.equal((await h.held(review.lease.id)).agent_session_id, crashed.session_id);
+
+  // Once the rows are free, the next mint (here a credential refresh) moves both.
+  const refreshed = await h.mint("daemon:entry-field-trail");
+  assert.equal(refreshed.session_id, recovered.session_id);
+  assert.equal(refreshed.adopted_task_leases.length, 2);
+  assert.equal((await h.held(work.lease.id)).agent_session_id, recovered.session_id);
+  assert.equal((await h.held(review.lease.id)).agent_session_id, recovered.session_id);
 });
 
 test("stale supervisor worker fence is an explicit conflict, never an internal error", { skip: requiresDatabase }, async () => {

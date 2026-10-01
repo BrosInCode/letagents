@@ -21,15 +21,28 @@ import { coordinationId } from "../utils.js";
 // predecessor's credentials stop resolving and its lease-guarded writes fail
 // at authentication; `epoch` is the additional monotonic fence that makes
 // concurrent rebinds resolve to exactly one winner.
+//
+// The usual restart no longer needs it. When the supervisor registers the
+// same agent instance again under the same grant, the mint itself carries
+// the work and review leases of that instance's ended sessions over to the
+// new session (adoptTaskLeasesFromEndedSessionsTx, called from
+// createOrRotateSupervisorWorkerSession). The mint does not wait for a proof
+// of exit: the supervisor runs one process per agent instance, so a process
+// that outlived its ended session is the one the new session serves (a room
+// admin disconnecting a live supervised worker, then the supervisor minting
+// it fresh credentials, is that case). Rebind stays for a work lease the mint
+// skipped because another write held it, and keeps its own proof rule below.
 
 // The strict terminal vocabulary an attestation may carry, mirroring the
 // daemon adapter's ProviderTerminalCause — every value asserts an OBSERVED
 // process exit. Explicit revocation without an observed exit is deliberately
 // NOT attestable: an ended auth session can leave a live OS process writing
 // the reused workspace (the §4.5 two-writer hazard), so revocation may only
-// authorize a rebind once a durable process-terminal/workspace-fence proof
-// (P1b/P1d) can stand in for the observed exit. Free-form causes are rejected —
-// the attestation is normative evidence, not a log line.
+// authorize a REBIND once a durable process-terminal/workspace-fence proof
+// (P1b/P1d) can stand in for the observed exit. (The mint's carry-over above
+// does not consult attestations; it is bounded by the agent instance.)
+// Free-form causes are rejected — the attestation is normative evidence, not
+// a log line.
 export const REBIND_ATTESTATION_CAUSES = [
   "exited",         // clean process exit
   "killed",         // SIGKILL / force stop
@@ -127,9 +140,11 @@ export async function rebindTaskLease(input: RebindTaskLeaseInput): Promise<Rebi
 
       // Only WORK leases are rebindable. A review lease's authority cannot be
       // proven by the work-attempt/execution-generation terminal attestation the
-      // rebind consumes (§4.5), so the generic route must not silently move one —
-      // a dead reviewer's review lease is released, not rebound. Guard here so no
-      // caller can slip a non-work kind past the attestation model.
+      // rebind consumes (§4.5), so this route must not move one. A review lease
+      // follows its reviewer only when the supervisor registers the same agent
+      // instance again (the mint's carry-over); otherwise it is released.
+      // Guard here so no caller can slip a non-work kind past the attestation
+      // model.
       if (lease.kind !== ("work" as TaskLeaseKind)) {
         abort("kind_not_rebindable");
       }

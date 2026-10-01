@@ -18,6 +18,8 @@ interface RoomBoardControllerProps {
   tasks: DesktopTaskSummary[];
   presence: DesktopAgentPresence[];
   workers: WorkerSnapshot[];
+  /** The viewer is a room admin, who may clear any agent's lease. */
+  canEditTasks?: boolean;
 }
 
 type RoomBoardEmit = {
@@ -96,7 +98,7 @@ export function useRoomBoardController(
       actions.push(statusAction("done", "Mark Done", "primary", "done"));
       actions.push(statusAction("reopen", "Reopen", "neutral", "accepted"));
     }
-    if (work) {
+    if (work && props.canEditTasks) {
       actions.push({
         id: "release-work",
         label: "Remove assignment",
@@ -109,11 +111,13 @@ export function useRoomBoardController(
         })).task,
       });
     }
-    // Every reviewer's lease can be released on its own, and each action says
-    // whose it is: a task can have more than one, and one may belong to an
-    // agent's earlier session that can no longer release it.
+    // A room admin can release every reviewer's lease on its own, and each
+    // action says whose it is: a task can have more than one, and one may
+    // belong to an agent's earlier session that can no longer release it.
+    // Anyone else can release only the review their own worker holds.
     for (const review of reviews) {
       const ownReview = workerHoldsReview(review);
+      if (!ownReview && !props.canEditTasks) continue;
       const holder = compactPerson(review.holderLabel || review.agentKey);
       actions.push({
         id: `release-review:${review.id}`,

@@ -993,11 +993,12 @@ export async function createOrRotateSupervisorWorkerSession(
       isNull(room_agent_session_bearers.revoked_at),
     )).limit(1);
     if (!bearer) throw new Error("Worker bearer was not persisted.");
-    // A supervisor that starts its agent again after the agent's process
+    // A supervisor that starts its agent again after the agent's session
     // ended (a crash, a restart, a recovery) gets a new session. The work the
     // ended session held is this agent's, and it passes to this session now,
     // or the agent could not finish or release it and nobody but a room admin
-    // could clear it.
+    // could clear it. The duplicates ended above were live when this mint
+    // began, and keep what they held.
     const adoptedTaskLeases = await adoptTaskLeasesFromEndedSessionsTx(tx, {
       room_id: input.room_id,
       agent_key: input.agent_key,
@@ -1009,6 +1010,7 @@ export async function createOrRotateSupervisorWorkerSession(
         actor_label: session.actor_label,
         display_name: session.display_name,
         process_host_id: null,
+        created_at: session.created_at,
       },
       now: new Date().toISOString(),
     });

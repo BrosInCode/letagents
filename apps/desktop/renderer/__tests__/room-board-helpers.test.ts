@@ -285,9 +285,10 @@ describe("board task actions", () => {
         lease({ id: "lease_review_harbor", kind: "review", agentKey: "owner/harbor-marsh", agentSessionId: "session_harbor", holderLabel: "HarborMarsh | Owner's agent | Codex" }),
       ],
     });
-    const board = useRoomBoardController({ roomIdentifier: "room_1", tasks: [reviewed], presence: [], workers: [] }, () => undefined);
+    const board = useRoomBoardController({ roomIdentifier: "room_1", tasks: [reviewed], presence: [], workers: [], canEditTasks: true }, () => undefined);
     const releases = board.actionsFor(reviewed).filter((action) => action.id.startsWith("release-review"));
     assert.deepEqual(releases.map((action) => action.label), ["Release FieldTrail's review", "Release HarborMarsh's review"]);
+    assert.ok(board.actionsFor(reviewed).some((action) => action.id === "release-work"));
 
     const released: unknown[] = [];
     const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -312,6 +313,22 @@ describe("board task actions", () => {
     }
     assert.equal(board.errorMessage.value, null);
     assert.deepEqual(released, [{ room: "room_1", taskId: "task_1", action: "release", leaseId: "lease_review_retired" }]);
+  });
+
+  it("offers someone who is not a room admin only the release of their own worker's review", () => {
+    const reviewed = task({
+      status: "in_review",
+      activeLeases: [
+        lease({ id: "lease_work", kind: "work", agentKey: "owner/lunar-amber", agentSessionId: "session_lunar", holderLabel: "LunarAmber" }),
+        lease({ id: "lease_review_blake", kind: "review", agentKey: "codex/blake", agentSessionId: "session_blake", holderLabel: "Blake | Codex" }),
+        lease({ id: "lease_review_harbor", kind: "review", agentKey: "owner/harbor-marsh", agentSessionId: "session_harbor", holderLabel: "HarborMarsh" }),
+      ],
+    });
+    const releases = (workers: WorkerSnapshot[]) => useRoomBoardController(
+      { roomIdentifier: "room_1", tasks: [reviewed], presence: [], workers, canEditTasks: false }, () => undefined,
+    ).actionsFor(reviewed).filter((action) => action.id.startsWith("release-")).map((action) => action.id);
+    assert.deepEqual(releases([]), []);
+    assert.deepEqual(releases([worker()]), ["release-review:lease_review_blake"]);
   });
 });
 

@@ -71,6 +71,7 @@ test(
     await ask("dawnwinter-stale-review-lease", `Release review lease ${reviewLeaseId} on ${task.id}; its session ended.`, dawnCredentials);
     await ask("bayotter-stale-work-lease", `Release work lease ${workLeaseId} on ${task.id}.`, bayCredentials);
     await ask("dawnwinter-other-request", "Which reviewer should take the next task?", dawnCredentials);
+    await ask("dawnwinter-both-leases", `Release ${reviewLeaseId} and ${workLeaseId} so ${task.id} can be reassigned.`, dawnCredentials);
 
     // The owner clears the review lease from the task panel.
     const releasedReview = await reviewLeaseAction(task.id, { action: "release", lease_id: reviewLeaseId }, { sessionToken: adminSession });
@@ -82,12 +83,15 @@ test(
     assert.equal(open.get("dawnwinter-stale-review-lease")?.response?.actor.id, owner.id);
     assert.equal(open.get("bayotter-stale-work-lease")?.response, null, "a request about another lease stays open");
     assert.equal(open.get("dawnwinter-other-request")?.response, null);
+    assert.equal(open.get("dawnwinter-both-leases")?.response, null, "a request naming a lease still held stays open");
 
     // And the work lease.
     const releasedWork = await leaseAction(task.id, { action: "release", lease_id: workLeaseId }, { sessionToken: adminSession });
     assert.equal(releasedWork.status, 200, await releasedWork.clone().text());
     open = await requests();
     assert.equal(open.get("bayotter-stale-work-lease")?.response?.body, `Released the work lease ${workLeaseId} on ${task.id}.`);
+    assert.equal(open.get("dawnwinter-both-leases")?.response?.body, `Released the work lease ${workLeaseId} on ${task.id}.`,
+      "answered once every lease it names is released");
     assert.equal(open.get("dawnwinter-other-request")?.response, null);
     assert.deepEqual(await getActiveTaskLeases(room.id, task.id), []);
 

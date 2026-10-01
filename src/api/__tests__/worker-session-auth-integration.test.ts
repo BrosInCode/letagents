@@ -3015,20 +3015,20 @@ test("a lease that moved while it was being adopted is left where it went", take
   await pool!.query("UPDATE task_leases SET agent_session_id = $2, actor_label = $3, epoch = 0 WHERE id = $1",
     [work.lease.id, first.session_id, first.actor_label]);
 
-  // Between reading the lease and writing it, something else advanced it.
+  // Between reading the lease and locking its row, something else that does
+  // not take the lease's advisory lock advanced it. (Once the row is locked,
+  // nothing can.)
   const adopted = await db.transaction(async (tx) => {
-    const original = tx.update.bind(tx);
+    const original = tx.execute.bind(tx);
     let advanced = false;
     const racing = Object.assign(Object.create(tx), {
-      update: (table: unknown) => {
-        const builder = original(table as never);
-        if (advanced) return builder;
-        advanced = true;
-        return { set: (values: unknown) => ({ where: (condition: unknown) => ({ returning: async (fields: unknown) => {
+      execute: async (query: unknown) => {
+        const result = await original(query as never);
+        if (!advanced) {
+          advanced = true;
           await pool!.query("UPDATE task_leases SET epoch = epoch + 1 WHERE id = $1", [work.lease.id]);
-          return (builder.set(values as never).where(condition as never) as never as {
-            returning: (f: unknown) => Promise<unknown[]> }).returning(fields);
-        } }) }) };
+        }
+        return result;
       },
     });
     return adoptTaskLeasesFromEndedSessionsTx(racing, {
