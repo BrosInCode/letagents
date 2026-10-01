@@ -209,7 +209,8 @@ export interface ProviderActionPort {
   onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription>;
   probeControl?(handle: ProviderActionHandle): Promise<ControlProbeResult>;
   observePermissions?(handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, signal: AbortSignal): Promise<void>;
-  correlatePermissionTurn?(handle: ProviderActionHandle, request: ProviderPermissionRequest): Promise<ProviderPermissionCorrelation>;
+  /** `roomTurnId` is the durable turn the caller expects; a provider uses it only where its transcript proves it. */
+  correlatePermissionTurn?(handle: ProviderActionHandle, request: ProviderPermissionRequest, options?: { roomTurnId?: string }): Promise<ProviderPermissionCorrelation>;
   replyPermission?(handle: ProviderActionHandle, request: ProviderPermissionRequest, reply: "once" | "reject", options: ProviderPermissionDispatchOptions): Promise<ProviderPermissionReply>;
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
   /** Verify the selected polling runtime before an existing writer is stopped. */

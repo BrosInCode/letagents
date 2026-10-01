@@ -44,6 +44,13 @@
         <button type="button" class="desktop-composer-permission-detail" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
           @click="decideRoomHostApproval(approval.id, approval.retryDecision)">Retry recorded {{ approval.retryDecision === 'deny' ? 'denial' : 'approval' }}</button>
       </div>
+      <template v-else-if="approvalBlocksTurn(approval)">
+        <p>{{ approval.presentation.displayName }} is waiting on this request, which can't be answered here. Stopping the turn cancels it.</p>
+        <div class="desktop-composer-permission-actions">
+          <button type="button" class="desktop-composer-permission-deny"
+            @click="emit('stop-agent-turn', approval.presentation.agentId, approval.id)">Stop turn</button>
+        </div>
+      </template>
     </section>
     <p v-if="hostApprovalError" class="desktop-composer-permission-error" role="status">
       {{ hostApprovalError }} <button type="button" :disabled="hostApprovalLoading" @click="refreshRoomHostApprovals">Refresh approvals</button>
@@ -216,8 +223,8 @@ import type {
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
-import type { HostApprovalSelection } from "../../../../../../shared/host-approvals";
-import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalFields, hostApprovalHeading } from "./host-approval-presentation";
+import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
+import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalFields, hostApprovalHeading } from "./host-approval-presentation";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "./host-approval-dismissals";
 import { decideHostApproval, hostApprovalRoom, refreshHostApprovals } from "./host-approvals";
 import { roomMentionCandidates } from "../../../../domain/participants";
@@ -269,6 +276,7 @@ const emit = defineEmits<{
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
   "open-event-preview": [event: ComposerEventPreview];
   "dismiss-event-preview": [messageId: string];
+  "stop-agent-turn": [agentId: string, approvalId: string];
 }>();
 
 const maxComposerInputHeight = 156;
@@ -292,6 +300,8 @@ const dismissedHostApprovalIds = ref(new Set<string>());
 const rememberedHostApprovalDismissals = ref(readHostApprovalDismissals());
 const showApprovalHistory = ref(false);
 let approvalTimer: ReturnType<typeof setInterval> | null = null;
+// Moves with the approval refresh, so a request's grace can end without new data.
+const approvalNowMs = ref(Date.now());
 
 const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approval =>
   (approval.status === "pending" || approval.status === "decision_recorded"
@@ -300,8 +310,13 @@ const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approv
   && !(approval.dismissKey && rememberedHostApprovalDismissals.value.has(approval.dismissKey))));
 const attentionApprovalCount = computed(() => unresolvedHostApprovals.value.filter(approval =>
   approval.status === "uncertain" || approval.status === "unavailable").length);
+function approvalBlocksTurn(approval: DesktopHostApproval): boolean {
+  return hostApprovalBlocksTurn(approval, approvalRoom.value.firstSeenAt[approval.id], approvalNowMs.value);
+}
+// A request its agent is still waiting on stays in view, even when it cannot be decided here.
 const visibleHostApprovals = computed(() => unresolvedHostApprovals.value.filter(approval =>
-  showApprovalHistory.value || approval.status === "pending" || approval.status === "decision_recorded"));
+  showApprovalHistory.value || approval.status === "pending" || approval.status === "decision_recorded"
+  || approvalBlocksTurn(approval)));
 
 // An undecidable record stays dismissed across restarts until its status
 // changes. A live request is dismissed only for this session.
@@ -382,7 +397,7 @@ watch(
 
 onMounted(() => {
   void refreshRoomHostApprovals();
-  approvalTimer = setInterval(() => { void refreshRoomHostApprovals(); }, 3_000);
+  approvalTimer = setInterval(() => { approvalNowMs.value = Date.now(); void refreshRoomHostApprovals(); }, 3_000);
   void nextTick(syncTextareaHeight);
 });
 

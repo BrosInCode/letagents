@@ -1803,6 +1803,8 @@ test("startup recovery requeues only checkpoint-gated unstarted work and preserv
     const recovered = await store.head("exact-recovery");
     assert.equal(recovered?.state, "pending");
     assert.equal(recovered?.provider_turn_id, "provider:exact-turn", "recovery inspects the exact turn and never reruns it");
+    // Delivery also normalizes whenever one agent's lane restarts, with the daemon still running.
+    assert.equal(recovered?.last_error, "Room delivery restarted while awaiting the exact persisted provider turn; recovering it without rerunning.");
 
     const noReply = await store.head("no-reply-crash");
     assert.ok(noReply);

@@ -7,6 +7,7 @@ export const NO_REPLY_FAILURE = Object.freeze({
   outputLimit: "The model hit its output limit before writing a reply.",
   emptyAnswer: "The model finished without writing a reply.",
   contentFilter: "The model provider's content filter stopped the reply before any text was written.",
+  deniedTool: "The model stopped after one of its tool calls was denied, before it wrote a reply.",
 });
 
 export function noReplyFailureKind(detail) {

@@ -80,6 +80,7 @@ import {
   OpenCodeServerClient,
   parseOpenCodePermissionEvent,
   record,
+  turnUserMessageIds,
   type JsonRecord,
   type OpenCodeEvent,
   type OpenCodeMessage,
@@ -176,6 +177,36 @@ function classifyTurn(turnId: string, text: string | null): ProviderRoomTurnResu
   return { turnId, outcome: "reply", text: normalized, evidence: "transcript" };
 }
 
+/** OpenCode 1.18.20 `PermissionV1.RejectedError`, also the start of its `CorrectedError`. */
+const OPENCODE_PERMISSION_REJECTED = "The user rejected permission to use this specific tool call";
+/**
+ * A denied call no longer ends the turn (continue_loop_on_deny), so a model
+ * could retry what it was refused for as long as someone keeps refusing.
+ * This many steps in a row in which every tool call was denied end the turn
+ * as if OpenCode had stopped at the first. Steps, not calls: one decision
+ * rejects every request pending in the session, so a single step with
+ * parallel calls is one refusal.
+ */
+const MAX_CONSECUTIVE_DENIED_STEPS = 3;
+
+type TurnStep = {
+  created: number;
+  completed: boolean;
+  aborted: boolean;
+  text: boolean;
+  /** callID -> whether it was denied, or null while it has not finished. */
+  tools: Map<string, boolean | null>;
+};
+
+function deniedToolState(state: JsonRecord | null): boolean {
+  return state?.status === "error" && typeof state.error === "string"
+    && state.error.startsWith(OPENCODE_PERMISSION_REJECTED);
+}
+
+function deniedToolCall(message: OpenCodeMessage): boolean {
+  return (message.parts ?? []).some((part) => part.type === "tool" && deniedToolState(record(part.state)));
+}
+
 /**
  * Why a completed step that OpenCode ended with a finish reason has no answer.
  * OpenCode writes every text part before it marks the step completed, so a
@@ -186,7 +217,10 @@ function classifyTurn(turnId: string, text: string | null): ProviderRoomTurnResu
 function unansweredCompletionReason(message: OpenCodeMessage): string | null {
   if (messageText(message)) return null;
   const finish = messageFinishReason(message);
-  if (!finish || finish === "tool-calls") return null;
+  // OpenCode ends its loop on a step whose tool call was rejected, unless
+  // it runs with continue_loop_on_deny (runtimes started earlier).
+  if (finish === "tool-calls") return deniedToolCall(message) ? NO_REPLY_FAILURE.deniedTool : null;
+  if (!finish) return null;
   if (finish === "length") return NO_REPLY_FAILURE.outputLimit;
   if (finish === "content-filter") return NO_REPLY_FAILURE.contentFilter;
   return NO_REPLY_FAILURE.emptyAnswer;
@@ -1224,10 +1258,14 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     return result;
   }
 
-  /** Read-only native linkage; pending-request and durable admission checks remain separate. */
+  /**
+   * Read-only native linkage; pending-request and durable admission checks remain separate.
+   * `roomTurnId` is the caller's durable turn; it is used only when the transcript proves it.
+   */
   async correlatePermissionTurn(
     rawHandle: ProviderHandle,
     expectedRequest: OpenCodePermissionRequest,
+    options: { roomTurnId?: string } = {},
   ): Promise<OpenCodePermissionTurnCorrelation> {
     try {
       const handle = this.required(rawHandle);
@@ -1240,7 +1278,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           throw new Error("OpenCode permission correlation instance could not be verified.");
         }
       };
-      const result = await handle.client.correlatePermissionTurn(sessionId, expectedRequest, assertCurrentInstance);
+      const result = await handle.client.correlatePermissionTurn(sessionId, expectedRequest, assertCurrentInstance,
+        options.roomTurnId);
       assertCurrentInstance();
       return result;
     } catch {
@@ -1502,6 +1541,55 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const toolStatuses = new Map<string, string>();
     const assistantIds = new Set<string>();
     const typedAssistantIds = new Set<string>();
+    // The prompt, plus any message OpenCode added while compacting this turn;
+    // the steps after a compaction answer those, not the prompt.
+    const turnUserIds = new Set([turnId]);
+    const reexaminedAssistantIds = new Set<string>();
+    // A compaction summary is OpenCode's own record, not the agent's answer.
+    const summaryIds = new Set<string>();
+    // The turn's steps (compaction summaries aside), for the denial bound.
+    const steps = new Map<string, TurnStep>();
+    const noteStep = (info: JsonRecord | null): void => {
+      if (info?.role !== "assistant" || info.summary === true || typeof info.id !== "string") return;
+      const step = steps.get(info.id)
+        ?? { created: Number.MAX_SAFE_INTEGER, completed: false, aborted: false, text: false, tools: new Map() };
+      const time = record(info.time);
+      if (typeof time?.created === "number") step.created = time.created;
+      if (typeof time?.completed === "number" || info.error) step.completed = true;
+      if (record(info.error)?.name === "MessageAbortedError") step.aborted = true;
+      steps.set(info.id, step);
+    };
+    const noteStepPart = (messageId: string, part: JsonRecord | null): void => {
+      const step = steps.get(messageId);
+      if (!step || !part) return;
+      if (part.type === "text" && typeof part.text === "string" && part.text.trim()) step.text = true;
+      const callId = typeof part.callID === "string" ? part.callID : typeof part.id === "string" ? part.id : null;
+      if (part.type !== "tool" || !callId) return;
+      const state = record(part.state);
+      step.tools.set(callId, state?.status === "completed" || state?.status === "error" ? deniedToolState(state) : null);
+    };
+    const keepsRetryingDeniedCalls = (): boolean => {
+      const ordered = [...steps.entries()]
+        .sort(([leftId, left], [rightId, right]) => left.created - right.created || (leftId < rightId ? -1 : leftId > rightId ? 1 : 0))
+        .map(([, step]) => step);
+      let index = ordered.length - 1;
+      const newest = ordered[index];
+      // The step after the denied ones may still be starting, or may have
+      // been ended by an abort. Once it writes text or runs a tool, the model
+      // has moved on from what it was refused.
+      if (newest && (!newest.completed || newest.aborted || (!newest.text && newest.tools.size === 0))) {
+        if (newest.text || [...newest.tools.values()].some((denied) => denied === false)) return false;
+        index -= 1;
+      }
+      let deniedSteps = 0;
+      for (; index >= 0; index -= 1) {
+        const step = ordered[index]!;
+        const outcomes = [...step.tools.values()];
+        if (!step.completed || !outcomes.length || !outcomes.every((denied) => denied === true)) break;
+        deniedSteps += 1;
+      }
+      return deniedSteps >= MAX_CONSECUTIVE_DENIED_STEPS;
+    };
     // Attempt numbers restart when a later step of the same turn fails, so
     // the scheduled time is part of what makes a retry distinct.
     const retriesNotified = new Set<string>();
@@ -1569,20 +1657,29 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         handle.providerContinuationId,
         Math.max(64, this.maxAssistantSteps + 1),
       );
-      const assistants = assistantsFor(messages, turnId);
+      for (const id of turnUserMessageIds(messages, turnId)) turnUserIds.add(id);
+      const assistants = assistantsFor(messages, turnId, turnUserIds);
       for (const assistant of assistants) {
         const info = record(assistant.info);
         if (typeof info?.id === "string") assistantIds.add(info.id);
+        if (info?.summary === true && typeof info.id === "string") summaryIds.add(info.id);
         const exactSession = info?.sessionID === undefined || info.sessionID === handle.providerContinuationId;
         if (exactSession && typeof info?.id === "string") typedAssistantIds.add(info.id);
+        if (info?.summary === true) continue;
+        noteStep(info);
+        for (const part of assistant.parts ?? []) if (typeof info?.id === "string") noteStepPart(info.id, part);
         this.emitMessageEvidence(handle, assistant, emittedLengths, toolStatuses,
           exactSession ? turnId : undefined);
       }
       enforceStepBound(assistants.length);
-      const finalAssistant = finalAssistantFor(messages, turnId);
+      const finalAssistant = finalAssistantFor(messages, turnId, turnUserIds);
       const finalInfo = record(finalAssistant?.info);
       const exactSession = finalInfo?.sessionID === undefined || finalInfo.sessionID === handle.providerContinuationId;
-      const terminalError = safeProviderErrorMessage(finalAssistant);
+      // A turn ended for retrying denied calls reads back as that, not as the
+      // abort that ended it.
+      const deniedSettlement = exactSession && keepsRetryingDeniedCalls();
+      const terminalError = deniedSettlement && messageError(finalAssistant)?.name === "MessageAbortedError"
+        ? null : safeProviderErrorMessage(finalAssistant);
       if (terminalError) {
         const terminalResult = exactSession ? {
           turnId,
@@ -1598,9 +1695,10 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       const completed = finalAssistant && messageCompleted(finalAssistant) ? finalAssistant : null;
       // Only the turn's last step can settle it; an earlier finished step
       // with a later step still unfinished is not the turn's answer.
-      const unanswered = completed && exactSession && completed === assistants.at(-1)
-        ? unansweredCompletionReason(completed)
-        : null;
+      const unanswered = deniedSettlement ? NO_REPLY_FAILURE.deniedTool
+        : completed && exactSession && completed === assistants.at(-1)
+          ? unansweredCompletionReason(completed)
+          : null;
       const result: ProviderRoomTurnResult | null = !completed ? null
         : unanswered ? {
           turnId,
@@ -1614,7 +1712,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       return {
         assistantCount: assistants.length,
         result,
-        terminalOutcome: exactSession && result && messageFinishReason(finalAssistant) !== "tool-calls"
+        // A step settled by a denied tool call is the turn's last, despite its finish reason.
+        terminalOutcome: exactSession && result && (messageFinishReason(finalAssistant) !== "tool-calls" || unanswered)
           ? result.outcome === "unreadable" || result.outcome === "failed" ? result.outcome : "completed" : null,
       };
     };
@@ -1638,6 +1737,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         && (recovery || initial.assistantCount > 0)) {
         return resultAtSessionBoundary(initial);
       }
+      if (keepsRetryingDeniedCalls()) return await this.endDeniedTurn(handle, turnId);
 
       while (softBounds || Date.now() < deadline) {
         if (controller.signal.aborted) {
@@ -1654,18 +1754,30 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         const event = next.value;
         const properties = record(event.properties);
         const info = record(properties?.info);
-        if (info?.role === "assistant" && info.parentID === turnId
+        if (info?.role === "assistant" && typeof info.parentID === "string" && typeof info.id === "string"
+          && !turnUserIds.has(info.parentID) && info.sessionID === handle.providerContinuationId
+          && !reexaminedAssistantIds.has(info.id)) {
+          // A step in this session that answers another message: after a
+          // compaction, the transcript shows whether it is still this turn.
+          reexaminedAssistantIds.add(info.id);
+          await snapshot();
+        }
+        if (info?.role === "assistant" && typeof info.parentID === "string" && turnUserIds.has(info.parentID)
           && typeof info.id === "string") {
           assistantIds.add(info.id);
+          if (info.summary === true) summaryIds.add(info.id);
           if (info.sessionID === handle.providerContinuationId) typedAssistantIds.add(info.id);
+          noteStep(info);
           enforceStepBound(assistantIds.size);
         }
         if (event.type === "message.part.updated") {
           const part = record(properties?.part);
-          if (typeof part?.messageID === "string" && assistantIds.has(part.messageID)) {
+          if (typeof part?.messageID === "string" && assistantIds.has(part.messageID)
+            && !summaryIds.has(part.messageID)) {
             if (typeof part.id === "string" && typeof part.type === "string") {
               partTypes.set(part.id, part.type);
             }
+            noteStepPart(part.messageID, part);
             this.emitMessageEvidence(
               handle,
               { parts: [part] as OpenCodeMessage["parts"] },
@@ -1678,10 +1790,15 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         if (event.type === "message.part.delta"
           && typeof properties?.messageID === "string"
           && assistantIds.has(properties.messageID)
+          && !summaryIds.has(properties.messageID)
           && properties?.field === "text"
           && typeof properties.partID === "string"
           && typeof properties.delta === "string") {
           const partId = properties.partID;
+          if (partTypes.get(partId) === "text") {
+            const step = steps.get(properties.messageID);
+            if (step) step.text = true;
+          }
           emittedLengths.set(
             partId,
             (emittedLengths.get(partId) ?? 0) + properties.delta.length,
@@ -1693,6 +1810,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
             partTypes.get(partId) === "reasoning",
           );
         }
+        // A step counts for the bound once it has ended, with every call it made.
+        if (keepsRetryingDeniedCalls()) return await this.endDeniedTurn(handle, turnId);
         if (!eventReferencesSession(event, handle.providerContinuationId)) continue;
         if (event.type === "session.status") {
           const retry = openCodeRetryStatus(properties?.status);
@@ -1722,6 +1841,26 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       signal?.removeEventListener("abort", detach);
       await events.return?.(undefined).catch(() => undefined);
     }
+  }
+
+  /**
+   * Ends a turn whose model keeps retrying tool calls that are denied. It
+   * settles as the turn that stopped at its first denial would, so a task
+   * owner's single follow-up turn is told the call was denied.
+   */
+  private async endDeniedTurn(handle: OpenModelHandle, turnId: string): Promise<ProviderRoomTurnResult> {
+    try {
+      await handle.client.abort(handle.providerContinuationId);
+      await this.waitForSessionIdle(handle, this.turnControlTimeoutMs);
+    } catch (error) {
+      throw new OpenCodeBoundedTurnError(
+        "OpenCode kept retrying denied tool calls, and its native abort could not be verified; the exact turn will not be rerun automatically.",
+        { cause: error },
+      );
+    }
+    this.emitTurnTerminal(handle, turnId, "failed");
+    return { turnId, providerContinuationId: handle.providerContinuationId, outcome: "failed", text: null,
+      evidence: "transcript", error: NO_REPLY_FAILURE.deniedTool };
   }
 
   private async abortBoundedTurn(
