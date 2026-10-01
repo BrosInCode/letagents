@@ -254,3 +254,12 @@ export function deriveTaskTitle(title: string, description: string): string {
     ? `${firstLine.slice(0, 93).trimEnd()}...`
     : firstLine;
 }
+
+/**
+ * Whether the viewer manages this room's board: edits tasks and clears any
+ * agent's lease. A room admin does; so does whoever owns a local room, which
+ * has no roles of its own.
+ */
+export function canManageRoomBoard(role: string | null | undefined): boolean {
+  return role === "admin" || role === "local";
+}

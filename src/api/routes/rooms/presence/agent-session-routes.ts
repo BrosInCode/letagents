@@ -871,6 +871,9 @@ export function registerAgentSessionRoutes(
         room_id: project.id,
         owner_account_id: ownerAccountScope,
         credential_fence: credentialFence,
+        // A room admin disconnecting an agent takes its work away: its leases
+        // stay with this session to be released, not passed to its next one.
+        end_reason: hasSelfCredentials ? null : "room_admin",
       });
       if (!endedSession) {
         res.status(404).json({ error: "Agent session not found" });

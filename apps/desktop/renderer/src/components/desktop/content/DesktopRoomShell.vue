@@ -152,7 +152,7 @@
         :room-identifier="room.identifier"
         :tasks="tasks"
         :board-settings="boardSettings"
-        :can-edit-tasks="room.role === 'admin'"
+        :can-edit-tasks="canManageRoomBoard(room.role)"
         :presence="roomPresence"
         :workers="workers"
         :supervisor-entries="supervisorEntries"
@@ -443,6 +443,7 @@ import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
+import { canManageRoomBoard } from "./room-board/board-presentation";
 import RoomChatView from "./RoomChatView.vue";
 import RoomEventsView from "./RoomEventsView.vue";
 import RoomDetailsView from "./RoomDetailsView.vue";

@@ -22,6 +22,7 @@ import {
   respondWithBadRequest,
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
+import { answerRequestsNamingLease } from "../../../rooms/attention-answers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import {
   normalizeTaskActorInstanceId,
@@ -457,6 +458,15 @@ export function registerTaskLeaseActionRoute(
           next_task_status: nextTask.status,
         },
       });
+      // A person clearing a lease answers the requests that asked for it.
+      if (action === "release" && desktopHumanWrite && req.sessionAccount) {
+        await answerRequestsNamingLease({
+          room_id: project.id,
+          lease_id: releasedLease.id,
+          response: `Released the work lease ${releasedLease.id} on ${task.id}.`,
+          person: { id: req.sessionAccount.account_id, label: req.sessionAccount.login, kind: "human" },
+        });
+      }
 
       const taskWithDetails = await attachTaskDetails(project.id, nextTask);
       deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });

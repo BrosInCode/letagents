@@ -499,6 +499,12 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
             worker_bearer_expires_at: created.bearer.expires_at,
             worker_bearer_generation: created.bearer.generation,
             worker_bearer_capabilities: created.bearer.capabilities,
+            // Said only when there is something to say, as registration does.
+            ...(created.adopted_task_leases.length > 0 ? {
+              adopted_task_leases: created.adopted_task_leases.map((lease) => ({
+                lease_id: lease.lease_id, task_id: lease.task_id, kind: lease.kind,
+              })),
+            } : {}),
           });
           return;
         } catch (error) {

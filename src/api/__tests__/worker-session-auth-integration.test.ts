@@ -2537,6 +2537,29 @@ test("an agent that starts again holds the leases its old session held", takeove
   });
 });
 
+test("a room admin's disconnect takes an agent's work away; its own disconnect does not", takeoverTest, async () => {
+  const h = await takeoverHarness({ realCoordination: true });
+  const leases = await leaseHarness(h);
+  const disconnect = h.handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/disconnect$/");
+  const key = await h.addIdentity("EmmyMay/mossdawn");
+  const body = { actor_key: key, display_name: "MossDawn", requested_base_display_name: "MossDawn", agent_instance_id: "process-1" };
+  const first = (await h.register(body)).session;
+  const work = await leases.give(first, "Fix the flaky test", "work", "assigned");
+
+  // The agent disconnects itself and registers again: its work comes with it.
+  const left = await invoke(disconnect, ownerTokenRequest(sessionCredentials(first), { params: { 0: h.room.id, 1: first.session_id } }));
+  assert.equal(left.statusCode, 200, JSON.stringify(left.body));
+  const back = (await h.register(body)).session;
+  assert.equal((await leases.held(work.lease.id)).agent_session_id, back.session_id);
+
+  // A room admin disconnects it: the work stays behind for the admin to release.
+  const removed = await invoke(disconnect, ownerTokenRequest({}, { params: { 0: h.room.id, 1: back.session_id } }));
+  assert.equal(removed.statusCode, 200, JSON.stringify(removed.body));
+  const again = (await h.register(body)).session;
+  assert.notEqual(again.session_id, back.session_id);
+  assert.equal((await leases.held(work.lease.id)).agent_session_id, back.session_id);
+});
+
 test("work is not taken from an agent that was only silent, or that only disconnected", takeoverTest, async () => {
   const h = await takeoverHarness({ realCoordination: true });
   const leases = await leaseHarness(h);
@@ -3015,20 +3038,20 @@ test("a lease that moved while it was being adopted is left where it went", take
   await pool!.query("UPDATE task_leases SET agent_session_id = $2, actor_label = $3, epoch = 0 WHERE id = $1",
     [work.lease.id, first.session_id, first.actor_label]);
 
-  // Between reading the lease and writing it, something else advanced it.
+  // Between reading the lease and locking its row, something else that does
+  // not take the lease's advisory lock advanced it. (Once the row is locked,
+  // nothing can.)
   const adopted = await db.transaction(async (tx) => {
-    const original = tx.update.bind(tx);
+    const original = tx.execute.bind(tx);
     let advanced = false;
     const racing = Object.assign(Object.create(tx), {
-      update: (table: unknown) => {
-        const builder = original(table as never);
-        if (advanced) return builder;
-        advanced = true;
-        return { set: (values: unknown) => ({ where: (condition: unknown) => ({ returning: async (fields: unknown) => {
+      execute: async (query: unknown) => {
+        const result = await original(query as never);
+        if (!advanced) {
+          advanced = true;
           await pool!.query("UPDATE task_leases SET epoch = epoch + 1 WHERE id = $1", [work.lease.id]);
-          return (builder.set(values as never).where(condition as never) as never as {
-            returning: (f: unknown) => Promise<unknown[]> }).returning(fields);
-        } }) }) };
+        }
+        return result;
       },
     });
     return adoptTaskLeasesFromEndedSessionsTx(racing, {
