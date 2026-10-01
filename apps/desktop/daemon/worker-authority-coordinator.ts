@@ -658,7 +658,7 @@ export class WorkerAuthorityCoordinator {
     if (publishes && (announcement !== "when_needed" || !exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
       try {
         const accepted = await this.pacedAuthority(input.entry_id, normalizedApiUrl,
-          () => this.options.activity.publishNative(input.entry_id, "native_harness.bound", "working"));
+          () => this.options.activity.publishNative(input.entry_id, "native_harness.bound", boundAnnouncementStatus(handle)));
         if (announcement === "require_accepted" && !accepted) throw new Error("The room did not accept the bound announcement.");
       } catch (error) {
         // The binding is already durable and the checks below still decide
@@ -709,7 +709,8 @@ export class WorkerAuthorityCoordinator {
             : "supervised worker session bound",
         },
         ...(clearsCoordinationLatch
-          ? { observed_state: handle?.observedState === "idle" ? "idle" as const : "working" as const,
+          // No provider handle means no work, as in the bound announcement.
+          ? { observed_state: handle && handle.observedState !== "idle" ? "working" as const : "idle" as const,
             condition: "none" as const, last_error: null }
           : {}),
         ready_reached_at: resolveReadyReachedAt(current, clearsCoordinationLatch, new Date().toISOString()),
@@ -1926,4 +1927,13 @@ export class WorkerAuthorityCoordinator {
       return { checkpointed: true, entry_id: input.entry_id, room_cursor: input.room_cursor };
     }));
   }
+}
+
+/**
+ * Binding a worker proves the room connection, not that a turn is running.
+ * Report what the provider is doing, as the regular heartbeat does, so a
+ * rebind cannot show an idle agent as working.
+ */
+export function boundAnnouncementStatus(handle: Pick<ProviderActionHandle, "observedState"> | undefined): "working" | "idle" {
+  return handle?.observedState === "working" ? "working" : "idle";
 }
