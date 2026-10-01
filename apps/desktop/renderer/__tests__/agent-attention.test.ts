@@ -290,11 +290,11 @@ test("agent attention sorts with human requests in Needs you and opens where the
   const data = needsYou({ rooms: [{ roomIdentifier: "room-a", displayName: "fern-reef", truncated: false, tasks: [],
     records: [{ ...record, created_at: at(900_000) }] }] });
   const needs = filterUniversalInbox(buildUniversalInbox(data, [], items), "needs-you", [], {});
-  assert.deepEqual(needs.map(item => item.category), ["agent_attention", "decision", "board_intent", "tool_approval"],
-    "one queue, ordered by when each item started waiting");
+  assert.deepEqual(needs.map(item => item.category), ["agent_attention", "board_intent", "tool_approval", "decision"],
+    "blocked agent work leads, longest-waiting first; requests follow");
   assert.ok(needs.every(item => item.roomName === "fern-reef"));
 
-  const [agentItem, , intentItem, approvalItem] = needs;
+  const [agentItem, intentItem, approvalItem] = needs;
   assert.deepEqual(inboxNavigationIntent(agentItem), { roomIdentifier: "room-a", taskId: undefined, agentEntryId: "supervised_copper" });
   assert.deepEqual(inboxNavigationIntent(intentItem), { roomIdentifier: "room-a", taskId: undefined, boardRequests: true });
   assert.deepEqual(inboxNavigationIntent(approvalItem, "room"), { roomIdentifier: "room-a", approvals: true });
