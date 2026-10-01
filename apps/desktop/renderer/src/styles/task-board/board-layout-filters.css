@@ -196,7 +196,8 @@
 }
 
 .desktop-board-search:focus-within {
-  border-color: color-mix(in srgb, var(--blue) 60%, var(--border-strong));
+  /* The border is the focus indicator here, so it is full blue, as on the filters beside it. */
+  border-color: var(--blue);
   background: var(--bg-elevated);
   box-shadow: 0 0 0 3px var(--blue-dim);
 }
@@ -217,6 +218,14 @@
   color: var(--text);
   font: inherit;
   font-size: 0.78rem;
+}
+
+/*
+ * The search box is the focus ring. Without this, the panel-wide control
+ * outline also draws a square ring on the input inside the rounded box.
+ */
+.desktop-board-panel .desktop-board-search input:focus-visible {
+  outline: 0;
 }
 
 .desktop-board-search input::placeholder {
@@ -428,6 +437,10 @@
 @media (prefers-contrast: more) {
   .desktop-board-panel :is(button, a, input, textarea, select, [tabindex]):focus-visible {
     outline-width: 3px;
+  }
+
+  .desktop-board-search:focus-within {
+    box-shadow: 0 0 0 3px var(--blue);
   }
 }
 
