@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { parse, compileScript, compileTemplate } from "@vue/compiler-sfc";
@@ -138,6 +138,7 @@ let RoomComposer: object;
 let RoomComposerEventChips: object;
 let messageDrafts: typeof import("../src/domain/desktop-message-drafts");
 let attentionResponse: typeof import("../src/domain/attention-response");
+let hostApprovals: typeof import("../src/components/desktop/content/room-chat/host-approvals");
 
 async function attachClientRender(component: object, modulePath: string): Promise<void> {
   const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
@@ -165,6 +166,7 @@ before(async () => {
   messageDrafts = await vite.ssrLoadModule("/renderer/src/domain/desktop-message-drafts.ts");
   // The same module instance DesktopChatMessage injects from.
   attentionResponse = await vite.ssrLoadModule("/renderer/src/domain/attention-response.ts") as typeof attentionResponse;
+  hostApprovals = await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/host-approvals.ts");
   [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomComposerEventChips] = await Promise.all([
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue").then((module) => module.default),
@@ -186,6 +188,8 @@ before(async () => {
 });
 
 after(async () => { await vite?.close(); });
+// Approvals are shared app-wide; each test starts from a desktop that has listed none.
+beforeEach(() => { hostApprovals?.resetHostApprovals(); });
 
 function composerProps() {
   return { attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], participants: [],

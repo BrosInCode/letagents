@@ -35,16 +35,7 @@ export function mapDesktopBoardGovernanceSnapshot(
       lastSeenAt: candidate.last_seen_at,
       isActiveManager: candidate.is_active_manager,
     })),
-    pendingIntents: data.pending_intents.map((intent): DesktopBoardIntentSummary => ({
-      id: intent.id,
-      taskId: intent.task_id,
-      actionType: intent.action_type,
-      status: intent.status,
-      proposerActorLabel: intent.proposer_actor_label,
-      payload: intent.payload,
-      createdAt: intent.created_at,
-      expiresAt: intent.expires_at,
-    })),
+    pendingIntents: data.pending_intents.map(mapDesktopBoardIntent),
     pendingIntentCount: data.pending_intent_count,
     audit: data.audit.map((entry): DesktopBoardGovernanceAuditEntry => ({
       id: entry.id,
@@ -61,6 +52,21 @@ export function mapDesktopBoardGovernanceSnapshot(
       message: warning.message,
     })),
     capabilities: mapCapabilities(data.capabilities),
+  };
+}
+
+export function mapDesktopBoardIntent(
+  intent: BoardGovernanceApiResponse["pending_intents"][number],
+): DesktopBoardIntentSummary {
+  return {
+    id: intent.id,
+    taskId: intent.task_id,
+    actionType: intent.action_type,
+    status: intent.status,
+    proposerActorLabel: intent.proposer_actor_label,
+    payload: intent.payload,
+    createdAt: intent.created_at,
+    expiresAt: intent.expires_at,
   };
 }
 

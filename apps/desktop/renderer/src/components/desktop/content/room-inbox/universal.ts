@@ -2,7 +2,11 @@ import type { DesktopRentalRequest } from '../../../../../../electron/ipc-types.
 import type { DesktopNeedsYou } from '../../../../../../electron/ipc-types/knowledge.js';
 import type { KnowledgeRecord } from '../../../../../../../../shared/room-knowledge.mjs';
 import { buildDesktopInboxItems, desktopInboxItemFingerprint, type DesktopInboxItem } from './items';
+import type { AgentAttentionItem } from './agent-attention';
+import type { AttentionNavigationIntent } from '../room-shell/types';
 import { mergeDesktopManagedAgentPresence } from '../../../../domain/managed-agents';
+import { hostApprovalFields, hostApprovalHeading } from '../room-chat/host-approval-presentation';
+import { readableIntentBody } from '../room-board/governance-presentation';
 
 export type InboxSection = 'needs-you' | 'updates' | 'answered';
 export interface UniversalInboxItem {
@@ -17,12 +21,17 @@ export interface UniversalInboxItem {
   actor: string;
   record?: KnowledgeRecord;
   activity?: DesktopInboxItem;
+  attention?: AgentAttentionItem;
   taskId?: string;
   fingerprint: string;
 }
 
-export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: DesktopRentalRequest[] = []): UniversalInboxItem[] {
+export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: DesktopRentalRequest[] = [], attention: readonly AgentAttentionItem[] = []): UniversalInboxItem[] {
   const result: UniversalInboxItem[] = [];
+  const roomNames = new Map((data?.rooms ?? []).map(room => [room.roomIdentifier, room.displayName]));
+  for (const item of attention) result.push({ key: item.key, roomIdentifier: item.roomIdentifier,
+    roomName: roomNames.get(item.roomIdentifier) || item.roomIdentifier, section: 'needs-you', category: item.kind,
+    timestamp: item.timestamp, attention: item, fingerprint: item.timestamp, ...agentAttentionText(item) });
   for (const room of data?.rooms ?? []) {
     const scope = { roomIdentifier: room.roomIdentifier, roomName: room.displayName };
     for (const record of room.records) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, record.id]),
@@ -54,10 +63,40 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
   });
 }
 
+function agentAttentionText(item: AgentAttentionItem): Pick<UniversalInboxItem, 'title' | 'body' | 'actor'> {
+  if (item.kind === 'tool_approval') return { title: hostApprovalHeading(item.approval), actor: item.approval.presentation.displayName,
+    body: hostApprovalFields(item.approval.presentation).map(field => `${field.label}: ${field.value}`).join(' · ') };
+  if (item.kind === 'agent_attention') return { title: `${item.agentName} · Needs attention`, body: item.summary, actor: item.agentName };
+  const create = item.intent.actionType === 'task_create';
+  return { title: create ? 'Create task' : readableIntentBody(item.intent),
+    body: `${create ? `${readableIntentBody(item.intent)}\n` : ''}Waiting for a Board Manager decision. As a room admin, you can decide it.`,
+    actor: item.intent.proposerActorLabel?.split('|')[0]?.trim() || 'A participant' };
+}
+
+/** Where an item opens: its source message, the room, or (by default) the exact place to act. */
+export function inboxNavigationIntent(item: UniversalInboxItem, mode?: 'room' | 'source'): AttentionNavigationIntent | null {
+  if (!item.roomIdentifier) return null;
+  const intent: AttentionNavigationIntent = { roomIdentifier: item.roomIdentifier };
+  if (mode === 'source') intent.messageId = item.record?.source_message_id ?? undefined;
+  else if (!mode) {
+    intent.taskId = item.taskId;
+    if (item.activity?.kind === 'thread') intent.threadRootId = item.activity.root.id;
+    if (item.activity?.kind === 'github_failure') { intent.eventId = item.activity.event.id; intent.eventUrl = item.activity.url ?? undefined; }
+    if (item.activity?.kind === 'agent_blocked') intent.reasoningSessionId = item.activity.session.id;
+    if (item.activity?.kind === 'agent_offline') intent.activity = true;
+    if (item.attention?.kind === 'agent_attention') intent.agentEntryId = item.attention.entry.id;
+    if (item.attention?.kind === 'board_intent') intent.boardRequests = true;
+  }
+  // An approval card is docked above the room composer.
+  if (item.attention?.kind === 'tool_approval' && mode !== 'source') intent.approvals = true;
+  return intent;
+}
+
 export function inboxCategoryLabel(category: string): string {
   return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', blocked: 'Blocked task',
     in_review: 'Task review', done: 'Completed', merged: 'Merged', thread: 'Unread replies', github_failure: 'Failed check',
-    agent_blocked: 'Blocked agent', agent_offline: 'Agent offline', rental_request: 'Rental request' } as Record<string, string>)[category] || category;
+    agent_blocked: 'Blocked agent', agent_offline: 'Agent offline', rental_request: 'Rental request',
+    tool_approval: 'Tool approval', agent_attention: 'Stuck agent', board_intent: 'Board request' } as Record<string, string>)[category] || category;
 }
 
 export function filterUniversalInbox(items: UniversalInboxItem[], section: InboxSection, rooms: string[], dismissals: Record<string, string>): UniversalInboxItem[] {

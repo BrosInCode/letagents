@@ -5,13 +5,14 @@ import type {
   DesktopBoardGovernanceSetModeInput,
   DesktopBoardGovernanceSnapshot,
   DesktopBoardIntentDecisionInput,
+  DesktopBoardIntentSummary,
 } from "../../ipc-types/board-governance.js";
 import { apiFetch } from "../auth.js";
 import {
   cloudRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
 } from "./local-store.js";
-import { mapDesktopBoardGovernanceSnapshot } from "./board-governance/mappers.js";
+import { mapDesktopBoardGovernanceSnapshot, mapDesktopBoardIntent } from "./board-governance/mappers.js";
 import type { BoardGovernanceApiResponse } from "./board-governance/payloads.js";
 
 export { mapDesktopBoardGovernanceSnapshot } from "./board-governance/mappers.js";
@@ -36,6 +37,18 @@ export async function getDesktopBoardGovernance(
     `/rooms/${encodeURIComponent(apiRoomIdentifier)}/board-governance`,
   );
   return mapDesktopBoardGovernanceSnapshot(data);
+}
+
+/** Pending intents alone, for the Inbox. Local rooms have no board governance. */
+export async function listDesktopPendingBoardIntents(
+  roomIdentifier: string,
+): Promise<DesktopBoardIntentSummary[]> {
+  const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
+  if (storage.effectiveMode === "local") return [];
+  const data = await apiFetch<{ intents: BoardGovernanceApiResponse["pending_intents"] }>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifierForStorage(storage, roomIdentifier))}/board-intents?status=pending`,
+  );
+  return data.intents.map(mapDesktopBoardIntent);
 }
 
 export async function assignDesktopBoardManager(

@@ -106,7 +106,7 @@ const props = defineProps<{
   roomIdentifier: string;
   roomDisplayName?: string;
   requestVersion: number;
-  initialTab?: "overview" | "work" | "workspace";
+  initialTab?: "overview" | "work" | "workspace" | "diagnostics";
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;

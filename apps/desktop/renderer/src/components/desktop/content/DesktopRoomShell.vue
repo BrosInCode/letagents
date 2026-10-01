@@ -157,6 +157,7 @@
         :workers="workers"
         :supervisor-entries="supervisorEntries"
         :selected-task-id="boardSelectedTaskId"
+        :governance-section="boardGovernanceSection" @update:governance-section="boardGovernanceSection = $event"
         @task-updated="emit('task-updated', $event)"
         @refresh-room="emit('refresh-room')"
         @update:selected-task-id="boardSelectedTaskId = $event"
@@ -373,6 +374,7 @@ import {
   participantAgentInspectorRequest,
   resolvingAgentInspectorRequest,
   resolveAgentInspectorSelection,
+  supervisedAgentInspectorRequest,
   type AgentInspectorSupervisorEntryUpdate,
   type SupervisorEntriesResource,
 } from "../../../domain/agent-inspector-identity";
@@ -457,6 +459,8 @@ import {
 } from "./room-shell/preferences";
 import { exportRoomChat } from "./room-shell/roomExport";
 import { isRoomTabId, type AttentionNavigationIntent, type RoomTab, type RoomTabId } from "./room-shell/types";
+import { useRoomAttentionNavigation } from "./room-shell/useRoomAttentionNavigation";
+import { useSupervisorStateSubscription } from "./room-shell/useSupervisorStateSubscription";
 import { useAgentInspectorObservations } from "./room-shell/useAgentInspectorObservations";
 import { useAgentInspectorConfigurationApply } from "./room-shell/useAgentInspectorConfigurationApply";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
@@ -542,7 +546,7 @@ const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
 const selectedAgentDetailRequestVersion = ref(0);
-const agentInspectorInitialTab = ref<"overview" | "work" | "workspace">("overview");
+const agentInspectorInitialTab = ref<"overview" | "work" | "workspace" | "diagnostics">("overview");
 const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
 // Cap the retained live-feed tail so a long turn can't grow the renderer
@@ -578,6 +582,7 @@ const roomDeliverySkippingKeys = roomDeliverySkipCoordinator.retryingKeys;
 const deliveryRetryNegotiated = ref(false);
 const deliveryRetryAvailable = computed(() => deliveryRetryNegotiated.value && typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
 const boardSelectedTaskId = ref<string | null>(null);
+const boardGovernanceSection = ref<"pending" | null>(null);
 const activityHistoryRequest = ref(0);
 const artifactTimelineTaskFilterId = ref<string | null>(null);
 const storageBusy = ref(false);
@@ -728,18 +733,12 @@ let managedAgentSessionsRefreshOwnerActive = true;
 let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 let unsubscribeSupervisorActivity: (() => void) | null = null;
 let unsubscribeSupervisorAgentStream: (() => void) | null = null;
-let unsubscribeSupervisorState: (() => void) | null = null;
 let unsubscribeSupervisorRetirement: (() => void) | null = null;
 let retirementStatusCheckOperationId: string | null = null;
-let supervisorStateSubscriptionMounted = false;
-let supervisorStateSubscriptionEpoch = 0;
-let supervisorStateSubscriptionActive = false;
-let supervisorStateLastSnapshotAtMs: number | null = null;
 let supervisorStateLastRepairAtMs: number | null = null;
 let supervisorStateDaemonGeneration = 0;
 let supervisorStateSequence = 0;
-let pendingSupervisorStateSnapshot: DesktopSupervisorStateSnapshot | null = null;
-let supervisorStateFrame: number | null = null;
+const supervisorStateSubscription = useSupervisorStateSubscription({ roomIdentifier: () => props.room.identifier, accept: acceptSupervisorStateSnapshot });
 let environmentRepoStatusRefreshRequestId = 0;
 const roomUrl = computed(() => props.room.kind === "focus"
   ? buildLetAgentsFocusRoomUrl({
@@ -970,7 +969,7 @@ watch(() => props.room.identifier, () => {
   supervisorEntriesUpdatedAt.value = null;
   composerPermissionError.value = null;
   resolvingComposerPermissionIds.value = {};
-  boardSelectedTaskId.value = null;
+  boardSelectedTaskId.value = null; boardGovernanceSection.value = null;
   githubEventsVisible.value = readGitHubEventsVisible(props.room.identifier);
   environmentPanelOpen.value = readEnvironmentPanelOpen(props.room.identifier);
   supervisorStateLastRepairAtMs = null;
@@ -978,7 +977,7 @@ watch(() => props.room.identifier, () => {
   scheduleManagedAgentSessionsRepair();
 }, { immediate: true });
 
-watch(() => props.room.identifier, syncSupervisorStateSubscription, { flush: "sync" });
+watch(() => props.room.identifier, supervisorStateSubscription.sync, { flush: "sync" });
 
 watch(() => props.repoStatus, () => {
   refreshedEnvironmentRepoStatus.value = null;
@@ -1028,20 +1027,22 @@ watch(activeTab, (tab) => {
   rememberRoomActiveTab(props.room.identifier, tab);
 }, { flush: "sync" });
 
-watch(() => [props.attentionIntent, props.roomLoading] as const, ([intent, loading]) => {
-  if (!intent || loading || props.room.identifier !== intent.roomIdentifier) return;
-  if (intent.taskId) openBoardTask(intent.taskId);
-  else if (intent.threadRootId) { activeTab.value = "chat"; void nextTick(() => roomChatView.value?.openThread(intent.threadRootId!)); }
-  else if (intent.eventId) {
-    if (intent.eventUrl && !eventsPage.value?.events.some(event => event.id === intent.eventId)) {
-      void desktopIpc.app.openExternalUrl(intent.eventUrl);
-    } else openEventById(intent.eventId);
-  }
-  else if (intent.reasoningSessionId) openReasoningInspector(intent.reasoningSessionId);
-  else if (intent.activity) activeTab.value = "activity";
-  else if (intent.messageId) { activeTab.value = "chat"; void revealRoomMessage(intent.messageId); }
-  emit("attention-opened");
-}, { immediate: true });
+useRoomAttentionNavigation({
+  intent: () => props.attentionIntent, roomIdentifier: () => props.room.identifier, roomLoading: () => props.roomLoading,
+  agentsSettled: () => supervisorEntriesHaveLoaded.value || supervisorEntriesState.value === "error", agents: () => supervisorEntries.value,
+  activeTab, boardGovernanceSection, openBoardTask, openReasoning: openReasoningInspector,
+  openThread: (threadRootId) => { activeTab.value = "chat"; void nextTick(() => roomChatView.value?.openThread(threadRootId)); },
+  openEvent: (eventId, eventUrl) => {
+    if (eventUrl && !eventsPage.value?.events.some(event => event.id === eventId)) void desktopIpc.app.openExternalUrl(eventUrl);
+    else openEventById(eventId);
+  },
+  revealMessage: (messageId) => { activeTab.value = "chat"; void revealRoomMessage(messageId); },
+  openAgentDiagnostics: (entry) => {
+    openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: ownerAttributionLabel(entry.createdBy) }));
+    agentInspectorInitialTab.value = "diagnostics";
+  },
+  opened: () => emit("attention-opened"),
+});
 
 watch(
   () => [props.notificationRevealMessageId, props.notificationRevealNonce, props.roomLoading] as const,
@@ -1076,8 +1077,7 @@ onBeforeUnmount(() => {
   unsubscribeSupervisorAgentStream?.();
   unsubscribeSupervisorAgentStream = null;
   void desktopIpc.supervisor?.watchAgentStream?.(null);
-  supervisorStateSubscriptionMounted = false;
-  stopSupervisorStateSubscription();
+  supervisorStateSubscription.unmount();
   unsubscribeSupervisorRetirement?.();
   unsubscribeSupervisorRetirement = null;
   retirementStatusCheckOperationId = null;
@@ -1108,8 +1108,7 @@ onMounted(() => {
     supervisorEntries.value = next;
     supervisorEntriesUpdatedAt.value = new Date().toISOString();
   }) || null;
-  supervisorStateSubscriptionMounted = true;
-  syncSupervisorStateSubscription();
+  supervisorStateSubscription.mount();
   unsubscribeSupervisorRetirement = desktopIpc.supervisor?.onRetirement?.((event) => {
     acceptSupervisorRetirementEvent(event);
   }) || null;
@@ -1131,56 +1130,6 @@ onMounted(() => {
     };
   }) || null;
 });
-
-function stopSupervisorStateSubscription(): void {
-  supervisorStateSubscriptionEpoch += 1;
-  unsubscribeSupervisorState?.();
-  unsubscribeSupervisorState = null;
-  supervisorStateSubscriptionActive = false;
-  supervisorStateLastSnapshotAtMs = null;
-  pendingSupervisorStateSnapshot = null;
-  if (supervisorStateFrame !== null) {
-    window.cancelAnimationFrame(supervisorStateFrame);
-    supervisorStateFrame = null;
-  }
-}
-
-function syncSupervisorStateSubscription(): void {
-  stopSupervisorStateSubscription();
-  if (!supervisorStateSubscriptionMounted) return;
-  const roomIdentifier = props.room.identifier;
-  const epoch = supervisorStateSubscriptionEpoch;
-  unsubscribeSupervisorState = desktopIpc.supervisor?.onState?.((snapshot) => {
-    if (epoch !== supervisorStateSubscriptionEpoch || props.room.identifier !== roomIdentifier) return;
-    supervisorStateLastSnapshotAtMs = Date.now();
-    queueSupervisorStateSnapshot(snapshot);
-  }, roomIdentifier) || null;
-  supervisorStateSubscriptionActive = Boolean(unsubscribeSupervisorState);
-}
-
-function queueSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot): void {
-  const pending = pendingSupervisorStateSnapshot;
-  if (
-    pending
-    && (
-      snapshot.daemonGeneration < pending.daemonGeneration
-      || (
-        snapshot.daemonGeneration === pending.daemonGeneration
-        && snapshot.sequence < pending.sequence
-      )
-    )
-  ) return;
-  pendingSupervisorStateSnapshot = snapshot;
-  if (supervisorStateFrame !== null) return;
-  const epoch = supervisorStateSubscriptionEpoch;
-  supervisorStateFrame = window.requestAnimationFrame(() => {
-    if (epoch !== supervisorStateSubscriptionEpoch) return;
-    supervisorStateFrame = null;
-    const next = pendingSupervisorStateSnapshot;
-    pendingSupervisorStateSnapshot = null;
-    if (next) acceptSupervisorStateSnapshot(next);
-  });
-}
 
 function acceptSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot): void {
   if (
@@ -1706,8 +1655,8 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
     supervisorEntriesError.value = null;
   }
   const pollSupervisor = !supervisorEntriesHaveLoaded.value || supervisorStateSubscriptionNeedsRepair({
-    active: supervisorStateSubscriptionActive,
-    lastSnapshotAtMs: supervisorStateLastSnapshotAtMs,
+    active: supervisorStateSubscription.state().active,
+    lastSnapshotAtMs: supervisorStateSubscription.state().lastSnapshotAtMs,
     nowMs: Date.now(),
   });
   const [sessions, entriesResult] = await Promise.all([
@@ -1762,7 +1711,7 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
     supervisorEntriesUpdatedAt.value = new Date().toISOString();
     supervisorEntriesState.value = "ready";
     supervisorEntriesError.value = null;
-  } else if (!supervisorStateSubscriptionActive || !supervisorEntriesHaveLoaded.value) {
+  } else if (!supervisorStateSubscription.state().active || !supervisorEntriesHaveLoaded.value) {
     // Keep the last successfully loaded entries. Consumers receive an error
     // resource instead of an empty list, so supervised identity cannot be
     // reclassified as external during a transient daemon failure.

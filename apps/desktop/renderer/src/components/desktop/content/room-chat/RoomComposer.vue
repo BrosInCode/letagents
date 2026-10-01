@@ -9,8 +9,7 @@
       <div class="desktop-composer-permission-main">
         <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
         <div class="desktop-composer-permission-copy">
-          <strong>{{ approval.presentation.displayName }} · {{ approval.status === 'pending'
-            ? hostApprovalTitle(approval.presentation) : hostApprovalStatus(approval.status) }}</strong>
+          <strong>{{ hostApprovalHeading(approval) }}</strong>
         </div>
       </div>
       <button type="button" class="desktop-host-approval-dismiss"
@@ -32,23 +31,22 @@
       <p v-if="approval.status === 'pending' && approval.presentation.denyScope === 'session_pending'">Deny applies to all pending permissions for this agent.</p>
       <div v-if="approval.status === 'pending'" class="desktop-composer-permission-actions">
         <button type="button" class="desktop-composer-permission-deny" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
-          @click="decideHostApproval(approval.id, 'deny')">Deny</button>
+          @click="decideRoomHostApproval(approval.id, 'deny')">Deny</button>
         <button type="button" class="desktop-composer-permission-allow" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
-          @click="decideHostApproval(approval.id, 'allow_once')">{{ hostApprovalBusy === approval.id
-            ? 'Recording…'
-            : approval.presentation.title === 'Grant for this turn' ? 'Grant for this turn' : 'Allow once' }}</button>
+          @click="decideRoomHostApproval(approval.id, 'allow_once')">{{ hostApprovalBusy === approval.id
+            ? 'Recording…' : hostApprovalAllowLabel(approval.presentation) }}</button>
         <button v-if="approval.presentation.alwaysAllow" type="button" class="desktop-composer-permission-allow"
           :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
-          title="Saved for this agent. Revoke in Permissions. Configured access settings are unchanged."
-          @click="decideHostApproval(approval.id, 'allow_always')">Always allow {{ approval.presentation.alwaysAllow.toolLabel }} in {{ "kind" in approval.presentation.alwaysAllow ? "this room workspace" : approval.presentation.alwaysAllow.projectName }}</button>
+          :title="HOST_APPROVAL_ALWAYS_ALLOW_HINT"
+          @click="decideRoomHostApproval(approval.id, 'allow_always')">{{ hostApprovalAlwaysAllowLabel(approval.presentation) }}</button>
       </div>
       <div v-else-if="approval.status === 'decision_recorded' && approval.retryDecision" class="desktop-composer-permission-actions">
         <button type="button" class="desktop-composer-permission-detail" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
-          @click="decideHostApproval(approval.id, approval.retryDecision)">Retry recorded {{ approval.retryDecision === 'deny' ? 'denial' : 'approval' }}</button>
+          @click="decideRoomHostApproval(approval.id, approval.retryDecision)">Retry recorded {{ approval.retryDecision === 'deny' ? 'denial' : 'approval' }}</button>
       </div>
     </section>
     <p v-if="hostApprovalError" class="desktop-composer-permission-error" role="status">
-      {{ hostApprovalError }} <button type="button" :disabled="hostApprovalLoading" @click="refreshHostApprovals">Refresh approvals</button>
+      {{ hostApprovalError }} <button type="button" :disabled="hostApprovalLoading" @click="refreshRoomHostApprovals">Refresh approvals</button>
     </p>
     <div
       v-if="primaryPermissionApproval"
@@ -218,12 +216,12 @@ import type {
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
-import type { DesktopHostApproval, HostApprovalSelection, HostApprovalStatus } from "../../../../../../shared/host-approvals";
-import { hostApprovalFields, hostApprovalTitle } from "./host-approval-presentation";
+import type { HostApprovalSelection } from "../../../../../../shared/host-approvals";
+import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalFields, hostApprovalHeading } from "./host-approval-presentation";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "./host-approval-dismissals";
+import { decideHostApproval, hostApprovalRoom, refreshHostApprovals } from "./host-approvals";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
-import { desktopIpc } from "../../../../ipc";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
@@ -284,21 +282,16 @@ const visibleEventPreviews = computed(() => [...visibleComposerEventPreviews(pro
 })]);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
-const hostApprovals = ref<DesktopHostApproval[]>([]);
+// Approvals are shared with the Inbox; card visibility stays local to this composer.
+const approvalRoom = computed(() => hostApprovalRoom(props.roomIdentifier));
+const hostApprovals = computed(() => approvalRoom.value.approvals);
+const hostApprovalError = computed(() => approvalRoom.value.error);
+const hostApprovalBusy = computed(() => approvalRoom.value.busy);
+const hostApprovalLoading = computed(() => approvalRoom.value.loading);
 const dismissedHostApprovalIds = ref(new Set<string>());
 const rememberedHostApprovalDismissals = ref(readHostApprovalDismissals());
 const showApprovalHistory = ref(false);
-const hostApprovalError = ref<string | null>(null);
-const hostApprovalBusy = ref<string | null>(null);
-const hostApprovalLoading = ref(false);
-let approvalEpoch = 0;
-let approvalMutation = 0;
 let approvalTimer: ReturnType<typeof setInterval> | null = null;
-
-function hostApprovalStatus(status: HostApprovalStatus): string {
-  return { pending: "Needs your approval", decision_recorded: "Decision recorded", decision_sent: "Decision sent",
-    uncertain: "Approval unconfirmed", request_closed: "Approval request closed", resolved: "Decision applied", unavailable: "Approval unavailable" }[status];
-}
 
 const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approval =>
   (approval.status === "pending" || approval.status === "decision_recorded"
@@ -321,46 +314,18 @@ function dismissHostApproval(id: string): void {
   }
 }
 
-async function refreshHostApprovals(): Promise<void> {
-  const epoch = approvalEpoch;
-  const mutation = approvalMutation;
-  const room = props.roomIdentifier;
-  const read = desktopIpc.supervisor?.listHostApprovals;
-  if (!room || !read || hostApprovalLoading.value || hostApprovalBusy.value) return;
-  hostApprovalLoading.value = true;
-  try {
-    const snapshot = await read(room);
-    if (epoch !== approvalEpoch || mutation !== approvalMutation) return;
-    if (snapshot.available) {
-      hostApprovals.value = snapshot.approvals;
-      const present = new Set(snapshot.approvals.map(approval => approval.id));
-      dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value].filter(id => present.has(id)));
-    }
-    hostApprovalError.value = snapshot.available ? snapshot.error
-      : snapshot.error ?? "Host approvals are unavailable. Decisions are disabled until the service reconnects.";
-  } catch {
-    if (epoch === approvalEpoch && mutation === approvalMutation) hostApprovalError.value = "Could not refresh host approvals. Decisions are disabled until the service reconnects.";
-  } finally { hostApprovalLoading.value = false; }
+function refreshRoomHostApprovals(): Promise<void> {
+  return props.roomIdentifier ? refreshHostApprovals(props.roomIdentifier) : Promise.resolve();
 }
 
-async function decideHostApproval(id: string, decision: HostApprovalSelection): Promise<void> {
-  const epoch = approvalEpoch;
-  const decide = desktopIpc.supervisor?.decideHostApproval;
-  if (!decide || hostApprovalBusy.value || hostApprovalError.value) return;
-  approvalMutation += 1;
-  hostApprovalBusy.value = id;
-  try {
-    const status = await decide({ id, decision });
-    if (epoch !== approvalEpoch) return;
-    const approval = hostApprovals.value.find(item => item.id === id);
-    if (approval) {
-      approval.status = status;
-      if (status !== "decision_recorded") approval.retryDecision = null;
-    }
-  } catch {
-    if (epoch === approvalEpoch) hostApprovalError.value = "Could not confirm the decision. Refresh approvals to check its recorded state.";
-  } finally { hostApprovalBusy.value = null; }
+function decideRoomHostApproval(id: string, decision: HostApprovalSelection): Promise<void> {
+  return props.roomIdentifier ? decideHostApproval(props.roomIdentifier, id, decision) : Promise.resolve();
 }
+
+watch(hostApprovals, (approvals) => {
+  const present = new Set(approvals.map(approval => approval.id));
+  dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value].filter(id => present.has(id)));
+});
 
 const canSend = computed(() =>
   Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0))
@@ -390,12 +355,9 @@ const mentionCandidates = computed(() => {
 watch(
   () => props.roomIdentifier,
   () => {
-    approvalEpoch += 1;
-    hostApprovals.value = [];
     dismissedHostApprovalIds.value = new Set();
     showApprovalHistory.value = false;
-    hostApprovalError.value = null;
-    void refreshHostApprovals();
+    void refreshRoomHostApprovals();
     mentionQuery.value = null;
     void nextTick(syncTextareaHeight);
   },
@@ -419,13 +381,12 @@ watch(
 );
 
 onMounted(() => {
-  void refreshHostApprovals();
-  approvalTimer = setInterval(() => { void refreshHostApprovals(); }, 3_000);
+  void refreshRoomHostApprovals();
+  approvalTimer = setInterval(() => { void refreshRoomHostApprovals(); }, 3_000);
   void nextTick(syncTextareaHeight);
 });
 
 onBeforeUnmount(() => {
-  approvalEpoch += 1;
   if (approvalTimer) clearInterval(approvalTimer);
 });
 

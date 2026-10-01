@@ -110,7 +110,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { TaskContentPatch } from '../../../../../../../shared/task-markdown-editing.mjs';
 import type {
   DesktopAgentPresence,
@@ -141,6 +141,8 @@ const props = defineProps<{
   presence: DesktopAgentPresence[];
   workers: WorkerSnapshot[];
   selectedTaskId?: string | null;
+  /** Opens Manager at this section once, e.g. from an Inbox board request. */
+  governanceSection?: "pending" | null;
   canEditTasks?: boolean;
 }>();
 
@@ -148,6 +150,7 @@ const emit = defineEmits<{
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [];
   "update:selected-task-id": [taskId: string | null];
+  "update:governance-section": [section: null];
   "view-events": [taskId: string];
   "view-artifacts": [taskId: string];
 }>();
@@ -218,6 +221,13 @@ const {
   decideIntent,
   loadGovernance,
 } = useBoardGovernance(props.roomIdentifier);
+
+watch(() => props.governanceSection, (section) => {
+  if (!section) return;
+  activeGovernanceSection.value = section;
+  emit("update:governance-section", null);
+  void openGovernance();
+}, { immediate: true });
 
 const liveBoardManagerAgents = computed(() => activeBoardManagerAgents(props.presence));
 const boardManagerMode = computed(() => props.boardSettings?.managerMode || "manager_optional");

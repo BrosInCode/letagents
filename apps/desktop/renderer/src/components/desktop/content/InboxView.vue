@@ -32,7 +32,7 @@
     </div>
     <div v-if="lastRead.length" class="inbox-undo" role="status"><span>{{ lastRead.length.toLocaleString() }} {{ lastRead.length === 1 ? 'update' : 'updates' }} marked read in this inbox.</span><button class="knowledge-text-button" @click="undoRead">Undo</button></div>
     <div v-if="loading && !data" class="knowledge-empty" role="status"><LoaderCircle class="knowledge-spin" :size="24" /><h2>Checking your rooms</h2><p>Gathering requests and updates.</p></div>
-    <div v-else-if="!items.length" class="knowledge-empty"><span class="knowledge-empty-mark"><Inbox v-if="section === 'updates'" :size="26" aria-hidden="true" /><CircleCheck v-else :size="26" aria-hidden="true" /></span><h2>{{ emptyTitle }}</h2><p>{{ emptyDescription }}</p><button v-if="rooms.length" class="knowledge-button inbox-empty-action" @click="emit('update:rooms', [])">Show all rooms</button></div>
+    <div v-else-if="!items.length && !selected" class="knowledge-empty"><span class="knowledge-empty-mark"><Inbox v-if="section === 'updates'" :size="26" aria-hidden="true" /><CircleCheck v-else :size="26" aria-hidden="true" /></span><h2>{{ emptyTitle }}</h2><p>{{ emptyDescription }}</p><button v-if="rooms.length" class="knowledge-button inbox-empty-action" @click="emit('update:rooms', [])">Show all rooms</button></div>
     <div v-else class="knowledge-workspace">
       <nav class="knowledge-queue" aria-label="Inbox items">
         <TransitionGroup name="knowledge-list">
@@ -47,12 +47,22 @@
         <div class="knowledge-detail-top"><span class="knowledge-category" :data-kind="selected.category">{{ inboxCategoryLabel(selected.category) }}</span><button v-if="selected.roomIdentifier" class="knowledge-text-button" @click="openRoom(selected, 'room')">Open room <ArrowUpRight :size="14" /></button></div>
         <h2 id="request-title" ref="requestHeading" tabindex="-1">{{ selected.title }}</h2>
         <p class="knowledge-byline"><span>{{ selected.actor }}</span><span>{{ selected.roomName }}</span><time :datetime="selected.timestamp" :title="date(selected.timestamp)">{{ relative(selected.timestamp) === 'Just now' ? 'Just now' : `${relative(selected.timestamp)} ago` }}</time></p>
-        <div class="knowledge-prose">{{ selected.body || 'Open the original work for more context.' }}</div>
+        <dl v-if="selectedApproval" class="inbox-approval-fields"><template v-for="(field, index) in hostApprovalFields(selectedApproval.presentation)" :key="index"><dt>{{ field.label }}</dt><dd><pre>{{ field.value }}</pre></dd></template></dl>
+        <div v-else class="knowledge-prose">{{ selected.body || 'Open the original work for more context.' }}</div>
+        <p v-if="selectedApproval?.detail" class="knowledge-prose inbox-approval-detail">{{ selectedApproval.detail }}</p>
         <div v-if="selected.record?.recommendation" class="knowledge-recommendation"><span><Lightbulb :size="15" aria-hidden="true" />Suggested approach</span><p>{{ selected.record.recommendation }}</p></div>
         <div v-if="selected.record?.unblocks" class="knowledge-unblocks"><ArrowRight :size="15" /><p><strong>Your answer unblocks</strong>{{ selected.record.unblocks }}</p></div>
         <div v-if="selected.record?.source_url || selected.record?.source_message_id" class="knowledge-source-row"><button v-if="selected.record.source_url" class="knowledge-button" @click="openSource(selected.record.source_url)"><Link2 :size="14" />View source</button><button v-if="selected.record.source_message_id" class="knowledge-button" @click="openRoom(selected, 'source')"><MessageSquare :size="14" />Original message</button></div>
         </div>
         <div v-if="selected.record?.response" class="knowledge-answer" role="status"><span><CircleCheck :size="16" /> Answer recorded</span><p>{{ selected.record.response.body }}</p><small>{{ selected.record.response.actor.label }} · {{ date(selected.record.response.at) }}</small></div>
+        <div v-else-if="selectedApproval" class="knowledge-task-action">
+          <p v-if="selectedApproval.status === 'pending' && selectedApproval.presentation.denyScope === 'session_pending'" class="inbox-approval-note">Deny applies to all pending permissions for this agent.</p>
+          <div v-if="selectedApproval.status === 'pending'" class="knowledge-source-row"><button class="knowledge-button" :disabled="approvalDisabled" @click="decideApproval('deny')">Deny</button><button class="knowledge-button knowledge-primary" :disabled="approvalDisabled" @click="decideApproval('allow_once')">{{ approvalState.busy === selectedApproval.id ? 'Recording…' : hostApprovalAllowLabel(selectedApproval.presentation) }}</button><button v-if="selectedApproval.presentation.alwaysAllow" class="knowledge-button" :disabled="approvalDisabled" :title="HOST_APPROVAL_ALWAYS_ALLOW_HINT" @click="decideApproval('allow_always')">{{ hostApprovalAlwaysAllowLabel(selectedApproval.presentation) }}</button></div>
+          <div v-else-if="selectedApproval.retryDecision" class="knowledge-source-row"><button class="knowledge-button knowledge-primary" :disabled="approvalDisabled" @click="decideApproval(selectedApproval.retryDecision)">Retry recorded {{ selectedApproval.retryDecision === 'deny' ? 'denial' : 'approval' }}</button></div>
+          <p v-else-if="selectedApproval.status === 'decision_sent' || selectedApproval.status === 'resolved'" class="knowledge-success inbox-approval-result" role="status"><CircleCheck :size="16" aria-hidden="true" />{{ hostApprovalStatusLabel(selectedApproval.status) }}</p>
+          <p v-else class="inbox-approval-note inbox-approval-result" role="status">{{ hostApprovalStatusLabel(selectedApproval.status) }}.{{ selectedApproval.status === 'uncertain' ? ' Your decision will not be sent again.' : '' }}</p>
+          <p v-if="approvalState.error" class="knowledge-inline-error inbox-approval-error" role="status">{{ approvalState.error }} <button class="knowledge-text-button" :disabled="approvalState.loading" @click="refreshApproval">Refresh approvals</button></p>
+        </div>
         <form v-else-if="selected.record" class="knowledge-response" @submit.prevent="respond">
           <label :for="`response-${selected.record.id}`">Your response</label><textarea :id="`response-${selected.record.id}`" v-model="drafts[selected.key]" rows="4" maxlength="8000" placeholder="Give the agent a clear decision or next step…" :disabled="sending" required></textarea>
           <div class="knowledge-response-footer"><small>Sent to the room and saved with this request.</small><button class="knowledge-button knowledge-primary" :disabled="sending || !drafts[selected.key]?.trim()"><LoaderCircle v-if="sending" :size="14" class="knowledge-spin" /><Send v-else :size="14" />{{ sending ? 'Sending…' : 'Send response' }}</button></div>
@@ -74,10 +84,14 @@ import type { DesktopRentalRequest, DesktopRoomThreadInboxPage } from '../../../
 import type { DesktopNeedsYou } from '../../../../../electron/ipc-types/knowledge.js';
 import type { AttentionNavigationIntent } from './room-shell/types';
 import { desktopBridgeUpgradeMessage, desktopIpc } from '../../../ipc/index.js';
-import { buildUniversalInbox, filterUniversalInbox, inboxCategoryLabel, inboxSourceFailureKey, markInboxUpdatesRead, undoInboxRead, type InboxReadChange, type InboxSection, type UniversalInboxItem } from './room-inbox/universal';
+import { buildUniversalInbox, filterUniversalInbox, inboxCategoryLabel, inboxNavigationIntent, inboxSourceFailureKey, markInboxUpdatesRead, undoInboxRead, type InboxReadChange, type InboxSection, type UniversalInboxItem } from './room-inbox/universal';
+import type { AgentAttentionItem } from './room-inbox/agent-attention';
+import type { HostApprovalSelection } from '../../../../../shared/host-approvals';
+import { decideHostApproval, hostApprovalRoom, refreshHostApprovals } from './room-chat/host-approvals';
+import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalFields, hostApprovalStatusLabel } from './room-chat/host-approval-presentation';
 import './room-knowledge.css';
 
-const props = withDefaults(defineProps<{ data: DesktopNeedsYou | null; loading: boolean; error: string; rentals?: DesktopRentalRequest[]; rentalError?: string; rooms?: string[]; section?: InboxSection; storageKey?: string }>(), { rentals: () => [], rentalError: '', rooms: () => [], section: 'needs-you', storageKey: 'local' });
+const props = withDefaults(defineProps<{ data: DesktopNeedsYou | null; attention?: AgentAttentionItem[]; loading: boolean; error: string; rentals?: DesktopRentalRequest[]; rentalError?: string; rooms?: string[]; section?: InboxSection; storageKey?: string }>(), { attention: () => [], rentals: () => [], rentalError: '', rooms: () => [], section: 'needs-you', storageKey: 'local' });
 const emit = defineEmits<{ refresh: []; openRoom: [intent: AttentionNavigationIntent]; openRental: []; 'update:section': [section: InboxSection]; 'update:rooms': [rooms: string[]]; 'threads-loaded': [room: string, page: DesktopRoomThreadInboxPage] }>();
 const motionEnabled = ref(false);
 const requestHeading = ref<HTMLElement | null>(null);
@@ -114,9 +128,16 @@ const sections: { id: InboxSection; label: string }[] = [{ id: 'needs-you', labe
 const selectedKey = ref(''); const drafts = reactive<Record<string, string>>({}); const sending = ref(false); const sendError = ref('');
 const roomMenu = ref<HTMLDetailsElement | null>(null); const dismissals = ref<Record<string, string>>({}); const lastRead = ref<InboxReadChange[]>([]); const loadingOlder = ref(false);
 let alive = true;
-const allItems = computed(() => buildUniversalInbox(props.data, props.rentals));
+const allItems = computed(() => buildUniversalInbox(props.data, props.rentals, props.attention));
 const items = computed(() => filterUniversalInbox(allItems.value, props.section, props.rooms, dismissals.value));
-const selected = computed(() => items.value.find(item => item.key === selectedKey.value) ?? items.value[0]);
+// A decided approval leaves the queue but stays open with its result until you move on.
+const decided = ref<UniversalInboxItem | null>(null);
+const selected = computed(() => items.value.find(item => item.key === selectedKey.value)
+  ?? (decided.value?.key === selectedKey.value ? decided.value : items.value[0]));
+// Tool approvals share the composer card's state, so a decision here or there shows on both.
+const selectedApproval = computed(() => selected.value?.attention?.kind === 'tool_approval' ? selected.value.attention.approval : null);
+const approvalState = computed(() => hostApprovalRoom(selected.value?.roomIdentifier));
+const approvalDisabled = computed(() => approvalState.value.busy !== null || approvalState.value.error !== null);
 const sortedRooms = computed(() => [...(props.data?.rooms ?? [])].sort((a, b) => a.displayName.localeCompare(b.displayName)));
 const roomFilterLabel = computed(() => !props.rooms.length ? 'All rooms' : props.rooms.length > 1 ? `${props.rooms.length} rooms` : sortedRooms.value.find(room => room.roomIdentifier === props.rooms[0])?.displayName || 'Selected room');
 const unavailable = computed(() => (props.data?.rooms ?? []).filter(room => !props.rooms.length || props.rooms.includes(room.roomIdentifier)).flatMap(room => room.updates?.unavailable.length ? [`${room.displayName} (${[...room.updates.unavailable].sort().join(', ')})`] : []).sort());
@@ -125,6 +146,7 @@ const emptyTitle = computed(() => props.loading ? 'Checking your rooms' : props.
 const emptyDescription = computed(() => props.section === 'answered' ? 'Answered requests will appear here.' : props.section === 'updates' ? props.error || hasSourceFailure.value ? 'New activity will appear here. Some room data is still unavailable.' : 'Room updates will appear here as work progresses.' : 'Questions, decisions and approvals will appear when someone asks for your input.');
 function count(section: InboxSection) { return filterUniversalInbox(allItems.value, section, props.rooms, dismissals.value).length; }
 watch(() => selected.value?.key, () => { sendError.value = ''; });
+watch([selectedKey, () => props.section], () => { if (decided.value && decided.value.key !== selectedKey.value) decided.value = null; });
 watch(() => props.storageKey, () => {
   dismissals.value = {}; lastRead.value = []; dismissedSourceNotice.value = ''; selectedKey.value = ''; sendError.value = '';
   for (const key of Object.keys(drafts)) delete drafts[key];
@@ -142,20 +164,19 @@ onMounted(() => document.addEventListener('pointerdown', outsideRoomMenu));
 onBeforeUnmount(() => { alive = false; document.removeEventListener('pointerdown', outsideRoomMenu); });
 function date(time: string) { return Number.isFinite(Date.parse(time)) ? new Date(time).toLocaleString() : ''; }
 function relative(time: string) { if (!Number.isFinite(Date.parse(time))) return ''; const hours = Math.max(0, Math.floor((Date.now() - Date.parse(time)) / 3600000)); return hours < 1 ? 'Just now' : hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`; }
-function actionLabel(item: UniversalInboxItem) { if (item.taskId) return 'Open task'; return ({ thread: 'Open thread', github_failure: 'Open check', agent_blocked: 'Open agent', agent_offline: 'Open room activity', rental_request: 'Review rental request' } as Record<string, string>)[item.category] || 'Open room'; }
+function actionLabel(item: UniversalInboxItem) { if (item.taskId) return 'Open task'; return ({ thread: 'Open thread', github_failure: 'Open check', agent_blocked: 'Open agent', agent_offline: 'Open room activity', rental_request: 'Review rental request', agent_attention: 'Open diagnostics', board_intent: 'Review request' } as Record<string, string>)[item.category] || 'Open room'; }
 function openRoom(item: UniversalInboxItem, mode?: 'room' | 'source') {
-  if (!item.roomIdentifier) { emit('openRental'); return; }
-  const intent: AttentionNavigationIntent = { roomIdentifier: item.roomIdentifier };
-  if (mode === 'source') intent.messageId = item.record?.source_message_id ?? undefined;
-  else if (!mode) {
-    intent.taskId = item.taskId;
-    if (item.activity?.kind === 'thread') intent.threadRootId = item.activity.root.id;
-    if (item.activity?.kind === 'github_failure') { intent.eventId = item.activity.event.id; intent.eventUrl = item.activity.url ?? undefined; }
-    if (item.activity?.kind === 'agent_blocked') intent.reasoningSessionId = item.activity.session.id;
-    if (item.activity?.kind === 'agent_offline') intent.activity = true;
-  }
-  emit('openRoom', intent);
+  const intent = inboxNavigationIntent(item, mode);
+  if (intent) emit('openRoom', intent); else emit('openRental');
 }
+async function decideApproval(decision: HostApprovalSelection) {
+  const item = selected.value; const approval = selectedApproval.value;
+  if (!item?.roomIdentifier || !approval) return;
+  selectedKey.value = item.key; decided.value = item;
+  await decideHostApproval(item.roomIdentifier, approval.id, decision);
+  if (alive) void nextTick(() => requestHeading.value?.focus({ preventScroll: true }));
+}
+function refreshApproval() { if (selected.value?.roomIdentifier) void refreshHostApprovals(selected.value.roomIdentifier); }
 async function openSource(url: string) { try { await desktopIpc.app.openExternalUrl(url); } catch (error) { sendError.value = String(error); } }
 async function loadOlder(room: string) {
   const page = props.data?.rooms.find(item => item.roomIdentifier === room)?.updates?.threads;

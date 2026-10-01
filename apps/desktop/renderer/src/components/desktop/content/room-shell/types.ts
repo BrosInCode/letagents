@@ -27,4 +27,10 @@ export function isRoomTabId(value: string | null): value is RoomTabId {
 }
 
 
-export type AttentionNavigationIntent = { roomIdentifier: string; taskId?: string; messageId?: string; threadRootId?: string; eventId?: string; eventUrl?: string; reasoningSessionId?: string; activity?: boolean };
+export type AttentionNavigationIntent = { roomIdentifier: string; taskId?: string; messageId?: string; threadRootId?: string; eventId?: string; eventUrl?: string; reasoningSessionId?: string; activity?: boolean;
+  /** Supervised agent to open in the Inspector's Diagnostics. */
+  agentEntryId?: string;
+  /** Board → Manager → Requests. */
+  boardRequests?: boolean;
+  /** Chat, where tool approval cards are docked above the composer. */
+  approvals?: boolean };
