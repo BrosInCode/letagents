@@ -507,7 +507,7 @@ export async function updateTask(
         previousPrUrl: task.pr_url,
         nextPrUrl: newPrUrl,
       });
-  const now = new Date().toISOString();
+  let now = new Date().toISOString();
   const expectedContent = updates.expected_content;
   const writesWorkflow = updates.pr_url !== undefined || updates.workflow_artifacts !== undefined;
   let writtenTask: TaskRow | undefined;
@@ -596,7 +596,24 @@ export async function updateTask(
       if (options.leaseFence) {
         const held = await acquireLeaseFenceTx(tx, options.leaseFence);
         if (!held) throw new LeaseFenceStaleError();
-        if (progressRetryEligible && updates.status && ["in_progress", "in_review"].includes(updates.status)) {
+        const mayRetryProgress = progressRetryEligible && updates.status !== undefined
+          && ["in_progress", "in_review"].includes(updates.status);
+        if (mayRetryProgress) {
+          // An exact retry checks the worker's session once the task is locked.
+          // Share-lock the session first, as registration and claims do
+          // (session, then lease, then task), so a registration relabelling
+          // this worker never holds the session while waiting on this write.
+          await tx.select({ session_id: room_agent_sessions.session_id }).from(room_agent_sessions)
+            .where(eq(room_agent_sessions.session_id, options.leaseFence.agent_session_id)).for("share");
+        }
+        if (updates.pr_url !== undefined) {
+          // The pr_url is written to the lease too. Lock the lease row before
+          // the task row, the order lease actions and lease adoption take, so
+          // this never holds the task while waiting for the lease.
+          await tx.select({ id: task_leases.id }).from(task_leases)
+            .where(eq(task_leases.id, options.leaseFence.lease_id)).for("no key update");
+        }
+        if (mayRetryProgress) {
           // Re-read under the rebind lock and task lock: concurrent identical
           // requests must return the winning commit without changing its timestamp.
           const [current] = await tx.select().from(tasks)
@@ -655,6 +672,9 @@ export async function updateTask(
           ...(locked ? { task_state: locked } : {}),
         }, tx);
       }
+      // Read the clock after the lock waits above, the lease lock first among
+      // them, so updated_at never goes back past a write this one waited for.
+      now = new Date().toISOString();
       await writeTaskUpdate(tx);
       await writeWorkLeaseCreation(tx);
       await supersedeMootBoardIntents(tx);
