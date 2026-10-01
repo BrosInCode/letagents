@@ -1281,74 +1281,120 @@ test("Open Model follows a turn's steps live across an OpenCode compaction", asy
   assert.equal(result.text, "Rewired after the compaction.");
 });
 
-/** Steps of one turn whose tool calls finish in order: "denied", "ran", or a final answer. */
-function toolCallEvents(session: string, turnId: string, outcomes: ReadonlyArray<"denied" | "ran">): Array<Record<string, unknown>> {
-  return outcomes.flatMap((outcome, index) => {
-    const id = `assistant-retry-${index}`;
-    return [
-      { type: "message.updated", properties: { sessionID: session, info: { id, role: "assistant", parentID: turnId,
-        sessionID: session, time: { created: 10 + index } } } },
-      { type: "message.part.updated", properties: { sessionID: session, part: { id: `${id}-tool`, messageID: id,
-        sessionID: session, type: "tool", tool: "bash", callID: `call-retry-${index}`,
-        state: outcome === "denied"
-          ? { status: "error", input: { command: "gh pr view 4" }, error: "The user rejected permission to use this specific tool call." }
-          : { status: "completed", input: { command: "git status" }, output: "clean", metadata: { exit: 0 } } } } },
-    ];
-  });
+type ToolOutcome = "denied" | "ran";
+
+function toolPart(messageId: string, callId: string, outcome: ToolOutcome, session?: string): Record<string, unknown> {
+  return { id: `${callId}-part`, messageID: messageId, ...(session ? { sessionID: session } : {}), type: "tool", tool: "bash", callID: callId,
+    state: outcome === "denied"
+      ? { status: "error", input: { command: "gh pr view 4" }, error: "The user rejected permission to use this specific tool call." }
+      : { status: "completed", input: { command: "git status" }, output: "clean", metadata: { exit: 0 } } };
 }
 
-test("Open Model ends a turn whose model keeps retrying denied tool calls", async () => {
-  const { adapter, handle, harness } = await spawnAdapter();
+/** One model step of a turn: its tool calls finish in order, then the step ends. */
+function stepEvents(session: string, turnId: string, step: number, calls: readonly ToolOutcome[]): Array<Record<string, unknown>> {
+  const id = `assistant-step-${step}`;
+  const info = { id, role: "assistant", parentID: turnId, sessionID: session, time: { created: 10 + step } };
+  return [
+    { type: "message.updated", properties: { sessionID: session, info } },
+    ...calls.map((outcome, call) => ({ type: "message.part.updated",
+      properties: { sessionID: session, part: toolPart(id, `call-${step}-${call}`, outcome, session) } })),
+    { type: "message.updated", properties: { sessionID: session, info: { ...info, time: { created: 10 + step, completed: 10 + step } } } },
+  ];
+}
+
+/** The same step as the transcript keeps it. */
+function stepMessage(turnId: string, step: number, calls: readonly ToolOutcome[]): TranscriptMessage {
+  const id = `assistant-step-${step}`;
+  return { info: { id, role: "assistant", parentID: turnId, time: { created: 10 + step, completed: 10 + step } },
+    parts: [...calls.map((outcome, call) => toolPart(id, `call-${step}-${call}`, outcome)),
+      { id: `${id}-finish`, type: "step-finish", reason: "tool-calls" }] };
+}
+
+/** Runs a held-open turn through `steps`, then ends it unless the adapter already did. */
+async function runSteps(steps: ReadonlyArray<readonly ToolOutcome[]>) {
+  const harness = createHarness();
+  // Long enough that only the denial bound, or the test, ends the turn.
+  const adapter = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-denials-")), dependencies: harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 10_000 });
+  const handle = await adapter.spawn(spawnRequest());
   const observations: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, (event) => observations.push(event));
   harness.holdTurnOpenWithTranscript();
-  harness.setTranscriptFactories([() => []]);
+  harness.setTranscriptFactories([() => [], (turnId) => [...steps.map((calls, step) => stepMessage(turnId, step, calls)),
+    assistantMessage(turnId, "assistant-final", 90, "Answered without the denied calls.")]]);
   const initialRead = harness.nextMessageRead();
   const turn = adapter.runRoomTurn(handle, {
-    inboxItemId: "inbox-retrying",
+    inboxItemId: "inbox-denials",
     sourceMessage: { text: "check the pull request" },
     activation: { decision: "activate" },
-    actionId: "retrying",
+    actionId: "denials",
   });
   await initialRead;
   const turnId = String(harness.promptBodies[0]?.messageID);
-  for (const event of toolCallEvents(handle.providerContinuationId!, turnId, ["denied", "denied", "denied"])) harness.sendEvent(event);
+  steps.forEach((calls, step) => { for (const event of stepEvents(handle.providerContinuationId!, turnId, step, calls)) harness.sendEvent(event); });
   let timer: NodeJS.Timeout | undefined;
-  const ended = await Promise.race([turn.then(() => true),
-    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 2_000); })]);
+  const endedByAdapter = await Promise.race([turn.then(() => true),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 300); })]);
   clearTimeout(timer);
-  if (!ended) harness.completeTurn();
-  const result = await turn;
+  if (!endedByAdapter) harness.completeTurn();
+  return { adapter, handle, harness, observations, turnId, endedByAdapter, result: await turn };
+}
 
-  assert.equal(ended, true, "the third denial in a row ends the turn");
+test("Open Model ends a turn whose model keeps retrying denied tool calls, three steps in a row", async () => {
+  const { adapter, handle, harness, observations, turnId, endedByAdapter, result } = await runSteps([["denied"], ["denied", "denied"], ["denied"]]);
+  const settled = { turnId, providerContinuationId: handle.providerContinuationId, outcome: "failed", text: null,
+    evidence: "transcript", error: NO_REPLY_FAILURE.deniedTool };
+  assert.equal(endedByAdapter, true);
   assert.deepEqual(harness.aborts, [handle.providerContinuationId]);
-  assert.deepEqual(result, { turnId, providerContinuationId: handle.providerContinuationId, outcome: "failed", text: null,
-    evidence: "transcript", error: NO_REPLY_FAILURE.deniedTool });
+  assert.deepEqual(result, settled);
   assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"
     && fact.providerTurnId === turnId && fact.turnOutcome === "failed"));
+
+  // A re-read finds the three denied steps and the step the abort ended.
+  harness.setTranscriptFactories([(id) => [stepMessage(id, 0, ["denied"]), stepMessage(id, 1, ["denied", "denied"]), stepMessage(id, 2, ["denied"]),
+    { info: { id: "assistant-step-3", role: "assistant", parentID: id, time: { created: 13, completed: 14 },
+      error: { name: "MessageAbortedError", data: { message: "Aborted" } } }, parts: [] }]]);
+  assert.deepEqual(await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-denials", providerTurnId: turnId }), settled,
+    "the re-read reports the denials, not the abort that ended the turn");
 });
 
-test("Open Model lets a turn go on when a tool call runs between its denied ones", async () => {
-  const { adapter, handle, harness } = await spawnAdapter();
+test("Open Model treats one step's parallel denials as one refusal", async () => {
+  // One Deny rejects every request pending in the session.
+  const { harness, endedByAdapter, result } = await runSteps([["denied", "denied", "denied"], ["denied", "denied"]]);
+  assert.equal(endedByAdapter, false);
+  assert.deepEqual(harness.aborts, []);
+  assert.equal(result.text, "Answered without the denied calls.");
+});
+
+test("Open Model lets a turn go on when a step runs a tool among its denied calls", async () => {
+  const { harness, endedByAdapter, result } = await runSteps([["denied"], ["denied"], ["denied", "ran"], ["denied"], ["denied"]]);
+  assert.equal(endedByAdapter, false);
+  assert.deepEqual(harness.aborts, []);
+  assert.equal(result.text, "Answered without the denied calls.");
+});
+
+test("Open Model recovering a turn does not stop a model writing its answer after denied steps", async () => {
+  const harness = createHarness();
+  const adapter = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-answering-")), dependencies: harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 10_000 });
+  const handle = await adapter.spawn(spawnRequest());
+  const denied = (turnId: string) => [stepMessage(turnId, 0, ["denied"]), stepMessage(turnId, 1, ["denied"]), stepMessage(turnId, 2, ["denied"])];
   harness.holdTurnOpenWithTranscript();
-  harness.setTranscriptFactories([() => [], (turnId) => [assistantMessage(turnId, "assistant-final", 30, "Checked without the denied call.")]]);
-  const initialRead = harness.nextMessageRead();
-  const turn = adapter.runRoomTurn(handle, {
-    inboxItemId: "inbox-adapting",
-    sourceMessage: { text: "check the pull request" },
-    activation: { decision: "activate" },
-    actionId: "adapting",
-  });
-  await initialRead;
-  const turnId = String(harness.promptBodies[0]?.messageID);
-  for (const event of toolCallEvents(handle.providerContinuationId!, turnId, ["denied", "denied", "ran", "denied"])) harness.sendEvent(event);
+  harness.setTranscriptFactories([
+    (turnId) => [...denied(turnId), { info: { id: "assistant-answer", role: "assistant", parentID: turnId, time: { created: 20 } },
+      parts: [{ id: "answer-text", type: "text", text: "Answering without the pull request check" }] }],
+    (turnId) => [...denied(turnId), assistantMessage(turnId, "assistant-answer", 20, "Answering without the pull request check.")],
+  ]);
+  const read = harness.nextMessageRead();
+  const turn = adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-answering", providerTurnId: "turn-recovery" });
+  await read;
   await new Promise((resolve) => setTimeout(resolve, 100));
   harness.completeTurn();
   const result = await turn;
-
   assert.deepEqual(harness.aborts, []);
-  assert.equal(result.outcome, "reply");
-  assert.equal(result.text, "Checked without the denied call.");
+  assert.equal(result.text, "Answering without the pull request check.");
 });
 
 test("Open Model settles a turn that stopped on a denied tool call", async () => {
