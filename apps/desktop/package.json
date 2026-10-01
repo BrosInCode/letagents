@@ -86,7 +86,7 @@
     "postcss": "8.5.23",
     "@hono/node-server": "2.0.10",
     "fast-uri": "3.1.8",
-    "hono": "4.13.5",
+    "hono": "4.13.8",
     "ip-address": "10.7.2",
     "builder-util-runtime": "9.7.0",
     "joi": "18.2.9",
