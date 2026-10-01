@@ -51,7 +51,7 @@
 .diagnostics-intro[data-state=attention] .diagnostics-status-label { color: var(--amber-text); }
 .diagnostics-intro[data-state=passed] .diagnostics-status-label { color: var(--green-text); }
 .diagnostics-intro h3 { margin: 0 0 10px; color: var(--text); font-size: 20px; font-weight: 610; line-height: 1.3; letter-spacing: -.03em; text-wrap: balance; }
-.diagnostics-intro > p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.diagnostics-intro > p { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .diagnostics-state { display: inline-flex; align-items: center; gap: 4px; color: var(--text-tertiary); font-size: .61rem; white-space: nowrap; }
 .diagnostics-state[data-state="passed"] { color: var(--green-text); }
 .diagnostics-state[data-state="attention"], .diagnostics-state[data-state="pending"] { color: var(--amber-text); }
@@ -86,7 +86,7 @@
 .diagnostics-finding strong { font-size: .8rem; font-weight: 600; }
 .diagnostics-finding p { margin: 9px 0 0; color: var(--text-secondary); line-height: 1.65; overflow-wrap: anywhere; }
 .diagnostics-finding time { display: block; margin-top: 11px; color: var(--text-tertiary); font-size: .64rem; }
-.diagnostics-next > p:last-child { margin: 7px 0 0; color: var(--text-secondary); line-height: 1.7; }
+.diagnostics-next > p:last-child { margin: 7px 0 0; color: var(--text-secondary); line-height: 1.7; overflow-wrap: anywhere; }
 .diagnostics-remedy { display: grid; gap: 12px; }
 .diagnostics-remedy p { margin: 0; color: var(--text-secondary); font-size: .72rem; line-height: 1.6; }
 .diagnostics-secondary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; padding: 9px 12px; border: 1px solid var(--border-strong); border-radius: 9px; background: transparent; color: var(--text); font-size: .73rem !important; transition: background-color 140ms ease; }
