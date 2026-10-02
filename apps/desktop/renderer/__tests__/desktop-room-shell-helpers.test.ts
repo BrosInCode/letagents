@@ -1015,3 +1015,78 @@ it("revealMessage continues with paging when getMessage throws offline error", a
   });
 });
 
+
+it("revealMessage waits for the existing history page before deciding availability", async () => {
+  let completePage!: (page: { messages: DesktopRoomMessage[]; hasOlder: boolean }) => void;
+  let calls = 0;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    async getMessage() { return roomMessage({ id: "msg_15" }); },
+    getMessagesBefore() {
+      calls += 1;
+      return new Promise(resolve => { completePage = resolve; });
+    },
+  } } }, async () => {
+    const state = useDesktopRoomMessages({
+      room: ref(roomInfo()), messages: ref([roomMessage({ id: "msg_20" })]),
+      githubEventsVisible: ref(false), playRoomSound() {}, onMessageSent() {},
+    });
+    const page = state.loadOlderMessages();
+    let settled = false;
+    const reveal = state.revealMessage("msg_15").then(outcome => { settled = true; return outcome; });
+    await nextTick();
+    await Promise.resolve();
+    const settledDuringLoad = settled;
+    completePage({ messages: [roomMessage({ id: "msg_15" })], hasOlder: false });
+    await page;
+    assert.equal(await reveal, "revealed");
+    assert.equal(settledDuringLoad, false);
+    assert.equal(calls, 1);
+  });
+});
+
+it("revealMessage loads at most twenty older pages", async () => {
+  let calls = 0;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    async getMessage() { return roomMessage({ id: "msg_1" }); },
+    async getMessagesBefore() {
+      calls += 1;
+      return { messages: [roomMessage({ id: `msg_${100 - calls}` })], hasOlder: true };
+    },
+  } } }, async () => {
+    const state = useDesktopRoomMessages({
+      room: ref(roomInfo()), messages: ref([roomMessage({ id: "msg_100" })]),
+      githubEventsVisible: ref(false), playRoomSound() {}, onMessageSent() {},
+    });
+    assert.equal(await state.revealMessage("msg_1"), "too_far_back");
+    assert.equal(calls, 20);
+  });
+});
+
+it("a room change while reveal waits on history discards the old page", async () => {
+  let completePage!: (page: { messages: DesktopRoomMessage[]; hasOlder: boolean }) => void;
+  let calls = 0;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    async getMessage() { return roomMessage({ id: "msg_15" }); },
+    getMessagesBefore() {
+      calls += 1;
+      return new Promise(resolve => { completePage = resolve; });
+    },
+  } } }, async () => {
+    const room = ref(roomInfo());
+    const messages = ref([roomMessage({ id: "msg_20" })]);
+    const state = useDesktopRoomMessages({
+      room, messages, githubEventsVisible: ref(false), playRoomSound() {}, onMessageSent() {},
+    });
+    const page = state.loadOlderMessages();
+    const reveal = state.revealMessage("msg_15");
+    await nextTick();
+    room.value = { ...roomInfo(), identifier: "another-room" };
+    messages.value = [roomMessage({ id: "msg_100" })];
+    await nextTick();
+    completePage({ messages: [roomMessage({ id: "msg_15" })], hasOlder: false });
+    await page;
+    assert.equal(await reveal, "unavailable");
+    assert.deepEqual(state.visibleMessages.value.map(message => message.id), ["msg_100"]);
+    assert.equal(calls, 1);
+  });
+});
