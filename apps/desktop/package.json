@@ -70,6 +70,7 @@
     "electron": "42.11.6",
     "eslint": "10.6.0",
     "eslint-plugin-vue": "10.9.2",
+    "highlight.js": "11.11.1",
     "monaco-editor": "0.56.0",
     "tsx": "4.23.0",
     "typescript": "5.9.3",

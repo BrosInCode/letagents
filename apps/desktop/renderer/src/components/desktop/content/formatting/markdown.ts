@@ -1,3 +1,5 @@
+import { desktopHighlighter } from "./code-highlighter";
+
 export interface DesktopMarkdownOptions {
   highlightQuery?: string;
   block?: boolean;
@@ -86,8 +88,7 @@ function renderBlockMarkdown(value: string, options: DesktopMarkdownOptions, quo
         index += 1;
       }
       if (index < lines.length) index += 1;
-      const language = fence[1] ? ` class="language-${escapeAttr(fence[1])}"` : "";
-      blocks.push(`<pre><code${language}>${escapeHtml(code.join("\n"))}</code></pre>`);
+      blocks.push(desktopHighlighter.renderCodeBlock(code.join("\n"), fence[1]));
       continue;
     }
 

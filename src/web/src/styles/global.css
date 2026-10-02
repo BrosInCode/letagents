@@ -1,3 +1,5 @@
+@import "../../../../shared/code-block.css";
+
 /* ─── Design Tokens ─── */
 :root {
   /* Colors — Dark palette */
@@ -46,6 +48,18 @@
   --task-merged:      #34d399;
   --task-done:        #22c55e;
   --task-cancelled:   #64748b;
+
+  /* Code blocks & syntax highlighting */
+  --code-bg:          #141414;
+  --code-header-bg:   #1a1a1a;
+  --code-text:        var(--text);
+  --code-comment:     var(--text-secondary);
+  --code-keyword:     var(--task-assigned);
+  --code-string:      var(--green-text);
+  --code-number:      var(--amber-text);
+  --code-function:    var(--blue-text);
+  --code-variable:    var(--task-in-review);
+  --code-type:        var(--red-text);
 
   /* Typography */
   --font-sans:       'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -130,6 +144,9 @@
   --task-merged:      #047857;
   --task-done:        #15803d;
   --task-cancelled:   #64748b;
+
+  --code-bg:          #f4f4f5;
+  --code-header-bg:   #ebecee;
 
   --shadow-sm:  0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-md:  0 4px 12px rgba(0, 0, 0, 0.08);
