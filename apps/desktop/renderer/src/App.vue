@@ -510,6 +510,7 @@ import { useAgentAttention } from "./composables/useAgentAttention";
 import { resetHostApprovals } from "./components/desktop/content/room-chat/host-approvals";
 import { useInboxRoomFilter } from "./composables/useInboxRoomFilter";
 import { desktopIpc } from "./ipc/index.js";
+import { roomNotificationPreferences } from "./composables/useRoomNotificationPreferences";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
@@ -672,6 +673,12 @@ const {
   selectedRootRoomIdentifier,
   selectedSnapshot,
 });
+
+watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null, (account) => {
+  roomNotificationPreferences.setViewer(account ? { id: account.id, login: account.login } : null);
+  void roomNotificationPreferences.refreshAll();
+  if (selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(selectedRoomIdentifier.value);
+}, { immediate: true, flush: "sync" });
 
 let unsubscribeRoomStream: (() => void) | null = null;
 let unsubscribeOpenSettings: (() => void) | null = null;
@@ -1102,6 +1109,8 @@ function handleVisibilityChange(): void {
 
 function handleWindowFocus(): void {
   refreshForegroundData();
+  void roomNotificationPreferences.refreshAll();
+  if (selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(selectedRoomIdentifier.value);
 }
 
 async function refreshSidebarLatestMessages(): Promise<void> {
