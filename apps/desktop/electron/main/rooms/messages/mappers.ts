@@ -1,5 +1,6 @@
 import type { DesktopRoomMessage } from "../../../ipc-types.js";
 import { parseAccountAgentRoutingEnvelope } from "../../../../../../shared/message-contracts.mjs";
+import { normalizeMessageReactions } from "../../../../../../shared/message-reactions.mjs";
 import {
   mapRoomMessageAttachmentPayload,
   type RoomMessageAttachmentPayload,
@@ -33,6 +34,7 @@ export type RoomMessagePayload = {
   thread_reply_to_id?: string | null;
   thread?: RoomMessageThreadSummaryPayload | null;
   reply_to?: RoomMessageReplyPayload | null;
+  reactions?: unknown;
   agent_identity?: {
     name?: string | null;
     display_name?: string | null;
@@ -106,6 +108,8 @@ export function mapRoomMessagePayload(
           agentIdentity: mapRoomMessageAgentIdentity(message.reply_to.agent_identity || null),
         }
       : null,
+    // Absent on local rooms and older servers; an empty list still means "none".
+    ...(message.reactions === undefined ? {} : { reactions: normalizeMessageReactions(message.reactions) }),
     ...(accountAgentRouting === undefined ? {} : { accountAgentRouting }),
     ...(typeof message.local_control_authorized === "boolean"
       ? { localControlAuthorized: message.local_control_authorized }

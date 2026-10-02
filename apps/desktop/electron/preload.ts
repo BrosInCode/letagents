@@ -187,6 +187,10 @@ const api: DesktopApi = {
       };
     },
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-conversation-routing", roomIdentifier, enabled),
+    getMessageReactions: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) =>
+      ipcRenderer.invoke("desktop:room:get-message-reactions", roomIdentifier, firstMessageId, lastMessageId),
+    setMessageReaction: (roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) =>
+      ipcRenderer.invoke("desktop:room:set-message-reaction", roomIdentifier, messageId, emoji, reacted),
     getGitHubEventFilter: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-github-event-filter", roomIdentifier),
     setGitHubEventFilter: (roomIdentifier: string, enabledKinds: string[]) => ipcRenderer.invoke("desktop:room:set-github-event-filter", roomIdentifier, enabledKinds),
     getAgentGuidelines: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-agent-guidelines", roomIdentifier),

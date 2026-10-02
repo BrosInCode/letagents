@@ -6,6 +6,9 @@ export const ROOM_RESOURCE_AGENT_WORK = "agent_work";
 export const ROOM_RESOURCE_AGENT_APPROVAL = "agent_approval";
 export const ROOM_RESOURCE_EXECUTION_DELEGATION = "execution_delegation";
 export const ROOM_RESOURCE_WAKE_RULES = "wake_rules";
+// Someone added or removed an emoji reaction. Consumers re-read the reactions
+// of the messages they show; the pointer never says which message changed.
+export const ROOM_RESOURCE_MESSAGE_REACTIONS = "message_reactions";
 // Protocol-known references. Each consumer still decides which surfaces, if
 // any, react to a supported pointer.
 export const ROOM_RESOURCE_INVALIDATION_RESOURCES = [
@@ -13,6 +16,7 @@ export const ROOM_RESOURCE_INVALIDATION_RESOURCES = [
   ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_EXECUTION_DELEGATION,
   ROOM_RESOURCE_WAKE_RULES,
+  ROOM_RESOURCE_MESSAGE_REACTIONS,
 ];
 
 function exactKeys(value, keys) {

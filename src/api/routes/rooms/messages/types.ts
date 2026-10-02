@@ -31,6 +31,8 @@ export interface RoomMessageRouteDeps {
   getMessageThreads?: typeof import("../../../db.js").getMessageThreads;
   getMessageThread?: typeof import("../../../db.js").getMessageThread;
   resolveMessageActivationIdentity?: typeof import("./activation-identity.js").resolveMessageActivationIdentity;
+  messageReactionStore?: import("./reactions.js").MessageReactionStore;
+  queueMessageReactionInvalidation?(roomId: string): void;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(

@@ -65,6 +65,7 @@ import MessageInfoSurface from './MessageInfoSurface.vue'
 import { mergeMessageArrivalIds, watchMessageListGrowth } from './messageArrival'
 import { buildMessageThreadSummaries } from './messageThreading'
 import { createReadEvidenceReporter } from './readEvidence'
+import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 
 const activeInfoMessage = ref<RoomMessage | null>(null)
 const infoSurfaceOpen = ref(false)
@@ -205,6 +206,17 @@ watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
   readReporter = createReadEvidenceReporter({ roomIdentifier: nextRoomIdentifier || '' })
   void retiring.dispose()
 })
+
+// A reaction row appearing under a message makes the list taller without a
+// new message. A reader at the newest message stays there.
+const messageReactions = injectRoomMessageReactions()
+if (messageReactions) {
+  watch(messageReactions.revision, async () => {
+    if (!isScrolledToBottom) return
+    await nextTick()
+    scrollToBottom('instant')
+  })
+}
 
 watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, addedCount }) => {
   if (prepended) {

@@ -261,6 +261,9 @@ jobs:
       - name: Test agent wake rules and room resource invalidation
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wake-rules-contract.test.ts src/api/__tests__/wake-rules-evaluate.test.ts src/api/__tests__/wake-rules-db.test.ts src/api/__tests__/room-event-broker.test.ts
 
+      - name: Test message reactions
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
+
       - name: Run message attachment tests
         run: >-
           node

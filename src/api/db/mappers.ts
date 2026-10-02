@@ -5,6 +5,7 @@ import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts } from "../repo-w
 import { isInviteCode } from "../rooms/routing.js";
 import { board_intents, board_manager_assignments, github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, room_board_settings, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import { formatAttachmentId, formatMessageId, formatTaskId } from "./utils.js";
+import type { MessageReaction } from "../../../shared/message-reactions.mjs";
 import type { BoardIntent, BoardIntentRow, BoardManagerAssignment, BoardManagerAssignmentRow, CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitRoomBinding, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomBoardSettings, RoomBoardSettingsRow, RoomKind, RoomParticipant, RoomParticipantRow, RoomSharedArtifact, RoomSharedArtifactTaskLink, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
 
 export function toProject(row: typeof rooms.$inferSelect): Project {
@@ -235,6 +236,7 @@ export function toMessage(row: MessageRow): Message {
     thread: null,
     reply_to: null,
     attachments: [],
+    reactions: [],
   };
 }
 
@@ -271,8 +273,9 @@ export function toMessageWithReply(
   replyReference: MessageReplyReference | null,
   attachments: MessageAttachment[] = [],
   thread: MessageThreadSummary | null = null,
+  reactions: MessageReaction[] = [],
 ): Message {
-  return { ...toMessage(row), thread, reply_to: replyReference, attachments };
+  return { ...toMessage(row), thread, reply_to: replyReference, attachments, reactions };
 }
 
 export function toTask(row: TaskRow): Task {
