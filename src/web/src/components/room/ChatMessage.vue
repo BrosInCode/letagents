@@ -18,6 +18,7 @@
     <div v-if="isWakeNotice" class="message-body wake-notice-body">
       <p class="wake-notice-line">
         <span class="wake-notice-text">{{ visibleText }}</span>
+        <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
         <time :datetime="message.timestamp" :title="fullTimestamp">{{ formattedTime }}</time>
       </p>
       <ThreadMarker
@@ -38,6 +39,7 @@
         :provenance-badge="provenanceBadge"
         :inline-prompt-injection="inlinePromptInjection"
         :formatted-time="formattedTime"
+        :pinned="pinned"
         :can-react="reactable"
         :picker-open="reactionPickerAnchor !== null"
         @reply="emit('reply', message)"
@@ -139,6 +141,7 @@
       >
         <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
         <button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
+        <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromMenu">{{ pinned ? 'Unpin message' : 'Pin message' }}</button>
         <button v-if="reactable" type="button" role="menuitem" @click="reactFromMenu">Add reaction…</button>
         <div class="web-message-context-menu-separator" role="separator" />
         <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
@@ -170,6 +173,8 @@ import ThreadMarker from './chat-message/ThreadMarker.vue'
 import MessageReactionBar from '../../../../../shared/ui/MessageReactionBar.vue'
 import MessageReactionPicker, { type MessageReactionPickerAnchor } from '../../../../../shared/ui/MessageReactionPicker.vue'
 import WakeGlyph from '../../../../../shared/ui/WakeGlyph.vue'
+import { isPinMessageId } from '../../../../../shared/message-pins.mjs'
+import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 import { WAKE_NOTICE_SOURCE } from '../../../../../shared/wake-rules.mjs'
 import {
@@ -238,7 +243,7 @@ function openContextMenu(event: MouseEvent) {
   contextMenuRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
   contextMenuPosition.value = {
     x: Math.min(event.clientX, window.innerWidth - 190),
-    y: Math.min(event.clientY, window.innerHeight - (reactable.value ? 202 : 170)),
+    y: Math.min(event.clientY, window.innerHeight - (170 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0))),
   }
   contextMenuOpen.value = true
   void nextTick(() => {
@@ -274,6 +279,10 @@ function messageInfoFromMenu() {
 
 // Reactions exist only inside a room that provides them (not in previews or
 // tests), and only on a message the server sent with its reactions.
+const pinContext = injectRoomMessagePins()
+const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id))
+const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false)
+function pinFromMenu(): void { closeContextMenu(); pinContext?.toggle(props.message.id) }
 const reactionContext = injectRoomMessageReactions()
 const reactions = computed(() => reactionContext?.reactionsFor(props.message.id) ?? [])
 const reactable = computed(() => Boolean(reactionContext?.canReact.value)

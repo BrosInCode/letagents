@@ -187,6 +187,8 @@ const api: DesktopApi = {
       };
     },
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-conversation-routing", roomIdentifier, enabled),
+    getMessagePins: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-message-pins", roomIdentifier),
+    setMessagePin: (roomIdentifier: string, messageId: string, pinned: boolean) => ipcRenderer.invoke("desktop:room:set-message-pin", roomIdentifier, messageId, pinned),
     getMessageReactions: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) =>
       ipcRenderer.invoke("desktop:room:get-message-reactions", roomIdentifier, firstMessageId, lastMessageId),
     setMessageReaction: (roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) =>

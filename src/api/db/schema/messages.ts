@@ -590,3 +590,17 @@ export const message_reactions = pgTable(
     emoji_check: check("message_reactions_emoji_check", sql`octet_length(${table.emoji}) BETWEEN 1 AND 64`),
   })
 );
+
+/** Room pin membership stays separate from message payloads. */
+export const message_pins = pgTable("message_pins", {
+  room_id: text("room_id").notNull(),
+  message_number: integer("message_number").notNull(),
+  pinned_by_account_id: text("pinned_by_account_id").notNull()
+    .references(() => accounts.id, { onDelete: "cascade", onUpdate: "cascade" }),
+  pinned_at: timestamp("pinned_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  pk: primaryKey({ name: "message_pins_pk", columns: [table.room_id, table.message_number] }),
+  message_fk: foreignKey({ name: "message_pins_message_fk", columns: [table.room_id, table.message_number],
+    foreignColumns: [messages.room_id, messages.number] }).onDelete("cascade").onUpdate("cascade"),
+  account_idx: index("message_pins_account_idx").on(table.pinned_by_account_id),
+}));

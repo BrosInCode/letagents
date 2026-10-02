@@ -6,6 +6,7 @@ export const ROOM_RESOURCE_EXECUTION_DELEGATION: "execution_delegation";
 /** What agents are waiting for changed; consumers re-read the room's wake rules. */
 export const ROOM_RESOURCE_WAKE_RULES: "wake_rules";
 /** A reaction was added or removed; consumers re-read the reactions of the messages they show. */
+export const ROOM_RESOURCE_MESSAGE_PINS: "message_pins";
 export const ROOM_RESOURCE_MESSAGE_REACTIONS: "message_reactions";
 /** Protocol-known references; consumers independently choose what they render. */
 export const ROOM_RESOURCE_INVALIDATION_RESOURCES: readonly [
@@ -14,6 +15,7 @@ export const ROOM_RESOURCE_INVALIDATION_RESOURCES: readonly [
   "execution_delegation",
   "wake_rules",
   "message_reactions",
+  "message_pins",
 ];
 
 export type RoomResourceInvalidationResource =
