@@ -1208,7 +1208,7 @@ test("the production Cursor profile keeps supervisor coordinates out of native c
   }
 });
 
-test("the production wrapper hosts one exact MCP connector across fresh and resume turns, then revokes it", async () => {
+async function verifyMcpConnectorRetirement(slowMembershipProbe = false, gracefulDescendant = false): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-connector-e2e-"));
   const workspace = join(root, "workspace");
   const sourceHome = join(root, "source-home");
@@ -1217,6 +1217,7 @@ test("the production wrapper hosts one exact MCP connector across fresh and resu
   const runtimeEntry = join(runtimePackage, "dist", "mcp", "server.js");
   const runtimePidPath = join(root, "runtime.pid");
   const runtimeDescendantPidPath = join(root, "runtime-descendant.pid");
+  const preloadPath = join(root, "slow-membership-preload.cjs");
   const managedProfileRoot = join(
     dirname(statePath),
     "cursor-supervised",
@@ -1237,11 +1238,16 @@ const readline = require("node:readline");
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 fs.writeFileSync(${JSON.stringify(runtimePidPath)}, String(process.pid));
-process.on("SIGTERM", () => {});
+process.on("SIGTERM", () => { if (${gracefulDescendant}) process.exit(0); });
 setInterval(() => {}, 1000);
-const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
-  stdio: "ignore",
+const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(`
+process.on("SIGTERM", () => { ${gracefulDescendant ? "setTimeout(() => process.exit(0), 700);" : ""} });
+setInterval(() => {}, 1000);
+process.send("ready");
+`)}, ${JSON.stringify(runtimeEntry)}], {
+  stdio: ["ignore", "ignore", "ignore", "ipc"],
 });
+const descendantReady = new Promise((resolve) => descendant.once("message", () => { descendant.disconnect(); resolve(); }));
 descendant.unref();
 fs.writeFileSync(${JSON.stringify(runtimeDescendantPidPath)}, String(descendant.pid));
 const required = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR", "NODE_COMPILE_CACHE"];
@@ -1258,7 +1264,8 @@ const boundaryValid = process.env.LETAGENTS_SUPERVISOR_ENTRY_ID === "supervised_
     catch { return false; }
   });
 const lines = readline.createInterface({ input: process.stdin });
-lines.on("line", (line) => {
+lines.on("line", async (line) => {
+  await descendantReady;
   const request = JSON.parse(line);
   const result = request.method === "initialize"
     ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
@@ -1357,6 +1364,29 @@ setTimeout(() => process.exit(73), 5000).unref();
 `);
   chmodSync(cursorBin, 0o700);
 
+  writeFileSync(preloadPath, `
+const fs = require("node:fs");
+const childProcess = require("node:child_process");
+const originalSpawnSync = childProcess.spawnSync;
+// The fault injection belongs to the wrapper, outside the native sandbox.
+delete process.env.NODE_OPTIONS;
+childProcess.spawnSync = function(command, args, options) {
+  if (command === "/bin/ps" && args[0] === "-axo" && args[1] === "pid=,pgid=") {
+    let runtimeAlive = false;
+    try {
+      const pid = Number(fs.readFileSync(${JSON.stringify(runtimePidPath)}, "utf8"));
+      process.kill(pid, 0);
+      runtimeAlive = true;
+    } catch {}
+    if (runtimeAlive) return {
+      status: null, stdout: "", stderr: "",
+      error: Object.assign(new Error("slow process-table scan"), { code: "ETIMEDOUT" }),
+    };
+  }
+  return originalSpawnSync.call(this, command, args, options);
+};
+`);
+
   const previousStatePath = process.env.LETAGENTS_STATE_PATH;
   const previousSourceHome = process.env.LETAGENTS_CURSOR_SOURCE_HOME;
   const previousDevMode = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
@@ -1374,7 +1404,9 @@ setTimeout(() => process.exit(73), 5000).unref();
         ...productionPersonalIdentityDependencies,
         launchTurn(input) {
           connectorRoots.push(dirname(input.mcpConnectorSocketPath!));
-          return defaultLaunchTurn(input);
+          return defaultLaunchTurn(slowMembershipProbe ? {
+            ...input, env: { ...input.env, NODE_OPTIONS: `--require=${preloadPath}` },
+          } : input);
         },
       },
     });
@@ -1480,6 +1512,17 @@ setTimeout(() => process.exit(73), 5000).unref();
       "adapter-owned exit cleanup removes the connector root when SIGKILL prevents wrapper cleanup",
     );
   } finally {
+    if (existsSync(runtimePidPath)) {
+      const pid = Number(readFileSync(runtimePidPath, "utf8"));
+      const observed = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,command="], { encoding: "utf8", timeout: 1_000 });
+      const member = (observed.stdout ?? "").split("\n").some((line) => {
+        const fields = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+        return fields && Number(fields[2]) === pid && fields[3]!.split(/\s+/).includes(runtimeEntry);
+      });
+      if (Number.isSafeInteger(pid) && pid > 1 && member) {
+        try { process.kill(-pid, "SIGKILL"); } catch {}
+      }
+    }
     for (const pid of [thirdRuntimeDescendantPid, thirdRuntimePid, stubbornPid]) {
       if (pid && Number.isSafeInteger(pid)) {
         try { process.kill(pid, "SIGKILL"); } catch {}
@@ -1493,11 +1536,20 @@ setTimeout(() => process.exit(73), 5000).unref();
     else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = previousDevMode;
     rmSync(root, { recursive: true, force: true });
   }
-});
+}
 
-test("the production wrapper refuses a recycled MCP runtime process group before signaling", {
+test("the production wrapper hosts one exact MCP connector across fresh and resume turns, then revokes it",
+  () => verifyMcpConnectorRetirement());
+
+test("MCP retirement escalates a live exact runtime despite slow process-table scans", {
   skip: process.platform === "win32",
-}, async () => {
+}, () => verifyMcpConnectorRetirement(true));
+
+test("MCP retirement preserves the grace window after its leader exits before a descendant", {
+  skip: process.platform === "win32",
+}, () => verifyMcpConnectorRetirement(false, true));
+
+async function verifyMcpRuntimeSignalFence(probeMode: "recycled" | "absent" | "ambiguous_identity" | "ambiguous_kill_identity" | "ambiguous_group"): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-runtime-recycled-group-"));
   const statePath = join(root, "turn.jsonl");
   const cursorBin = join(root, "fake-cursor-agent");
@@ -1507,6 +1559,8 @@ test("the production wrapper refuses a recycled MCP runtime process group before
   const initialIdentityPath = join(root, "initial-identity.log");
   const identityProbePath = join(root, "identity-probe.log");
   const groupSignalPath = join(root, "group-signal.log");
+  const ambiguousProbePath = join(root, "ambiguous-probe.log");
+  const laterProbePath = join(root, "later-probe.log");
   const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
   const connectorSocketPath = join(connectorRoot, "stdio.sock");
   const runtimeDataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
@@ -1517,6 +1571,7 @@ test("the production wrapper refuses a recycled MCP runtime process group before
 const fs = require("node:fs");
 const readline = require("node:readline");
 fs.writeFileSync(${JSON.stringify(runtimePidPath)}, String(process.pid));
+process.on("SIGTERM", () => {});
 const lines = readline.createInterface({ input: process.stdin });
 lines.on("line", (line) => {
   const request = JSON.parse(line);
@@ -1536,8 +1591,10 @@ lines.on("line", (line) => {
           },
         }] }
       : {};
+  // Invalid startup contracts take the repeated finishNotStarted cleanup path.
+  if (request.method === "tools/list") result.tools = [];
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
-  if (request.method === "tools/list") setTimeout(() => process.exit(0), 25);
+  if (request.method === "tools/list") setTimeout(() => process.exit(0), 1_500);
 });
 `);
   writeFileSync(preloadPath, `
@@ -1547,6 +1604,15 @@ const originalSpawnSync = childProcess.spawnSync;
 const originalKill = process.kill.bind(process);
 fs.appendFileSync(${JSON.stringify(preloadLoadedPath)}, String(process.pid) + "\\n");
 let exactIdentityReads = 0;
+let capturedIdentity;
+let ambiguousGroupProbe = false;
+const probeMode = ${JSON.stringify(probeMode)};
+const retryIdentity = probeMode === "ambiguous_identity" || probeMode === "ambiguous_kill_identity";
+function ambiguousProbe() {
+  fs.writeFileSync(${JSON.stringify(ambiguousProbePath)}, fs.existsSync(${JSON.stringify(groupSignalPath)})
+    ? fs.readFileSync(${JSON.stringify(groupSignalPath)}, "utf8") : "");
+  return { status: null, stdout: "", stderr: "", error: Object.assign(new Error("probe timed out"), { code: "ETIMEDOUT" }) };
+}
 function runtimePid() {
   try { return Number(fs.readFileSync(${JSON.stringify(runtimePidPath)}, "utf8")); }
   catch { return null; }
@@ -1557,17 +1623,25 @@ childProcess.spawnSync = function(command, args, options) {
     exactIdentityReads += 1;
     if (exactIdentityReads === 1) {
       const observed = originalSpawnSync.call(this, command, args, options);
+      capturedIdentity = observed;
       fs.writeFileSync(${JSON.stringify(initialIdentityPath)}, JSON.stringify({
         args, status: observed.status, stdout: observed.stdout, error: observed.error && observed.error.message,
       }));
       return observed;
     }
+    if (probeMode === "ambiguous_identity" && exactIdentityReads === 2) return ambiguousProbe();
+    if (probeMode === "ambiguous_kill_identity" && exactIdentityReads === 3) return ambiguousProbe();
+    if (exactIdentityReads > 2 || retryIdentity || probeMode === "ambiguous_group") {
+      fs.appendFileSync(${JSON.stringify(laterProbePath)}, "identity\\n");
+      return capturedIdentity;
+    }
     const pid = Number(args[args.indexOf("-p") + 1]);
     fs.appendFileSync(${JSON.stringify(identityProbePath)}, "recycled\\n");
+    if (probeMode === "absent") return { status: 1, stdout: "", stderr: "" };
     return {
       pid: 0,
-      output: [null, pid + " 1 " + pid + " Thu Jan  1 00:00:00 1970\\n", ""],
-      stdout: pid + " 1 " + pid + " Thu Jan  1 00:00:00 1970\\n",
+      output: [null, pid + " " + process.pid + " " + pid + " Thu Jan  1 00:00:00 1970\\n", ""],
+      stdout: pid + " " + process.pid + " " + pid + " Thu Jan  1 00:00:00 1970\\n",
       stderr: "",
       status: 0,
       signal: null,
@@ -1576,7 +1650,12 @@ childProcess.spawnSync = function(command, args, options) {
   if (command === "/bin/ps" && Array.isArray(args)
     && args[0] === "-axo" && args[1] === "pid=,pgid=") {
     const pid = runtimePid();
-    if (pid) {
+    if (pid && !retryIdentity) {
+      if (probeMode === "ambiguous_group" && !ambiguousGroupProbe) {
+        ambiguousGroupProbe = true;
+        return ambiguousProbe();
+      }
+      fs.appendFileSync(${JSON.stringify(laterProbePath)}, "group\\n");
       const observed = originalSpawnSync.call(this, command, args, options);
       const stdout = String(observed.stdout || "")
         + String(pid + 100000) + " " + String(pid) + "\\n";
@@ -1596,7 +1675,7 @@ process.kill = function(target, signal) {
   const pid = runtimePid();
   if (pid && target === -pid) {
     fs.appendFileSync(${JSON.stringify(groupSignalPath)}, String(signal) + "\\n");
-    return true;
+    if (!retryIdentity) return true;
   }
   return originalKill(target, signal);
 };
@@ -1648,9 +1727,27 @@ attestFixtureMcp().then(() => setInterval(() => {}, 1000)).catch((error) => {
     const terminal = JSON.parse(readFileSync(`${statePath}.terminal.json`, "utf8"));
     assert.equal(existsSync(preloadLoadedPath), true, `the adversarial process shim loaded: ${child.stderrTail()}`);
     assert.equal(existsSync(initialIdentityPath), true, "spawn records the original runtime leader's exact birth and ancestry");
-    assert.equal(existsSync(identityProbePath), true, "retirement observes that the original group leader birth changed");
-    assert.equal(existsSync(groupSignalPath), false, "the recycled numeric PGID receives neither TERM nor KILL");
-    assert.equal(terminal.remote_authority_revoked, false, "ambiguous recycled-group retirement stays fail closed");
+    assert.equal(terminal.type, "not_started", "the invalid contract exercises cleanup before and after startup settles");
+    const signals = existsSync(groupSignalPath) ? readFileSync(groupSignalPath, "utf8").trim().split("\n") : [];
+    if (probeMode === "recycled" || probeMode === "absent") {
+      assert.equal(existsSync(identityProbePath), true, "retirement observes that the original group leader birth changed");
+      assert.equal(existsSync(groupSignalPath), false, "the recycled numeric PGID receives neither TERM nor KILL");
+      assert.equal(existsSync(laterProbePath), true, "cleanup continues probing group absence without restoring signal authority");
+    } else {
+      assert.equal(existsSync(ambiguousProbePath), true, "retirement encounters the injected probe timeout");
+      assert.equal(existsSync(laterProbePath), true, "retirement probes again after the timeout");
+      if (probeMode === "ambiguous_group") {
+        assert.equal(signals[0], "SIGTERM");
+        assert.ok(signals.length <= 2 && signals.slice(1).every((signal) => signal === "SIGKILL"));
+        assert.equal(readFileSync(groupSignalPath, "utf8"), readFileSync(ambiguousProbePath, "utf8"),
+          "cleanup retries cannot signal after losing group continuity, regardless of earlier escalation");
+      } else {
+        assert.deepEqual(signals, ["SIGTERM", "SIGKILL"], "a fresh matching identity permits the timed-out signal to retry");
+      }
+    }
+    assert.equal(terminal.remote_authority_revoked,
+      probeMode === "ambiguous_identity" || probeMode === "ambiguous_kill_identity",
+      "only successful retirement of a freshly verified runtime proves revoked authority");
   } finally {
     if (child?.pid) {
       try { process.kill(child.pid, "SIGKILL"); } catch {}
@@ -1659,6 +1756,19 @@ attestFixtureMcp().then(() => setInterval(() => {}, 1000)).catch((error) => {
     rmSync(runtimeDataRoot, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+test("the production wrapper refuses a recycled MCP runtime process group before signaling", {
+  skip: process.platform === "win32",
+}, () => verifyMcpRuntimeSignalFence("recycled"));
+
+test("MCP cleanup retries distinguish unavailable identity from lost process-group signal authority", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  await t.test("TERM identity timeout then success", () => verifyMcpRuntimeSignalFence("ambiguous_identity"));
+  await t.test("KILL identity timeout then success", () => verifyMcpRuntimeSignalFence("ambiguous_kill_identity"));
+  await t.test("confirmed absence permanently revokes signals", () => verifyMcpRuntimeSignalFence("absent"));
+  await t.test("group probe ambiguity", () => verifyMcpRuntimeSignalFence("ambiguous_group"));
 });
 
 test("the exact live Cursor connector rejects a swapped runtime with a missing or malformed completion contract", async () => {
