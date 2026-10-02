@@ -1,3 +1,4 @@
+import { registerRoomTypingRoute } from "./typing.js";
 import type { Express } from "express";
 
 import { registerCreateMessageRoute } from "./create-message.js";
@@ -30,4 +31,5 @@ export function registerRoomMessageRoutes(
   registerMessagePinRoutes(app, deps);
   registerAgentReceiptsRoute(app, deps);
   registerAgentObservationRoute(app, deps);
+  registerRoomTypingRoute(app, deps);
 }

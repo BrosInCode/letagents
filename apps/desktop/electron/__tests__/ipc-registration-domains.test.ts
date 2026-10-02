@@ -113,6 +113,7 @@ const expectedDirectChannels = [
   "desktop:room:release-board-manager",
   "desktop:room:rename",
   "desktop:room:repair-stream-delivery",
+  "desktop:room:report-typing",
   "desktop:room:restart-account-activity",
   "desktop:room:restore-wake-rule",
   "desktop:room:run-task-review-worker-action",

@@ -1,3 +1,5 @@
+import { ROOM_TYPING } from "../../../../../shared/room-typing.mjs";
+import { roomTyping } from "../../../server/room-typing.js";
 import { waitForMessageRouting } from "./wait-for-routing.js";
 import type { Express } from "express";
 import {
@@ -44,7 +46,7 @@ const runStreamCheckpoint = createBoundedExecutor({
 const MAX_STREAM_CAPABILITY_VALUES = 16;
 const MAX_STREAM_CAPABILITY_BYTES = 512;
 
-function streamSupportsResourceInvalidation(req: AuthenticatedRequest): boolean {
+function streamSupports(req: AuthenticatedRequest, capability: string): boolean {
   const raw = req.query?.stream_capability;
   const values = typeof raw === "string"
     ? [raw]
@@ -60,7 +62,7 @@ function streamSupportsResourceInvalidation(req: AuthenticatedRequest): boolean 
       || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)
     ) return false;
   }
-  return values.includes(ROOM_RESOURCE_INVALIDATION_CAPABILITY);
+  return values.includes(capability);
 }
 
 export function registerMessageStreamRoute(
@@ -72,7 +74,7 @@ export function registerMessageStreamRoute(
     if (!project) return;
 
     const projectId = project.id;
-    const supportsResourceInvalidation = streamSupportsResourceInvalidation(req);
+    const supportsResourceInvalidation = streamSupports(req, ROOM_RESOURCE_INVALIDATION_CAPABILITY);
     const accessRoomName = await (
       deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
     )(req, project);
@@ -169,6 +171,17 @@ export function registerMessageStreamRoute(
         requested_cursor: requestedCursor,
         event_cursor: subscription.checkpointCursor,
         gap: true,
+      }));
+    }
+
+    if (isAppSession(req) && !project.focus_key?.startsWith("rental:") && streamSupports(req, ROOM_TYPING)) {
+      let checking = false;
+      connection.addCleanup(roomTyping.subscribe(projectId, req.sessionAccount!.account_id, (signal) => {
+        if (checking || streamClosed || res.writableNeedDrain || res.writableLength > 0) return;
+        checking = true;
+        void liveController.check().then((allowed) => {
+          if (allowed && signal.expires_at > Date.now()) connection?.tryWrite(`event: ${ROOM_TYPING}\ndata: ${JSON.stringify(signal)}\n\n`);
+        }).catch(() => { /* A failed hint never closes message delivery. */ }).finally(() => { checking = false; });
       }));
     }
 

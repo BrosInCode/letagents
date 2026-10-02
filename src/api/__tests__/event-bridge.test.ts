@@ -430,3 +430,23 @@ test("oversized deferred routing events retain an authoritative reference", () =
   assert.ok(event?.mode === "ref");
   assert.deepEqual(event.ref, { room_id: "room_jev", number: 9 });
 });
+
+test('malformed/expired typing and a failed typing publish never generate a durable loss marker', async () => {
+  const { ROOM_TYPING } = await import('../../../shared/room-typing.mjs');
+  const { pool } = await import('../db/client.js');
+  const { startBridgePublisher, beginStopBridgePublisher, finishStopBridgePublisher } = await import('../server/event-bridge/publisher.js');
+  const losses: unknown[] = [];
+  const onLoss = (value: unknown) => losses.push(value);
+  roomEventBridgeLossEvents.on('loss', onLoss);
+  const connect = pool.connect;
+  pool.connect = (async () => { throw new Error('offline'); }) as typeof connect;
+  try {
+    await dispatchBridgeNotification({ v: 1, origin: 'remote', lane: ROOM_TYPING, event: ROOM_TYPING, mode: 'inline', data: { text: 'not a hint' } });
+    startBridgePublisher();
+    createBridgedEmitter(ROOM_TYPING).emit(ROOM_TYPING, { client_id: 'composer_bridge_2', sequence: 1,
+      typing: true, ttl_ms: 5000, expires_at: Date.now() + 5000, room_id: 'room_1', account_id: 'ada', name: 'Ada' });
+    beginStopBridgePublisher();
+    await finishStopBridgePublisher();
+    assert.deepEqual(losses, []);
+  } finally { pool.connect = connect; roomEventBridgeLossEvents.off('loss', onLoss); }
+});

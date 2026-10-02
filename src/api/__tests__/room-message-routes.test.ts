@@ -365,6 +365,7 @@ test("registerRoomMessageRoutes preserves canonical message route order", () => 
     { method: "delete", path: "/^\\/rooms\\/(.+)\\/messages\\/([^/]+)\\/pin$/" },
     { method: "put", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/agent-receipts\\/self$/" },
     { method: "put", path: "/^\\/rooms\\/(.+)\\/agents\\/self\\/observation$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/typing$/" },
   ]);
 });
 
@@ -2276,3 +2277,113 @@ test("worker stream routing barrier retains frames, coalesces readers and releas
   closed = true;
   assert.equal(await waitForMessageRouting({ roomId: "routing-stream", messageId: "msg_4", includePromptOnly: false, closed: () => closed, load }), false);
 });
+
+test('typing reaches only opted-in other people; agent SSE/poll stay parked and reconnect has no replay', async () => {
+  const { roomTyping } = await import('../server/room-typing.js');
+  const handlers = new Map<string, Function>();
+  const app = Object.fromEntries(['get', 'post', 'put', 'delete'].map(method => [method,
+    (path: RegExp, handler: Function) => handlers.set(`${method}:${path}`, handler)]));
+  const room = `typing-live-${Date.now()}`;
+  let historyReads = 0;
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => room,
+    resolveRoomOrReply: async (_id: string) => ({ id: room }),
+    requireParticipant: async () => true,
+    getMessagesAfter: async () => { historyReads++; return { messages: [], has_more: false }; },
+    beginRoomAgentDelivery: async () => null,
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  const stream = handlers.get('get:/^\\/rooms\\/(.+)\\/messages\\/stream$/')!;
+  const poll = handlers.get('get:/^\\/rooms\\/(.+)\\/messages\\/poll$/')!;
+  const requests: EventEmitter[] = [];
+  function open(account: string, auth = 'session', capability = true) {
+    const req = Object.assign(new EventEmitter(), { params: { 0: room },
+      query: capability ? { stream_capability: 'room_typing_v1' } : {}, headers: {},
+      authKind: auth, sessionAccount: { account_id: account }, get() {} });
+    requests.push(req);
+    const res = Object.assign(new EventEmitter(), { writes: [] as string[], writableLength: 0,
+      writableNeedDrain: false, writableEnded: false, headersSent: false,
+      socket: { setKeepAlive() {} }, setHeader() {}, flushHeaders() {},
+      status() { return this; }, json(value: unknown) { this.writes.push(JSON.stringify(value)); return this; },
+      write(value: string) { this.writes.push(value); return true; }, end() { this.writableEnded = true; } });
+    return { req, res };
+  }
+  const human = open('bea'), self = open('ada'), otherSelf = open('ada'), agent = open('agent', 'owner_token'), worker = open('worker', 'agent_session'), legacy = open('cy', 'session', false);
+  const agentPoll = open('agent', 'owner_token');
+  Object.assign(agentPoll.req.query, { after: 'msg_1', timeout: '60000' });
+  const all = [human, self, otherSelf, agent, worker, legacy];
+  try {
+    for (const pair of all) { await stream(pair.req, pair.res); pair.res.writes.length = 0; }
+    await poll(agentPoll.req, agentPoll.res);
+    const checkpoint = deps.roomEventBroker.subscribe(room);
+    const cursor = checkpoint.checkpointCursor;
+    checkpoint.close();
+    roomTyping.report(room, 'ada', 'Ada', { client_id: 'composer_test_live', sequence: 1, typing: true, ttl_ms: 5000 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(human.res.writes.join(''), /event: room_typing_v1/);
+    assert.doesNotMatch(human.res.writes.join(''), /^id: /m);
+    for (const pair of [self, otherSelf, agent, worker, legacy, agentPoll]) assert.equal(pair.res.writes.length, 0);
+    assert.equal(historyReads, 1, 'typing never wakes the actual long-poll handler');
+    const reconnect = open('bea');
+    await stream(reconnect.req, reconnect.res);
+    assert.doesNotMatch(reconnect.res.writes.join(''), /room_typing_v1/, 'no snapshot or replay');
+    const after = deps.roomEventBroker.subscribe(room);
+    assert.equal(after.checkpointCursor, cursor, 'no broker event or cursor');
+    after.close();
+    human.req.emit('close');
+    const before = human.res.writes.length;
+    roomTyping.report(room, 'ada', 'Ada', { client_id: 'composer_test_live', sequence: 2, typing: false, ttl_ms: 0 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(human.res.writes.length, before, 'subscription removed with connection');
+  } finally {
+    for (const req of requests) req.emit('close');
+    deps.roomEventBroker.close();
+  }
+});
+
+for (const failure of ['denied', 'throws'] as const) {
+  test(`typing authorization ${failure} drops only the hint; message delivery owns stream closure`, async (context) => {
+    context.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const { roomTyping } = await import('../server/room-typing.js');
+    const handlers = new Map<string, Function>();
+    const app = Object.fromEntries(['get', 'post', 'put', 'delete'].map(method => [method,
+      (path: RegExp, handler: Function) => handlers.set(`${method}:${path}`, handler)]));
+    const room = `typing-authorization-${failure}-${Date.now()}`;
+    let failing = false;
+    const deps = {
+      ...createDeps(),
+      resolveCanonicalRoomRequestId: async () => room,
+      resolveRoomOrReply: async () => ({ id: room }),
+      requireParticipant: async () => true,
+      reauthorizeGitRoomParticipant: async () => {
+        if (failing && failure === 'throws') throw new Error('temporary dependency failure');
+        return !failing;
+      },
+    };
+    registerRoomMessageRoutes(app as never, deps as never);
+    const req = Object.assign(new EventEmitter(), { params: { 0: room },
+      query: { stream_capability: 'room_typing_v1' }, headers: {}, authKind: 'session',
+      sessionAccount: { account_id: 'bea' }, get() {} });
+    const res = Object.assign(new EventEmitter(), { writes: [] as string[], writableLength: 0,
+      writableNeedDrain: false, writableEnded: false, socket: { setKeepAlive() {} },
+      setHeader() {}, flushHeaders() {}, status() { return this; }, json() { return this; },
+      write(value: string) { this.writes.push(value); return true; }, end() { this.writableEnded = true; } });
+    const errorLog = context.mock.method(console, 'error', () => {});
+    try {
+      await handlers.get('get:/^\\/rooms\\/(.+)\\/messages\\/stream$/')!(req, res);
+      res.writes.length = 0;
+      failing = true;
+      context.mock.timers.tick(60001);
+      roomTyping.report(room, 'ada', 'Ada', { client_id: 'composer_auth_test', sequence: 1, typing: true, ttl_ms: 5000 });
+      await flushAsyncEvents();
+      assert.equal(res.writes.length, 0, 'denied/failed hint is dropped');
+      assert.equal(res.writableEnded, false, 'a hint cannot close the stream');
+      assert.equal(errorLog.mock.callCount(), failure === 'throws' ? 1 : 0);
+      // The next real room event still enforces the same existing authorization.
+      deps.roomEventBroker.publish({ kind: 'message_info_updated', roomId: room, messageIds: null });
+      await flushAsyncEvents();
+      assert.equal(res.writableEnded, true, 'real event keeps its authorization behavior');
+    } finally { req.emit('close'); deps.roomEventBroker.close(); }
+  });
+}

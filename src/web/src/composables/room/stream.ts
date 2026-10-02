@@ -1,3 +1,5 @@
+import { ROOM_TYPING } from "../../../../../shared/room-typing.mjs"
+import { receiveRoomTyping } from "../roomTyping"
 import {
   ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_INVALIDATION_CAPABILITY,
@@ -387,6 +389,7 @@ export function createRoomStream(
   }
 
   function stop(preserveStartupState = false) {
+    if (activeRoomIdentifier) receiveRoomTyping(activeRoomIdentifier)
     streamGeneration += 1
     resyncPromises.clear()
     eventSource?.close()
@@ -453,6 +456,7 @@ export function createRoomStream(
     const streamParams = new URLSearchParams()
     if (eventCursor) streamParams.set('event_cursor', eventCursor)
     streamParams.append('stream_capability', ROOM_RESOURCE_INVALIDATION_CAPABILITY)
+    streamParams.append('stream_capability', ROOM_TYPING)
     const source = new EventSource(
       `${roomPath(roomIdentifier)}/messages/stream?${streamParams.toString()}`,
     )
@@ -468,6 +472,7 @@ export function createRoomStream(
     source.onopen = () => {
       if (!isCurrentSource()) return
       publishMessagePinInvalidation(roomIdentifier)
+      receiveRoomTyping(roomIdentifier)
       openRoomIdentifier = roomIdentifier
       handlers.setConnectionState('live')
       handlers.setStreaming(true)
@@ -481,6 +486,11 @@ export function createRoomStream(
       }
       if (bootstrapRoom !== roomIdentifier) startResyncLoop(roomIdentifier, true)
     }
+
+    source.addEventListener(ROOM_TYPING, (event) => {
+      if (!isCurrentSource()) return
+      try { receiveRoomTyping(roomIdentifier, JSON.parse(event.data)) } catch { /* No history repair for a hint. */ }
+    })
 
     source.addEventListener('message', (event) => {
       if (!isCurrentSource()) return
@@ -711,6 +721,7 @@ export function createRoomStream(
 
     source.onerror = () => {
       if (!isCurrentSource()) return
+      receiveRoomTyping(roomIdentifier)
       handlers.setConnectionState('error')
       handlers.setStreaming(false)
       source.close()
