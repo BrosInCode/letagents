@@ -417,6 +417,21 @@ export interface DesktopGitHubRoomEvent {
   createdAt: string;
 }
 
+export interface DesktopPullRequestDiff {
+  number: number;
+  head_sha: string;
+  diff: string;
+  github_url: string;
+  file_list: {
+    files: Array<{ path: string; previous_path: string | null; status: string; additions: number; deletions: number }>;
+    total_files: number;
+  } | null;
+}
+
+export type DesktopPullRequestDiffResult =
+  | { ok: true; value: DesktopPullRequestDiff }
+  | { ok: false; code: string };
+
 export interface DesktopGitHubEventsQuery {
   limit?: number;
   after?: string | null;

@@ -98,6 +98,7 @@ const expectedDirectChannels = [
   "desktop:room:get-message-reminders",
   "desktop:room:get-messages-before",
   "desktop:room:get-notification-preference",
+  "desktop:room:get-pull-request-diff",
   "desktop:room:get-reasoning-session",
   "desktop:room:get-snapshot",
   "desktop:room:get-thread",

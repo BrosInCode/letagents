@@ -3,6 +3,7 @@ import { getDesktopConversationRouting, setDesktopConversationRouting } from "..
 import { getDesktopMessageLinkPreviews } from "../rooms/link-previews.js";
 import { getDesktopMessagePins, setDesktopMessagePin } from "../rooms/pins.js";
 import { reportDesktopRoomTyping } from "../rooms/typing.js";
+import { getDesktopPullRequestDiff } from "../rooms/pull-request-diff.js";
 import { getDesktopMessageReactions, setDesktopMessageReaction } from "../rooms/reactions.js";
 import { searchDesktopRoomMessages } from "../rooms/search.js";
 import { getAccountActivityState, restartAccountActivityStream, stopAccountActivityStream } from "../account-activity-stream.js";
@@ -517,6 +518,10 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle(
     "desktop:room:create-invite-room",
     async (): Promise<DesktopInviteRoomCreation> => createDesktopInviteRoom(),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-pull-request-diff",
+    (_event, roomIdentifier: string, number: number) => getDesktopPullRequestDiff(roomIdentifier, number),
   );
   targetIpcMain.handle(
     "desktop:room:get-github-events",
