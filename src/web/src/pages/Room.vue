@@ -20,6 +20,7 @@
     />
 
     <RoomHeader
+      ref="roomHeader"
       :title="roomTitle"
       :subtitle="roomSubtitle"
       :activeTab="activeTab"
@@ -123,6 +124,8 @@
       :roomIdentifier="room?.identifier || ''"
       :attachmentsEnabled="room?.attachmentsEnabled !== false"
       :submitMessage="handleSend"
+      :createTask="addTask"
+      :openSearch="openComposerSearch"
       :stageAttachmentDraft="stageAttachmentUpload"
       :discardAttachmentDraft="discardAttachmentUpload"
       :replyTo="selectedReply"
@@ -293,6 +296,12 @@ onUnmounted(() => {
 })
 
 const searchQuery = ref('')
+const roomHeader = ref<InstanceType<typeof RoomHeader> | null>(null)
+function openComposerSearch(query: string): boolean {
+  if (!roomHeader.value?.openSearch()) return false
+  searchQuery.value = query
+  return true
+}
 const roomTabPanelsRef = ref<InstanceType<typeof RoomTabPanels> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
 const selectedBoardTaskId = computed(() => {
