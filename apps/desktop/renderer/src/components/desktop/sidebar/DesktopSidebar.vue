@@ -699,6 +699,10 @@ import {
   getRoomSwitcherAriaKeyShortcuts,
   getRoomSwitcherShortcutLabel,
 } from "../../../domain/room-switcher-shortcut";
+import {
+  coordinateRoomSwitcherFocus,
+  focusSwitchedRoomOnceRendered,
+} from "../../../domain/room-switcher-focus";
 import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
@@ -832,9 +836,22 @@ function openRoomSwitcher(): void {
   closeBackgroundContextMenu();
   switcherOpen.value = true;
 }
+let cancelPendingSwitcherFocus: (() => void) | null = null;
+
 function selectSwitchedRoom(entry: RoomEntry): void {
   switcherOpen.value = false;
   emit("select-entry", entry);
+  cancelPendingSwitcherFocus?.();
+  cancelPendingSwitcherFocus = coordinateRoomSwitcherFocus({
+    currentRoomId: () => props.activeEntry.id,
+    chosenRoomId: entry.id,
+    startFocus: () => focusSwitchedRoomOnceRendered(),
+    watchRoomId: (onChange) => watch(
+      () => props.activeEntry.id,
+      (newId) => { onChange(newId); },
+    ),
+    nextTick,
+  });
 }
 function handleRoomSwitcherShortcut(event: KeyboardEvent): void {
   if (!canOpenRoomSwitcher({
@@ -869,6 +886,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleRoomSwitcherShortcut);
   navigationHeightQuery?.removeEventListener("change", revealFocusedNavigationItem);
   cancelAnimationFrame(navigationFocusFrame);
+  cancelPendingSwitcherFocus?.();
 });
 
 const searchButton = ref<HTMLButtonElement | null>(null);

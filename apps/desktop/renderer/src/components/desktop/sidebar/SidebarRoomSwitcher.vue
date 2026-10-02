@@ -8,6 +8,7 @@
       :show-close="false"
       initial-focus="#sidebar-switcher-query"
       test-id="sidebar-room-switcher"
+      :restore-focus="shouldRestoreFocus"
       @close="$emit('close')"
     >
       <div class="sidebar-switcher-search">
@@ -42,7 +43,7 @@
           :aria-selected="index === activeIndex"
           class="sidebar-switcher-result"
           @pointerenter="activeIndex = index"
-          @click="$emit('select', option.entry)"
+          @click="chooseOption(option.entry)"
         >
           <span class="sidebar-switcher-icon" aria-hidden="true"><GitBranch v-if="option.entry.kind === 'branch'" /><MessageSquare v-else-if="option.entry.kind === 'focus'" /><House v-else /></span>
           <span class="sidebar-switcher-copy"><strong>{{ option.title }}</strong><small>{{ option.detail }}</small></span>
@@ -75,9 +76,16 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{ close: []; select: [entry: RoomEntry] }>();
 const query = ref('');
 const activeIndex = ref(0);
+const shouldRestoreFocus = ref(true);
 const options = computed(() => sidebarRoomSwitchOptions(props.projects, query.value));
 const resultId = (index: number) => `sidebar-switcher-result-${index}`;
-watch(() => props.open, (open) => { if (open) { query.value = ''; activeIndex.value = 0; } });
+watch(() => props.open, (open) => {
+  if (open) {
+    query.value = '';
+    activeIndex.value = 0;
+    shouldRestoreFocus.value = true;
+  }
+});
 watch(query, () => { activeIndex.value = 0; });
 watch(options, (entries) => { activeIndex.value = Math.min(activeIndex.value, Math.max(0, entries.length - 1)); });
 async function move(delta: number): Promise<void> {
@@ -86,9 +94,13 @@ async function move(delta: number): Promise<void> {
   await nextTick();
   document.getElementById(resultId(activeIndex.value))?.scrollIntoView({ block: 'nearest' });
 }
+function chooseOption(entry: RoomEntry): void {
+  shouldRestoreFocus.value = false;
+  emit('select', entry);
+}
 function chooseActive(): void {
   const option = options.value[activeIndex.value];
-  if (option) emit('select', option.entry);
+  if (option) chooseOption(option.entry);
 }
 </script>
 
