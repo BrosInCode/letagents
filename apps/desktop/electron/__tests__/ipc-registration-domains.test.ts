@@ -90,6 +90,7 @@ const expectedDirectChannels = [
   "desktop:room:get-live-metadata",
   "desktop:room:get-message",
   "desktop:room:get-message-info",
+  "desktop:room:get-message-link-previews",
   "desktop:room:get-message-pins",
   "desktop:room:get-message-reactions",
   "desktop:room:get-messages-before",

@@ -67,6 +67,7 @@ import { mergeMessageArrivalIds, watchMessageListGrowth } from './messageArrival
 import { buildMessageThreadSummaries } from './messageThreading'
 import { createReadEvidenceReporter } from './readEvidence'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
+import { injectRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 import { decideMessageRevealAction } from './messageReveal'
 import { useRoomUnread } from '@/composables/roomUnread'
@@ -256,8 +257,10 @@ if (messagePins) {
 // A reaction row appearing under a message makes the list taller without a
 // new message. A reader at the newest message stays there.
 const messageReactions = injectRoomMessageReactions()
-if (messageReactions) {
-  watch(messageReactions.revision, async () => {
+const messageLinkPreviews = injectRoomMessageLinkPreviews()
+for (const context of [messageReactions, messageLinkPreviews]) {
+  if (!context) continue
+  watch(context.revision, async () => {
     if (!isScrolledToBottom) return
     await nextTick()
     scrollToBottom('instant')

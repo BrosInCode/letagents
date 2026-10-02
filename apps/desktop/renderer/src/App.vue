@@ -383,6 +383,7 @@
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { invalidateRoomWakeRules } from "./composables/useRoomWakeRules";
+import { invalidateRoomMessageLinkPreviews, setMessageLinkPreviewViewer } from "./composables/useRoomMessageLinkPreviews";
 import { invalidateRoomMessagePins, setMessagePinViewer } from "./composables/useRoomMessagePins";
 import { receiveRoomTyping, setTypingAccount } from "./composables/useRoomTyping";
 import { invalidateRoomMessageReactions, setMessageReactionViewer } from "./composables/useRoomMessageReactions";
@@ -525,7 +526,7 @@ const authStatus = ref<DesktopAuthStatus | null>(null);
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
   setDesktopMessageDraftAccount, { immediate: true, flush: "sync" });
 watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null,
-  (account) => { setMessageReactionViewer(account); setMessagePinViewer(account); roomUnread.account.value = account?.id ?? null; }, { immediate: true, flush: "sync" });
+  (account) => { setMessageReactionViewer(account); setMessagePinViewer(account); setMessageLinkPreviewViewer(account); roomUnread.account.value = account?.id ?? null; }, { immediate: true, flush: "sync" });
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
   setTypingAccount, { immediate: true, flush: "sync" });
 const sessionGeneration = ref(0);
@@ -1433,6 +1434,7 @@ const {
 function handleDesktopRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   if (event.type === "typing") { receiveRoomTyping(event.roomIdentifier, event.signal); return; }
   if (event.type === "open" || event.type === "error" || event.type === "session_disconnect") receiveRoomTyping(event.roomIdentifier);
+  if (["open", "github_event", "artifact_update"].includes(event.type)) invalidateRoomMessageLinkPreviews(event.roomIdentifier);
   if (event.type === "resource_invalidation") {
     if (event.resource === "wake_rules") invalidateRoomWakeRules(event.roomIdentifier);
     else if (event.resource === "message_pins") invalidateRoomMessagePins(event.roomIdentifier);

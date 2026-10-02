@@ -187,6 +187,7 @@ const api: DesktopApi = {
       };
     },
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-conversation-routing", roomIdentifier, enabled),
+    getMessageLinkPreviews: (roomIdentifier, references) => ipcRenderer.invoke("desktop:room:get-message-link-previews", roomIdentifier, references),
     getMessagePins: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-message-pins", roomIdentifier),
     setMessagePin: (roomIdentifier: string, messageId: string, pinned: boolean) => ipcRenderer.invoke("desktop:room:set-message-pin", roomIdentifier, messageId, pinned),
     reportTyping: (roomIdentifier, input) => ipcRenderer.invoke("desktop:room:report-typing", roomIdentifier, input),
