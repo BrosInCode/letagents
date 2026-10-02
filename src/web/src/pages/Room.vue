@@ -127,6 +127,7 @@
       :replyTo="selectedReply"
       :messages="messages"
       :presence="presence"
+      :presenceReady="presenceLoaded"
       :participants="participants"
       :refreshReachability="refreshRoomReachability"
       :isSignedIn="auth.isSignedIn.value"
@@ -189,6 +190,7 @@ const {
   tasks,
   focusRooms,
   presence,
+  presenceLoaded,
   boardHandoffPresence,
   participants,
   reasoningSessions,
