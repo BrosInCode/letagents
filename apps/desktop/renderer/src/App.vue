@@ -2367,8 +2367,14 @@ function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): void {
   void syncSelectedRoomStream(snapshot.roomIdentifier);
 }
 
-function handleRoomMessageRevealUnavailable(_messageId: string): void {
-  pushActionToast("That earlier message is not available in the loaded room history.", "info");
+function handleRoomMessageRevealUnavailable(_messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"): void {
+  if (reason === "not_found") {
+    pushActionToast("That message is not available.", "info");
+  } else if (reason === "too_far_back") {
+    pushActionToast("That message is too far back to open here yet.", "info");
+  } else {
+    pushActionToast("That earlier message is not available in the loaded room history.", "info");
+  }
 }
 
 function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): void {

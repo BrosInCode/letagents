@@ -23,6 +23,7 @@ import {
   isConnected,
   joinError,
   messagesHasOlder,
+  messagesLoaded,
   participantHiddenCount,
   participants,
   presence,
@@ -84,6 +85,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       )
       replaceRoomMessages(mergeMessages([], bootstrap.messagePage.messages))
       messagesHasOlder.value = bootstrap.messagePage.hasOlder
+      messagesLoaded.value = true
       tasks.value = bootstrap.tasks
       focusRooms.value = bootstrap.focusRooms
       presence.value = bootstrap.presence
