@@ -38,3 +38,62 @@ test("an agent's visible reply cancels its older coalesced progress echo", () =>
   assert.match(viewportSource, /currentLocalAgentWork/);
   assert.match(viewportSource, /v-if="displayedAgentWork\.length && !roomLoading"/);
 });
+
+const cssSource = readFileSync(fileURLToPath(new URL(
+  "../src/styles/04-room-chat-stream.css",
+  import.meta.url,
+)), "utf8");
+
+const hostSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/agent-inspector/AgentInspectorHost.vue",
+  import.meta.url,
+)), "utf8");
+
+const surfaceSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue",
+  import.meta.url,
+)), "utf8");
+
+const shellSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/DesktopRoomShell.vue",
+  import.meta.url,
+)), "utf8");
+
+test("the work indicator renders as a clickable button with accessible name and phrasing content", () => {
+  assert.match(viewportSource, /<button[\s\S]*?class="room-local-agent-work"[\s\S]*?:aria-label="`\$\{work\.displayName\}: \$\{work\.summary\}\. Open live activity`"[\s\S]*?@click="\$emit\('open-agent', workIndicatorAgentTarget\(work\)\)"/);
+  assert.match(viewportSource, /<span class="room-local-agent-work-copy">/);
+  assert.doesNotMatch(viewportSource, /<button[\s\S]*?class="room-local-agent-work"[\s\S]*?<div>/);
+  assert.match(viewportSource, /import\s*\{\s*[^}]*workIndicatorAgentTarget[^}]*\}\s*from\s*"[^"]*agent-inspector-identity"/);
+});
+
+test("work indicator button has interactive styling, accessible focus, and theme tokens with no dead selectors", () => {
+  assert.match(cssSource, /\.room-local-agent-work\s*\{[\s\S]*?cursor:\s*pointer;/);
+  assert.doesNotMatch(cssSource, /button\.room-local-agent-work/);
+  assert.doesNotMatch(cssSource, /\.room-local-agent-work div/);
+  assert.match(cssSource, /\.room-local-agent-work:focus-visible\s*\{[\s\S]*?outline:/);
+  assert.match(cssSource, /\.room-local-agent-work:active\s*\{[\s\S]*?background:\s*var\(--accent-active\)/);
+  assert.match(cssSource, /@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)\s*\{[\s\S]*?\.room-local-agent-work:hover\s*\{[\s\S]*?background:\s*var\(--accent-hover\)/);
+  assert.match(cssSource, /\.room-local-agent-work-copy/);
+});
+
+test("agent inspector host falls back to composer only when opener row is non-null and disconnected", () => {
+  assert.match(hostSource, /if\s*\(restoreFocusOnClose\s*&&\s*restoreFocusElement\)\s*\{/);
+  assert.match(hostSource, /restoreFocusElement\.isConnected/);
+  assert.match(hostSource, /data-testid="desktop-composer-input"/);
+});
+
+test("agent inspector surface connects live stream on mount and watch via shared initialTabEffects and focuses live tab", () => {
+  assert.match(surfaceSource, /import\s*\{[^}]*initialTabEffects[^}]*\}\s*from\s*"[^"]*agent-inspector-identity"/);
+  assert.match(surfaceSource, /function applyInitialTab[\s\S]*?initialTabEffects/);
+  assert.match(surfaceSource, /onMounted\(\(\)\s*=>\s*\{[\s\S]*?applyInitialTab\(\)/);
+  assert.match(surfaceSource, /watch\(\[\(\)\s*=>\s*props\.projection\.entryId[\s\S]*?applyInitialTab\(\)/);
+  const applyInitialTabBody = /function applyInitialTab\(\): void \{[\s\S]*?\n\}/.exec(surfaceSource)?.[0] ?? "";
+  assert.doesNotMatch(applyInitialTabBody, /work-selected/);
+  assert.match(surfaceSource, /function focusInitial\(\)[\s\S]*?selectedTab\.value === "live"[\s\S]*?#agent-inspector-live-tab/);
+});
+
+test("DesktopRoomShell line count stays strictly under 3000 lines", () => {
+  const lineCount = shellSource.trimEnd().split("\n").length;
+  assert.ok(lineCount < 3000, `DesktopRoomShell line count ${lineCount} exceeds 3000-line cap`);
+  assert.equal(lineCount, 2998, `DesktopRoomShell line count should be exactly 2998 lines (zero-line edit)`);
+});

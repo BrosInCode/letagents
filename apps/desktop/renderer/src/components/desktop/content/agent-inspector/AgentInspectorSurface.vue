@@ -143,7 +143,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from "vue";
 import type {
   AgentInspectorActionIntent,
   AgentInspectorActionState,
@@ -155,6 +155,7 @@ import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
 import { AGENT_INSPECTOR_RETIRE_CONFIRMATION, configurationHasRuntimeLag } from "../../../../domain/agent-inspector-settings";
+import { initialTabEffects } from "../../../../domain/agent-inspector-identity";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
@@ -173,7 +174,7 @@ const props = defineProps<{
   roomDisplayName?: string;
   daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
   refreshDiagnostics?: () => Promise<boolean>;
-  initialTab?: "overview" | "work" | "workspace" | "diagnostics";
+  initialTab?: "overview" | "live" | "work" | "workspace" | "diagnostics";
   roomAgentWork?: import("../../../../../../electron/ipc-types").DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
@@ -273,6 +274,13 @@ function handleRetire(): void {
 
 function focusInitial(): void {
   if (focusCorrection()) return;
+  if (selectedTab.value === "live") {
+    const liveTab = surfaceElement.value?.querySelector<HTMLButtonElement>("#agent-inspector-live-tab");
+    if (liveTab) {
+      liveTab.focus({ preventScroll: true });
+      return;
+    }
+  }
   closeButton.value?.focus({ preventScroll: true });
 }
 
@@ -294,8 +302,20 @@ function containsFocus(): boolean {
 
 defineExpose({ focusInitial, containsFocus });
 
-watch([() => props.projection.entryId, () => props.requestVersion, () => props.initialTab], () => {
+function applyInitialTab(): void {
   selectedTab.value = props.initialTab ?? "overview";
+  const effects = initialTabEffects(selectedTab.value);
+  if (effects.emitLiveSelected) {
+    emit("live-selected");
+  }
+}
+
+onMounted(() => {
+  applyInitialTab();
+});
+
+watch([() => props.projection.entryId, () => props.requestVersion, () => props.initialTab], () => {
+  applyInitialTab();
   confirmRetire.value = false;
   recoveryOptionsRequested.value = false;
 });

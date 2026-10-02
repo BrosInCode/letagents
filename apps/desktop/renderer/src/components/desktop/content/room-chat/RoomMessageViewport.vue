@@ -63,23 +63,26 @@
         class="room-local-agent-work-list"
         data-testid="room-local-agent-work-list"
       >
-        <article
+        <button
           v-for="work in collapsedAgentWork.visible"
           :key="work.id"
+          type="button"
           class="room-local-agent-work"
+          :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"
           data-testid="room-local-agent-work"
+          @click="$emit('open-agent', workIndicatorAgentTarget(work))"
         >
           <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
-          <div>
+          <span class="room-local-agent-work-copy">
             <strong>{{ work.displayName }}</strong>
             <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
-          </div>
+          </span>
           <span class="room-local-agent-work-dots" aria-hidden="true">
             <i></i>
             <i></i>
             <i></i>
           </span>
-        </article>
+        </button>
         <p
           v-if="collapsedAgentWork.hiddenCount > 0"
           class="room-local-agent-work-overflow"
@@ -163,6 +166,7 @@ import {
   type ManagedAgentWorkIndicator,
   type WorkIndicatorEchoState,
 } from "../../../../domain/managed-agents";
+import { workIndicatorAgentTarget } from "../../../../domain/agent-inspector-identity";
 import RoomContribution from "./RoomContribution.vue";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
