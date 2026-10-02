@@ -271,8 +271,8 @@ function openContextMenu(event: MouseEvent) {
     (pinnable.value ? 32 : 0) +
     (canMarkUnread.value ? 32 : 0)
   contextMenuPosition.value = {
-    x: Math.min(event.clientX, window.innerWidth - 190),
-    y: Math.min(event.clientY, window.innerHeight - (170 + menuExtraHeight)),
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 190)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - (170 + menuExtraHeight))),
   }
   contextMenuOpen.value = true
   void nextTick(() => {
@@ -331,7 +331,7 @@ function markUnreadFromMenu() {
 const pinContext = injectRoomMessagePins()
 const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id))
 const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false)
-function pinFromMenu(): void { closeContextMenu(); pinContext?.toggle(props.message.id) }
+function pinFromMenu(): void { closeContextMenu(true); pinContext?.toggle(props.message.id) }
 const reactionContext = injectRoomMessageReactions()
 const reactions = computed(() => reactionContext?.reactionsFor(props.message.id) ?? [])
 const reactable = computed(() => Boolean(reactionContext?.canReact.value)
@@ -393,7 +393,7 @@ function reactFromMenu() {
 }
 
 function handleMenuKeydown(event: KeyboardEvent) {
-  const items = Array.from(contextMenuRef.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+  const items = Array.from(contextMenuRef.value?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])
   if (items.length === 0) return
   const activeIndex = items.indexOf(document.activeElement as HTMLElement)
   if (event.key === 'ArrowDown') {
@@ -845,6 +845,8 @@ watch(() => [props.message.id, renderedMessage.value.urls, previewContext?.conte
   z-index: 9998;
   display: grid;
   min-width: 172px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   padding: 5px;
   border: 1px solid var(--border, #27272a);
   border-radius: 10px;

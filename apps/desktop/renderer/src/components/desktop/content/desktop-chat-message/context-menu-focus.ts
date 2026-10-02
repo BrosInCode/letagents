@@ -1,4 +1,4 @@
-export type ContextMenuCloseReason = "action" | "copy" | "escape" | "outside";
+export type ContextMenuCloseReason = "action" | "complete" | "copy" | "escape" | "outside";
 
 export interface ContextMenuFocusTarget {
   readonly isConnected: boolean;
@@ -6,7 +6,7 @@ export interface ContextMenuFocusTarget {
 }
 
 export function shouldRestoreContextMenuFocus(reason: ContextMenuCloseReason): boolean {
-  return reason === "copy" || reason === "escape";
+  return reason === "copy" || reason === "escape" || reason === "complete";
 }
 
 export function restoreContextMenuFocus(target: ContextMenuFocusTarget | null): void {
