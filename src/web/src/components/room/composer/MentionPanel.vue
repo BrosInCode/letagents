@@ -1,5 +1,5 @@
 <template>
-  <div ref="panelEl" id="composer-mention-listbox" class="composer-mention-panel" role="listbox" aria-label="Mention suggestions">
+  <div ref="panelEl" id="composer-mention-listbox" class="composer-mention-panel" role="listbox" :aria-label="ariaLabel || 'Mention suggestions'">
     <button
       v-for="(candidate, index) in candidates"
       :key="candidate.key"
@@ -18,16 +18,19 @@
         <span>{{ candidate.meta }}</span>
       </span>
     </button>
+    <p v-if="hint" role="status">{{ hint }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import type { MentionCandidate } from '../reachability'
+type Suggestion = { key: string; label: string; meta: string }
 
 const props = defineProps<{
-  candidates: readonly MentionCandidate[]
+  candidates: readonly Suggestion[]
   activeIndex: number
+  ariaLabel?: string
+  hint?: string
 }>()
 
 const panelEl = ref<HTMLElement | null>(null)
@@ -43,7 +46,7 @@ watch(() => [props.activeIndex, props.candidates], () => {
 }, { flush: 'post' })
 
 const emit = defineEmits<{
-  select: [candidate: MentionCandidate]
+  select: [candidate: Suggestion]
 }>()
 </script>
 

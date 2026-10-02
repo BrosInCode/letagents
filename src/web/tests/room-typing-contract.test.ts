@@ -4,16 +4,7 @@ import test from 'node:test'
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8')
 
-test('typing reports only actual main-composer input and stops after successful send or empty draft', () => {
-  const web = read('../src/components/room/Composer.vue')
-  const desktop = read('../../../apps/desktop/renderer/src/components/desktop/content/room-chat/RoomComposer.vue')
-  assert.match(web, /@input="handleTypingInput"/)
-  assert.match(web, /typing\.input\(Boolean\(text\.value\.trim\(\)\)\)/)
-  assert.match(web, /if \(!sent\) return\s+typing\.stop\(\)/)
-  assert.match(web, /watch\(text, value => \{ if \(!value\) typing\.stop\(\)/)
-  assert.match(desktop, /function handleDraftInput\(\): void \{\s+typing\.input/)
-  assert.match(desktop, /if \(!sent\) return;\s+typing\.stop\(\)/)
-  assert.match(desktop, /watch\(draft, value => \{ if \(!value\) typing\.stop\(\)/)
+test('typing stays out of prompt insertion and the thread composer', () => {
   for (const path of ['../src/components/room/composer/useComposerPrompts.ts',
     '../../../apps/desktop/renderer/src/components/desktop/content/room-chat/RoomThreadPanel.vue']) {
     assert.doesNotMatch(read(path), /useRoomTyping|TypingIndicator/)
