@@ -8,6 +8,7 @@
         <button class="knowledge-button" :disabled="loading" @click="emit('refresh')"><RefreshCw :size="14" :class="{ 'knowledge-spin': loading }" />Refresh</button>
       </div>
     </header>
+    <MessageRemindersSection @open="emit('openRoom', $event)" />
     <div class="knowledge-filters">
       <div class="knowledge-segments" aria-label="Inbox view">
         <button v-for="tab in sections" :key="tab.id" :aria-pressed="section === tab.id" @click="emit('update:section', tab.id)">{{ tab.label }}<span v-if="tab.id !== 'answered'">{{ count(tab.id) }}</span></button>
@@ -85,6 +86,7 @@
 </template>
 
 <script setup lang="ts">
+import MessageRemindersSection from "./MessageRemindersSection.vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ArrowRight, ArrowUpRight, Check, CheckCheck, ChevronDown, ChevronRight, CircleCheck, Inbox, Link2, LoaderCircle, MessageSquare, RefreshCw, Send, SlidersHorizontal, Lightbulb, TriangleAlert, X } from '@lucide/vue';
 import type { DesktopRentalRequest, DesktopRoomThreadInboxPage } from '../../../../../electron/ipc-types.js';

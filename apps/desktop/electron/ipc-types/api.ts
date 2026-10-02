@@ -313,6 +313,9 @@ export interface DesktopApi {
     /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */
     getMessageLinkPreviews?: (roomIdentifier: string, references: import("../../../../shared/message-link-previews.mjs").LinkPreviewReference[]) => Promise<import("../../../../shared/message-link-previews.mjs").MessageLinkPreviewsResponse>;
     getMessagePins?: (roomIdentifier: string) => Promise<import("../../../../shared/message-pins.mjs").MessagePinsResponse>;
+    createMessageReminder?: (room: string, message: string, dueAt: string) => Promise<{ reminder: import("./reminders.js").DesktopMessageReminder }>;
+    getMessageReminders?: (offset?: number) => Promise<import("./reminders.js").DesktopMessageRemindersPage>;
+    deleteMessageReminder?: (id: string) => Promise<{ ok: boolean }>;
     setMessagePin?: (roomIdentifier: string, messageId: string, pinned: boolean) => Promise<import("../../../../shared/message-pins.mjs").MessagePinMutationResponse>;
     reportTyping?: (roomIdentifier: string, input: import("../../../../shared/room-typing.mjs").TypingReport) => Promise<void>;
     getMessageReactions?: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) => Promise<DesktopMessageReactionsRange>;

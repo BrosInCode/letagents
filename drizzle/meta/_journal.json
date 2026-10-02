@@ -778,6 +778,13 @@
       "when": 1790900200000,
       "tag": "0110_account_room_notification_preferences",
       "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1790900300000,
+      "tag": "0111_message_reminders",
+      "breakpoints": true
     }
   ]
 }
