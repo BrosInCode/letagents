@@ -599,6 +599,45 @@ function codexLifecycleStatus(value: unknown): "failed" | "idle" | "working" | n
   return null;
 }
 
+/**
+ * The provider's own reason for a failed turn, for the `error` notification
+ * the app-server sends before `turn/completed`. It is the one line the owner
+ * needs in this agent's activity; the generic summary only said "error". The
+ * activity is local to the owner's machine and is never posted to the room.
+ */
+function codexErrorActivitySummary(notification: RpcNotification): string | null {
+  if (notification.method !== "error") return null;
+  const message = recordValue(recordValue(notification.params)?.error)?.message;
+  if (typeof message !== "string" || !message.trim()) return null;
+  const safe = safeStreamPayload(message.replace(/\s+/g, " ").trim()).payload;
+  return typeof safe === "string" ? `Codex error: ${safe}`.slice(0, 500) : null;
+}
+
+/**
+ * The provider declined the turn's content. Unlike a rate limit or a rejected
+ * key, neither a retry nor the owner can make the same content go through.
+ */
+function isCodexPolicyRefusal(codexErrorInfo: unknown): boolean {
+  return codexErrorInfo === "cyberPolicy" || codexErrorInfo === "misalignmentPolicyViolation";
+}
+
+/**
+ * How long after a thread reports `systemError` its turn's own ending is
+ * awaited before the ending is read from the thread instead. The app-server
+ * sends the two within milliseconds of each other.
+ */
+const CODEX_SYSTEM_ERROR_SETTLE_MS = 2_000;
+
+/**
+ * A thread is between turns when it is `idle`, and also when it is in
+ * `systemError`: that is what a failed turn leaves on its thread, and the
+ * app-server keeps reporting it until the thread's next turn starts. Waiting
+ * for `idle` there waits for the turn this boundary is asked in order to allow.
+ */
+function isCodexThreadBetweenTurns(status: string | null): boolean {
+  return status === "idle" || status === "systemError";
+}
+
 function hasExplicitCodexSystemError(value: unknown): boolean {
   const root = recordValue(value);
   if (!root) return false;
@@ -808,6 +847,8 @@ class CodexProviderHandle implements ProviderHandle {
   threadIdleEpoch = 0;
   threadIdleReconciledEpoch = 0;
   threadIdleReconciliation: Promise<void> | null = null;
+  /** The one pending read after the thread reported `systemError`. */
+  systemErrorReconciliation: Promise<void> | null = null;
   readonly roomTurnResults = new CodexTurnResultAccumulator();
   providerContinuationId: string;
 
@@ -1360,8 +1401,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       }
       if (active) return { state: "active", providerContinuationId: continuation, nativeProcessIdentity: identity, providerTurnId: active };
       // A cached handle state or an active thread with no visible turn cannot
-      // certify idle. Even a valid empty list requires native idle as well.
-      if (extractThreadStatus(read.thread) !== "idle") return { state: "unknown" };
+      // certify idle. Even a valid empty list requires the thread itself to
+      // be between turns.
+      if (!isCodexThreadBetweenTurns(extractThreadStatus(read.thread))) return { state: "unknown" };
       return { state: "idle", providerContinuationId: continuation, nativeProcessIdentity: identity, latestProviderTurnId: latest };
     } catch {
       // Timeouts and unavailable snapshots are uncertainty, not runtime failure.
@@ -2546,12 +2588,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     notification: RpcNotification,
     correlateLifecycle = true,
   ): void {
-    this.observePermissionFileChangeProposal(handle, notification);
-    const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);
-    handle.roomTurnResults.observe(notification.method, notification.params);
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
     const terminalMatch = /^turn\/(completed|interrupted|failed|cancelled|stopped)$/i.exec(notification.method);
+    this.observePermissionFileChangeProposal(handle, notification);
+    const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);
+    handle.roomTurnResults.observe(notification.method, notification.params);
     // Record the durable in-memory terminal edge first. Stream/activity
     // observers are best-effort and must never suppress exact turn settlement.
     if (exactTurnId && exactThreadId === handle.providerContinuationId && terminalMatch) {
@@ -2564,18 +2606,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     const threadStatus = recordValue(recordValue(notification.params)?.status)?.type
       ?? recordValue(notification.params)?.status;
-    if (notification.method === "thread/status/changed"
-      && exactThreadId === handle.providerContinuationId
-      && String(threadStatus ?? "").toLowerCase() === "idle") {
-      handle.threadIdleEpoch += 1;
-      this.reconcileExactTurnTerminalsAfterIdle(handle);
+    if (notification.method === "thread/status/changed" && exactThreadId === handle.providerContinuationId) {
+      const status = String(threadStatus ?? "").toLowerCase();
+      if (status === "idle") {
+        handle.threadIdleEpoch += 1;
+        this.reconcileExactTurnTerminalsAfterIdle(handle);
+      } else if (status === "systemerror") this.reconcileAfterSystemError(handle);
     }
     // Build the readable summary once and attach the same value to both the
     // ordered stream and the compact activity event. In particular, Codex's
     // approved summaryTextDelta stream is accumulated here; raw reasoning
     // textDelta content remains hidden by summarizeCodexRuntimeNotification.
+    // An `error` line in the ordered stream names the provider's reason.
     const summary = summarizeCodexRuntimeNotification(notification);
-    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary,
+    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method),
+      codexErrorActivitySummary(notification) ?? summary.summary,
       nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
     // Execution status belongs to the item, never to the reusable app-server.
     // Exact turn settlement above remains independent of this runtime state.
@@ -2642,10 +2687,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
   ): NativeLifecycleCheckpoint | null {
     if (handle.nativeRuntimeUnavailable) return null;
     const params = recordValue(notification.params);
+    // `systemError` is the status of a thread whose last turn failed: a
+    // provider refusal, a rejected key, a rate limit. The app-server stays up
+    // and the same thread takes the next turn. Where the daemon starts every
+    // turn that is a failed turn, reported by `turn/completed`, and never the
+    // end of the runtime: latching here cost the agent a usable conversation
+    // for each refusal. A lane that polls for itself has no one to start its
+    // next turn, so it keeps the latch and is restarted.
+    const threadSystemError = notification.method === "thread/status/changed"
+      && params?.threadId === handle.providerContinuationId
+      && hasExplicitCodexSystemError(params);
     const explicitRuntimeFailure = notification.method === "process/systemError"
-      || (notification.method === "thread/status/changed"
-        && params?.threadId === handle.providerContinuationId
-        && hasExplicitCodexSystemError(params));
+      || (threadSystemError && handle.lifecycleAuthorityMode !== "typed");
     if (explicitRuntimeFailure) {
       this.emitNativeRuntimeUnavailable(handle, "native_session_terminated");
       return null;
@@ -2865,7 +2918,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ? { turnId, ...handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, turn) }
       : { turnId, providerContinuationId: handle.providerContinuationId,
         outcome: status === "failed" ? "failed" : "interrupted", text: null, evidence: "transcript",
-        error: String(safeStreamPayload(turn.error?.message || `Codex bounded room turn ended ${status}.`).payload).slice(0, 2000) };
+        error: String(safeStreamPayload(turn.error?.message || `Codex bounded room turn ended ${status}.`).payload).slice(0, 2000),
+        ...(status === "failed" && isCodexPolicyRefusal(turn.error?.codexErrorInfo) ? { refusal: true as const } : {}) };
     await checkpointTerminalResult?.(terminalResult);
     handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
     return terminalResult;
@@ -2900,6 +2954,26 @@ export class CodexProviderAdapter implements ProviderAdapter {
     });
   }
 
+  /**
+   * A failed turn puts its thread in `systemError` just before its
+   * `turn/completed`. If that ending is lost, nothing else settles the turn:
+   * the thread does not go idle until its next turn, and the daemon starts no
+   * turn behind an open one. So read the thread once, a short stated time
+   * after the status, and take a waiting turn's ending from there.
+   */
+  private reconcileAfterSystemError(handle: CodexProviderHandle): void {
+    if (handle.systemErrorReconciliation) return;
+    const settle = () => {
+      handle.systemErrorReconciliation = null;
+      // Nothing waits: the ending arrived. Asking anyway would be remembered
+      // and make the next turn's waiter read the thread the moment it starts.
+      if (!handle.turnWaiters.size) return;
+      handle.threadIdleEpoch += 1;
+      this.reconcileExactTurnTerminalsAfterIdle(handle);
+    };
+    handle.systemErrorReconciliation = this.deps.sleep(CODEX_SYSTEM_ERROR_SETTLE_MS).then(settle, settle);
+  }
+
   private reconcileExactTurnTerminalsAfterIdle(handle: CodexProviderHandle): void {
     if (!handle.turnWaiters.size
       || handle.threadIdleReconciliation
@@ -2920,7 +2994,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
           if (!handle.turnWaiters.has(key)) continue;
           const status = String(extractTurnStatus(turn) ?? "").toLowerCase();
           if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) {
-            this.noteExactTurnTerminal(handle, key, status);
+            // The ending never arrived. Take it from the thread's own record
+            // exactly as its notification would have brought it: that wakes
+            // the waiter and also records the turn's ending, without which the
+            // agent would keep saying it is working. If the notification still
+            // comes, it repeats the same native event and changes nothing.
+            this.consumeNotification(handle, {
+              method: "turn/completed",
+              params: { threadId: handle.providerContinuationId, turnId: turn.id, turn: { ...turn, status } },
+            });
           }
         }
       } catch {

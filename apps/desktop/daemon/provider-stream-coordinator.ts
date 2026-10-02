@@ -76,6 +76,8 @@ type PendingTypedOperationalActivation = {
 
 const TYPED_OPERATIONAL_RETRY_BASE_MS = 250;
 const TYPED_OPERATIONAL_RETRY_MAX_MS = 30_000;
+/** An ended handle is handed to convergence at doubling gaps, then every 20 heartbeats (five minutes at 15 s). */
+const ENDED_HANDLE_HAND_OFF_MAX_GAP_TICKS = 20;
 /** How long the read model holds a Cursor lane's readiness through one turn boundary. */
 export const CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS = 60_000;
 
@@ -733,6 +735,10 @@ export class ProviderStreamCoordinator {
         })
       : () => {};
     if (!this.adoptLeaseDisposer(lease, disposeStream)) return;
+    // Consecutive ticks on which this lease's handle had ended while its room
+    // binding was intact, and the tick on which convergence is asked again.
+    let endedHandleTicks = 0;
+    let nextEndedHandleHandOff = 1;
     const heartbeat = this.setHeartbeat(() => {
       const heartbeatInstallation = this.currentInstallationForLease(lease);
       if (!heartbeatInstallation) return;
@@ -756,8 +762,14 @@ export class ProviderStreamCoordinator {
         const custodyOnly = !publishesLiveness && manifestEntry.desired_state === "running"
           && manifestEntry.observed_state === "recovering";
         if (!publishesLiveness && !custodyOnly) return;
-        if (!["working", "idle"].includes(current.observedState)) return;
-        if (manifestEntry.delivery_mode === "daemon_inbox"
+        // A handle can report that it ended while its entry still says the
+        // agent is running: no process exits, and the fact that should mark
+        // the entry failed can be lost. Such an agent gets no liveness, but
+        // leaving here used to skip its credential checks too, so its bearer
+        // expired and nothing ever replaced the runtime.
+        const handleEnded = ["failed", "stopped"].includes(current.observedState);
+        if (!handleEnded && !["working", "idle"].includes(current.observedState)) return;
+        if (!handleEnded && manifestEntry.delivery_mode === "daemon_inbox"
           && ["working", "idle"].includes(manifestEntry.observed_state)
           && provider.probeControl) {
           try { await provider.probeControl(current); }
@@ -773,14 +785,26 @@ export class ProviderStreamCoordinator {
           this.options.heartbeat.requestConvergence(entryId);
           return;
         }
-        if (hostGrant) {
-          const binding = await this.options.bindings.get(entryId);
-          if (binding
-            && await this.options.heartbeat.hostWorkerBearerNeedsRotation(manifestEntry, binding)) {
-            this.options.heartbeat.requestConvergence(entryId);
-            return;
-          }
+        const binding = hostGrant || handleEnded ? await this.options.bindings.get(entryId) : null;
+        if (hostGrant && binding
+          && await this.options.heartbeat.hostWorkerBearerNeedsRotation(manifestEntry, binding)) {
+          this.options.heartbeat.requestConvergence(entryId);
+          return;
         }
+        if (handleEnded) {
+          // Convergence decides what replaces it; this tick only asks, and only
+          // for an agent that still has its room binding. Without one,
+          // convergence would mint a session on every tick for a runtime it
+          // never reaches, also after room access was ended on purpose.
+          if (!binding) { endedHandleTicks = 0; nextEndedHandleHandOff = 1; return; }
+          endedHandleTicks += 1;
+          if (endedHandleTicks < nextEndedHandleHandOff) return;
+          nextEndedHandleHandOff = endedHandleTicks + Math.min(endedHandleTicks, ENDED_HANDLE_HAND_OFF_MAX_GAP_TICKS);
+          this.options.heartbeat.requestConvergence(entryId);
+          return;
+        }
+        endedHandleTicks = 0;
+        nextEndedHandleHandOff = 1;
         if (custodyOnly) return;
         const status = current.observedState === "idle" ? "idle" : "working";
         await this.options.publishNativeActivity(
