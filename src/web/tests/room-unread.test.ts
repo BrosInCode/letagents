@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import { createRenderer, h, nextTick, reactive, ref, ssrContextKey } from "vue";
 
+let provideReactions: any, providePreviews: any, providePins: any;
 let createRoomUnreadClient: any, useUnreadTimeline: any, Message: any, MessageList: any, unreadMenuKey: any;
 before(async () => {
   (globalThis as any).localStorage ??= { getItem: () => null, setItem() {}, removeItem() {} };
@@ -13,6 +14,9 @@ before(async () => {
     ({ createRoomUnreadClient, useUnreadTimeline, unreadMenuKey } = await vite.ssrLoadModule(fileURLToPath(new URL("../../../shared/room-unread-client.ts", import.meta.url))));
     Message = (await vite.ssrLoadModule("/src/components/room/ChatMessage.vue")).default;
     MessageList = (await vite.ssrLoadModule("/src/components/room/MessageList.vue")).default;
+    ({ provideRoomMessageReactions: provideReactions } = await vite.ssrLoadModule("/src/composables/roomMessageReactions.ts"));
+    ({ provideRoomMessageLinkPreviews: providePreviews } = await vite.ssrLoadModule("/src/composables/roomMessageLinkPreviews.ts"));
+    ({ provideRoomMessagePins: providePins } = await vite.ssrLoadModule("/src/composables/roomMessagePins.ts"));
   } finally { await vite.close(); }
 });
 
@@ -58,7 +62,7 @@ test("the actual web list reuses bounded reveal for an older bookmark and retain
   const data = new Map();
   const win = Object.assign(new EventTarget(), {
     localStorage: { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => data.set(k, v) },
-    setTimeout: () => 0,
+    setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, cancelAnimationFrame() {},
   });
   Object.assign(globalThis, { window: win, document: Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => true }), CSS: { escape: (id: string) => id } });
   const message = (id: string) => ({ id, sender: "Ada", source: "browser", text: id, timestamp: "2026-10-02T00:00:00Z", thread_root_id: null });
@@ -195,3 +199,192 @@ test("storage events refresh the active account without allowing an earlier visi
     assert.equal(first.get("room").messageId, "msg_2");
   } finally { Object.assign(globalThis, old); }
 });
+
+test("a queued user read check is cancelled by an intervening programmatic scroll", async () => {
+  const old = { window: globalThis.window, document: globalThis.document, KeyboardEvent: globalThis.KeyboardEvent };
+  const data = new Map();
+  const win = Object.assign(new EventTarget(), { localStorage: { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => data.set(k, v) } });
+  Object.assign(globalThis, { window: win, document: Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => true }), KeyboardEvent: class extends Event {} });
+  const client = createRoomUnreadClient("queued-read"); client.account.value = "alice";
+  client.mark("room", "msg_1"); client.enter("room");
+  const el = Object.assign(new EventTarget(), { scrollHeight: 2000, clientHeight: 400, scrollTop: 100 });
+  let surface: any;
+  const app = renderer.createApp({ setup() {
+    surface = useUnreadTimeline({ client, room: ref("room"), active: ref(true), ready: ref(true), element: ref(el), reveal: async () => true, bottom() {} });
+    return () => h("div");
+  } });
+  try {
+    app.mount({}); await flush();
+    el.dispatchEvent(new Event("wheel"));
+    surface.programmaticScroll(); el.scrollTop = 1600;
+    await flush();
+    assert.ok(client.get("room"), "queued input cannot count an automatic scroll as reading");
+    win.dispatchEvent(new Event("focus")); document.dispatchEvent(new Event("visibilitychange")); await flush();
+    assert.ok(client.get("room"), "focus and visibility do not turn automatic scrolling into reading");
+    el.dispatchEvent(new Event("wheel")); await flush();
+    assert.equal(client.get("room"), null, "a later genuine input still clears");
+  } finally { app.unmount(); Object.assign(globalThis, old); }
+});
+
+async function webScrollSurface() {
+  const old = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver };
+  let resize = () => {};
+  let now = 0, nextHandle = 0;
+  const frames = new Map<number, () => void>();
+  const timers = new Map<number, { at: number; callback: () => void }>();
+  Object.assign(globalThis, {
+    window: Object.assign(new EventTarget(), {
+      requestAnimationFrame: (callback: () => void) => { frames.set(++nextHandle, callback); return nextHandle; },
+      cancelAnimationFrame: (handle: number) => frames.delete(handle),
+      setTimeout: (callback: () => void, delay = 0) => { timers.set(++nextHandle, { at: now + delay, callback }); return nextHandle; },
+      clearTimeout: (handle: number) => timers.delete(handle), localStorage: { getItem: () => null, setItem() {} } }),
+    document: Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => true }), CSS: { escape: (id: string) => id },
+    ResizeObserver: class { constructor(callback: () => void) { resize = callback; } observe() {} disconnect() {} },
+  });
+  const calls: string[] = [];
+  let revealTop: number | null = 100;
+  const el = Object.assign(new EventTarget(), { scrollHeight: 2000, clientHeight: 400, scrollTop: 1600,
+    scrollTo: () => { el.scrollTop = el.scrollHeight - el.clientHeight; calls.push("bottom"); },
+    querySelectorAll: () => [], querySelector: () => ({ scrollIntoView: () => { if (revealTop !== null) el.scrollTop = revealTop; calls.push("reveal"); }, classList: { add() {}, remove() {} } }),
+  });
+  const row = (id: string) => ({ id, sender: "Ada", source: "browser", text: id, timestamp: "2026-10-02T00:00:00Z" });
+  const props = reactive<any>({ messages: [row("msg_1"), row("msg_2")], roomIdentifier: "room", messagesLoaded: true, hasOlderMessages: false, searchQuery: "" });
+  const reactions = { revision: ref(0) }, previews = { revision: ref(0) }, pins = { state: ref({ pins: [] as any[] }) };
+  let vm: any;
+  const app = renderer.createApp({ setup() {
+    provideReactions(reactions); providePreviews(previews); providePins(pins);
+    return () => h({ setup() {
+      vm = MessageList.setup(props, { expose() {}, emit() {} }); vm.messagesEl.value = el;
+      return () => h("div");
+    } });
+  } });
+  app.provide(ssrContextKey, { modules: new Set() }); app.mount({}); await flush(); calls.length = 0;
+  return { vm, props, el, reactions, previews, pins, calls, row,
+    setRevealTop: (value: number | null) => { revealTop = value; },
+    frame: () => { for (const [handle, callback] of [...frames]) { frames.delete(handle); callback(); } },
+    advance: (duration: number) => {
+      const end = now + duration;
+      while (true) {
+        const next = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        timers.delete(next[0]); now = next[1].at; next[1].callback();
+      }
+      now = end;
+    }, resize: () => resize(), close: () => { app.unmount(); Object.assign(globalThis, old); } };
+}
+test("web: queued revisions cannot override a reveal or user scrolling up", async () => {
+  const s = await webScrollSurface();
+  try {
+    s.reactions.revision.value++; s.previews.revision.value++; s.pins.state.value.pins.push({});
+    await Promise.resolve(); s.vm.scrollToMessage("msg_1"); await flush();
+    assert.equal(s.el.scrollTop, 100);
+    s.vm.scrollToBottom("instant"); s.vm.checkScroll();
+    s.reactions.revision.value++;
+    await Promise.resolve(); s.el.scrollTop = 100; s.vm.checkScroll(); await flush();
+    assert.equal(s.el.scrollTop, 100);
+  } finally { s.close(); }
+});
+test("web: simultaneous append, reaction, preview and pin changes follow once", async () => {
+  const s = await webScrollSurface();
+  try {
+    s.props.messages.push(s.row("msg_3"));
+    s.reactions.revision.value++; s.previews.revision.value++; s.pins.state.value.pins.push({});
+    await Promise.resolve(); s.el.scrollHeight += 200; await flush();
+    assert.equal(s.el.scrollTop, 1800); assert.deepEqual(s.calls, ["bottom"]);
+    s.el.scrollTop = 100; s.vm.checkScroll(); s.calls.length = 0;
+    s.reactions.revision.value++; s.previews.revision.value++; s.pins.state.value.pins = [];
+    await flush(); assert.equal(s.el.scrollTop, 100); assert.deepEqual(s.calls, []);
+  } finally { s.close(); }
+});
+test("web: search retains its target through same-tick revisions", async () => {
+  const s = await webScrollSurface();
+  try {
+    s.props.searchQuery = "Ada"; s.reactions.revision.value++; s.previews.revision.value++;
+    await flush(); assert.equal(s.el.scrollTop, 100);
+  } finally { s.close(); }
+});
+test("web: typing/composer resize keeps latest visible, preserves a scrolled-up reader", async () => {
+  const s = await webScrollSurface();
+  try {
+    s.el.clientHeight = 300; s.resize(); await flush(); assert.equal(s.el.scrollTop, 1700);
+    s.el.scrollTop = 100; s.vm.checkScroll(); s.el.clientHeight = 250; s.resize(); await flush(); assert.equal(s.el.scrollTop, 100);
+  } finally { s.close(); }
+});
+
+test("web: all append/reaction/preview/pin/resize combinations preserve bottom and scrolled-up intent", async () => {
+  for (const atBottom of [true, false]) for (let mask = 1; mask < 32; mask++) {
+    const s = await webScrollSurface();
+    try {
+      if (!atBottom) { s.el.scrollTop = 100; s.vm.checkScroll(); }
+      if (mask & 1) s.props.messages.push(s.row("msg_3"));
+      if (mask & 2) s.reactions.revision.value++;
+      if (mask & 4) s.previews.revision.value++;
+      if (mask & 8) s.pins.state.value.pins.push({});
+      await Promise.resolve();
+      if (mask & 7) s.el.scrollHeight += 200;
+      if (mask & 24) { s.el.clientHeight = 300; s.resize(); }
+      await flush();
+      assert.equal(s.el.scrollTop, atBottom ? s.el.scrollHeight - s.el.clientHeight : 100, `bottom=${atBottom}, mask=${mask}`);
+      assert.ok(s.calls.length <= 1, `duplicate follow: bottom=${atBottom}, mask=${mask}: ${s.calls}`);
+    } finally { s.close(); }
+  }
+});
+test("web: later revisions during smooth reveal preserve the target", async () => {
+  const s = await webScrollSurface();
+  try {
+    s.vm.scrollToMessage("msg_1"); s.el.scrollTop = 1600; s.calls.length = 0;
+    s.vm.checkScroll(); s.reactions.revision.value++; await flush();
+    assert.deepEqual(s.calls, []);
+  } finally { s.close(); }
+});
+
+for (const search of [false, true]) for (const completion of ["no movement", "missing scrollend"]) {
+  test(`web ${search ? "search" : "reference"}: ${completion} releases reveal suppression before the next arrival`, async () => {
+    const s = await webScrollSurface();
+    try {
+      s.setRevealTop(completion === "no movement" ? null : 1500);
+      if (search) { s.props.searchQuery = "Ada"; await flush(); }
+      else s.vm.scrollToMessage("msg_1");
+      s.frame(); s.frame();
+      if (completion === "missing scrollend") {
+        s.el.scrollTop = 1600; // Smooth scrolling finishes without a scrollend event.
+        s.calls.length = 0;
+        s.advance(799);
+        s.reactions.revision.value++; await flush();
+        assert.deepEqual(s.calls, [], "suppress follow while the reveal is still bounded");
+        s.advance(1);
+      }
+      s.props.messages.push(s.row("msg_3"));
+      await Promise.resolve(); s.el.scrollHeight += 200; await flush();
+      assert.equal(s.el.scrollTop, 1800, "the next arrival follows after reveal suppression ends");
+    } finally { s.close(); }
+  });
+}
+
+for (const started of ["second frame", "scroll event"]) {
+  test(`web: a reveal starting on the ${started} stays protected`, async () => {
+    const s = await webScrollSurface();
+    try {
+      s.setRevealTop(null); s.vm.scrollToMessage("msg_1"); s.calls.length = 0;
+      if (started === "second frame") {
+        s.frame();
+        s.reactions.revision.value++; await flush();
+        assert.deepEqual(s.calls, [], "the first frame must not release bottom-follow suppression");
+        s.el.scrollTop = 1500;
+      } else {
+        s.el.scrollTop = 1580;
+        s.el.dispatchEvent(new Event("scroll"));
+        s.el.scrollTop = 1600; // An event proves movement even if the next sampled offset matches.
+        s.frame();
+      }
+      s.frame();
+      s.el.scrollTop = 1600; s.calls.length = 0;
+      s.previews.revision.value++; await flush();
+      assert.deepEqual(s.calls, [], "a started reveal remains protected until scrollend or the maximum");
+      s.advance(800);
+      s.props.messages.push(s.row("msg_3"));
+      await Promise.resolve(); s.el.scrollHeight += 200; await flush();
+      assert.equal(s.el.scrollTop, 1800, "the maximum still releases suppression");
+    } finally { s.close(); }
+  });
+}

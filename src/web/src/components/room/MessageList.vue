@@ -1,6 +1,6 @@
 <template>
   <div class="messages-wrap">
-    <div class="messages scroll-fade-y" ref="messagesEl">
+    <div class="messages scroll-fade-y" ref="messagesEl" @scrollend="finishMessageReveal">
       <button
         v-if="hasOlderMessages"
         class="load-older-btn"
@@ -136,6 +136,21 @@ const unreadCount = ref(0)
 const isScrolledFarUp = ref(false)
 const arrivingMessageIds = ref<ReadonlySet<string>>(new Set())
 let isScrolledToBottom = true
+let scrollRevision = 0
+let revealingMessage = false
+let revealFrame: number | null = null
+let revealTimer: number | null = null
+let bottomFollowQueued = false
+function followLatestAfterLayout() {
+  if (!isScrolledToBottom || bottomFollowQueued) return
+  const revision = scrollRevision
+  const top = messagesEl.value?.scrollTop
+  bottomFollowQueued = true
+  void nextTick(() => {
+    bottomFollowQueued = false
+    if (revision === scrollRevision && messagesEl.value?.scrollTop === top) scrollToBottom('instant')
+  })
+}
 
 const matchedIds = computed(() => {
   const q = (props.searchQuery || '').toLowerCase().trim()
@@ -182,11 +197,17 @@ function handleAfterEnter(element: Element) {
   arrivingMessageIds.value = nextIds
 }
 
+function handleScroll() {
+  cancelMessageRevealFrame()
+  checkScroll()
+}
+
 function checkScroll() {
+  scrollRevision++
   if (!messagesEl.value) return
   const el = messagesEl.value
   const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-  isScrolledToBottom = distanceToBottom < 60
+  isScrolledToBottom = !revealingMessage && distanceToBottom < 60
   if (el.scrollTop < 240 && props.hasOlderMessages && !props.isLoadingOlderMessages) {
     emit('loadOlder')
   }
@@ -199,9 +220,44 @@ function checkScroll() {
   }
 }
 
+function cancelMessageRevealFrame() {
+  if (revealFrame !== null) window.cancelAnimationFrame(revealFrame)
+  revealFrame = null
+}
+
+function cancelMessageReveal() {
+  cancelMessageRevealFrame()
+  if (revealTimer !== null) window.clearTimeout(revealTimer)
+  revealFrame = revealTimer = null
+  revealingMessage = false
+}
+
+function beginMessageReveal() {
+  cancelMessageReveal()
+  const element = messagesEl.value
+  if (!element) return
+  const top = element.scrollTop
+  revealingMessage = true
+  // Smooth scrolling may start after the first frame. Any scroll event cancels this probe.
+  revealFrame = window.requestAnimationFrame(() => {
+    revealFrame = window.requestAnimationFrame(() => {
+      revealFrame = null
+      if (messagesEl.value === element && element.scrollTop === top) finishMessageReveal()
+    })
+  })
+  revealTimer = window.setTimeout(finishMessageReveal, 800)
+}
+
+function finishMessageReveal() {
+  cancelMessageReveal()
+  checkScroll()
+}
+
 function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
   unreadTimeline.programmaticScroll()
   if (!messagesEl.value) return
+  cancelMessageReveal()
+  isScrolledToBottom = true
   messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior })
   unreadCount.value = 0
   isScrolledFarUp.value = false
@@ -216,6 +272,10 @@ function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth')
   unreadTimeline.programmaticScroll()
   const target = findMessageElement(messageId)
   if (!target) return
+  scrollRevision++
+  isScrolledToBottom = false
+  if (behavior === 'instant') cancelMessageReveal()
+  else beginMessageReveal()
   target.scrollIntoView({ behavior, block: 'center' })
   target.classList.add('jump-target')
   window.setTimeout(() => {
@@ -229,11 +289,16 @@ watch(() => props.searchQuery, async () => {
   const firstMatch = messagesEl.value?.querySelector('.search-match')
   if (firstMatch) {
     unreadTimeline.programmaticScroll()
+    scrollRevision++
+    isScrolledToBottom = false
+    beginMessageReveal()
     firstMatch.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
 })
 
 watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
+  scrollRevision++
+  cancelMessageReveal()
   arrivingMessageIds.value = new Set()
   // Retire the old room's reporter: cancel its 600ms qualification timers
   // (rows are no longer visible), flush its gathered evidence against the
@@ -244,35 +309,37 @@ watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
   void retiring.dispose()
 })
 
-// Reuse the existing pre-layout bottom check for the 0↔1 pin-row resize.
-// Scrolled-up readers retain their scrollTop; never force them to the bottom.
+// Coalesce layout changes into one follow, cancelled by navigation or scrolling.
 const messagePins = injectRoomMessagePins()
-if (messagePins) {
-  watch(() => messagePins.state.value.pins.length > 0, async () => {
-    if (!isScrolledToBottom) return
-    await nextTick()
-    scrollToBottom('instant')
-  })
-}
-// A reaction row appearing under a message makes the list taller without a
-// new message. A reader at the newest message stays there.
 const messageReactions = injectRoomMessageReactions()
 const messageLinkPreviews = injectRoomMessageLinkPreviews()
-for (const context of [messageReactions, messageLinkPreviews]) {
-  if (!context) continue
-  watch(context.revision, async () => {
-    if (!isScrolledToBottom) return
-    await nextTick()
-    scrollToBottom('instant')
-  })
+watch([
+  () => Boolean(messagePins?.state.value.pins.length),
+  () => messageReactions?.revision.value,
+  () => messageLinkPreviews?.revision.value,
+], followLatestAfterLayout)
+
+// Typing and composer growth resize the list without changing its messages.
+let viewportResizeObserver: ResizeObserver | null = null
+let observedViewportHeight = 0
+function keepLatestInViewOnResize() {
+  const el = messagesEl.value
+  if (!el || el.clientHeight === observedViewportHeight) return
+  const wasAtLatest = isScrolledToBottom || el.scrollHeight - el.scrollTop - observedViewportHeight < 60
+  observedViewportHeight = el.clientHeight
+  if (wasAtLatest && !revealingMessage) {
+    isScrolledToBottom = true
+    followLatestAfterLayout()
+  }
 }
 
 watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, addedCount }) => {
   if (prepended) {
     const el = messagesEl.value
     const previousScrollHeight = el?.scrollHeight || 0
+    const revision = scrollRevision
     await nextTick()
-    if (el) {
+    if (el && revision === scrollRevision) {
       unreadTimeline.programmaticScroll()
       el.scrollTop += el.scrollHeight - previousScrollHeight
     }
@@ -285,8 +352,7 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
   }
 
   if (isScrolledToBottom) {
-    await nextTick()
-    scrollToBottom()
+    followLatestAfterLayout()
   } else {
     unreadCount.value += addedCount
   }
@@ -460,7 +526,12 @@ function observeMessageRows() {
 }
 
 onMounted(() => {
-  messagesEl.value?.addEventListener('scroll', checkScroll)
+  messagesEl.value?.addEventListener('scroll', handleScroll)
+  if (typeof ResizeObserver !== 'undefined' && messagesEl.value) {
+    observedViewportHeight = messagesEl.value.clientHeight
+    viewportResizeObserver = new ResizeObserver(keepLatestInViewOnResize)
+    viewportResizeObserver.observe(messagesEl.value)
+  }
   document.addEventListener('visibilitychange', handleDocumentVisibilityChange)
   window.addEventListener('blur', handleDocumentVisibilityChange)
   window.addEventListener('focus', handleDocumentVisibilityChange)
@@ -474,8 +545,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  scrollRevision++
+  cancelMessageReveal()
+  viewportResizeObserver?.disconnect()
   completeUnreadReveal(false)
-  messagesEl.value?.removeEventListener('scroll', checkScroll)
+  messagesEl.value?.removeEventListener('scroll', handleScroll)
   document.removeEventListener('visibilitychange', handleDocumentVisibilityChange)
   window.removeEventListener('blur', handleDocumentVisibilityChange)
   window.removeEventListener('focus', handleDocumentVisibilityChange)

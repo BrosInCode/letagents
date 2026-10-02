@@ -26,7 +26,7 @@
       </div>
     </header>
 
-    <section ref="bodyElement" class="room-thread-body">
+    <section ref="bodyElement" @scroll="handleScroll" @scrollend="finishMessageReveal" class="room-thread-body">
       <div v-if="loadingOlderReplies" class="room-thread-history-state" data-testid="room-thread-loading-earlier">
         <span class="room-thread-history-spinner" aria-hidden="true"></span>
         <span>Loading earlier replies...</span>
@@ -223,7 +223,7 @@
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import RoomContribution from "./RoomContribution.vue";
 import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
-import { computed, inject, nextTick, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { injectRoomMessageReactions } from "../../../../composables/useRoomMessageReactions";
 import { injectRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
@@ -321,6 +321,45 @@ const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
 const bodyElement = ref<HTMLElement | null>(null);
 const mentionQuery = ref<string | null>(null);
+let scrollRevision = 0;
+let revealingMessage = false;
+let revealFrame: number | null = null;
+let revealTimer: number | null = null;
+
+function cancelMessageRevealFrame(): void {
+  if (revealFrame !== null) window.cancelAnimationFrame(revealFrame);
+  revealFrame = null;
+}
+
+function handleScroll(): void {
+  scrollRevision++;
+  cancelMessageRevealFrame();
+}
+
+function finishMessageReveal(): void {
+  cancelMessageRevealFrame();
+  if (revealTimer !== null) window.clearTimeout(revealTimer);
+  revealFrame = revealTimer = null;
+  revealingMessage = false;
+}
+
+function beginMessageReveal(): void {
+  finishMessageReveal();
+  const body = bodyElement.value;
+  if (!body) return;
+  const top = body.scrollTop;
+  revealingMessage = true;
+  // Smooth scrolling may start after the first frame. Any scroll event cancels this probe.
+  revealFrame = window.requestAnimationFrame(() => {
+    revealFrame = window.requestAnimationFrame(() => {
+      revealFrame = null;
+      if (bodyElement.value === body && body.scrollTop === top) finishMessageReveal();
+    });
+  });
+  revealTimer = window.setTimeout(finishMessageReveal, 800);
+}
+onBeforeUnmount(finishMessageReveal);
+
 const activeMentionIndex = ref(0);
 const emptyThreadSummary: ThreadIndicatorSummary = {
   count: 0,
@@ -364,7 +403,7 @@ const mentionCandidates = computed(() => {
 });
 
 watch(
-  () => [props.revealMessageId, props.parent.id, props.replies.map((reply) => reply.id).join("|")] as const,
+  [() => props.revealMessageId, () => props.parent.id, () => Boolean(props.revealMessageId && threadMessageReferenceIds.value.has(props.revealMessageId))],
   ([messageId]) => {
     if (!messageId) return;
     if (messageId !== props.parent.id && !props.replies.some((reply) => reply.id === messageId)) return;
@@ -376,66 +415,57 @@ watch(
 watch(
   () => props.parent.id,
   async () => {
+    scrollRevision++;
+    finishMessageReveal();
     mentionQuery.value = null;
     await nextTick();
     panelElement.value?.focus({ preventScroll: true });
-    if (!scrollActiveSearchMessage()) textareaElement.value?.focus();
+    if (!props.activeSearchMessageId && !props.revealMessageId) {
+      if (bodyElement.value) bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
+      textareaElement.value?.focus({ preventScroll: true });
+    }
   },
   { immediate: true },
 );
 
 watch(
-  () => [props.activeSearchMessageId, props.parent.id, props.replies.length] as const,
+  [() => props.activeSearchMessageId, () => props.parent.id, () => Boolean(props.activeSearchMessageId && threadMessageReferenceIds.value.has(props.activeSearchMessageId))],
   async () => {
     await nextTick();
     scrollActiveSearchMessage();
   },
+  { immediate: true },
 );
 
-watch(
-  () => props.replies,
-  async (newReplies, oldReplies = []) => {
-    const body = bodyElement.value;
-    const previousScrollHeight = body?.scrollHeight || 0;
-    const previousScrollTop = body?.scrollTop || 0;
-    const wasNearBottom = body
-      ? body.scrollHeight - body.scrollTop - body.clientHeight < 96
-      : true;
-    const oldLastId = oldReplies[oldReplies.length - 1]?.id || null;
-    const newLastId = newReplies[newReplies.length - 1]?.id || null;
-    await nextTick();
-    if (!bodyElement.value) return;
-    if (scrollActiveSearchMessage()) return;
-    if (oldLastId && oldLastId === newLastId && newReplies.length > oldReplies.length) {
-      bodyElement.value.scrollTop = previousScrollTop + bodyElement.value.scrollHeight - previousScrollHeight;
-      return;
-    }
-    if (oldLastId && !wasNearBottom) return;
-    bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
-  },
-);
-
-watch(() => [props.parent.id, ...props.replies.map(reply => reply.id)]
-  .flatMap(source => contributionsFor(source).map(work => work.attemptId)).join('|'), async () => {
-  const body = bodyElement.value;
-  const following = body && body.scrollHeight - body.scrollTop - body.clientHeight < 96;
-  await nextTick();
-  if (following && bodyElement.value && !props.activeSearchMessageId) bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
-});
-
-// Reactions or previews appearing under a reply make the thread taller without a
-// new reply. A reader at the newest reply stays there.
+// One pre-layout snapshot covers replies, contributions, reactions and previews.
 const messageReactions = injectRoomMessageReactions();
 const messageLinkPreviews = injectRoomMessageLinkPreviews();
-for (const context of [messageReactions, messageLinkPreviews]) {
-  if (!context) continue;
-  watch(context.revision, async () => {
+watch(
+  [
+    () => props.replies,
+    () => [props.parent.id, ...props.replies.map(reply => reply.id)]
+      .flatMap(source => contributionsFor(source).map(work => work.attemptId)).join('|'),
+    () => messageReactions?.revision.value,
+    () => messageLinkPreviews?.revision.value,
+  ],
+  async ([newReplies], [oldReplies]) => {
     const body = bodyElement.value;
-    const following = body && body.scrollHeight - body.scrollTop - body.clientHeight < 96;
+    if (!body) return;
+    const revision = scrollRevision;
+    const previousScrollHeight = body.scrollHeight;
+    const previousScrollTop = body.scrollTop;
+    const wasNearBottom = !revealingMessage && body.scrollHeight - body.scrollTop - body.clientHeight < 96;
+    const oldFirstId = oldReplies[0]?.id;
+    const isPrepend = oldFirstId && newReplies.findIndex(reply => reply.id === oldFirstId) > 0;
     await nextTick();
-    if (following && bodyElement.value && !props.activeSearchMessageId) bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
-  });
-}
+    if (revision !== scrollRevision || body !== bodyElement.value || body.scrollTop !== previousScrollTop) return;
+    if (isPrepend) {
+      body.scrollTop = previousScrollTop + body.scrollHeight - previousScrollHeight;
+    } else if (wasNearBottom) {
+      body.scrollTop = body.scrollHeight;
+    }
+  },
+);
 
 function displayName(message: DesktopRoomMessage): string {
   return message.agentIdentity?.displayName || parseSenderIdentity(message).displayName;
@@ -463,13 +493,18 @@ function scrollActiveSearchMessage(): boolean {
   if (!messageId || (messageId !== props.parent.id && !props.replies.some((reply) => reply.id === messageId))) {
     return false;
   }
+  scrollRevision++;
+  beginMessageReveal();
   const target = scrollThreadMessageIntoView(panelElement.value, messageId);
+  if (!target) finishMessageReveal();
   return Boolean(target);
 }
 
 function jumpToThreadMessageReference(messageId: string): void {
+  scrollRevision++;
+  beginMessageReveal();
   const target = scrollThreadMessageIntoView(panelElement.value, messageId, "smooth");
-  if (!target) return;
+  if (!target) { finishMessageReveal(); return; }
   target.classList.add("jump-target");
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
 }
