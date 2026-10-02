@@ -7,6 +7,7 @@ import type {
   AgentInspectorRequest,
   AgentModalTarget,
 } from "../components/desktop/content/desktop-chat-message/types";
+import type { ManagedAgentWorkIndicator } from "./managed-agents";
 
 export type SupervisorEntriesResource =
   | { state: "loading"; roomIdentifier: string; updatedAt: string | null; data: readonly DesktopSupervisorManifestEntry[]; error: null }
@@ -191,6 +192,42 @@ export function participantAgentInspectorRequest(target: AgentModalTarget): Agen
 
 export function resolvingAgentInspectorRequest(target: AgentModalTarget): AgentInspectorRequest {
   return { kind: "resolving", target };
+}
+
+export interface InitialTabEffects {
+  emitLiveSelected: boolean;
+}
+
+export function initialTabEffects(tab: string | undefined): InitialTabEffects {
+  return {
+    emitLiveSelected: tab === "live",
+  };
+}
+
+export function inspectorInitialTab(target: AgentModalTarget): "overview" | "live" | "work" | "workspace" {
+  return target.initialTab ?? (target.workSourceMessageId ? "work" : target.workspaceSourceMessageId ? "workspace" : "overview");
+}
+
+/**
+ * Project a room work indicator into an agent modal target aimed directly at
+ * the Live inspector view. Supervision and session resolution are handled by
+ * resolveSupervisorEntryId in the room shell using exact runtime identity.
+ */
+export function workIndicatorAgentTarget(work: ManagedAgentWorkIndicator): AgentModalTarget {
+  return {
+    workSourceMessageId: undefined,
+    messageId: null,
+    clientMessageId: null,
+    messageSource: "agent",
+    actorLabel: work.displayName,
+    displayName: work.displayName,
+    ownerAttribution: null,
+    ideLabel: null,
+    sender: work.displayName,
+    agentKey: work.agentKey ?? null,
+    agentSessionId: work.agentSessionId ?? null,
+    initialTab: "live",
+  };
 }
 
 /**

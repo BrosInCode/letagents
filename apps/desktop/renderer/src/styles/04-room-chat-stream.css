@@ -138,7 +138,26 @@
   border-radius: 8px;
   background: transparent;
   color: var(--text-secondary);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
   box-shadow: none;
+  appearance: none;
+}
+
+.room-local-agent-work:focus-visible {
+  outline: 2px solid var(--blue, #3b82f6);
+  outline-offset: 1px;
+}
+
+.room-local-agent-work:active {
+  background: var(--accent-active);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .room-local-agent-work:hover {
+    background: var(--accent-hover);
+  }
 }
 
 .room-local-agent-work-pulse {
@@ -150,7 +169,7 @@
   animation: local-agent-work-pulse 1.8s ease-in-out infinite;
 }
 
-.room-local-agent-work div {
+.room-local-agent-work-copy {
   display: flex;
   min-width: 0;
   align-items: baseline;
@@ -164,7 +183,7 @@
   white-space: nowrap;
 }
 
-.room-local-agent-work div span {
+.room-local-agent-work-copy span {
   min-width: 0;
   overflow: hidden;
   color: var(--text-tertiary);
