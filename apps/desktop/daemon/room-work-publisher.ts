@@ -24,6 +24,8 @@ type Options = {
 type Row = Record<string, string | number | null>;
 const COALESCE_MS = 1_000;
 const RETRY_MS = 30_000;
+/** How many receipt-derived `failed` summaries one pass stages. */
+const FAILED_RECEIPTS_PER_PASS = 4;
 const canonicalSource = (id: string) => /^msg_[1-9]\d{0,9}$/.test(id) && Number(id.slice(4)) <= 2147483647;
 const key = (record: Pick<RoomWorkPublication, "agentId" | "roomId" | "sourceMessageId">) =>
   JSON.stringify([record.agentId, record.roomId, record.sourceMessageId]);
@@ -243,6 +245,18 @@ export class RoomWorkPublisher {
       const stamp = JSON.stringify([attempt.attempt_id, attempt.state, attempt.conclusion, sequence, incomplete]);
       const recordKey = key(record);
       if (previous.get(recordKey) !== stamp) candidates.push({ record, stamp });
+    }
+    // A capture gap means a message's turn was never recorded and never will
+    // be. Its delivery receipt still says whether it failed. A few per pass;
+    // each one staged leaves the set, so the rest follow on later passes.
+    if (incomplete) {
+      let unstaged: RoomWorkPublication[] = [];
+      try { unstaged = this.store.unstagedFailedReceipts(agentId, FAILED_RECEIPTS_PER_PASS); } catch { this.report("storage_unavailable"); }
+      for (const record of unstaged) {
+        await this.options.assertCurrent();
+        if (this.unavailable()) return false;
+        try { this.store.stageFailedReceipt(record); } catch { this.report("storage_unavailable"); }
+      }
     }
     const eligible = candidates.filter(({ record }) => {
       const prior = this.stagingAttemptedAt.get(key(record));

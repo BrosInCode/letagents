@@ -55,7 +55,7 @@ import type {
   MintedWorkerAuthorization,
 } from "./worker-runtime-custody.js";
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
-import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
+import type { SupervisedAgentInboxStore, SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
@@ -69,6 +69,22 @@ const UNATTACHABLE_GENERATION_RECHECK_MS = 60_000;
 const UNATTACHABLE_GENERATION_RECHECK_MAX_MS = 30 * 60_000;
 const WORKSPACE_REPOSITORY_RETRY_MS = 5_000;
 const WORKSPACE_REPOSITORY_RETRY_MAX_MS = 5 * 60_000;
+/**
+ * How long an ended runtime is left for the turn of its in-flight message to
+ * be recorded. A provider reports a failed turn's result moments after the
+ * failure; past this the result is not coming and the runtime is retired
+ * without it.
+ */
+export const RETIREMENT_SETTLEMENT_WAIT_MS = 30_000;
+/**
+ * The inbox head has a turn that may still be running and no result saved for
+ * it. A started turn handed back to `pending` counts: a delivery lane that
+ * lets go of its turn leaves the row that way while the provider works on.
+ */
+function turnInFlight(head: Pick<SupervisedInboxItem, "state" | "provider_turn_id" | "outcome"> | null): boolean {
+  return head !== null && (["dispatching", "awaiting_result", "result_recovery"].includes(head.state)
+    || (head.state === "pending" && Boolean(head.provider_turn_id) && !head.outcome));
+}
 const UNATTACHABLE_GENERATION_CAUSE = "durable execution generation remains live without an attachable provider handle";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
@@ -208,6 +224,8 @@ export type ProviderExecutionCoordinatorOptions = {
   delivery: {
     stop(entryId: string): Promise<unknown>;
     start(entryId: string, mode?: "ensure" | "wake"): Promise<unknown>;
+    /** The room refuses the bearer this agent's delivery polls with. */
+    roomRefusesAccess?(entryId: string): boolean;
   };
   inbox: {
     head: SupervisedAgentInboxStore["head"];
@@ -281,6 +299,8 @@ export class ProviderExecutionCoordinator {
   private readonly pendingReminders = new Map<string, symbol>();
   private readonly failedLaunchAdmissions = new Map<string, string>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** When the wait for an ended runtime's last turn runs out, per runtime. */
+  private readonly retirementDeadlines = new WeakMap<ProviderActionHandle, number>();
   private readonly recoveryDueAtMs = new Map<string, number>();
   private readonly unattachableRechecks = new Map<string, number>();
   private readonly workspaceRepositoryRetries = new Map<string, number>();
@@ -1335,10 +1355,19 @@ export class ProviderExecutionCoordinator {
         "daemon-convergence",
       );
     }
-    const terminal = (typed && ["failed", "stopped"].includes(entry.observed_state))
+    // A typed lane takes its state from execution facts, not from the handle.
+    // The one exception runs toward failure only: no turn can run on a handle
+    // that itself reports failed or stopped, and the fact that should have
+    // failed the entry can be lost, which left the agent looking alive and
+    // receiving nothing. Cursor is excluded: its handle ends only with a
+    // committed terminal, which the exit path already owns.
+    const typedHandleEnded = typed && entry.provider !== "cursor"
+      && ["failed", "stopped"].includes(handle.observedState);
+    const terminal = (typed && (["failed", "stopped"].includes(entry.observed_state) || typedHandleEnded))
       || (!typed && (["failed", "stopped"].includes(handle.observedState)
         || (handle.observedState === "idle" && !requiresGrant)));
     if (terminal) {
+      if (await this.holdsRetirement(entry, handle, typedHandleEnded)) return;
       await this.options.streams.fenceTerminalOnce(
         handle,
         `manifest:${entry.id}:reattached-terminal:${entry.provider_ref?.execution_generation_id ?? "unknown"}`,
@@ -1348,6 +1377,47 @@ export class ProviderExecutionCoordinator {
     if (entry.desired_state === "running" && entry.delivery_mode === "daemon_inbox") {
       await this.options.delivery.start(entry.id, "ensure");
     }
+  }
+
+  /**
+   * Retiring a runtime stops its process, and two things can make that the
+   * wrong moment.
+   *
+   * Its message is still in flight: the inbox head has a turn started and no
+   * result saved. A stop now would land before the provider finished the turn,
+   * and the next message would wait behind a turn nobody can finish. Leave the
+   * runtime until the result is saved; delivery wakes convergence when it
+   * records one. The inbox is asked rather than the delivery lane, because a
+   * lane that lost its turn (a newly minted session takes its authority to
+   * record it) holds nothing while the provider is still working. The wait is
+   * bounded: a runtime that never reports the result is retired anyway, and
+   * the turn is then recovered from the provider's own record, never run
+   * again.
+   *
+   * The room refuses this agent's bearer: a handle that ended while its entry
+   * did not is left as it is. Replacing it is not what the room's answer asks
+   * for, and the daemon cannot tell an expired bearer from a session a room
+   * admin ended. A bearer that is due is still rotated above, on its
+   * schedule, and an entry that itself ended is still replaced, as both were
+   * before.
+   */
+  private async holdsRetirement(
+    entry: DaemonManifestEntry,
+    handle: ProviderActionHandle,
+    typedHandleEnded: boolean,
+  ): Promise<boolean> {
+    const head = await this.options.inbox.head(entry.id);
+    if (turnInFlight(head)) {
+      const now = this.options.nowMs();
+      const deadline = this.retirementDeadlines.get(handle) ?? now + RETIREMENT_SETTLEMENT_WAIT_MS;
+      this.retirementDeadlines.set(handle, deadline);
+      if (now < deadline) {
+        this.scheduleRecovery(entry.id, deadline - now);
+        return true;
+      }
+    }
+    return typedHandleEnded && !["failed", "stopped"].includes(entry.observed_state)
+      && this.options.delivery.roomRefusesAccess?.(entry.id) === true;
   }
 
   /** Delivery readiness comes from durable worker authority, never provider polling output. */

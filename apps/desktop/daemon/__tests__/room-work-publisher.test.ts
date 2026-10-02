@@ -150,6 +150,100 @@ test("publisher coalesces structural evidence, not output, and terminal state fo
   assert.doesNotMatch(JSON.stringify(f.sent[1].summary), /PRIVATE|workspace|conversation|outputBytes|turn-|native-/);
 });
 
+test("a failed delivery that capture never recorded is published as failed from its receipt, and only then", async t => {
+  const f = await fixture(t);
+  const reason = "PRIVATE provider reason";
+  const receipt = (id: number, state: string) => f.db.prepare(`INSERT INTO supervised_agent_inbox
+    (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,
+     action_id,reply_client_message_id,provider_turn_id,outcome,last_error,created_at,updated_at,acknowledged_at)
+    VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)`).run(`inbox-${id}`, "agent", "room", `msg_${id}`,
+    JSON.stringify({ id: `msg_${id}`, text: "PRIVATE message content" }), "{}", id, state, `action-${id}`, `reply-${id}`,
+    `native-${id}`, null, reason, "2026-08-31T00:00:00Z", "2026-08-31T00:00:01Z", "2026-08-31T00:00:01Z");
+  f.publisher.observeNewSources(f.agent)?.(["msg_1", "msg_2", "msg_3"]);
+  receipt(1, "acknowledged_failed");
+  receipt(2, "acknowledged");
+  f.captureMessage(3, false);
+  receipt(3, "acknowledged_failed");
+
+  assert.equal(f.receipts.stageFailedReceipt({ ...f.row(3) }), null, "an attempt capture did record is never replaced by a receipt");
+
+  // Capture is whole: its own attempt may still arrive, so nothing is derived.
+  await f.publisher.flush();
+  assert.equal(f.row(1).revision, 0);
+
+  // A gap: the observer saw a position it could never record.
+  f.db.prepare("UPDATE execution_observers SET max_observed_sequence=last_source_sequence+1 WHERE agent_id='agent'").run();
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  const failed = f.sent.find(input => input.sourceMessageId === "msg_1");
+  assert.deepEqual(failed?.summary, { version: 1, recorded_state: "failed", evidence_incomplete: true, elapsed_ms: null,
+    operation_counts: { unresolved: 0, succeeded: 0, failed: 0, denied_before_start: 0,
+      cancelled_before_start: 0, interrupted_after_start: 0, lost_after_start: 0 } });
+  assert.doesNotMatch(JSON.stringify(failed), /PRIVATE provider reason|PRIVATE message content|inbox-1|native-1/,
+    "the room learns the state only: no reason, no content, no local identity");
+  assert.equal(f.row(1).acknowledgedRevision, 1);
+  assert.equal(f.row(2).revision, 0, "a message the agent answered is not reported from its receipt");
+  assert.notEqual(f.row(3).attemptId, null);
+  assert.equal(f.receipts.stageFailedReceipt({ ...f.row(2) }), null);
+  assert.equal(f.sent.find(input => input.sourceMessageId === "msg_3")?.summary.recorded_state, "active",
+    "a message capture did record keeps its captured evidence");
+
+  const sent = f.sent.length;
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.equal(f.sent.length, sent, "the same receipt is not published twice");
+  assert.equal(f.receipts.stageFailedReceipt(f.row(1)), null, "nor staged again");
+  assert.equal(f.row(1).revision, 1);
+});
+
+test("failed deliveries behind any number of answered ones are all published from their receipts, a few per pass", async t => {
+  const f = await fixture(t);
+  const receipt = (id: string, state: string) => f.db.prepare(`INSERT INTO supervised_agent_inbox
+    (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,
+     action_id,reply_client_message_id,provider_turn_id,outcome,last_error,created_at,updated_at,acknowledged_at)
+    VALUES (?,?,?,?,?,?,?,?,1,?,?,?,?,?,?,?,?)`).run(`inbox-${id}`, "agent", "room", `msg_${id}`,
+    JSON.stringify({ id: `msg_${id}` }), "{}", Number(id), state, `action-${id}`, `reply-${id}`,
+    `native-${id}`, null, null, "2026-08-31T00:00:00Z", "2026-08-31T00:00:01Z", "2026-08-31T00:00:01Z");
+  // Ahead of six failed messages that capture never recorded sort six that
+  // were answered, and four failed ones that capture did record.
+  const answered = ["10", "11", "12", "13", "14", "15"];
+  const captured = ["16", "17", "18", "19"];
+  const failed = ["20", "21", "22", "23", "24", "25"];
+  f.publisher.observeNewSources(f.agent)?.([...answered, ...captured, ...failed].map(id => `msg_${id}`));
+  for (const id of answered) receipt(id, "acknowledged");
+  for (const id of captured) {
+    f.captureMessage(Number(id), false);
+    f.fact(Number(id), { state: "terminal", turnOutcome: "failed" });
+    receipt(id, "acknowledged_failed");
+  }
+  for (const id of failed) receipt(id, "acknowledged_failed");
+  f.db.prepare("UPDATE execution_observers SET max_observed_sequence=last_source_sequence+1 WHERE agent_id='agent'").run();
+  const published = () => f.sent.filter(input => input.summary.recorded_state === "failed").map(input => input.sourceMessageId).sort();
+  const staged = () => failed.filter(id => f.row(Number(id)).revision === 1).map(id => `msg_${id}`);
+
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.deepEqual(staged(), ["msg_20", "msg_21", "msg_22", "msg_23"], "one pass stages a bounded few, and only failed ones");
+
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.deepEqual(staged(), failed.map(id => `msg_${id}`), "the next pass takes the rest: none waits behind the answered ones");
+  // Sending is its own bounded step, shared with the captured summaries.
+  for (let pass = 0; pass < 4 && published().length < failed.length; pass += 1) {
+    f.publisher.changed("agent");
+    await f.publisher.flush();
+  }
+  assert.deepEqual(published(), failed.map(id => `msg_${id}`), "and every one of them is published");
+  assert.deepEqual(f.receipts.unstagedFailedReceipts("agent", 100), [], "nothing is left to stage");
+  for (const id of answered) assert.equal(f.receipts.get("agent", "room", `msg_${id}`)?.revision, 0, `msg_${id} was answered`);
+  for (const id of captured) assert.notEqual(f.row(Number(id)).attemptId, null, `msg_${id} keeps its captured evidence`);
+
+  const sent = f.sent.length;
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.equal(f.sent.length, sent, "and nothing is published twice");
+});
+
 test("network retry survives restart and coalesces newer evidence into a stable revision", async t => {
   const f = await fixture(t); f.captureMessage();
   f.options.publish = async input => { f.sent.push(input); throw new Error("offline PRIVATE_ERROR"); };

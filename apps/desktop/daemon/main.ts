@@ -459,11 +459,11 @@ export class SupervisorDaemon {
         terminalPayload: (terminal, actor, connection) => this.providerTerminals.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor, executionGenerationId, handle) =>
           this.observeProviderExitOnce(entryId, terminal, actor, executionGenerationId, handle),
-        completeTurnControlForRuntimeRecovery: (entry) =>
-          this.runtimeRecovery.completeTurnControl(entry),
+        completeTurnControlForRuntimeRecovery: (entry) => this.runtimeRecovery.completeTurnControl(entry),
         delivery: {
           stop: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
           start: (entryId, mode) => this.startSupervisedDelivery(entryId, mode ?? "refresh"),
+          roomRefusesAccess: (entryId) => this.supervisedDelivery?.roomRefusesAccess(entryId) ?? false,
         },
         inbox: {
           head: (entryId) => this.supervisedInbox.head(entryId),

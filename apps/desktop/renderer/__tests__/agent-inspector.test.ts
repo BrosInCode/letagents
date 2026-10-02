@@ -194,6 +194,35 @@ test("truthful online state requires the exact delivery connection and preserves
   })), "reconnecting");
 });
 
+test("an agent its room refuses needs attention and says so, ahead of its queued messages", () => {
+  const detail = "The room refused this agent's access, so it is not receiving room messages.";
+  const refused = (inbox: NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["inbox"]) => entry({
+    observedState: "idle",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      ingress: { state: "blocked", observedAt: "2026-07-23T10:00:00.000Z", detail },
+      inbox,
+    },
+  });
+  for (const inbox of [
+    { state: "empty" as const, pendingCount: 0, blockedByMessageId: null, detail: null },
+    { state: "queued" as const, pendingCount: 2, blockedByMessageId: null, detail: "Room delivery is queued." },
+  ]) {
+    const agent = refused(inbox);
+    assert.equal(agentInspectorOverallState(agent), "needs_attention", "never shown as reconnecting or online");
+    const now = projectAgentInspector(agent, { roomId: "focus_1", deliveryRetryAvailable: false })?.now;
+    assert.deepEqual([now?.kind, now?.label, now?.summary], ["attention", "Needs attention", detail], inbox.state);
+  }
+  // Without a refusal, a queue is still described as a queue.
+  const reconnecting = entry({ observedState: "idle", roomAgentState: {
+    ...entry().roomAgentState!,
+    ingress: { state: "backoff", observedAt: null, detail: "Supervised room poll failed with HTTP 503." },
+    inbox: { state: "queued", pendingCount: 2, blockedByMessageId: null, detail: "Room delivery is queued." },
+  } });
+  const now = projectAgentInspector(reconnecting, { roomId: "focus_1", deliveryRetryAvailable: false })?.now;
+  assert.deepEqual([now?.label, now?.summary], ["Reconnecting", "Room delivery is queued."]);
+});
+
 test("a Claude usage-limit bootstrap failure explains the automatic retry instead of a raw diagnostic", () => {
   const limited = entry({
     observedState: "recovering",

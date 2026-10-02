@@ -202,6 +202,51 @@ export class RoomWorkPublicationStore {
       }
     });
   }
+  /**
+   * Open publications of this agent that `stageFailedReceipt` would stage:
+   * nothing staged yet, no captured attempt, and a delivery that ended failed.
+   * The filter is here, in one indexed query with a limit, so that messages
+   * which were answered, or are still being answered, cannot stand in front
+   * of a failed one however many there are.
+   */
+  unstagedFailedReceipts(agentId: string, limit: number): RoomWorkPublication[] {
+    return this.database.prepare(`SELECT p.* FROM ${table} p
+      JOIN supervised_agent_inbox i ON i.agent_id=p.agent_id AND i.room_id=p.room_id AND i.source_message_id=p.source_message_id
+      WHERE p.agent_id=? AND p.state='open' AND p.revision=0 AND i.state='acknowledged_failed'
+        AND NOT EXISTS (SELECT 1 FROM execution_message_attempts a
+          WHERE a.agent_id=p.agent_id AND a.room_id=p.room_id AND a.source_message_id=p.source_message_id)
+      ORDER BY p.room_id,p.source_message_id LIMIT ?`).all(text(agentId), limit).map(decode);
+  }
+
+  /**
+   * Stage `failed` for a message whose delivery ended failed while execution
+   * capture never recorded an attempt for it. The room then learns that the
+   * message was not answered: the state only, with no reason and no content.
+   * The attempt id is derived from the delivery receipt, so a retry stages the
+   * same publication. Captured evidence wins: nothing is staged once an
+   * attempt or an earlier revision exists.
+   */
+  stageFailedReceipt(value: RoomWorkPublicationIdentity): RoomWorkPublication | null {
+    const key = identity(value);
+    return this.transaction(() => {
+      const current = this.get(key.agentId, key.roomId, key.sourceMessageId);
+      if (!current || !sameIdentity(current, key) || current.state !== "open" || current.revision !== 0) return null;
+      if (this.database.prepare("SELECT 1 FROM execution_message_attempts WHERE agent_id=? AND room_id=? AND source_message_id=?")
+        .get(key.agentId, key.roomId, key.sourceMessageId)) return null;
+      const receipt = this.database.prepare("SELECT inbox_item_id,state FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?")
+        .get(key.agentId, key.roomId, key.sourceMessageId);
+      if (receipt?.state !== "acknowledged_failed" || typeof receipt.inbox_item_id !== "string") return null;
+      const hex = createHash("sha256").update(JSON.stringify(["room-work-failed-receipt", receipt.inbox_item_id])).digest("hex");
+      const attempt = attemptId(`${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`);
+      const staged = summaryReceipt({ version: 1, recorded_state: "failed", evidence_incomplete: true, elapsed_ms: null,
+        operation_counts: { unresolved: 0, succeeded: 0, failed: 0, denied_before_start: 0,
+          cancelled_before_start: 0, interrupted_after_start: 0, lost_after_start: 0 } });
+      this.database.prepare(`UPDATE ${table} SET attempt_id=?,revision=revision+1,summary_json=?,digest=? WHERE agent_id=? AND room_id=? AND source_message_id=?`)
+        .run(attempt, staged.json, staged.digest, key.agentId, key.roomId, key.sourceMessageId);
+      return this.get(key.agentId, key.roomId, key.sourceMessageId)!;
+    });
+  }
+
   stage(value: RoomWorkPublicationIdentity, captured: { attemptId: string; summary: RoomAgentWorkSummary }): RoomWorkPublication {
     const key = identity(value); const attempt = attemptId(captured.attemptId); const receipt = summaryReceipt(captured.summary);
     return this.transaction(() => {
