@@ -82,9 +82,15 @@
         <LongMessageContent
           v-else-if="message.text"
           :text="visibleText"
-          :html="renderedContent"
+          :html="renderedMessage.html"
           :messageId="message.id"
           @taskReferenceClick="emit('openTask', $event)"
+        />
+        <GitHubEventCard
+          v-for="preview in linkPreviews"
+          :key="preview.url"
+          :event="linkPreviewPresentation(preview)"
+          compact
         />
         <MessageAttachments
           v-if="attachments.length"
@@ -177,6 +183,8 @@ import MessageReactionPicker, { type MessageReactionPickerAnchor } from '../../.
 import WakeGlyph from '../../../../../shared/ui/WakeGlyph.vue'
 import { isPinMessageId } from '../../../../../shared/message-pins.mjs'
 import { unreadMenuKey } from '../../../../../shared/room-unread-client'
+import { injectRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
+import { linkPreviewPresentation } from '../../../../../shared/message-link-previews.mjs'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 import { WAKE_NOTICE_SOURCE } from '../../../../../shared/wake-rules.mjs'
@@ -421,6 +429,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopTrackingReactions?.()
+  stopTrackingPreviews?.()
   document.removeEventListener('pointerdown', handleMenuDismiss, true)
   document.removeEventListener('keydown', handleMenuDismiss, true)
   window.removeEventListener('blur', handleMenuDismiss)
@@ -531,12 +540,19 @@ const fullTimestamp = computed(() => {
     ? ''
     : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 })
-const renderedContent = computed(() => renderMessageContent(
-  isAmbientSystem.value
-    ? stripStatusPrefix(visibleText.value)
-    : visibleText.value,
-  props.taskReferenceIds,
-))
+const renderedMessage = computed(() => {
+  const urls: string[] = []
+  const html = renderMessageContent(isAmbientSystem.value ? stripStatusPrefix(visibleText.value) : visibleText.value,
+    props.taskReferenceIds, (url) => urls.push(url))
+  return { html, urls }
+})
+const previewContext = injectRoomMessageLinkPreviews()
+const linkPreviews = computed(() => previewContext?.previewsFor(props.message.id) ?? [])
+let stopTrackingPreviews: (() => void) | null = null
+watch(() => [props.message.id, renderedMessage.value.urls, previewContext?.contextKey.value], () => {
+  stopTrackingPreviews?.()
+  stopTrackingPreviews = previewContext?.track({ id: props.message.id, urls: renderedMessage.value.urls }) ?? null
+}, { immediate: true })
 </script>
 
 <style scoped>
