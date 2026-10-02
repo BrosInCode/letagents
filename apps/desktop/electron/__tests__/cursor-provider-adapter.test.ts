@@ -655,17 +655,28 @@ async function waitForPath(path: string, timeoutMs = 5_000): Promise<boolean> {
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  // Native preparation includes async filesystem work. A 10 ms flush cannot
+  // prove the child exists or that checkpoints and stream listeners are ready.
   const deadline = Date.now() + timeoutMs;
   while (!predicate() && Date.now() < deadline) await flush();
   assert.equal(predicate(), true, "condition did not become true before the wait deadline");
 }
 
+const loopKeepAlives = new Set<ReturnType<typeof setInterval>>();
+test.afterEach(() => {
+  // A failed assertion can abandon the turn before withLoopAlive settles.
+  for (const keepAlive of loopKeepAlives) clearInterval(keepAlive);
+  loopKeepAlives.clear();
+});
+
 async function withLoopAlive<T>(work: Promise<T>): Promise<T> {
   const keepAlive = setInterval(() => {}, 20);
+  loopKeepAlives.add(keepAlive);
   try {
     return await work;
   } finally {
     clearInterval(keepAlive);
+    loopKeepAlives.delete(keepAlive);
   }
 }
 
@@ -903,7 +914,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     const turn = withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
       checkpointTurnStarted: async (value) => { turnId = value; },
     }));
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
     const launch = harness.launches[0]!;
     assert.equal(launch.args.includes("--force"), false, "daemon read-only Cursor never receives --force");
     assert.equal(harness.mcpAttestations.length, 2, "both registry shape and the real bridge are attested at the native turn boundary");
@@ -1129,7 +1140,7 @@ test("the production Cursor profile keeps supervisor coordinates out of native c
     const turn = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "inbox-production-profile" }), {
       checkpointTurnStarted: async (value) => { turnId = value; },
     });
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
 
     const profileRoot = join(
       dirname(statePath),
@@ -1441,6 +1452,12 @@ setTimeout(() => process.exit(73), 5000).unref();
     thirdRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
     thirdRuntimeDescendantPid = Number(readFileSync(runtimeDescendantPidPath, "utf8"));
     assert.notEqual(thirdRuntimePid, secondRuntimePid);
+    for (const pid of [thirdRuntimePid, thirdRuntimeDescendantPid, stubbornPid]) {
+      await waitFor(() => {
+        try { process.kill(pid, 0); return false; }
+        catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      });
+    }
     assert.throws(
       () => process.kill(thirdRuntimePid!, 0),
       (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
@@ -1823,7 +1840,6 @@ setTimeout(() => {
             ...input,
             testAgentUpstreamEndpoint: "http://127.0.0.1:9",
             testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
-            testMcpCapabilityTimeoutMs: 500,
           });
         },
       },
@@ -2184,7 +2200,7 @@ test("a project MCP added after the final reseal gains no blanket approval or pe
     const adapter = supervisedAdapter(harness);
     const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({ cwd: workspace }));
     const turn = adapter.runRoomTurn(handle, roomTurnRequest());
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
 
     assert.equal(insertedAtLaunch, true, "the adversarial config appears only after the last reseal");
     harness.children[0]!.emit({
@@ -2666,7 +2682,7 @@ test("Cursor handoff never adopts a later PID birth when the prepared wrapper bi
   const handle = await spawnDaemonLane(adapter, harness);
   const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest());
   roomTurn.catch(() => {});
-  await flush();
+  await waitFor(() => identityReads >= 1);
   const child = harness.children[0]!;
 
   assert.equal(identityReads, 1, "cleanup may not re-read and adopt a later PID birth");
@@ -2705,7 +2721,7 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
       order.push("terminal");
     },
   });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
 
   assert.match(persistedTurnId, /^cursor:/);
   assert.equal(harness.launches.length, 1);
@@ -2756,7 +2772,7 @@ test("Cursor checkpoints a proven native provider failure and reuses its exact s
   const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
     checkpointTerminalResult: async result => { checkpoints.push(result); },
   });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
   child.emit({ type: "result", subtype: "error_during_execution", is_error: true,
     result: "HTTP 503 service unavailable", session_id: "sess-cursor-1" });
@@ -2768,7 +2784,7 @@ test("Cursor checkpoints a proven native provider failure and reuses its exact s
   assert.deepEqual(checkpoints, [failure]);
   assert.equal(handle.observedState(), "idle");
   const next = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "continuation" }));
-  await flush();
+  await waitFor(() => harness.children[1]?.isReleased === true);
   assert.equal(argValue(harness.launches[1]!.args, "--resume"), "sess-cursor-1");
   harness.children[1]!.emit({ type: "result", subtype: "success", is_error: false,
     result: "finished", session_id: "sess-cursor-1" });
@@ -2798,7 +2814,7 @@ test("writable Cursor turns launch only in their private generation and retire i
   const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
     checkpointTerminalResult: async () => { terminalOrder.push("terminal"); },
   });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
 
   const launch = harness.launches[0]!;
   assert.equal(argValue(launch.args, "--workspace"), "/private/letagents-generation/live/project");
@@ -2830,7 +2846,7 @@ test("room scratch Cursor turns use their exact workspace without Git generation
   }));
 
   const pending = adapter.runRoomTurn(handle, roomTurnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
 
   const launch = harness.launches[0]!;
   assert.equal(argValue(launch.args, "--workspace"), scratchWorkspace);
@@ -2871,7 +2887,7 @@ test("Cursor bounded turns classify only the exact no-reply sentinel and preserv
   const handle = await spawnDaemonLane(adapter, harness);
 
   const noReply = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_no_reply" }));
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,
     result: CURSOR_NO_ROOM_REPLY_SENTINEL, session_id: "sess-cursor-1",
@@ -2888,7 +2904,7 @@ test("Cursor bounded turns classify only the exact no-reply sentinel and preserv
   });
 
   const unreadable = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_unreadable" }));
-  await flush();
+  await waitFor(() => harness.children[1]?.isReleased === true);
   harness.children[1]!.emit({
     type: "result", subtype: "success", is_error: false,
     result: null, session_id: "sess-cursor-1",
@@ -2901,7 +2917,7 @@ test("Cursor bounded turns classify only the exact no-reply sentinel and preserv
   assert.equal(unreadableResult.evidence, "none");
 
   const extraText = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_extra_text" }));
-  await flush();
+  await waitFor(() => harness.children[2]?.isReleased === true);
   harness.children[2]!.emit({
     type: "result", subtype: "success", is_error: false,
     result: `${CURSOR_NO_ROOM_REPLY_SENTINEL} because this is extra`, session_id: "sess-cursor-1",
@@ -2928,7 +2944,7 @@ test("Cursor handoff detaches observation while the same in-memory exact turn re
     checkpointTurnStarted: async (value) => { turnId = value; },
     detachSignal: abort.signal,
   });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   abort.abort();
   await assert.rejects(pending, /observation detached/);
 
@@ -2962,7 +2978,7 @@ test("Cursor retains terminal stream evidence when checkpointing fails and recov
     checkpointTerminalResult: async () => { throw new Error("database unavailable"); },
   });
   const rejected = assert.rejects(pending, /database unavailable/);
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,
     result: "Durable after retry", session_id: "sess-cursor-1",
@@ -2997,7 +3013,7 @@ test("Cursor cleanup follows the daemon-accepted structured result rather than t
       };
     },
   });
-  await flush();
+  await waitFor(() => acceptedHarness.children[0]?.isReleased === true);
   acceptedHarness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false, result: null, session_id: "sess-cursor-1",
   });
@@ -3023,7 +3039,7 @@ test("Cursor cleanup follows the daemon-accepted structured result rather than t
       cleanupRecoveryEvidence: false,
     }),
   });
-  await flush();
+  await waitFor(() => rejectedHarness.children[0]?.isReleased === true);
   rejectedHarness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false, result: "raw aggregate only", session_id: "sess-cursor-1",
   });
@@ -3068,7 +3084,7 @@ test("Cursor keeps a durable no-reply journal until fallible workspace receipt c
         cleanupRecoveryEvidence: true,
       }),
     });
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
     const launch = harness.launches[0]!;
     const sessionId = "sess-cursor-1";
     const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
@@ -4828,9 +4844,6 @@ function request(body, path = "/agent.v1.AgentService/Run") {
   const replacement = request("replacement-held");
   if ((await request("overflow-again").done).status !== 503) process.exit(92);
   const remaining = [...held.slice(1), replacement];
-  let attested = false;
-  let resolvedBeforeAttest = false;
-  for (const pending of remaining) pending.done.then(() => { if (!attested) resolvedBeforeAttest = true; });
   const init = { type: "system", subtype: "init", session_id: "sess-hold-admit" };
   const result = { type: "result", subtype: "success", is_error: false, result: "hold-admit-ok", session_id: "sess-hold-admit" };
   if (${terminalWhileHeld}) {
@@ -4840,10 +4853,10 @@ function request(body, path = "/agent.v1.AgentService/Run") {
     if ((await Promise.all(remaining.map((pending) => pending.done))).some((response) => response.status !== 503)) process.exit(93);
   }
   const connector = await attestFixtureMcp();
-  attested = true;
   if (!${terminalWhileHeld}) {
+    // Held Runs may finish once the MCP socket connects, before tools/list returns.
     const responses = await Promise.all(remaining.map((pending) => pending.done));
-    if (resolvedBeforeAttest || responses.some((response) => response.status !== 200 || response.body !== "held-upstream-ok")) process.exit(94);
+    if (responses.some((response) => response.status !== 200 || response.body !== "held-upstream-ok")) process.exit(94);
     if ((await request("background-completion").done).status !== 200) process.exit(95);
     process.stdout.write(JSON.stringify(init) + "\\n");
     process.stdout.write(JSON.stringify(result) + "\\n");
@@ -6469,9 +6482,16 @@ process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_i
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "checkpoint recovered", session_id: "sess-checkpoint-real" }) + "\\n");
 `);
     chmodSync(executable, 0o700);
+    let child: CursorCliChild | undefined;
     const adapter = new CursorProviderAdapter({
       cursorBin: executable,
-      dependencies: productionPersonalIdentityDependencies,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          child = defaultLaunchTurn(input);
+          return child;
+        },
+      },
       supervisedProfileFactory: () => ({
         homeDir, configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
         env: { HOME: homeDir, NPM_CONFIG_CACHE: join(root, "npm-cache") },
@@ -6486,9 +6506,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       if (state.providerContinuationId === "sess-checkpoint-real") {
         realSessionCheckpoints += 1;
         if (realSessionCheckpoints === 1) {
-          // Let the already-emitted result drain so this covers recovery of
-          // a terminal first turn, not the separate interrupted-turn case.
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          // Wait for the wrapper to drain stdout and persist its terminal journal
+          // so this exercises a completed first turn even under slow teardown.
+          assert.ok(child);
+          await child.exited;
           throw new Error("transient manifest checkpoint failure");
         }
         if (realSessionCheckpoints === 3) {
@@ -6770,7 +6791,7 @@ test("daemon Cursor correction refuses an unjournaled side turn and native resum
   assert.equal(harness.launches.length, 0);
 
   const turn = adapter.runRoomTurn(handle, roomTurnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   assert.equal(argValue(harness.launches[0]!.args, "--resume"), "sess-cursor-existing");
   harness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,
@@ -7333,7 +7354,7 @@ test("startup gates on a valid init, not arbitrary stdout bytes (msg_1758)", asy
     turnStartTimeoutMs: 500,
   });
   const spawning = adapter.spawn(spawnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
   child.emitRaw("cursor-agent: warming up model cache");
   await flush();
@@ -7347,7 +7368,7 @@ test("startup gates on a valid init, not arbitrary stdout bytes (msg_1758)", asy
   const rawOnlyAdapter = new CursorProviderAdapter({ dependencies: rawOnly.dependencies, turnStartTimeoutMs: 60, stopGraceMs: 30 });
   const rawSpawning = rawOnlyAdapter.spawn(spawnRequest({ workAttemptId: "wa-cursor-7" }));
   rawSpawning.catch(() => {});
-  await flush();
+  await waitFor(() => rawOnly.children[0]?.isReleased === true);
   rawOnly.children[0]!.emitRaw("just noise, never an init");
   await assert.rejects(rawSpawning, /no stream-json init within the startup bound/);
   assert.equal(rawOnly.children[0]!.alive, false, "the unobservable child was terminated and awaited");
@@ -7357,7 +7378,7 @@ test("only a genuine system/init with a session id satisfies readiness — other
   const harness = createHarness({ silent: true });
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
   const spawning = adapter.spawn(spawnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
 
   // A non-init system event — even one carrying a session id — must not start
@@ -7376,7 +7397,7 @@ test("an init that carries no session id is fenced immediately as a session-cont
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
   const spawning = adapter.spawn(spawnRequest());
   spawning.catch(() => {});
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.children[0]!.emit({ type: "system", subtype: "init" });
   await assert.rejects(spawning, /violated the session contract/);
   assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM"], "the sessionless child was fenced, not awaited to timeout");
@@ -7388,7 +7409,7 @@ test("a late Cursor protocol callback never signals a recycled wrapper PID", asy
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
   const spawning = adapter.spawn(spawnRequest());
   spawning.catch(() => {});
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.identities.set(5200, "unrelated-recycled-birth");
 
   harness.children[0]!.emit({ type: "system", subtype: "init" });
@@ -7403,7 +7424,7 @@ test("a child that exits before init rejects the launch and records terminal evi
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
   const spawning = adapter.spawn(spawnRequest());
   spawning.catch(() => {});
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.identities.set(5200, null);
   harness.children[0]!.resolveExit({ type: "exit", code: 1, signal: null });
   await assert.rejects(spawning, /exited before reporting its stream-json init/);
@@ -7433,7 +7454,7 @@ test("post-release Cursor startup cleanup never signals a recycled wrapper PID",
   });
   const spawning = adapter.spawn(spawnRequest());
   spawning.catch(() => {});
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.identities.set(5200, "unrelated-recycled-birth");
 
   await assert.rejects(spawning, /no stream-json init within the startup bound/);
@@ -7895,7 +7916,7 @@ test("Cursor typed observations fence each native child and exclude synthetic di
     settledBirths.push(birth);
   };
   const first = adapter.runRoomTurn(handle, roomTurnRequest(), { settleLifecycleBeforeIdle: settleExactBirth });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
   const session_id = "sess-cursor-1";
   child.emit({ type: "system", subtype: "init", session_id, model: "cursor-fast" });
@@ -7934,7 +7955,7 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   const second = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "second" }), {
     settleLifecycleBeforeIdle: settleExactBirth,
   });
-  await flush();
+  await waitFor(() => harness.children[1]?.isReleased === true);
   const nextChild = harness.children[1]!;
   nextChild.emit(started);
   nextChild.emit({ type: "tool_call", subtype: "completed", call_id: "same-call", session_id,
@@ -8028,7 +8049,7 @@ test("Cursor typed child loss differs from an exact user interruption", async ()
           assert.match(result.error ?? "", /ended before.*terminal result/);
         })
         : assert.rejects(running, /ended before.*terminal result/);
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
     const child = harness.children[0]!;
     child.emit({ type: "tool_call", subtype: "started", call_id: "shell", session_id: "sess-cursor-1",
       tool_call: { shellToolCall: { args: { command: "slow-command" } } } });
@@ -8062,7 +8083,7 @@ test("Cursor typed shell completion preserves native exit codes and does not com
   const events: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, (event) => events.push(event));
   const running = adapter.runRoomTurn(handle, roomTurnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
   const session_id = "sess-cursor-1";
   for (const [call_id, result] of [
