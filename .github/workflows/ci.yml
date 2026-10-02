@@ -264,6 +264,9 @@ jobs:
       - name: Test message reactions
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
 
+      - name: Test room message search
+        run: node --import tsx --test src/api/__tests__/message-search-routes.test.ts src/api/__tests__/message-search-db.test.ts src/api/__tests__/message-search-controller.test.ts
+
       - name: Run message attachment tests
         run: >-
           node

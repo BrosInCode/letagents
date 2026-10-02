@@ -116,6 +116,7 @@ const expectedDirectChannels = [
   "desktop:room:restore-wake-rule",
   "desktop:room:run-task-review-worker-action",
   "desktop:room:run-task-worker-action",
+  "desktop:room:search-messages",
   "desktop:room:send-message",
   "desktop:room:set-agent-guidelines",
   "desktop:room:set-board-manager-mode",

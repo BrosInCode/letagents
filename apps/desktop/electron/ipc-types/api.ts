@@ -10,6 +10,8 @@ export interface DesktopMessageReactionsRange {
 }
 /** The message's reactions after the viewer added or removed one. */
 export interface DesktopMessageReactionChange { changed: boolean; reactions: MessageReaction[]; }
+/** One page of a room history search, newest first; the shape the shared search controller reads. */
+export interface DesktopRoomMessageSearchPage { terms: string[]; messages: DesktopRoomMessage[]; has_more: boolean; next_before: string | null; }
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
 import type { DesktopAccountActivityState } from "./account-activity.js";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
@@ -310,6 +312,8 @@ export interface DesktopApi {
     /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */
     getMessageReactions?: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) => Promise<DesktopMessageReactionsRange>;
     setMessageReaction?: (roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) => Promise<DesktopMessageReactionChange>;
+    /** Cloud rooms only. Optional so a renderer newer than its main process keeps its in-place find. */
+    searchMessages?: (roomIdentifier: string, query: string, beforeMessageId?: string | null) => Promise<DesktopRoomMessageSearchPage>;
     getGitHubEventFilter: (roomIdentifier: string) => Promise<GitHubRoomChatEventFilter>;
     setGitHubEventFilter: (roomIdentifier: string, enabledKinds: GitHubRoomChatEventKind[]) => Promise<GitHubRoomChatEventFilter>;
     getAgentGuidelines: (roomIdentifier: string) => Promise<RoomAgentGuidelines>;

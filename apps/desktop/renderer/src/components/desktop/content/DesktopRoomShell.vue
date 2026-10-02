@@ -43,7 +43,7 @@
       :github-events-visible="githubEventsVisible"
       :storage-busy="storageBusy"
       :search-summary="searchSummary"
-      :search-results-count="searchResults.length"
+      :search-results-count="searchResults.length" @show-search-result="revealRoomMessage"
       @copy-room-link="copyRoomLink"
       @open-rules="openRules"
       @toggle-sound="toggleSound"

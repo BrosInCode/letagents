@@ -95,6 +95,8 @@ const emit = defineEmits<{
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   openTask: [taskId: string]
   revealed: [messageId: string]
+  /** The requested message is further back than the list will load to reach it. */
+  revealUnavailable: [messageId: string]
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)
@@ -263,6 +265,8 @@ function revealRequestedMessage() {
       emit('loadOlder')
     }
     return
+  } else {
+    emit('revealUnavailable', messageId)
   }
   revealOlderPagesRequested = 0
   emit('revealed', messageId)
