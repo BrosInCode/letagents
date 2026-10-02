@@ -379,7 +379,7 @@ import {
   participantAgentInspectorRequest,
   resolvingAgentInspectorRequest,
   resolveAgentInspectorSelection,
-  supervisedAgentInspectorRequest,
+  supervisedAgentInspectorRequest, inspectorInitialTab,
   type AgentInspectorSupervisorEntryUpdate,
   type SupervisorEntriesResource,
 } from "../../../domain/agent-inspector-identity";
@@ -555,7 +555,7 @@ const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
 const selectedAgentDetailRequestVersion = ref(0);
-const agentInspectorInitialTab = ref<"overview" | "work" | "workspace" | "diagnostics">("overview");
+const agentInspectorInitialTab = ref<"overview" | "live" | "work" | "workspace" | "diagnostics">("overview");
 const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
 // Cap the retained live-feed tail so a long turn can't grow the renderer
@@ -1941,7 +1941,7 @@ async function openAgentDetailFromParticipant(target: AgentModalTarget): Promise
 }
 
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
-  agentInspectorInitialTab.value = request.target.workSourceMessageId ? "work" : request.target.workspaceSourceMessageId ? "workspace" : "overview";
+  agentInspectorInitialTab.value = inspectorInitialTab(request.target);
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = request;
   agentInspectorActionState.value = null;

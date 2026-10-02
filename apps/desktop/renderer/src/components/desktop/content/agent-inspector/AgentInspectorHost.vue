@@ -107,7 +107,7 @@ const props = defineProps<{
   roomIdentifier: string;
   roomDisplayName?: string;
   requestVersion: number;
-  initialTab?: "overview" | "work" | "workspace" | "diagnostics";
+  initialTab?: "overview" | "live" | "work" | "workspace" | "diagnostics";
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
@@ -285,7 +285,16 @@ watch(() => [props.open, compact.value] as const, ([open, isCompact], previous) 
     const focusTarget = restoreFocusOnClose ? restoreFocusElement : null;
     restoreFocusElement = null;
     restoreFocusOnClose = true;
-    if (focusTarget) void nextTick(() => focusTarget.focus({ preventScroll: true }));
+    if (focusTarget) {
+      void nextTick(() => {
+        if (focusTarget.isConnected) {
+          focusTarget.focus({ preventScroll: true });
+        } else {
+          const composer = document.querySelector<HTMLElement>('[data-testid="desktop-composer-input"]');
+          composer?.focus({ preventScroll: true });
+        }
+      });
+    }
   }
 }, { immediate: true });
 
@@ -339,6 +348,12 @@ onBeforeUnmount(() => {
   document.removeEventListener("keydown", handleHostKeydown, true);
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   setShellContentInert(false);
-  if (restoreFocusOnClose) restoreFocusElement?.focus({ preventScroll: true });
+  if (restoreFocusOnClose && restoreFocusElement) {
+    if (restoreFocusElement.isConnected) {
+      restoreFocusElement.focus({ preventScroll: true });
+    } else {
+      document.querySelector<HTMLElement>('[data-testid="desktop-composer-input"]')?.focus({ preventScroll: true });
+    }
+  }
 });
 </script>
