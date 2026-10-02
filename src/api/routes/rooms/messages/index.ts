@@ -7,6 +7,7 @@ import { registerMessageStreamRoute } from "./stream.js";
 import { registerMessageInfoRoute } from "./info.js";
 import { registerMessageReadsRoute } from "./reads.js";
 import { registerMessageReactionRoutes } from "./reactions.js";
+import { registerMessageSearchRoute } from "./search.js";
 import { registerAgentReceiptsRoute } from "./agent-receipts.js";
 import { registerAgentObservationRoute } from "../agents/observation.js";
 import type { RoomMessageRouteDeps } from "./types.js";
@@ -24,6 +25,7 @@ export function registerRoomMessageRoutes(
   registerMessageInfoRoute(app, deps);
   registerMessageReadsRoute(app, deps);
   registerMessageReactionRoutes(app, deps);
+  registerMessageSearchRoute(app, deps);
   registerAgentReceiptsRoute(app, deps);
   registerAgentObservationRoute(app, deps);
 }
