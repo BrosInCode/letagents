@@ -92,6 +92,7 @@
           :attachment-drafts="attachmentDrafts"
           :attachment-error="attachmentError"
           :event-previews="composerEventPreviews"
+          :presence-chips="presenceChips"
           :message-namespace="messageNamespace"
           :participants="participants"
           :permission-approvals="permissionApprovals"
@@ -247,6 +248,7 @@ import {
   isLowSignalGitHubCheckMessage,
 } from "./desktop-chat-message/github-event";
 import { useDesktopMessageDraft } from "../../../domain/desktop-message-drafts";
+import { useAgentPresenceChips } from "../../../composables/useAgentPresenceChips";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
 import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
@@ -358,6 +360,12 @@ const emit = defineEmits<{
   "thread-read": [threadRootId: string, summary: DesktopRoomMessageThreadSummary];
   "stop-agent-turn": [agentId: string, approvalId: string];
 }>();
+
+const { chips: presenceChips } = useAgentPresenceChips({
+  presence: () => props.presence,
+  scope: () => props.roomIdentifier,
+  ready: () => !props.roomLoading,
+});
 
 const threadLayoutAnimationMs = 250;
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>

@@ -26,6 +26,7 @@ import {
   participantHiddenCount,
   participants,
   presence,
+  presenceLoaded,
   reasoningSessions,
   replaceRoomMessages,
   resetRoomState,
@@ -86,6 +87,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       tasks.value = bootstrap.tasks
       focusRooms.value = bootstrap.focusRooms
       presence.value = bootstrap.presence
+      presenceLoaded.value = true
       boardHandoffPresence.value = bootstrap.presence
       participants.value = bootstrap.participantsPage.participants
       participantHiddenCount.value = bootstrap.participantsPage.hidden_count
