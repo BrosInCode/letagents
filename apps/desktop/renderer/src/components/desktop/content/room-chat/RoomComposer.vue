@@ -4,6 +4,7 @@
       :aria-expanded="showApprovalHistory" @click="showApprovalHistory = !showApprovalHistory">
       {{ `${showApprovalHistory ? 'Hide' : 'Show'} ${attentionApprovalCount} ${attentionApprovalCount === 1 ? 'approval' : 'approvals'} needing attention` }}
     </button>
+    <RoomPresenceChips :chips="presenceChips ?? []" />
     <RoomComposerEventChips
       :event-previews="visibleEventPreviews"
       @open-event-preview="openEventPreview"
@@ -284,6 +285,8 @@ import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
+import RoomPresenceChips from "./RoomPresenceChips.vue";
+import type { PresenceChip } from "../../../../domain/presence-chips";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
 import { visibleComposerEventPreviews } from "./composer-event-preview";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../../domain/attention-response";
@@ -310,6 +313,7 @@ const props = defineProps<{
   eventPreviews: ComposerEventPreview[];
   messageNamespace?: string;
   participants: DesktopParticipantSummary[];
+  presenceChips?: PresenceChip[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;
