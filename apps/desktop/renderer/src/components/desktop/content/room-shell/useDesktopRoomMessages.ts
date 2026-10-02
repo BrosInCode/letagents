@@ -19,7 +19,7 @@ import { desktopMessageOutbox, enqueueDesktopMessage, reconcileDesktopMessageOut
 
 const messageHistoryPageSize = 150;
 const maxAutoHistoryBackfillPages = 5;
-const maxExplicitMessageRevealPages = 5;
+const maxExplicitMessageRevealPages = 20;
 
 export function useDesktopRoomMessages(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
@@ -189,17 +189,43 @@ export function useDesktopRoomMessages(options: {
    * A false result is intentionally surfaced by the App shell rather than
    * silently leaving a link that appears to have worked.
    */
-  async function revealMessage(messageId: string): Promise<boolean> {
+  async function revealMessage(
+    messageId: string,
+  ): Promise<"revealed" | "not_found" | "too_far_back" | "unavailable"> {
     const generation = roomHistoryGeneration;
     const targetId = messageId.trim();
-    if (!targetId) return false;
-    for (let page = 0; page <= maxExplicitMessageRevealPages; page += 1) {
-      if (visibleMessages.value.some((message) => message.id === targetId)) return true;
-      if (!hasOlderMessages.value || loadingOlderMessages.value) return false;
-      await loadOlderMessages();
-      if (roomHistoryGeneration !== generation || olderMessagesError.value) return false;
+    if (!targetId) return "unavailable";
+
+    if (visibleMessages.value.some((message) => message.id === targetId)) return "revealed";
+
+    // Pre-flight check: tell "not found" / hidden from "too far back"
+    if (typeof desktopIpc.room?.getMessage === "function") {
+      try {
+        const targetMessage = await desktopIpc.room.getMessage(options.room.value.identifier, targetId);
+        if (!targetMessage || isHiddenChatMessage(targetMessage)) {
+          return "not_found";
+        }
+      } catch {
+        // Thrown error means lookup failed (network, timeout, 500); fall through to paging.
+      }
     }
-    return visibleMessages.value.some((message) => message.id === targetId);
+
+    for (let page = 0; page <= maxExplicitMessageRevealPages; page += 1) {
+      if (visibleMessages.value.some((message) => message.id === targetId)) return "revealed";
+      if (!hasOlderMessages.value || loadingOlderMessages.value) {
+        return "unavailable";
+      }
+      await loadOlderMessages();
+      if (roomHistoryGeneration !== generation || olderMessagesError.value) {
+        return "unavailable";
+      }
+    }
+
+    if (visibleMessages.value.some((message) => message.id === targetId)) {
+      return "revealed";
+    }
+
+    return hasOlderMessages.value ? "too_far_back" : "unavailable";
   }
 
   return {
@@ -208,7 +234,7 @@ export function useDesktopRoomMessages(options: {
     hasOlderMessages,
     loadingOlderMessages,
     olderMessagesError,
-      ownMessageIds,
+    ownMessageIds,
     hasFilteredRoomActivity,
     visibleMessages,
     timelineMessages,

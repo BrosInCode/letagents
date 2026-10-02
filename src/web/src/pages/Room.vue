@@ -58,6 +58,7 @@
       :tabTransitionName="tabTransitionName"
       :messages="messages"
       :messagesHasOlder="messagesHasOlder"
+      :messagesLoaded="messagesLoaded"
       :isLoadingOlderMessages="isLoadingOlderMessages"
       :tasks="tasks"
       :focusRooms="focusRooms"
@@ -177,6 +178,9 @@ import { useRoomPresentation } from './room/useRoomPresentation'
 import { useRoomTabs } from './room/useRoomTabs'
 import { useRoomTaskHandlers } from './room/useRoomTaskHandlers'
 import { useToast } from '@/composables/useToast'
+import { isValidMessageId } from '@/domain/roomRoutes'
+import { apiFetch, roomPath } from '@/composables/room/api'
+import { isVisibleRoomMessage } from '@/composables/room/identity'
 import type {
   OutgoingMessageAttachment,
   RoomMessage,
@@ -187,6 +191,7 @@ const router = useRouter()
 const {
   messages,
   messagesHasOlder,
+  messagesLoaded,
   isLoadingOlderMessages,
   tasks,
   focusRooms,
@@ -519,6 +524,55 @@ watch(activeTab, async (tab) => {
   }
 })
 
+let messagePermalinkTargetId: string | null = null
+let messagePermalinkRunning = false
+
+async function handleMessagePermalink(messageId: string) {
+  if (!isValidMessageId(messageId)) return
+  if (messagePermalinkRunning && messagePermalinkTargetId === messageId) return
+
+  const currentRoomId = room.value?.identifier
+  if (!currentRoomId) return
+
+  messagePermalinkRunning = true
+  messagePermalinkTargetId = messageId
+
+  try {
+    let preflightNotFound = false
+    try {
+      const response = await apiFetch(`${roomPath(currentRoomId)}/messages/${encodeURIComponent(messageId)}`)
+      const targetMessage = (response?.message ?? response) as RoomMessage | null
+      if (!targetMessage || !isVisibleRoomMessage(targetMessage)) {
+        preflightNotFound = true
+      }
+    } catch (error: any) {
+      if (error?.status === 404) {
+        preflightNotFound = true
+      }
+    }
+
+    if (preflightNotFound) {
+      toast.info('That message is not available.')
+      void router.replace({ query: { ...route.query, message: undefined } })
+      return
+    }
+
+    setActiveTab('chat')
+    roomTabPanelsRef.value?.openMessageInChat(messageId)
+    void router.replace({ query: { ...route.query, message: undefined } })
+  } finally {
+    messagePermalinkRunning = false
+  }
+}
+
+watch(
+  () => [route.query.message, isConnected.value, messagesLoaded.value] as const,
+  ([messageQuery, connected, loaded]) => {
+    if (!connected || !loaded || typeof messageQuery !== 'string' || !isValidMessageId(messageQuery)) return
+    void handleMessagePermalink(messageQuery)
+  },
+  { immediate: true },
+)
 </script>
 
 <style scoped>

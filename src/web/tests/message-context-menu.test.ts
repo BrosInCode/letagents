@@ -13,6 +13,7 @@ const messageMeta = source('../src/components/room/chat-message/MessageMeta.vue'
 test('web messages replace the browser context menu with the message menu', () => {
   assert.match(chatMessage, /@contextmenu="openContextMenu"/)
   assert.match(chatMessage, /Copy message<\/button>/)
+  assert.match(chatMessage, /Copy link to message<\/button>/)
   assert.match(chatMessage, /Reply<\/button>/)
   assert.match(chatMessage, /web-message-context-menu-separator/)
   assert.match(chatMessage, /Message info<\/button>/)

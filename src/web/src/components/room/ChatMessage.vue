@@ -140,6 +140,7 @@
         @keydown="handleMenuKeydown"
       >
         <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
+        <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromMenu">Copy link to message</button>
         <button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
         <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromMenu">{{ pinned ? 'Unpin message' : 'Pin message' }}</button>
         <button v-if="reactable" type="button" role="menuitem" @click="reactFromMenu">Add reaction…</button>
@@ -199,6 +200,11 @@ import {
   hasInlinePromptInjection,
   getReplyPreviewText,
 } from '@/composables/useRoom'
+import {
+  buildLetAgentsMessageUrl,
+  isLocalRoomIdentifier,
+  isValidMessageId,
+} from '@/domain/roomRoutes'
 
 const props = defineProps<{
   message: RoomMessage
@@ -230,6 +236,14 @@ const contextMenuPosition = ref({ x: 0, y: 0 })
 const contextMenuRef = ref<HTMLElement | null>(null)
 let contextMenuRestoreFocus: HTMLElement | null = null
 
+const canCopyMessageLink = computed(() => {
+  return (
+    Boolean(props.roomIdentifier) &&
+    !isLocalRoomIdentifier(props.roomIdentifier) &&
+    isValidMessageId(props.message.id)
+  )
+})
+
 // Native context menus stay useful on these targets (open link in new tab,
 // copy selection, media controls), so the message menu defers to them.
 const NATIVE_MENU_TARGETS = 'a[href], button, input, textarea, select, [contenteditable="true"], img, video, audio'
@@ -241,9 +255,13 @@ function openContextMenu(event: MouseEvent) {
   if (selection && !selection.isCollapsed && target && selection.containsNode(target, true)) return
   event.preventDefault()
   contextMenuRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  const menuExtraHeight =
+    (canCopyMessageLink.value ? 32 : 0) +
+    (reactable.value ? 32 : 0) +
+    (pinnable.value ? 32 : 0)
   contextMenuPosition.value = {
     x: Math.min(event.clientX, window.innerWidth - 190),
-    y: Math.min(event.clientY, window.innerHeight - (170 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0))),
+    y: Math.min(event.clientY, window.innerHeight - (170 + menuExtraHeight)),
   }
   contextMenuOpen.value = true
   void nextTick(() => {
@@ -262,6 +280,18 @@ async function copyMessageFromMenu() {
   closeContextMenu(true)
   try {
     await navigator.clipboard.writeText(visibleText.value)
+  } catch {
+    // Clipboard may be unavailable; text remains selectable.
+  }
+}
+
+async function copyMessageLinkFromMenu() {
+  closeContextMenu(true)
+  if (!props.roomIdentifier) return
+  try {
+    const origin = typeof window !== 'undefined' ? window.location.origin : ''
+    const url = buildLetAgentsMessageUrl(props.roomIdentifier, props.message.id, origin)
+    await navigator.clipboard.writeText(url)
   } catch {
     // Clipboard may be unavailable; text remains selectable.
   }

@@ -136,6 +136,7 @@
           :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
+          :room-identifier="roomIdentifier"
           @message-reference-click="$emit('scroll-to-message', $event)"
           @task-reference-click="$emit('open-task', $event)"
         />
@@ -284,6 +285,9 @@
           <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
             <span>Copy message</span>
           </button>
+          <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromContext">
+            <span>Copy link to message</span>
+          </button>
           <button type="button" role="menuitem" @click="quoteReplyFromContext">
             <span>Quote reply</span>
           </button>
@@ -337,6 +341,11 @@ import { desktopIpc } from "../../../ipc/index.js";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
+import {
+  buildLetAgentsMessageUrl,
+  isLocalRoomIdentifier,
+  isValidMessageId,
+} from "../../../domain/room-urls";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
 import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
@@ -392,6 +401,7 @@ const props = withDefaults(defineProps<{
   continuationRepairKeys?: ReadonlySet<string>;
   roomDeliverySkipKeys?: ReadonlySet<string>;
   providerLabel?: string | null;
+  roomIdentifier?: string | null;
 }>(), {
   context: "timeline",
   deliveryReceipts: () => [],
@@ -591,6 +601,12 @@ function participantInitials(value: string): string {
   return initials.toUpperCase();
 }
 
+const canCopyMessageLink = computed(() =>
+  !isLocalRoomIdentifier(props.roomIdentifier) &&
+  !props.message.outgoing &&
+  isValidMessageId(props.message.id)
+);
+
 function openContextMenu(event: MouseEvent): void {
   if (props.message.outgoing) return;
   const target = event.target instanceof HTMLElement ? event.target : null;
@@ -615,9 +631,10 @@ function openContextMenu(event: MouseEvent): void {
   // cover the tallest variant or the last row ("Message info") clips below
   // the viewport near the bottom edge.
   const menuHeight = linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0);
+  const clampedMenuHeight = menuHeight + (!linkHref && canCopyMessageLink.value ? 32 : 0);
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - clampedMenuHeight - 8)),
   };
   contextMenuOpen.value = true;
   void nextTick(() => firstContextMenuButton.value?.focus());
@@ -758,6 +775,15 @@ function messageInfoFromContext(): void {
 async function copyFromContext(): Promise<void> {
   closeContextMenu("copy");
   await copyMessage();
+}
+
+async function copyMessageLinkFromContext(): Promise<void> {
+  const invoker = contextMenuInvoker.value;
+  closeContextMenu("copy");
+  if (!props.roomIdentifier || !props.message.id) return;
+  const url = buildLetAgentsMessageUrl(props.roomIdentifier, props.message.id);
+  await copyToClipboard(url);
+  restoreContextMenuFocus(invoker);
 }
 
 async function openLinkFromContext(): Promise<void> {

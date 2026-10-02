@@ -41,6 +41,7 @@ import {
   lastSendError,
   messages,
   messagesHasOlder,
+  messagesLoaded,
   participantHiddenCount,
   participants,
   presence,
@@ -263,6 +264,7 @@ export function useRoom() {
   return {
     messages: readonly(messages),
     messagesHasOlder: readonly(messagesHasOlder),
+    messagesLoaded: readonly(messagesLoaded),
     isLoadingOlderMessages: readonly(isLoadingOlderMessages),
     tasks: readonly(tasks),
     focusRooms: readonly(focusRooms),

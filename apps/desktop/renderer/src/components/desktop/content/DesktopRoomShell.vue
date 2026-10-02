@@ -541,7 +541,7 @@ const emit = defineEmits<{
   "add-agent-open-request-consumed": [];
   /** Placeholder until the daemon exposes a receipt retry control endpoint. */
   "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
-  "message-reveal-unavailable": [messageId: string];
+  "message-reveal-unavailable": [messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"];
   "open-inbox": [];
 }>();
 
@@ -1521,9 +1521,9 @@ async function revealRoomMessage(messageId: string): Promise<void> {
     selectAgentInspectorWorkSource(messageId);
     return;
   }
-  const revealed = await revealMessage(messageId);
-  if (!revealed) {
-    emit("message-reveal-unavailable", messageId);
+  const outcome = await revealMessage(messageId);
+  if (outcome !== "revealed") {
+    emit("message-reveal-unavailable", messageId, outcome);
     return;
   }
   // Repeated links to the same message need a new reactive edge.

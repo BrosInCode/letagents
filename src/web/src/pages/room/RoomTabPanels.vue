@@ -27,6 +27,7 @@
         :roomIdentifier="room?.identifier || ''"
         :reasoningSessions="reasoningSessions"
         :hasOlderMessages="messagesHasOlder"
+        :messagesLoaded="messagesLoaded"
         :isLoadingOlderMessages="isLoadingOlderMessages"
         :searchQuery="searchQuery"
         :stalePromptTaskStates="stalePromptTaskStates"
@@ -136,7 +137,7 @@
 <script setup lang="ts">
 import PinnedMessages from '../../../../../shared/ui/PinnedMessages.vue'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
@@ -176,6 +177,7 @@ const props = defineProps<{
   tabTransitionName: string
   messages: readonly RoomMessage[]
   messagesHasOlder: boolean
+  messagesLoaded?: boolean
   isLoadingOlderMessages: boolean
   tasks: readonly RoomTask[]
   focusRooms: readonly FocusRoomInfo[]
@@ -256,6 +258,14 @@ const agentNames = computed(() => attentionResponseAgentNames([...props.particip
 const revealMessageId = ref<string | null>(null)
 
 function openMessageInChat(messageId: string) {
+  if (revealMessageId.value === messageId) {
+    revealMessageId.value = null
+    void nextTick(() => {
+      revealMessageId.value = messageId
+      emit('openChat')
+    })
+    return
+  }
   revealMessageId.value = messageId
   emit('openChat')
 }
@@ -270,8 +280,16 @@ const historySearch = useRoomHistorySearch(
   computed(() => props.searchQuery),
 )
 const toast = useToast()
-function handleMessageRevealUnavailable() {
-  toast.info('That message is too far back to open here. Expand the search result to read it.', 5000)
+function handleMessageRevealUnavailable(_messageId: string, reason?: 'too_far_back' | 'unavailable') {
+  if (props.searchQuery) {
+    toast.info('That message is too far back to open here. Expand the search result to read it.', 5000)
+    return
+  }
+  if (reason === 'unavailable' || !props.messagesHasOlder) {
+    toast.info('That earlier message is not available in the loaded room history.')
+  } else {
+    toast.info('That message is too far back to open here yet.')
+  }
 }
 
 watch(() => props.activeTab, (tab) => {
@@ -289,7 +307,7 @@ function emitUpdateFocusSettings(focusKey: string, settings: FocusRoomSettings) 
   emit('updateFocusSettings', focusKey, settings)
 }
 
-defineExpose({ matchCount })
+defineExpose({ matchCount, openMessageInChat })
 </script>
 
 <style scoped>

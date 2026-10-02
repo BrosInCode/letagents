@@ -71,14 +71,17 @@
 import { computed, nextTick, ref } from "vue";
 
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import { LETAGENTS_ROOM_ORIGIN, resolveSameRoomMessageReference } from "../../../domain/room-urls";
 
 const props = withDefaults(defineProps<{
   text: string;
   html: string;
   messageId: string;
+  roomIdentifier?: string | null;
   collapseAfterChars?: number;
   collapseAfterLines?: number;
 }>(), {
+  roomIdentifier: null,
   collapseAfterChars: 1400,
   collapseAfterLines: 18,
 });
@@ -119,6 +122,25 @@ function closeReader(): void {
 }
 
 function handleInlineReferenceClick(event: MouseEvent): void {
+  const anchorTarget = event.target instanceof Element
+    ? event.target.closest<HTMLAnchorElement>("a[href]")
+    : null;
+  if (anchorTarget) {
+    const href = anchorTarget.getAttribute("href") || "";
+    const targetMessageId = resolveSameRoomMessageReference(
+      href,
+      props.roomIdentifier,
+      LETAGENTS_ROOM_ORIGIN,
+    );
+    if (targetMessageId) {
+      event.preventDefault();
+      event.stopPropagation();
+      readerOpen.value = false;
+      emit("message-reference-click", targetMessageId);
+      return;
+    }
+  }
+
   const messageTarget = event.target instanceof Element
     ? event.target.closest<HTMLElement>("[data-message-reference-id]")
     : null;

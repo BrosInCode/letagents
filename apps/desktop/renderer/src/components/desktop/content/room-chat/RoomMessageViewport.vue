@@ -31,6 +31,7 @@
           :thread-summary="threadIndicatorSummary(entry.message)"
           :active-thread-root="entry.message.id === activeThreadParentId"
           :highlight-query="searchQuery"
+          :room-identifier="roomIdentifier"
           :message-reference-ids="messageReferenceIds"
           :task-reference-ids="taskReferenceIds"
           :search-active="entry.message.id === activeSearchMessageId"
