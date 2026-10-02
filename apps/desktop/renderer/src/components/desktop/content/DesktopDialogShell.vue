@@ -61,6 +61,7 @@ const props = withDefaults(defineProps<{
   showClose?: boolean;
   initialFocus?: string;
   focusKey?: string | null;
+  restoreFocus?: boolean;
   testId?: string;
 }>(), {
   ariaLabel: undefined,
@@ -75,6 +76,7 @@ const props = withDefaults(defineProps<{
   showClose: true,
   initialFocus: undefined,
   focusKey: null,
+  restoreFocus: true,
   testId: undefined,
 });
 
@@ -120,7 +122,9 @@ function handleSubmit(event: Event): void {
 }
 
 function restorePreviousFocus(): void {
-  restoreFocus(previousFocusElement);
+  if (props.restoreFocus) {
+    restoreFocus(previousFocusElement);
+  }
   previousFocusElement = null;
 }
 </script>
