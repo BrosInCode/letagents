@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { beforeEach, describe, it } from "node:test";
+import hljs from "highlight.js/lib/core";
 
 import { renderDesktopMarkdown } from "../src/components/desktop/content/formatting/markdown";
 import { renderMessageText } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
@@ -14,6 +15,16 @@ import {
   setupCodeBlockCopyListener,
   resolveLanguage,
 } from "../../../../shared/code-highlighting.mjs";
+
+// Rendering assertions need a fresh budget with no wall-clock dependency.
+// The sliding-window test below supplies its own advancing clock.
+beforeEach((t) => {
+  const highlighter = createCodeHighlighter({
+    highlight: (code, language) => hljs.highlight(code, { language, ignoreIllegals: true }).value,
+    now: () => 0,
+  });
+  t.mock.method(desktopHighlighter, "renderCodeBlock", highlighter.renderCodeBlock);
+});
 
 function createMockButton(isConnected = true) {
   const attrs = new Map();
@@ -329,7 +340,9 @@ describe("Fenced Code Blocks & Syntax Highlighting (Desktop)", () => {
     }
   });
 
-  it("adversarial corpus benchmark: all supported languages complete within bound (< 500 ms)", () => {
+  it("adversarial corpus benchmark: all supported languages complete within bound (< 500 ms)", (t) => {
+    // This benchmark measures the production clock and budget, unlike rendering assertions.
+    t.mock.restoreAll();
     const lineWrap = (str: string, len = 500) => {
       const lines = [];
       for (let i = 0; i < str.length; i += len) lines.push(str.slice(i, i + len));

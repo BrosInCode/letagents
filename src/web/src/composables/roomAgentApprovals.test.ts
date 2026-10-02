@@ -263,7 +263,9 @@ test('room switching releases pagination owned by the previous room', async () =
   }
 })
 
-test('expiry scheduling uses the server clock and never collapses into a skew loop', async () => {
+test('expiry scheduling uses the server clock and never collapses into a skew loop', async (t) => {
+  // Keep the local clock skewed without charging scheduler pauses to the expiry delay.
+  t.mock.method(Date, 'now', () => Date.parse('2026-09-03T10:00:00.000Z'))
   const originalSetTimeout = globalThis.setTimeout
   const delays: number[] = []
   globalThis.setTimeout = ((handler: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]) => {
@@ -281,8 +283,10 @@ test('expiry scheduling uses the server clock and never collapses into a skew lo
   const scope = effectScope()
   const controller = scope.run(() => useRoomAgentApprovals(ref('room_skew')))!
   try {
-    await waitFor(() => controller.entries.value.length === 1)
-    assert.ok(delays.some((delay) => delay >= 60_000), 'expiry delay follows server time')
+    await controller.refresh()
+    assert.equal(controller.entries.value.length, 1)
+    assert.ok(delays.length > 0)
+    assert.ok(delays.every((delay) => delay === 60_025), 'expiry delay follows server time')
   } finally {
     scope.stop()
     globalThis.setTimeout = originalSetTimeout
