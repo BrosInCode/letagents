@@ -174,6 +174,7 @@
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
     <div class="desktop-composer-input-row">
+      <TypingIndicator :label="typing.label.value" />
       <button
         class="desktop-composer-add-agent"
         type="button"
@@ -269,6 +270,8 @@
 </template>
 
 <script setup lang="ts">
+import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
+import { useRoomTyping } from "../../../../composables/useRoomTyping";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, Plus, X } from "@lucide/vue";
 import type {
@@ -345,6 +348,8 @@ const emit = defineEmits<{
 
 const maxComposerInputHeight = 156;
 const { text: draft, captureSubmittedDraft } = useDesktopMessageDraft(() => props.messageNamespace || props.roomIdentifier);
+const typing = useRoomTyping(computed(() => props.roomIdentifier ?? ""));
+watch(draft, value => { if (!value) typing.stop(); });
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
 const visibleEventPreviews = computed(() => [...visibleComposerEventPreviews(props.eventPreviews, {
@@ -549,6 +554,7 @@ function submitMessage(): void {
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
     (sent) => {
       if (!sent) return;
+      typing.stop();
       clearSubmittedText();
       void nextTick(() => textareaElement.value?.focus());
     },
@@ -609,6 +615,7 @@ function syncMentionQuery(): void {
 }
 
 function handleDraftInput(): void {
+  typing.input(Boolean(draft.value.trim()));
   syncMentionQuery();
 }
 

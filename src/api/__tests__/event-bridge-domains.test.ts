@@ -82,6 +82,7 @@ const domainDeclarations = {
     "createOrderedBridgeNotificationReceiver:export",
   ],
   publisher: [
+    "typingPublishActive:private",
     "lossRetryTimer:private",
     "stopped:private",
     "bridgeActive:private",

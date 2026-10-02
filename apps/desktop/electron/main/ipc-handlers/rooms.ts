@@ -1,5 +1,6 @@
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
 import { getDesktopMessagePins, setDesktopMessagePin } from "../rooms/pins.js";
+import { reportDesktopRoomTyping } from "../rooms/typing.js";
 import { getDesktopMessageReactions, setDesktopMessageReaction } from "../rooms/reactions.js";
 import { searchDesktopRoomMessages } from "../rooms/search.js";
 import { getAccountActivityState, restartAccountActivityStream, stopAccountActivityStream } from "../account-activity-stream.js";
@@ -445,6 +446,7 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
   targetIpcMain.handle("desktop:room:get-message-pins", (_event, roomIdentifier: string) => getDesktopMessagePins(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-message-pin", (_event, roomIdentifier: string, messageId: string, pinned: boolean) => setDesktopMessagePin(roomIdentifier, messageId, pinned));
+  targetIpcMain.handle("desktop:room:report-typing", (_event, room: string, input: unknown) => reportDesktopRoomTyping(room, input));
   targetIpcMain.handle("desktop:room:get-message-reactions", (_event, roomIdentifier: string, firstMessageId: string, lastMessageId: string) =>
     getDesktopMessageReactions(roomIdentifier, firstMessageId, lastMessageId));
   targetIpcMain.handle("desktop:room:set-message-reaction", (_event, roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) =>
