@@ -381,6 +381,7 @@
 <script setup lang="ts">
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { invalidateRoomWakeRules } from "./composables/useRoomWakeRules";
+import { invalidateRoomMessageReactions, setMessageReactionViewer } from "./composables/useRoomMessageReactions";
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -519,6 +520,8 @@ const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
   setDesktopMessageDraftAccount, { immediate: true, flush: "sync" });
+watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null,
+  setMessageReactionViewer, { immediate: true });
 const sessionGeneration = ref(0);
 const authDialogOpen = ref(false);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
@@ -1417,9 +1420,12 @@ const {
 function handleDesktopRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   if (event.type === "resource_invalidation") {
     if (event.resource === "wake_rules") invalidateRoomWakeRules(event.roomIdentifier);
+    else if (event.resource === "message_reactions") invalidateRoomMessageReactions(event.roomIdentifier);
     else invalidateSelectedRoomAgentWork(event.roomIdentifier);
     return;
   }
+  // A stream that just (re)connected may have missed a reaction change.
+  if (event.type === "open") invalidateRoomMessageReactions(event.roomIdentifier);
   handleRoomStreamEvent(event);
 }
 

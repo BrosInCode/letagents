@@ -222,6 +222,7 @@ import { useDesktopMessageDraft } from "../../../../domain/desktop-message-draft
 import RoomContribution from "./RoomContribution.vue";
 import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
 import { computed, inject, nextTick, ref, watch } from "vue";
+import { injectRoomMessageReactions } from "../../../../composables/useRoomMessageReactions";
 import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
 import { MessageSquarePlus, Paperclip, X } from "@lucide/vue";
 import type {
@@ -418,6 +419,18 @@ watch(() => [props.parent.id, ...props.replies.map(reply => reply.id)]
   await nextTick();
   if (following && bodyElement.value && !props.activeSearchMessageId) bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
 });
+
+// A reaction row appearing under a reply makes the thread taller without a
+// new reply. A reader at the newest reply stays there.
+const messageReactions = injectRoomMessageReactions();
+if (messageReactions) {
+  watch(messageReactions.revision, async () => {
+    const body = bodyElement.value;
+    const following = body && body.scrollHeight - body.scrollTop - body.clientHeight < 96;
+    await nextTick();
+    if (following && bodyElement.value && !props.activeSearchMessageId) bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
+  });
+}
 
 function displayName(message: DesktopRoomMessage): string {
   return message.agentIdentity?.displayName || parseSenderIdentity(message).displayName;

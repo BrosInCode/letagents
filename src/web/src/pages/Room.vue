@@ -157,6 +157,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
+import { provideRoomMessageReactions, useRoomMessageReactions } from '@/composables/roomMessageReactions'
 import RoomHeader from '@/components/room/RoomHeader.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
@@ -237,6 +238,10 @@ const {
 } = useRoom()
 const auth = useAuth()
 const toast = useToast()
+provideRoomMessageReactions(useRoomMessageReactions(
+  computed(() => room.value?.identifier || ''),
+  (message) => toast.error(message),
+))
 const roomSessionValidated = ref(false)
 const roomAuthLifecycleReady = ref(false)
 

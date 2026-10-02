@@ -220,6 +220,8 @@
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, toRef, watch } from "vue";
 import type { CSSProperties } from "vue";
+import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
+import { provideRoomMessageReactions, useRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import type {
   DesktopAgentPresence,
   DesktopManagedAgentPermissionDecisionBehavior,
@@ -310,6 +312,12 @@ const props = defineProps<{
   activeSearchMessageId: string | null;
   initialScrollTop?: number | null;
 }>();
+
+const { pushActionToast } = useDesktopActionToasts();
+provideRoomMessageReactions(useRoomMessageReactions(
+  computed(() => props.roomIdentifier ?? ""),
+  (message) => pushActionToast(message, "error", 6_000),
+));
 
 /*
  * Keep provider resolution anchored to the room currently being rendered.

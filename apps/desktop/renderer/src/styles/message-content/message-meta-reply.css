@@ -159,7 +159,8 @@
 }
 
 .room-chat-message:hover .room-message-reply-action,
-.room-chat-message:focus-within .room-message-reply-action {
+.room-chat-message:focus-within .room-message-reply-action,
+.room-chat-message.is-reacting .room-message-reply-action {
   opacity: 1;
   transform: translateY(0);
 }

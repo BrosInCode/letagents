@@ -1,11 +1,13 @@
 import {
   ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_INVALIDATION_CAPABILITY,
+  ROOM_RESOURCE_MESSAGE_REACTIONS,
   ROOM_RESOURCE_WAKE_RULES,
   parseRoomResourceInvalidation,
 } from '../../../../../shared/room-resource-invalidation.mjs'
 import { publishMessageInfoInvalidation } from '../../components/room/messageInfoInvalidation'
 import { publishAgentApprovalInvalidation } from '../roomAgentApprovalInvalidation'
+import { publishMessageReactionInvalidation } from '../roomMessageReactionInvalidation'
 import { publishWakeRuleInvalidation } from '../roomWakeRuleInvalidation'
 import { roomPath } from './api'
 import { isVisibleRoomMessage } from './identity'
@@ -268,8 +270,9 @@ export function createRoomStream(
             && passGeneration === fullReconcileRequestedGeneration
           ) {
             publishAgentApprovalInvalidation(passRoom)
-            // Pointers lost in the gap may have named wake rules too.
+            // Pointers lost in the gap may have named wake rules or reactions too.
             publishWakeRuleInvalidation(passRoom)
+            publishMessageReactionInvalidation(passRoom)
             if (replayBufferedGapEvents(passRoom)) {
               clearGapRepairRetry()
               commitPendingGapCursor(passRoom)
@@ -648,6 +651,13 @@ export function createRoomStream(
         ) {
           bufferOrApplyRoomEvent(roomIdentifier, () => {
             publishWakeRuleInvalidation(roomIdentifier)
+          }, streamEventBytes(event))
+        } else if (
+          result.status === 'supported'
+          && result.pointer.resource === ROOM_RESOURCE_MESSAGE_REACTIONS
+        ) {
+          bufferOrApplyRoomEvent(roomIdentifier, () => {
+            publishMessageReactionInvalidation(roomIdentifier)
           }, streamEventBytes(event))
         }
       } catch {

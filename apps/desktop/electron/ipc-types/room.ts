@@ -6,6 +6,7 @@ import type {
   ClearedRoomAgentWorkSummary,
   RoomAgentWorkSummary,
 } from "../../../../shared/room-agent-work.mjs";
+import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 
 export interface DesktopRoomAgentWork {
   attemptId: string;
@@ -337,6 +338,8 @@ export interface DesktopRoomMessage {
   threadReplyToId: string | null;
   thread: DesktopRoomMessageThreadSummary | null;
   replyTo: DesktopRoomMessageReply | null;
+  /** Emoji reactions as of this read, in the shape the shared reaction helpers use. */
+  reactions?: MessageReaction[];
   /** Trusted provenance retained only for local/forked dispatch decisions. */
   localControlAuthorized?: boolean;
   /** Account-scoped, non-rendered managed-agent dispatch metadata. */
@@ -687,7 +690,7 @@ export type DesktopRoomStreamEvent =
   | {
       type: "resource_invalidation";
       roomIdentifier: string;
-      resource: "agent_work" | "wake_rules";
+      resource: "agent_work" | "wake_rules" | "message_reactions";
     }
   | {
       type: "rental_activity";

@@ -949,7 +949,7 @@ function handleRoomStreamFrame(
       return;
     }
     stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
-    if (resource === "agent_work" || resource === "wake_rules") {
+    if (resource === "agent_work" || resource === "wake_rules" || resource === "message_reactions") {
       emitRoomStreamEvent({
         type: "resource_invalidation",
         roomIdentifier: payloadRoomIdentifier,

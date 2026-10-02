@@ -1,8 +1,20 @@
 export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
+/** Reactions of the messages in a requested range, in the shape the shared reaction store reads. */
+export interface DesktopMessageReactionsRange {
+  /** Only reacted messages appear. */
+  reactions: Record<string, MessageReaction[]>;
+  /** The emoji the signed-in person reacted with, per message. */
+  viewer_reactions?: Record<string, string[]>;
+  /** Null when the whole range was read; otherwise the message to continue from. */
+  next_first_message_id: string | null;
+}
+/** The message's reactions after the viewer added or removed one. */
+export interface DesktopMessageReactionChange { changed: boolean; reactions: MessageReaction[]; }
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
 import type { DesktopAccountActivityState } from "./account-activity.js";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
 import type { WakeRule, WakeRulePage } from "../../../../shared/wake-rules.mjs";
+import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
 import type { DesktopAttentionRoom, DesktopNeedsYou } from "./knowledge.js";
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
@@ -295,6 +307,9 @@ export interface DesktopApi {
     stopAccountActivity?: () => Promise<void>;
     onAccountActivity?: (callback: (state: DesktopAccountActivityState) => void) => () => void;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
+    /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */
+    getMessageReactions?: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) => Promise<DesktopMessageReactionsRange>;
+    setMessageReaction?: (roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) => Promise<DesktopMessageReactionChange>;
     getGitHubEventFilter: (roomIdentifier: string) => Promise<GitHubRoomChatEventFilter>;
     setGitHubEventFilter: (roomIdentifier: string, enabledKinds: GitHubRoomChatEventKind[]) => Promise<GitHubRoomChatEventFilter>;
     getAgentGuidelines: (roomIdentifier: string) => Promise<RoomAgentGuidelines>;

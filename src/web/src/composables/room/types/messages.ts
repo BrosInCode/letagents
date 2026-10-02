@@ -62,6 +62,11 @@ export interface RoomMessage {
   thread_root_id?: string | null
   thread_reply_to_id?: string | null
   reply_to?: MessageReplyReference | null
+  /**
+   * Emoji reactions as of this read, exactly as the server sent them. The
+   * reaction store validates them; nothing else should read this field.
+   */
+  reactions?: unknown
   agent_identity?: {
     name: string
     display_name: string

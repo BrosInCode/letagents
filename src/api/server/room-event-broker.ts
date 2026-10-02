@@ -14,6 +14,7 @@ import {
   ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_AGENT_WORK,
   ROOM_RESOURCE_EXECUTION_DELEGATION,
+  ROOM_RESOURCE_MESSAGE_REACTIONS,
   ROOM_RESOURCE_WAKE_RULES,
   type RoomResourceInvalidationResource,
 } from "../../../shared/room-resource-invalidation.mjs";
@@ -125,6 +126,7 @@ interface EventSourceDeps {
   agentApprovalEvents?: EventEmitter;
   executionDelegationEvents?: EventEmitter;
   wakeRuleEvents?: EventEmitter;
+  messageReactionEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
 }
 
@@ -287,6 +289,7 @@ export class RoomEventBroker {
       [deps.agentApprovalEvents, "agent_approval:invalidated", ROOM_RESOURCE_AGENT_APPROVAL],
       [deps.executionDelegationEvents, "execution_delegation:invalidated", ROOM_RESOURCE_EXECUTION_DELEGATION],
       [deps.wakeRuleEvents, "wake_rules:invalidated", ROOM_RESOURCE_WAKE_RULES],
+      [deps.messageReactionEvents, "message_reactions:invalidated", ROOM_RESOURCE_MESSAGE_REACTIONS],
     ];
     for (const [emitter, eventName, resource] of invalidationSources) {
       if (!emitter) continue;
