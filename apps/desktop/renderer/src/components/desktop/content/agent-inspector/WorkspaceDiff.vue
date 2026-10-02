@@ -1,5 +1,5 @@
 <template>
-<section class="workspace-diff" aria-label="Changed files and code">
+<section class="workspace-diff" :data-file-counts="showFileCounts || undefined" aria-label="Changed files and code">
           <div v-if="snapshot.state !== 'ready'" class="workspace-empty"><FileDiff :size="28" aria-hidden="true" /><h3>{{ snapshot.state === 'not_git' ? 'No Git workspace' : 'Changes could not be captured' }}</h3><p>{{ snapshot.state === 'not_git' ? 'This agent’s workspace is not a Git repository.' : 'The workspace was unavailable at the end of this turn. Its changes may still be present.' }}</p></div>
           <div v-else-if="!(snapshot.files.length + snapshot.hidden_files)" class="workspace-empty"><Check :size="28" aria-hidden="true" /><h3>No changes to review</h3><p>No file changes were recorded for this view.</p></div>
           <div v-else class="workspace-review-layout">
@@ -8,7 +8,7 @@
               <button v-for="file in visibleFiles" :key="file.path" type="button" class="workspace-file-button" :aria-current="selectedPath === file.path ? 'true' : undefined" :title="file.previous_path ? `${file.previous_path} → ${file.path}` : file.path" @click="selectedPath = file.path">
                 <span class="workspace-file-status" :data-status="file.status" :aria-label="fileStatus(file.status)">{{ statusLetter(file.status) }}</span>
                 <span class="workspace-file-name"><strong>{{ basename(file.path) }}</strong><small v-if="dirname(file.path)">{{ dirname(file.path) }}</small></span>
-                <span v-if="!file.binary" class="workspace-file-counts"><span class="workspace-added">+{{ file.additions }}</span><span class="workspace-deleted">−{{ file.deletions }}</span></span>
+                <span v-if="!file.binary && !countsUnavailable" class="workspace-file-counts"><span class="workspace-added">+{{ file.additions }}</span><span class="workspace-deleted">−{{ file.deletions }}</span></span>
               </button>
               <p v-if="snapshot.hidden_files" class="workspace-hidden-note">{{ snapshot.hidden_files }} more files omitted</p>
             </nav>
@@ -29,7 +29,7 @@
                   <button v-for="{ line, offset } in longLines" :key="offset" type="button" class="workspace-long-line" :data-line-offset="offset" @click="openLongLine(offset)">Read full {{ line.kind === 'deleted' ? 'removed ' : '' }}line {{ line.after ?? line.before }} · {{ line.textLength.toLocaleString() }} characters</button>
                 </nav>
               </div>
-              <div v-else-if="!pageLoading && !pageError" class="workspace-empty workspace-file-empty"><FileCode :size="26" aria-hidden="true" /><h3>{{ selectedFile.binary ? 'Binary file changed' : page?.included ? 'No text changes' : 'Diff not included' }}</h3><p>{{ selectedFile.binary ? 'A text preview is not available for this file.' : page?.included ? 'Only the file name, permissions, or other file metadata changed.' : 'This file is listed in the snapshot, but its code diff was not captured.' }}</p></div>
+              <div v-else-if="!pageLoading && !pageError" class="workspace-empty workspace-file-empty"><FileCode :size="26" aria-hidden="true" /><h3>{{ fileNotices?.[selectedFile.path]?.title ?? (selectedFile.binary ? 'Binary file changed' : page?.included ? 'No text changes' : 'Diff not included') }}</h3><p>{{ fileNotices?.[selectedFile.path]?.detail ?? (selectedFile.binary ? 'A text preview is not available for this file.' : page?.included ? 'Only the file name, permissions, or other file metadata changed.' : 'This file is listed in the snapshot, but its code diff was not captured.') }}</p></div>
               <nav v-if="longLine !== null" class="workspace-line-pages" aria-label="Long line parts">
                 <button type="button" :disabled="textOffset === 0 || pageLoading" @click="textOffset = textHistory.pop() ?? 0">Previous part</button>
                 <span>Full captured text</span>
@@ -42,7 +42,7 @@
               </nav>
             </section>
           </div>
-          <footer class="workspace-review-footer"><span v-if="snapshot.patch_truncated || snapshot.hidden_files" class="workspace-partial"><Info :size="13" aria-hidden="true" />Partial snapshot · some content or line counts omitted</span><span v-else>Snapshot after the agent’s turn</span></footer>
+          <footer class="workspace-review-footer"><span v-if="snapshot.patch_truncated || snapshot.hidden_files" class="workspace-partial"><Info :size="13" aria-hidden="true" />{{ partialLabel ?? 'Partial snapshot · some content or line counts omitted' }}</span><span v-else>{{ footerLabel ?? 'Snapshot after the agent’s turn' }}</span></footer>
 </section>
 </template>
 <script setup lang="ts">
@@ -51,7 +51,17 @@ import { Check, FileCode, FileDiff, Info } from '@lucide/vue';
 import WorkspaceCode from './WorkspaceCode.vue';
 import type { WorkspaceChangeSummary } from '../../../../../../../../shared/workspace-change-summary.mjs';
 import { createWorkspaceDiffIndex, readWorkspaceDiffPage, type WorkspaceDiffPage, type WorkspaceDiffPageOptions } from '../../../../domain/workspace-diff';
-const props = defineProps<{ snapshot: WorkspaceChangeSummary; reader?: boolean; viewKey?: string; loadPage?: (path: string, options: WorkspaceDiffPageOptions) => Promise<WorkspaceDiffPage> }>();
+const props = defineProps<{
+  snapshot: WorkspaceChangeSummary;
+  reader?: boolean;
+  viewKey?: string;
+  loadPage?: (path: string, options: WorkspaceDiffPageOptions) => Promise<WorkspaceDiffPage>;
+  fileNotices?: Record<string, { title: string; detail: string }>;
+  footerLabel?: string;
+  partialLabel?: string;
+  showFileCounts?: boolean;
+  countsUnavailable?: boolean;
+}>();
 const emit = defineEmits<{ escape: [] }>();
 const selectedPath = ref('');
 const fileOffset = ref(0);
@@ -163,6 +173,7 @@ const statusLetter = (status: string) => status === 'untracked' ? 'A' : status =
 .workspace-diff .workspace-files-heading { display: none; }
 .workspace-diff .workspace-file-button { flex: 0 0 175px; margin: 0; }
 .workspace-diff .workspace-file-counts { display: none; }
+.workspace-diff[data-file-counts] .workspace-file-counts { display: flex; }
 .workspace-diff .workspace-file-toolbar { padding: 12px; }
 .workspace-diff .workspace-added { color: var(--workspace-positive); }
 .workspace-diff .workspace-deleted { color: var(--workspace-negative); }

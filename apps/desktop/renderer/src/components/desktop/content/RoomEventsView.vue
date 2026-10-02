@@ -251,6 +251,7 @@
           </section>
 
           <div class="desktop-events-detail-actions">
+            <PullRequestChangesButton v-if="selectedEvent.kind === 'pull-request'" :url="selectedEvent.url" />
             <a
               v-if="selectedEvent.url"
               :href="selectedEvent.url"
@@ -279,6 +280,7 @@ import type {
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { renderDesktopMarkdown } from "./formatting/markdown";
 import RoomEventIcon from "./room-events/RoomEventIcon.vue";
+import PullRequestChangesButton from "./room-events/PullRequestChangesButton.vue";
 import {
   buildDesktopGitHubEventFilterOptions,
   filterDesktopGitHubEventPresentations,

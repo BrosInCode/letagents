@@ -54,6 +54,7 @@
       <strong>{{ event.headline }}</strong>
       <p v-if="event.detail">{{ event.detail }}</p>
       <div class="desktop-github-event-actions">
+        <PullRequestChangesButton v-if="event.kind === 'pull-request'" :url="event.url" />
         <a v-if="event.url" class="desktop-github-event-link" :href="event.url" target="_blank" rel="noopener noreferrer">
           {{ event.urlLabel }}
         </a>
@@ -72,6 +73,7 @@
 
 <script setup lang="ts">
 import type { GitHubEventPresentation } from "./types";
+import PullRequestChangesButton from "../room-events/PullRequestChangesButton.vue";
 
 defineProps<{
   event: GitHubEventPresentation;

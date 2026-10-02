@@ -255,3 +255,113 @@ test("400 on a non-numeric pull request number", async () => {
   assert.equal(res.statusCode, 400);
   assert.equal(calls.participant, 0);
 });
+
+const fileList = { files: [{ path: "a.ts", previous_path: null, status: "added", additions: 1, deletions: 0 }], total_files: 101 };
+test("desktop metadata is opt-in; default and cached agent responses retain their exact shape", async () => {
+  __resetPullRequestDiffCache();
+  const inputs: unknown[] = [];
+  const { deps } = baseDeps({ fetchPullRequestUnifiedDiff: async (input) => {
+    inputs.push(input);
+    return { diff: "patch", headSha: "sha_abc", fileList };
+  } });
+  const handler = handlerFor(deps);
+  const response = responseStub();
+  await handler({ ...req(ROOM, "42"), query: { include_files: "1", owner: "attacker", repo: "other", url: "http://127.0.0.1/" } }, response);
+  assert.deepEqual(inputs, [{ owner: "octo", repo: "repo", number: 42, installationId: "inst_1", includeFiles: true }]);
+  assert.deepEqual(response.body, { number: 42, head_sha: "sha_abc", diff: "patch", cached: false, file_list: fileList, github_url: "https://github.com/octo/repo/pull/42/files" });
+  const desktopCached = responseStub();
+  await handler({ ...req(ROOM, "42"), query: { include_files: "1" } }, desktopCached);
+  assert.equal((desktopCached.body as { cached: boolean }).cached, true);
+  const legacy = responseStub();
+  await handler(req(ROOM, "42"), legacy);
+  assert.deepEqual(legacy.body, { number: 42, head_sha: "sha_abc", diff: "patch", cached: true });
+  assert.equal(inputs.length, 1);
+});
+
+test("an unavailable file list is cached explicitly so repeated desktop reads do not refetch", async () => {
+  __resetPullRequestDiffCache();
+  let calls = 0;
+  const { deps } = baseDeps({ fetchPullRequestUnifiedDiff: async () => {
+    calls++;
+    return { diff: "patch", headSha: "sha_abc", fileList: null };
+  } });
+  const handler = handlerFor(deps);
+  const request = { ...req(ROOM, "42"), query: { include_files: "1" } };
+  const first = responseStub();
+  await handler(request, first);
+  assert.equal(first.statusCode, 200);
+  assert.equal((first.body as { file_list: unknown }).file_list, null);
+  const second = responseStub();
+  await handler(request, second);
+  assert.deepEqual(second.body, { number: 42, head_sha: "sha_abc", diff: "patch", cached: true, file_list: null, github_url: "https://github.com/octo/repo/pull/42/files" });
+  assert.equal(calls, 1, "retry serves the unavailable marker without another GitHub fetch");
+  const legacy = responseStub();
+  await handler(req(ROOM, "42"), legacy);
+  assert.deepEqual(legacy.body, { number: 42, head_sha: "sha_abc", diff: "patch", cached: true });
+});
+
+test("a plain in-flight fetch finishing after a desktop fetch preserves its file list", async () => {
+  for (const metadata of [fileList, null]) {
+    __resetPullRequestDiffCache();
+    let releasePlain!: () => void;
+    let plainStarted!: () => void;
+    const started = new Promise<void>(resolve => { plainStarted = resolve; });
+    const release = new Promise<void>(resolve => { releasePlain = resolve; });
+    let fetches = 0;
+    const { deps } = baseDeps({ fetchPullRequestUnifiedDiff: async input => {
+      fetches++;
+      if (input.includeFiles) return { diff: "patch", headSha: "sha_abc", fileList: metadata };
+      plainStarted();
+      await release;
+      return { diff: "patch", headSha: "sha_abc" };
+    } });
+    const handler = handlerFor(deps);
+    const plain = handler(req(ROOM, "42"), responseStub());
+    await started;
+    const request = { ...req(ROOM, "42"), query: { include_files: "1" } };
+    await handler(request, responseStub());
+    releasePlain();
+    await plain;
+    const cached = responseStub();
+    await handler(request, cached);
+    assert.deepEqual(cached.body, { number: 42, head_sha: "sha_abc", diff: "patch", cached: true, file_list: metadata, github_url: "https://github.com/octo/repo/pull/42/files" });
+    assert.equal(fetches, 2, "the plain completion must not force a third fetch");
+  }
+});
+
+test("a plain cached diff can still be enhanced once", async () => {
+  __resetPullRequestDiffCache();
+  const inputs: Array<boolean | undefined> = [];
+  const { deps } = baseDeps({ fetchPullRequestUnifiedDiff: async input => {
+    inputs.push(input.includeFiles);
+    return { diff: "patch", headSha: "sha_abc", ...(input.includeFiles ? { fileList } : {}) };
+  } });
+  const handler = handlerFor(deps);
+  await handler(req(ROOM, "42"), responseStub());
+  const request = { ...req(ROOM, "42"), query: { include_files: "1" } };
+  await handler(request, responseStub());
+  const cached = responseStub();
+  await handler(request, cached);
+  assert.deepEqual(inputs, [undefined, true]);
+  assert.deepEqual((cached.body as { file_list: unknown }).file_list, fileList);
+  assert.equal((cached.body as { cached: boolean }).cached, true);
+});
+
+test("revoked access cannot read cached desktop file metadata", async () => {
+  __resetPullRequestDiffCache();
+  let allowed = true;
+  const { deps } = baseDeps({
+    fetchPullRequestUnifiedDiff: async () => ({ diff: "private", headSha: "sha_abc", fileList }),
+    requireParticipant: async (_req, res) => {
+      if (!allowed) res.status(403).json({ error: "PRIVATE_REPO_NO_ACCESS" });
+      return allowed;
+    },
+  });
+  const handler = handlerFor(deps), request = { ...req(ROOM, "42"), query: { include_files: "1" } };
+  await handler(request, responseStub());
+  allowed = false;
+  const denied = responseStub();
+  await handler(request, denied);
+  assert.equal(denied.statusCode, 403);
+  assert.deepEqual(denied.body, { error: "PRIVATE_REPO_NO_ACCESS" });
+});
