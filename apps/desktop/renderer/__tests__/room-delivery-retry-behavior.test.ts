@@ -55,7 +55,7 @@ Object.assign(globalThis, {
     location: { href: "http://localhost/" }, getSelection: () => null,
     document: { documentElement: { style: { scrollBehavior: "" } } },
   },
-  document: { documentElement: { style: { scrollBehavior: "" } } },
+  document: { documentElement: { style: { scrollBehavior: "" } }, addEventListener() {}, removeEventListener() {}, visibilityState: "visible", hasFocus: () => true },
 });
 
 const renderer = createRenderer<HostNode, HostNode>({

@@ -25,6 +25,7 @@
         class="room-tab-panel"
         :messages="messages"
         :roomIdentifier="room?.identifier || ''"
+        :unreadRoomId="room?.projectId || ''"
         :reasoningSessions="reasoningSessions"
         :hasOlderMessages="messagesHasOlder"
         :messagesLoaded="messagesLoaded"
@@ -135,6 +136,8 @@
 </template>
 
 <script setup lang="ts">
+import { onScopeDispose } from "vue";
+import { useRoomUnread } from "@/composables/roomUnread";
 import PinnedMessages from '../../../../../shared/ui/PinnedMessages.vue'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { computed, nextTick, ref, watch } from 'vue'
@@ -246,6 +249,10 @@ const emit = defineEmits<{
 }>()
 
 const messagePins = injectRoomMessagePins()
+const roomUnread = useRoomUnread();
+watch(() => props.room?.projectId, roomUnread.enter, { immediate: true, flush: "sync" });
+onScopeDispose(() => roomUnread.enter(null));
+
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>

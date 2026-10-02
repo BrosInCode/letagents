@@ -6,6 +6,7 @@ export type SidebarRoomMenuActionId =
   | "open-room"
   | "select-room"
   | "mark-room-read"
+  | "mark-room-unread"
   | "pin-room"
   | "rename-room"
   | "copy-room-url"
@@ -53,6 +54,9 @@ export function buildSidebarRoomContextMenuItems(input: {
   }
   if (entry.hasUnread && selectable) {
     navigation.push({ id: "mark-room-read", label: "Mark as read" });
+  }
+  if (!entry.hasUnread && selectable && entry.latestMessageId && canManageRooms) {
+    navigation.push({ id: "mark-room-unread", label: "Mark as unread" });
   }
   if (navigation.length) groups.push(navigation);
 

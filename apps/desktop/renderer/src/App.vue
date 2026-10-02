@@ -99,7 +99,8 @@
           @archive-room="archiveSidebarRoom"
           @archive-focus-room="archiveSidebarFocusRoom"
           @conclude-focus-room="openSidebarFocusRoomConclusion"
-          @mark-room-read="markRoomEntryRead"
+          @mark-room-read="entry => markRoomEntryRead(entry, true)"
+          @mark-room-unread="entry => roomUnread.mark(entry.roomIdentifier, latestMessageIdForEntry(entry) || '')"
           @pin-room="togglePinSidebarRoom"
           @rename-room="renameSidebarRoom"
           @start-selection="startSidebarRoomSelection"
@@ -379,6 +380,7 @@
 </template>
 
 <script setup lang="ts">
+import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { invalidateRoomWakeRules } from "./composables/useRoomWakeRules";
 import { invalidateRoomMessagePins, setMessagePinViewer } from "./composables/useRoomMessagePins";
@@ -523,7 +525,7 @@ const authStatus = ref<DesktopAuthStatus | null>(null);
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
   setDesktopMessageDraftAccount, { immediate: true, flush: "sync" });
 watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null,
-  (account) => { setMessageReactionViewer(account); setMessagePinViewer(account); }, { immediate: true, flush: "sync" });
+  (account) => { setMessageReactionViewer(account); setMessagePinViewer(account); roomUnread.account.value = account?.id ?? null; }, { immediate: true, flush: "sync" });
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
   setTypingAccount, { immediate: true, flush: "sync" });
 const sessionGeneration = ref(0);
@@ -1151,6 +1153,9 @@ function sidebarRoomIdentifiers(): string[] {
   return [...identifiers];
 }
 
+watch(() => activeEntry.value.type === "room" ? selectedRoomIdentifier.value : null,
+  roomUnread.enter, { immediate: true, flush: "sync" });
+
 function withRoomUnreadState(entry: RoomEntry): RoomEntry {
   const latestMessageId = latestMessageIdForEntry(entry);
   return {
@@ -1158,7 +1163,7 @@ function withRoomUnreadState(entry: RoomEntry): RoomEntry {
     activity: sidebarActivityFor(accountActivity.index.value, entry.roomIdentifier),
     latestMessageId,
     latestMessageAt: latestMessageAtForEntry(entry),
-    hasUnread: hasUnreadRoomActivity({
+    hasUnread: Boolean(roomUnread.get(entry.roomIdentifier)) || hasUnreadRoomActivity({
       activeRoomIdentifier: selectedRoomIdentifier.value,
       latestMessageId,
       readMarkers: readRoomMessageIds.value,
@@ -1327,7 +1332,11 @@ function markActiveRoomRead(): void {
   markRoomEntryRead(activeEntry.value);
 }
 
-function markRoomEntryRead(entry: RoomEntry): void {
+function markRoomEntryRead(entry: RoomEntry, explicit = false): void {
+  if (explicit) {
+    const bookmark = roomUnread.get(entry.roomIdentifier);
+    if (bookmark) roomUnread.clear(entry.roomIdentifier, bookmark.revision);
+  }
   const result = markRoomRead(readRoomMessageIds.value, entry.roomIdentifier, latestMessageIdForEntry(entry));
   if (!result.changed) return;
   readRoomMessageIds.value = result.readMarkers;
@@ -1612,7 +1621,7 @@ async function handleSidebarBatchAction(action: SidebarRoomBatchActionId): Promi
   if (!resolution.targets.length) return;
 
   if (action === "mark-read") {
-    resolution.targets.forEach(markRoomEntryRead);
+    resolution.targets.forEach(entry => markRoomEntryRead(entry, true));
     pushActionToast(
       `${resolution.targets.length} ${resolution.targets.length === 1 ? "room" : "rooms"} marked as read.`,
       "success",

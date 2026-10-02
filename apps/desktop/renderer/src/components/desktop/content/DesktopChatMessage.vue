@@ -300,6 +300,9 @@
           <button v-if="reactable" type="button" role="menuitem" @click="reactFromContext">
             <span>Add reaction…</span>
           </button>
+          <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromContext">
+            <span>Mark unread from here</span>
+          </button>
           <div class="room-message-context-menu-separator" role="separator" />
           <button type="button" role="menuitem" @click="messageInfoFromContext">
             <span>Message info</span>
@@ -332,6 +335,7 @@
 </template>
 
 <script setup lang="ts">
+import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
 import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
@@ -631,7 +635,8 @@ function openContextMenu(event: MouseEvent): void {
   // cover the tallest variant or the last row ("Message info") clips below
   // the viewport near the bottom edge.
   const menuHeight = linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0);
-  const clampedMenuHeight = menuHeight + (!linkHref && canCopyMessageLink.value ? 32 : 0);
+  const clampedMenuHeight = menuHeight + (!linkHref && canCopyMessageLink.value ? 32 : 0)
+    + (!linkHref && canMarkUnread.value ? 32 : 0);
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - clampedMenuHeight - 8)),
@@ -682,6 +687,15 @@ function quoteReplyFromContext(): void {
   emit("quote-reply", props.message.id);
 }
 
+const unreadContext = inject(unreadMenuKey, null);
+const canMarkUnread = computed(() => Boolean(unreadContext?.client.account.value)
+  && props.context === "timeline" && !props.message.threadReplyToId
+  && (!props.message.threadRootId || props.message.threadRootId === props.message.id)
+  && !props.message.id.startsWith("pending:"));
+function markUnreadFromContext(): void {
+  closeContextMenu("action");
+  if (canMarkUnread.value) unreadContext?.client.mark(unreadContext.room.value, props.message.id);
+}
 const pinContext = injectRoomMessagePins();
 const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id));
 const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false);

@@ -11,9 +11,9 @@
         {{ isLoadingOlderMessages ? 'Loading older messages...' : 'Load older messages' }}
       </button>
       <TransitionGroup name="message-arrival" @after-enter="handleAfterEnter">
+        <template v-for="msg in messages" :key="msg.id">
+        <div v-if="msg.id === unreadTimeline.dividerId.value" class="explicit-unread" role="separator">New messages</div>
         <ChatMessage
-          v-for="msg in messages"
-          :key="msg.id"
           :message="msg"
           :roomIdentifier="roomIdentifier"
           :thread="threadSummaries.get(msg.id) || null"
@@ -30,12 +30,13 @@
           @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
           @openTask="emit('openTask', $event)"
         />
+        </template>
       </TransitionGroup>
     </div>
     <button
       v-if="unreadCount > 0 || isScrolledFarUp"
       class="new-messages-pill visible"
-      @click="() => scrollToBottom()"
+      @click="unreadTimeline.jumpToLatest()"
     >
       <span v-if="unreadCount > 0">↓ {{ unreadCount }} new messages</span>
       <span v-else>↓ Scroll to latest</span>
@@ -57,7 +58,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { provide, ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
 import { messageMatchesSearch } from './chat-message/formatting'
@@ -68,6 +69,8 @@ import { createReadEvidenceReporter } from './readEvidence'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 import { decideMessageRevealAction } from './messageReveal'
+import { useRoomUnread } from '@/composables/roomUnread'
+import { unreadMenuKey, useUnreadTimeline } from '../../../../../shared/room-unread-client'
 
 const activeInfoMessage = ref<RoomMessage | null>(null)
 const infoSurfaceOpen = ref(false)
@@ -80,6 +83,7 @@ function handleOpenMessageInfo(msg: RoomMessage) {
 const props = defineProps<{
   messages: readonly RoomMessage[]
   roomIdentifier?: string
+  unreadRoomId?: string
   reasoningSessions?: readonly RoomReasoningSession[]
   hasOlderMessages?: boolean
   messagesLoaded?: boolean
@@ -103,6 +107,30 @@ const emit = defineEmits<{
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)
+const unreadRoom = computed(() => props.unreadRoomId)
+const roomUnread = useRoomUnread()
+provide(unreadMenuKey, { client: roomUnread, room: unreadRoom })
+const unreadRevealId = ref<string | null>(null)
+let finishUnreadReveal: ((found: boolean) => void) | null = null
+const unreadTimeline = useUnreadTimeline({
+  client: roomUnread, room: unreadRoom,
+  active: computed(() => Boolean(props.unreadRoomId)),
+  ready: computed(() => Boolean(props.messagesLoaded)),
+  element: messagesEl,
+  reveal: id => new Promise(resolve => {
+    finishUnreadReveal?.(false)
+    finishUnreadReveal = resolve
+    unreadRevealId.value = id
+    revealOlderPagesRequested = 0
+    void nextTick(revealRequestedMessage)
+  }),
+  bottom: (reading) => scrollToBottom(reading ? 'smooth' : 'instant'),
+})
+function completeUnreadReveal(found: boolean) {
+  unreadRevealId.value = null
+  finishUnreadReveal?.(found)
+  finishUnreadReveal = null
+}
 const unreadCount = ref(0)
 const isScrolledFarUp = ref(false)
 const arrivingMessageIds = ref<ReadonlySet<string>>(new Set())
@@ -171,6 +199,7 @@ function checkScroll() {
 }
 
 function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
+  unreadTimeline.programmaticScroll()
   if (!messagesEl.value) return
   messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior })
   unreadCount.value = 0
@@ -182,10 +211,11 @@ function findMessageElement(messageId: string): HTMLElement | null {
   return messagesEl.value.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(messageId)}"]`)
 }
 
-function scrollToMessage(messageId: string) {
+function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth') {
+  unreadTimeline.programmaticScroll()
   const target = findMessageElement(messageId)
   if (!target) return
-  target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  target.scrollIntoView({ behavior, block: 'center' })
   target.classList.add('jump-target')
   window.setTimeout(() => {
     target.classList.remove('jump-target')
@@ -197,6 +227,7 @@ watch(() => props.searchQuery, async () => {
   await nextTick()
   const firstMatch = messagesEl.value?.querySelector('.search-match')
   if (firstMatch) {
+    unreadTimeline.programmaticScroll()
     firstMatch.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
 })
@@ -239,6 +270,7 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
     const previousScrollHeight = el?.scrollHeight || 0
     await nextTick()
     if (el) {
+      unreadTimeline.programmaticScroll()
       el.scrollTop += el.scrollHeight - previousScrollHeight
     }
     observeMessageRows()
@@ -268,13 +300,15 @@ let initialScrollSettled = false
 let revealOlderPagesRequested = 0
 
 function revealRequestedMessage() {
-  const messageId = props.revealMessageId
+  const messageId = props.revealMessageId || unreadRevealId.value
+  const isUnreadReveal = !props.revealMessageId && Boolean(unreadRevealId.value)
   if (!messageId) return
 
   const historyReady =
     initialScrollSettled &&
     (props.messagesLoaded ?? (props.messages.length > 0 || !props.hasOlderMessages))
   const found = Boolean(findMessageElement(messageId))
+    && (!isUnreadReveal || props.messages.some(message => message.id === messageId && (!message.thread_root_id || message.thread_root_id === message.id)))
 
   const action = decideMessageRevealAction({
     found,
@@ -287,9 +321,10 @@ function revealRequestedMessage() {
 
   switch (action) {
     case 'scroll':
-      scrollToMessage(messageId)
+      scrollToMessage(messageId, isUnreadReveal ? 'instant' : 'smooth')
       revealOlderPagesRequested = 0
-      emit('revealed', messageId)
+      if (isUnreadReveal) completeUnreadReveal(true)
+      else emit('revealed', messageId)
       break
     case 'wait':
       // Still waiting for initial history, or a page load is currently in flight.
@@ -300,11 +335,13 @@ function revealRequestedMessage() {
       break
     case 'too_far_back':
       revealOlderPagesRequested = 0
+      if (isUnreadReveal) { completeUnreadReveal(false); break }
       emit('revealUnavailable', messageId, 'too_far_back')
       emit('revealed', messageId)
       break
     case 'unavailable':
       revealOlderPagesRequested = 0
+      if (isUnreadReveal) { completeUnreadReveal(false); break }
       emit('revealUnavailable', messageId, 'unavailable')
       emit('revealed', messageId)
       break
@@ -434,6 +471,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  completeUnreadReveal(false)
   messagesEl.value?.removeEventListener('scroll', checkScroll)
   document.removeEventListener('visibilitychange', handleDocumentVisibilityChange)
   window.removeEventListener('blur', handleDocumentVisibilityChange)
@@ -447,6 +485,8 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 </script>
 
 <style scoped>
+.explicit-unread { transition: none !important; animation: none !important; display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
+.explicit-unread::before, .explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
 .messages-wrap { position: relative; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
 
 .messages {

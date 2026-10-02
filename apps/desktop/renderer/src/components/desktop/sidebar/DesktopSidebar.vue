@@ -646,6 +646,7 @@ import {
   CircleCheck,
   ChevronRight,
   Copy,
+  Dot,
   Download,
   ExternalLink,
   GitBranch,
@@ -745,6 +746,7 @@ const emit = defineEmits<{
   "archive-focus-room": [entry: RoomEntry];
   "conclude-focus-room": [entry: RoomEntry];
   "mark-room-read": [entry: RoomEntry];
+  "mark-room-unread": [entry: RoomEntry];
   "pin-room": [entry: RoomEntry];
   "rename-room": [entry: RoomEntry];
   "start-selection": [entry?: RoomEntry];
@@ -979,6 +981,7 @@ const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
   "open-room": House,
   "select-room": ListChecks,
   "mark-room-read": Check,
+  "mark-room-unread": Dot,
   "pin-room": Pin,
   "rename-room": Pencil,
   "copy-room-url": Copy,
@@ -1068,6 +1071,7 @@ function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
     "open-room": () => emit("select-entry", menu.entry),
     "select-room": () => startSelection(menu.entry),
     "mark-room-read": () => emit("mark-room-read", menu.entry),
+    "mark-room-unread": () => emit("mark-room-unread", menu.entry),
     "pin-room": () => emit("pin-room", menu.entry),
     "rename-room": () => emit("rename-room", menu.entry),
     "copy-room-url": () =>

@@ -144,6 +144,7 @@
         <button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
         <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromMenu">{{ pinned ? 'Unpin message' : 'Pin message' }}</button>
         <button v-if="reactable" type="button" role="menuitem" @click="reactFromMenu">Add reaction…</button>
+        <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromMenu">Mark unread from here</button>
         <div class="web-message-context-menu-separator" role="separator" />
         <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
       </div>
@@ -160,7 +161,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { inject, computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
@@ -175,6 +176,7 @@ import MessageReactionBar from '../../../../../shared/ui/MessageReactionBar.vue'
 import MessageReactionPicker, { type MessageReactionPickerAnchor } from '../../../../../shared/ui/MessageReactionPicker.vue'
 import WakeGlyph from '../../../../../shared/ui/WakeGlyph.vue'
 import { isPinMessageId } from '../../../../../shared/message-pins.mjs'
+import { unreadMenuKey } from '../../../../../shared/room-unread-client'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 import { WAKE_NOTICE_SOURCE } from '../../../../../shared/wake-rules.mjs'
@@ -258,7 +260,8 @@ function openContextMenu(event: MouseEvent) {
   const menuExtraHeight =
     (canCopyMessageLink.value ? 32 : 0) +
     (reactable.value ? 32 : 0) +
-    (pinnable.value ? 32 : 0)
+    (pinnable.value ? 32 : 0) +
+    (canMarkUnread.value ? 32 : 0)
   contextMenuPosition.value = {
     x: Math.min(event.clientX, window.innerWidth - 190),
     y: Math.min(event.clientY, window.innerHeight - (170 + menuExtraHeight)),
@@ -309,6 +312,14 @@ function messageInfoFromMenu() {
 
 // Reactions exist only inside a room that provides them (not in previews or
 // tests), and only on a message the server sent with its reactions.
+const unreadContext = inject(unreadMenuKey, null)
+const canMarkUnread = computed(() => Boolean(unreadContext?.client.account.value && unreadContext.room.value)
+  && (!props.message.thread_root_id || props.message.thread_root_id === props.message.id)
+  && !props.message.id.startsWith('pending:'))
+function markUnreadFromMenu() {
+  closeContextMenu(true)
+  if (canMarkUnread.value) unreadContext?.client.mark(unreadContext.room.value, props.message.id)
+}
 const pinContext = injectRoomMessagePins()
 const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id))
 const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false)

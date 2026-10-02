@@ -1,4 +1,4 @@
-import { computed, ref, watch, type Ref } from "vue";
+import { computed, provide, ref, watch, type Ref } from "vue";
 import type {
   DesktopRoomInfo,
   DesktopRoomMessage,
@@ -16,6 +16,8 @@ import { roomTimelineMessages } from "../room-chat/thread-utils";
 import { desktopIpc } from "../../../../ipc/index.js";
 
 import { desktopMessageOutbox, enqueueDesktopMessage, reconcileDesktopMessageOutbox, retryDesktopOutgoingMessage } from "../../../../domain/message-outbox";
+
+import { unreadRevealKey } from "../../../../composables/roomUnread";
 
 const messageHistoryPageSize = 150;
 const maxAutoHistoryBackfillPages = 5;
@@ -227,6 +229,11 @@ export function useDesktopRoomMessages(options: {
 
     return hasOlderMessages.value ? "too_far_back" : "unavailable";
   }
+
+  provide(unreadRevealKey, async (id) => {
+    const outcome = await revealMessage(id);
+    return outcome === "revealed" && timelineMessages.value.some(message => message.id === id);
+  });
 
   return {
     sendingMessage,
