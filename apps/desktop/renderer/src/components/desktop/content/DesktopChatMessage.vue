@@ -517,7 +517,7 @@ const remindable = computed(() => Boolean(reminderAccount.value && props.roomIde
 const { pushActionToast } = useDesktopActionToasts();
 function reminderScheduled(dueAt: string) {
   pushActionToast(`Reminder set for ${new Date(dueAt).toLocaleString()}`, "success");
-  closeContextMenu("action");
+  closeContextMenu("complete");
 }
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
@@ -662,7 +662,7 @@ function openContextMenu(event: MouseEvent): void {
   // cover the tallest variant or the last row ("Message info") clips below
   // the viewport near the bottom edge.
   const menuHeight = linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0);
-  const clampedMenuHeight = menuHeight + (remindable.value ? 32 : 0) + (!linkHref && canCopyMessageLink.value ? 32 : 0)
+  const clampedMenuHeight = menuHeight + (!linkHref && remindable.value ? 32 : 0) + (!linkHref && canCopyMessageLink.value ? 32 : 0)
     + (!linkHref && canMarkUnread.value ? 32 : 0);
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
@@ -702,7 +702,7 @@ function handleContextMenuKeydown(event: KeyboardEvent): void {
 }
 
 function focusContextMenuItem(direction: 1 | -1): void {
-  const items = Array.from(document.querySelectorAll<HTMLButtonElement>(".room-message-context-menu [role='menuitem']"));
+  const items = Array.from(firstContextMenuButton.value?.parentElement?.querySelectorAll<HTMLButtonElement>(":scope > [role='menuitem']:not(:disabled)") ?? []);
   if (!items.length) return;
   const currentIndex = Math.max(0, items.findIndex((item) => item === document.activeElement));
   const nextIndex = (currentIndex + direction + items.length) % items.length;
@@ -720,13 +720,13 @@ const canMarkUnread = computed(() => Boolean(unreadContext?.client.account.value
   && (!props.message.threadRootId || props.message.threadRootId === props.message.id)
   && !props.message.id.startsWith("pending:"));
 function markUnreadFromContext(): void {
-  closeContextMenu("action");
+  closeContextMenu("complete");
   if (canMarkUnread.value) unreadContext?.client.mark(unreadContext.room.value, props.message.id);
 }
 const pinContext = injectRoomMessagePins();
 const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id));
 const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false);
-function pinFromContext(): void { closeContextMenu("action"); pinContext?.toggle(props.message.id); }
+function pinFromContext(): void { closeContextMenu("complete"); pinContext?.toggle(props.message.id); }
 
 // Reactions exist only inside a room that provides them (not in previews or
 // tests), and only on a message the server sent with its reactions: a room
