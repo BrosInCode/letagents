@@ -593,6 +593,8 @@ function nowProjection(
       kind: "attention",
       label: overallState === "reconnecting" ? "Reconnecting" : "Needs attention",
       summary: lifecycleDetail(entry)
+        // A room that refuses the agent is why its messages are only queued.
+        || (entry.roomAgentState?.ingress.state === "blocked" ? entry.roomAgentState.ingress.detail : null)
         || entry.roomAgentState?.inbox.detail
         || entry.roomAgentState?.ingress.detail
         || entry.roomAgentState?.connection.detail

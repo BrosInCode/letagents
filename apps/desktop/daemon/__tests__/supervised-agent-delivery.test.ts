@@ -1462,8 +1462,8 @@ async function enqueue(store: SupervisedAgentInboxStore, id = "1") {
   return (await store.claimHead(agent.agentId))!;
 }
 
-async function ingest(store: SupervisedAgentInboxStore, id = "1") {
-  await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: id, messages: [{ source_message_id: id, source_message: { id }, activation: {} }] });
+async function ingest(store: SupervisedAgentInboxStore, id = "1", activation: Record<string, unknown> = {}) {
+  await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: id, messages: [{ source_message_id: id, source_message: { id }, activation }] });
 }
 
 test("a transient provider failure continues its unfinished task without another room message", async () => {
@@ -1507,8 +1507,13 @@ test("a transient provider failure continues its unfinished task without another
 
 const continuityTask = { id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 };
 
-/** A lease holder whose provider turns end with `failures` in order, then succeed with no reply. */
-async function runNoReplyContinuity(failures: readonly string[], rounds: readonly (readonly string[])[]) {
+/**
+ * A lease holder whose provider turns end with `failures` in order, then succeed with no reply.
+ * A turn listed in `refusedTurns` (counted from one) is one the provider marked as a refusal.
+ */
+async function runNoReplyContinuity(failures: readonly string[], rounds: readonly (readonly string[])[], refusedTurns: readonly number[] = [],
+  /** What the room's messages carry as activation: everything in it comes from the server. */
+  activation: Record<string, unknown> = {}) {
   const root = await mkdtemp(join(tmpdir(), "continuity-no-reply-"));
   let tick = 0;
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"),
@@ -1523,13 +1528,14 @@ async function runNoReplyContinuity(failures: readonly string[], rounds: readonl
     await options?.checkpointTurnStarted?.(turnId);
     const error = failures[sources.length - 1];
     return error
-      ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "transcript", error }
+      ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "transcript", error,
+        ...(refusedTurns.includes(sources.length) ? { refusal: true as const } : {}) }
       : { turnId, outcome: "no_reply", text: null };
   }), { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] },
   currentAuthority, 0, async () => {});
   try {
     for (const ids of rounds) {
-      for (const id of ids) await ingest(store, id);
+      for (const id of ids) await ingest(store, id, activation);
       await delivery.pump(agent);
     }
     return { receipts: await store.receipts(agent.agentId), sources, prompts };
@@ -1569,6 +1575,49 @@ test("a content-filter failure is settled without a follow-up and without blocki
   assert.deepEqual(sources, ["1", "2"]);
   assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
   assert.match(receipts[0]!.last_error ?? "", /content filter.*not continued automatically/);
+});
+
+test("a provider's refusal of a lease holder's turn is settled with its reason and never blocks later messages", async () => {
+  const reason = "This content was flagged by the provider. Try rephrasing your request.";
+  const policy = taskFailurePolicy(reason, 1, true);
+  assert.deepEqual({ automatic: policy.automatic, settle: policy.settle }, { automatic: false, settle: true });
+  assert.ok(policy.detail.startsWith(reason), "the provider's own reason leads the message");
+  // A follow-up turn that is refused as well is settled the same way, however many came before it.
+  for (const attempt of [2, 3, 4, 9]) assert.deepEqual(taskFailurePolicy(reason, attempt, true), policy, `attempt ${attempt}`);
+
+  const { receipts, sources } = await runNoReplyContinuity([reason, reason], [["1"], ["2"], ["3"]], [1, 2]);
+  assert.deepEqual(sources, ["1", "2", "3"], "no follow-up turn repeats the refused context, and each next message still runs");
+  assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_failed", "acknowledged_no_reply"],
+    "a second refusal in a row is settled the same way; no blocked follow-up was queued");
+  for (const refused of receipts.slice(0, 2)) {
+    assert.equal(Object.hasOwn(refused.activation, "task_continuity_refusal"), false, "nothing is kept on the message that would need clearing");
+    assert.ok(refused.last_error?.startsWith(reason), refused.last_error ?? "");
+    assert.match(refused.last_error ?? "", /not continued automatically.*send a message to continue it/);
+  }
+});
+
+test("a lease holder's failure that the owner can clear still blocks until Retry delivery", async () => {
+  // The same wording without the provider's refusal mark is an unknown
+  // failure, and a rejected key is one only the owner can fix. Continuing is
+  // how the held task resumes after that, so the follow-up waits, blocked.
+  for (const reason of [
+    "This content was flagged by the provider. Try rephrasing your request.",
+    "unexpected status 401 Unauthorized: the provider rejected this key.",
+  ]) {
+    assert.equal(taskFailurePolicy(reason, 1).settle, undefined, reason);
+    const { receipts, sources } = await runNoReplyContinuity([reason], [["1"], ["2"]]);
+    assert.deepEqual(sources, ["1"], reason);
+    assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "blocked", "pending"], reason);
+    assert.match(receipts[1]!.last_error ?? "", /use Retry delivery to continue the existing task/, reason);
+  }
+});
+
+test("only the provider's own result marks a turn refused: a message that arrives claiming it is treated as any other", async () => {
+  const reason = "unexpected status 401 Unauthorized: the provider rejected this key.";
+  const { receipts, sources } = await runNoReplyContinuity([reason], [["1"], ["2"]], [], { task_continuity_refusal: true });
+  assert.deepEqual(sources, ["1"]);
+  assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "blocked", "pending"],
+    "the failure blocks until Retry delivery, as without the claim");
 });
 
 test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {

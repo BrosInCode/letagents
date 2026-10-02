@@ -1,6 +1,6 @@
 import { roomRequest, isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "./local-room-runtime.js";
 import type { WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
-import type { SupervisedDeliveryHttp, SupervisedPollResponse } from "./supervised-agent-delivery.js";
+import { SupervisedRoomAuthorizationError, type SupervisedDeliveryHttp, type SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
 import type { RemoteExecutionDelegationRevision } from "./execution-delegation-journal.js";
 import {
@@ -296,6 +296,9 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
       headers: { authorization: `Bearer ${input.bearer}` },
       signal: boundedCloudSignal(input.signal, SUPERVISED_ROOM_POLL_TIMEOUT_MS + 20_000),
     });
+    if (response.status === 401 || response.status === 403) {
+      throw new SupervisedRoomAuthorizationError(`Supervised room poll failed with HTTP ${response.status}.`, response.status);
+    }
     if (!response.ok) throw new Error(`Supervised room poll failed with HTTP ${response.status}.`);
     return await response.json() as SupervisedPollResponse;
   },

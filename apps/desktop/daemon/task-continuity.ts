@@ -18,7 +18,16 @@ export type TaskFailurePolicy = {
   note?: string;
 };
 
-export function taskFailurePolicy(error: string | null, attempt: number): TaskFailurePolicy {
+export function taskFailurePolicy(error: string | null, attempt: number, refusal = false): TaskFailurePolicy {
+  // The provider declined the turn's content. Retry delivery cannot change
+  // that and a follow-up would send the same context again, so stop without a
+  // follow-up and without blocking: the provider's reason stays on the
+  // message and later messages go ahead. A failure the owner can clear, such
+  // as credit or a key, still blocks below, because Retry delivery is then
+  // how the held task resumes.
+  if (refusal) {
+    return { automatic: false, settle: true, detail: `${error?.trim() || "The model provider refused this turn."} The unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
+  }
   const retry = "Resolve this issue, then use Retry delivery to continue the existing task.";
   if (/\b402\b|insufficient.{0,30}(?:credit|balance|quota)|(?:account|credit).{0,60}(?:output budget|exhausted)|(?:usage|spend|credit) limit|quota[ _-](?:exhausted|reached|exceeded)/i.test(error ?? "")) {
     return { automatic: false, detail: `The model provider has insufficient credit or quota. ${retry}` };
