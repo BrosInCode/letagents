@@ -76,8 +76,9 @@
           :data-active="searchOpen"
           :aria-expanded="zenMode ? switcherOpen : searchOpen"
           :aria-controls="zenMode ? undefined : 'sidebar-room-search'"
-          :aria-label="searchOpen ? 'Close room search' : 'Search rooms'"
-          :title="searchOpen ? 'Close room search' : 'Search rooms'"
+          :aria-label="zenMode ? 'Switch rooms' : (searchOpen ? 'Close room search' : 'Search rooms')"
+          :title="zenMode ? `Switch rooms (${switchShortcutLabel})` : (searchOpen ? 'Close room search' : `Search rooms (${switchShortcutLabel} switches rooms)`)"
+          :aria-keyshortcuts="zenMode ? switchAriaKeyShortcuts : undefined"
           data-testid="sidebar-search-button"
           @click="zenMode ? openRoomSwitcher() : toggleSearch()"
         >
@@ -627,8 +628,9 @@
     <SidebarRoomSwitcher
       :open="switcherOpen"
       :projects="projectEntries"
-      :active-project-id="zenProject?.id || null"
+      :active-project-id="zenMode ? zenProject?.id || null : null"
       :active-entry-id="activeEntry.id"
+      :zen-mode="zenMode"
       @close="switcherOpen = false"
       @select="selectSwitchedRoom"
     />
@@ -692,6 +694,11 @@ import {
 } from "../../../domain/sidebar-context-menu";
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
 import { sidebarProjectForEntry } from "../../../domain/sidebar-zen-mode";
+import {
+  canOpenRoomSwitcher,
+  getRoomSwitcherAriaKeyShortcuts,
+  getRoomSwitcherShortcutLabel,
+} from "../../../domain/room-switcher-shortcut";
 import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
@@ -779,7 +786,8 @@ const zenProject = computed(() => activeProject.value
 const displayedProjects = computed(() => zenMode.value
   ? zenProject.value ? [zenProject.value] : []
   : props.projectEntries);
-const switchShortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K";
+const switchShortcutLabel = getRoomSwitcherShortcutLabel();
+const switchAriaKeyShortcuts = getRoomSwitcherAriaKeyShortcuts();
 
 watch(activeProject, (project, previous) => {
   if (!project || project.id === previous?.id) return;
@@ -829,11 +837,11 @@ function selectSwitchedRoom(entry: RoomEntry): void {
   emit("select-entry", entry);
 }
 function handleRoomSwitcherShortcut(event: KeyboardEvent): void {
-  const sidebar = sidebarElement.value;
-  if (!zenMode.value || !sidebar || sidebar.closest("[inert]") || !sidebar.getClientRects().length) return;
-  if (event.defaultPrevented || event.altKey || event.shiftKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return;
-  // A different dialog owns its keyboard input. Never open a second modal over it.
-  if (!switcherOpen.value && document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+  if (!canOpenRoomSwitcher({
+    event,
+    hasOpenModal: () => Boolean(document.querySelector('[role="dialog"][aria-modal="true"]')),
+    isSwitcherOpen: switcherOpen.value,
+  })) return;
   event.preventDefault();
   openRoomSwitcher();
 }

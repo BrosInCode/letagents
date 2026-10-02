@@ -45,4 +45,32 @@ describe("desktop sidebar search contract", () => {
     assert.doesNotMatch(motionStyles, /\.sidebar-navigation-swap/);
     assert.doesNotMatch(motionStyles, /\.sidebar-search-icon/);
   });
+
+  it("teleports room switcher dialog to body so inert or hidden ancestors cannot block it", () => {
+    assert.match(switcherSource, /<template>\s*<Teleport to="body">[\s\S]*?<DesktopDialogShell/);
+    assert.match(switcherSource, /<\/DesktopDialogShell>\s*<\/Teleport>\s*<\/template>/);
+  });
+
+  it("renders the Zen Mode stays on caption only when zenMode is active", () => {
+    assert.match(switcherSource, /<span v-if="zenMode"><Focus aria-hidden="true" \/>Zen Mode stays on<\/span>/);
+    assert.match(sidebarSource, /<SidebarRoomSwitcher[\s\S]*?:zen-mode="zenMode"/);
+    assert.match(sidebarSource, /:active-project-id="zenMode \? zenProject\?\.id \|\| null : null"/);
+  });
+
+  it("eliminates entrance and leave animation for the switcher without !important", () => {
+    assert.match(switcherSource, /\.sidebar-switcher-backdrop\.desktop-dialog-enter-active,\s*\.sidebar-switcher-backdrop\.desktop-dialog-leave-active\s*\{[\s\S]*?transition:\s*none;/);
+    assert.match(switcherSource, /\.sidebar-switcher-backdrop\.desktop-dialog-enter-active > \[role="dialog"\],\s*\.sidebar-switcher-backdrop\.desktop-dialog-leave-active > \[role="dialog"\]\s*\{[\s\S]*?transition:\s*none;/);
+    assert.match(switcherSource, /\.sidebar-switcher-backdrop\.desktop-dialog-enter-from,\s*\.sidebar-switcher-backdrop\.desktop-dialog-leave-to\s*\{[\s\S]*?opacity:\s*1;/);
+    assert.match(switcherSource, /\.sidebar-switcher-backdrop\.desktop-dialog-enter-from > \[role="dialog"\],\s*\.sidebar-switcher-backdrop\.desktop-dialog-leave-to > \[role="dialog"\]\s*\{[\s\S]*?opacity:\s*1;[\s\S]*?transform:\s*none;/);
+    assert.doesNotMatch(switcherSource, /transition:\s*none\s*!important/);
+  });
+
+  it("makes shortcut discoverable on sidebar search control with correct mode-aware titles and ARIA keyshortcuts", () => {
+    assert.match(sidebarSource, /:title="zenMode \? `Switch rooms \(\$\{switchShortcutLabel\}\)` : \(searchOpen \? 'Close room search' : `Search rooms \(\$\{switchShortcutLabel\} switches rooms\)`\)"/);
+    assert.match(sidebarSource, /:aria-keyshortcuts="zenMode \? switchAriaKeyShortcuts : undefined"/);
+  });
+
+  it("delegates shortcut handling to canOpenRoomSwitcher predicate with lazy modal evaluation", () => {
+    assert.match(sidebarSource, /canOpenRoomSwitcher\(\s*\{[\s\S]*?event,[\s\S]*?hasOpenModal:\s*\(\)\s*=>\s*Boolean\(document\.querySelector\('\[role="dialog"\]\[aria-modal="true"\]'\)\),[\s\S]*?isSwitcherOpen:\s*switcherOpen\.value,[\s\S]*?\}\)/);
+  });
 });
