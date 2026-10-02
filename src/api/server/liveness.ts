@@ -13,13 +13,9 @@ import {
   getLivenessAnnouncementCandidate,
   getReachableWorkerDeliverySessionForAgentSession,
   getRoomBoardSettings,
-  getRoomLiveAgentSuppressionActorLabels,
   listActiveBoardManagerAssignments,
   listActiveBoardManagerCandidates,
   listEscalationCandidateBoardIntents,
-  listLivenessAnnouncementCandidates,
-  markAgentOfflineAnnounced,
-  markAgentRecoveryAnnounced,
   pruneExpiredExecutionApprovalPublications,
   pruneStaleRoomAgentDeliveryInstances,
   markBoardIntentAutoApprovedTx,
@@ -32,7 +28,6 @@ import {
 } from "../db.js";
 import {
   getDueRoomOperationalContext,
-  getLivenessRoomContexts,
 } from "../db/coordination/due-room-context.js";
 import {
   lockBoardManagerFailoverDeliveryKeysTx,
@@ -40,7 +35,6 @@ import {
 } from "../db/coordination/board-manager-failover.js";
 import { rescheduleEscalationCandidateBoardIntent } from "../db/coordination/board-intents.js";
 import { rescheduleStalledRoomCandidate } from "../db/coordination/room-stall.js";
-import { rescheduleLivenessAnnouncementCandidate } from "../db/presence/offline-announcements.js";
 import {
   createBoardManagerFailoverSweeper,
   type BoardManagerFailoverResult,
@@ -54,65 +48,8 @@ import {
   createRoomStallSweeper,
   selectRoomStallNudgeWorkerLabels,
 } from "../rooms/room-stall-sweep.js";
-import {
-  createLivenessSweeper,
-  LIVENESS_SWEEP_INTERVAL_MS,
-  resolveOfflineAnnounceAfterMs,
-  type LivenessAnnouncementInput,
-} from "../rooms/liveness-sweep.js";
 import { emitProjectMessage } from "./events.js";
 import { workflowEffectBroker } from "../workflow-effects/runtime.js";
-
-async function announceOffline(input: LivenessAnnouncementInput): Promise<void> {
-  await emitProjectMessage(input.room_id, "letagents", input.text, {
-    source: "agent_liveness",
-    agent_prompt_kind: "auto",
-    client_message_id: input.client_message_id,
-    with_created_message_in_transaction: async (tx) => {
-      await markAgentOfflineAnnounced(
-        {
-          room_id: input.room_id,
-          delivery_key: input.delivery_key,
-          announced_at: input.announced_at,
-        },
-        tx
-      );
-    },
-  });
-}
-
-async function announceRecovery(input: LivenessAnnouncementInput): Promise<void> {
-  await emitProjectMessage(input.room_id, "letagents", input.text, {
-    source: "agent_liveness",
-    client_message_id: input.client_message_id,
-    with_created_message_in_transaction: async (tx) => {
-      await markAgentRecoveryAnnounced(
-        {
-          room_id: input.room_id,
-          delivery_key: input.delivery_key,
-          announced_at: input.announced_at,
-        },
-        tx
-      );
-    },
-  });
-}
-
-const livenessSweeper = createLivenessSweeper({
-  listCandidates: (options) => listLivenessAnnouncementCandidates(options),
-  getCandidate: getLivenessAnnouncementCandidate,
-  rescheduleCandidate: rescheduleLivenessAnnouncementCandidate,
-  getSuppressedActorLabels: getRoomLiveAgentSuppressionActorLabels,
-  getRoomContexts: getLivenessRoomContexts,
-  announceOffline,
-  announceRecovery,
-  offlineAnnounceAfterMs: resolveOfflineAnnounceAfterMs(
-    process.env.LETAGENTS_LIVENESS_NOTICE_AFTER_MS
-  ),
-  onError: (roomId, error) => {
-    console.error(`Liveness sweep failed for room ${roomId}:`, error);
-  },
-});
 
 /** Fence lost inside the failover transaction: roll the announcement back quietly. */
 class BoardManagerFailoverLostRace extends Error {
@@ -427,6 +364,9 @@ const roomStallSweeper = createRoomStallSweeper({
   },
 });
 
+/** Cadence of the shared background sweeps below. */
+const LIVENESS_SWEEP_INTERVAL_MS = 60 * 1000;
+
 let sweepTimer: NodeJS.Timeout | null = null;
 let sweepPromise: Promise<void> | null = null;
 
@@ -449,11 +389,6 @@ export function startLivenessSweep(): void {
       await pruneExpiredExecutionApprovalPublications();
       } catch (error) {
       console.error("Execution approval publication cleanup failed:", error);
-      }
-      try {
-      await livenessSweeper.sweepOnce();
-      } catch (error) {
-      console.error("Liveness sweep failed:", error);
       }
       try {
       await boardManagerFailoverSweeper.sweepOnce();

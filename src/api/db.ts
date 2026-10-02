@@ -38,7 +38,7 @@ export type { MessageThreadReadOverlay, MessageThreadReadTarget } from "./db/mes
 export { getMessageAttachmentUpload, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";
 export { upsertRoomAgentPresence, upsertRoomAgentLivenessObservation, heartbeatNativeHarnessTaskLeases, recordNativeHarnessActivity, markRoomAgentDeliveryConnected, markRoomAgentDeliveryHeartbeat, upsertDesktopRoomAgentDeliveryHeartbeat, upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat, pauseDesktopRoomAgentDelivery, isStaleDesktopRoomAgentDeliverySignalError, markRoomAgentDeliveryDisconnected, forceDisconnectRoomAgentDeliverySession, getRoomAgentDeliverySessions, getReachableWorkerDeliverySessionForAgentSession, pruneStaleRoomAgentDeliveryInstances } from "./db/presence.js";
 export { setRoomLiveAgentSuppressed, getRoomAgentPresence, getRoomAgentPresenceSnapshot } from "./db/presence.js";
-export { listLivenessAnnouncementCandidates, getLivenessAnnouncementCandidate, markAgentOfflineAnnounced, markAgentRecoveryAnnounced, getRoomLiveAgentSuppressionActorLabels } from "./db/presence.js";
+export { getLivenessAnnouncementCandidate } from "./db/presence.js";
 export type { LivenessAnnouncementCandidate } from "./db/presence.js";
 export { upsertRoomParticipant, getParticipantOwnersProvenByMessages, claimRoomParticipantOwner, getRoomParticipants, getRoomParticipantsForRooms, setRoomParticipantsHidden } from "./db/participants.js";
 export { createReasoningSession, getReasoningSessions, getRoomReasoningSessionCountsByActor, getReasoningSessionById, getReasoningSessionUpdates, appendReasoningSessionUpdate, updateReasoningSession } from "./db/reasoning.js";
