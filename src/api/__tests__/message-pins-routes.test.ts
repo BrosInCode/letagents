@@ -10,12 +10,12 @@ const { createRoomEventBroker, MESSAGE_CREATED_EVENT_KINDS } = await import("../
 const room = "github.com/org/repo";
 type Auth = "session" | "owner_token" | "agent_session" | null;
 function harness(options: { denied?: boolean; resolutionError?: boolean; failure?: unknown; result?: string } = {}) {
-  const routes: Array<{ method: string; path: RegExp; handler: Function }> = [];
+  const routes: Array<{ method: string; path: RegExp | string; handler: Function }> = [];
   const pins = new Set<number>();
   const invalidated: string[] = [];
   const writes: any[] = [];
   const app = Object.fromEntries(["get", "post", "put", "delete"].map((method) => [method,
-    (path: RegExp, handler: Function) => routes.push({ method, path, handler })])) as unknown as Express;
+    (path: RegExp | string, handler: Function) => routes.push({ method, path, handler })])) as unknown as Express;
   registerRoomMessageRoutes(app, {
     emitProjectMessage: () => { throw Error("Pins must not emit messages"); },
     resolveCanonicalRoomRequestId: async (id: string) => { if (options.resolutionError) throw Error("secret database detail"); return id; },
@@ -38,7 +38,7 @@ function harness(options: { denied?: boolean; resolutionError?: boolean; failure
     },
   } as any);
   async function request(method: string, path: string, auth: Auth = "session") {
-    const matching = routes.filter((r) => r.method === method && r.path.test(path));
+    const matching = routes.filter((r) => r.method === method && (r.path instanceof RegExp ? r.path.test(path) : r.path === path));
     assert.equal(matching.length, 1, `${method} ${path} must match exactly once`);
     const route = matching[0]!;
     const req = { params: Object.fromEntries(path.match(route.path)!.slice(1).map((v, i) => [i, decodeURIComponent(v)])),
@@ -98,7 +98,7 @@ test("pins do not shadow any existing message route", () => {
   const api = harness();
   for (const suffix of ["pins", "reactions", "msg_1", "poll", "stream", "threads", "msg_1/thread"]) {
     const url = `/rooms/${room}/messages/${suffix}`;
-    assert.equal(api.routes.filter((r) => r.method === "get" && r.path.test(url)).length, 1, suffix);
+    assert.equal(api.routes.filter((r) => r.method === "get" && (r.path instanceof RegExp ? r.path.test(url) : r.path === url)).length, 1, suffix);
   }
 });
 test("the room stream sends only a pin pointer and never wakes message-only subscribers", async () => {

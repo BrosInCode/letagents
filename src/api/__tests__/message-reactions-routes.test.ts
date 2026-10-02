@@ -27,7 +27,7 @@ const room = 'github.com/org/repo';
 type Auth = 'session' | 'owner_token' | 'agent_session' | null;
 
 function harness(options: { denied?: boolean; storeFails?: unknown; nextFirst?: number } = {}) {
-  const routes: Array<{ method: string; path: RegExp; handler: Function }> = [];
+  const routes: Array<{ method: string; path: RegExp | string; handler: Function }> = [];
   // message number -> emoji -> account ids, in reaction order
   const stored = new Map<number, Map<string, string[]>>([[7, new Map()]]);
   const invalidated: string[] = [];
@@ -37,7 +37,7 @@ function harness(options: { denied?: boolean; storeFails?: unknown; nextFirst?: 
       emoji, count: accounts.length, reactors: accounts.map((login) => ({ login, name: login, avatar_url: null })),
     })).filter((reaction) => reaction.count > 0);
   const app = Object.fromEntries(['get', 'post', 'put', 'delete'].map((method) => [
-    method, (path: RegExp, handler: Function) => routes.push({ method, path, handler }),
+    method, (path: RegExp | string, handler: Function) => routes.push({ method, path, handler }),
   ])) as unknown as Express;
   registerRoomMessageRoutes(app, {
     emitProjectMessage: () => { throw new Error('A reaction must never emit a room message'); },
@@ -81,7 +81,7 @@ function harness(options: { denied?: boolean; storeFails?: unknown; nextFirst?: 
     },
   } as any);
   async function request(method: string, path: string, auth: Auth = 'session', query: Record<string, unknown> = {}) {
-    const route = routes.find((candidate) => candidate.method === method && candidate.path.test(path));
+    const route = routes.find((candidate) => candidate.method === method && (candidate.path instanceof RegExp ? candidate.path.test(path) : candidate.path === path));
     assert.ok(route, `${method} ${path} is routed`);
     const matches = path.match(route.path)!;
     const req = {
@@ -270,7 +270,7 @@ test('range continuation returns an exact cursor and viewer state only for the c
 
 test('the reaction routes never shadow the single-message route', () => {
   const api = harness();
-  const matching = (method: string, path: string) => api.routes.filter((route) => route.method === method && route.path.test(path)).length;
+  const matching = (method: string, path: string) => api.routes.filter((route) => route.method === method && (route.path instanceof RegExp ? route.path.test(path) : route.path === path)).length;
   assert.equal(matching('get', `/rooms/${room}/messages/reactions`), 1);
   assert.equal(matching('get', `/rooms/${room}/messages/msg_7`), 1, 'the real single-message route is registered alongside reactions');
   assert.equal(matching('get', `/rooms/${room}/messages/poll`), 1);

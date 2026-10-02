@@ -296,8 +296,11 @@ jobs:
           node
           --import ./node_modules/tsx/dist/loader.mjs
           --test
+          --test-concurrency=1
           src/api/__tests__/desktop-push-worker-db.test.ts
           src/api/__tests__/room-notification-preferences-routes.test.ts
+          src/api/__tests__/message-reminders-db.test.ts
+          src/api/__tests__/message-reminders-routes.test.ts
 
       - name: Run webhook integration tests
         run: >-
