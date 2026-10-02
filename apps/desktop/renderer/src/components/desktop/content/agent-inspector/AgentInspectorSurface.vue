@@ -18,6 +18,7 @@
             <span class="agent-inspector-state-label" :data-state="projection.overallState" :data-tab="selectedTab">
               <span aria-hidden="true"></span>{{ projection.overallLabel }}
             </span>
+            <span v-if="projection.entry.homeHarness" class="agent-inspector-own-setup" :title="homeHarnessBadge(projection.provider, projection.entry.homeHarness).title" data-testid="agent-inspector-own-setup">{{ homeHarnessBadge(projection.provider, projection.entry.homeHarness).label }}</span>
           </div>
           <p>
             <span v-if="projection.ownerAttribution">{{ projection.ownerAttribution }} · </span>
@@ -155,6 +156,7 @@ import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
 import { AGENT_INSPECTOR_RETIRE_CONFIRMATION, configurationHasRuntimeLag } from "../../../../domain/agent-inspector-settings";
+import { homeHarnessBadge } from "../../../../domain/agent-home-harness";
 import { initialTabEffects } from "../../../../domain/agent-inspector-identity";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";

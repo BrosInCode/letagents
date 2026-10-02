@@ -380,6 +380,16 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     assertDesktopUpdateMutationAllowed();
     return supervisorDaemonClient.updateAgentConfiguration(input);
   });
+  // Like an approval, this is accepted only from the app's own window and
+  // signed by the app: it lets an agent act with the owner's own tools.
+  targetIpcMain.handle("desktop:supervisor:set-agent-home-harness", async (event, input: import("../../ipc-types.js").DesktopSupervisorAgentHomeHarnessInput) => {
+    assertHostApprovalSender(event);
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.setAgentHomeHarness(input, () => {
+      assertHostApprovalSender(event);
+      assertDesktopUpdateMutationAllowed();
+    });
+  });
   targetIpcMain.handle("desktop:supervisor:apply-agent-configuration", async (_event, input: import("../../ipc-types.js").DesktopSupervisorAgentConfigurationApplyInput) => {
     assertDesktopUpdateMutationAllowed();
     return supervisorDaemonClient.applyAgentConfiguration(input);

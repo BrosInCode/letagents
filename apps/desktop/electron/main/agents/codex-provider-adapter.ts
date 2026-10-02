@@ -1,5 +1,6 @@
 import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
+import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -9,12 +10,19 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import {
+  codexAppServerEnvironment,
   launchManagedCodexAppServer,
   resolveCodexAppServerUrl,
   waitForLaunchedCodexAppServer,
   type CodexAppServerExit,
   type CodexAppServerLaunch,
 } from "./codex-app-server.js";
+import {
+  assertLiveCodexProjectUnchanged,
+  codexProcessKeepsOwnerSetup,
+  readCodexCommandLine,
+  type CodexLiveProcess,
+} from "./codex-home-harness.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
@@ -29,7 +37,7 @@ import {
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { LETAGENTS_MCP_RUNTIME_TREE_SHA256, resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
-import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
+import { attestProviderSpawnPolicy, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
 import {
   ProviderExecutionObserver,
@@ -167,6 +175,8 @@ export interface CodexAdapterRpc {
   onDisconnect(listener: () => void): () => void;
   currentConnectionId(): string | null;
   listPendingRequests(): readonly RpcServerRequest[];
+  /** Told of each server request as it arrives, before any observer of the pending set. */
+  onRequest?(listener: (request: RpcServerRequest) => void): () => void;
   onPendingRequestsChanged(listener: () => void): () => void;
   onRequestResolved(listener: (request: RpcServerRequest) => void): () => void;
   respond(request: RpcServerRequest, result: unknown): void;
@@ -193,7 +203,7 @@ export interface CodexProviderAdapterDependencies {
   launchServer(
     serverUrl: string,
     codexBin: string,
-    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string> },
+    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean },
   ): CodexAppServerLaunch | Promise<CodexAppServerLaunch>;
   waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
   createRpcClient(
@@ -204,6 +214,16 @@ export interface CodexProviderAdapterDependencies {
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<CodexAppServerExit>;
+  /**
+   * A running app-server's command line. Null when it cannot be read in time.
+   * Asked only for a process that has its owner's setup.
+   */
+  readCommandLine(pid: number): Promise<string | null>;
+  /**
+   * Throws when a running app-server that has its owner's setup would load
+   * project configuration it was not started with turned off.
+   */
+  assertLiveProjectUnchanged(codexBin: string, live: CodexLiveProcess): Promise<void>;
   writeSupervisorBridgeContext(
     cwd: string,
     context: {
@@ -244,6 +264,8 @@ const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
 };
 
 const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input", "sandbox"]);
+/** What an access level decides for a Codex thread. With the owner's setup a thread is given these alone. */
+const CODEX_ACCESS_LEVEL_OPTIONS = ["approvalPolicy", "sandboxPolicy", "approvalsReviewer"] as const;
 const PS_BIRTH_EVIDENCE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
 
 function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
@@ -508,6 +530,30 @@ function permissionParams(request: RpcServerRequest): Record<string, unknown> | 
     ? params : null;
 }
 
+/**
+ * With the owner's own setup on, their MCP servers can ask a person for typed
+ * input or a browser sign-in, or send a tool approval too large to show.
+ * LetAgents can show only a tool approval of bounded size, so nobody could
+ * answer and the turn would wait forever. Without the owner's setup the only
+ * MCP server Codex runs is the room's, and the room's own requests are never
+ * answered here, so nothing changes for such an agent.
+ */
+function isUnanswerableOwnerElicitation(request: RpcServerRequest): boolean {
+  return request.method === "mcpServer/elicitation/request" && permissionParams(request) === null
+    && recordValue(request.params)?.serverName !== LETAGENTS_MCP_SERVER_NAME;
+}
+
+/** What the owner is told in the agent's activity about a request that was turned down for them. */
+function declinedOwnerRequestSummary(request: RpcServerRequest): string {
+  const params = recordValue(request.params);
+  const name = typeof params?.serverName === "string" ? params.serverName.trim().replace(/[^\x20-\x7e]/g, "?").slice(0, 64) : "";
+  const server = name ? `your MCP server ${JSON.stringify(name)}` : "one of your MCP servers";
+  if (recordValue(params?._meta)?.codex_approval_kind === "mcp_tool_call") {
+    return `Did not allow a tool of ${server}. Its approval request was too large or malformed to show.`;
+  }
+  return `Declined a request for ${params?.mode === "url" ? "a sign-in" : "typed input"} from ${server}. LetAgents cannot show it.`;
+}
+
 function permissionFileChanges(value: unknown): CodexPermissionFileChange[] | null {
   if (!Array.isArray(value) || !value.length || value.length > 128) return null;
   const path = (input: unknown): input is string => typeof input === "string" && input.trim().length > 0
@@ -713,6 +759,10 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
+  readCommandLine: readCodexCommandLine,
+  // The owner's own config is found as the launch found it: through the launch's environment.
+  assertLiveProjectUnchanged: (codexBin, live) =>
+    assertLiveCodexProjectUnchanged(codexBin, live, codexAppServerEnvironment({ homeHarness: true }).env),
   writeSupervisorBridgeContext: writeCodexSupervisorBridgeContext,
   now: () => new Date().toISOString(),
   sleep: delay,
@@ -724,6 +774,12 @@ function isCodexRuntimeUnavailable(state: ProviderObservedState): boolean {
 
 class CodexProviderHandle implements ProviderHandle {
   subscriptionAfterMaterialization = false;
+  /** Told what was turned down for the owner, so it can be shown in the agent's activity. */
+  ownerRequestDeclined: ((summary: string) => void) | null = null;
+  /** The process was started with its owner's own Codex setup, so it must never reload a project's config unchecked. */
+  ownerSetup = false;
+  /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
+  launchNotices: readonly string[] = [];
   custodyLaunchAgentSessionId?: string;
   managedLaunchContract?: string;
   readonly execution: ProviderExecutionObserver;
@@ -773,6 +829,12 @@ class CodexProviderHandle implements ProviderHandle {
       if (this.nativeRuntimeUnavailable) return;
       this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
         providerConnection.processIdentity ?? undefined, providerConnection.pid ?? undefined);
+    });
+    client.onRequest?.((request) => {
+      if (!isUnanswerableOwnerElicitation(request)) return;
+      // Declining is what the server sees when a person says no.
+      try { client.respond(request, { action: "decline", content: null, _meta: null }); } catch { return; /* It is no longer pending. */ }
+      try { this.ownerRequestDeclined?.(declinedOwnerRequestSummary(request)); } catch { /* Reporting never controls native work. */ }
     });
   }
 
@@ -1567,6 +1629,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     if (handle.terminal) throw new Error("Codex continuation repair requires a live provider process.");
     if (handle.turnWaiters.size) throw new Error("Codex continuation repair is unsafe while a provider turn is active.");
+    // Loading or starting a thread makes Codex read the project's config again.
+    if (handle.ownerSetup) await this.stopBeforeProjectReload(handle, request.cwd);
 
     const assertAttached = () => {
       if (options.detachSignal?.aborted) {
@@ -1583,7 +1647,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // advertised seven-second grace into eleven seconds).
     // A stored policy can predate the access level it was launched under. The
     // policy bound to this runtime is the one a replacement thread must keep.
-    const policy = normalizeLaunchPolicy({ ...(recordValue(request.launchPolicy) ?? {}), ...(handle.appliedTurnPolicy() ?? {}) });
+    // A thread of a process with its owner's setup is given the access level's
+    // own three options and nothing else the stored policy holds.
+    const stored = recordValue(request.launchPolicy) ?? {};
+    const policy = normalizeLaunchPolicy({
+      ...(handle.ownerSetup ? Object.fromEntries(CODEX_ACCESS_LEVEL_OPTIONS.filter((key) => Object.hasOwn(stored, key)).map((key) => [key, stored[key]])) : stored),
+      ...(handle.appliedTurnPolicy() ?? {}),
+    });
     const probeDelays = [0, 1_000, 2_000, 4_000];
     const probe = async (threadId: string): Promise<boolean> => {
       for (const waitMs of probeDelays) {
@@ -1884,6 +1954,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Codex spawn requires the durable agent display name from the manifest.");
     }
 
+    // With the owner's setup this is the access level's own options and nothing else the stored policy holds.
     const attestedPolicy = attestProviderSpawnPolicy("codex", req);
     const policy = normalizeLaunchPolicy(attestedPolicy);
     const turnPolicy = codexTurnPolicy(attestedPolicy);
@@ -1965,6 +2036,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const managedLaunchContract = boundedMcp && !req.devMcpServerEntryPath
       ? boundedLaunchContract(req.supervisorWorkerSession?.apiUrl || desktopApiUrl, custodialTools)
       : undefined;
+    // With the owner's own setup on, the app-server's environment carries none
+    // of the room agent's coordinates, so the room's server must be the sealed
+    // one that is given them in its own configuration.
+    const homeHarness = spawnUsesHomeHarness("codex", req);
+    if (homeHarness && !custodialRuntime) {
+      throw new Error("Codex can use its owner's own setup only as a daemon-supervised room agent.");
+    }
     const serverUrl = await this.deps.resolveServerUrl();
     const launch = await this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
@@ -1976,6 +2054,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
           }, custodialTools)]
         : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
       ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
+      // The owner's own Codex setup stays on for this agent's app-server.
+      ...(homeHarness ? { homeHarness: true } : {}),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {
@@ -2067,6 +2147,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
         turnPolicy,
       );
       handle.managedLaunchContract = managedLaunchContract;
+      handle.ownerSetup = homeHarness;
+      // A start with the owner's setup asks Codex nothing more that can fail it, so a line given here reaches the owner.
+      const unused = homeHarness
+        ? ownerSetupUnusedOptionsSaidOnce.whenChanged(req.supervisorEntryId, ownerSetupUnusedOptionsNotice("Codex", req.launchPolicy, attestedPolicy))
+        : null;
+      if (unused) handle.launchNotices = [unused];
+      this.reportDeclinedOwnerRequests(handle);
       handle.setLiveState("idle");
       this.emitNativeExecution(handle, {
         domain: "runtime",
@@ -2164,6 +2251,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
         },
       };
     }
+    // Whether this process has its owner's setup is what the daemon recorded
+    // when it started it, never something read off the process. For every
+    // other agent nothing below differs from an attach without the setup.
+    const ownerSetup = ref.ownerSetup === true;
     let handle: CodexProviderHandle | null = null;
     let exactEndpointVerified = false;
     const pendingNotifications: RpcNotification[] = [];
@@ -2173,7 +2264,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
     });
     try {
       await client.connect();
-      await requireLetAgentsWorkplace(client);
+      // Listing the app-server's MCP servers makes Codex read the project's
+      // config again, and what the project gained since this process started
+      // would load as the owner's. The list is only a look at a process that
+      // already runs, so a process with its owner's setup is not asked for it,
+      // and nor is one whose record cannot say. Nothing else here makes Codex
+      // read the project again.
+      if (ref.ownerSetup === undefined) await requireLetAgentsWorkplace(client);
       let read: ThreadReadResult;
       let continuationMissing = false;
       let exactEmptyFallback = false;
@@ -2260,6 +2357,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
         this.deps.now,
         turnPolicy,
       );
+      handle.ownerSetup = ownerSetup;
+      this.reportDeclinedOwnerRequests(handle);
       handle.setLiveState(continuationMissing ? "idle" : "working");
       handle.subscriptionAfterMaterialization = exactEmptyFallback;
       this.handles.set(ref.workAttemptId, handle);
@@ -2872,6 +2971,47 @@ export class CodexProviderAdapter implements ProviderAdapter {
     };
     this.streamSink?.(event);
     for (const listener of handle.streamListeners) listener(event);
+  }
+
+  /**
+   * For a process that has its owner's setup: check the project still adds
+   * nothing the process was not started with turned off, and stop the process
+   * and refuse when it does, or when that cannot be checked. The caller then
+   * never makes the call that would have loaded the project's config as the
+   * owner's. The agent is idle here, and the owner is told why it stopped.
+   */
+  private async stopBeforeProjectReload(handle: CodexProviderHandle, cwd: string): Promise<void> {
+    const reason = await this.projectReloadRefusal(handle, cwd);
+    if (!reason) return;
+    // The daemon keeps an agent's activity from its stream, so this is said there before the process goes.
+    this.publishStream(handle, "ownerSetup/stopped", {}, "provider_event", `Stopped this agent. ${reason}`);
+    await this.stop(handle).catch(() => undefined);
+    throw new Error(reason);
+  }
+
+  /** Why a process with its owner's setup may not load the project's config again. Null when it may. */
+  private async projectReloadRefusal(handle: CodexProviderHandle, cwd: string): Promise<string | null> {
+    const commandLine = handle.pid === null ? null : await this.deps.readCommandLine(handle.pid);
+    if (!commandLine) {
+      return "LetAgents could not read how this agent's Codex was started, so it stopped the agent "
+        + "before Codex could load the project's configuration with your own setup. It starts again by itself.";
+    }
+    // LetAgents started this process with the owner's setup. A command line that says otherwise is not believed.
+    if (!codexProcessKeepsOwnerSetup(commandLine)) {
+      return "This agent's Codex is not running the way LetAgents started it, so LetAgents stopped the agent "
+        + "before Codex could load the project's configuration with your own setup. It starts again by itself.";
+    }
+    try {
+      await this.deps.assertLiveProjectUnchanged(this.codexBin, { commandLine, cwd });
+      return null;
+    } catch (error) {
+      return errorMessage(error);
+    }
+  }
+
+  private reportDeclinedOwnerRequests(handle: CodexProviderHandle): void {
+    // The daemon builds an agent's activity from its stream, so that is where it is said.
+    handle.ownerRequestDeclined = (summary) => this.publishStream(handle, "mcpServer/elicitation/declined", {}, "provider_event", summary);
   }
 
   private publishActivity(

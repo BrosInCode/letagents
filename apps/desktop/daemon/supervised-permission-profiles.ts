@@ -149,6 +149,52 @@ export function supervisedPermissionProfilesForProvider(providerId: string): Sup
   return profiles.map((profile) => ({ ...profile }));
 }
 
+/**
+ * What changes in an access level's description for an agent that uses its
+ * owner's own setup. The owner's allow rules, hooks, MCP tools and plugins
+ * then apply as well, and some of them act without an approval, so a line
+ * that promises an approval for everything would no longer be true.
+ */
+const OWNER_SETUP_DESCRIPTIONS: Readonly<Record<string, Readonly<Record<string, { description?: string; detail: string }>>>> = {
+  "claude-code": {
+    read_only: {
+      description: "Can read and search files, and use LetAgents room tools and the MCP tools your own Claude Code rules allow.",
+      detail: "Its own tools cannot change files or run commands. Your MCP tools and hooks can, where your own Claude Code settings allow them. Nothing asks you.",
+    },
+    ask_before_write: {
+      description: "Asks before Claude changes files or runs write-capable commands, unless your own Claude Code rules already allow them.",
+      detail: "Commands that only read the project, its history, or its pull requests run without asking. Each approval allows one action. Your own Claude Code allow rules apply too, and can let the agent act without asking you. Your hooks run as you set them up. LetAgents room tools remain available.",
+    },
+    auto_review: {
+      detail: "Claude blocks actions it judges risky. Anything a room message asks for counts as approved, including commands that reach outside your project. Your own Claude Code allow rules apply first, and your hooks run as you set them up.",
+    },
+    full_access: {
+      detail: "Commands can access files outside your project. Use only for work you trust. While your own setup is on, the project's own Claude settings, hooks, skills, commands and MCP servers are not loaded. Its CLAUDE.md still is.",
+    },
+  },
+  codex: {
+    ask_before_write: {
+      detail: "Starts with read-only file access and no network access. Requests approval when it needs more access. Your own MCP tools, hooks and plugins are not held to these limits: they run as you, and some run without asking.",
+    },
+    auto_review: {
+      detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project. Your own MCP tools, hooks and plugins are not held to these limits: they run as you.",
+    },
+  },
+};
+
+/** The same profiles, described truthfully for an agent that uses its owner's own setup. */
+export function describeProfilesWithOwnerSetup(providerId: string, profiles: unknown): unknown {
+  const provider = providerId.trim().toLowerCase();
+  const descriptions = OWNER_SETUP_DESCRIPTIONS[provider === "claude" ? "claude-code" : provider];
+  if (!descriptions || !Array.isArray(profiles)) return profiles;
+  return profiles.map((profile) => {
+    const id = profile && typeof profile === "object" ? (profile as { id?: unknown }).id : null;
+    const described = typeof id === "string" && Object.hasOwn(descriptions, id) ? descriptions[id] : null;
+    // Only an access level the agent can actually use is redescribed.
+    return described && (profile as { status?: unknown }).status === "available" ? { ...profile, ...described } : profile;
+  });
+}
+
 export function assertSupervisedPermissionProfileAvailable(providerId: string, requestedId: string | null): string {
   const profiles = supervisedPermissionProfilesForProvider(providerId);
   if (!profiles.length) throw new Error(`Provider '${providerId}' does not expose supervised permission profiles.`);

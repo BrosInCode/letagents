@@ -43,6 +43,8 @@ export interface DaemonControlOperations {
   getAgentConfiguration(entryId: string, daemonGeneration: number): unknown;
   updateAgentConfiguration(input: {
     entryId: string; daemonGeneration: number; expectedRevision: number; configuration: Record<string, unknown>;
+    /** Only the desktop app's signed request may carry this. */
+    homeHarness?: boolean;
   }): unknown;
   applyAgentConfiguration(input: {
     entryId: string; daemonGeneration: number; expectedConfigurationRevision: number;
@@ -136,6 +138,10 @@ const HANDOFF_DRAIN_METHODS = new Set<string>([
 function paramsRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Daemon request params must be an object.");
   return value as Record<string, unknown>;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function requiredStringParam(params: Record<string, unknown>, key: string, error: string): string {
@@ -241,6 +247,40 @@ export function createDaemonControlRequestHandler(
       }
       if (authenticated.operation === "list_tool_rules") return operations.hostApprovals.listToolRules(input);
       if (authenticated.operation === "revoke_tool_rule") return operations.hostApprovals.revokeToolRule(input);
+      if (authenticated.operation === "set_home_harness") {
+        // The signature proves the desktop app sent this: no agent, MCP tool
+        // or other local caller of this socket can let an agent use the
+        // owner's own setup. It is a configuration change like any other.
+        if (context.isHandoffDraining?.()) {
+          throw new Error("An update is waiting for current agent work to finish. Try this action after the update completes or is deferred.");
+        }
+        const error = "Changing an agent's use of your own setup requires an exact agent, the current daemon generation, a positive expected revision and a choice.";
+        if (!input || Object.keys(input).length !== 4 || typeof input.enabled !== "boolean") throw new Error(error);
+        const entryId = requiredStringParam(input, "entryId", error);
+        const daemonGeneration = positiveIntegerParam(input, "daemonGeneration", error);
+        const result = recordValue(await operations.updateAgentConfiguration({
+          entryId,
+          daemonGeneration,
+          expectedRevision: positiveIntegerParam(input, "expectedRevision", error),
+          configuration: {},
+          // The daemon entrypoint hands this object on as it is, so the choice reaches the coordinator.
+          homeHarness: input.enabled,
+        }));
+        const saved = recordValue(result?.configuration);
+        if (input.enabled || result?.outcome !== "updated" || saved?.home_harness_pending !== true) return result;
+        // Turned off while a process that has the owner's setup may be running:
+        // replace it now if it is idle. A turn in progress is never interrupted;
+        // the answer says so, and the agent keeps the setup until it restarts.
+        let apply: Record<string, unknown> | null = null;
+        try {
+          apply = recordValue(await operations.applyAgentConfiguration({
+            entryId, daemonGeneration, expectedConfigurationRevision: saved.config_revision as number,
+          }));
+        } catch {
+          // The choice is saved. A restart that failed is reported as not done.
+        }
+        return { ...result, apply: typeof apply?.outcome === "string" ? apply.outcome : "unavailable" };
+      }
       if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
       return operations.hostApprovals.decide(input);
     }

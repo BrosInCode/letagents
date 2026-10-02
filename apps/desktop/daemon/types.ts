@@ -351,6 +351,11 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
   runtime_generation_id?: string | null;
   /** Read-only credential contract from configuration, never caller-owned manifest input. */
   polling_contract?: "custodial_polling_v1" | null;
+  /**
+   * Read-only: this agent uses its owner's own provider setup ("on"), will
+   * once it restarts, or still does until it restarts. Absent means off.
+   */
+  home_harness?: import("./provider-configuration.js").HomeHarnessState;
   worker_binding?: DaemonWorkerBindingProjection | null;
   /** Ephemeral causal delivery projection; never persisted in the manifest. */
   room_agent_state?: {

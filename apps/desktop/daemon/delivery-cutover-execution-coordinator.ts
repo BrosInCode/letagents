@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { redactCredentialText } from "./credential-redaction.js";
 import { DeliveryCutoverObservationDetached, type DeliveryCutoverCoordinator } from "./delivery-cutover-coordinator.js";
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
+import { homeHarnessRosterState } from "./provider-configuration.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { DaemonAuthority } from "./daemon-authority.js";
 import type { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
@@ -254,6 +255,13 @@ export class DeliveryCutoverExecutionCoordinator {
           || handle.providerContinuationId !== entry.provider_ref.provider_continuation_id
           || !sameProviderActionConnectionSnapshot(handle.providerConnection, entry.provider_ref.provider_connection)) {
           throw new Error("Delivery drain requires the exact owned Codex runtime.");
+        }
+        // An agent that collects its own messages cannot be held back from its
+        // next turn, so its owner's setup could never be taken away again. The
+        // move is refused while the setup is on, saved for the next start, or
+        // still held by the running process.
+        if (!forward && homeHarnessRosterState(entry, { startedAtRevision: handle.appliedConfigurationRevision }) !== null) {
+          throw new Error("Turn off \"Use your own Codex setup\" for this agent and let it restart before moving it to polling delivery.");
         }
         // Prove the actual resolved MCP runtime, not a version promised by the
         // controller, before installing a gate or stopping any provider.

@@ -1,4 +1,5 @@
 import { ManagedRuntimeRefreshDeferred } from "./provider-action-port.js";
+import { agentUsesHomeHarness } from "./provider-configuration.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
 import type { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
@@ -29,6 +30,14 @@ type ReadyReplacement = {
 type ManagedReplacement = { contract: string; apiUrl: string };
 
 type ApplyInspection = ReadyReplacement | ApplyAgentConfigurationResult;
+
+/** The agent is still to be replaced: convergence should run again after this long. `notice` is for its activity. */
+export type ManagedRefreshRetry = { retryAfterMs: number; notice?: string };
+
+const OWNER_SETUP_END_RETRY_BASE_MS = 1_000;
+const OWNER_SETUP_END_RETRY_MAX_MS = 30_000;
+/** After this many tries that found the agent neither busy nor replaceable, its owner is told it is still waiting. */
+const OWNER_SETUP_END_NOTICE_AFTER = 5;
 
 export type RuntimeConfigurationApplyCoordinatorOptions = {
   store: Pick<ManifestStore,
@@ -67,10 +76,92 @@ export type RuntimeConfigurationApplyCoordinatorOptions = {
 export class RuntimeConfigurationApplyCoordinator {
   private readonly desiredContracts = new Map<string, string>();
   private readonly admissionRefreshRequested = new WeakMap<object, ProviderInstallationToken>();
+  private readonly ownerSetupEndTries = new WeakMap<ProviderInstallationToken, { all: number; unexplained: number }>();
   constructor(private readonly options: RuntimeConfigurationApplyCoordinatorOptions) {}
+
+  /**
+   * For a process that was started with its owner's setup: the agent's saved
+   * configuration when the owner has turned the setup off since, or null
+   * while it is still on. Such a process must take no further turn: it is
+   * replaced as soon as it is idle. Only a process that was started with the
+   * setup can owe this, so callers ask for no other agent, and for every
+   * other agent nothing is read at all.
+   */
+  private async ownerSetupToEnd(entryId: string) {
+    const configuration = await this.options.store.getAgentConfiguration(entryId);
+    if (!configuration) return null;
+    return agentUsesHomeHarness({ id: entryId, provider: configuration.provider, deliveryMode: configuration.delivery_mode },
+      configuration.provider_launch_policy) ? null : configuration;
+  }
+
+  /**
+   * Replace an idle process that still has the owner's setup after the owner
+   * turned it off. It is the same path as "Restart to apply changes", so it
+   * never interrupts a turn. When the process could not be replaced this
+   * time, the answer says when to try again: later after each try, so an
+   * agent whose turn was refused is never left waiting on some other event.
+   * A replacement that fails outright is thrown, and shown as the agent's error.
+   */
+  private async endOwnerSetup(entryId: string): Promise<"replaced" | ManagedRefreshRetry | null> {
+    const installation = this.options.streams.currentInstallation(entryId);
+    if (installation?.handle.ownerSetup !== true) return null;
+    let configuration: Awaited<ReturnType<RuntimeConfigurationApplyCoordinator["ownerSetupToEnd"]>>;
+    try {
+      configuration = await this.ownerSetupToEnd(entryId);
+    } catch {
+      // Whether the setup was turned off could not be read. Its turns wait meanwhile, so it is asked again.
+      return this.ownerSetupEndRetry(installation, false);
+    }
+    if (!configuration) {
+      this.ownerSetupEndTries.delete(installation);
+      return null;
+    }
+    let outcome: ApplyAgentConfigurationResult["outcome"];
+    try {
+      outcome = (await this.applyInternal({ entryId, daemonGeneration: this.options.authority.currentDaemonGeneration(),
+        expectedConfigurationRevision: configuration.config_revision }, undefined, true)).outcome;
+    } catch (error) {
+      // The agent cannot be restarted: that is an error its owner sees, not a quiet wait. What went
+      // wrong stays its cause, which is shown after it and is what the scheduler decides from.
+      throw new Error("LetAgents could not restart this agent to stop it running with your own setup, so its messages are waiting. "
+        + "Pause the agent and resume it to finish switching your setup off", { cause: error });
+    }
+    if (outcome === "restarting") return "replaced";
+    // A turn that is still running, or an agent that is paused, is waited for without comment.
+    return this.ownerSetupEndRetry(installation, outcome === "busy_active_turn" || outcome === "unsupported");
+  }
+
+  private ownerSetupEndRetry(installation: ProviderInstallationToken, expected: boolean): ManagedRefreshRetry {
+    const tries = this.ownerSetupEndTries.get(installation) ?? { all: 0, unexplained: 0 };
+    tries.all += 1;
+    if (!expected) tries.unexplained += 1;
+    this.ownerSetupEndTries.set(installation, tries);
+    return {
+      retryAfterMs: Math.min(OWNER_SETUP_END_RETRY_MAX_MS, OWNER_SETUP_END_RETRY_BASE_MS * 2 ** Math.min(tries.all - 1, 10)),
+      ...(!expected && tries.unexplained === OWNER_SETUP_END_NOTICE_AFTER ? {
+        notice: "Still waiting to restart this agent so it stops running with your own setup. Its messages wait until then. "
+          + "Pause the agent and resume it to do it now.",
+      } : {}),
+    };
+  }
 
   /** Observe only: replacement drains the caller, so convergence must run separately. */
   async canAdmitManagedDelivery(agent: SupervisedIngressAgent, demand: object): Promise<boolean> {
+    const current = this.options.streams.currentInstallation(agent.agentId);
+    // An agent whose process was not started with its owner's setup is admitted as it always was: nothing is read for it.
+    if (current?.handle.ownerSetup === true) {
+      // Whether the setup was turned off could not be read: the turn waits rather than run with it.
+      const mustEnd = await this.ownerSetupToEnd(agent.agentId).then((configuration) => configuration !== null, () => true);
+      if (mustEnd) {
+        // No new turn starts on a process that still has the setup its owner
+        // turned off. Convergence replaces it, and the turn waits for the new one.
+        if (this.admissionRefreshRequested.get(demand) !== current) {
+          this.admissionRefreshRequested.set(demand, current);
+          this.options.requestConvergence(agent.agentId);
+        }
+        return false;
+      }
+    }
     if (agent.provider !== "codex" || !this.options.managed || !this.options.provider?.describeManagedLaunchContract) return true;
     const installation = this.options.streams.currentInstallation(agent.agentId);
     const matches = () => Boolean(installation
@@ -110,7 +201,10 @@ export class RuntimeConfigurationApplyCoordinator {
     return contract;
   }
 
-  async refreshManaged(entryId: string): Promise<void> {
+  async refreshManaged(entryId: string): Promise<void | ManagedRefreshRetry> {
+    // Runs after every convergence, so also when a turn has just ended.
+    const ownerSetup = await this.endOwnerSetup(entryId);
+    if (ownerSetup) return ownerSetup === "replaced" ? undefined : ownerSetup;
     const managed = this.options.managed;
     const provider = this.options.provider;
     if (!managed || !provider?.stopIdle || !provider.describeManagedLaunchContract) return;
@@ -134,7 +228,8 @@ export class RuntimeConfigurationApplyCoordinator {
     return this.applyInternal(input);
   }
 
-  private async applyInternal(input: ApplyAgentConfigurationInput, managed?: ManagedReplacement): Promise<ApplyAgentConfigurationResult> {
+  /** `retriedByCaller`: a replacement that did not happen is tried again later by the caller, not by an immediate convergence. */
+  private async applyInternal(input: ApplyAgentConfigurationInput, managed?: ManagedReplacement, retriedByCaller = false): Promise<ApplyAgentConfigurationResult> {
     if (!input.entryId.trim()
       || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1
       || !Number.isSafeInteger(input.expectedConfigurationRevision)
@@ -214,9 +309,12 @@ export class RuntimeConfigurationApplyCoordinator {
       release();
       // Lifecycle admission may have excluded a room move that raced the
       // read-only preflight. Reconcile after exclusion ends even if the exact
-      // second inspection prevented a provider fence.
-      if (!managed || replaced) this.options.requestConvergence(input.entryId);
-      else if (releaseDelivery) await this.options.managed!.resumeDelivery(input.entryId);
+      // second inspection prevented a provider fence. A caller that tries
+      // again by itself is not converged at once for a try that changed
+      // nothing, so its retries cannot become a loop; a try that had taken
+      // delivery over still is, because convergence is what hands it back.
+      if (replaced || (!managed && (!retriedByCaller || releaseDelivery))) this.options.requestConvergence(input.entryId);
+      else if (managed && releaseDelivery) await this.options.managed!.resumeDelivery(input.entryId);
     }
   }
 
