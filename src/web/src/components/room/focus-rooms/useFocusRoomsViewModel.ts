@@ -1,4 +1,5 @@
 import { computed, ref, watch } from 'vue'
+import { useRoomUnread } from '@/composables/roomUnread'
 import {
   DEFAULT_FOCUS_ROOM_SETTINGS,
   focusRoomSettingsFrom,
@@ -22,6 +23,7 @@ export function useFocusRoomsViewModel(
   props: FocusRoomsViewProps,
   emit: FocusRoomsViewEmit,
 ) {
+  const roomUnread = useRoomUnread()
   const resultSummary = ref('')
   const shareAttempted = ref(false)
   const settingsDraft = ref<FocusRoomSettings>({
@@ -42,6 +44,7 @@ export function useFocusRoomsViewModel(
       .filter((room) => room.kind === 'focus')
       .map((room) => ({
         id: room.room_id,
+        hasUnread: Boolean(roomUnread.get(room.room_id)),
         title: roomDisplayTitle(room.display_name),
         kind: room.git_room ? 'branch' : room.source_task_id ? 'task' : 'topic',
         kindLabel: room.git_room

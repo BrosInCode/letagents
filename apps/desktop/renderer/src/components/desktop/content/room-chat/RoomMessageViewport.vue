@@ -24,8 +24,9 @@
         </div>
 
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
+        <template v-else>
+        <div v-if="entry.message.id === unreadTimeline.dividerId.value" class="room-explicit-unread" role="separator">New messages</div>
         <DesktopChatMessage
-          v-else
           :message="entry.message"
           :compact-with-previous="entry.compactWithPrevious"
           :thread-summary="threadIndicatorSummary(entry.message)"
@@ -57,6 +58,7 @@
           @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
         />
+        </template>
       </template>
 
       <div
@@ -141,7 +143,7 @@
       class="room-new-messages-pill"
       type="button"
       data-testid="desktop-new-messages-pill"
-      @click="scrollToBottom()"
+      @click="unreadTimeline.jumpToLatest()"
     >
       {{ unreadCount > 0 ? `↓ ${unreadCount} new message${unreadCount === 1 ? "" : "s"}` : "↓ Scroll to latest" }}
     </button>
@@ -149,6 +151,9 @@
 </template>
 
 <script setup lang="ts">
+import { provide } from "vue";
+import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
+import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
 import { injectRoomMessageReactions } from "../../../../composables/useRoomMessageReactions";
 import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
@@ -264,6 +269,21 @@ const emptyStateDescription = computed(() => {
 });
 
 const messagesElement = ref<HTMLElement | null>(null);
+const unreadRoom = computed(() => props.roomIdentifier);
+provide(unreadMenuKey, { client: roomUnread, room: unreadRoom });
+const revealUnreadMessage = inject(unreadRevealKey, null);
+const unreadTimeline = useUnreadTimeline({
+  client: roomUnread, room: unreadRoom,
+  active: computed(() => props.active && roomUnread.visit.value.room === (props.roomIdentifier ?? "").toLowerCase()),
+  ready: computed(() => !props.roomLoading && !props.loadingOlderMessages),
+  element: messagesElement,
+  reveal: async (id) => {
+    if (!revealUnreadMessage || !await revealUnreadMessage(id)) return false;
+    await nextTick();
+    return scrollToMessage(id, "instant");
+  },
+  bottom: (reading) => scrollToBottom(reading ? "smooth" : "auto"),
+});
 const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 const threadActivityNotice = ref<ThreadActivityNotice | null>(null);
@@ -727,6 +747,7 @@ function maybeAutoFillViewport(): void {
 }
 
 function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
+  unreadTimeline.programmaticScroll();
   if (!messagesElement.value) return;
   shouldRestoreInitialScroll = false;
   if (behavior === "auto") {
@@ -744,6 +765,7 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
 }
 
 function jumpToBottom(): void {
+  unreadTimeline.programmaticScroll();
   if (!messagesElement.value) return;
   const element = messagesElement.value;
   const previousScrollBehavior = element.style.scrollBehavior;
@@ -921,6 +943,7 @@ function isMeasurableScrollViewport(element: HTMLElement): boolean {
 function setInstantScrollTop(element: HTMLElement, scrollTop: number): void {
   const previousScrollBehavior = element.style.scrollBehavior;
   element.style.scrollBehavior = "auto";
+  unreadTimeline.programmaticScroll();
   element.scrollTop = scrollTop;
   element.style.scrollBehavior = previousScrollBehavior;
 }
@@ -946,11 +969,12 @@ function revealOrScrollToMessage(messageId: string | null): void {
   if (!scrollToMessage(messageId)) emit("reveal-message", messageId);
 }
 
-function scrollToMessage(messageId: string | null): boolean {
+function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "smooth"): boolean {
+  unreadTimeline.programmaticScroll();
   if (!messageId || !messagesElement.value) return false;
   const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
   if (!target) return false;
-  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.scrollIntoView({ behavior, block: "center" });
   target.classList.add("jump-target");
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
   return true;
@@ -978,3 +1002,8 @@ function newestMessage(messages: readonly DesktopRoomMessage[]): DesktopRoomMess
 }
 
 </script>
+
+<style scoped>
+.room-explicit-unread { display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
+.room-explicit-unread::before, .room-explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
+</style>
