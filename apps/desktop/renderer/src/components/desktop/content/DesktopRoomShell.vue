@@ -482,7 +482,6 @@ import { useDesktopRoomGitHubEvents } from "./room-shell/useDesktopRoomGitHubEve
 import { useDesktopRoomMessages } from "./room-shell/useDesktopRoomMessages";
 import {
   useDesktopRoomPreferences,
-  watchRoomNotifications,
 } from "./room-shell/useDesktopRoomPreferences";
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -789,7 +788,8 @@ const {
   toggleNotifications,
   playRoomSound,
   showRoomNotification,
-} = useDesktopRoomPreferences();
+  watchRoomNotifications,
+} = useDesktopRoomPreferences(() => props.room.identifier);
 
 const {
   sendingMessage,

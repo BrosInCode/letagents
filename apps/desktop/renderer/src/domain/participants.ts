@@ -139,6 +139,7 @@ export function roomMentionCandidates(
     .filter((participant) => participant.displayName.toLowerCase() !== "everyone"));
   const mentionableParticipants = allMentionableParticipants.filter((participant) => [
       participant.displayName,
+      ...(participant.kind === "human" ? [participant.githubLogin] : []),
       participant.ownerLabel,
       ownerLabelFromActor(participant.actorLabel),
     ].some((value) => normalizeDisplayName(value).toLowerCase().includes(normalizedQuery)));
@@ -154,7 +155,7 @@ export function roomMentionCandidates(
       (agentDisplayNameCounts.get(participant.displayName.toLowerCase()) || 0) > 1;
     const insertText = participant.kind === "agent"
       ? agentMentionInsertText(participant, duplicateDisplayName)
-      : participant.displayName;
+      : participant.githubLogin || participant.displayName;
     if (!insertText) return [];
     return [{
       participantKey: participant.participantKey,

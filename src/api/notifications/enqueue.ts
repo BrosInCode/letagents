@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { PERSON_MENTION_START, PERSON_MENTION_END } from "../../../shared/room-notification-preferences.mjs";
 
 import type { MessageCreateTransaction } from "../db/messages/create.js";
 import type { MessageRow } from "../db/types.js";
@@ -51,8 +52,19 @@ export async function enqueueDesktopPushNotifications(
       AND recent.room_id = ${message.room_id}
       AND recent.archived = FALSE
     INNER JOIN rooms AS room ON room.id = ${message.room_id}
+    LEFT JOIN account_room_notification_preferences AS preference
+      ON preference.account_id = device.account_id AND preference.room_id = ${message.room_id}
+    INNER JOIN accounts AS account ON account.id = device.account_id
     WHERE device.enabled = TRUE
       AND (${message.publisher_account_id}::text IS NULL OR device.account_id <> ${message.publisher_account_id})
+      AND (preference.snoozed_until IS NULL OR preference.snoozed_until <= statement_timestamp())
+      AND CASE COALESCE(preference.level, 'all')
+        WHEN 'all' THEN TRUE
+        WHEN 'mentions' THEN ${message.text} ~* (
+          ${PERSON_MENTION_START} || REGEXP_REPLACE(account.login, '([^A-Za-z0-9_-])', ${String.raw`\\\1`}, 'g') || ${PERSON_MENTION_END}
+        )
+        ELSE FALSE
+      END
     ON CONFLICT (device_id, room_id, message_number) DO NOTHING
   `);
 }

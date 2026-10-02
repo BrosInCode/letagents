@@ -17,6 +17,7 @@ import { publishWakeRuleInvalidation } from '../roomWakeRuleInvalidation'
 import { roomPath } from './api'
 import { isVisibleRoomMessage } from './identity'
 import { playNotificationSound } from './sound'
+import { roomNotificationPreferences } from './notificationPreferences'
 import type {
   RoomMessage,
   RoomReasoningSession,
@@ -508,7 +509,9 @@ export function createRoomStream(
           if (!isVisibleRoomMessage(message)) return
           if (!handlers.appendMessage(message)) return
 
-          playNotificationSound()
+          void roomNotificationPreferences.allowsAfterRead(roomIdentifier, message.text).then((allowed) => {
+            if (allowed && isCurrentSource()) playNotificationSound()
+          })
           const source = (message.source || '').toLowerCase()
           const sender = (message.sender || '').toLowerCase()
 

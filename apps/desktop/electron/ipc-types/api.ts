@@ -15,6 +15,7 @@ export interface DesktopRoomMessageSearchPage { terms: string[]; messages: Deskt
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
 import type { DesktopAccountActivityState } from "./account-activity.js";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
+import type { RoomNotificationPreferenceChange, RoomNotificationPreferenceEntry, RoomNotificationPreferenceList } from "../../../../shared/room-notification-preferences.mjs";
 import type { WakeRule, WakeRulePage } from "../../../../shared/wake-rules.mjs";
 import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
@@ -321,6 +322,9 @@ export interface DesktopApi {
     getGitHubEventFilter: (roomIdentifier: string) => Promise<GitHubRoomChatEventFilter>;
     setGitHubEventFilter: (roomIdentifier: string, enabledKinds: GitHubRoomChatEventKind[]) => Promise<GitHubRoomChatEventFilter>;
     getAgentGuidelines: (roomIdentifier: string) => Promise<RoomAgentGuidelines>;
+    listNotificationPreferences: () => Promise<RoomNotificationPreferenceList>;
+    getNotificationPreference: (identifier: string) => Promise<RoomNotificationPreferenceEntry>;
+    setNotificationPreference: (identifier: string, change: RoomNotificationPreferenceChange) => Promise<RoomNotificationPreferenceEntry>;
     setAgentGuidelines: (roomIdentifier: string, guidelines: string) => Promise<RoomAgentGuidelines>;
     getWakeRules: (roomIdentifier: string) => Promise<WakeRulePage>;
     cancelWakeRule: (roomIdentifier: string, ruleId: string) => Promise<WakeRule>;
