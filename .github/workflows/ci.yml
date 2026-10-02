@@ -270,6 +270,9 @@ jobs:
       - name: Test room message search
         run: node --import tsx --test src/api/__tests__/message-search-routes.test.ts src/api/__tests__/message-search-db.test.ts src/api/__tests__/message-search-controller.test.ts
 
+      - name: Test ephemeral room typing and stream isolation
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-typing.test.ts src/api/__tests__/room-message-routes.test.ts src/api/__tests__/sse.test.ts src/api/__tests__/event-bridge.test.ts src/api/__tests__/event-bridge-domains.test.ts src/api/__tests__/event-bridge-pg.test.ts
+
       - name: Run message attachment tests
         run: >-
           node

@@ -1,0 +1,35 @@
+import { computed, onScopeDispose, ref, watch, type Ref } from 'vue'
+import { createTypingDisplay, createTypingSender, TYPING } from '../../../../shared/room-typing.mjs'
+import { roomPath } from './room/api'
+import { useAuth } from './useAuth'
+
+const listeners = new Set<(room: string, signal: unknown) => void>()
+export function receiveRoomTyping(room: string, signal: unknown = null) {
+  for (const listener of listeners) listener(room, signal)
+}
+
+export function useRoomTyping(room: Ref<string>) {
+  const auth = useAuth()
+  const self = computed(() => auth.isSignedIn.value ? auth.user.value?.id ?? null : null)
+  const label = ref('')
+  if (typeof window === 'undefined') return { label, input: (_nonempty: boolean) => {}, stop: () => {} }
+  const receiver = createTypingDisplay(value => { label.value = value })
+  let target = room.value
+  const sender = createTypingSender({ clientId: crypto.randomUUID(), send: input => {
+    if (!target || !self.value) return
+    return fetch(`${roomPath(target)}/typing`, { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+      signal: AbortSignal.timeout(TYPING.interval), keepalive: true })
+  } })
+  const clear = () => receiver.clear()
+  const receive = (identifier: string, signal: unknown) => {
+    if (identifier !== target || !self.value) return
+    if (signal === null) clear(); else receiver.receive(signal, self.value)
+  }
+  listeners.add(receive)
+  watch([room, self], () => { sender.stop(); clear(); target = room.value }, { flush: 'sync' })
+  const leave = () => { sender.stop(); clear() }
+  window.addEventListener('pagehide', leave)
+  onScopeDispose(() => { leave(); listeners.delete(receive); window.removeEventListener('pagehide', leave) })
+  return { label, input: (nonempty: boolean) => { if (self.value) sender.input(nonempty) }, stop: sender.stop }
+}

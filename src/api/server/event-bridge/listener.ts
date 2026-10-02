@@ -1,3 +1,4 @@
+import { ROOM_TYPING } from "../../../../shared/room-typing.mjs";
 import type { PoolClient } from "pg";
 
 import { pool } from "../../db/client.js";
@@ -94,6 +95,13 @@ async function connectListener(generation: number): Promise<void> {
     });
     const connectedReceiver = notificationReceiver;
     const onNotification = (notification: { channel: string; payload?: string }) => {
+      if (notification.channel === ROOM_TYPING) {
+        try {
+          const envelope = JSON.parse(notification.payload ?? "");
+          if (envelope?.lane === ROOM_TYPING) void dispatchBridgeNotification(envelope);
+        } catch { /* Ephemeral hints do not cause durable gap repairs. */ }
+        return;
+      }
       if (notification.channel === PRESENCE_CHANGE_CHANNEL) {
         // The payload is a room id written by our own trigger; bound it anyway.
         const roomId = notification.payload;
@@ -126,6 +134,7 @@ async function connectListener(generation: number): Promise<void> {
       [],
       BRIDGE_CLIENT_ACQUIRE_TIMEOUT_MS,
     );
+    await queryBridgeClient(connectedClient, `LISTEN ${ROOM_TYPING}`, [], BRIDGE_CLIENT_ACQUIRE_TIMEOUT_MS);
     await queryBridgeClient(
       connectedClient,
       `LISTEN ${PRESENCE_CHANGE_CHANNEL}`,

@@ -1,3 +1,4 @@
+import { ROOM_TYPING, parseTypingSignal } from "../../../../shared/room-typing.mjs";
 import type {
   DesktopManagedAgentSession,
   DesktopRentalActivityEvent,
@@ -695,6 +696,15 @@ function handleRoomStreamFrame(
   data: string,
   eventCursor: string | null,
 ): void {
+  if (eventName === ROOM_TYPING) {
+    try {
+      const signal = parseTypingSignal(JSON.parse(data));
+      if (signal && signal.room_id === (activeRoomStream?.canonicalRoomIdentifier ?? roomIdentifier)) {
+        emitRoomStreamEvent({ type: "typing", roomIdentifier, signal }, { deliverToManagedAgents: false });
+      }
+    } catch { /* Malformed ephemeral hints are ignored, without cursor or gap changes. */ }
+    return;
+  }
   if (!data.trim()) {
     repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
@@ -1020,7 +1030,7 @@ function queueOrHandleRoomStreamFrame(
   data: string,
   eventCursor: string | null,
 ): void {
-  if (!stream.deferSseFrames) {
+  if (eventName === ROOM_TYPING || !stream.deferSseFrames) {
     handleRoomStreamFrame(stream.roomIdentifier, eventName, data, eventCursor);
     return;
   }
@@ -1582,6 +1592,7 @@ async function openDesktopRoomStream(
     const streamParams = new URLSearchParams();
     if (stream.lastMessageId) streamParams.set("after", stream.lastMessageId);
     streamParams.append("stream_capability", "resource_invalidation_v1");
+    streamParams.append("stream_capability", ROOM_TYPING);
     const response = await fetch(
       `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/stream?${streamParams.toString()}`,
       {

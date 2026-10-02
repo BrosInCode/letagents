@@ -229,3 +229,11 @@ test("dispatcher: apiFetch routes through a shared keep-alive dispatcher", async
 
   recorder.restore();
 });
+
+test("204 typing acknowledgments do not attempt to parse an empty JSON body", async () => {
+  const previous = globalThis.fetch;
+  globalThis.fetch = async () => new Response(null, { status: 204 });
+  try {
+    assert.equal(await apiFetch<void>("/rooms/room/typing", { method: "POST" }), undefined);
+  } finally { globalThis.fetch = previous; }
+});

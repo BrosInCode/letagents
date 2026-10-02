@@ -627,6 +627,7 @@ export interface DesktopLocalRoomMutationResult {
 }
 
 export type DesktopRoomStreamEvent =
+  | { type: "typing"; roomIdentifier: string; signal: import("../../../../shared/room-typing.mjs").TypingSignal }
   | {
       type: "open";
       roomIdentifier: string;

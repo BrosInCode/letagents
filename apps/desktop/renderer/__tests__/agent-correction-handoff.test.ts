@@ -192,7 +192,7 @@ function withComposer(run: (composer: ReturnType<typeof mountComposer>) => void)
 }
 
 function mountComposer() {
-  Object.assign(globalThis, { window: { letagentsDesktop: {} } });
+  Object.assign(globalThis, { window: Object.assign(new EventTarget(), { letagentsDesktop: {} }) });
   const emitted: Array<[string, ...unknown[]]> = [];
   const props = reactive({
     attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], messageNamespace: "room-a",

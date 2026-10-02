@@ -35,24 +35,27 @@
           :preview-text="replyPreviewText"
           @clear="emit('clearReply')"
         />
-        <textarea
-          ref="textareaEl"
-          class="message-textarea"
-          placeholder="Write a message…"
-          aria-label="Write a message"
-          v-model="text"
-          role="combobox"
-          aria-autocomplete="list"
-          :aria-expanded="mentionMenuOpen"
-          aria-controls="composer-mention-listbox"
-          :aria-activedescendant="mentionMenuOpen ? `composer-mention-option-${filteredMentionCandidates[mentionActiveIndex]?.key}` : undefined"
-          @input="syncMentionContext"
-          @click="syncMentionContext"
-          @select="syncMentionContext"
-          @keydown="handleKeyDown"
-          @keyup="handleKeyUp"
-          rows="1"
-        />
+        <div class="composer-typing-input">
+          <TypingIndicator :label="typing.label.value" />
+          <textarea
+            ref="textareaEl"
+            class="message-textarea"
+            placeholder="Write a message…"
+            aria-label="Write a message"
+            v-model="text"
+            role="combobox"
+            aria-autocomplete="list"
+            :aria-expanded="mentionMenuOpen"
+            aria-controls="composer-mention-listbox"
+            :aria-activedescendant="mentionMenuOpen ? `composer-mention-option-${filteredMentionCandidates[mentionActiveIndex]?.key}` : undefined"
+            @input="handleTypingInput"
+            @click="syncMentionContext"
+            @select="syncMentionContext"
+            @keydown="handleKeyDown"
+            @keyup="handleKeyUp"
+            rows="1"
+          />
+        </div>
         <AttachmentTray
           v-if="attachmentDrafts.length || attachmentError || attachmentStatusSummary"
           :attachments="attachmentDrafts"
@@ -152,6 +155,8 @@
 </template>
 
 <script setup lang="ts">
+import TypingIndicator from '../../../../../shared/ui/TypingIndicator.vue'
+import { useRoomTyping } from '@/composables/roomTyping'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
   type OutgoingMessageAttachment,
@@ -212,6 +217,9 @@ const textareaEl = ref<HTMLTextAreaElement | null>(null)
 const isSending = ref(false)
 
 const roomIdentifierRef = computed(() => props.roomIdentifier)
+const typing = useRoomTyping(roomIdentifierRef)
+watch(text, value => { if (!value) typing.stop() })
+function handleTypingInput() { typing.input(Boolean(text.value.trim())); syncMentionContext() }
 const disabledRef = computed(() => props.disabled)
 const attachmentsAvailable = computed(() => props.attachmentsEnabled !== false)
 
@@ -335,6 +343,7 @@ async function handleSend() {
     const sent = await submitComposerMessage(trimmed, kind, props.replyTo?.id || null, buildOutgoingAttachments())
     if (!sent) return
 
+    typing.stop()
     text.value = ''
     clearAttachments()
     attachmentError.value = ''

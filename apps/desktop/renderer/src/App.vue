@@ -382,6 +382,7 @@
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { invalidateRoomWakeRules } from "./composables/useRoomWakeRules";
 import { invalidateRoomMessagePins, setMessagePinViewer } from "./composables/useRoomMessagePins";
+import { receiveRoomTyping, setTypingAccount } from "./composables/useRoomTyping";
 import { invalidateRoomMessageReactions, setMessageReactionViewer } from "./composables/useRoomMessageReactions";
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
@@ -523,6 +524,8 @@ watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? nu
   setDesktopMessageDraftAccount, { immediate: true, flush: "sync" });
 watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null,
   (account) => { setMessageReactionViewer(account); setMessagePinViewer(account); }, { immediate: true, flush: "sync" });
+watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
+  setTypingAccount, { immediate: true, flush: "sync" });
 const sessionGeneration = ref(0);
 const authDialogOpen = ref(false);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
@@ -1419,6 +1422,8 @@ const {
 });
 
 function handleDesktopRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+  if (event.type === "typing") { receiveRoomTyping(event.roomIdentifier, event.signal); return; }
+  if (event.type === "open" || event.type === "error" || event.type === "session_disconnect") receiveRoomTyping(event.roomIdentifier);
   if (event.type === "resource_invalidation") {
     if (event.resource === "wake_rules") invalidateRoomWakeRules(event.roomIdentifier);
     else if (event.resource === "message_pins") invalidateRoomMessagePins(event.roomIdentifier);
