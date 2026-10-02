@@ -285,6 +285,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  messagePermalinkRequestId += 1
   window.visualViewport?.removeEventListener('resize', syncRoomViewport)
   window.visualViewport?.removeEventListener('scroll', syncRoomViewport)
 })
@@ -524,54 +525,53 @@ watch(activeTab, async (tab) => {
   }
 })
 
-let messagePermalinkTargetId: string | null = null
-let messagePermalinkRunning = false
+let messagePermalinkRequestId = 0
 
 async function handleMessagePermalink(messageId: string) {
   if (!isValidMessageId(messageId)) return
-  if (messagePermalinkRunning && messagePermalinkTargetId === messageId) return
-
   const currentRoomId = room.value?.identifier
-  if (!currentRoomId) return
+  const routeRoomId = route.params.roomId
+  if (!currentRoomId || (room.value?.requestedIdentifier ?? currentRoomId) !== routeRoomId
+    || route.query.message !== messageId) return
+  const requestId = ++messagePermalinkRequestId
 
-  messagePermalinkRunning = true
-  messagePermalinkTargetId = messageId
-
+  let preflightNotFound = false
   try {
-    let preflightNotFound = false
-    try {
-      const response = await apiFetch(`${roomPath(currentRoomId)}/messages/${encodeURIComponent(messageId)}`)
-      const targetMessage = (response?.message ?? response) as RoomMessage | null
-      if (!targetMessage || !isVisibleRoomMessage(targetMessage)) {
-        preflightNotFound = true
-      }
-    } catch (error: any) {
-      if (error?.status === 404) {
-        preflightNotFound = true
-      }
+    const response = await apiFetch(`${roomPath(currentRoomId)}/messages/${encodeURIComponent(messageId)}`)
+    const targetMessage = (response?.message ?? response) as RoomMessage | null
+    if (!targetMessage || !isVisibleRoomMessage(targetMessage)) {
+      preflightNotFound = true
     }
-
-    if (preflightNotFound) {
-      toast.info('That message is not available.')
-      void router.replace({ query: { ...route.query, message: undefined } })
-      return
+  } catch (error: any) {
+    if (error?.status === 404) {
+      preflightNotFound = true
     }
-
-    setActiveTab('chat')
-    roomTabPanelsRef.value?.openMessageInChat(messageId)
-    void router.replace({ query: { ...route.query, message: undefined } })
-  } finally {
-    messagePermalinkRunning = false
   }
+
+  if (requestId !== messagePermalinkRequestId
+    || room.value?.identifier !== currentRoomId
+    || route.params.roomId !== routeRoomId
+    || route.query.message !== messageId) return
+
+  if (preflightNotFound) {
+    toast.info('That message is not available.')
+    void router.replace({ query: { ...route.query, message: undefined } })
+    return
+  }
+
+  setActiveTab('chat')
+  roomTabPanelsRef.value?.openMessageInChat(messageId)
+  void router.replace({ query: { ...route.query, message: undefined } })
 }
 
 watch(
-  () => [route.query.message, isConnected.value, messagesLoaded.value] as const,
+  [() => route.query.message, isConnected, messagesLoaded, () => route.params.roomId],
   ([messageQuery, connected, loaded]) => {
+    messagePermalinkRequestId += 1
     if (!connected || !loaded || typeof messageQuery !== 'string' || !isValidMessageId(messageQuery)) return
     void handleMessagePermalink(messageQuery)
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
 </script>
 

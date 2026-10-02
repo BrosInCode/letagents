@@ -834,6 +834,8 @@ function toggleZenMode(): void {
 }
 function openRoomSwitcher(): void {
   if (props.batchActionBusy || props.selectionActive) return;
+  cancelPendingSwitcherFocus?.();
+  cancelPendingSwitcherFocus = null;
   closeRoomContextMenu();
   closeBackgroundContextMenu();
   switcherOpen.value = true;
@@ -842,15 +844,16 @@ let cancelPendingSwitcherFocus: (() => void) | null = null;
 
 function selectSwitchedRoom(entry: RoomEntry): void {
   switcherOpen.value = false;
-  emit("select-entry", entry);
   cancelPendingSwitcherFocus?.();
+  emit("select-entry", entry);
   cancelPendingSwitcherFocus = coordinateRoomSwitcherFocus({
     currentRoomId: () => props.activeEntry.id,
     chosenRoomId: entry.id,
-    startFocus: () => focusSwitchedRoomOnceRendered(),
+    startFocus: (isCurrent, onComplete) => focusSwitchedRoomOnceRendered({ isCurrent, onComplete }),
     watchRoomId: (onChange) => watch(
       () => props.activeEntry.id,
       (newId) => { onChange(newId); },
+      { flush: "sync" },
     ),
     nextTick,
   });

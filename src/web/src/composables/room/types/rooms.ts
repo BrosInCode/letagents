@@ -45,6 +45,8 @@ export interface GitRoomInfo {
 }
 
 export interface RoomInfo {
+  /** Route locator accepted by the join, before resolving aliases to identifier. */
+  requestedIdentifier?: string
   projectId: string
   identifier: string
   code: string
