@@ -1,0 +1,193 @@
+/* ─── Shared Fenced Code Block & Syntax Highlighting Styles ─── */
+
+.fenced-code-block {
+  position: relative;
+  max-width: 100%;
+  margin: 0.75em 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--code-bg, color-mix(in srgb, var(--bg) 88%, transparent));
+  color: var(--code-text, var(--text));
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.fenced-code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--code-header-bg, color-mix(in srgb, var(--text) 4%, transparent));
+  border-bottom: 1px solid var(--border);
+  user-select: none;
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  line-height: 1.2;
+}
+
+.fenced-code-block-lang {
+  color: var(--code-lang, var(--text-secondary));
+  font-weight: 500;
+  text-transform: lowercase;
+}
+
+.fenced-code-block-lang[data-lang]::before {
+  content: attr(data-lang);
+}
+
+.fenced-code-block-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--code-copy-bg, transparent);
+  color: var(--code-copy-text, var(--text-secondary));
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: color var(--duration-fast, 150ms) var(--ease-out, ease),
+              background var(--duration-fast, 150ms) var(--ease-out, ease),
+              border-color var(--duration-fast, 150ms) var(--ease-out, ease);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .fenced-code-block-copy:hover {
+    background: var(--accent-hover, rgba(255, 255, 255, 0.08));
+    color: var(--text);
+    border-color: var(--border-strong);
+  }
+}
+
+.fenced-code-block-copy:focus-visible {
+  outline: 2px solid var(--blue, #3b82f6);
+  outline-offset: 1px;
+}
+
+.fenced-code-block-copy::before {
+  content: "Copy";
+}
+
+.fenced-code-block-copy[data-copied="true"] {
+  color: var(--green-text, #4ade80);
+  border-color: color-mix(in srgb, var(--green-text, #4ade80) 40%, transparent);
+}
+
+.fenced-code-block-copy[data-copied="true"]::before {
+  content: "Copied";
+}
+
+.fenced-code-block-copy[data-copied="error"] {
+  color: var(--red-text, #f87171);
+  border-color: color-mix(in srgb, var(--red-text, #f87171) 40%, transparent);
+}
+
+.fenced-code-block-copy[data-copied="error"]::before {
+  content: "Failed";
+}
+
+/*
+ * Eleven different surfaces across desktop and web (e.g. chat messages, long message reader,
+ * board task inspector, thread panel, events view, markdown editor preview, agent inspector)
+ * define conflicting styles for `pre` with varying selector specificity.
+ * The `!important` declarations below ensure the fenced code block pre maintains a clean,
+ * borderless, transparent container with standard monospace sizing across all surfaces.
+ */
+.fenced-code-block pre {
+  margin: 0 !important;
+  padding: 10px 14px !important;
+  overflow-x: auto !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  line-height: 1.55;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  white-space: pre;
+}
+
+.fenced-code-block code.fenced-code-block-content {
+  display: block;
+  padding: 0;
+  overflow-x: visible;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  white-space: pre;
+}
+
+/* ─── Syntax Highlighting Token Mappings ─── */
+.hljs-comment,
+.hljs-quote {
+  color: var(--code-comment, var(--text-secondary));
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-subst {
+  color: var(--code-keyword, var(--task-assigned));
+}
+
+.hljs-string,
+.hljs-doctag,
+.hljs-regexp {
+  color: var(--code-string, var(--green-text));
+}
+
+.hljs-number,
+.hljs-literal {
+  color: var(--code-number, var(--amber-text));
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-title.class_,
+.hljs-section {
+  color: var(--code-function, var(--blue-text));
+}
+
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attr,
+.hljs-attribute {
+  color: var(--code-variable, var(--task-in-review));
+}
+
+.hljs-type,
+.hljs-built_in,
+.hljs-name {
+  color: var(--code-type, var(--red-text));
+}
+
+.hljs-meta,
+.hljs-tag {
+  color: var(--code-comment, var(--text-secondary));
+}
+
+.hljs-addition {
+  color: var(--code-string, var(--green-text));
+  background-color: var(--green-dim, rgba(34, 197, 94, 0.12));
+}
+
+.hljs-deletion {
+  color: var(--code-type, var(--red-text));
+  background-color: var(--red-dim, rgba(239, 68, 68, 0.12));
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: bold;
+}

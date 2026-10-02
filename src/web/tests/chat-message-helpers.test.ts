@@ -77,7 +77,7 @@ test('renderMessageContent renders safe block markdown', () => {
       'const safe = "<ok>"',
       '```',
     ].join('\n')),
-    '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><pre><code class="language-ts">const safe = &quot;&lt;ok&gt;&quot;</code></pre>',
+    '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><div class="fenced-code-block"><div class="fenced-code-block-header"><span class="fenced-code-block-lang" data-lang="ts"></span><button type="button" class="fenced-code-block-copy" data-code-copy aria-label="Copy code"></button></div><pre><code class="fenced-code-block-content language-ts"><span class="hljs-keyword">const</span> safe = <span class="hljs-string">&quot;&lt;ok&gt;&quot;</span></code></pre></div>',
   )
 })
 

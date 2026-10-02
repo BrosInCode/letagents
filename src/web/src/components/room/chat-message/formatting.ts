@@ -2,6 +2,7 @@ import {
   attentionResponseDisplayText,
   attentionResponseHandle,
 } from '../../../../../../shared/room-knowledge.mjs'
+import { webHighlighter } from './code-highlighter'
 
 /**
  * The text people see for a room message. A person's Needs-you answer carries
@@ -137,8 +138,7 @@ function renderMessageBlocks(value: string, quoteDepth = 0): string {
         index += 1
       }
       if (index < lines.length) index += 1
-      const language = fence[1] ? ` class="language-${escapeAttribute(fence[1])}"` : ''
-      blocks.push(`<pre><code${language}>${escapeHtml(code.join('\n'))}</code></pre>`)
+      blocks.push(webHighlighter.renderCodeBlock(code.join('\n'), fence[1]))
       continue
     }
 

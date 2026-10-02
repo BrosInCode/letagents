@@ -1401,7 +1401,7 @@ test("a Needs-you answer that opens with a block keeps the block apart from the 
     text: "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\n```sh\nnpm test\n```",
   }).html;
   assert.match(html, /<p><span class="mention-token">@SummitMisty<\/span><\/p>/);
-  assert.match(html, /<pre[^>]*><code[^>]*>npm test/);
+  assert.match(html, /<pre[^>]*>[\s\S]*<code[^>]*>npm <span class="hljs-built_in">test<\/span><\/code>/);
 });
 
 test("replies to a Needs-you answer preview it by agent name, in the message and in the composer", async () => {

@@ -81,7 +81,7 @@ test('an answer that opens with a block keeps the block apart from the mention',
   }))
   const fence = await render('```sh\nnpm test\n```')
   assert.match(fence, /<p><span class="mention-token">@SummitMisty<\/span><\/p>/)
-  assert.match(fence, /<pre[^>]*><code[^>]*>npm test/)
+  assert.match(fence, /<pre[^>]*>[\s\S]*<code[^>]*>npm <span class="hljs-built_in">test<\/span><\/code>/)
   assert.match(await render('- first\n- second'), /<ul[^>]*>\s*<li[^>]*>first<\/li>/)
   assert.match(await render('# Plan'), /<h[1-6][^>]*>Plan<\/h[1-6]>/)
 })
