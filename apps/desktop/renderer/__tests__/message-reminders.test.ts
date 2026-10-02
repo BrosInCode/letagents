@@ -46,7 +46,10 @@ test('real submenu handlers open, move focus, return to parent and send the chos
  const buttons=[0,1,2,3].map(i=>({focus:()=>{focus.push(String(i));(document as any).activeElement=buttons[i];}}));
  vm.trigger.value={getBoundingClientRect:()=>({right:790,top:590}),focus:()=>focus.push('parent')};vm.menu.value={querySelector:()=>buttons[0],querySelectorAll:()=>buttons};
  vm.show();await nextTick();assert.equal(vm.open.value,true);assert.equal(focus.at(-1),'0');assert.deepEqual(vm.position.value,{left:'592px',top:'410px'});
- vm.keydown({key:'ArrowDown',preventDefault(){}});assert.equal(focus.at(-1),'1');
+ for(let i=0;i<buttons.length;i++) {
+   buttons[i].focus();vm.keydown({key:'ArrowDown',preventDefault(){}});assert.equal(focus.at(-1),String((i+1)%buttons.length));
+   vm.keydown({key:'ArrowUp',preventDefault(){}});assert.equal(focus.at(-1),String(i));
+ }
  vm.keydown({key:'ArrowLeft',preventDefault(){}});assert.equal(vm.open.value,false);assert.equal(focus.at(-1),'parent');
  vm.show();await nextTick();vm.keydown({key:'Escape',preventDefault(){}});assert.equal(focus.at(-1),'parent');
  await vm.schedule('1h');assert.equal(sent.length,1);assert.equal(sent[0][0],'room');assert.equal(sent[0][1],'msg_12');assert.ok(Math.abs(Date.parse(sent[0][2])-Date.now()-3600000)<1000);assert.equal(emitted[0][0],'scheduled');

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createRenderer, createSSRApp, h, nextTick, reactive, ssrContextKey } from "vue";
+import { createRenderer, createSSRApp, h, markRaw, nextTick, provide, reactive, ref, ssrContextKey } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 import {
@@ -89,9 +89,10 @@ test("thread-context messages expose their DOM contract through the shared compo
   assert.doesNotMatch(html, /room-message-provenance[^>]*data-kind="agent"/);
 });
 
-test("context-menu dismissal restores focus only for keyboard and copy actions", () => {
+test("context-menu dismissal restores focus after Escape, copy and completed actions", () => {
   assert.equal(shouldRestoreContextMenuFocus("escape"), true);
   assert.equal(shouldRestoreContextMenuFocus("copy"), true);
+  assert.equal(shouldRestoreContextMenuFocus("complete"), true);
   assert.equal(shouldRestoreContextMenuFocus("outside"), false);
   assert.equal(shouldRestoreContextMenuFocus("action"), false);
 
@@ -297,4 +298,136 @@ test("board notification renders readable copy while keeping its canonical body 
   assert.match(html, /Tests and CI/);
   assert.doesNotMatch(html, /owner\/lumen|bi_123|board_intent_id/);
   assert.match(message.text, /board_intent_id/);
+});
+
+// Execute the integrated menu and its SSR template; browser geometry is supplied
+// separately because this suite has no layout engine.
+class MenuAuditElement {
+  isConnected = true;
+  disabled = false;
+  href: string | null = null;
+  constructor(readonly label = '') { markRaw(this); }
+  focus() { if (!this.disabled) (document as any).activeElement = this; }
+  closest(selector: string) { return this.href && (selector.includes('a[') || selector.includes('button, a')) ? this : null; }
+  getAttribute(name: string) { return name === 'href' ? this.href : null; }
+}
+async function desktopMenuAudit(t: any, flags = 63, extra: Record<string, unknown> = {}) {
+  const originals = { window: globalThis.window, document: globalThis.document, Element: globalThis.Element, HTMLElement: globalThis.HTMLElement };
+  const doc: any = { activeElement: null, querySelectorAll: () => [] };
+  Object.assign(globalThis, { document: doc, Element: MenuAuditElement, HTMLElement: MenuAuditElement,
+    window: { innerWidth: 800, innerHeight: 600, location: { href: 'https://letagents.chat/' }, setTimeout() { return 0; }, addEventListener() {}, removeEventListener() {} } });
+  const pins = await vite.ssrLoadModule('/renderer/src/composables/useRoomMessagePins.ts');
+  const reactions = await vite.ssrLoadModule('/renderer/src/composables/useRoomMessageReactions.ts');
+  const reminders = await vite.ssrLoadModule('/renderer/src/composables/useMessageReminders.ts');
+  const { unreadMenuKey } = await vite.ssrLoadModule('/@fs' + fileURLToPath(new URL('../../../../shared/room-unread-client.ts', import.meta.url)));
+  reminders.setReminderAccount(flags & 8 ? 'person' : null);
+  t.after(() => { reminders.setReminderAccount(null); Object.assign(globalThis, originals); });
+  const invoker = new MenuAuditElement('message');
+  const target = new MenuAuditElement();
+  if (flags & 1) target.href = 'https://example.com/';
+  const props = { message: { id: 'msg_12', text: 'Message', sender: 'Ada', timestamp: '2026-10-02T00:00:00Z', attachments: [], reactions: [], ...extra },
+    roomIdentifier: flags & 32 ? 'room' : 'local_room', threadSummary: { count: 0, unreadCount: 0, participants: [] }, activeThreadRoot: false, highlightQuery: '', searchActive: false };
+  const events: any[] = [];
+  let vm: any;
+  const OpenChat = { ...(DesktopChatMessage as any), setup(props: any, context: any) {
+    vm = (DesktopChatMessage as any).setup(props, context);
+    vm.openContextMenu({ target, currentTarget: invoker, clientX: 799, clientY: 599, preventDefault() {} });
+    return vm;
+  } };
+  const app = createSSRApp({ setup() {
+    pins.provideRoomMessagePins({ canPin: ref(Boolean(flags & 2)), state: ref({ pending: extra.pinPending ? 'msg_12' : null }), isPinned: () => false, toggle: () => events.push('pin') });
+    reactions.provideRoomMessageReactions({ canReact: ref(Boolean(flags & 4)), reactionsFor: () => [], viewerReacted: () => false, track: () => () => {}, toggle() {} });
+    provide(unreadMenuKey, { client: { account: ref(flags & 16 ? 'person' : null), mark: () => events.push('unread') }, room: ref('room') });
+    return () => h(OpenChat, props);
+  } });
+  const context: any = {};
+  await renderToString(app, context);
+  const html = context.teleports?.body ?? '';
+  const rows = [...html.matchAll(/<button([^>]*role="menuitem"[^>]*)>([\s\S]*?)<\/button>/g)].map(match => {
+    const row = new MenuAuditElement(match[2].replace(/<[^>]+>/g, '').trim());
+    row.disabled = /\bdisabled\b/.test(match[1]);
+    return row;
+  });
+  const menu = markRaw({ querySelectorAll: (selector: string) => rows.filter(row => !selector.includes(':not(:disabled)') || !row.disabled) });
+  for (const row of rows) Object.assign(row, { parentElement: menu });
+  vm.firstContextMenuButton.value = rows[0];
+  doc.querySelectorAll = menu.querySelectorAll;
+  return { vm, rows, invoker: flags & 1 ? target : invoker, events, html, doc, reminders };
+}
+
+test('integrated desktop menu renders ordered rows and reserves height across all 64 feature configurations', async t => {
+  for (let flags = 0; flags < 64; flags++) await t.test(String(flags), async t => {
+    const { vm, rows, invoker } = await desktopMenuAudit(t, flags);
+    const expected = flags & 1 ? ['Open link in browser', 'Copy link', 'Message info'] : [
+      'Copy message', ...(flags & 32 ? ['Copy link to message'] : []), 'Quote reply', 'Reply in thread',
+      ...(flags & 8 && flags & 32 ? ['Remind me ›'] : []), ...(flags & 2 ? ['Pin message'] : []),
+      ...(flags & 4 ? ['Add reaction…'] : []), ...(flags & 16 ? ['Mark unread from here'] : []), 'Message info',
+    ];
+    assert.deepEqual(rows.map(row => row.label), expected);
+    // Current CSS: 32px minimum rows, 12px border/padding, 9px separator.
+    assert.ok(vm.contextMenuPosition.value.y + rows.length * 32 + 21 <= 592);
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].focus(); vm.focusContextMenuItem(1); assert.equal(document.activeElement, rows[(i + 1) % rows.length]);
+      vm.focusContextMenuItem(-1); assert.equal(document.activeElement, rows[i]);
+    }
+    vm.handleContextMenuKeydown({ key: 'Escape' }); await nextTick();
+    assert.equal(document.activeElement, invoker);
+  });
+});
+
+test('desktop keyboard navigation skips a pending disabled pin row', async t => {
+  const { vm, rows } = await desktopMenuAudit(t, 62, { pinPending: true });
+  const disabled = rows.findIndex(row => row.disabled);
+  assert.ok(disabled > 0);
+  rows[disabled - 1].focus(); vm.focusContextMenuItem(1);
+  assert.equal(document.activeElement, rows[disabled + 1]);
+});
+
+test('desktop non-navigation actions return focus to the message', async t => {
+  for (const action of ['pinFromContext', 'markUnreadFromContext', 'reminderScheduled']) await t.test(action, async t => {
+    const { vm, rows, invoker } = await desktopMenuAudit(t, 62);
+    rows.at(-1)!.focus();
+    vm[action]('2026-10-03T09:00:00Z'); await nextTick();
+    assert.equal(document.activeElement, invoker);
+  });
+});
+
+test('desktop parent navigation stays out of a separately open submenu', async t => {
+  const { vm, rows, doc } = await desktopMenuAudit(t, 62);
+  const nested = new MenuAuditElement('20 minutes');
+  // An open reminder submenu is a descendant of the parent menu, but has its
+  // own keyboard handler; it must not enter the parent's arrow-key sequence.
+  const reminderIndex = rows.findIndex(row => row.label === 'Remind me ›');
+  assert.ok(reminderIndex >= 0);
+  const descendants = [...rows.slice(0, reminderIndex + 1), nested, ...rows.slice(reminderIndex + 1)];
+  doc.querySelectorAll = () => descendants;
+  rows[reminderIndex].focus(); vm.focusContextMenuItem(1);
+  assert.equal(document.activeElement, rows[reminderIndex + 1]);
+});
+
+test('desktop link menu reserves only its rendered rows when reminders are available', async t => {
+  const { vm, invoker, reminders } = await desktopMenuAudit(t, 63);
+  const withReminders = vm.contextMenuPosition.value.y;
+  reminders.setReminderAccount(null);
+  vm.openContextMenu({ target: invoker, currentTarget: invoker, clientX: 799, clientY: 599, preventDefault() {} });
+  assert.equal(vm.contextMenuPosition.value.y, withReminders);
+});
+
+test('desktop copy restores focus while outside dismissal preserves the new focus target', async t => {
+  for (const action of ['copyFromContext', 'copyMessageLinkFromContext', 'closeContextMenuFromOutside']) await t.test(action, async t => {
+    const { vm, rows, invoker } = await desktopMenuAudit(t, 62);
+    rows[0].focus();
+    await vm[action](); await nextTick();
+    assert.equal(document.activeElement, action === 'closeContextMenuFromOutside' ? rows[0] : invoker);
+  });
+});
+
+test('desktop row conditions exclude outgoing messages, unconfirmed IDs and unread thread replies', async t => {
+  for (const message of [{ outgoing: { state: 'pending' } }, { id: 'pending:1' }, { threadRootId: 'msg_1', threadReplyToId: 'msg_1' }, { source: 'wake_rule' }]) await t.test(JSON.stringify(message), async t => {
+    const { vm, rows } = await desktopMenuAudit(t, 62, message);
+    if ('outgoing' in message) assert.deepEqual(rows, []);
+    if ('id' in message) for (const name of ['canCopyMessageLink', 'remindable', 'pinnable', 'reactable', 'canMarkUnread']) assert.equal(vm[name].value, false, name);
+    if ('threadRootId' in message) assert.equal(vm.canMarkUnread.value, false);
+    if ('source' in message) assert.equal(vm.reactable.value, false);
+  });
 });
