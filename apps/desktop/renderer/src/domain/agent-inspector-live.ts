@@ -1,4 +1,4 @@
-import type { DesktopAgentStreamEvent } from "../../../electron/ipc-types";
+import type { DesktopAgentStreamBatch, DesktopAgentStreamEvent } from "../../../electron/ipc-types";
 import type { AgentInspectorOverallState } from "./agent-inspector";
 
 /**
@@ -363,4 +363,19 @@ export function describeLiveToolCall(
     return { ...action(title, inputRecord, bareTool), ...(detail ? { detail: truncateDetail(detail) } : {}) };
   }
   return action(bareTool, inputRecord, bareTool);
+}
+
+/** Append a bounded native batch, retaining loss accounting across updates. */
+export function appendAgentInspectorLiveBatch(
+  feed: { events: DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number },
+  batch: DesktopAgentStreamBatch,
+  limit = 400,
+): typeof feed {
+  const priorEvents = batch.reset ? [] : feed.events;
+  const localOverflow = Math.max(0, priorEvents.length + batch.events.length - limit);
+  return {
+    events: batch.events.length ? [...priorEvents, ...batch.events].slice(-limit) : priorEvents,
+    ended: batch.ended,
+    droppedEvents: (batch.reset ? 0 : feed.droppedEvents) + Math.max(0, batch.droppedEvents) + localOverflow,
+  };
 }

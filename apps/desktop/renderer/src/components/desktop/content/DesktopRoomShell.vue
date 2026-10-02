@@ -371,6 +371,7 @@ import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { attentionResponseAgentNames } from "../../../domain/attention-response";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import { useAgentPauseRequests } from "../../../domain/agent-pause-requests";
+import { appendAgentInspectorLiveBatch } from "../../../domain/agent-inspector-live";
 import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import { roomMentionCandidates } from "../../../domain/participants";
@@ -558,9 +559,7 @@ const selectedAgentDetailRequestVersion = ref(0);
 const agentInspectorInitialTab = ref<"overview" | "live" | "work" | "workspace" | "diagnostics">("overview");
 const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
-// Cap the retained live-feed tail so a long turn can't grow the renderer
-// buffer without bound; matches the daemon's ephemeral ring buffer intent.
-const AGENT_LIVE_FEED_LIMIT = 400;
+let agentInspectorLiveIdentity: string | null = null;
 // Ephemeral live feed for the inspected agent's "Live" tab. Not persisted;
 // accumulates raw stream events for the focused entry only, reset on focus
 // change and inspector close.
@@ -1138,18 +1137,7 @@ onMounted(() => {
     // Only accumulate for the agent whose inspector is focused; a batch for a
     // stale focus (raced focus change) is ignored.
     if (batch.entryId !== selectedAgentDetailProjection.value?.entryId) return;
-    const priorEvents = batch.reset ? [] : agentInspectorLiveFeed.value.events;
-    const localOverflow = Math.max(0, priorEvents.length + batch.events.length - AGENT_LIVE_FEED_LIMIT);
-    const events = batch.events.length
-      ? [...priorEvents, ...batch.events].slice(-AGENT_LIVE_FEED_LIMIT)
-      : priorEvents;
-    agentInspectorLiveFeed.value = {
-      events,
-      ended: batch.ended,
-      droppedEvents: (batch.reset ? 0 : agentInspectorLiveFeed.value.droppedEvents)
-        + Math.max(0, batch.droppedEvents)
-        + localOverflow,
-    };
+    agentInspectorLiveFeed.value = appendAgentInspectorLiveBatch(agentInspectorLiveFeed.value, batch);
   }) || null;
 });
 
@@ -1992,6 +1980,9 @@ function closeAgentDetail(): void {
 function openAgentInspectorLive(): void {
   const projection = selectedAgentDetailProjection.value;
   if (!projection) return;
+  const identity = JSON.stringify([projection.entryId, projection.entry.agentSessionId, projection.entry.executionGenerationId]);
+  if (agentInspectorLiveIdentity === identity) return;
+  agentInspectorLiveIdentity = identity;
   agentInspectorLiveFeed.value = { events: [], ended: false, droppedEvents: 0 };
   void loadAgentInspectorProviders();
   openAgentInspectorWork();
@@ -1999,9 +1990,17 @@ function openAgentInspectorLive(): void {
 }
 
 function stopAgentInspectorLive(): void {
+  agentInspectorLiveIdentity = null;
   agentInspectorLiveFeed.value = { events: [], ended: false, droppedEvents: 0 };
   void desktopIpc.supervisor?.watchAgentStream?.(null);
 }
+
+watch(
+  () => [selectedAgentDetailProjection.value?.entry.agentSessionId, selectedAgentDetailProjection.value?.entry.executionGenerationId],
+  () => {
+    if (agentInspectorLiveIdentity !== null) openAgentInspectorLive();
+  },
+);
 
 function resetAgentInspectorSettings(): void {
   agentInspectorSettingsRequestToken += 1;

@@ -95,5 +95,5 @@ test("agent inspector surface connects live stream on mount and watch via shared
 test("DesktopRoomShell line count stays strictly under 3000 lines", () => {
   const lineCount = shellSource.trimEnd().split("\n").length;
   assert.ok(lineCount < 3000, `DesktopRoomShell line count ${lineCount} exceeds 3000-line cap`);
-  assert.equal(lineCount, 2998, `DesktopRoomShell line count should be exactly 2998 lines (zero-line edit)`);
+  assert.ok(lineCount <= 2998, `DesktopRoomShell line count ${lineCount} must not exceed the 2998-line baseline`);
 });

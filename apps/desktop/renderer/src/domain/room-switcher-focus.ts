@@ -25,9 +25,12 @@ function defaultIsAvailable(element: unknown): boolean {
   if ("disabled" in element && Boolean((element as { disabled: unknown }).disabled)) {
     return false;
   }
-  if ("isConnected" in element) {
-    return Boolean((element as { isConnected: unknown }).isConnected);
-  }
+  if ("isConnected" in element && !element.isConnected) return false;
+  const target = element as HTMLElement;
+  if (target.getClientRects && target.getClientRects().length === 0) return false;
+  if (target.closest?.("[hidden], [inert]")) return false;
+  const style = target.ownerDocument?.defaultView?.getComputedStyle(target);
+  if (style?.visibility === "hidden" || style?.visibility === "collapse" || style?.display === "none") return false;
   return true;
 }
 
@@ -85,7 +88,7 @@ export function resolveRoomSwitcherActivationAction(options: {
 export interface CoordinateRoomSwitcherFocusOptions {
   currentRoomId: () => string | null | undefined;
   chosenRoomId: string;
-  startFocus: () => (() => void) | void;
+  startFocus: (isCurrent: () => boolean, onComplete: () => void) => (() => void) | void;
   watchRoomId?: (onChange: (roomId: string) => void) => (() => void);
   nextTick?: () => Promise<unknown>;
   timeoutMs?: number;
@@ -103,68 +106,64 @@ export interface CoordinateRoomSwitcherFocusOptions {
  * - Returns a cancel/cleanup function that stops watch/timers and cancels any active focus.
  */
 export function coordinateRoomSwitcherFocus(options: CoordinateRoomSwitcherFocusOptions): () => void {
-  const action = resolveRoomSwitcherActivationAction({
-    currentRoomId: options.currentRoomId(),
-    chosenRoomId: options.chosenRoomId,
-  });
-
-  if (action === "immediate") {
-    const cancelFocus = options.startFocus();
-    return () => {
-      cancelFocus?.();
-    };
-  }
-
   let cleanedUp = false;
+  let started = false;
   let cancelFocus: (() => void) | null = null;
   let unwatch: (() => void) | null = null;
-  let timerId: any = null;
+  let timerId: ReturnType<typeof setTimeout> | null = null;
 
-  const cleanup = () => {
-    cleanedUp = true;
-    if (timerId !== null) {
-      (options.clearTimeoutFn ?? clearTimeout)(timerId);
-      timerId = null;
-    }
-    if (unwatch) {
-      unwatch();
-      unwatch = null;
-    }
-    cancelFocus?.();
+  const clearTimer = () => {
+    if (timerId === null) return;
+    (options.clearTimeoutFn ?? clearTimeout)(timerId);
+    timerId = null;
   };
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    clearTimer();
+    unwatch?.();
+    unwatch = null;
+    cancelFocus?.();
+    cancelFocus = null;
+  };
+  const isCurrent = () => !cleanedUp && options.currentRoomId() === options.chosenRoomId;
 
-  const timeoutMs = options.timeoutMs ?? 1500;
-  timerId = (options.setTimeoutFn ?? setTimeout)(() => {
-    cleanup();
-  }, timeoutMs);
-
-  if (options.watchRoomId) {
-    unwatch = options.watchRoomId(async (newRoomId: string) => {
-      if (newRoomId === options.chosenRoomId && !cleanedUp) {
-        if (timerId !== null) {
-          (options.clearTimeoutFn ?? clearTimeout)(timerId);
-          timerId = null;
-        }
-        if (unwatch) {
-          unwatch();
-          unwatch = null;
-        }
-        if (options.nextTick) {
-          await options.nextTick();
-        }
-        if (!cleanedUp) {
-          cancelFocus = options.startFocus() ?? null;
-        }
-      }
-    });
+  async function activate(waitForRender: boolean): Promise<void> {
+    if (started || cleanedUp) return;
+    started = true;
+    if (waitForRender) await options.nextTick?.();
+    if (!isCurrent()) {
+      cleanup();
+      return;
+    }
+    clearTimer();
+    const cancel = options.startFocus(isCurrent, cleanup);
+    if (cleanedUp) cancel?.();
+    else cancelFocus = cancel ?? null;
   }
 
+  // Keep ownership through nextTick and every pending animation frame, including
+  // when the selected room was already active at the time of selection.
+  unwatch = options.watchRoomId?.((newRoomId) => {
+    if (newRoomId !== options.chosenRoomId) cleanup();
+    else return activate(true);
+  }) ?? null;
+  if (resolveRoomSwitcherActivationAction({
+    currentRoomId: options.currentRoomId(),
+    chosenRoomId: options.chosenRoomId,
+  }) === "immediate") {
+    void activate(false);
+  } else {
+    timerId = (options.setTimeoutFn ?? setTimeout)(cleanup, options.timeoutMs ?? 1500);
+  }
   return cleanup;
 }
 
 export interface FocusSwitchedRoomOptions {
   doc?: Document;
   timeoutMs?: number;
+  isCurrent?: () => boolean;
+  onComplete?: () => void;
   onFocus?: (decision: RoomSwitcherFocusDecision<HTMLElement>) => void;
 }
 
@@ -177,7 +176,10 @@ export interface FocusSwitchedRoomOptions {
  */
 export function focusSwitchedRoomOnceRendered(options?: FocusSwitchedRoomOptions): () => void {
   const doc = options?.doc ?? (typeof document !== "undefined" ? document : null);
-  if (!doc) return () => {};
+  if (!doc) {
+    options?.onComplete?.();
+    return () => {};
+  }
 
   let cancelled = false;
   let frameId = 0;
@@ -185,10 +187,11 @@ export function focusSwitchedRoomOnceRendered(options?: FocusSwitchedRoomOptions
   const timeoutMs = options?.timeoutMs ?? 1500;
 
   function attempt(): boolean {
-    if (cancelled) return true;
+    if (cancelled || options?.isCurrent?.() === false) return true;
 
     const composer = doc!.querySelector<HTMLElement>(DESKTOP_COMPOSER_SELECTOR);
-    const mainRegion = doc!.querySelector<HTMLElement>(DESKTOP_ROOM_MAIN_SELECTOR);
+    const mainRegion = Array.from(doc!.querySelectorAll<HTMLElement>(DESKTOP_ROOM_MAIN_SELECTOR))
+      .find(defaultIsAvailable);
 
     const decision = resolveRoomSwitcherFocusTarget<HTMLElement>({
       composerElement: composer,
@@ -197,25 +200,29 @@ export function focusSwitchedRoomOnceRendered(options?: FocusSwitchedRoomOptions
 
     if (decision.action === "composer" && decision.target) {
       decision.target.focus({ preventScroll: true });
-      options?.onFocus?.(decision);
-      return true;
+      if (doc!.activeElement === decision.target) {
+        options?.onFocus?.(decision);
+        return true;
+      }
     }
 
     // While composer skeleton loading indicator is present, wait for the actual
     // composer to finish mounting.
-    const isLoading = Boolean(doc!.querySelector(DESKTOP_COMPOSER_LOADING_SELECTOR));
+    const loading = doc!.querySelector(DESKTOP_COMPOSER_LOADING_SELECTOR);
+    const isLoading = loading && defaultIsAvailable(loading);
     if (isLoading && Date.now() - startTime < timeoutMs) {
       return false;
     }
 
-    // If destination has no composer (or timeout exceeded), focus the room's main region
-    if (decision.action === "main" && decision.target) {
-      if (decision.target.tabIndex < 0 && !decision.target.hasAttribute("tabindex")) {
-        decision.target.setAttribute("tabindex", "-1");
+    // A visible input may still reject focus; only report success after checking
+    // activeElement, and fall back to the visible main region if it does.
+    if (mainRegion) {
+      if (!mainRegion.hasAttribute("tabindex")) mainRegion.setAttribute("tabindex", "-1");
+      mainRegion.focus({ preventScroll: true });
+      if (doc!.activeElement === mainRegion) {
+        options?.onFocus?.({ action: "main", target: mainRegion });
+        return true;
       }
-      decision.target.focus({ preventScroll: true });
-      options?.onFocus?.(decision);
-      return true;
     }
 
     if (Date.now() - startTime >= timeoutMs) {
@@ -226,7 +233,10 @@ export function focusSwitchedRoomOnceRendered(options?: FocusSwitchedRoomOptions
   }
 
   function step(): void {
-    if (attempt()) return;
+    if (attempt()) {
+      options?.onComplete?.();
+      return;
+    }
     if (typeof requestAnimationFrame !== "undefined") {
       frameId = requestAnimationFrame(step);
     }
@@ -235,7 +245,7 @@ export function focusSwitchedRoomOnceRendered(options?: FocusSwitchedRoomOptions
   if (typeof requestAnimationFrame !== "undefined") {
     frameId = requestAnimationFrame(step);
   } else {
-    attempt();
+    step();
   }
 
   return () => {

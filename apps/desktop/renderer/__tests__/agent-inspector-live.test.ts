@@ -11,6 +11,7 @@ import { canPresentCurrentAgentStream, currentAgentRequest, presentAgentTrace, l
 
 import {
   agentLiveAvailability,
+  appendAgentInspectorLiveBatch,
   describeLiveToolCall,
   foldAgentStreamEvents,
   formatLiveWorkDuration,
@@ -276,8 +277,6 @@ test("the inspector wires a lazily-subscribed Live tab that starts and stops wit
   assert.match(shell, /watchAgentStream\?\.\(null\)/);
   assert.match(shell, /@live-dismissed="stopAgentInspectorLive"/);
   assert.match(shell, /onAgentStream\?\.\(\(batch\)/);
-  assert.match(shell, /priorEvents\.length \+ batch\.events\.length - AGENT_LIVE_FEED_LIMIT/,
-    "continuous local buffer eviction is counted as a visible gap");
 });
 
 test("describeLiveToolCall unwraps Cursor's mcpToolCall and strips the per-turn server alias", () => {
@@ -636,4 +635,57 @@ test("Live failures show received errors and output excerpts outside disclosure 
     assert.equal(success.failure, null);
     assert.doesNotMatch(success.html, /class="agent-live-error"/);
   } finally { await vite.close(); }
+});
+
+test("Live layout remount retains the feed and subscription for the same agent/session", async () => {
+  const ts = (await import("typescript")).default;
+  const { runInNewContext } = await import("node:vm");
+  const { ref, watch, nextTick, effectScope } = await import("vue");
+  const text = source("../src/components/desktop/content/DesktopRoomShell.vue");
+  const marker = '<script setup lang="ts">';
+  const script = text.slice(text.indexOf(marker) + marker.length, text.indexOf("</script>"));
+  const ast = ts.createSourceFile("shell.ts", script, ts.ScriptTarget.Latest, true);
+  const variables = new Set(["agentInspectorLiveFeed", "agentInspectorLiveIdentity"]);
+  const functions = new Set(["openAgentInspectorLive", "stopAgentInspectorLive"]);
+  const statements = ast.statements.filter(statement =>
+    (ts.isVariableStatement(statement) && statement.declarationList.declarations.some(declaration => variables.has(declaration.name.getText(ast))))
+    || (ts.isFunctionDeclaration(statement) && statement.name && functions.has(statement.name.text))
+    || (ts.isExpressionStatement(statement) && ts.isCallExpression(statement.expression) && statement.expression.expression.getText(ast) === "watch" && statement.getText(ast).includes("agentInspectorLiveIdentity"))
+  ).map(statement => statement.getText(ast)).join("\n");
+  const projection = ref({ entryId: "agent-a", entry: { agentSessionId: "session-a", executionGenerationId: "generation-a" } });
+  const watches: Array<string | null> = [];
+  const scope = effectScope();
+  const live = scope.run(() => runInNewContext(ts.transpileModule(statements, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+    + "\n({open: openAgentInspectorLive, stop: stopAgentInspectorLive, feed: agentInspectorLiveFeed})", {
+    ref, watch, selectedAgentDetailProjection: projection,
+    loadAgentInspectorProviders() {}, openAgentInspectorWork() {},
+    desktopIpc: { supervisor: { watchAgentStream: (id: string | null) => watches.push(id) } },
+  }));
+  live.open();
+  live.feed.value.events.push(event({ sequence: 1 }));
+  const retained = live.feed.value;
+  live.open();
+  assert.equal(live.feed.value, retained, "a layout-only remount must not clear the retained feed");
+  assert.deepEqual(watches, ["agent-a"], "the same viewer must not reconnect");
+  projection.value.entry.agentSessionId = "session-b";
+  await nextTick();
+  assert.equal(live.feed.value.events.length, 0, "a changed session starts a new feed");
+  live.feed.value.events.push(event({ sequence: 2 }));
+  projection.value.entryId = "agent-b";
+  live.open();
+  assert.equal(live.feed.value.events.length, 0, "another agent must not inherit activity");
+  live.stop();
+  assert.equal(watches.at(-1), null, "closing still releases the native watch");
+  scope.stop();
+});
+
+test("Live batches retain local eviction and upstream loss counts until reset", () => {
+  const feed = { events: [event({ sequence: 1 }), event({ sequence: 2 })], ended: false, droppedEvents: 3 };
+  const batch = { entryId: "agent-a", events: [event({ sequence: 3 })], ended: false, droppedEvents: 2, reset: false };
+  const appended = appendAgentInspectorLiveBatch(feed, batch, 2);
+  assert.deepEqual(appended.events.map(item => item.sequence), [2, 3]);
+  assert.equal(appended.droppedEvents, 6);
+  const reset = appendAgentInspectorLiveBatch(appended, { ...batch, reset: true }, 2);
+  assert.deepEqual(reset.events.map(item => item.sequence), [3]);
+  assert.equal(reset.droppedEvents, 2);
 });

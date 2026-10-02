@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   coordinateRoomSwitcherFocus,
+  focusSwitchedRoomOnceRendered,
   DESKTOP_COMPOSER_LOADING_SELECTOR,
   DESKTOP_COMPOSER_SELECTOR,
   DESKTOP_ROOM_MAIN_SELECTOR,
@@ -152,7 +153,7 @@ describe("room-switcher-focus: activation synchronization decision", () => {
 });
 
 describe("room-switcher-focus: coordinateRoomSwitcherFocus coordinator", () => {
-  it("case 1 (already active): starts focus immediately without registering watch or timeout", () => {
+  it("case 1 (already active): starts focus with a room ownership watch and no activation timeout", () => {
     let focusStarted = 0;
     let watchRegistered = 0;
     let timeoutRegistered = 0;
@@ -174,7 +175,7 @@ describe("room-switcher-focus: coordinateRoomSwitcherFocus coordinator", () => {
     });
 
     assert.equal(focusStarted, 1);
-    assert.equal(watchRegistered, 0);
+    assert.equal(watchRegistered, 1);
     assert.equal(timeoutRegistered, 0);
   });
 
@@ -219,7 +220,7 @@ describe("room-switcher-focus: coordinateRoomSwitcherFocus coordinator", () => {
 
     assert.equal(nextTickCalled, 1);
     assert.equal(focusStarted, 1);
-    assert.equal(watchUnsubscribed, 1);
+    assert.equal(watchUnsubscribed, 0, "room watch lasts until focus completes or is cancelled");
     assert.equal(timeoutCleared, 1);
   });
 
@@ -305,4 +306,146 @@ describe("room-switcher-focus: selector contracts", () => {
   it("DESKTOP_COMPOSER_LOADING_SELECTOR targets composer loading placeholder", () => {
     assert.ok(DESKTOP_COMPOSER_LOADING_SELECTOR.includes('[data-testid="desktop-composer-loading"]'));
   });
+});
+
+function focusFixture(options: { hiddenComposer?: boolean; rejectedComposerFocus?: boolean } = {}) {
+  const actions: string[] = [];
+  const doc = { activeElement: null as unknown, querySelector: (selector: string): unknown => {
+    if (selector === DESKTOP_COMPOSER_SELECTOR) return composer;
+    if (selector === DESKTOP_ROOM_MAIN_SELECTOR) return main;
+    return null;
+  }, querySelectorAll: () => [main] };
+  function element(hidden: boolean, acceptsFocus: boolean) {
+    const target = {
+      tagName: "DIV", isConnected: true, tabIndex: -1,
+      getClientRects: () => hidden ? [] : [{}],
+      closest: () => null,
+      ownerDocument: { defaultView: { getComputedStyle: () => ({ visibility: "visible" }) } },
+      hasAttribute: () => false, setAttribute() {},
+      focus() { if (!hidden && acceptsFocus) doc.activeElement = target; },
+    };
+    return target;
+  }
+  const composer = element(Boolean(options.hiddenComposer), !options.rejectedComposerFocus);
+  const main = element(false, true);
+  return { doc: doc as unknown as Document, composer, main, actions };
+}
+
+describe("room-switcher-focus: real focus attempts", () => {
+  for (const options of [{ hiddenComposer: true }, { rejectedComposerFocus: true }]) {
+    it(`falls back to visible main when composer cannot receive focus: ${JSON.stringify(options)}`, () => {
+      const fixture = focusFixture(options);
+      const cancel = focusSwitchedRoomOnceRendered({ doc: fixture.doc, onFocus: decision => fixture.actions.push(decision.action) });
+      assert.equal(fixture.doc.activeElement, fixture.main);
+      assert.deepEqual(fixture.actions, ["main"]);
+      cancel();
+    });
+  }
+});
+
+it("cancels focus when the chosen room is left while its composer is still loading", async () => {
+  let current = "a";
+  let listener: (id: string) => void = () => {};
+  let cancelled = 0;
+  let started = 0;
+  let released = 0;
+  const cancel = coordinateRoomSwitcherFocus({
+    currentRoomId: () => current, chosenRoomId: "b",
+    startFocus: () => { started++; return () => { cancelled++; }; },
+    watchRoomId: callback => { listener = callback; return () => { released++; }; },
+    nextTick: async () => {}, setTimeoutFn: () => 1, clearTimeoutFn() {},
+  });
+  current = "b";
+  await listener(current);
+  assert.equal(started, 1);
+  current = "c";
+  await listener(current);
+  assert.equal(cancelled, 1, "a pending render must lose focus ownership when another room opens");
+  assert.equal(released, 1);
+  cancel();
+});
+
+it("does not start focus if room ownership changes during nextTick", async () => {
+  let current = "a";
+  let listener: (id: string) => void = () => {};
+  let finishTick!: () => void;
+  let started = 0;
+  const cancel = coordinateRoomSwitcherFocus({
+    currentRoomId: () => current, chosenRoomId: "b",
+    startFocus: () => { started++; },
+    watchRoomId: callback => { listener = callback; return () => {}; },
+    nextTick: () => new Promise<void>(resolve => { finishTick = resolve; }),
+    setTimeoutFn: () => 1, clearTimeoutFn() {},
+  });
+  current = "b";
+  const pending = listener(current);
+  current = "c";
+  finishTick();
+  await pending;
+  assert.equal(started, 0);
+  cancel();
+});
+
+it("opening the switcher again cancels the previous focus job", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { runInNewContext } = await import("node:vm");
+  const ts = (await import("typescript")).default;
+  const text = readFileSync(new URL("../src/components/desktop/sidebar/DesktopSidebar.vue", import.meta.url), "utf8");
+  const marker = '<script setup lang="ts">';
+  const ast = ts.createSourceFile("sidebar.ts", text.slice(text.indexOf(marker) + marker.length, text.indexOf("</script>")), ts.ScriptTarget.Latest, true);
+  const handler = ast.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === "openRoomSwitcher");
+  assert.ok(handler);
+  let cancelled = 0;
+  const switcherOpen = { value: false };
+  const open = runInNewContext(ts.transpileModule(handler.getText(ast), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText + "\nopenRoomSwitcher", {
+    props: { batchActionBusy: false, selectionActive: false }, switcherOpen,
+    closeRoomContextMenu() {}, closeBackgroundContextMenu() {},
+    cancelPendingSwitcherFocus: () => { cancelled++; },
+  });
+  open();
+  assert.equal(cancelled, 1);
+  assert.equal(switcherOpen.value, true);
+});
+
+it("successful focus and timeout both release the room watch and pending frames", () => {
+  const savedFrame = Object.getOwnPropertyDescriptor(globalThis, "requestAnimationFrame");
+  const savedCancel = Object.getOwnPropertyDescriptor(globalThis, "cancelAnimationFrame");
+  const frames = new Map<number, FrameRequestCallback>();
+  let serial = 0;
+  Object.defineProperty(globalThis, "requestAnimationFrame", { configurable: true, value: (callback: FrameRequestCallback) => { frames.set(++serial, callback); return serial; } });
+  Object.defineProperty(globalThis, "cancelAnimationFrame", { configurable: true, value: (id: number) => frames.delete(id) });
+  try {
+    for (const timeout of [false, true]) {
+      const fixture = focusFixture();
+      if (timeout) fixture.doc.querySelectorAll = (() => []) as unknown as Document["querySelectorAll"];
+      if (timeout) fixture.doc.querySelector = (() => null) as Document["querySelector"];
+      let released = 0;
+      const cancel = coordinateRoomSwitcherFocus({
+        currentRoomId: () => "a", chosenRoomId: "a",
+        watchRoomId: () => () => { released++; },
+        startFocus: (isCurrent, onComplete) => focusSwitchedRoomOnceRendered({ doc: fixture.doc, timeoutMs: 0, isCurrent, onComplete }),
+      });
+      const [id, callback] = [...frames.entries()][0]!;
+      frames.delete(id);
+      callback(0);
+      assert.equal(released, 1);
+      assert.equal(frames.size, 0);
+      assert.equal(fixture.doc.activeElement, timeout ? null : fixture.composer);
+      cancel();
+      assert.equal(released, 1, "cleanup is idempotent");
+    }
+  } finally {
+    if (savedFrame) Object.defineProperty(globalThis, "requestAnimationFrame", savedFrame);
+    else Reflect.deleteProperty(globalThis, "requestAnimationFrame");
+    if (savedCancel) Object.defineProperty(globalThis, "cancelAnimationFrame", savedCancel);
+    else Reflect.deleteProperty(globalThis, "cancelAnimationFrame");
+  }
+});
+
+it("a render attempt cannot focus after its selected room loses ownership", () => {
+  const fixture = focusFixture();
+  let completed = 0;
+  focusSwitchedRoomOnceRendered({ doc: fixture.doc, isCurrent: () => false, onComplete: () => { completed++; } });
+  assert.equal(fixture.doc.activeElement, null);
+  assert.equal(completed, 1);
 });
