@@ -14,6 +14,9 @@
         @more="historySearch.loadMore()"
       />
     </div>
+    <PinnedMessages v-if="activeTab === 'chat' && messagePins" :pins="messagePins.state.value.pins"
+      :loading="messagePins.state.value.loading" :error="messagePins.state.value.error"
+      @refresh="messagePins.refresh" @reveal="openMessageInChat" />
     <Transition :name="tabTransitionName">
       <MessageList
         v-if="activeTab === 'chat'"
@@ -131,6 +134,8 @@
 </template>
 
 <script setup lang="ts">
+import PinnedMessages from '../../../../../shared/ui/PinnedMessages.vue'
+import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { computed, ref, watch } from 'vue'
 
 import ActivityView from '@/components/room/ActivityView.vue'
@@ -238,6 +243,7 @@ const emit = defineEmits<{
   openChat: []
 }>()
 
+const messagePins = injectRoomMessagePins()
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>
@@ -288,6 +294,8 @@ defineExpose({ matchCount })
 
 <style scoped>
 .room-view-viewport {
+  display: flex;
+  flex-direction: column;
   position: relative;
   height: 100%;
   min-width: 0;
@@ -318,7 +326,7 @@ defineExpose({ matchCount })
 }
 
 .room-tab-panel {
-  height: 100%;
+  flex: 1;
   min-width: 0;
   min-height: 0;
 }

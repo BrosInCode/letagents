@@ -101,6 +101,7 @@
           <span v-if="provenanceLabel" class="room-message-provenance" :data-kind="ownerKind">
             {{ provenanceLabel }}
           </span>
+          <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
           <time :datetime="message.timestamp">{{ formattedTime }}</time>
         </div>
       </div>
@@ -289,6 +290,9 @@
           <button type="button" role="menuitem" @click="tertiaryActionFromContext">
             <span>{{ tertiaryActionLabel }}</span>
           </button>
+          <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromContext">
+            <span>{{ pinned ? "Unpin message" : "Pin message" }}</span>
+          </button>
           <button v-if="reactable" type="button" role="menuitem" @click="reactFromContext">
             <span>Add reaction…</span>
           </button>
@@ -362,6 +366,8 @@ import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 import MessageReactionBar from "../../../../../../../shared/ui/MessageReactionBar.vue";
 import MessageReactionPicker, { type MessageReactionPickerAnchor } from "../../../../../../../shared/ui/MessageReactionPicker.vue";
 import WakeGlyph from "../../../../../../../shared/ui/WakeGlyph.vue";
+import { isPinMessageId } from "../../../../../../../shared/message-pins.mjs";
+import { injectRoomMessagePins } from "../../../composables/useRoomMessagePins";
 import { injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
 
@@ -605,10 +611,10 @@ function openContextMenu(event: MouseEvent): void {
   closeSelectionPopover();
   const menuWidth = 180;
   // Link variant: 3 rows + separator; message variant: 4 rows + separator,
-  // plus a row when the message can be reacted to. The estimate must
+  // plus a row for each available pin/reaction action. The estimate must
   // cover the tallest variant or the last row ("Message info") clips below
   // the viewport near the bottom edge.
-  const menuHeight = linkHref ? 140 : reactable.value ? 208 : 176;
+  const menuHeight = linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0);
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -658,6 +664,11 @@ function quoteReplyFromContext(): void {
   closeContextMenu("action");
   emit("quote-reply", props.message.id);
 }
+
+const pinContext = injectRoomMessagePins();
+const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id));
+const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false);
+function pinFromContext(): void { closeContextMenu("action"); pinContext?.toggle(props.message.id); }
 
 // Reactions exist only inside a room that provides them (not in previews or
 // tests), and only on a message the server sent with its reactions: a room

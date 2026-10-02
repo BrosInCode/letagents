@@ -37,6 +37,7 @@ export const agentWorkEvents = createBridgedEmitter("agent-work");
 export const agentApprovalEvents = createBridgedEmitter("agent-approval");
 export const executionDelegationEvents = createBridgedEmitter("execution-delegation");
 export const wakeRuleEvents = createBridgedEmitter("wake-rules");
+export const messagePinEvents = createBridgedEmitter("message-pins");
 export const messageReactionEvents = createBridgedEmitter("message-reactions");
 
 const ROOM_INVALIDATION_COALESCE_MS = 100;
@@ -102,6 +103,9 @@ export const queueMessageReactionInvalidation = createRoomInvalidationQueue(
   messageReactionEvents,
   "message_reactions:invalidated",
 );
+
+/** A pin changes a read model, never the message/notification/agent stream. */
+export const queueMessagePinInvalidation = createRoomInvalidationQueue(messagePinEvents, "message_pins:invalidated");
 
 export async function emitProjectMessage(
   projectId: string,

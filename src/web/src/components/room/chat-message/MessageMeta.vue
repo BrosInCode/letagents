@@ -49,6 +49,7 @@
       >
         Worker prompt
       </span>
+      <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
       <time>{{ formattedTime }}</time>
     </div>
   </div>
@@ -67,6 +68,7 @@ defineProps<{
   formattedTime: string
   canReact?: boolean
   pickerOpen?: boolean
+  pinned?: boolean
 }>()
 
 const emit = defineEmits<{

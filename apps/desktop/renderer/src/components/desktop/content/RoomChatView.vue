@@ -21,6 +21,8 @@
           <span>Drop files to attach</span>
         </div>
 
+        <PinnedMessages :pins="messagePins.state.value.pins" :loading="messagePins.state.value.loading"
+          :error="messagePins.state.value.error" @refresh="messagePins.refresh" @reveal="jumpToMessage" />
         <RoomMessageViewport
           ref="messageViewport"
           v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', workspaceAgentTarget($event, participants))"
@@ -222,6 +224,8 @@ import { workspaceAgentTarget } from "../../../domain/room-contributions";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, toRef, watch } from "vue";
 import type { CSSProperties } from "vue";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
+import PinnedMessages from "../../../../../../../shared/ui/PinnedMessages.vue";
+import { provideRoomMessagePins, useRoomMessagePins } from "../../../composables/useRoomMessagePins";
 import { provideRoomMessageReactions, useRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import type {
   DesktopAgentPresence,
@@ -316,6 +320,9 @@ const props = defineProps<{
 }>();
 
 const { pushActionToast } = useDesktopActionToasts();
+const messagePins = useRoomMessagePins(computed(() => props.roomIdentifier ?? ""),
+  (message) => pushActionToast(message, "error", 6_000));
+provideRoomMessagePins(messagePins);
 provideRoomMessageReactions(useRoomMessageReactions(
   computed(() => props.roomIdentifier ?? ""),
   (message) => pushActionToast(message, "error", 6_000),
