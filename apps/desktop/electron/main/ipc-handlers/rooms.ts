@@ -1,3 +1,4 @@
+import { createDesktopMessageReminder, getDesktopMessageReminders, deleteDesktopMessageReminder } from "../rooms/reminders.js";
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
 import { getDesktopMessageLinkPreviews } from "../rooms/link-previews.js";
 import { getDesktopMessagePins, setDesktopMessagePin } from "../rooms/pins.js";
@@ -449,6 +450,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
   targetIpcMain.handle("desktop:room:get-message-link-previews", (_event, roomIdentifier: string, references) => getDesktopMessageLinkPreviews(roomIdentifier, references));
   targetIpcMain.handle("desktop:room:get-message-pins", (_event, roomIdentifier: string) => getDesktopMessagePins(roomIdentifier));
+  targetIpcMain.handle("desktop:room:create-message-reminder", (_event, room: string, message: string, dueAt: string) => createDesktopMessageReminder(room, message, dueAt));
+  targetIpcMain.handle("desktop:room:get-message-reminders", (_event, offset?: number) => getDesktopMessageReminders(offset));
+  targetIpcMain.handle("desktop:room:delete-message-reminder", (_event, id: string) => deleteDesktopMessageReminder(id));
   targetIpcMain.handle("desktop:room:set-message-pin", (_event, roomIdentifier: string, messageId: string, pinned: boolean) => setDesktopMessagePin(roomIdentifier, messageId, pinned));
   targetIpcMain.handle("desktop:room:report-typing", (_event, room: string, input: unknown) => reportDesktopRoomTyping(room, input));
   targetIpcMain.handle("desktop:room:get-message-reactions", (_event, roomIdentifier: string, firstMessageId: string, lastMessageId: string) =>

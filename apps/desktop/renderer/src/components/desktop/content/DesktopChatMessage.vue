@@ -300,6 +300,7 @@
           <button type="button" role="menuitem" @click="tertiaryActionFromContext">
             <span>{{ tertiaryActionLabel }}</span>
           </button>
+          <MessageReminderMenu v-if="remindable" :room="roomIdentifier ?? ''" :message="message.id" @scheduled="reminderScheduled" />
           <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromContext">
             <span>{{ pinned ? "Unpin message" : "Pin message" }}</span>
           </button>
@@ -342,12 +343,15 @@
 
 <script setup lang="ts">
 import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
+import MessageReminderMenu from "./MessageReminderMenu.vue";
+import { reminderAccount } from "../../../composables/useMessageReminders";
 import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
 import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
 import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
+import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
@@ -509,6 +513,12 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   return `Waiting for ${receipt.agentName}`;
 }
 
+const remindable = computed(() => Boolean(reminderAccount.value && props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier) && isValidMessageId(props.message.id) && !props.message.outgoing));
+const { pushActionToast } = useDesktopActionToasts();
+function reminderScheduled(dueAt: string) {
+  pushActionToast(`Reminder set for ${new Date(dueAt).toLocaleString()}`, "success");
+  closeContextMenu("action");
+}
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
@@ -652,7 +662,7 @@ function openContextMenu(event: MouseEvent): void {
   // cover the tallest variant or the last row ("Message info") clips below
   // the viewport near the bottom edge.
   const menuHeight = linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0);
-  const clampedMenuHeight = menuHeight + (!linkHref && canCopyMessageLink.value ? 32 : 0)
+  const clampedMenuHeight = menuHeight + (remindable.value ? 32 : 0) + (!linkHref && canCopyMessageLink.value ? 32 : 0)
     + (!linkHref && canMarkUnread.value ? 32 : 0);
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
