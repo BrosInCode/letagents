@@ -240,6 +240,9 @@ let AgentInspectorSurface: object;
 let AgentInspectorOverview: object;
 let AgentInspectorNow: object;
 let ProviderBadge: object;
+let AgentInspectorHomeHarness: object;
+let DesktopSwitch: object;
+let agentRoomAudienceKey: symbol;
 
 before(async () => {
   vite = await createServer({
@@ -259,6 +262,9 @@ before(async () => {
   AgentInspectorOverview = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorOverview.vue")).default;
   AgentInspectorNow = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorNow.vue")).default;
   ProviderBadge = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/desktop-chat-message/ProviderBadge.vue")).default;
+  AgentInspectorHomeHarness = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorHomeHarness.vue")).default;
+  DesktopSwitch = (await vite.ssrLoadModule("/renderer/src/components/desktop/controls/DesktopSwitch.vue")).default;
+  agentRoomAudienceKey = (await vite.ssrLoadModule("/renderer/src/domain/agent-home-harness.ts")).agentRoomAudienceKey;
   await Promise.all([
     attachClientRender(AgentInspectorDiagnostics, "components/desktop/content/agent-inspector/AgentInspectorDiagnostics.vue"),
     attachClientRender(AgentInspectorSettings, "components/desktop/content/agent-inspector/AgentInspectorSettings.vue"),
@@ -269,6 +275,8 @@ before(async () => {
     attachClientRender(AgentInspectorOverview, "components/desktop/content/agent-inspector/AgentInspectorOverview.vue"),
     attachClientRender(AgentInspectorNow, "components/desktop/content/agent-inspector/AgentInspectorNow.vue"),
     attachClientRender(ProviderBadge, "components/desktop/content/desktop-chat-message/ProviderBadge.vue"),
+    attachClientRender(AgentInspectorHomeHarness, "components/desktop/content/agent-inspector/AgentInspectorHomeHarness.vue"),
+    attachClientRender(DesktopSwitch, "components/desktop/controls/DesktopSwitch.vue"),
   ]);
 });
 
@@ -1323,4 +1331,330 @@ test("room workspace permissions distinguish old and current scopes before revoc
     await (buttons[1]!.props.onClick as () => Promise<void>)();
     assert.equal((revoked[0] as { ruleId: string }).ruleId, "current");
   } finally { mounted.app.unmount(); }
+});
+
+function ownSetupResource(overrides: Record<string, unknown> = {}, draft: Record<string, unknown> = {}): AgentInspectorConfigurationResource {
+  const withSetup = { ...configuration, homeHarness: { enabled: false, pending: false, availability: "available" as const }, ...overrides };
+  return { status: "ready", configuration: withSetup as never, error: null, draft: {
+    model: withSetup.model, reasoningEffort: withSetup.reasoningEffort, charter: withSetup.charter,
+    permissionProfileId: withSetup.permissionProfileId, ...draft,
+  } as never };
+}
+const ownSetupSwitch = (root: HostNode) => descendants(root).find((node) => node.props["data-testid"] === "agent-inspector-home-harness");
+const settle = async () => { await new Promise((resolve) => setImmediate(resolve)); await nextTick(); };
+
+test("the owner's own setup is a switch that is off by default and saved on its own through the app's signed request", async () => {
+  const requests: unknown[] = [];
+  let reloads = 0;
+  const saved = Vue.ref(ownSetupResource());
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    setAgentHomeHarness: async (input: { enabled: boolean }) => {
+      requests.push(input);
+      return { outcome: "updated", configuration: { ...saved.value.configuration, homeHarness: { enabled: input.enabled, pending: true, availability: "available" }, configRevision: 5 },
+        ...(input.enabled ? {} : { restart: "restarting" }) };
+    },
+  } } });
+  const patches: unknown[] = [];
+  const saves: unknown[] = [];
+  const mounted = mount({ setup: () => () => Vue.h(AgentInspectorSettings, settingsProps({
+    resource: saved.value,
+    onReload: () => {
+      reloads += 1;
+      saved.value = reloads === 1
+        ? ownSetupResource({ homeHarness: { enabled: true, pending: true, availability: "available" }, configRevision: 5 })
+        : ownSetupResource({ homeHarness: { enabled: false, pending: true, availability: "available" }, configRevision: 6 });
+    },
+    onPatch: (patch: unknown) => patches.push(patch), onSave: (overwrite: unknown) => saves.push(overwrite),
+  })) }, {});
+  try {
+    await settle();
+    const toggle = ownSetupSwitch(mounted.root);
+    assert.ok(toggle, "an agent of the owner's gets the switch");
+    assert.equal(toggle.props.role, "switch");
+    assert.equal(toggle.props["aria-checked"], false, "it is off until the owner turns it on");
+    assert.equal(toggle.props.disabled, false);
+    assert.equal(toggle.props["aria-labelledby"], "agent-inspector-home-harness-title");
+    assert.equal(toggle.props["aria-describedby"], "agent-inspector-home-harness-description");
+    const text = textContent(mounted.root);
+    assert.match(text, /Use your own Codex setup/);
+    assert.match(text, /Lets this agent use your own Codex setup: your MCP servers, plugins, app connectors, skills, hooks, memories, and browser or computer control\. Those tools act as you\./);
+    assert.match(text, /With Full access, those tools run without asking you\./);
+    assert.match(text, /Anyone who can message this agent in the room can ask it to use them\./);
+    assert.match(text, /Servers and hooks that a project adds stay off, and the agent will not start in a project that changes your servers/);
+    assert.match(text, /Turning this on takes effect the next time the agent starts\. Turning it off restarts the agent straight away if it is idle\./);
+
+    (toggle.props.onClick as () => void)();
+    await settle();
+    assert.deepEqual(requests, [{ entryId: "agent_a", daemonGeneration: 7, expectedRevision: 4, enabled: true }]);
+    assert.equal(reloads, 1, "the saved settings are read again");
+    assert.deepEqual(patches, [], "it is not an edit to the draft");
+    assert.deepEqual(saves, [], "and it does not ride on Save changes");
+    assert.equal(ownSetupSwitch(mounted.root)!.props["aria-checked"], true);
+    assert.match(textContent(mounted.root), /Restart the agent to apply them\./, "it applies at the next start, like any saved change");
+    const timing = (root: HostNode) => textContent(descendants(root).find((node) => node.props["data-testid"] === "agent-inspector-home-harness-timing")!);
+    const restart = (root: HostNode) => descendants(root).find((node) => node.props["data-testid"] === "agent-inspector-home-harness-restart");
+    assert.equal(timing(mounted.root), "This agent has not restarted since you turned this on. It gets your setup the next time it starts.");
+    assert.equal(restart(mounted.root), undefined, "turning it on restarts nothing, and nothing says it did");
+
+    (ownSetupSwitch(mounted.root)!.props.onClick as () => void)();
+    await settle();
+    assert.deepEqual(requests[1], { entryId: "agent_a", daemonGeneration: 7, expectedRevision: 5, enabled: false });
+    assert.equal(ownSetupSwitch(mounted.root)!.props["aria-checked"], false);
+    // Off is saved, but it is only over once the running agent restarts, and the panel says which it is.
+    assert.equal(timing(mounted.root), "If this agent is still running, it keeps your setup until it restarts.");
+    assert.equal(textContent(restart(mounted.root)!), "Restarting this agent now so it stops using your setup.");
+    assert.equal(restart(mounted.root)!.props["data-tone"], undefined);
+  } finally { mounted.app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("the approval note follows the agent's saved access level and its agent app", async () => {
+  Object.assign(window, { letagentsDesktop: { supervisor: { setAgentHomeHarness: async () => ({ outcome: "invalid", error: "unused" }) } } });
+  try {
+    for (const [provider, permissionProfileId, expected] of [
+      ["codex", "ask_before_write", /With Ask before writes, you approve each of those tools before it runs\. Two kinds run without asking: tools your own Codex settings already approve, and tools their own server labels read-only, which nothing checks\./],
+      ["codex", "auto_review", /With Auto, Codex decides whether each of those tools runs\. You are not asked\./],
+      ["claude-code", "ask_before_write", /unless your own Claude Code rules already allow it\./],
+      ["claude-code", "read_only", /only where your own Claude Code rules allow them\. Nothing asks you\./],
+    ] as const) {
+      const mounted = mount(AgentInspectorSettings, settingsProps({ resource: ownSetupResource({ provider, permissionProfileId, reasoningEffort: null }) }));
+      await settle();
+      assert.match(textContent(mounted.root), expected, `${provider}/${permissionProfileId}`);
+      assert.match(textContent(mounted.root), provider === "codex" ? /Use your own Codex setup/ : /Use your own Claude Code setup/);
+      mounted.app.unmount();
+    }
+  } finally { delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a rental, a Cursor agent and an Open Model agent get a reason instead of a switch", async () => {
+  const requests: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: { setAgentHomeHarness: async (input: unknown) => { requests.push(input); } } } });
+  try {
+    for (const [provider, availability, reason] of [
+      ["cursor", "rental", /A rented agent works for someone else, so it never uses your own setup\./],
+      ["codex", "rental", /A rented agent works for someone else, so it never uses your own setup\./],
+      ["cursor", "unsupported", /Cursor agents run in a sealed copy of Cursor, so they cannot load your own Cursor setup\./],
+      ["open-model", "unsupported", /Open Model agents run LetAgents' own copy of OpenCode, which has no setup of yours to load\./],
+      ["codex", "polling", /Not available for this agent: it fetches its own messages, so LetAgents can't reliably switch your setup off again\./],
+      ["claude-code", "polling", /Not available for this agent: it fetches its own messages/],
+    ] as const) {
+      const mounted = mount(AgentInspectorSettings, settingsProps({
+        // Even a service that wrongly said "on" would not produce a control here.
+        resource: ownSetupResource({ provider, reasoningEffort: null, homeHarness: { enabled: true, pending: true, availability } }),
+      }));
+      await settle();
+      assert.equal(ownSetupSwitch(mounted.root), undefined, `${provider}/${availability} has no switch`);
+      assert.match(textContent(mounted.root), reason);
+      assert.doesNotMatch(textContent(mounted.root), /Those tools act as you/);
+      mounted.app.unmount();
+    }
+    assert.deepEqual(requests, []);
+  } finally { delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("the switch is absent when the background service or the app cannot change it", async () => {
+  // An older background service reports nothing about it.
+  Object.assign(window, { letagentsDesktop: { supervisor: { setAgentHomeHarness: async () => ({}) } } });
+  const older = mount(AgentInspectorSettings, settingsProps());
+  await settle();
+  assert.equal(ownSetupSwitch(older.root), undefined);
+  assert.doesNotMatch(textContent(older.root), /Use your own/);
+  older.app.unmount();
+  // An app bridge without the signed request cannot offer it either.
+  Object.assign(window, { letagentsDesktop: { supervisor: {} } });
+  const bridge = mount(AgentInspectorSettings, settingsProps({ resource: ownSetupResource() }));
+  await settle();
+  assert.equal(ownSetupSwitch(bridge.root), undefined);
+  bridge.app.unmount();
+  delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+test("the switch does not answer while settings are saving, retired, or holding unsaved edits", async () => {
+  const requests: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: { setAgentHomeHarness: async (input: unknown) => { requests.push(input); return { outcome: "invalid", error: "unused" }; } } } });
+  try {
+    for (const [name, props, note] of [
+      ["saving", { busy: true, resource: ownSetupResource() }, null],
+      ["retired", { retired: true, resource: ownSetupResource() }, null],
+      ["refreshing", { resource: { ...ownSetupResource(), status: "refreshing" } }, null],
+      ["unsaved edits", { resource: ownSetupResource({}, { model: "another-model" }) }, /Save or reload your other changes before changing this\./],
+    ] as const) {
+      const mounted = mount(AgentInspectorSettings, settingsProps(props));
+      await settle();
+      const toggle = ownSetupSwitch(mounted.root);
+      assert.ok(toggle, name);
+      assert.equal(toggle.props.disabled, true, name);
+      (toggle.props.onClick as () => void)();
+      await settle();
+      if (note) assert.match(textContent(mounted.root), note);
+      mounted.app.unmount();
+    }
+    assert.deepEqual(requests, [], "nothing was sent");
+  } finally { delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a refused or failed change leaves the switch where the saved settings have it and says why", async () => {
+  let reloads = 0;
+  for (const [reply, message] of [
+    [async () => ({ outcome: "invalid", error: "A rented agent works for someone else and cannot use your own setup." }), /A rented agent works for someone else and cannot use your own setup\./],
+    [async () => ({ outcome: "conflict", configuration: {} }), /These settings were changed elsewhere, so nothing was changed\. Try again\./],
+    [async () => { throw new Error("Host approvals require the main application window."); }, /Couldn’t change this\. Reload the settings to check it, then try again\./],
+  ] as const) {
+    Object.assign(window, { letagentsDesktop: { supervisor: { setAgentHomeHarness: reply } } });
+    const mounted = mount(AgentInspectorSettings, settingsProps({ resource: ownSetupResource(), onReload: () => { reloads += 1; } }));
+    try {
+      await settle();
+      (ownSetupSwitch(mounted.root)!.props.onClick as () => void)();
+      await settle();
+      assert.equal(ownSetupSwitch(mounted.root)!.props["aria-checked"], false);
+      assert.match(textContent(mounted.root), message);
+      assert.equal(ownSetupSwitch(mounted.root)!.props["aria-disabled"], undefined, "it can be tried again");
+    } finally { mounted.app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+  }
+  assert.equal(reloads, 2, "a refusal or a conflict is followed by reading the saved settings; a failure is left for the owner to reload");
+});
+
+test("turning it on where other people can reach the agent shows who can ask it to use the owner's tools", async () => {
+  Object.assign(window, { letagentsDesktop: { supervisor: { setAgentHomeHarness: async () => ({ outcome: "invalid", error: "unused" }) } } });
+  const roomNote = (root: HostNode) => descendants(root).find((node) => node.props["data-testid"] === "agent-inspector-home-harness-room")!;
+  try {
+    for (const [audience, enabled, warning, expected] of [
+      ["public", true, true, /This room is public\. Anyone who can post here can ask this agent to use your tools\./],
+      ["shared", true, true, /Other people are in this room\. Any of them can ask this agent to use your tools\./],
+      ["public", false, false, /This room is public\./],
+      ["private", true, false, /Anyone who can message this agent in the room can ask it to use them\./],
+    ] as const) {
+      const mounted = mount({ setup() {
+        Vue.provide(agentRoomAudienceKey, Vue.ref(audience));
+        return () => Vue.h(AgentInspectorSettings, settingsProps({ resource: ownSetupResource({ homeHarness: { enabled, pending: false, availability: "available" } }) }));
+      } }, {});
+      await settle();
+      const note = roomNote(mounted.root);
+      assert.match(textContent(note), expected, `${audience}/${enabled}`);
+      assert.equal(note.props["data-tone"], warning ? "warning" : undefined, `${audience}/${enabled}`);
+      assert.equal(note.props.role, warning ? "alert" : undefined, `${audience}/${enabled}`);
+      mounted.app.unmount();
+    }
+  } finally { delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a second click while the first change is still being saved sends nothing", async () => {
+  const requests: unknown[] = [];
+  let finish!: (result: unknown) => void;
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    setAgentHomeHarness: (input: unknown) => { requests.push(input); return new Promise((resolve) => { finish = resolve; }); },
+  } } });
+  let reloads = 0;
+  const mounted = mount(AgentInspectorSettings, settingsProps({ resource: ownSetupResource(), onReload: () => { reloads += 1; } }));
+  try {
+    await settle();
+    (ownSetupSwitch(mounted.root)!.props.onClick as () => void)();
+    await settle();
+    const saving = ownSetupSwitch(mounted.root)!;
+    assert.equal(saving.props["aria-checked"], true, "the switch shows what was asked for while it is saved");
+    assert.equal(saving.props["aria-disabled"], true, "and that it is busy");
+    // Clicked again, and a third time, before the app has answered.
+    (saving.props.onClick as () => void)();
+    (ownSetupSwitch(mounted.root)!.props.onClick as () => void)();
+    await settle();
+    assert.equal(requests.length, 1, "only the first click is sent");
+    assert.equal(ownSetupSwitch(mounted.root)!.props["aria-checked"], true, "and it is not flipped back");
+    assert.equal(reloads, 0);
+    finish({ outcome: "updated", configuration: {} });
+    await settle();
+    assert.equal(reloads, 1, "the one answer is followed by one read of the saved settings");
+    assert.equal(ownSetupSwitch(mounted.root)!.props["aria-disabled"], undefined);
+    assert.equal(requests.length, 1);
+  } finally { mounted.app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("with the owner's setup on, each access level says what still asks, the move warns, and saved tool permissions are spoken to", async () => {
+  const rule = { id: "rule", revision: 1, ownerId: "host", createdAtMs: 1, scope: { toolLabel: "Bash", projectName: "Do App" } };
+  const find = (root: HostNode, id: string) => descendants(root).find((node) => node.props["data-testid"] === id);
+  for (const [enabled, rules] of [[true, [rule]], [true, []], [false, [rule]]] as const) {
+    Object.assign(window, { letagentsDesktop: { supervisor: {
+      setAgentHomeHarness: async () => ({ outcome: "invalid", error: "unused" }), listHostToolRules: async () => rules,
+    } } });
+    const mounted = mount(AgentInspectorSettings, settingsProps({ resource: ownSetupResource({
+      provider: "claude-code", permissionProfileId: "ask_before_write", reasoningEffort: null,
+      homeHarness: { enabled, pending: false, availability: "available" },
+      supervisedPermissionProfiles: [{ id: "ask_before_write", label: "Ask before writes", description: "From the background service.", status: "available", risk: "medium", detail: null, isDefault: false }],
+    }) }));
+    try {
+      await settle();
+      const text = textContent(mounted.root);
+      const ownerLimits = /Asks before it changes files or runs write commands, except where your own Claude Code rules already allow it\. Your hooks run without asking\./;
+      const isolatedLimits = /Can't change files or run write commands until you approve each one\./;
+      assert.equal(ownerLimits.test(text), enabled, `on=${enabled}`);
+      assert.equal(isolatedLimits.test(text), !enabled, `on=${enabled}: the unconditional promise is shown only where it is true`);
+      // Moving the agent takes the switch with it, and says so beside the move.
+      const move = find(mounted.root, "agent-inspector-move-own-setup");
+      assert.equal(Boolean(move), enabled);
+      if (move) {
+        assert.match(textContent(move), /This agent keeps using your own Claude Code setup after a move\. Anyone who can message it in the room you move it to can ask it to use your tools\./);
+        assert.equal(move.props.role, "alert");
+        assert.equal(move.props["data-tone"], "warning");
+      }
+      // Tools under Always allowed stop applying when this changes, and the toggle says so when there are any.
+      const rulesNote = find(mounted.root, "agent-inspector-home-harness-rules");
+      assert.equal(Boolean(rulesNote), rules.length > 0, `rules=${rules.length}`);
+      if (rulesNote) assert.match(textContent(rulesNote), /Changing this pauses the tools under Always allowed\. They stay listed but stop applying, so the agent asks again\. Changing it back restores them\./);
+    } finally { mounted.app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+  }
+});
+
+test("a working agent that kept the owner's setup is not restarted, and the panel says it still has it", async () => {
+  for (const [restart, expected] of [
+    ["busy", "This agent is working, so it was not restarted yet. It keeps your setup until this turn ends, then restarts before it takes another."],
+    ["not_restarted", "This agent was not restarted. If it is running, it keeps your setup until it restarts."],
+  ] as const) {
+    const saved = Vue.ref(ownSetupResource({ homeHarness: { enabled: true, pending: false, availability: "available" } }));
+    Object.assign(window, { letagentsDesktop: { supervisor: { setAgentHomeHarness: async () => ({ outcome: "updated", configuration: saved.value.configuration, restart }) } } });
+    const mounted = mount({ setup: () => () => Vue.h(AgentInspectorSettings, settingsProps({
+      resource: saved.value,
+      onReload: () => { saved.value = ownSetupResource({ homeHarness: { enabled: false, pending: true, availability: "available" }, configRevision: 5 }); },
+    })) }, {});
+    try {
+      await settle();
+      (ownSetupSwitch(mounted.root)!.props.onClick as () => void)();
+      await settle();
+      const note = descendants(mounted.root).find((node) => node.props["data-testid"] === "agent-inspector-home-harness-restart")!;
+      assert.equal(textContent(note), expected);
+      assert.equal(note.props["data-tone"], "warning");
+      assert.equal(ownSetupSwitch(mounted.root)!.props["aria-checked"], false, "the saved choice is off");
+    } finally { mounted.app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+  }
+});
+
+test("the inspector header marks an agent that is set to use the owner's own setup", async () => {
+  for (const [homeHarness, label, title] of [
+    ["on", "Your setup", "This agent uses your own Codex setup."],
+    ["after_restart", "Setup pending", "This agent is set to use your own Codex setup. It gets it the next time it starts."],
+    ["until_restart", "Setup ending", "You turned this off, but this agent is still running with your own Codex setup. It loses it when it restarts."],
+    [undefined, null, null],
+  ] as const) {
+    const state = troubleshootingProps();
+    Object.assign(state.projection.entry, {
+      displayName: "QuartzMeadow", createdBy: "owner", charter: "Notes", provider: "codex", deliveryMode: "daemon_inbox",
+      observedState: "idle", condition: "none", runtimeGenerationId: "runtime_a",
+      providerContinuationId: "continuation_a", workAttemptId: "attempt_a", lastTerminal: null,
+      turnControl: null, lastTurnControlSequence: 0, ...(homeHarness ? { homeHarness } : {}),
+    });
+    state.projection.entry.roomAgentState.task = { state: "none", taskId: null, title: null };
+    state.projection = projectAgentInspector(state.projection.entry, { roomId: "room_a" });
+    const mounted = mount(AgentInspectorSurface, {
+      ...state, compact: false, initialTab: "overview", actionState: null, requestVersion: 1, selectedWorkSourceMessageId: null,
+      workArtifacts: [], settingsResource: readyResource, roomMoveResource: noMove, roomMoveAvailable: false,
+      providers: [], destinations: [], settingsConflict: false, liveFeed: { events: [], ended: false, droppedEvents: 0 },
+    });
+    await settle();
+    const badge = descendants(mounted.root).find((node) => node.props["data-testid"] === "agent-inspector-own-setup");
+    if (homeHarness) {
+      assert.ok(badge);
+      assert.equal(textContent(badge), label);
+      assert.equal(badge.props.title, title);
+    } else {
+      assert.equal(badge, undefined, "an agent without it carries no mark");
+    }
+    mounted.app.unmount();
+  }
 });

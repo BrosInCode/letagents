@@ -11,10 +11,16 @@ import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../
 import {
   ClaudeCodeProviderAdapter,
   claudeSessionTranscriptCandidates,
+  claudeChildEnvironment,
   claudeCliEnv,
+  claudeCliLaunchArgs,
   claudeLaunchPolicyArgs,
+  claudeOwnerSetupReadsProjectInstructionsOnly,
+  claudeOwnerSetupStartEnvironment,
   createEphemeralClaudeMcpConfig,
   createManagedClaudeMcpConfig,
+  ownerMcpServerNotices,
+  ownerMcpStartupTimeoutMs,
   type ClaudeCliChild,
   type ClaudeCodeProviderAdapterDependencies,
 } from "../main/agents/claude-code-provider-adapter.js";
@@ -107,6 +113,8 @@ interface HarnessOptions {
   initSessionId?: string;
   noInit?: boolean;
   noLetagents?: boolean;
+  /** The servers the CLI reports, when a test needs more than the room's own. */
+  mcpServers?: Array<Record<string, unknown>>;
   mcpStatus?: string;
   mcpTools?: string[];
   noApprovalLifecycle?: boolean;
@@ -137,7 +145,7 @@ function birthIdentity(pid: number): string {
 
 function createHarness(options: HarnessOptions = {}) {
   const children: FakeClaudeChild[] = [];
-  const launches: Array<{ claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }> = [];
+  const launches: Array<{ claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; ownerSetup?: true }> = [];
   const versionBins: string[] = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
@@ -145,6 +153,7 @@ function createHarness(options: HarnessOptions = {}) {
   let mcpConfigDisposals = 0;
   let versionReads = 0;
   const commitRequests: ProviderSpawnRequest[] = [];
+  const mcpConfigRequests: unknown[][] = [];
 
   const dependencies: ClaudeCodeProviderAdapterDependencies = {
     async readVersion(claudeBin) {
@@ -152,7 +161,8 @@ function createHarness(options: HarnessOptions = {}) {
       versionBins.push(claudeBin);
       return options.versionOutput ?? "2.1.220 (Claude Code)";
     },
-    async createLetAgentsMcpConfig() {
+    async createLetAgentsMcpConfig(...received) {
+      mcpConfigRequests.push(received);
       return {
         path: "/private/tmp/letagents-claude-mcp-test/mcp.json",
         async dispose() { mcpConfigDisposals += 1; },
@@ -187,7 +197,7 @@ function createHarness(options: HarnessOptions = {}) {
             capabilities: options.noApprovalLifecycle ? [] : ["msg_lifecycle_v1"],
             permissionMode: options.initPermissionMode ?? "default",
             cwd: input.cwd,
-            mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: options.mcpStatus ?? "connected" }],
+            mcp_servers: options.mcpServers ?? (options.noLetagents ? [] : [{ name: "letagents", status: options.mcpStatus ?? "connected" }]),
             tools: options.mcpTools ?? ["mcp__letagents__get_board", "mcp__letagents__read_messages", "mcp__letagents__send_message"],
           });
           const frame = JSON.parse(json) as { uuid?: string };
@@ -254,6 +264,7 @@ function createHarness(options: HarnessOptions = {}) {
     identities,
     dependencies,
     commitRequests,
+    mcpConfigRequests,
     get mcpConfigDisposals() { return mcpConfigDisposals; },
     get versionReads() { return versionReads; },
   };
@@ -2968,4 +2979,603 @@ for (const sameBatchExit of [false, true]) test(`buffered explicit compaction fa
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   await assert.rejects(adapter.spawn(spawnRequest()), { reason: "compaction_failed" });
   assert.equal(adapter.compactionProgress("wa-claude-1"), null);
+});
+
+const ROOM_SERVER = { name: "letagents", status: "connected", source: "dynamic" };
+const OWNER_SERVER = { name: "owner_browser", status: "connected", source: "user" };
+const CLAUDE_TOOLS = ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"];
+/** How Claude is told to start MCP servers when it also starts the owner's: its own time limit, and all of them at once. */
+const OWNER_START_ENV = { MCP_TIMEOUT: "30000", MCP_SERVER_CONNECTION_BATCH_SIZE: "256", MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE: "256" };
+const OWNER_START_SETTINGS = JSON.stringify({ env: OWNER_START_ENV });
+/** The owner's own setup is only ever on for a daemon-supervised room agent. */
+const SUPERVISED = { supervisorEntryId: "supervised_owner", supervisorSocketPath: "/tmp/fake-daemon.sock", supervisorExecutionGenerationId: "generation-1" };
+const OWN_SETUP = { ...SUPERVISED, homeHarness: true };
+function ownSetupAskPolicy(homeHarness: boolean, permissionMode = "default") {
+  return {
+    permissionMode, dangerouslySkipPermissions: false, allowDangerouslySkipPermissions: false,
+    tools: homeHarness ? [...CLAUDE_TOOLS, "Skill"] : CLAUDE_TOOLS,
+    allowedTools: ["mcp__letagents__*"], settingSources: homeHarness ? "user" : "", settings: "{}",
+  };
+}
+
+test("Claude starts exactly as before without the owner's own setup, and reads the owner's servers and settings with it", async () => {
+  const launch = async (homeHarness: boolean, permissionProfileId: string, launchPolicy: Record<string, unknown>) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [OWNER_SERVER, ROOM_SERVER],
+      initPermissionMode: String(launchPolicy.permissionMode), commitEnvironment: { GIT_AUTHOR_NAME: "octo-fake" } });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    await adapter.spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId, launchPolicy,
+      ...SUPERVISED,
+      supervisorWorkerSession: { agentSessionId: "session-1", roomCursor: null, apiUrl: "https://letagents.invalid" },
+      ...(homeHarness ? { homeHarness: true } : {}),
+    }));
+    return { ...harness.launches[0]!, launch: harness.launches[0]!, mcpConfig: harness.mcpConfigRequests[0]! };
+  };
+  // What makes a process on this machine the room agent: the daemon answers whoever holds these.
+  const coordinates = {
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_owner",
+    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/fake-daemon.sock",
+    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "wa-claude-1",
+    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation-1",
+    LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "session-1",
+    LETAGENTS_SUPERVISOR_ROOM_ID: "github.com/example/repo",
+    LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "LanternRook",
+    LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+    LETAGENTS_PERMISSION_PROFILE_ID: "ask_before_write",
+  };
+
+  const off = await launch(false, "ask_before_write", ownSetupAskPolicy(false));
+  const session = argValue(off.args, "--session-id")!;
+  assert.deepEqual(off.args, [
+    "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--permission-prompt-tool", "stdio",
+    "--strict-mcp-config",
+    "--mcp-config", "/private/tmp/letagents-claude-mcp-test/mcp.json",
+    "--permission-mode", "default",
+    "--tools", "Read,Glob,Grep,Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch",
+    "--allowed-tools", "mcp__letagents__*",
+    "--setting-sources", "",
+    "--settings", "{}",
+    "--session-id", session,
+  ], "without the owner's setup the launch is exactly the isolated one");
+
+  const on = await launch(true, "ask_before_write", ownSetupAskPolicy(true));
+  assert.deepEqual(on.args, [
+    "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--permission-prompt-tool", "stdio",
+    "--mcp-config", "/private/tmp/letagents-claude-mcp-test/mcp.json",
+    "--permission-mode", "default",
+    "--tools", "Read,Glob,Grep,Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Skill",
+    "--allowed-tools", "mcp__letagents__*",
+    "--setting-sources", "user",
+    // Given on the command line so that the owner's own settings cannot replace them.
+    "--settings", OWNER_START_SETTINGS,
+    "--session-id", argValue(on.args, "--session-id")!,
+  ], "the room's server is still named, approvals still travel over stdio, and no project settings are read");
+  assert.equal(on.cwd, off.cwd);
+
+  // Without the owner's setup the coordinates are in the CLI's environment, where only the room's server inherits them.
+  assert.deepEqual(off.env, { GIT_AUTHOR_NAME: "octo-fake", ...coordinates });
+  assert.deepEqual(off.launch, { claudeBin: off.claudeBin, args: off.args, cwd: off.cwd, env: off.env }, "and the launch is marked in no other way");
+  assert.equal(off.mcpConfig.length, 1, "the room server's config is asked for exactly as before");
+  // With it, Claude hands its environment to the owner's servers and hooks too, so the coordinates go to the room's server alone.
+  assert.deepEqual(on.env, { GIT_AUTHOR_NAME: "octo-fake", ...OWNER_START_ENV },
+    "beside the commit identity, only how Claude is to start the owner's servers");
+  for (const name of Object.keys(OWNER_START_ENV)) assert.equal(Object.hasOwn(off.env ?? {}, name), false, name);
+  assert.equal(on.launch.ownerSetup, true);
+  assert.deepEqual(on.mcpConfig[1], coordinates);
+
+  // Full access names no setting sources: it reads the owner's, the project's and the folder's own.
+  const fullAccess = { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true };
+  const fullOff = await launch(false, "full_access", fullAccess);
+  const fullOn = await launch(true, "full_access", fullAccess);
+  assert.deepEqual(fullOff.args, [
+    "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--strict-mcp-config",
+    "--mcp-config", "/private/tmp/letagents-claude-mcp-test/mcp.json",
+    "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions",
+    "--session-id", argValue(fullOff.args, "--session-id")!,
+  ], "without the owner's setup a Full access launch is exactly what it was");
+  assert.deepEqual(fullOff.env, { GIT_AUTHOR_NAME: "octo-fake", ...coordinates, LETAGENTS_PERMISSION_PROFILE_ID: "full_access" });
+  // With the owner's setup it reads the owner's settings alone, so nothing of the project's runs beside the owner's tools,
+  // and it is given its own work folder as an added directory so that the project's CLAUDE.md still loads.
+  const withInstructions = { ...OWNER_START_ENV, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" };
+  assert.deepEqual(fullOn.args, [
+    "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--mcp-config", "/private/tmp/letagents-claude-mcp-test/mcp.json",
+    "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions",
+    "--settings", JSON.stringify({ env: withInstructions }),
+    "--setting-sources", "user",
+    "--add-dir", fullOn.cwd,
+    "--session-id", argValue(fullOn.args, "--session-id")!,
+  ]);
+  assert.equal(fullOn.cwd, spawnRequest().cwd, "the added directory is the agent's own work folder and nothing else");
+  assert.deepEqual(fullOn.env, { GIT_AUTHOR_NAME: "octo-fake", ...withInstructions });
+  // The other access levels never read a project's instructions, so they are given no added directory.
+  assert.equal(on.args.includes("--add-dir"), false);
+  assert.equal(Object.hasOwn(on.env ?? {}, "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"), false);
+});
+
+test("with the owner's own setup the Claude CLI's environment carries nothing that lets a process act as the room agent", () => {
+  const ambient = {
+    PATH: "/usr/bin", HOME: "/Users/fake", LETAGENTS_API_URL: "https://letagents.invalid",
+    // A desktop app started from inside an agent's shell has these in its own environment.
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_other", LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/other.sock",
+    LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn", LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_PERMISSION_PROFILE_ID: "full_access", LETAGENTS_TOKEN: "fake-owner-token", LETAGENTS_AGENT_SESSION_BEARER: "fake-bearer",
+  };
+  assert.deepEqual(claudeChildEnvironment({ env: { GIT_AUTHOR_NAME: "octo-fake" }, ownerSetup: true }, ambient), {
+    PATH: "/usr/bin", HOME: "/Users/fake", LETAGENTS_API_URL: "https://letagents.invalid", GIT_AUTHOR_NAME: "octo-fake",
+  });
+  // Without the owner's setup the environment is the one every launch had before.
+  assert.deepEqual(claudeChildEnvironment({ env: { GIT_AUTHOR_NAME: "octo-fake" } }, ambient), claudeCliEnv(ambient, { GIT_AUTHOR_NAME: "octo-fake" }));
+  assert.equal(claudeChildEnvironment({}, ambient).LETAGENTS_SUPERVISOR_ENTRY_ID, "supervised_other");
+});
+
+test("the room server's config carries the coordinates only when the launch hands them over", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-claude-room-config-"));
+  try {
+    const runtime = () => ({ entryPath: "/fake/letagents-mcp.js" }) as never;
+    const read = async (roomServerEnvironment?: Record<string, string>) => {
+      const config = await createManagedClaudeMcpConfig("https://letagents.invalid", directory, undefined, runtime, roomServerEnvironment);
+      try {
+        return { text: await readFile(config.path, "utf8"), mode: (await stat(config.path)).mode & 0o777 };
+      } finally {
+        await config.dispose();
+      }
+    };
+    const isolated = await read();
+    assert.equal(isolated.text, JSON.stringify({ mcpServers: { letagents: {
+      command: process.execPath, args: ["/fake/letagents-mcp.js"], env: { LETAGENTS_API_URL: "https://letagents.invalid", ELECTRON_RUN_AS_NODE: "1" },
+    } } }), "without the owner's setup the file is byte for byte the one written before");
+    const ownSetup = await read({ LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_owner", LETAGENTS_API_URL: "https://elsewhere.invalid" });
+    assert.deepEqual(JSON.parse(ownSetup.text).mcpServers.letagents.env, {
+      LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_owner", LETAGENTS_API_URL: "https://letagents.invalid", ELECTRON_RUN_AS_NODE: "1",
+    }, "the endpoint is always the launch's own");
+    assert.equal(ownSetup.mode, 0o600, "only the owner can read it");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Claude is refused the owner's own setup outside a daemon-supervised room agent", async () => {
+  const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [ROOM_SERVER] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest({
+    configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), homeHarness: true,
+  })), /only as a daemon-supervised room agent/);
+  assert.equal(harness.launches.length, 0);
+  assert.equal(harness.mcpConfigRequests.length, 0);
+});
+
+test("the owner's MCP servers get Claude's own time to start, a smaller limit of the owner's is kept, and a larger one is capped", () => {
+  for (const [configured, expected] of [
+    [undefined, 30_000], ["", 30_000], ["5000", 5_000], [" 7000 ", 7_000], ["30000", 30_000], ["45000", 45_000],
+    ["45001", 45_000], ["600000", 45_000], ["999999999", 45_000],
+    // Anything that is not a plain positive number of milliseconds is not the owner's limit.
+    ["0", 30_000], ["-1", 30_000], ["1e3", 30_000], ["3000ms", 30_000], ["0x10", 30_000], ["3000.5", 30_000], ["1234567890", 30_000],
+  ] as const) assert.equal(ownerMcpStartupTimeoutMs(configured), expected, String(configured));
+});
+
+test("each of the owner's MCP servers that did not connect is named, and the room's own never is", () => {
+  assert.deepEqual(ownerMcpServerNotices({ mcp_servers: [
+    { name: "owner_ok", status: "connected", source: "user" },
+    { name: "owner_silent", status: "failed", source: "user" },
+    { name: "owner_slow", status: "pending", source: "user" },
+    { name: "owner_login", status: "needs-auth", source: "user" },
+    { name: "owner_other", status: "disabled", source: "user" },
+    { name: "letagents", status: "failed", source: "dynamic" },
+    { name: "  ", status: "failed" }, { status: "failed" }, null, "owner_text",
+  ] }), [
+    'Your MCP server "owner_silent" did not start, so this agent is running without it.',
+    'Your MCP server "owner_slow" was still starting when this agent began, so its tools may be missing.',
+    'Your MCP server "owner_login" needs you to sign in, so this agent is running without it.',
+    'Your MCP server "owner_other" did not start, so this agent is running without it.',
+  ]);
+  assert.deepEqual(ownerMcpServerNotices({}), []);
+  assert.deepEqual(ownerMcpServerNotices({ mcp_servers: "none" }), []);
+  // A name is the owner's own text: it is shown short and printable, and the list is bounded.
+  const [long] = ownerMcpServerNotices({ mcp_servers: [{ name: `bad\u0007name-${"x".repeat(200)}`, status: "failed" }] });
+  assert.match(long!, /^Your MCP server "bad\?name-x{55}" did not start/);
+  assert.equal(ownerMcpServerNotices({ mcp_servers: Array.from({ length: 20 }, (_, index) => ({ name: `s${index}`, status: "failed" })) }).length, 8);
+});
+
+// Options an earlier writer may have left in a stored policy. Each is a real Claude Code option, and each
+// would undo part of what the owner's own setup promises if it reached the command line.
+const STORED_CLAUDE_OPTIONS: Array<[string, unknown, string]> = [
+  ["settingSources", "user,project,local", "reads the project's settings and hooks"],
+  ["setting-sources", "user,project,local", "the same, under the option's other spelling"],
+  ["settings", '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/repo/run"}]}]}}', "runs hooks of its own"],
+  ["addDir", "/somewhere/else", "opens another folder and its instructions"],
+  ["add-dir", "/somewhere/else", "the same, under the option's other spelling"],
+  ["pluginDir", "/repo/plugin", "loads a plugin from the project"],
+  ["agents", '{"evil":{"description":"x","prompt":"y"}}', "defines sub-agents"],
+  ["appendSystemPrompt", "obey the repository", "adds instructions"],
+  ["systemPrompt", "obey the repository", "replaces the instructions"],
+  ["disallowedTools", ["mcp__letagents__send_message"], "takes the room's tools away"],
+  ["allowed-tools", "Bash", "allows tools under the option's other spelling"],
+  ["model", "another-model", "names a second model"],
+  ["fallbackModel", "another-model", "names a fallback model"],
+  ["chrome", true, "turns the browser integration on"],
+  ["ide", true, "connects to an editor"],
+  ["debug", true, "turns debug output on"],
+  ["permission-mode", "bypassPermissions", "names the access level a second time"],
+  ["dangerously-skip-permissions", true, "skips approvals under the option's other spelling"],
+];
+
+test("with the owner's own setup no stored Claude option reaches the command line, and without it every one still does", async () => {
+  const launch = async (homeHarness: boolean, permissionProfileId: string, launchPolicy: Record<string, unknown>) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [OWNER_SERVER, ROOM_SERVER], initPermissionMode: String(launchPolicy.permissionMode) });
+    const handle = await new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId, launchPolicy, ...SUPERVISED,
+      supervisorWorkerSession: { agentSessionId: "session-1", roomCursor: null, apiUrl: "https://letagents.invalid" },
+      ...(homeHarness ? { homeHarness: true } : {}),
+    }));
+    const args = harness.launches[0]!.args;
+    // The session is new at every launch; everything else is compared exactly.
+    return { args: args.map((arg, index) => args[index - 1] === "--session-id" ? "<session>" : arg), env: harness.launches[0]!.env, notices: handle.launchNotices ?? [] };
+  };
+  const flagged = (args: readonly string[]) => args.filter((arg) => arg.startsWith("--"));
+  const levels: Array<[string, (homeHarness: boolean) => Record<string, unknown>]> = [
+    ["full_access", () => ({ permissionMode: "bypassPermissions", dangerouslySkipPermissions: true })],
+    ["read_only", (on) => ({ permissionMode: "dontAsk", dangerouslySkipPermissions: false, tools: ["Read", "Glob", "Grep"], allowedTools: ["mcp__letagents__*"], settingSources: on ? "user" : "" })],
+    ["ask_before_write", (on) => ownSetupAskPolicy(on)],
+  ];
+  for (const [permissionProfileId, level] of levels) {
+    // The launch an agent with nothing else stored gets, with and without the owner's setup.
+    const on = await launch(true, permissionProfileId, level(true));
+    const off = await launch(false, permissionProfileId, level(false));
+    assert.deepEqual(on.notices, [], permissionProfileId);
+    // With the owner's setup every flag is there once, and these three are what the launch says they are.
+    assert.equal(new Set(flagged(on.args)).size, flagged(on.args).length, `${permissionProfileId}: no flag is given twice`);
+    assert.equal(argValue(on.args, "--setting-sources"), "user", permissionProfileId);
+    assert.equal(on.args.includes("--strict-mcp-config"), false, permissionProfileId);
+    assert.equal(argValue(on.args, "--mcp-config"), "/private/tmp/letagents-claude-mcp-test/mcp.json", permissionProfileId);
+    assert.deepEqual(JSON.parse(argValue(on.args, "--settings")!), { env: on.env }, `${permissionProfileId}: the launch's own start settings`);
+    assert.equal(argValue(on.args, "--add-dir") ?? null, permissionProfileId === "full_access" ? spawnRequest().cwd : null, permissionProfileId);
+
+    for (const [option, value, what] of STORED_CLAUDE_OPTIONS) {
+      // The asking levels refuse the other spelling of their own options at any launch, as they always did.
+      if (permissionProfileId === "ask_before_write" && ["settings", "setting-sources", "allowed-tools", "permission-mode", "dangerously-skip-permissions"].includes(option)) continue;
+      const name = `${permissionProfileId}: ${option} (${what})`;
+      // An option the level decides itself stays the level's.
+      const stored = (homeHarness: boolean) => ({ [option]: value, ...level(homeHarness) });
+      const withOption = await launch(true, permissionProfileId, stored(true));
+      assert.deepEqual(withOption.args, on.args, `${name}: the launch is the one with nothing else stored`);
+      assert.deepEqual(withOption.env, on.env, name);
+      assert.deepEqual(withOption.notices, Object.hasOwn(level(true), option) ? [] : [
+        `With your own setup on, this agent starts with its access level's own Claude Code options only. These saved options were not used: ${JSON.stringify(option)}.`,
+      ], `${name}: and the owner is told what was left out`);
+      // Without the owner's setup the option is passed on exactly as it always was.
+      const passedOn = await launch(false, permissionProfileId, stored(false));
+      assert.deepEqual(passedOn.args, [
+        ...off.args.slice(0, off.args.indexOf("--mcp-config") + 2),
+        ...claudeLaunchPolicyArgs(stored(false)),
+        ...off.args.slice(off.args.indexOf("--session-id")),
+      ], `${name}: unchanged without the owner's setup`);
+      assert.deepEqual(passedOn.notices, [], name);
+    }
+  }
+});
+
+test("a Claude agent is told which saved options were left out when they change, not at every start, and a failed start does not use the line up", async () => {
+  const level = { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true };
+  const told = async (agent: string, stored: Record<string, unknown>, over: { fails?: boolean; servers?: unknown[] } = {}) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: (over.servers ?? [OWNER_SERVER, ROOM_SERVER]) as never, initPermissionMode: "bypassPermissions",
+      ...(over.fails ? { bootstrapResultSubtype: "error_max_turns" } : {}) });
+    return new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId: "full_access", launchPolicy: { ...level, ...stored }, ...OWN_SETUP, supervisorEntryId: agent,
+      supervisorWorkerSession: { agentSessionId: "session-1", roomCursor: null, apiUrl: "https://letagents.invalid" },
+    })).then((handle) => handle.launchNotices ?? [], (error: Error) => error);
+  };
+  const line = (...options: string[]) => `With your own setup on, this agent starts with its access level's own Claude Code options only. These saved options were not used: ${options.map((option) => JSON.stringify(option)).join(", ")}.`;
+  const stored = { settingSources: "user,project,local" };
+  assert.deepEqual(await told("supervised_said_once", stored), [line("settingSources")], "its first start says it");
+  assert.deepEqual(await told("supervised_said_once", stored), [], "the same again says nothing");
+  assert.deepEqual(await told("supervised_said_once", { settingSources: "project" }), [], "another value under the same name is not a change");
+  assert.deepEqual(await told("supervised_said_once", { ...stored, pluginDir: "/repo" }), [line("settingSources", "pluginDir")], "a change is said");
+  // What one of the owner's servers did is still said at every start.
+  const silent = [OWNER_SERVER, { name: "owner_silent", status: "failed", source: "user" }, ROOM_SERVER];
+  const serverLine = 'Your MCP server "owner_silent" did not start, so this agent is running without it.';
+  assert.deepEqual(await told("supervised_said_once", { ...stored, pluginDir: "/repo" }, { servers: silent }), [serverLine]);
+  assert.deepEqual(await told("supervised_said_once", { ...stored, pluginDir: "/repo" }, { servers: silent }), [serverLine]);
+  // A start that failed after it was given the line never showed it, so the next one says it.
+  assert.ok(await told("supervised_said_once_failed", stored, { fails: true }) instanceof Error);
+  assert.deepEqual(await told("supervised_said_once_failed", stored), [line("settingSources")]);
+  // One that failed without being given it, the line having been said before, changes nothing.
+  assert.ok(await told("supervised_said_once_failed", stored, { fails: true, servers: silent }) instanceof Error);
+  assert.deepEqual(await told("supervised_said_once_failed", stored), []);
+  // What one agent was told says nothing about another.
+  assert.deepEqual(await told("supervised_said_once_other", stored), [line("settingSources")]);
+});
+
+test("a flag the launch with the owner's own setup decides is set once, wherever it stood before", () => {
+  const base = { approvalProfileLabel: null, homeHarness: true, ownerMcpStartupMs: 30_000, cwd: "/work/attempt", mcpConfigPath: "/room/mcp.json", session: { sessionId: "s-1" } };
+  const clean = claudeCliLaunchArgs({ ...base, policyArgs: ["--permission-mode", "bypassPermissions", "--dangerously-skip-permissions"] });
+  const settings = argValue(clean, "--settings")!;
+  // Arguments that already name the launch's own flags, first, last and twice: the answer is the same.
+  for (const policyArgs of [
+    ["--setting-sources", "user,project,local", "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions"],
+    ["--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--setting-sources", "user,project,local"],
+    ["--setting-sources", "project", "--permission-mode", "bypassPermissions", "--setting-sources", "local", "--dangerously-skip-permissions", "--setting-sources", "user,project,local"],
+    ["--settings", '{"hooks":{}}', "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--settings", '{"env":{"MCP_TIMEOUT":"1"}}'],
+    ["--add-dir", "/somewhere/else", "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--add-dir", "/another"],
+  ]) {
+    const args = claudeCliLaunchArgs({ ...base, policyArgs });
+    for (const flag of ["--setting-sources", "--settings", "--add-dir", "--mcp-config"]) {
+      assert.equal(args.filter((arg) => arg === flag).length <= 1, true, `${flag} in ${policyArgs.join(" ")}`);
+    }
+    assert.equal(argValue(args, "--setting-sources"), "user", policyArgs.join(" "));
+    assert.equal(args.join(" ").includes("project"), false, policyArgs.join(" "));
+    assert.equal(args.includes("/somewhere/else") || args.includes("/another"), false);
+    assert.equal(argValue(args, "--settings")?.includes("hooks"), false);
+    assert.equal(JSON.parse(argValue(args, "--settings")!).env.MCP_TIMEOUT, "30000");
+    // Arguments that named the settings to read are not Full access as stored, so no folder is added for them.
+    assert.equal(argValue(args, "--add-dir") ?? null, policyArgs.includes("--setting-sources") ? null : "/work/attempt");
+  }
+  assert.equal(argValue(clean, "--settings"), settings);
+  // Without the owner's setup the arguments are passed on untouched, twice-named flags included.
+  const off = claudeCliLaunchArgs({ ...base, homeHarness: false, policyArgs: ["--setting-sources", "user", "--setting-sources", "project", "--add-dir", "/x"] });
+  assert.deepEqual(off.slice(off.indexOf("--mcp-config") + 2, -2), ["--setting-sources", "user", "--setting-sources", "project", "--add-dir", "/x"]);
+});
+
+test("an owner MCP server that did not start is reported on the handle, only for a launch with the owner's setup", async () => {
+  const servers = [OWNER_SERVER, { name: "owner_silent", status: "failed", source: "user" }, { name: "owner_slow", status: "pending", source: "user" }, ROOM_SERVER];
+  const launch = async (over: Partial<ProviderSpawnRequest>) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: servers });
+    return new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId: "ask_before_write", ...over,
+    }));
+  };
+  const on = await launch({ launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP });
+  assert.deepEqual(on.launchNotices, [
+    'Your MCP server "owner_silent" did not start, so this agent is running without it.',
+    'Your MCP server "owner_slow" was still starting when this agent began, so its tools may be missing.',
+  ]);
+  // The agent started all the same.
+  assert.equal(on.observedState(), "idle");
+  // Its handle says the process has the owner's setup: that is what later ends it when the owner turns it off.
+  assert.equal(on.ownerSetup, true);
+  const off = await launch({ launchPolicy: ownSetupAskPolicy(false), ...SUPERVISED });
+  assert.deepEqual(off.launchNotices ?? [], []);
+  assert.equal(off.ownerSetup, false);
+});
+
+test("the start waits for the owner's MCP servers on top of its usual budget, and only with the owner's setup", async () => {
+  const start = (over: Partial<ProviderSpawnRequest>, ownerMcpTimeout?: string) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", noInit: true });
+    const adapter = new ClaudeCodeProviderAdapter({
+      dependencies: { ...harness.dependencies, ownerMcpTimeout: () => ownerMcpTimeout }, initTimeoutMs: 40,
+    });
+    let settled: "pending" | Error = "pending";
+    const spawned = adapter.spawn(spawnRequest({ configurationRevision: 4, permissionProfileId: "ask_before_write", ...over }));
+    spawned.catch((error: Error) => { settled = error; });
+    return { harness, spawned, state: () => settled };
+  };
+  // Without the owner's setup the budget is the one it always was.
+  const offStarted = Date.now();
+  const off = start({ launchPolicy: ownSetupAskPolicy(false), ...SUPERVISED }, "400");
+  await assert.rejects(withLoopAlive(off.spawned), (error: Error) => {
+    assert.ok(Date.now() - offStarted < 300, "it gives up after its usual 40 ms, not after the owner's limit as well");
+    assert.match(error.message, /did not report its stream-json init/);
+    assert.doesNotMatch(error.message, /your MCP servers/);
+    return true;
+  });
+  assert.equal(Object.hasOwn(off.harness.launches[0]!.env ?? {}, "MCP_TIMEOUT"), false);
+
+  // With it, Claude is told the limit and the launch waits that much longer for init.
+  const on = start({ launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP }, "400");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(on.state(), "pending", "the usual 40 ms have long passed and the launch is still waiting");
+  assert.equal(on.harness.launches[0]!.env?.MCP_TIMEOUT, "400");
+  await assert.rejects(withLoopAlive(on.spawned), (error: Error) => {
+    assert.match(error.message, /did not report its stream-json init/);
+    assert.match(error.message, /This agent starts with your own Claude Code setup, so one of your MCP servers or hooks may be holding the start up\./);
+    return true;
+  });
+  assert.equal(on.harness.children[0]!.alive, false, "a launch that still never reports is stopped, as before");
+});
+
+test("a start that ran out of time after Claude came up names the owner's servers that did not start", async () => {
+  const servers = [OWNER_SERVER, { name: "owner_silent", status: "failed", source: "user" }, ROOM_SERVER];
+  const start = (over: Partial<ProviderSpawnRequest>) => {
+    // Claude reports init, and then the first turn never finishes.
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: servers, omitBootstrapResult: true });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: { ...harness.dependencies, ownerMcpTimeout: () => "60" }, initTimeoutMs: 40 });
+    return adapter.spawn(spawnRequest({ configurationRevision: 4, permissionProfileId: "ask_before_write", ...over }));
+  };
+  await assert.rejects(withLoopAlive(start({ launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP })), (error: Error) => {
+    assert.match(error.message, /did not complete its daemon-safe bootstrap turn \(deadline\)/);
+    assert.match(error.message, /Your MCP server "owner_silent" did not start, so this agent is running without it\.$/);
+    return true;
+  });
+  await assert.rejects(withLoopAlive(start({ launchPolicy: ownSetupAskPolicy(false), ...SUPERVISED })), (error: Error) => {
+    assert.match(error.message, /did not complete its daemon-safe bootstrap turn \(deadline\)/);
+    assert.doesNotMatch(error.message, /Your MCP server/, "an isolated agent's failure says nothing about the owner's servers");
+    return true;
+  });
+});
+
+test("the Claude launch arguments differ only in what the owner's setup needs", () => {
+  // An access level that names its setting sources, as Read-only, Ask before writes and Auto do.
+  const input = { approvalProfileLabel: "Ask before writes", mcpConfigPath: "/tmp/mcp.json", policyArgs: ["--permission-mode", "default", "--setting-sources", "user"], model: "opus" };
+  const off = claudeCliLaunchArgs({ ...input, homeHarness: false, session: { sessionId: "s-1" } });
+  const on = claudeCliLaunchArgs({ ...input, homeHarness: true, cwd: "/work/attempt", session: { sessionId: "s-1" } });
+  assert.deepEqual(off, ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--permission-prompt-tool", "stdio", "--strict-mcp-config", "--mcp-config", "/tmp/mcp.json",
+    "--permission-mode", "default", "--setting-sources", "user", "--model", "opus", "--session-id", "s-1"]);
+  assert.deepEqual(on, ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--permission-prompt-tool", "stdio", "--mcp-config", "/tmp/mcp.json",
+    "--permission-mode", "default", "--setting-sources", "user", "--settings", OWNER_START_SETTINGS, "--model", "opus", "--session-id", "s-1"],
+  "the strict MCP flag is dropped and the start settings are added; no directory is added");
+  assert.deepEqual(claudeCliLaunchArgs({ ...input, approvalProfileLabel: null, model: null, homeHarness: true, ownerMcpStartupMs: 4_000, session: { resume: "s-2" } }),
+    ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+      "--mcp-config", "/tmp/mcp.json", "--permission-mode", "default", "--setting-sources", "user",
+      "--settings", JSON.stringify({ env: { ...OWNER_START_ENV, MCP_TIMEOUT: "4000" } }), "--resume", "s-2"]);
+  // A policy that already carries settings has them replaced where they stand, never given twice.
+  const replaced = claudeCliLaunchArgs({ ...input, policyArgs: ["--permission-mode", "default", "--setting-sources", "user", "--settings", "{}", "--tools", "Read"], homeHarness: true, session: { sessionId: "s-1" } });
+  assert.deepEqual(replaced.filter((arg) => arg === "--settings").length, 1);
+  assert.equal(replaced[replaced.indexOf("--settings") + 1], OWNER_START_SETTINGS);
+  assert.deepEqual(claudeCliLaunchArgs({ ...input, policyArgs: ["--permission-mode", "default", "--settings", "{}", "--tools", "Read"], homeHarness: false, ownerMcpStartupMs: 4_000, cwd: "/work/attempt", session: { sessionId: "s-1" } })
+    .filter((arg, index, all) => all[index - 1] === "--settings"), ["{}"], "without the owner's setup the policy's own settings are passed as they are");
+
+  // An access level that names no setting sources reads the project's too: Full access.
+  const full = { approvalProfileLabel: null, mcpConfigPath: "/tmp/mcp.json", policyArgs: ["--permission-mode", "bypassPermissions", "--dangerously-skip-permissions"], model: null };
+  assert.equal(claudeOwnerSetupReadsProjectInstructionsOnly(full.policyArgs), true);
+  assert.equal(claudeOwnerSetupReadsProjectInstructionsOnly(input.policyArgs), false);
+  assert.equal(claudeOwnerSetupReadsProjectInstructionsOnly(["--permission-mode", "dontAsk", "--setting-sources", ""]), false);
+  const fullOff = claudeCliLaunchArgs({ ...full, homeHarness: false, cwd: "/work/attempt", session: { sessionId: "s-1" } });
+  assert.deepEqual(fullOff, ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--strict-mcp-config", "--mcp-config", "/tmp/mcp.json",
+    "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--session-id", "s-1"], "without the owner's setup nothing is added, whatever folder is named");
+  const instructions = JSON.stringify({ env: { ...OWNER_START_ENV, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" } });
+  assert.deepEqual(claudeCliLaunchArgs({ ...full, homeHarness: true, cwd: "/work/attempt", session: { sessionId: "s-1" } }),
+    ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--mcp-config", "/tmp/mcp.json",
+      "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions",
+      "--settings", instructions, "--setting-sources", "user", "--add-dir", "/work/attempt", "--session-id", "s-1"]);
+  // With no folder to add, the launch still reads the owner's settings alone.
+  for (const cwd of [undefined, "", "  "]) {
+    const args = claudeCliLaunchArgs({ ...full, homeHarness: true, ...(cwd === undefined ? {} : { cwd }), session: { sessionId: "s-1" } });
+    assert.equal(args.includes("--add-dir"), false, String(cwd));
+    assert.equal(args[args.indexOf("--setting-sources") + 1], "user", String(cwd));
+  }
+  assert.deepEqual(claudeOwnerSetupStartEnvironment(30_000), OWNER_START_ENV);
+  assert.deepEqual(claudeOwnerSetupStartEnvironment(30_000, true), { ...OWNER_START_ENV, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" });
+});
+
+test("with the owner's own setup, Claude must report the room's server as the one this launch named", async () => {
+  for (const [servers, starts] of [
+    [[OWNER_SERVER, ROOM_SERVER], true],
+    [[{ name: "letagents", status: "connected", source: "user" }], false],
+    [[{ name: "letagents", status: "connected", source: "project" }], false],
+    [[{ name: "letagents", status: "connected" }], false],
+    [[ROOM_SERVER, { name: "letagents", status: "connected", source: "user" }], false],
+  ] as const) {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [...servers] });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const spawned = adapter.spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP,
+    }));
+    if (starts) {
+      await spawned;
+    } else {
+      await assert.rejects(withLoopAlive(spawned), /did not report the room's LetAgents server as the one this launch started/);
+      assert.equal(harness.mcpConfigDisposals, 1, "the refused launch leaves no room config behind");
+    }
+  }
+  // Without the owner's setup only the room's server can load, so an older CLI that names no source still starts.
+  const isolated = createHarness({ versionOutput: "2.1.278 (Claude Code)" });
+  await new ClaudeCodeProviderAdapter({ dependencies: isolated.dependencies }).spawn(spawnRequest({
+    configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(false),
+  }));
+});
+
+test("a rented Claude agent is refused the owner's own setup before anything starts", async () => {
+  const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [ROOM_SERVER] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest({
+    configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP,
+    supervisorEntryId: "supervised_rental_0123", supervisorSocketPath: "/tmp/fake-daemon.sock", supervisorExecutionGenerationId: "generation-1",
+  })), /a rented agent never uses its owner's own setup/);
+  assert.equal(harness.launches.length, 0);
+});
+
+test("a request nobody can answer is turned down at once instead of holding the turn", async () => {
+  const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [OWNER_SERVER, ROOM_SERVER] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({
+    configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP,
+  }));
+  const child = harness.children[0]!;
+  const answers = () => child.written.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.type === "control_response");
+  const observed: unknown[] = [];
+  const controller = new AbortController();
+  void adapter.observePermissions(handle, (event) => { observed.push(event); }, controller.signal);
+  const activity: string[] = [];
+  // The background service keeps an agent's activity from its stream, so that is where each one must be.
+  adapter.onStream(handle, (event) => { if (event.method === "control_request/declined") activity.push(event.summary ?? ""); });
+
+  // One of the owner's MCP servers asks the person to type something.
+  child.emit({ type: "control_request", request_id: "elicit-1", request: {
+    subtype: "elicitation", mcp_server_name: "owner_browser", message: "Which account?", mode: "form",
+    requested_schema: { type: "object", properties: { account: { type: "string" } }, required: ["account"] },
+  } });
+  // A skill's helper agent wants a tool approved.
+  child.emit({ type: "control_request", request_id: "sub-1", request: {
+    subtype: "can_use_tool", tool_name: "mcp__owner_browser__owner_write", input: {}, tool_use_id: "toolu_sub_1", agent_id: "a37a052b",
+  } });
+  assert.deepEqual(answers(), [
+    { type: "control_response", response: { subtype: "success", request_id: "elicit-1", response: { action: "decline" } } },
+    { type: "control_response", response: { subtype: "success", request_id: "sub-1", response: {
+      behavior: "deny", message: "LetAgents cannot show an approval for a sub-agent's action, so it was not allowed.",
+    } } },
+  ]);
+
+  // The owner can see in the agent's activity what was turned down, and whose request it was.
+  assert.deepEqual(activity, [
+    'Declined a request for typed input from your MCP server "owner_browser". LetAgents cannot show it.',
+    "Did not allow the tool \"mcp__owner_browser__owner_write\" for a skill's helper agent. LetAgents cannot show an approval for it.",
+  ]);
+  child.emit({ type: "control_request", request_id: "elicit-2", request: {
+    subtype: "elicitation", mcp_server_name: "owner_browser", message: "Sign in", mode: "url", url: "https://example.invalid/sign-in",
+  } });
+  assert.equal(activity.at(-1), 'Declined a request for a sign-in from your MCP server "owner_browser". LetAgents cannot show it.');
+  activity.length = 0;
+
+  // The agent's own tool call is never answered here: it waits for the owner's decision.
+  child.emit({ type: "control_request", request_id: "own-1", request: {
+    subtype: "can_use_tool", tool_name: "mcp__owner_browser__owner_write", input: {}, tool_use_id: "toolu_1",
+    mcp_server: { name: "owner_browser", source: "user" }, display_name: "Owner Write",
+  } });
+  // Neither is anything the room's own server might one day ask.
+  child.emit({ type: "control_request", request_id: "room-1", request: {
+    subtype: "elicitation", mcp_server_name: "letagents", message: "?", mode: "form", requested_schema: { type: "object", properties: {} },
+  } });
+  assert.equal(answers().length, 3);
+  assert.deepEqual(activity, [], "nothing is reported as declined that was not");
+  controller.abort();
+  assert.equal(JSON.stringify(observed).includes("elicit-1") || JSON.stringify(observed).includes("sub-1"), false,
+    "a declined request is never offered as an approval");
+});
+
+test("one of the owner's MCP tools asks for approval through the same flow as the agent's built-in tools", async () => {
+  for (const reply of ["once", "reject"] as const) {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [OWNER_SERVER, ROOM_SERVER] });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP,
+    }));
+    const child = harness.children[0]!;
+    const controller = new AbortController();
+    let requests: import("../../shared/provider-permissions.js").ClaudeNativePermissionRequest[] = [];
+    const observing = adapter.observePermissions(handle, event => { if (event.type === "snapshot") requests = [...event.requests]; }, controller.signal);
+    const running = adapter.runRoomTurn(handle, { inboxItemId: "inbox", actionId: "action", sourceMessage: { text: "Click the button" }, activation: {} }, {});
+    void running.catch(() => {});
+    await flush();
+    const turnId = JSON.parse(child.written.at(-1)!).uuid as string;
+    child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: handle.providerContinuationId });
+    child.emit({ type: "assistant", session_id: handle.providerContinuationId, parent_tool_use_id: null,
+      message: { content: [{ type: "tool_use", id: "toolu_owner", name: "mcp__owner_browser__owner_write", input: { selector: "#buy" } }] } });
+    // The request exactly as Claude Code 2.1.278 sends it for a user-scope MCP tool.
+    child.emit({ type: "control_request", request_id: "native-owner-tool", request: {
+      subtype: "can_use_tool", tool_name: "mcp__owner_browser__owner_write", mcp_server: { name: "owner_browser", source: "user" },
+      display_name: "Owner Write", input: { selector: "#buy" }, tool_use_id: "toolu_owner",
+      permission_suggestions: [{ type: "addRules", rules: [{ toolName: "mcp__owner_browser__owner_write" }], behavior: "allow", destination: "localSettings" }],
+    } });
+    await flush();
+    assert.equal(requests.length, 1, "the owner sees it as a pending approval");
+    assert.equal(requests[0]!.request.tool_name, "mcp__owner_browser__owner_write");
+    assert.equal(child.written.some((line) => line.includes("control_response")), false, "nothing is decided for the owner");
+    assert.deepEqual(await adapter.correlatePermissionTurn(handle, requests[0]!),
+      { outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: turnId });
+    assert.deepEqual(await adapter.replyPermission(handle, requests[0]!, reply, { beforeNativeDispatch: async () => {} }),
+      { outcome: "sent", scope: "request" });
+    assert.deepEqual(JSON.parse(child.written.at(-1)!), { type: "control_response", response: {
+      subtype: "success", request_id: "native-owner-tool",
+      response: reply === "once" ? { behavior: "allow", updatedInput: { selector: "#buy" } } : { behavior: "deny", message: "The host rejected this action." },
+    } });
+    child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId, result: "Done" });
+    await running.catch(() => {}); controller.abort(); await observing; await adapter.stop(handle);
+  }
 });

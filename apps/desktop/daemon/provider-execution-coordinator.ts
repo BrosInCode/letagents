@@ -22,7 +22,7 @@ import {
   type ProviderActionSpawn,
   type ProviderActionTerminal,
 } from "./provider-action-port.js";
-import { deriveProviderConfigurationSnapshot } from "./provider-configuration.js";
+import { deriveProviderConfigurationSnapshot, entryLaunchPolicy, ownerSetupRef } from "./provider-configuration.js";
 import { isCursorChildConnection } from "./provider-state-policy.js";
 import {
   lifecycleAuthorityModeForProvider,
@@ -195,7 +195,8 @@ export type ProviderExecutionCoordinatorOptions = {
   ): Promise<void>;
   terminalPayload(terminal: ProviderActionTerminal, actor: string, connection?: ProviderActionHandle["providerConnection"]): ExecutionTerminalPayload;
   settleRuntimeApprovals(entryId: string): Promise<void>;
-  refreshManagedRuntime?(entryId: string): Promise<void>;
+  /** Resolves with when to converge again while a replacement is still owed, and what to tell the owner meanwhile. */
+  refreshManagedRuntime?(entryId: string): Promise<void | { retryAfterMs: number; notice?: string }>;
   observeProviderExit(
     entryId: string,
     terminal: ProviderActionTerminal,
@@ -306,6 +307,7 @@ export class ProviderExecutionCoordinator {
       provider: entry.provider,
       providerConnection: ref.provider_connection,
       ...(lifecycleAuthorityMode ? { lifecycleAuthorityMode } : {}),
+      ...ownerSetupRef(entry),
     };
   }
 
@@ -343,8 +345,14 @@ export class ProviderExecutionCoordinator {
           return this.converge(entryId, kind);
         },
       ))
-      .then(() => {
-        if (!this.options.authority.isDispatchPaused?.()) return this.options.refreshManagedRuntime?.(entryId);
+      .then(async () => {
+        if (this.options.authority.isDispatchPaused?.()) return;
+        const pending = await this.options.refreshManagedRuntime?.(entryId);
+        if (!pending) return;
+        // The agent is still to be replaced. It is tried again from here, so
+        // a turn held back for the replacement never waits on another event.
+        this.scheduleRecovery(entryId, pending.retryAfterMs);
+        if (pending.notice) await this.recordLaunchNotices(entryId, [pending.notice]);
       })
       .catch(async (error) => {
         await this.options.recordSchedulerFailure(
@@ -909,7 +917,7 @@ export class ProviderExecutionCoordinator {
         reasoningEffort: configuration!.reasoning_effort ?? null,
         permissionProfileId: configuration!.permission_profile_id,
         configurationRevision: appliedRevision!,
-      }, configuration!.provider_launch_policy).launchPolicy;
+      }, entryLaunchPolicy({ id: entry.id, provider: configuration!.provider, deliveryMode: entry.delivery_mode }, configuration!.provider_launch_policy)).launchPolicy;
     }
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return null;
     const attachment = await this.options.provider.attach(attachRef);
@@ -1571,7 +1579,8 @@ export class ProviderExecutionCoordinator {
       reasoningEffort: launchConfiguration.reasoning_effort ?? null,
       permissionProfileId,
       configurationRevision: launchConfiguration.config_revision,
-    }, launchConfiguration.provider_launch_policy);
+      // A rental never carries its owner's own setup, whatever is stored.
+    }, entryLaunchPolicy({ id: entry.id, provider: launchConfiguration.provider, deliveryMode: entry.delivery_mode }, launchConfiguration.provider_launch_policy));
     const openModelCredential = entry.provider === "open-model"
       ? this.options.host.currentOpenModelCredential(
           entry.id,
@@ -1632,6 +1641,7 @@ export class ProviderExecutionCoordinator {
         ? "room_scratch"
         : "git_worktree",
       launchPolicy: launchSnapshot.launchPolicy,
+      ...(launchSnapshot.homeHarness ? { homeHarness: true as const } : {}),
       provider: launchSnapshot.provider,
       model: launchSnapshot.model,
       reasoningEffort: launchSnapshot.reasoningEffort,
@@ -1718,7 +1728,9 @@ export class ProviderExecutionCoordinator {
           }
           this.failedLaunchAdmissions.delete(entry.id);
           providerDispatched = true;
-          if (handle.appliedConfigurationRevision !== launchSnapshot.configurationRevision) {
+          if (handle.appliedConfigurationRevision !== launchSnapshot.configurationRevision
+            // A process started with its owner's setup must say so: that is what later ends it when the owner turns it off.
+            || (handle.ownerSetup === true) !== (launchSnapshot.homeHarness === true)) {
             throw new Error(
               "Provider launch did not attest the complete configuration snapshot.",
             );

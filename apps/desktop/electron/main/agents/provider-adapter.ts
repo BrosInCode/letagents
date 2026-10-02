@@ -151,6 +151,13 @@ export interface ProviderContinuationRef {
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   /** Durable native process endpoint used to reconnect without creating a second writer. */
   providerConnection?: ProviderConnectionRef | null;
+  /**
+   * The daemon's own records say this process was started with its owner's
+   * own provider setup, or ("unknown") cannot say how it was started. It is
+   * never read off the process, and it is absent for every agent that has
+   * never had that setup.
+   */
+  ownerSetup?: true | "unknown";
 }
 
 export type ProviderConnectionRef =
@@ -246,6 +253,13 @@ export interface ProviderSpawnRequest {
    * hands it to the native harness verbatim; LetAgents never reinterprets it.
    */
   launchPolicy: unknown;
+  /**
+   * The owner turned on their own provider setup for this agent: their MCP
+   * servers, plugins, skills, hooks and the rest of what the provider's CLI
+   * loads for them. Off unless exactly `true`. The daemon never sets it for a
+   * rental, and every adapter refuses it for one.
+   */
+  homeHarness?: boolean;
   /** Exact configuration snapshot selected before this native runtime starts. */
   model?: string | null;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
@@ -312,6 +326,8 @@ export interface ProviderHandle {
   readonly providerConnection?: ProviderConnectionRef | null;
   /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
   readonly launchNotices?: readonly string[];
+  /** The process was started with its owner's own provider setup. */
+  readonly ownerSetup?: boolean;
   observedState(): ProviderObservedState;
 }
 

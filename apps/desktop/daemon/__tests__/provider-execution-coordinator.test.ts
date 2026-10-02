@@ -14,6 +14,7 @@ import {
 import type {
   ProviderActionHandle,
   ProviderActionPort,
+  ProviderActionRef,
   ProviderActionSpawn,
   ProviderActionTerminal,
 } from "../provider-action-port.js";
@@ -23,6 +24,7 @@ import type { BoundWorkerAuthorization, InstalledHostGrant } from "../worker-run
 import type { PollingActivationRecord } from "../custodial-polling-activation.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
+import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordinator.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -1940,4 +1942,245 @@ test("a provider's launch notices are recorded in the agent's activity", async (
   assert.equal(notices.length, 1);
   assert.equal(notices[0]!.summary, "Plugin boundary not in effect: no git on the launch's PATH.");
   assert.equal(notices[0]!.method, "workspace_boundary");
+});
+
+test("a launch carries the owner's own setup only for the owner's own agent, and never the stored key", async () => {
+  const stored = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, letagentsOwnerIsolation: false, letagentsOwnerIsolationChangedAt4: false };
+  const launch = async (entry: DaemonManifestEntry) => {
+    let request: ProviderActionSpawn | null = null;
+    // A process started with its owner's setup says so on its handle, as every provider's does.
+    const runtime = harness({ entry, provider: provider({ spawn: async (input) => {
+      request = input;
+      return input.homeHarness ? { ...returnedHandle, ownerSetup: true as const } : returnedHandle;
+    } }) });
+    await runtime.coordinator.converge(entry.id);
+    return request as ProviderActionSpawn | null;
+  };
+
+  // An agent the daemon delivers room messages to: the only kind that may have the owner's setup.
+  const delivered = (): DaemonManifestEntry => ({ ...baseEntry(), delivery_mode: "daemon_inbox" });
+  const off = await launch(delivered());
+  assert.ok(off);
+  assert.equal(Object.hasOwn(off, "homeHarness"), false, "an agent without it launches exactly as before");
+
+  const on = await launch({ ...delivered(), provider_launch_policy: stored });
+  assert.equal(on?.homeHarness, true);
+  assert.deepEqual(on?.launchPolicy, off.launchPolicy, "the provider's own policy never carries LetAgents' keys");
+
+  // An agent that collects its own room messages launches without it, whatever is stored: turning it off could not be enforced.
+  for (const deliveryMode of [undefined, "mcp_polling"] as const) {
+    const polling = await launch({ ...baseEntry(), ...(deliveryMode ? { delivery_mode: deliveryMode } : {}), provider_launch_policy: stored });
+    assert.ok(polling, "it still launches");
+    assert.equal(Object.hasOwn(polling, "homeHarness"), false, String(deliveryMode));
+    assert.deepEqual(polling.launchPolicy, (await launch(baseEntry()))!.launchPolicy);
+  }
+
+  // Only the exact stored form counts.
+  const unclear = await launch({ ...delivered(), provider_launch_policy: { ...stored, letagentsOwnerIsolation: true } });
+  assert.equal(Object.hasOwn(unclear!, "homeHarness"), false);
+  assert.deepEqual(unclear?.launchPolicy, off.launchPolicy);
+
+  // A rental is Cursor in a workspace-rooted profile. Whatever is stored, it launches without the owner's setup.
+  const rental = await launch({
+    ...baseEntry(), id: "supervised_rental_0123", provider: "cursor", permission_profile_id: "sandboxed_write",
+    provider_launch_policy: { force: true, sandbox: "enabled", letagentsOwnerIsolation: false },
+  });
+  assert.ok(rental, "the rental still launches");
+  assert.equal(Object.hasOwn(rental, "homeHarness"), false);
+  assert.deepEqual(rental.launchPolicy, { force: true, sandbox: "enabled" });
+});
+
+const OWNER_SETUP_NATIVE = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } };
+
+test("a launch is refused unless its handle says whether the process was started with the owner's setup", async () => {
+  const launched = async (policy: Record<string, unknown>, handle: ProviderActionHandle) => {
+    const runtime = harness({ entry: { ...baseEntry(), delivery_mode: "daemon_inbox", provider_launch_policy: policy },
+      provider: provider({ spawn: async () => handle }) });
+    return runtime.coordinator.converge("agent-1").then(() => runtime, (error: Error) => error);
+  };
+  const on = { ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: false, letagentsOwnerIsolationChangedAt1: false };
+  const refused = /Provider launch did not attest the complete configuration snapshot/;
+  // What ends the setup when its owner turns it off is the handle. A launch that hides it is not accepted.
+  assert.match(String(await launched(on, returnedHandle)), refused);
+  // Nor one that claims the setup for an agent that was started without it.
+  assert.match(String(await launched(OWNER_SETUP_NATIVE, { ...returnedHandle, ownerSetup: true })), refused);
+  for (const [policy, handle] of [[on, { ...returnedHandle, ownerSetup: true as const }], [OWNER_SETUP_NATIVE, returnedHandle]] as const) {
+    const runtime = await launched(policy, handle);
+    assert.ok(!(runtime instanceof Error), String(runtime));
+    assert.equal(runtime.installed.length, 1);
+  }
+});
+
+test("a reference to an agent's process says it was started with the owner's setup only when the daemon's own records do", async () => {
+  const attachedWith = async (entry: DaemonManifestEntry) => {
+    const current: DaemonManifestEntry = { ...entry, provider_ref: { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+      provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection } };
+    let seen: ProviderActionRef | null = null;
+    const runtime = harness({ entry: current, provider: provider({ attach: async (ref) => { seen = ref; return null; } }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
+    await runtime.coordinator.attachLiveProvider(current);
+    assert.ok(seen, "the provider was asked to attach");
+    // The same record goes on every reference the coordinator builds, a stop's included,
+    // and on the one a runtime recovery attaches with.
+    assert.equal(runtime.coordinator.providerRef(current).ownerSetup, (seen as ProviderActionRef).ownerSetup);
+    assert.equal(recoveryProviderRef(current).ownerSetup, (seen as ProviderActionRef).ownerSetup);
+    assert.deepEqual(Object.keys(recoveryProviderRef(current)).sort(),
+      ["provider", "providerConnection", "providerContinuationId", "workAttemptId", ...((seen as ProviderActionRef).ownerSetup ? ["ownerSetup"] : [])].sort());
+    return seen as ProviderActionRef;
+  };
+  // The process last started at revision 4.
+  const delivered = (policy: unknown, overrides: Partial<DaemonManifestEntry> = {}): DaemonManifestEntry =>
+    ({ ...baseEntry(), delivery_mode: "daemon_inbox", runtime_configuration_revision: 4, provider_launch_policy: policy, ...overrides });
+  const on = { letagentsOwnerIsolation: false };
+  const changed = (...revisions: number[]) => Object.fromEntries(revisions.map((revision) => [`letagentsOwnerIsolationChangedAt${revision}`, false]));
+
+  // An agent that never had the setup: its reference is the one every agent had before, with no such key.
+  const never = await attachedWith(delivered(OWNER_SETUP_NATIVE));
+  assert.equal(Object.hasOwn(never, "ownerSetup"), false);
+  assert.deepEqual(Object.keys(never).sort(), ["launchPolicy", "lifecycleAuthorityMode", "provider", "providerConnection", "providerContinuationId", "workAttemptId"]);
+
+  // Started with it and still on, or turned off since and not restarted yet: the process has it.
+  for (const [name, policy] of [
+    ["on since before it started", { ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }],
+    ["on, with no record of the change left", { ...OWNER_SETUP_NATIVE, ...on }],
+    ["turned off after it started", { ...OWNER_SETUP_NATIVE, ...changed(5) }],
+    ["off and on again after it started", { ...OWNER_SETUP_NATIVE, ...on, ...changed(5, 6) }],
+  ] as const) {
+    const ref = await attachedWith(delivered(policy));
+    assert.equal(ref.ownerSetup, true, name);
+    assert.deepEqual({ ...ref, ownerSetup: undefined }, { ...never, ownerSetup: undefined }, `${name}: nothing else about the reference differs`);
+  }
+
+  // Not started with it, whatever is saved now.
+  for (const [name, entry] of [
+    ["turned on after it started", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(5) })],
+    ["on and off again after it started", delivered({ ...OWNER_SETUP_NATIVE, ...changed(5, 6) })],
+    ["turned off before it started", delivered({ ...OWNER_SETUP_NATIVE, ...changed(3) })],
+    // A start whose revision was never recorded is older than every change.
+    ["a start with no recorded revision", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(2) }, { runtime_configuration_revision: undefined })],
+    // An agent that may not have the setup never has it, whatever is stored.
+    ["an agent that collects its own messages", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }, { delivery_mode: "mcp_polling" })],
+    ["an agent with no delivery recorded", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }, { delivery_mode: undefined })],
+    ["a rented agent", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }, { id: "supervised_rental_0123" })],
+    // A stored value that is not the exact one is not read as on, here or at a launch.
+    ["a true", delivered({ ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: true })],
+    ["a string", delivered({ ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: "false" })],
+    ["a null", delivered({ ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: null })],
+    ["a zero", delivered({ ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: 0 })],
+  ] as const) {
+    assert.equal(Object.hasOwn(await attachedWith(entry), "ownerSetup"), false, name);
+  }
+});
+
+test("a reference built from a stored policy that cannot be read says so, for a re-attach and for a recovery alike", () => {
+  const runtime = harness();
+  for (const unreadable of ["not a policy", ["not", "a", "policy"], 7]) {
+    const current: DaemonManifestEntry = { ...baseEntry(), delivery_mode: "daemon_inbox", runtime_configuration_revision: 4, provider_launch_policy: unreadable,
+      provider_ref: { work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+        provider_connection: returnedHandle.providerConnection } };
+    assert.equal(runtime.coordinator.providerRef(current).ownerSetup, "unknown", JSON.stringify(unreadable));
+    assert.equal(recoveryProviderRef(current).ownerSetup, "unknown", JSON.stringify(unreadable));
+  }
+});
+
+test("a pause stops the agent's process, and the agent is marked paused only once that process has ended or is proven gone", async () => {
+  const paused = (attach: ProviderActionPort["attach"]) => {
+    const current: DaemonManifestEntry = { ...baseEntry(), desired_state: "paused", observed_state: "idle", delivery_mode: "daemon_inbox",
+      provider_ref: { work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+        provider_connection: returnedHandle.providerConnection } };
+    const stops: ProviderActionHandle[] = [];
+    const runtime = harness({ entry: current, provider: provider({ attach, stop: async (handle) => { stops.push(handle); return terminal(handle); } }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
+    return { runtime, stops };
+  };
+  // The daemon holds no process, as after a restart. The process is still there: it is re-attached and stopped.
+  // Its exit is what marks the agent paused, so until then it is only stopping.
+  const alive = paused(async () => returnedHandle);
+  await alive.runtime.coordinator.converge("agent-1");
+  assert.equal(alive.stops.length, 1);
+  assert.equal(alive.runtime.entry().observed_state, "stopping");
+  // The provider proves the process gone: its end is recorded, and then the agent is paused.
+  const gone = paused(async () => ({ state: "terminal", terminal: { endedAt: "2026-08-26T00:00:03.000Z", exitCode: null, signal: null,
+    terminalCause: "crashed", providerContinuationId: "continuation-1" } }));
+  await gone.runtime.coordinator.converge("agent-1");
+  assert.equal(gone.runtime.entry().observed_state, "paused");
+  assert.equal(gone.runtime.terminalWrites.length, 1);
+  // The provider cannot tell: the agent is not marked paused at all.
+  const unsure = paused(async () => { throw new Error("attach is ambiguous; the recorded process identity cannot be verified."); });
+  await assert.rejects(unsure.runtime.coordinator.converge("agent-1"), /ambiguous/);
+  assert.equal(unsure.runtime.entry().observed_state, "idle");
+  // The one route with no proof: nothing the provider could attach to. The agent is marked paused with no
+  // recorded end, which is why the roster asks for that record before it treats a paused agent's process as gone.
+  const unattachable = paused(async () => null);
+  await unattachable.runtime.coordinator.converge("agent-1");
+  assert.equal(unattachable.runtime.entry().observed_state, "paused");
+  assert.deepEqual([unattachable.stops.length, unattachable.runtime.terminalWrites.length], [0, 0]);
+});
+
+test("a stored choice that cannot be read starts the agent without the owner's setup, as its re-attach assumes", async () => {
+  // The re-attach of such an agent is the plain one (see the test above). That is only right because
+  // a launch from the same record gives the agent no setup either.
+  for (const unreadable of [true, "false", null, 0, {}, []]) {
+    let request: ProviderActionSpawn | null = null;
+    const runtime = harness({
+      entry: { ...baseEntry(), delivery_mode: "daemon_inbox", provider_launch_policy: { ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: unreadable } },
+      provider: provider({ spawn: async (input) => { request = input; return returnedHandle; } }),
+    });
+    await runtime.coordinator.converge("agent-1");
+    assert.ok(request, JSON.stringify(unreadable));
+    assert.equal(Object.hasOwn(request, "homeHarness"), false, JSON.stringify(unreadable));
+    assert.deepEqual((request as ProviderActionSpawn).launchPolicy, OWNER_SETUP_NATIVE, JSON.stringify(unreadable));
+  }
+});
+
+test("while an agent is still to be replaced the scheduler converges again after the wait it is given, and tells the owner what it is told to", async () => {
+  const runtime = harness({ entry: { ...baseEntry(), delivery_mode: "daemon_inbox" } });
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  const answers: Array<void | { retryAfterMs: number; notice?: string }> = [
+    { retryAfterMs: 1_000 },
+    { retryAfterMs: 2_000, notice: "Still waiting to restart this agent so it stops running with your own setup." },
+    undefined,
+  ];
+  let refreshes = 0;
+  const failures: unknown[] = [];
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+    refreshManagedRuntime: async () => { refreshes += 1; return answers.shift(); },
+    recordSchedulerFailure: async (_entryId, error) => { failures.push(error); },
+    setTimeout: ((callback: () => void, delay: number) => { timers.push({ callback, delay }); return { unref() {} }; }) as unknown as typeof setTimeout,
+    clearTimeout: (() => {}) as typeof clearTimeout,
+  });
+  const notices = () => (runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice").map((event) => event.summary);
+
+  coordinator.request("agent-1");
+  await coordinator.drainConvergence();
+  assert.deepEqual(timers.map((timer) => timer.delay), [1_000], "one wake-up, after the wait it was given");
+  assert.deepEqual(notices(), []);
+
+  // Nothing else happens until that wake-up: it is what converges again.
+  timers.shift()!.callback();
+  await coordinator.drainConvergence();
+  assert.equal(refreshes, 2);
+  assert.deepEqual(timers.map((timer) => timer.delay), [2_000]);
+  assert.deepEqual(notices(), ["Still waiting to restart this agent so it stops running with your own setup."]);
+
+  // Replaced: no further wake-up is set.
+  timers.shift()!.callback();
+  await coordinator.drainConvergence();
+  assert.equal(refreshes, 3);
+  assert.deepEqual(timers, []);
+  assert.deepEqual(failures, []);
+
+  // A replacement that fails outright is the agent's error, recorded as every scheduler failure is.
+  const failed = new Error("LetAgents could not restart this agent to stop it running with your own setup, so its messages are waiting.");
+  const failing = new ProviderExecutionCoordinator({ ...runtime.options,
+    refreshManagedRuntime: async () => { throw failed; },
+    recordSchedulerFailure: async (_entryId, error) => { failures.push(error); },
+    setTimeout: ((callback: () => void, delay: number) => { timers.push({ callback, delay }); return { unref() {} }; }) as unknown as typeof setTimeout,
+  });
+  failing.request("agent-1");
+  await failing.drainConvergence();
+  assert.deepEqual(failures, [failed]);
+  assert.deepEqual(timers, [], "and it is not tried again behind the owner's back");
 });

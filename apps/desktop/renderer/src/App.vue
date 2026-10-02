@@ -445,6 +445,7 @@ import {
   useDesktopAccountRoomSettings,
   type SidebarRoomBatchMutationResult,
 } from "./composables/useDesktopAccountRoomSettings";
+import { provideAgentRoomAudience } from "./composables/useAgentRoomAudience";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { clearDesktopMessageOutbox } from "./domain/message-outbox";
@@ -744,6 +745,7 @@ const selectedRoomWithProjectContext = computed(() => {
   );
   return roomWithInheritedProjectContext(room, parentRoom, isListedChild);
 });
+provideAgentRoomAudience(() => selectedRoomWithProjectContext.value, () => selectedSnapshot.value?.participants ?? [], () => [authStatus.value?.account?.login, authStatus.value?.account?.displayName]);
 
 const selectedGitRoomMatchesActiveRepo = computed(() => {
   const gitRoom = selectedRoomWithProjectContext.value.gitRoom;

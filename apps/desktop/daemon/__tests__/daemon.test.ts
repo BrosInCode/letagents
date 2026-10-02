@@ -2023,6 +2023,25 @@ test("reverse drain socket and daemon restart preserve stop intent without a suc
     assert.equal(await env.internals.store.unresolvedDeliveryDrain(env.id), null);
     assert.deepEqual((await env.internals.store.getEntry(env.id))?.provider_ref, stored.provider_ref);
     assert.equal(env.internals.liveHandles.get(env.id)?.providerContinuationId, "observed-continuation");
+    // An agent that collects its own messages cannot be held back from its next turn, so it must never carry its
+    // owner's own setup. While the setup is on, the move to polling delivery is refused and nothing is prepared.
+    const policy = (value: string | null) => {
+      const database = new DatabaseSync(env.paths.manifestPath);
+      try {
+        database.prepare(`UPDATE agent_configurations SET provider_launch_policy_present=?, provider_launch_policy_undefined=0, provider_launch_policy_json=? WHERE agent_id=?`)
+          .run(value === null ? 0 : 1, value, env.id);
+      } finally { database.close(); }
+    };
+    for (const withSetup of ['{"letagentsOwnerIsolation":false}', '{"letagentsOwnerIsolationChangedAt999":false}']) {
+      // Saved on, or turned off while the running process still has it.
+      policy(withSetup);
+      const refused = await daemonRequest(env.paths.socketPath, "supervisor.prepare_delivery_drain", params);
+      assert.equal(refused.ok, false, withSetup);
+      assert.match(refused.error ?? "", /Turn off "Use your own Codex setup" for this agent and let it restart before moving it to polling delivery/);
+      assert.equal(await env.internals.store.unresolvedDeliveryDrain(env.id), null);
+      assert.equal(await env.internals.store.getDeliveryDrain("reverse-operation"), null);
+    }
+    policy(null);
     const prepared = await daemonRequest(env.paths.socketPath, "supervisor.prepare_delivery_drain", params);
     assert.equal(prepared.ok, true, prepared.error);
     const firstDriver = env.daemon as unknown as { deliveryCutovers: { start(id: string): Promise<void> } };

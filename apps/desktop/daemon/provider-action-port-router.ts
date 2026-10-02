@@ -34,6 +34,7 @@ type NativeHandle = {
   providerContinuationId: string | null;
   providerConnection?: ProviderActionHandle["providerConnection"];
   launchNotices?: readonly string[];
+  ownerSetup?: boolean;
   observedState(): ProviderActionHandle["observedState"];
 };
 
@@ -88,6 +89,7 @@ function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: numbe
     ...(appliedConfigurationRevision === undefined ? {} : { appliedConfigurationRevision }),
     ...(handle.custodyLaunchAgentSessionId === undefined ? {} : { custodyLaunchAgentSessionId: handle.custodyLaunchAgentSessionId }),
     ...(handle.launchNotices?.length ? { launchNotices: [...handle.launchNotices] } : {}),
+    ...(handle.ownerSetup === true ? { ownerSetup: true as const } : {}),
     get observedState() { return handle.observedState(); },
   };
 }

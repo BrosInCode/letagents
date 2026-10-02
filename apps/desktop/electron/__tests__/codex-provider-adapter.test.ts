@@ -16,6 +16,7 @@ import {
   type CodexProviderAdapterDependencies,
 } from "../main/agents/codex-provider-adapter.js";
 import { CodexRpcClient, type RpcNotification, type RpcServerRequest } from "../main/agents/codex-rpc-client.js";
+import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../../shared/codex-owner-isolation.mjs";
 import {
   CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE,
   writeCodexSupervisorBridgeContext,
@@ -208,6 +209,11 @@ class FakeRpc implements CodexAdapterRpc {
     this.permissionListeners.add(listener);
     return () => { this.permissionListeners.delete(listener); };
   }
+  readonly requestListeners = new Set<(request: RpcServerRequest) => void>();
+  onRequest(listener: (request: RpcServerRequest) => void): () => void {
+    this.requestListeners.add(listener);
+    return () => { this.requestListeners.delete(listener); };
+  }
   private permissionsChanged(): void {
     queueMicrotask(() => { for (const listener of this.permissionListeners) listener(); });
   }
@@ -216,6 +222,8 @@ class FakeRpc implements CodexAdapterRpc {
     const request = Object.freeze({ id, method, params: Object.freeze(structuredClone(params)), connectionId: this.currentConnectionId()! });
     this.pendingPermissions.set(id, request);
     this.permissionsChanged();
+    // Like the real client: told at arrival, before the pending set's observers.
+    for (const listener of this.requestListeners) listener(request);
     return request;
   }
   respond(request: RpcServerRequest, result: unknown): void {
@@ -278,6 +286,10 @@ function createHarness(options: {
   reviewerFromOwnSettings?: string;
   /** The folder new threads report instead of the launch folder; null reports none. */
   threadDirectory?: string | null;
+  /** The running process's command line cannot be read, as when `ps` does not answer in time. */
+  processUnreadable?: boolean;
+  /** The running process's command line carries every isolation override, whatever it was started with. */
+  commandLineClaimsIsolation?: boolean;
 } = {}) {
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
@@ -285,8 +297,13 @@ function createHarness(options: {
   const launchOptions: Array<{
     serverUrl: string;
     codexBin: string;
-    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string> };
+    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean };
   }> = [];
+  /** Each time a running process with the owner's setup was checked against its project, and what the check answers. */
+  const liveChecks: Array<{ commandLine: string; cwd: string | null }> = [];
+  /** Each time a running process's command line was read. */
+  const commandLineReads: number[] = [];
+  const project: { changed: string | null } = { changed: null };
   const supervisorBridgeContexts: Array<{
     cwd: string;
     context: Parameters<CodexProviderAdapterDependencies["writeSupervisorBridgeContext"]>[1];
@@ -355,6 +372,18 @@ function createHarness(options: {
       }
       return launch.exited;
     },
+    // A running process is read as it was launched: with the isolation overrides unless it kept the owner's setup.
+    readCommandLine: async (pid) => {
+      commandLineReads.push(pid);
+      const launch = launchOptions[launches.findIndex((entry) => entry.pid === pid)];
+      if (!launch || options.processUnreadable) return null;
+      const isolated = launch.options.homeHarness !== true || options.commandLineClaimsIsolation === true;
+      return `codex app-server ${isolated ? CODEX_OWNER_FEATURE_OVERRIDES.map((override) => `-c ${override}`).join(" ") : ""} --listen ${launch.serverUrl}`;
+    },
+    assertLiveProjectUnchanged: async (_codexBin, live) => {
+      liveChecks.push(live);
+      if (project.changed) throw new Error(project.changed);
+    },
     writeSupervisorBridgeContext: async (cwd, context) => {
       supervisorBridgeContexts.push({ cwd, context });
     },
@@ -371,6 +400,10 @@ function createHarness(options: {
     supervisorBridgeContexts,
     sleeps,
     mcpRuntimeProbes,
+    liveChecks,
+    commandLineReads,
+    /** The project now adds something the running process was not started with turned off. */
+    changeProject: (refusal: string) => { project.changed = refusal; },
     setIdentityObservable: (observable: boolean) => { identityObservable = observable; },
   };
 }
@@ -4929,4 +4962,373 @@ test("managed launch receipt freezes the exact generated tool policy and is neve
   });
   assertProviderHandle(restored);
   assert.equal((restored as ProviderHandle & { managedLaunchContract?: string }).managedLaunchContract, undefined);
+});
+
+/** The access level every launch below runs under: the default policy of these tests is Full access. */
+const FULL_ACCESS = { permissionProfileId: "full_access", configurationRevision: 1 };
+
+test("the owner's own Codex setup reaches the app-server launch only for an exact request, and never for a rental", async () => {
+  const supervised = { deliveryMode: "daemon_inbox" as const, supervisorEntryId: "supervised_owner",
+    supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS };
+  const launchOptions = async (overrides: Partial<ProviderSpawnRequest>) => {
+    const harness = createHarness();
+    await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({ ...supervised, ...overrides }));
+    return harness.launchOptions[0]!.options as Record<string, unknown>;
+  };
+  const off = await launchOptions({});
+  assert.equal(Object.hasOwn(off, "homeHarness"), false, "an ordinary launch is handed exactly what it was before");
+  for (const unclear of ["true", 1, false, null]) {
+    assert.deepEqual(await launchOptions({ homeHarness: unclear as never }), off, String(unclear));
+  }
+  assert.deepEqual(await launchOptions({ homeHarness: true }), { ...off, homeHarness: true },
+    "the room's own server, its environment and the working folder are the same either way");
+
+  const rental = createHarness();
+  await assert.rejects(new CodexProviderAdapter({ dependencies: rental.dependencies }).spawn(spawnRequest({
+    ...supervised, supervisorEntryId: "supervised_rental_0123", homeHarness: true,
+  })), /a rented agent never uses its owner's own setup/);
+  assert.equal(rental.launches.length, 0, "nothing starts");
+
+  // An agent that collects its own room messages could not be held back once the setup is turned off, so it never has it.
+  for (const deliveryMode of [undefined, "mcp_polling"] as const) {
+    const polling = createHarness();
+    await assert.rejects(new CodexProviderAdapter({ dependencies: polling.dependencies }).spawn(spawnRequest({
+      ...supervised, ...(deliveryMode ? { deliveryMode } : { deliveryMode: undefined }), homeHarness: true,
+    })), /an agent that collects its own room messages never uses its owner's own setup/, String(deliveryMode));
+    assert.equal(polling.launches.length, 0, "nothing starts");
+  }
+  // Its environment is cleared of the room agent's coordinates, so the room's server must be the one given its own copy.
+  const unsupervised = createHarness();
+  await assert.rejects(new CodexProviderAdapter({ dependencies: unsupervised.dependencies }).spawn(spawnRequest({ deliveryMode: "daemon_inbox", ...FULL_ACCESS, homeHarness: true })),
+    /only as a daemon-supervised room agent/);
+  assert.equal(unsupervised.launches.length, 0, "nothing starts");
+  // Nor without a named access level: the launch is built from that level and from nothing else the policy holds.
+  const unnamed = createHarness();
+  await assert.rejects(new CodexProviderAdapter({ dependencies: unnamed.dependencies }).spawn(spawnRequest({
+    ...supervised, permissionProfileId: undefined, homeHarness: true,
+  })), /an agent with its owner's own setup starts only under a named access level/);
+  assert.equal(unnamed.launches.length, 0, "nothing starts");
+});
+
+test("another MCP server's request for typed input or a sign-in is declined at once; approvals and the room's own server are left alone", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", supervisorEntryId: "supervised_owner",
+    supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS, homeHarness: true }));
+  const client = harness.clients[0]!; client.turnStatus = "inProgress";
+  const method = "mcpServer/elicitation/request";
+  const activity: string[] = [];
+  // The background service keeps an agent's activity from its stream, so that is where each one must be.
+  adapter.onStream(handle, (event) => { if (event.method === "mcpServer/elicitation/declined") activity.push(event.summary ?? ""); });
+  const form = client.askPermission(mcpToolPermissionParams({ serverName: "owner_browser", _meta: null, message: "Which account?",
+    requestedSchema: { type: "object", properties: { account: { type: "string" } }, required: ["account"] } }), 51, method);
+  const signIn = client.askPermission({ threadId: "thread-1", turnId: "turn-thread-1", serverName: "owner_browser", mode: "url",
+    url: "https://example.invalid/sign-in", elicitationId: "sign-in-1", message: "Sign in", _meta: null }, 52, method);
+  // A tool approval from the owner's server waits for the owner, like the room's own.
+  const ownerToolApproval = client.askPermission(mcpToolPermissionParams({ serverName: "owner_browser",
+    message: 'Allow the owner_browser MCP server to run tool "owner_write"?' }), 53, method);
+  const roomToolApproval = client.askPermission(mcpToolPermissionParams(), 54, method);
+  // The room's server never asks for input; an unrecognised request of its own is not answered for it.
+  const roomForm = client.askPermission(mcpToolPermissionParams({ _meta: {} }), 55, method);
+  const command = client.askPermission(approvalParams(), 56);
+  // A tool approval too large to show could never be answered either. From the owner's server it is turned down;
+  // from the room's own it is left exactly as it always was.
+  const oversized = { codex_approval_kind: "mcp_tool_call", persist: ["session"], tool_description: "Write", tool_params: { text: "x".repeat(30_000) } };
+  const ownerOversized = client.askPermission(mcpToolPermissionParams({ serverName: "owner_browser", _meta: oversized }), 57, method);
+  const roomOversized = client.askPermission(mcpToolPermissionParams({ _meta: oversized }), 58, method);
+  assert.deepEqual(client.permissionResponses, [
+    { request: form, result: { action: "decline", content: null, _meta: null } },
+    { request: signIn, result: { action: "decline", content: null, _meta: null } },
+    { request: ownerOversized, result: { action: "decline", content: null, _meta: null } },
+  ]);
+  assert.deepEqual(client.listPendingRequests(), [ownerToolApproval, roomToolApproval, roomForm, command, roomOversized]);
+  // Each one is in the agent's activity, with whose request it was, and nothing else is reported as declined.
+  assert.deepEqual(activity, [
+    'Declined a request for typed input from your MCP server "owner_browser". LetAgents cannot show it.',
+    'Declined a request for a sign-in from your MCP server "owner_browser". LetAgents cannot show it.',
+    'Did not allow a tool of your MCP server "owner_browser". Its approval request was too large or malformed to show.',
+  ]);
+});
+
+test("an agent that was re-attached still declines and reports an owner server's request nobody can answer", async () => {
+  const harness = createHarness();
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({
+    deliveryMode: "daemon_inbox", supervisorEntryId: "supervised_owner", supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS, homeHarness: true,
+  }));
+  // A fresh adapter, as after the background service restarts: it is not told about the switch again.
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await adapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+  assertProviderHandle(attached);
+  const client = harness.clients[1]!; client.turnStatus = "inProgress";
+  const activity: string[] = [];
+  adapter.onStream(attached, (event) => { if (event.method === "mcpServer/elicitation/declined") activity.push(event.summary ?? ""); });
+  const form = client.askPermission(mcpToolPermissionParams({ serverName: "owner_browser", _meta: null, message: "Which account?",
+    requestedSchema: { type: "object", properties: { account: { type: "string" } }, required: ["account"] } }), 71, "mcpServer/elicitation/request");
+  assert.deepEqual(client.permissionResponses, [{ request: form, result: { action: "decline", content: null, _meta: null } }]);
+  assert.deepEqual(activity, ['Declined a request for typed input from your MCP server "owner_browser". LetAgents cannot show it.']);
+});
+
+const OWN_SETUP_LAUNCH = { deliveryMode: "daemon_inbox" as const, supervisorEntryId: "supervised_owner",
+  supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS, homeHarness: true };
+const REFUSAL = "This project's Codex config changes your MCP server \"owner_browser\", so LetAgents will not start Codex here with your own setup.";
+
+/** A re-attach as the background service makes it after a restart: a fresh adapter, and a ref that carries the daemon's own record. */
+async function launchedThenRestarted(spawn: Partial<ProviderSpawnRequest>, recordedOwnerSetup: boolean, harnessOptions: Parameters<typeof createHarness>[0] = {}) {
+  const harness = createHarness({ exitOnSignal: true, processIdentity: "Mon Aug 31 08:00:00 2026", ...harnessOptions });
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest(spawn));
+  const ref = { workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection,
+    ...(recordedOwnerSetup ? { ownerSetup: true as const } : {}) };
+  harness.commandLineReads.length = 0;
+  return { harness, ref, adapter: new CodexProviderAdapter({ dependencies: harness.dependencies }) };
+}
+const attachRequests = (harness: ReturnType<typeof createHarness>) => harness.clients[1]!.requests.map((request) => request.method);
+/** What makes a running Codex read the project's config again. */
+const RELOADS = ["mcpServerStatus/list", "thread/start", "config/mcpServer/reload"];
+
+test("an agent that never had its owner's setup is re-attached exactly as before, whatever its process looks like, and nothing is read off the process", async () => {
+  // What a re-attach asked a running app-server before the owner's setup existed.
+  const BEFORE = ["mcpServerStatus/list", "thread/read", "thread/resume", "thread/read"];
+  for (const [shape, spawn, harnessOptions] of [
+    // Started by an older build: no override that turns the owner's extensions off is on its command line.
+    ["no isolation overrides on its command line", OWN_SETUP_LAUNCH, {}],
+    ["every isolation override on its command line", { deliveryMode: "daemon_inbox" as const }, {}],
+    // Nothing about the process is asked, so a process that cannot be read is no obstacle either.
+    ["a process that cannot be read", { deliveryMode: "daemon_inbox" as const }, { processUnreadable: true }],
+  ] as const) {
+    const { harness, ref, adapter } = await launchedThenRestarted(spawn, false, harnessOptions);
+    harness.changeProject(REFUSAL);
+    const attached = await adapter.attach(ref);
+    assertProviderHandle(attached);
+    assert.equal(attached.ownerSetup, false, shape);
+    assert.deepEqual(attachRequests(harness), BEFORE, shape);
+    assert.deepEqual(harness.commandLineReads, [], `${shape}: the process's command line is never read`);
+    assert.deepEqual(harness.liveChecks, [], `${shape}: the project is never inspected`);
+    assert.deepEqual(harness.signals, [], `${shape}: nothing is stopped`);
+    // Nor later: its conversation is repaired with no check at all.
+    await adapter.repairContinuation(attached, {
+      workAttemptId: attached.workAttemptId, expectedProviderContinuationId: attached.providerContinuationId!,
+      cwd: spawnRequest().cwd, launchPolicy: spawnRequest().launchPolicy, forceReplacement: true,
+    }, { checkpointReplacement: async () => {} });
+    assert.deepEqual(harness.commandLineReads, [], shape);
+    assert.deepEqual(harness.liveChecks, [], shape);
+    assert.deepEqual(harness.signals, [], shape);
+  }
+});
+
+test("re-attaching an agent the daemon started with its owner's setup never asks Codex to read the project again, and stops nothing", async () => {
+  for (const [name, harnessOptions, projectChanged] of [
+    ["the project is as it was", {}, false],
+    ["the project changed since the agent started", {}, true],
+    ["its command line cannot be read", { processUnreadable: true }, true],
+    ["its command line claims it was started isolated", { commandLineClaimsIsolation: true }, true],
+  ] as const) {
+    const { harness, ref, adapter } = await launchedThenRestarted(OWN_SETUP_LAUNCH, true, harnessOptions);
+    if (projectChanged) harness.changeProject(REFUSAL);
+    const attached = await adapter.attach(ref);
+    assertProviderHandle(attached);
+    assert.equal(attached.ownerSetup, true, name);
+    // The same re-attach as any agent's, without the one request that lists the MCP servers.
+    assert.deepEqual(attachRequests(harness), ["thread/read", "thread/resume", "thread/read"], name);
+    assert.deepEqual(attachRequests(harness).filter((method) => RELOADS.includes(method)), [], name);
+    assert.deepEqual(harness.signals, [], `${name}: the agent keeps running, mid-turn or not`);
+    assert.deepEqual(harness.commandLineReads, [], `${name}: no process is started to look at it`);
+    assert.deepEqual(harness.liveChecks, [], name);
+    assert.equal(harness.launches[0]!.alive, true, name);
+  }
+});
+
+test("a process whose record cannot say how it was started is not asked to read its project again, and is otherwise an agent without the setup", async () => {
+  for (const spawn of [OWN_SETUP_LAUNCH, { deliveryMode: "daemon_inbox" as const }]) {
+    const { harness, ref, adapter } = await launchedThenRestarted(spawn, false, { processUnreadable: true });
+    harness.changeProject(REFUSAL);
+    const attached = await adapter.attach({ ...ref, ownerSetup: "unknown" });
+    assertProviderHandle(attached);
+    assert.deepEqual(attachRequests(harness), ["thread/read", "thread/resume", "thread/read"], "the list of MCP servers is left out");
+    // Nothing else changes for it: it is not held to be an agent with the setup, and nothing is read or stopped.
+    assert.equal(attached.ownerSetup, false);
+    await adapter.repairContinuation(attached, {
+      workAttemptId: attached.workAttemptId, expectedProviderContinuationId: attached.providerContinuationId!,
+      cwd: spawnRequest().cwd, launchPolicy: spawnRequest().launchPolicy, forceReplacement: true,
+    }, { checkpointReplacement: async () => {} });
+    assert.deepEqual([harness.commandLineReads, harness.liveChecks, harness.signals], [[], [], []]);
+  }
+});
+
+test("repairing a conversation never lets a Codex that has its owner's setup reload a project that changed since it started", async () => {
+  const repair = async (spawn: Partial<ProviderSpawnRequest>, change: boolean, harnessOptions: Parameters<typeof createHarness>[0] = {}, reattachedAs?: boolean) => {
+    const harness = createHarness({ exitOnSignal: true, processIdentity: "Mon Aug 31 08:00:00 2026", ...harnessOptions });
+    let adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const request = spawnRequest(spawn);
+    let handle = await adapter.spawn(request);
+    // A launch says on its handle whether the process has the owner's setup.
+    assert.equal(handle.ownerSetup, spawn.homeHarness === true);
+    if (reattachedAs !== undefined) {
+      // After a restart of the background service the adapter knows only what the daemon's ref tells it.
+      adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+      const attached = await adapter.attach({ workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!,
+        providerConnection: handle.providerConnection, ...(reattachedAs ? { ownerSetup: true as const } : {}) });
+      assertProviderHandle(attached);
+      handle = attached;
+    }
+    const client = harness.clients.at(-1)!;
+    const before = client.requests.length;
+    // What the daemon puts in the agent's activity, and how many stops had been sent when it was said.
+    const told: Array<{ summary: string; stopsBefore: number }> = [];
+    adapter.onStream(handle, (event) => {
+      if (event.method === "ownerSetup/stopped") told.push({ summary: event.summary ?? "", stopsBefore: harness.signals.length });
+    });
+    if (change) harness.changeProject(REFUSAL);
+    const outcome = await adapter.repairContinuation(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+      cwd: request.cwd, launchPolicy: request.launchPolicy, forceReplacement: true,
+    }, { checkpointReplacement: async () => {} }).then(() => null, (error: Error) => error);
+    return { harness, handle, outcome, told, after: client.requests.slice(before).map((entry) => entry.method) };
+  };
+  const threadCalls = (methods: string[]) => methods.filter((method) => method === "thread/start" || method === "thread/resume");
+  const refused = (result: Awaited<ReturnType<typeof repair>>, reason: RegExp, name: string) => {
+    assert.match(result.outcome?.message ?? "", reason, name);
+    assert.deepEqual(threadCalls(result.after), [], `${name}: no thread was started or loaded`);
+    assert.deepEqual(result.harness.signals.map((signal) => signal.pid), [4100], `${name}: the process is stopped`);
+    assert.equal(result.handle.observedState() === "idle" || result.handle.observedState() === "working", false, name);
+    // The owner is told why in the agent's activity, once, before the process goes.
+    assert.equal(result.told.length, 1, name);
+    assert.match(result.told[0]!.summary, /^Stopped this agent\. /, name);
+    assert.match(result.told[0]!.summary, reason, name);
+    assert.equal(result.told[0]!.stopsBefore, 0, name);
+  };
+
+  const changed = await repair(OWN_SETUP_LAUNCH, true);
+  refused(changed, /changes your MCP server "owner_browser"/, "the refusal names what the project changed");
+
+  // A command line that cannot be read, as when `ps` does not answer in time: the project is not loaded on a guess.
+  const unreadable = await repair(OWN_SETUP_LAUNCH, false, { processUnreadable: true });
+  refused(unreadable, /could not read how this agent's Codex was started, so it stopped the agent before Codex could load the project's configuration with your own setup/, "unreadable");
+  assert.deepEqual(unreadable.harness.liveChecks, [], "there is nothing to compare the project with");
+
+  // LetAgents started this process with the owner's setup. A command line that says it is isolated is not believed.
+  const spoofed = await repair(OWN_SETUP_LAUNCH, false, { commandLineClaimsIsolation: true });
+  refused(spoofed, /is not running the way LetAgents started it, so LetAgents stopped the agent/, "a command line that claims isolation");
+  assert.deepEqual(spoofed.harness.liveChecks, []);
+
+  const same = await repair(OWN_SETUP_LAUNCH, false);
+  assert.equal(same.outcome, null);
+  assert.equal(same.after.includes("thread/start"), true);
+  assert.deepEqual(same.harness.liveChecks.map((check) => check.cwd), [spawnRequest().cwd], "the project is inspected in the agent's own folder");
+  assert.equal(same.harness.liveChecks[0]!.commandLine.includes("--listen"), true, "against what the process was started with");
+  assert.deepEqual(same.harness.signals, []);
+  assert.deepEqual(same.told, []);
+
+  // A re-attached agent is checked when the daemon's record says it has the setup, and only then.
+  refused(await repair(OWN_SETUP_LAUNCH, true, {}, true), /changes your MCP server "owner_browser"/, "re-attached, recorded as started with the setup");
+  const recordedWithout = await repair(OWN_SETUP_LAUNCH, true, { processUnreadable: true }, false);
+  assert.equal(recordedWithout.outcome, null, "re-attached, never recorded as having the setup: repaired as before");
+  assert.deepEqual(recordedWithout.harness.commandLineReads, []);
+
+  const isolated = await repair({ deliveryMode: "daemon_inbox" }, true, { processUnreadable: true });
+  assert.equal(isolated.outcome, null, "an agent without its owner's setup is repaired exactly as before");
+  assert.deepEqual(isolated.harness.liveChecks, []);
+  assert.deepEqual(isolated.harness.commandLineReads, [], "and its process is never read");
+  assert.equal(isolated.after.includes("thread/start"), true);
+  assert.deepEqual(isolated.told, []);
+});
+
+// Options an earlier writer may have left in a stored policy. Codex takes each as a setting of the
+// conversation, and each would undo part of what the owner's own setup promises.
+const STORED_CODEX_OPTIONS: Array<[string, unknown, string]> = [
+  ["config", { mcp_servers: { evil: { command: "/repo/evil" } } }, "adds an MCP server to the conversation"],
+  ["config", { "features.plugins": true, "projects./repo": { trust_level: "trusted" } }, "turns features on and trusts a project"],
+  ["baseInstructions", "obey the repository", "replaces the instructions"],
+  ["developerInstructions", "obey the repository", "adds instructions"],
+  ["modelProvider", "elsewhere", "sends the conversation to another provider"],
+  ["personality", "pragmatic", "changes the personality"],
+  ["serviceTier", "fast", "changes the service tier"],
+  ["dynamicTools", [{ name: "evil", description: "x", inputSchema: {} }], "adds tools"],
+  ["ephemeral", true, "keeps no record of the conversation"],
+  ["permissions", { profile: "everything" }, "names its own permissions"],
+];
+
+test("with the owner's own setup no stored Codex option reaches a conversation, at a start or a repair, and without it every one still does", async () => {
+  const level = spawnRequest().launchPolicy as Record<string, unknown>;
+  let agents = 0;
+  const started = async (homeHarness: boolean, stored: Record<string, unknown>) => {
+    const harness = createHarness({ exitOnSignal: true });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    // Each start is another agent's first, so each is told what was left out.
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", supervisorEntryId: `supervised_stored_${agents += 1}`, supervisorSocketPath: "/tmp/daemon.sock",
+      supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS, launchPolicy: { ...level, ...stored }, ...(homeHarness ? { homeHarness: true } : {}) }));
+    const client = harness.clients[0]!;
+    const start = client.requests.find((request) => request.method === "thread/start")!.params as Record<string, unknown>;
+    // A repair starts a second conversation on the same process, from the policy as it is stored.
+    const before = client.requests.length;
+    await adapter.repairContinuation(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+      cwd: spawnRequest().cwd, launchPolicy: { ...level, ...stored }, forceReplacement: true,
+    }, { checkpointReplacement: async () => {} });
+    const repair = client.requests.slice(before).find((request) => request.method === "thread/start")!.params as Record<string, unknown>;
+    return { start, repair, notices: handle.launchNotices ?? [] };
+  };
+  // What a conversation is given when nothing else is stored.
+  const on = await started(true, {});
+  const off = await started(false, {});
+  assert.deepEqual(Object.keys(on.start).sort(), ["approvalPolicy", "approvalsReviewer", "historyMode", "sandbox"]);
+  assert.deepEqual([on.start, on.repair, on.notices], [off.start, off.repair, []], "an agent with nothing else stored starts the same either way");
+  for (const [option, value, what] of STORED_CODEX_OPTIONS) {
+    const name = `${option} (${what})`;
+    const withOption = await started(true, { [option]: value });
+    assert.deepEqual(withOption.start, on.start, `${name}: not in the conversation the launch starts`);
+    assert.deepEqual(withOption.repair, on.repair, `${name}: nor in one a repair starts`);
+    assert.deepEqual(withOption.notices, [
+      `With your own setup on, this agent starts with its access level's own Codex options only. These saved options were not used: ${JSON.stringify(option)}.`,
+    ], name);
+    // Without the owner's setup the option is passed on exactly as it always was.
+    const passedOn = await started(false, { [option]: value });
+    assert.deepEqual(passedOn.start, { ...off.start, [option]: value }, `${name}: unchanged without the owner's setup`);
+    assert.deepEqual(passedOn.repair, { ...off.repair, [option]: value }, name);
+    assert.deepEqual(passedOn.notices, [], name);
+  }
+});
+
+test("a Codex agent is told which saved options were left out when they change, not at every start", async () => {
+  const level = spawnRequest().launchPolicy as Record<string, unknown>;
+  const told = async (agent: string, stored: Record<string, unknown>, own: Record<string, unknown> = OWN_SETUP_LAUNCH) => {
+    const harness = createHarness({ exitOnSignal: true });
+    const handle = await new CodexProviderAdapter({ dependencies: harness.dependencies })
+      .spawn(spawnRequest({ ...own, supervisorEntryId: agent, launchPolicy: { ...level, ...stored } }));
+    return handle.launchNotices ?? [];
+  };
+  const line = (...options: string[]) => [`With your own setup on, this agent starts with its access level's own Codex options only. These saved options were not used: ${options.map((option) => JSON.stringify(option)).join(", ")}.`];
+  const secret = { mcp_servers: { evil: { command: "/repo/value-that-is-never-shown" } } };
+  assert.deepEqual(await told("supervised_said_once", { config: secret }), line("config"), "its first start says it");
+  assert.deepEqual(await told("supervised_said_once", { config: secret }), [], "the same again says nothing");
+  assert.deepEqual(await told("supervised_said_once", { config: { other: true } }), [], "another value under the same name is not a change: names are all that is said");
+  assert.deepEqual(await told("supervised_said_once", { config: secret, personality: "x" }), line("config", "personality"), "a change is said");
+  assert.deepEqual(await told("supervised_said_once", {}), []);
+  assert.deepEqual(await told("supervised_said_once", { config: secret, personality: "x" }), line("config", "personality"), "and so is the same set coming back");
+  // A start without the owner's setup says nothing and is not counted as one that did.
+  const { homeHarness: _on, ...without } = OWN_SETUP_LAUNCH;
+  assert.deepEqual(await told("supervised_said_once", { config: secret, personality: "x" }, without), []);
+  assert.deepEqual(await told("supervised_said_once", { config: secret, personality: "x" }), []);
+  // What one agent was told says nothing about another.
+  assert.deepEqual(await told("supervised_said_once_other", { config: secret, personality: "x" }), line("config", "personality"));
+});
+
+test("without the owner's setup nothing the room's server asks is declined, whatever its size or shape", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!; client.turnStatus = "inProgress";
+  const method = "mcpServer/elicitation/request";
+  const activity: string[] = [];
+  // The background service keeps an agent's activity from its stream, so that is where each one must be.
+  adapter.onStream(handle, (event) => { if (event.method === "mcpServer/elicitation/declined") activity.push(event.summary ?? ""); });
+  const pending = [
+    client.askPermission(mcpToolPermissionParams(), 61, method),
+    client.askPermission(mcpToolPermissionParams({ _meta: { codex_approval_kind: "mcp_tool_call", tool_params: { text: "x".repeat(30_000) } } }), 62, method),
+    client.askPermission(mcpToolPermissionParams({ _meta: null, requestedSchema: { type: "object", properties: { a: { type: "string" } } } }), 63, method),
+    client.askPermission(mcpToolPermissionParams({ mode: "url", url: "https://example.invalid", _meta: null }), 64, method),
+    client.askPermission(approvalParams(), 65),
+  ];
+  assert.deepEqual(client.permissionResponses, []);
+  assert.deepEqual(client.listPendingRequests(), pending);
+  assert.deepEqual(activity, []);
 });

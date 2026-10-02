@@ -4,8 +4,10 @@ import { createServer } from "node:net";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import { codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
+import { codexHomeHarnessOverrides, runCodexMcpListForLaunch } from "./codex-home-harness.js";
 import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
+import { withoutRoomAuthority } from "./room-authority-environment.js";
 
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -41,6 +43,13 @@ interface CodexAppServerLaunchOptions {
   env?: Record<string, string>;
   /** GIT_AUTHOR_* and GIT_COMMITTER_* resolved for this project before launch. */
   commitEnvironment?: Record<string, string>;
+  /**
+   * The owner lets this agent use their own Codex setup, so a managed launch
+   * leaves their extensions on. Only an exact `true` does, and never for a
+   * rental. The caller must give the room's server its own environment in
+   * `configOverrides`: the process environment then carries none of it.
+   */
+  homeHarness?: boolean;
 }
 
 function readyUrlFromServerUrl(serverUrl: string): string {
@@ -446,7 +455,7 @@ export function codexAppServerLaunchArgs(
  * never carry the owner's identity.
  */
 export function codexAppServerEnvironment(
-  options: Pick<CodexAppServerLaunchOptions, "env" | "commitEnvironment"> = {},
+  options: Pick<CodexAppServerLaunchOptions, "env" | "commitEnvironment" | "homeHarness"> = {},
 ): { env: NodeJS.ProcessEnv; commitEnvironment: Record<string, string>; rental: boolean } {
   const runtimeEnv = desktopRuntimeEnvironment();
   const configuredEnv = options.env && Object.keys(options.env).length
@@ -469,6 +478,10 @@ export function codexAppServerEnvironment(
       delete env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID;
     }
   }
+  // Codex hands its own environment to every hook, the notifier and every
+  // command. With the owner's setup on those are the owner's programs, so the
+  // room agent's coordinates stay out of it; the room's server has its own copy.
+  if (options.homeHarness === true && !rental) return { env: withoutRoomAuthority(env), commitEnvironment, rental };
   return { env, commitEnvironment, rental };
 }
 
@@ -522,7 +535,8 @@ export function launchCodexAppServer(
  * that cannot get that list, or whose project changes the LetAgents server,
  * fails. The launch passes no project trust of its own. A project
  * that would commit as the host's global Git identity commits as the owner's
- * GitHub noreply identity instead.
+ * GitHub noreply identity instead. When the owner has turned their own setup
+ * on for this agent, only the extensions are left alone; the rest holds.
  */
 export async function launchManagedCodexAppServer(
   serverUrl: string,
@@ -531,13 +545,13 @@ export async function launchManagedCodexAppServer(
 ): Promise<CodexAppServerLaunch> {
   const { env, rental } = codexAppServerEnvironment(options);
   const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
+  // The launch's own directory and overrides, so the server list matches.
+  const view = { cwd: trustedProjectPath, env, configOverrides: options.configOverrides ?? [] };
   const [isolation, commitEnvironment] = await Promise.all([
-    // The launch's own directory and overrides, so the server list matches.
-    codexOwnerIsolationOverrides(codexBin, {
-      cwd: trustedProjectPath,
-      env,
-      configOverrides: options.configOverrides ?? [],
-    }),
+    // Either way, a listing that fails says why and never its command line.
+    options.homeHarness === true && !rental
+      ? codexHomeHarnessOverrides(codexBin, view)
+      : codexOwnerIsolationOverrides(codexBin, view, runCodexMcpListForLaunch),
     rental ? {} : managedAgentCommitEnvironment(trustedProjectPath),
   ]);
   return launchCodexAppServer(serverUrl, codexBin, {

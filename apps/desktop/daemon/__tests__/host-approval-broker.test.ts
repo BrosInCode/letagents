@@ -835,6 +835,9 @@ async function verifyNativeApproval(scenario: "command" | "command_restored_befo
     const adapter = new CodexProviderAdapter({ codexBin: "unused-offline-fixture", dependencies: {
       launchServer: () => assert.fail("approval attachment must not launch a provider"),
       signalProcess: () => assert.fail("approval payload must not signal a process"),
+      // The stand-in is this test's own process, whose command line carries no isolation override at all.
+      readCommandLine: () => assert.fail("nothing is read off the process of an agent that never had its owner's setup"),
+      assertLiveProjectUnchanged: () => assert.fail("an agent without its owner's setup is never inspected"),
       observeProcessExit: () => new Promise(() => {}),
       createRpcClient: (url, notify) => {
         rpc = new CodexRpcClient(url, notify, 1_000);
@@ -1208,6 +1211,46 @@ for (const roomWorkspace of [false, true]) for (const stage of ["before-intent",
     } finally { await f.close(); }
   });
 }
+
+test("turning the owner's own setup on pauses an Always-allowed tool, turning it off again restores it, and the record of the change does neither", async () => {
+  const f = await savedRuleFixture("codex");
+  const native = { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const store = (policy: Record<string, unknown>) => f.db.prepare(`UPDATE agent_configurations SET provider_launch_policy_present=1,
+    provider_launch_policy_undefined=0, provider_launch_policy_json=? WHERE agent_id='agent'`).run(JSON.stringify(policy));
+  let serial = 0;
+  /** Whether the next request of the same tool is answered from the saved rule. */
+  const answeredByRule = async () => {
+    const sent = f.sends.length;
+    f.reinstall();
+    f.emit([nextPermission(f.native, `request-${++serial}`)]);
+    // A saved rule answers on its own shortly after the request arrives.
+    for (let wait = 0; wait < 50 && f.sends.length === sent; wait++) await new Promise(resolve => setTimeout(resolve, 10));
+    if (f.sends.length > sent) return f.sends.at(-1) === "once";
+    const [candidate] = await f.broker.list("room");
+    assert.equal(candidate!.status, "pending", "with no rule answering, the owner is asked");
+    await f.broker.decide({ ...decision(candidate!), decisionId: `manual-${serial}`, decision: "deny" });
+    return false;
+  };
+  try {
+    store(native);
+    f.reinstall();
+    const [candidate] = await f.broker.list("room");
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    assert.equal((await f.broker.listToolRules({ agentId: "agent" })).length, 1);
+    assert.equal(await answeredByRule(), true, "the rule answers while nothing has changed");
+
+    // Turned on: the agent's tools are no longer the ones the rule was saved for.
+    store({ ...native, letagentsOwnerIsolation: false, letagentsOwnerIsolationChangedAt4: false });
+    assert.equal(await answeredByRule(), false, "the rule stays listed but does not answer");
+    assert.equal((await f.broker.listToolRules({ agentId: "agent" })).length, 1);
+    // Turned off again: only the record of the two changes is left, and the rule answers as before.
+    store({ ...native, letagentsOwnerIsolationChangedAt4: false, letagentsOwnerIsolationChangedAt6: false });
+    assert.equal(await answeredByRule(), true);
+    // A different access level still pauses it, as it always did.
+    store({ approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } });
+    assert.equal(await answeredByRule(), false);
+  } finally { await f.close(); }
+});
 
 test("saved permissions do not infer a Codex MCP tool from prose or silently follow another source project", async () => {
   const f = await savedRuleFixture("codex");

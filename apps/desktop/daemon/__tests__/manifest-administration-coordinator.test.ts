@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { hostToolPolicyDigest } from "../host-tool-rules.js";
 
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { schedulerErrorDetail } from "../daemon-error-policy.js";
@@ -87,6 +88,8 @@ function storedConfiguration(overrides: Partial<StoredAgentConfiguration> = {}):
     provider_launch_policy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
     config_revision: 3,
     runtime_configuration_revision: 2,
+    // Room messages are delivered by the daemon, as for every agent the desktop app creates.
+    delivery_mode: "daemon_inbox",
     ...overrides,
   };
 }
@@ -716,4 +719,322 @@ test("configuration keeps daemon and revision fences, trusted-policy derivation,
     "a revision conflict must not notify state watchers");
   assert.equal(state.events.includes("authority:accept:5"), true,
     "the unchanged durable generation is still adopted exactly as production does");
+});
+
+const OWN_SETUP_KEY = "letagentsOwnerIsolation";
+/** The stored form of "on", and of the revisions at which the choice changed. */
+const OWN_SETUP_ON = { [OWN_SETUP_KEY]: false };
+const changedAt = (...revisions: number[]) => Object.fromEntries(revisions.map((revision) => [`letagentsOwnerIsolationChangedAt${revision}`, false]));
+
+test("the owner's own setup is turned on and off as its own revisioned change, and other edits keep it", async () => {
+  const state = harness([entry({ provider: "codex" })]);
+  const before = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+  assert.equal(before.home_harness, false, "a row with no value is off");
+  assert.equal(before.home_harness_availability, "available");
+
+  state.events.length = 0;
+  const on = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3, configuration: {}, homeHarness: true,
+  });
+  assert.equal(on.outcome, "updated");
+  assert.equal(on.configuration?.home_harness, true);
+  assert.equal(on.configuration?.config_revision, 4, "it applies at the next start, like a model or access change");
+  assert.equal(on.configuration?.runtime_configuration_revision, 2);
+  assert.equal(on.configuration?.home_harness_pending, true, "a process that is already running does not have it yet");
+  assert.deepEqual(state.configuration?.provider_launch_policy,
+    { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, ...OWN_SETUP_ON, ...changedAt(4) });
+  assert.equal(state.configuration?.model, "gpt-5.6", "nothing else about the agent changes");
+  assert.equal(state.configuration?.charter, "Help the room");
+  assert.ok(state.events.includes("authority:fence") && state.events.includes("state:notify"));
+
+  // Asking for what is already saved changes nothing.
+  state.events.length = 0;
+  const again = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 4, configuration: {}, homeHarness: true,
+  });
+  assert.equal(again.outcome, "updated");
+  assert.equal(again.configuration?.config_revision, 4);
+  assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false);
+
+  // A model or access edit carries the choice forward.
+  const edited = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 4,
+    configuration: { model: "gpt-5.6-mini", reasoning_effort: "low", charter: "Help the room", permission_profile_id: "ask_before_write" },
+  });
+  assert.equal(edited.outcome, "updated");
+  assert.equal(edited.configuration?.home_harness, true);
+  assert.deepEqual(state.configuration?.provider_launch_policy, {
+    approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, ...OWN_SETUP_ON, ...changedAt(4),
+  });
+  assert.equal(edited.configuration?.home_harness_pending, true);
+
+  const stale = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 4, configuration: {}, homeHarness: false,
+  });
+  assert.equal(stale.outcome, "conflict", "a stale revision changes nothing");
+  assert.equal(state.configuration?.config_revision, 5);
+
+  const off = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 5, configuration: {}, homeHarness: false,
+  });
+  assert.equal(off.outcome, "updated");
+  assert.equal(off.configuration?.home_harness, false);
+  assert.equal(Object.hasOwn(state.configuration!.provider_launch_policy as object, OWN_SETUP_KEY), false,
+    "off stores no key, exactly like an agent that never had it");
+  assert.equal(off.configuration?.home_harness_pending, false, "the running process never started with it, so nothing is left to stop");
+});
+
+test("turning the owner's own setup off is not reported as done while the process that started with it still runs", async () => {
+  const state = harness([entry({ provider: "codex" })]);
+  const toggle = async (homeHarness: boolean) => {
+    const result = await state.subject.updateAgentConfiguration({
+      entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision, configuration: {}, homeHarness,
+    });
+    assert.equal(result.outcome, "updated");
+    return result.configuration!;
+  };
+  /** The agent restarts: its new process starts with the saved configuration. */
+  const restart = () => state.setConfiguration({ ...state.configuration!, runtime_configuration_revision: state.configuration!.config_revision });
+  const read = () => state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+
+  assert.deepEqual([(await toggle(true)).home_harness, (await read()).home_harness_pending], [true, true]);
+  restart();
+  assert.deepEqual([(await read()).home_harness, (await read()).home_harness_pending], [true, false], "now it runs with it");
+
+  const off = await toggle(false);
+  assert.deepEqual([off.home_harness, off.home_harness_pending], [false, true], "saved off, but the running process still has it");
+  // An ordinary save in between changes neither the choice nor what is still running.
+  const saved = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision,
+    configuration: { model: "gpt-5.6", reasoning_effort: "low", charter: "Help the room", permission_profile_id: "full_access" },
+  });
+  assert.deepEqual([saved.configuration?.home_harness, saved.configuration?.home_harness_pending], [false, true]);
+  // Back on before any restart: the process has had it all along.
+  const backOn = await toggle(true);
+  assert.deepEqual([backOn.home_harness, backOn.home_harness_pending], [true, false]);
+  const offAgain = await toggle(false);
+  assert.deepEqual([offAgain.home_harness, offAgain.home_harness_pending], [false, true]);
+  restart();
+  assert.deepEqual([(await read()).home_harness, (await read()).home_harness_pending], [false, false], "only a restart ends it");
+});
+
+test("turning the owner's setup on and off again leaves every agent's own settings, and what its saved tool permissions are tied to, exactly as they were", async () => {
+  // Each access level, in the short form Add Agent stores and in the full form a Save stores.
+  const cases: Array<[string, string | null, Record<string, unknown>]> = [
+    ["codex", "full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["codex", "full_access", {}],
+    ["codex", null, {}],
+    ["codex", "ask_before_write", {}],
+    ["codex", "ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }],
+    ["codex", "auto_review", {}],
+    ["codex", "auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" }],
+    ["claude-code", "read_only", { permissionMode: "dontAsk", dangerouslySkipPermissions: false }],
+    ["claude-code", "read_only", { permissionMode: "dontAsk", dangerouslySkipPermissions: false, tools: ["Read", "Glob", "Grep"], allowedTools: ["mcp__letagents__*"], settingSources: "" }],
+    ["claude-code", "ask_before_write", { permissionMode: "default" }],
+    ["claude-code", "ask_before_write", { permissionMode: "default", dangerouslySkipPermissions: false, allowDangerouslySkipPermissions: false,
+      tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"], allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}" }],
+    ["claude-code", "auto_review", { permissionMode: "auto" }],
+    ["claude-code", "full_access", { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }],
+    ["claude-code", "full_access", { dangerouslySkipPermissions: true, permissionMode: "bypassPermissions", model: "kept-as-it-was" }],
+  ];
+  for (const [provider, profile, policy] of cases) {
+    const name = `${provider}/${profile}/${JSON.stringify(policy)}`;
+    const state = harness([entry({ provider })]);
+    state.setConfiguration(storedConfiguration({ provider, reasoning_effort: null, permission_profile_id: profile, provider_launch_policy: policy }));
+    const before = structuredClone(state.configuration!);
+    const digest = () => hostToolPolicyDigest({ permission_profile_id: state.configuration!.permission_profile_id ?? undefined, provider_launch_policy: state.configuration!.provider_launch_policy });
+    const digestBefore = digest();
+    const toggle = async (homeHarness: boolean) => {
+      const result = await state.subject.updateAgentConfiguration({
+        entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision, configuration: {}, homeHarness,
+      });
+      assert.equal(result.outcome, "updated", name);
+    };
+    await toggle(true);
+    assert.notEqual(digest(), digestBefore, `${name}: on, the saved tool permissions are paused`);
+    // On adds LetAgents' own keys and touches nothing else.
+    const native = Object.fromEntries(Object.entries(state.configuration!.provider_launch_policy as Record<string, unknown>).filter(([key]) => !key.startsWith("letagents")));
+    assert.equal(JSON.stringify(native), JSON.stringify(policy), `${name}: the provider's own options are not rewritten`);
+    await toggle(false);
+    assert.equal(digest(), digestBefore, `${name}: off again, they apply again`);
+    const after = state.configuration!;
+    assert.deepEqual(
+      { model: after.model, reasoning_effort: after.reasoning_effort, charter: after.charter, permission_profile_id: after.permission_profile_id },
+      { model: before.model, reasoning_effort: before.reasoning_effort, charter: before.charter, permission_profile_id: before.permission_profile_id }, name);
+    // A second round trip, and one made before the agent ever restarted, change nothing either.
+    await toggle(true); await toggle(false);
+    assert.equal(digest(), digestBefore, `${name}: second round trip`);
+  }
+});
+
+test("a value planted in a rental's stored settings is removed by its next ordinary save", async () => {
+  for (const [id, provider, profile, native] of [
+    ["supervised_rental_0123", "codex", "full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["supervised_rental_0123", "cursor", "sandboxed_write", { force: true, sandbox: "enabled" }],
+    ["agent-1", "cursor", "sandboxed_write", { force: true, sandbox: "enabled" }],
+  ] as const) {
+    const state = harness([entry({ id, provider })]);
+    state.setConfiguration(storedConfiguration({
+      provider, reasoning_effort: null, model: null, permission_profile_id: profile,
+      provider_launch_policy: { ...native, ...OWN_SETUP_ON, ...changedAt(2) },
+    }));
+    const saved = await state.subject.updateAgentConfiguration({
+      entryId: id, daemonGeneration: DAEMON_GENERATION, expectedRevision: 3,
+      configuration: { model: null, reasoning_effort: null, charter: "Help the room, carefully", permission_profile_id: profile },
+    });
+    assert.equal(saved.outcome, "updated", `${id}/${provider}`);
+    assert.deepEqual(state.configuration?.provider_launch_policy, native, `${id}/${provider}: neither key survives the save`);
+    assert.equal(saved.configuration?.home_harness, false);
+    assert.equal(saved.configuration?.home_harness_pending, false);
+  }
+});
+
+test("an ordinary configuration update cannot turn the owner's own setup on", async () => {
+  const state = harness([entry({ provider: "codex" })]);
+  const fields = { model: "gpt-5.6", reasoning_effort: "high", charter: "Help the room", permission_profile_id: "full_access" };
+  for (const smuggled of [
+    { ...fields, homeHarness: true },
+    { ...fields, home_harness: true },
+    { ...fields, ...OWN_SETUP_ON },
+  ]) {
+    const result = await state.subject.updateAgentConfiguration({
+      entryId: "agent-1", daemonGeneration: DAEMON_GENERATION,
+      expectedRevision: state.configuration!.config_revision, configuration: smuggled,
+    });
+    assert.equal(result.outcome, "updated");
+    assert.equal(result.configuration?.home_harness, false, JSON.stringify(smuggled));
+    assert.equal(Object.hasOwn(state.configuration!.provider_launch_policy as object, OWN_SETUP_KEY), false);
+  }
+  const policy = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision,
+    configuration: { ...fields, provider_launch_policy: OWN_SETUP_ON },
+  });
+  assert.equal(policy.outcome, "invalid");
+  assert.equal((await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).home_harness, false);
+
+  // A choice that is not exactly on or off is refused, not guessed.
+  const unclear = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision,
+    configuration: {}, homeHarness: "true" as never,
+  });
+  assert.equal(unclear.outcome, "invalid");
+  assert.equal((await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).home_harness, false);
+});
+
+test("a rented agent and an agent app with no owner setup never get the owner's own setup", async () => {
+  for (const [id, provider, availability, reason] of [
+    ["supervised_rental_0123", "codex", "rental", /rented agent works for someone else/],
+    ["supervised_rental_0123", "cursor", "rental", /rented agent works for someone else/],
+    ["agent-1", "cursor", "unsupported", /no setup of yours/],
+    ["agent-1", "open-model", "unsupported", /no setup of yours/],
+  ] as const) {
+    const state = harness([entry({ id, provider })]);
+    // Even a stored value, however it got there, reads as off.
+    state.setConfiguration(storedConfiguration({
+      provider,
+      permission_profile_id: provider === "cursor" ? "sandboxed_write" : "full_access",
+      provider_launch_policy: provider === "cursor"
+        ? { force: true, sandbox: "enabled", ...OWN_SETUP_ON }
+        : provider === "open-model" ? { permission: { "*": "allow" }, ...OWN_SETUP_ON }
+          : { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, ...OWN_SETUP_ON },
+    }));
+    const current = await state.subject.getAgentConfiguration(id, DAEMON_GENERATION);
+    assert.equal(current.home_harness, false, `${id}/${provider}`);
+    assert.equal(current.home_harness_availability, availability);
+    state.events.length = 0;
+    const refused = await state.subject.updateAgentConfiguration({
+      entryId: id, daemonGeneration: DAEMON_GENERATION, expectedRevision: 3, configuration: {}, homeHarness: true,
+    });
+    assert.equal(refused.outcome, "invalid");
+    assert.match((refused as { error: string }).error, reason);
+    assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false, "nothing is written");
+  }
+});
+
+test("an agent that collects its own room messages cannot be given the owner's own setup, and a stored value is taken out at its next save", async () => {
+  for (const [provider, profile, native] of [
+    ["codex", "full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["claude-code", "ask_before_write", { permissionMode: "default", dangerouslySkipPermissions: false }],
+  ] as const) {
+    for (const deliveryMode of ["mcp_polling", undefined] as const) {
+      const state = harness([entry({ provider })]);
+      const stored = storedConfiguration({
+        provider, reasoning_effort: null, model: null, permission_profile_id: profile,
+        provider_launch_policy: { ...native, ...OWN_SETUP_ON, ...changedAt(2) },
+      });
+      if (deliveryMode) stored.delivery_mode = deliveryMode; else delete stored.delivery_mode;
+      state.setConfiguration(stored);
+      // Settings shows it as off, with the reason, and never as waiting for a restart.
+      const read = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+      assert.deepEqual([read.home_harness, read.home_harness_pending, read.home_harness_availability], [false, false, "polling"], `${provider}/${deliveryMode}`);
+      // The desktop app's own signed request is refused, and nothing is written.
+      state.events.length = 0;
+      const refused = await state.subject.updateAgentConfiguration({
+        entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3, configuration: {}, homeHarness: true,
+      });
+      assert.equal(refused.outcome, "invalid");
+      assert.match((refused as { error: string }).error, /it fetches its own messages, so LetAgents can't reliably switch your setup off again/);
+      assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false);
+      // An ordinary save removes what was stored.
+      const saved = await state.subject.updateAgentConfiguration({
+        entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3,
+        configuration: { model: null, reasoning_effort: null, charter: "Help the room, carefully", permission_profile_id: profile },
+      });
+      assert.equal(saved.outcome, "updated");
+      assert.equal(Object.keys(state.configuration!.provider_launch_policy as object).some((key) => key.startsWith("letagents")), false);
+    }
+  }
+});
+
+test("a new agent cannot be created with the owner's own setup already on", async () => {
+  const state = harness();
+  for (const value of [false, true, "false", null]) {
+    await assert.rejects(
+      state.subject.putManifestEntry(entry({
+        id: "supervised_new", provider: "codex",
+        provider_launch_policy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, [OWN_SETUP_KEY]: value },
+      })),
+      /turned on in the desktop app and cannot be supplied to manifest\.put/,
+    );
+  }
+  // Nor with the key nested, in a history of changes, or carried on an own `__proto__` as JSON text can.
+  for (const policy of [
+    { approvalPolicy: "never", nested: OWN_SETUP_ON },
+    { approvalPolicy: "never", ...changedAt(1) },
+    JSON.parse(`{"approvalPolicy":"never","__proto__":{"${OWN_SETUP_KEY}":false}}`),
+    JSON.parse(`{"approvalPolicy":"never","sandboxPolicy":{"__proto__":{"${OWN_SETUP_KEY}":false}}}`),
+    // Any spelling of a key LetAgents keeps for itself, and the escaped and repeated forms JSON text allows.
+    { approvalPolicy: "never", LetagentsOwnerIsolation: false },
+    { approvalPolicy: "never", "letagents-owner-isolation": false },
+    { approvalPolicy: "never", letagentsHomeHarness: true },
+    JSON.parse('{"approvalPolicy":"never","letagents\\u004fwnerIsolation":false}'),
+    JSON.parse('{"approvalPolicy":"never","letagentsOwnerIsolation":true,"letagentsOwnerIsolation":false}'),
+  ]) {
+    await assert.rejects(
+      state.subject.putManifestEntry(entry({ id: "supervised_new", provider: "codex", provider_launch_policy: policy })),
+      /turned on in the desktop app and cannot be supplied to manifest\.put/, JSON.stringify(policy),
+    );
+  }
+  assert.deepEqual(state.manifest.entries, []);
+  assert.equal(state.events.includes("store:load"), false, "the request is refused before anything is read or written");
+});
+
+test("an agent that uses its owner's Claude settings is told so beside each access level", async () => {
+  const state = harness([entry({ provider: "claude-code" })]);
+  state.setConfiguration(storedConfiguration({
+    provider: "claude-code", reasoning_effort: null, permission_profile_id: "ask_before_write",
+    provider_launch_policy: { permissionMode: "default", dangerouslySkipPermissions: false, ...OWN_SETUP_ON },
+  }));
+  const on = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+  assert.equal(on.home_harness, true);
+  const details = (on.supervised_permission_profiles as Array<{ detail: string | null }>).map((profile) => profile.detail ?? "").join(" ");
+  assert.doesNotMatch(details, /Other Claude settings do not apply/);
+  assert.match(details, /Your own Claude Code allow rules apply too, and can let the agent act without asking you/);
+  state.setConfiguration(storedConfiguration({
+    provider: "claude-code", reasoning_effort: null, permission_profile_id: "ask_before_write",
+    provider_launch_policy: { permissionMode: "default", dangerouslySkipPermissions: false },
+  }));
+  const off = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+  assert.match((off.supervised_permission_profiles as Array<{ detail: string | null }>).map((profile) => profile.detail ?? "").join(" "),
+    /Other Claude settings do not apply/);
 });

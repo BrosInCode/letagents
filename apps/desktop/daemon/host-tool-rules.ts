@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import type { ApprovalReference, ExecutionApprovalRecord } from "./execution-approval-journal.js";
+import { launchPolicyForToolRules } from "./provider-configuration.js";
 import type { DaemonManifestEntry } from "./types.js";
 import type { ProviderPermissionRequest } from "../shared/provider-permissions.js";
 import { createGitCommand, resolveSourceRepositoryIdentity, normalizeRemote, WORKSPACE_MARKER } from "./workspace-provisioner.js";
@@ -27,7 +28,10 @@ export const hostToolScopeSchema = z.union([projectToolScopeSchema, roomToolScop
 export type HostToolScope = z.infer<typeof hostToolScopeSchema>;
 export type HostToolRule = { id: string; revision: number; ownerId: string; scope: HostToolScope; createdAtMs: number };
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const policy = (entry: DaemonManifestEntry) => digest([entry.permission_profile_id, entry.provider_launch_policy ?? null]);
+/** What a saved tool permission is tied to: the agent's access level and its stored launch settings. */
+export const hostToolPolicyDigest = (entry: Pick<DaemonManifestEntry, "permission_profile_id" | "provider_launch_policy">): string =>
+  digest([entry.permission_profile_id, launchPolicyForToolRules(entry.provider_launch_policy) ?? null]);
+const policy = hostToolPolicyDigest;
 
 /** Only structured native identities establish tool scope; prose never does. */
 export function nativeToolIdentity(request: ProviderPermissionRequest): { id: string; label: string } | null {

@@ -2,6 +2,7 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
 import { agentCompactionProgress } from "./managed-agents";
+import { ownerSetupRefusalReason } from "./agent-home-harness";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
@@ -136,7 +137,7 @@ function missingProviderRuntimeDetail(entry: LaunchFields, providerLabel: string
  * to friendly, retryable copy. */
 const INTERNAL_SCHEDULER_FAILURE = /^convergence scheduler failure:/i;
 function provisioningFailureDetail(lastError: string | null | undefined, fallback: string): string {
-  if (lastError && INTERNAL_SCHEDULER_FAILURE.test(lastError.trim())) return fallback;
+  if (lastError && INTERNAL_SCHEDULER_FAILURE.test(lastError.trim())) return ownerSetupRefusalReason(lastError) ?? fallback;
   return safeUserVisibleErrorDetail(lastError, fallback);
 }
 

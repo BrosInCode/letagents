@@ -4,6 +4,7 @@ import {
   continuationRepairMissingContinuation,
 } from "./continuation-repair-policy.js";
 import { redactCredentialText } from "./credential-redaction.js";
+import { withoutHomeHarness } from "./provider-configuration.js";
 import {
   sameProviderActionConnectionIdentity,
   type ProviderActionHandle,
@@ -232,7 +233,7 @@ export class ContinuationRepairCoordinator {
           checkpointedReplacementProviderContinuationId: repair.replacement_continuation,
           forceReplacement,
           cwd: entry.workspace_path ?? "",
-          launchPolicy: entry.provider_launch_policy,
+          launchPolicy: withoutHomeHarness(entry.provider_launch_policy),
           model: entry.model,
           reasoningEffort: entry.reasoning_effort ?? null,
         }, {

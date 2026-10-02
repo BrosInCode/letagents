@@ -475,7 +475,31 @@ export interface DesktopSupervisorAgentConfiguration {
   providerLaunchPolicy: unknown;
   configRevision: number;
   runtimeConfigurationRevision: number;
+  /**
+   * Whether this agent may use the owner's own provider setup, and whether it
+   * can at all: never for a rented agent, and not for an agent app that has
+   * no setup of the owner's to load. `pending` means a process that started
+   * before the last change would still run the other way until it restarts.
+   * Absent from an older background service.
+   */
+  homeHarness?: { enabled: boolean; pending: boolean; availability: "available" | "rental" | "unsupported" | "polling" };
 }
+
+/** Changed on its own, by the owner in the desktop app, never as part of a saved draft. */
+export interface DesktopSupervisorAgentHomeHarnessInput {
+  entryId: string;
+  daemonGeneration: number;
+  expectedRevision: number;
+  enabled: boolean;
+}
+
+/**
+ * Turning it off also restarts an idle agent that still has the owner's
+ * setup, so `restart` says what happened to the running process: restarted,
+ * left alone because it is working, or not restarted for another reason.
+ */
+export type DesktopSupervisorAgentHomeHarnessResult = DesktopSupervisorAgentConfigurationUpdateResult
+  & { restart?: "restarting" | "busy" | "not_restarted" };
 
 export interface DesktopSupervisorAgentConfigurationUpdateInput {
   entryId: string;
@@ -691,6 +715,11 @@ export interface DesktopSupervisorManifestEntry {
   deliveryMode: DesktopManagedAgentDeliveryMode;
   /** Read-only daemon-owned custody; selecting delivery mode cannot enable it. */
   pollingContract?: "custodial_polling_v1" | null;
+  /**
+   * Read-only: this agent uses its owner's own provider setup ("on"), will
+   * once it restarts, or still does until it restarts. Absent means off.
+   */
+  homeHarness?: "on" | "after_restart" | "until_restart";
   createdBy: string;
   createdAt: string;
   /** User-selected source checkout. Distinct from the daemon's private work-attempt workspace. */

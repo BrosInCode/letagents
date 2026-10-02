@@ -1,6 +1,19 @@
 import { isDeepStrictEqual } from "node:util";
 
-import type { ProviderConfigurationSnapshot, ProviderReasoningEffort } from "./provider-configuration.js";
+import {
+  HOME_HARNESS_ON,
+  agentUsesHomeHarness,
+  entryLaunchPolicy,
+  homeHarnessAvailability,
+  homeHarnessDiffersFromSaved,
+  namesHomeHarness,
+  storedHomeHarness,
+  storedLaunchPolicy,
+  withoutHomeHarness,
+  type ProviderConfigurationSnapshot,
+  type ProviderReasoningEffort,
+} from "./provider-configuration.js";
+import { describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
 import type {
   DaemonActivityEvent,
   DaemonAgentConfiguration,
@@ -27,6 +40,8 @@ export type StoredAgentConfiguration = {
   config_revision: number;
   runtime_configuration_revision: number;
   polling_contract?: DaemonAgentConfiguration["polling_contract"];
+  /** How room messages reach the agent. Absent is read as the older polling delivery. */
+  delivery_mode?: string;
 };
 
 export type ManifestAdministrationStore = {
@@ -134,6 +149,12 @@ export type UpdateAgentConfigurationInput = {
   daemonGeneration: number;
   expectedRevision: number;
   configuration: Record<string, unknown>;
+  /**
+   * Whether this agent may use the owner's own provider setup. The control
+   * router sets it only for a request the desktop app signed; it is never
+   * read from `configuration`, which any local caller can supply.
+   */
+  homeHarness?: boolean;
 };
 
 /**
@@ -227,6 +248,9 @@ export class ManifestAdministrationCoordinator {
   async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
     if (Object.hasOwn(entry, "polling_contract")) {
       throw new Error("Polling custody is daemon-owned and cannot be supplied to manifest.put.");
+    }
+    if (namesHomeHarness(entry.provider_launch_policy)) {
+      throw new Error("An agent's use of its owner's own setup is turned on in the desktop app and cannot be supplied to manifest.put.");
     }
     this.validateEntry(entry);
     const updated = await this.options.authority.serialize(async () => {
@@ -425,12 +449,96 @@ export class ManifestAdministrationCoordinator {
     }
     const configuration = await this.options.store.getAgentConfiguration(entryId);
     if (!configuration) throw new Error("The exact agent no longer exists.");
+    const agent = { id: entryId, provider: configuration.provider, deliveryMode: configuration.delivery_mode };
+    const availability = homeHarnessAvailability(agent);
+    const homeHarness = agentUsesHomeHarness(agent, configuration.provider_launch_policy);
+    const profiles = this.options.policies.permissionProfilesForProvider(configuration.provider);
     return {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
       ...configuration,
-      supervised_permission_profiles: this.options.policies.permissionProfilesForProvider(configuration.provider),
+      supervised_permission_profiles: homeHarness ? describeProfilesWithOwnerSetup(configuration.provider, profiles) : profiles,
+      home_harness: homeHarness,
+      // A running process started before the last change still runs the way it started.
+      home_harness_pending: availability === "available"
+        && homeHarnessDiffersFromSaved(configuration.provider_launch_policy, configuration.runtime_configuration_revision),
+      home_harness_availability: availability,
     };
+  }
+
+  /**
+   * Turn the owner's own provider setup on or off for one agent. Reached only
+   * through the desktop app's signed request. The change is a new
+   * configuration revision, so it applies the next time the agent starts.
+   */
+  private async setHomeHarness(input: UpdateAgentConfigurationInput) {
+    if (typeof input.homeHarness !== "boolean") {
+      return { outcome: "invalid" as const, error: "Choose whether this agent may use your own setup." };
+    }
+    const current = await this.options.store.getAgentConfiguration(input.entryId);
+    if (!current) return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
+    const availability = homeHarnessAvailability({ id: input.entryId, provider: current.provider, deliveryMode: current.delivery_mode });
+    if (availability !== "available") {
+      return {
+        outcome: "invalid" as const,
+        error: availability === "rental"
+          ? "A rented agent works for someone else and cannot use your own setup."
+          : availability === "polling"
+            ? "Not available for this agent: it fetches its own messages, so LetAgents can't reliably switch your setup off again."
+            : "This agent app has no setup of yours to use.",
+      };
+    }
+    if (storedHomeHarness(current.provider_launch_policy) === input.homeHarness) {
+      return { outcome: "updated" as const, configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration) };
+    }
+    try {
+      const policy = withoutHomeHarness(current.provider_launch_policy);
+      if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new Error("The agent's saved launch settings cannot be read.");
+      // Checked as the next start will derive it, so a choice that could not launch is refused here.
+      this.options.policies.deriveProviderConfiguration({
+        provider: current.provider,
+        model: current.model,
+        reasoningEffort: current.reasoning_effort ?? null,
+        permissionProfileId: current.permission_profile_id,
+        configurationRevision: input.expectedRevision + 1,
+      }, input.homeHarness ? { ...policy, ...HOME_HARNESS_ON } : policy);
+      return this.options.authority.serialize(async () => {
+        await this.options.authority.assertCurrent();
+        const result = await this.options.store.updateAgentConfiguration(
+          this.options.authority.currentManifestGeneration(),
+          {
+            agentId: input.entryId,
+            expectedRevision: input.expectedRevision,
+            // Nothing but LetAgents' own keys changes: the model, the access
+            // level and the provider's own options stay exactly as stored, so
+            // turning this off again leaves the agent's settings as they were.
+            model: current.model,
+            reasoningEffort: current.reasoning_effort ?? null,
+            charter: current.charter,
+            permissionProfileId: current.permission_profile_id,
+            providerLaunchPolicy: storedLaunchPolicy(
+              { launchPolicy: policy as Record<string, unknown>, ...(input.homeHarness ? { homeHarness: true as const } : {}) },
+              {
+                policy: current.provider_launch_policy,
+                runtimeRevision: current.runtime_configuration_revision,
+                changedAt: input.expectedRevision + 1,
+              },
+            ),
+          },
+          this.options.authority.fenceCommit,
+        );
+        this.options.authority.acceptManifestGeneration(result.generation);
+        if (result.outcome === "invalid") {
+          return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
+        }
+        return {
+          outcome: result.outcome,
+          configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration),
+        };
+      });
+    } catch (error) {
+      return { outcome: "invalid" as const, error: this.options.policies.safeErrorDetail(error) };
+    }
   }
 
   async updateAgentConfiguration(input: UpdateAgentConfigurationInput) {
@@ -443,6 +551,7 @@ export class ManifestAdministrationCoordinator {
         error: "Configuration requires an exact agent, current daemon generation, and positive expected revision.",
       };
     }
+    if (Object.hasOwn(input, "homeHarness")) return this.setHomeHarness(input);
     const effort = input.configuration.reasoning_effort;
     const model = input.configuration.model;
     const charter = input.configuration.charter;
@@ -468,13 +577,18 @@ export class ManifestAdministrationCoordinator {
       return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
     }
     try {
+      // A rental or an agent app with no owner setup never keeps the key, however it got there.
+      const trustedPolicy = entryLaunchPolicy(
+        { id: input.entryId, provider: currentConfiguration.provider, deliveryMode: currentConfiguration.delivery_mode },
+        currentConfiguration.provider_launch_policy,
+      );
       const normalized = this.options.policies.deriveProviderConfiguration({
         provider: currentConfiguration.provider,
         model: model === null ? null : (model as string).trim(),
         reasoningEffort: effort as ProviderReasoningEffort,
         permissionProfileId: profile === null ? null : (profile as string).trim(),
         configurationRevision: input.expectedRevision + 1,
-      }, currentConfiguration.provider_launch_policy);
+      }, trustedPolicy);
       return this.options.authority.serialize(async () => {
         await this.options.authority.assertCurrent();
         const result = await this.options.store.updateAgentConfiguration(
@@ -486,7 +600,8 @@ export class ManifestAdministrationCoordinator {
             reasoningEffort: normalized.reasoningEffort,
             charter: charter.trim(),
             permissionProfileId: normalized.permissionProfileId,
-            providerLaunchPolicy: normalized.launchPolicy,
+            // An edit to the model or access level keeps the owner's choice.
+            providerLaunchPolicy: storedLaunchPolicy(normalized, { policy: trustedPolicy }),
           },
           this.options.authority.fenceCommit,
         );
