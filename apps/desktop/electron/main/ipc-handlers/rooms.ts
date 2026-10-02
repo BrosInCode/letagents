@@ -6,6 +6,8 @@ import { getDesktopMessageReactions, setDesktopMessageReaction } from "../rooms/
 import { searchDesktopRoomMessages } from "../rooms/search.js";
 import { getAccountActivityState, restartAccountActivityStream, stopAccountActivityStream } from "../account-activity-stream.js";
 import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
+import { getDesktopRoomNotificationPreference, listDesktopRoomNotificationPreferences, setDesktopRoomNotificationPreference } from "../rooms/notification-preferences.js";
+import type { RoomNotificationPreferenceChange } from "../../../../../shared/room-notification-preferences.mjs";
 import { cancelDesktopRoomWakeRule, getDesktopRoomWakeRules, restoreDesktopRoomWakeRule } from "../rooms/wake-rules.js";
 import { getDesktopNeedsYou, getDesktopNeedsYouRoom, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
 import type { IpcMain } from "electron";
@@ -461,6 +463,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:get-github-event-filter", (_event, roomIdentifier: string) => getDesktopGitHubEventFilter(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-github-event-filter", (_event, roomIdentifier: string, enabledKinds: unknown) => setDesktopGitHubEventFilter(roomIdentifier, enabledKinds));
   targetIpcMain.handle("desktop:room:get-agent-guidelines", (_event, roomIdentifier: string) => getDesktopRoomAgentGuidelines(roomIdentifier));
+  targetIpcMain.handle("desktop:room:list-notification-preferences", () => listDesktopRoomNotificationPreferences());
+  targetIpcMain.handle("desktop:room:get-notification-preference", (_event, identifier: string) => getDesktopRoomNotificationPreference(identifier));
+  targetIpcMain.handle("desktop:room:set-notification-preference", (_event, identifier: string, change: RoomNotificationPreferenceChange) => setDesktopRoomNotificationPreference(identifier, change));
   targetIpcMain.handle("desktop:room:set-agent-guidelines", (_event, roomIdentifier: string, guidelines: unknown) => setDesktopRoomAgentGuidelines(roomIdentifier, guidelines));
   targetIpcMain.handle("desktop:room:get-wake-rules", (_event, roomIdentifier: string) => getDesktopRoomWakeRules(roomIdentifier));
   targetIpcMain.handle("desktop:room:cancel-wake-rule", (_event, roomIdentifier: string, ruleId: string) => cancelDesktopRoomWakeRule(roomIdentifier, ruleId));

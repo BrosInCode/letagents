@@ -297,6 +297,7 @@ jobs:
           --import ./node_modules/tsx/dist/loader.mjs
           --test
           src/api/__tests__/desktop-push-worker-db.test.ts
+          src/api/__tests__/room-notification-preferences-routes.test.ts
 
       - name: Run webhook integration tests
         run: >-

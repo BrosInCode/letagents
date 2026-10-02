@@ -24,6 +24,7 @@
     </span>
     <span class="room-title-line">
       <span class="room-title">{{ sidebarRoomTitle(entry) }}</span>
+      <RoomMutedIcon :room-identifier="entry.roomIdentifier" />
       <span v-if="entry.currentWorkspace" class="room-workspace-pill">Current</span>
       <SidebarRoomActivity :activity="entry.activity" />
       <span
@@ -46,6 +47,7 @@
 import { Check } from "@lucide/vue";
 import { sidebarRoomTitle } from "../../../domain/sidebar-room-display";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
+import RoomMutedIcon from "./RoomMutedIcon.vue";
 import type { RoomEntry } from "../types";
 
 defineProps<{

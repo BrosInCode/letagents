@@ -292,6 +292,7 @@
                 <span class="pinned-main">
                   <span class="room-title-line">
                     <span class="pinned-title">{{ project.roomName }}</span>
+                    <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
                     <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
                     <span
                       v-if="project.parent.hasUnread"
@@ -441,6 +442,7 @@
                   <span class="project-copy">
                     <span class="room-title-line">
                       <span class="project-name">{{ project.roomName }}</span>
+                      <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
                       <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
                       <span
                         v-if="project.parent.hasUnread"
@@ -694,6 +696,9 @@ import {
   type SidebarRoomMenuActionId,
 } from "../../../domain/sidebar-context-menu";
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
+import RoomMutedIcon from "./RoomMutedIcon.vue";
+import { roomNotificationPreferences, roomNotificationState } from "../../../composables/useRoomNotificationPreferences";
+import { roomNotificationMenuItems, roomNotificationMenuChange } from "../../../domain/room-notification-menu";
 import { sidebarProjectForEntry } from "../../../domain/sidebar-zen-mode";
 import {
   canOpenRoomSwitcher,
@@ -997,6 +1002,9 @@ const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
 };
 
 function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopContextMenuItem[][] {
+  const notificationState = roomNotificationState(entry.roomIdentifier || "");
+  const localOnly = /^local[_-]|^git-room:local:/i.test(entry.roomIdentifier || "") || entry.gitRoom?.accessMode === "local";
+  const unavailable = localOnly ? "Notification settings require a cloud room." : !props.authStatus?.authenticated ? "Sign in to manage your notifications." : "";
   const project = projectId
     ? props.projectEntries.find((candidate) => candidate.id === projectId && projectChildRooms(candidate).length)
     : null;
@@ -1006,9 +1014,15 @@ function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopC
     hasProjectChildren: Boolean(project),
     projectCollapsed: Boolean(project && projectIsCollapsed(project.id)),
     canManageRooms: props.authStatus?.authenticated === true,
+    notificationItems: [
+      ...(unavailable ? [{ id: "notification-unavailable", label: unavailable, disabled: true }] : []),
+      ...roomNotificationMenuItems(notificationState.preference, Boolean(unavailable) || notificationState.busy || notificationState.loading),
+      ...(notificationState.error && !unavailable ? [{ id: "notification-retry", label: "Could not load or save. Retry" }] : []),
+    ],
   }).map((group) => group.map((item) => ({
     ...item,
-    icon: item.id === "pin-room" && entry.pinned ? PinOff : roomMenuIcons[item.id],
+    icon: item.id === "pin-room" && entry.pinned ? PinOff : item.id === "notifications" ? undefined : roomMenuIcons[item.id],
+    children: item.children?.map((child) => ({ ...child, icon: child.checked ? Check : undefined })),
   })));
 }
 
@@ -1037,6 +1051,7 @@ const backgroundContextMenuItemGroups = computed<DesktopContextMenuItem[][]>(() 
 );
 
 function openRoomContextMenu(event: MouseEvent, entry: RoomEntry, projectId: string | null = null): void {
+  if (entry.roomIdentifier) void roomNotificationPreferences.refresh(entry.roomIdentifier);
   backgroundContextMenu.value = null;
   roomContextMenu.value = roomMenuGroupsFor(entry, projectId).length
     ? { entry, projectId, x: event.clientX, y: event.clientY }
@@ -1070,6 +1085,15 @@ function closeBackgroundContextMenu(): void {
 function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
   const menu = roomContextMenu.value;
   if (!menu) return;
+  if (item.id === "notification-retry" && menu.entry.roomIdentifier) {
+    void roomNotificationPreferences.refresh(menu.entry.roomIdentifier);
+    return;
+  }
+  const preferenceChange = roomNotificationMenuChange(item.id);
+  if (preferenceChange && menu.entry.roomIdentifier) {
+    void roomNotificationPreferences.update(menu.entry.roomIdentifier, preferenceChange);
+    return;
+  }
   const actions: Record<SidebarRoomMenuActionId, () => void> = {
     "open-room": () => emit("select-entry", menu.entry),
     "select-room": () => startSelection(menu.entry),

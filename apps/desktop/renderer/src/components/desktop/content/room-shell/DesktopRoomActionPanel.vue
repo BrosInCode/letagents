@@ -218,6 +218,7 @@
       <section class="room-settings-section" data-section="alerts" aria-labelledby="room-settings-heading-alerts">
         <h3 id="room-settings-heading-alerts">Alerts</h3>
         <div class="room-settings-list">
+          <RoomNotificationSettings :room-identifier="room.identifier" :local-only="storage.effectiveMode === 'local'" />
           <div class="room-settings-row" data-inline="true" data-testid="desktop-room-sounds-card">
             <div class="room-settings-row-copy">
               <p id="room-settings-sound-title" class="room-settings-row-title">Sound effects</p>
@@ -346,6 +347,7 @@
 </template>
 
 <script setup lang="ts">
+import RoomNotificationSettings from "./RoomNotificationSettings.vue";
 import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";

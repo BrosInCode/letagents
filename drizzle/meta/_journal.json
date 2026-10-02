@@ -771,6 +771,13 @@
       "when": 1790900100000,
       "tag": "0109_message_pins",
       "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1790900200000,
+      "tag": "0110_account_room_notification_preferences",
+      "breakpoints": true
     }
   ]
 }
