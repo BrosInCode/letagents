@@ -65,6 +65,7 @@ import MessageInfoSurface from './MessageInfoSurface.vue'
 import { mergeMessageArrivalIds, watchMessageListGrowth } from './messageArrival'
 import { buildMessageThreadSummaries } from './messageThreading'
 import { createReadEvidenceReporter } from './readEvidence'
+import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 
 const activeInfoMessage = ref<RoomMessage | null>(null)
@@ -209,6 +210,16 @@ watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
   void retiring.dispose()
 })
 
+// Reuse the existing pre-layout bottom check for the 0↔1 pin-row resize.
+// Scrolled-up readers retain their scrollTop; never force them to the bottom.
+const messagePins = injectRoomMessagePins()
+if (messagePins) {
+  watch(() => messagePins.state.value.pins.length > 0, async () => {
+    if (!isScrolledToBottom) return
+    await nextTick()
+    scrollToBottom('instant')
+  })
+}
 // A reaction row appearing under a message makes the list taller without a
 // new message. A reader at the newest message stays there.
 const messageReactions = injectRoomMessageReactions()

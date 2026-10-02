@@ -310,6 +310,8 @@ export interface DesktopApi {
     onAccountActivity?: (callback: (state: DesktopAccountActivityState) => void) => () => void;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
     /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */
+    getMessagePins?: (roomIdentifier: string) => Promise<import("../../../../shared/message-pins.mjs").MessagePinsResponse>;
+    setMessagePin?: (roomIdentifier: string, messageId: string, pinned: boolean) => Promise<import("../../../../shared/message-pins.mjs").MessagePinMutationResponse>;
     getMessageReactions?: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) => Promise<DesktopMessageReactionsRange>;
     setMessageReaction?: (roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) => Promise<DesktopMessageReactionChange>;
     /** Cloud rooms only. Optional so a renderer newer than its main process keeps its in-place find. */

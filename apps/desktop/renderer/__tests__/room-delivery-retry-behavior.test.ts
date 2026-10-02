@@ -995,7 +995,7 @@ test("history failure offers explicit retry without viewport or scroll retries",
   } finally { viewport.app.unmount(); }
 });
 
-test("a reader at the newest message keeps it in view when the composer below grows", async () => {
+test("viewport resizing for the composer or pin row keeps bottom readers attached and older readers in place", async () => {
   let resized: (() => void) | null = null;
   const observed: unknown[] = [];
   Object.assign(globalThis, { ResizeObserver: class {
@@ -1035,6 +1035,22 @@ test("a reader at the newest message keeps it in view when the composer below gr
     list.clientHeight = 330;
     resized!();
     assert.equal(list.scrollTop, 300);
+    // The last pin disappears: the viewport gains the row's height. Older
+    // readers keep their offset; no independent pin watcher is necessary.
+    list.clientHeight = 360;
+    resized!();
+    assert.equal(list.scrollTop, 300);
+    // Exercise the complete 0→1→0 pin row transition while following latest.
+    list.scrollTop = 1_640;
+    (list.props.onScroll as () => void)();
+    list.clientHeight = 330;
+    resized!();
+    assert.equal(list.scrollTop, 2_000);
+    list.scrollTop = 1_670;
+    (list.props.onScroll as () => void)();
+    list.clientHeight = 360;
+    resized!();
+    assert.equal(list.scrollTop, 2_000);
   } finally {
     viewport.app.unmount();
     delete (globalThis as Record<string, unknown>).ResizeObserver;

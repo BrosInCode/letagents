@@ -6,6 +6,7 @@ import { registerMessageHistoryRoutes } from "./history.js";
 import { registerMessageStreamRoute } from "./stream.js";
 import { registerMessageInfoRoute } from "./info.js";
 import { registerMessageReadsRoute } from "./reads.js";
+import { registerMessagePinRoutes } from "./pins.js";
 import { registerMessageReactionRoutes } from "./reactions.js";
 import { registerMessageSearchRoute } from "./search.js";
 import { registerAgentReceiptsRoute } from "./agent-receipts.js";
@@ -26,6 +27,7 @@ export function registerRoomMessageRoutes(
   registerMessageReadsRoute(app, deps);
   registerMessageReactionRoutes(app, deps);
   registerMessageSearchRoute(app, deps);
+  registerMessagePinRoutes(app, deps);
   registerAgentReceiptsRoute(app, deps);
   registerAgentObservationRoute(app, deps);
 }

@@ -1125,6 +1125,13 @@ test("resource invalidations advance the broker cursor while only supported reso
     assert.equal(managedEmitted.length, managedCount, "a reaction never reaches a managed agent");
 
     initial.pushRaw(
+      `id: broker_pins\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({ room_id: canonicalRoom, resource: "message_pins" })}\n\n`,
+    );
+    await waitUntil(() => emitted.length > emittedCount + 2);
+    assert.deepEqual(emitted.at(-1), { type: "resource_invalidation", roomIdentifier: canonicalRoom, resource: "message_pins" });
+    assert.equal(managedEmitted.length, managedCount, "a pin never reaches a managed agent");
+
+    initial.pushRaw(
       `id: broker_delegation\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
         room_id: canonicalRoom,
         resource: "execution_delegation",
@@ -1132,7 +1139,7 @@ test("resource invalidations advance the broker cursor while only supported reso
     );
     await waitUntil(() => delegationRooms.length === 1);
     assert.deepEqual(delegationRooms, [canonicalRoom]);
-    assert.equal(emitted.length, emittedCount + 2, "delegation pointers stay main-process-only");
+    assert.equal(emitted.length, emittedCount + 3, "delegation pointers stay main-process-only");
     assert.equal(managedEmitted.length, managedCount);
 
     const afterAgentWorkCount = emitted.length;

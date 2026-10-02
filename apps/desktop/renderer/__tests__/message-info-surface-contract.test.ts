@@ -16,7 +16,7 @@ const styles = source("../src/styles/message-content/message-info-surface.css");
 
 test("Message info appears in both context-menu variants below a separator", () => {
   const linkVariant = /Copy link<\/span>[\s\S]{0,200}?room-message-context-menu-separator[\s\S]{0,200}?Message info/;
-  const messageVariant = /tertiaryActionLabel \}\}<\/span>[\s\S]{0,200}?room-message-context-menu-separator[\s\S]{0,200}?Message info/;
+  const messageVariant = /Pin message" \}\}<\/span>[\s\S]{0,500}?room-message-context-menu-separator[\s\S]{0,200}?Message info/;
   assert.match(chatMessage, linkVariant);
   assert.match(chatMessage, messageVariant);
   assert.match(chatMessage, /"message-info": \[messageId: string, context: "timeline" \| "thread-root" \| "thread-reply"\];/);
@@ -101,6 +101,6 @@ test("the dialog takes initial focus on open", () => {
 });
 
 test("the menu position clamp accounts for the taller message variant", () => {
-  assert.match(chatMessage, /const menuHeight = linkHref \? 140 : reactable\.value \? 208 : 176/);
+  assert.match(chatMessage, /const menuHeight = linkHref \? 140 : 176 \+ \(reactable\.value \? 32 : 0\) \+ \(pinnable\.value \? 32 : 0\)/);
   assert.doesNotMatch(chatMessage, /const menuHeight = 122/);
 });

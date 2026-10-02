@@ -690,7 +690,7 @@ export type DesktopRoomStreamEvent =
   | {
       type: "resource_invalidation";
       roomIdentifier: string;
-      resource: "agent_work" | "wake_rules" | "message_reactions";
+      resource: "agent_work" | "wake_rules" | "message_reactions" | "message_pins";
     }
   | {
       type: "rental_activity";
