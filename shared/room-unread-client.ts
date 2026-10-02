@@ -47,13 +47,14 @@ export function useUnreadTimeline(options: {
   let generation = 0;
   let started = false;
   let reading = false;
+  let automaticScroll = false;
   let mounted = false;
   const dividerId = computed(() => client.visit.value.room === (options.room.value ?? "").trim().toLowerCase()
     ? client.visit.value.dividerId : null);
 
   function checkRead() {
     const el = options.element.value;
-    if (!el || !options.active.value) return;
+    if (!el || !options.active.value || automaticScroll) return;
     if (canClearUnreadBookmark({
       enteredRevision: enteredRevision.value, current: bookmark.value, revealed: revealed.value,
       atBottom: el.scrollHeight - el.clientHeight - el.scrollTop < 60,
@@ -69,6 +70,7 @@ export function useUnreadTimeline(options: {
     const found = await options.reveal(mark.messageId);
     if (generation !== currentGeneration || bookmark.value?.revision !== mark.revision) return;
     revealed.value = found;
+    automaticScroll = false;
     if (found) client.visit.value.dividerId = mark.messageId;
     await nextTick();
     if (generation !== currentGeneration) return;
@@ -83,6 +85,7 @@ export function useUnreadTimeline(options: {
     revealed.value = false;
     started = false;
     reading = false;
+    automaticScroll = false;
     void nextTick(open);
   }, { immediate: true, flush: "sync" });
   watch(options.ready, () => { void nextTick(open); });
@@ -90,15 +93,17 @@ export function useUnreadTimeline(options: {
   function input(event: Event) {
     if (event instanceof KeyboardEvent && !["ArrowDown", "ArrowUp", "PageDown", "PageUp", "End", "Home", " "].includes(event.key)) return;
     reading = true;
-    void nextTick(checkRead);
+    automaticScroll = false;
+    void nextTick(() => { if (reading) checkRead(); });
   }
   function scroll() { if (reading) checkRead(); }
   function scrollEnd() { if (reading) checkRead(); reading = false; }
-  function programmaticScroll() { reading = false; }
+  function programmaticScroll() { reading = false; automaticScroll = true; }
   function jumpToLatest() {
     options.bottom(true);
     reading = true;
-    void nextTick(checkRead);
+    automaticScroll = false;
+    void nextTick(() => { if (reading) checkRead(); });
   }
   onMounted(() => {
     mounted = true;

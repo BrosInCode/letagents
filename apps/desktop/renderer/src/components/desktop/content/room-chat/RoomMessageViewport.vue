@@ -1,6 +1,6 @@
 <template>
   <div class="room-message-viewport" data-testid="room-chat-viewport">
-    <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll">
+    <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll" @scrollend="finishMessageReveal">
       <p v-if="olderMessagesError" role="status" class="room-load-older-error">{{ olderMessagesError }}</p>
       <button
         v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages"
@@ -292,6 +292,22 @@ const autoViewportBackfillCount = ref(0);
 const arrivingMessageIds = ref<ReadonlySet<string>>(new Set());
 const arrivalTimers = new Map<string, number>();
 let isScrolledToBottom = false;
+let scrollRevision = 0;
+let revealingMessage = false;
+let revealFrame: number | null = null;
+let revealTimer: number | null = null;
+let bottomFollowQueued = false;
+
+function followLatestAfterLayout(): void {
+  if (!isScrolledToBottom || !props.active || shouldRestoreInitialScroll || bottomFollowQueued) return;
+  const revision = scrollRevision;
+  const top = messagesElement.value?.scrollTop;
+  bottomFollowQueued = true;
+  void nextTick(() => {
+    bottomFollowQueued = false;
+    if (revision === scrollRevision && props.active && messagesElement.value?.scrollTop === top) jumpToBottom();
+  });
+}
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
 let shouldJumpToLatestOnActivate = false;
@@ -314,6 +330,8 @@ function getAnchorElements(): HTMLElement[] {
 }
 let autoViewportBackfillFrame: number | null = null;
 let layoutAnchorRestoreFrame: number | null = null;
+let layoutRestoreRevision = 0;
+let layoutRestoredScrollTop: number | null = null;
 let threadActivityNamespace = props.messageNamespace;
 let suppressNextThreadActivityNotice = false;
 
@@ -351,8 +369,11 @@ watch(
       compareRoomMessages(newLastMessage, oldLastMessage) > 0
     );
     const prependAnchor = isPrepend ? captureScrollAnchor() : null;
+    const revision = scrollRevision;
+    if (!isPrepend && oldLastId && newLastId !== oldLastId) followLatestAfterLayout();
 
     await nextTick();
+    if (revision !== scrollRevision) return;
 
     if (!props.active) {
       if (isNewLatestMessage && isScrolledToBottom) {
@@ -383,13 +404,10 @@ watch(
       return;
     }
     if (newLastId === oldLastId) {
-      updateScrollState();
+      if (!bottomFollowQueued) updateScrollState();
       return;
     }
-    if (isScrolledToBottom) {
-      scrollToBottom("auto");
-      return;
-    }
+    if (isScrolledToBottom) return;
     if (newLastId) {
       unreadCount.value += Math.max(1, newMessages.length - (oldMessages?.length || 0));
     }
@@ -402,10 +420,12 @@ watch(() => timelineEntries.value.filter(entry => entry.type === 'contribution')
   if (shouldRestoreInitialScroll) return;
   const following = isScrolledToBottom;
   const anchor = captureScrollAnchor();
+  const revision = scrollRevision;
+  if (following) followLatestAfterLayout();
   await nextTick();
+  if (revision !== scrollRevision) return;
   if (!props.active) { if (following) shouldJumpToLatestOnActivate = true; return; }
-  if (following) scrollToBottom('auto');
-  else { restoreScrollAnchor(anchor); updateScrollState(); }
+  if (!following) { restoreScrollAnchor(anchor); updateScrollState(); }
 });
 
 // Rate-limit the live echo text: an entry's summary changes at most once per
@@ -454,19 +474,8 @@ watch(
   // Key off the rate-limited displayed set (not raw props) so scroll effects
   // share the coalesced echo cadence instead of firing on every native event.
   () => displayedAgentWork.value.map((work) => `${work.id}:${work.summary}`).join("|"),
-  async (nextKey, previousKey) => {
-    if (nextKey === previousKey) {
-      return;
-    }
-    await nextTick();
-    if (!messagesElement.value) {
-      return;
-    }
-    if (!previousKey || isScrolledToBottom) {
-      scrollToBottom("auto");
-      return;
-    }
-    updateScrollState();
+  (nextKey, previousKey) => {
+    if (nextKey !== previousKey) followLatestAfterLayout();
   },
 );
 
@@ -575,6 +584,8 @@ watch(
 watch(
   () => props.roomIdentifier,
   () => {
+    scrollRevision++;
+    cancelMessageReveal();
     clearMessageArrivals();
     unreadCount.value = 0;
     threadActivityNotice.value = null;
@@ -606,14 +617,10 @@ watch(
 // new message. A reader at the newest message stays there.
 const messageReactions = injectRoomMessageReactions();
 const messageLinkPreviews = injectRoomMessageLinkPreviews();
-for (const context of [messageReactions, messageLinkPreviews]) {
-  if (!context) continue;
-  watch(context.revision, async () => {
-    if (!isScrolledToBottom || !props.active) return;
-    await nextTick();
-    jumpToBottom();
-  });
-}
+watch(
+  () => [messageReactions?.revision.value, messageLinkPreviews?.revision.value],
+  followLatestAfterLayout,
+);
 
 // The composer below can grow (an approval, a reply, a longer draft). A reader
 // at the newest message stays there instead of having it covered.
@@ -626,7 +633,7 @@ function keepLatestInViewOnResize(): void {
   // event measured after it can already read the shrunken list as scrolled up.
   const wasAtLatest = isScrolledToBottom || element.scrollHeight - element.scrollTop - observedViewportHeight < 80;
   observedViewportHeight = element.clientHeight;
-  if (props.active && wasAtLatest && !shouldRestoreInitialScroll) jumpToBottom();
+  if (props.active && wasAtLatest && !revealingMessage && !shouldRestoreInitialScroll) jumpToBottom();
 }
 
 onMounted(() => {
@@ -659,6 +666,8 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  scrollRevision++;
+  cancelMessageReveal();
   viewportResizeObserver?.disconnect();
   clearMessageArrivals();
   cancelAutoFillViewport();
@@ -716,6 +725,8 @@ function cancelAutoFillViewport(): void {
 }
 
 function cancelLayoutAnchorRestore(): void {
+  layoutRestoreRevision++;
+  layoutRestoredScrollTop = null;
   if (layoutAnchorRestoreFrame === null) return;
   if (typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
     window.cancelAnimationFrame(layoutAnchorRestoreFrame);
@@ -753,6 +764,7 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   unreadTimeline.programmaticScroll();
   if (!messagesElement.value) return;
   shouldRestoreInitialScroll = false;
+  cancelMessageReveal();
   if (behavior === "auto") {
     jumpToBottom();
     return;
@@ -769,6 +781,7 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
 
 function jumpToBottom(): void {
   unreadTimeline.programmaticScroll();
+  cancelMessageReveal();
   if (!messagesElement.value) return;
   const element = messagesElement.value;
   const previousScrollBehavior = element.style.scrollBehavior;
@@ -782,6 +795,9 @@ function jumpToBottom(): void {
 }
 
 function handleScroll(): void {
+  scrollRevision++;
+  cancelMessageRevealFrame();
+  if (messagesElement.value?.scrollTop !== layoutRestoredScrollTop) cancelLayoutAnchorRestore();
   if (!messagesElement.value) return;
   if (!props.active) return;
   shouldRestoreInitialScroll = false;
@@ -796,11 +812,44 @@ function handleScroll(): void {
   }
 }
 
+function cancelMessageRevealFrame(): void {
+  if (revealFrame !== null) window.cancelAnimationFrame(revealFrame);
+  revealFrame = null;
+}
+
+function cancelMessageReveal(): void {
+  cancelMessageRevealFrame();
+  if (revealTimer !== null) window.clearTimeout(revealTimer);
+  revealFrame = revealTimer = null;
+  revealingMessage = false;
+}
+
+function beginMessageReveal(): void {
+  cancelMessageReveal();
+  const element = messagesElement.value;
+  if (!element) return;
+  const top = element.scrollTop;
+  revealingMessage = true;
+  // Smooth scrolling may start after the first frame. Any scroll event cancels this probe.
+  revealFrame = window.requestAnimationFrame(() => {
+    revealFrame = window.requestAnimationFrame(() => {
+      revealFrame = null;
+      if (messagesElement.value === element && element.scrollTop === top) finishMessageReveal();
+    });
+  });
+  revealTimer = window.setTimeout(finishMessageReveal, 800);
+}
+
+function finishMessageReveal(): void {
+  cancelMessageReveal();
+  updateScrollState();
+}
+
 function updateScrollState(): void {
   const element = messagesElement.value;
   if (!element) return;
   const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
-  isScrolledToBottom = distanceToBottom < 80;
+  isScrolledToBottom = !revealingMessage && distanceToBottom < 80;
   isScrolledFarUp.value = distanceToBottom > 900;
 }
 
@@ -868,11 +917,14 @@ function preserveScrollAnchorOnNextLayout(durationMs = 0): void {
   const anchor = captureScrollAnchor();
   const scrollTop = element.scrollTop;
   cancelLayoutAnchorRestore();
+  scrollRevision++;
+  const revision = layoutRestoreRevision;
   void nextTick(() => {
+    if (revision !== layoutRestoreRevision) return;
     const startedAt = currentTimeMs();
     const restore = (): void => {
       const currentElement = messagesElement.value;
-      if (!currentElement || !isMeasurableScrollViewport(currentElement)) {
+      if (revision !== layoutRestoreRevision || !currentElement || !isMeasurableScrollViewport(currentElement)) {
         layoutAnchorRestoreFrame = null;
         return;
       }
@@ -881,6 +933,7 @@ function preserveScrollAnchorOnNextLayout(durationMs = 0): void {
         updateScrollState();
         emitScrollPosition();
       }
+      layoutRestoredScrollTop = currentElement.scrollTop;
       if (
         durationMs <= 0 ||
         currentTimeMs() - startedAt >= durationMs ||
@@ -977,6 +1030,12 @@ function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "s
   if (!messageId || !messagesElement.value) return false;
   const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
   if (!target) return false;
+  scrollRevision++;
+  cancelLayoutAnchorRestore();
+  isScrolledToBottom = false;
+  if (behavior === "instant") cancelMessageReveal();
+  else beginMessageReveal();
+  shouldJumpToLatestOnActivate = false;
   target.scrollIntoView({ behavior, block: "center" });
   target.classList.add("jump-target");
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
