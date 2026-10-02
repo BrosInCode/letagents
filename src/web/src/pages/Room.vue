@@ -159,6 +159,8 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
+import { getGitHubSupportIdentifier } from '@/composables/room/data'
+import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
 import { provideRoomMessagePins, useRoomMessagePins } from '@/composables/roomMessagePins'
 import { provideRoomMessageReactions, useRoomMessageReactions } from '@/composables/roomMessageReactions'
 import RoomHeader from '@/components/room/RoomHeader.vue'
@@ -354,6 +356,7 @@ const {
   connectionState,
   authUser: auth.user,
 })
+provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(computed(() => room.value?.identifier || ''), computed(() => getGitHubSupportIdentifier(room.value))))
 const {
   focusDraftTaskId,
   creatingFocusRoomTaskId,

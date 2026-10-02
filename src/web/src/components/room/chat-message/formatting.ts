@@ -75,8 +75,8 @@ export function stripStatusPrefix(text: string): string {
 
 const MAX_BLOCKQUOTE_DEPTH = 8
 
-export function renderMessageContent(text: string, taskReferenceIds?: ReadonlySet<string>): string {
-  return linkTaskReferences(renderMessageBlocks(text), taskReferenceIds)
+export function renderMessageContent(text: string, taskReferenceIds?: ReadonlySet<string>, onLink?: (url: string) => void): string {
+  return linkTaskReferences(renderMessageBlocks(text, 0, onLink), taskReferenceIds)
 }
 
 function linkTaskReferences(html: string, taskReferenceIds?: ReadonlySet<string>): string {
@@ -116,7 +116,7 @@ function updateReferenceSkipStack(skipStack: string[], tag: string): void {
   if (!/\/\s*>$/.test(tag)) skipStack.push(tagName)
 }
 
-function renderMessageBlocks(value: string, quoteDepth = 0): string {
+function renderMessageBlocks(value: string, quoteDepth = 0, onLink?: (url: string) => void): string {
   const lines = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
   const blocks: string[] = []
   let index = 0
@@ -145,7 +145,7 @@ function renderMessageBlocks(value: string, quoteDepth = 0): string {
     const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed)
     if (heading) {
       const level = heading[1]!.length
-      blocks.push(`<h${level}>${renderMessageInline(heading[2]!)}</h${level}>`)
+      blocks.push(`<h${level}>${renderMessageInline(heading[2]!, onLink)}</h${level}>`)
       index += 1
       continue
     }
@@ -163,8 +163,8 @@ function renderMessageBlocks(value: string, quoteDepth = 0): string {
         index += 1
       }
       const quoteBody = quoteDepth >= MAX_BLOCKQUOTE_DEPTH
-        ? `<p>${renderMessageInline(quote.map(value => value.replace(/^>+\s?/, '')).join('\n')).replace(/\n/g, '<br>')}</p>`
-        : renderMessageBlocks(quote.join('\n'), quoteDepth + 1)
+        ? `<p>${renderMessageInline(quote.map(value => value.replace(/^>+\s?/, '')).join('\n'), onLink).replace(/\n/g, '<br>')}</p>`
+        : renderMessageBlocks(quote.join('\n'), quoteDepth + 1, onLink)
       blocks.push(`<blockquote>${quoteBody}</blockquote>`)
       continue
     }
@@ -176,7 +176,7 @@ function renderMessageBlocks(value: string, quoteDepth = 0): string {
       while (index < lines.length) {
         const item = listItem(lines[index]!)
         if (!item || item.ordered !== ordered) break
-        items.push(renderListItem(item.text))
+        items.push(renderListItem(item.text, onLink))
         index += 1
       }
       const tag = ordered ? 'ol' : 'ul'
@@ -193,14 +193,20 @@ function renderMessageBlocks(value: string, quoteDepth = 0): string {
       paragraph.push(line)
       index += 1
     }
-    blocks.push(`<p>${renderMessageInline(paragraph.join('\n')).replace(/\n/g, '<br>')}</p>`)
+    blocks.push(`<p>${renderMessageInline(paragraph.join('\n'), onLink).replace(/\n/g, '<br>')}</p>`)
   }
 
   return blocks.join('')
 }
 
-function renderMessageInline(value: string): string {
+function renderMessageInline(value: string, onLink?: (url: string) => void): string {
   const tokens: string[] = []
+  const links = new Map<number, string>()
+  const linkToken = (url: string, html: string) => {
+    const token = markdownToken(tokens, html)
+    links.set(tokens.length - 1, url)
+    return token
+  }
   const tokenized = value.replace(/`([^`\n]+)`/g, (_match, code: string) =>
     markdownToken(tokens, `<code>${escapeHtml(code)}</code>`)
   )
@@ -208,11 +214,11 @@ function renderMessageInline(value: string): string {
 
   rendered = rendered.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_match, label: string, url: string) => {
     const normalizedUrl = url.replace(/&amp;/g, '&')
-    return markdownToken(tokens, `<a href="${escapeAttribute(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${label}</a>`)
+    return linkToken(normalizedUrl, `<a href="${escapeAttribute(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${label}</a>`)
   })
   rendered = rendered.replace(/(https?:\/\/[^\s<"']+)/g, (_match, url: string) => {
     const normalizedUrl = url.replace(/&amp;/g, '&')
-    return markdownToken(tokens, `<a href="${escapeAttribute(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${url}</a>`)
+    return linkToken(normalizedUrl, `<a href="${escapeAttribute(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${url}</a>`)
   })
   rendered = rendered
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -222,14 +228,17 @@ function renderMessageInline(value: string): string {
     .replace(/(^|[^\w])_([^_\n]+)_(?!\w)/g, '$1<em>$2</em>')
     .replace(/(^|[\s(])@([A-Za-z0-9._:-]+(?:\/[A-Za-z0-9._-]+)*)/g, '$1<span class="mention-token">@$2</span>')
 
-  return restoreMarkdownTokens(rendered, tokens)
+  return restoreMarkdownTokens(rendered, tokens, (index) => {
+    const url = links.get(index)
+    if (url) onLink?.(url)
+  })
 }
 
-function renderListItem(value: string): string {
+function renderListItem(value: string, onLink?: (url: string) => void): string {
   const task = /^\[([ xX])\]\s+(.+)$/.exec(value)
-  if (!task) return renderMessageInline(value)
+  if (!task) return renderMessageInline(value, onLink)
   const checked = task[1]!.toLowerCase() === 'x' ? ' checked' : ''
-  return `<input class="markdown-task-checkbox" type="checkbox" disabled${checked}>${renderMessageInline(task[2]!)}`
+  return `<input class="markdown-task-checkbox" type="checkbox" disabled${checked}>${renderMessageInline(task[2]!, onLink)}`
 }
 
 function listItem(line: string): { ordered: boolean; text: string } | null {
@@ -253,8 +262,8 @@ function markdownToken(tokens: string[], html: string): string {
   return `\u0000MD${index}\u0000`
 }
 
-function restoreMarkdownTokens(value: string, tokens: string[]): string {
-  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => tokens[Number(index)] || '')
+function restoreMarkdownTokens(value: string, tokens: string[], onToken: (index: number) => void): string {
+  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => { onToken(Number(index)); return tokens[Number(index)] || '' })
 }
 
 function escapeHtml(value: string): string {

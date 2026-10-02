@@ -310,6 +310,7 @@ export interface DesktopApi {
     onAccountActivity?: (callback: (state: DesktopAccountActivityState) => void) => () => void;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
     /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */
+    getMessageLinkPreviews?: (roomIdentifier: string, references: import("../../../../shared/message-link-previews.mjs").LinkPreviewReference[]) => Promise<import("../../../../shared/message-link-previews.mjs").MessageLinkPreviewsResponse>;
     getMessagePins?: (roomIdentifier: string) => Promise<import("../../../../shared/message-pins.mjs").MessagePinsResponse>;
     setMessagePin?: (roomIdentifier: string, messageId: string, pinned: boolean) => Promise<import("../../../../shared/message-pins.mjs").MessagePinMutationResponse>;
     reportTyping?: (roomIdentifier: string, input: import("../../../../shared/room-typing.mjs").TypingReport) => Promise<void>;

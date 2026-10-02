@@ -1,5 +1,5 @@
 <template>
-  <article class="github-event-card" :class="[`tone-${event.tone}`, `kind-${event.kind}`]">
+  <article class="github-event-card" :class="[`tone-${event.tone}`, `kind-${event.kind}`, { 'is-preview': compact }]">
     <div class="github-event-icon" aria-hidden="true">
       <svg v-if="event.kind === 'pull-request'" viewBox="0 0 16 16" fill="none">
         <circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.3" />
@@ -75,6 +75,7 @@ import type { GitHubEventPresentation } from './githubEventMessage'
 defineProps<{
   event: GitHubEventPresentation
   taskLinkEnabled?: boolean
+  compact?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -83,6 +84,16 @@ const emit = defineEmits<{
 </script>
 
 <style scoped>
+.github-event-card.is-preview { max-width: 560px; margin-top: 6px; padding: 8px 10px; gap: 8px; border-radius: 8px; grid-template-columns: 24px minmax(0, 1fr); box-shadow: none; }
+.is-preview .github-event-icon { width: 24px; height: 24px; border-radius: 6px; }
+.is-preview .github-event-content { gap: 4px; }
+.is-preview .github-event-chips { gap: 4px; }
+.is-preview .github-chip { min-height: 20px; padding: 0 6px; font-size: 11px; }
+.is-preview .github-chip-brand { display: none; }
+.is-preview .github-chip-repo { white-space: normal; overflow-wrap: anywhere; }
+.is-preview .github-event-headline { font-size: 13px; overflow-wrap: anywhere; }
+.is-preview .github-event-link { min-height: 24px; padding: 0; font-size: 12px; background: none; border: 0; }
+
 .github-event-card {
   --event-accent: var(--text-tertiary, #71717a);
   --event-accent-soft: var(--accent-dim, rgba(255, 255, 255, 0.04));

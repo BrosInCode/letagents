@@ -155,6 +155,7 @@ import { provide } from "vue";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
+import { injectRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import { injectRoomMessageReactions } from "../../../../composables/useRoomMessageReactions";
 import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
 import type {
@@ -601,11 +602,13 @@ watch(
   },
 );
 
-// A reaction row appearing under a message makes the list taller without a
+// Reactions or previews appearing under a message make the list taller without a
 // new message. A reader at the newest message stays there.
 const messageReactions = injectRoomMessageReactions();
-if (messageReactions) {
-  watch(messageReactions.revision, async () => {
+const messageLinkPreviews = injectRoomMessageLinkPreviews();
+for (const context of [messageReactions, messageLinkPreviews]) {
+  if (!context) continue;
+  watch(context.revision, async () => {
     if (!isScrolledToBottom || !props.active) return;
     await nextTick();
     jumpToBottom();

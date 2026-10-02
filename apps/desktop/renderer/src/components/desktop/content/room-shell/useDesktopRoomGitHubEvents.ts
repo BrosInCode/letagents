@@ -1,3 +1,4 @@
+import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import {
   computed,
   onBeforeUnmount,
@@ -53,6 +54,10 @@ export function useDesktopRoomGitHubEvents(options: {
     || eventsPage.value?.githubRoomIdentifier
     || null
   );
+  provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(
+    computed(() => options.localGitRoom.value ? "" : options.room.value.identifier),
+    computed(() => options.room.value.gitRoom?.repository.fullName || githubRepository.value),
+  ));
   const showEventsTab = computed(() =>
     !options.localGitRoom.value && (
       roomSupportsGitHubIntegration(options.room.value)

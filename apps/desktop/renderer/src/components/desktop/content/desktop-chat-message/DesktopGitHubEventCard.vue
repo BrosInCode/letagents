@@ -1,5 +1,5 @@
 <template>
-  <div class="desktop-github-event" :data-tone="event.tone" :data-kind="event.kind">
+  <div class="desktop-github-event" :class="{ 'is-preview': compact }" :data-tone="event.tone" :data-kind="event.kind">
     <div class="desktop-github-event-icon" aria-hidden="true">
       <svg v-if="event.kind === 'pull-request'" viewBox="0 0 16 16" fill="none">
         <circle cx="4" cy="4" r="2" stroke="currentColor" stroke-width="1.3" />
@@ -58,7 +58,7 @@
           {{ event.urlLabel }}
         </a>
         <button
-          v-if="event.url"
+          v-if="event.url && !compact"
           type="button"
           class="desktop-github-event-link is-secondary"
           @click="$emit('open-event', event.url)"
@@ -76,6 +76,7 @@ import type { GitHubEventPresentation } from "./types";
 defineProps<{
   event: GitHubEventPresentation;
   taskLinkEnabled?: boolean;
+  compact?: boolean;
 }>();
 
 defineEmits<{

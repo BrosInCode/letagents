@@ -344,6 +344,7 @@ test("registerRoomMessageRoutes preserves canonical message route order", () => 
 
   assert.deepEqual(calls, [
     { method: "post", path: "/^\\/rooms\\/(.+)\\/messages$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/messages\\/link-previews$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/([^/]+)\\/attachments\\/([^/]+)$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads$/" },
     { method: "delete", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads\\/([^/]+)$/" },
@@ -2387,3 +2388,41 @@ for (const failure of ['denied', 'throws'] as const) {
     } finally { req.emit('close'); deps.roomEventBroker.close(); }
   });
 }
+
+test("preview reads leave message SSE frames unchanged and produce no agent-visible event", async () => {
+  const routes = new Map<string, Function>();
+  const app = Object.fromEntries(["get", "post", "put", "delete"].map(method => [method,
+    (path: RegExp, handler: Function) => routes.set(`${method}:${path}`, handler)]));
+  const deps = {
+    ...createDeps(), resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }), requireParticipant: async () => true,
+    getMessageLinkPreviews: async () => [{ kind: "pull", number: 1, repository: "org/repo", title: "Stored", state: "open", url: "https://github.com/org/repo/pull/1" }],
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  let close = () => {};
+  const req = { params: { 0: "room_1" }, query: {}, headers: {}, authKind: "session", sessionAccount: { account_id: "person" },
+    on(event: string, handler: () => void) { if (event === "close") close = handler; return this; } };
+  const res = { writes: [] as string[], writableEnded: false, socket: { setKeepAlive() {} },
+    setHeader() {}, flushHeaders() {}, write(chunk: string) { this.writes.push(chunk); return true; }, end() { this.writableEnded = true; } };
+  const stream = routes.get("get:/^\\/rooms\\/(.+)\\/messages\\/stream$/")!;
+  const previewRead = routes.get("post:/^\\/rooms\\/(.+)\\/messages\\/link-previews$/")!;
+  const agent = deps.roomEventBroker.subscribe("room_1", { kinds: new Set(["message_created"]) });
+  const message = { id: "msg_1", sender: "Ada", text: "https://github.com/org/repo/pull/1", source: "browser", timestamp: "2026-10-02T00:00:00Z" };
+  try {
+    await stream(req, res);
+    const emit = async () => { deps.messageEvents.emit("message:created", { projectId: "room_1", message }); await flushAsyncEvents(); await flushAsyncEvents(); };
+    await emit(); await agent.next();
+    const before = [...res.writes];
+    const output = { body: null as any, json(value: any) { this.body = value; } };
+    await previewRead({ ...req, body: { references: [{ kind: "pull", number: 1 }] } }, output);
+    assert.equal(output.body.previews[0].title, "Stored");
+    await flushAsyncEvents();
+    assert.deepEqual(res.writes, before, "a preview read emits no SSE event, receipt, notification or wake source");
+    assert.equal(await Promise.race([agent.next().then(() => true), flushAsyncEvents().then(() => false)]), false);
+    await emit();
+    const frames = res.writes.filter(frame => frame.includes('"text":'));
+    assert.equal(frames.length, 2);
+    assert.equal(frames[0]!.replace(/^id:.*\n/m, ""), frames[1]!.replace(/^id:.*\n/m, ""));
+    assert.doesNotMatch(frames.join(""), /previews|Stored/);
+  } finally { close(); agent.close(); deps.roomEventBroker.close(); }
+});

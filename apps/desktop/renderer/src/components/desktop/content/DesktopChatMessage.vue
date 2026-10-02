@@ -141,6 +141,12 @@
           @task-reference-click="$emit('open-task', $event)"
         />
 
+        <DesktopGitHubEventCard
+          v-for="preview in linkPreviews"
+          :key="preview.url"
+          :event="linkPreviewPresentation(preview)"
+          compact
+        />
         <DesktopMessageAttachments
           v-if="message.attachments.length"
           :message-id="message.id"
@@ -380,6 +386,8 @@ import MessageReactionBar from "../../../../../../../shared/ui/MessageReactionBa
 import MessageReactionPicker, { type MessageReactionPickerAnchor } from "../../../../../../../shared/ui/MessageReactionPicker.vue";
 import WakeGlyph from "../../../../../../../shared/ui/WakeGlyph.vue";
 import { isPinMessageId } from "../../../../../../../shared/message-pins.mjs";
+import { injectRoomMessageLinkPreviews } from "../../../composables/useRoomMessageLinkPreviews";
+import { linkPreviewPresentation } from "../../../../../../../shared/message-link-previews.mjs";
 import { injectRoomMessagePins } from "../../../composables/useRoomMessagePins";
 import { injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
@@ -549,12 +557,21 @@ const replyPreviewText = computed(() => truncate((props.message.replyTo
   : "").replace(/\s+/g, " ").trim(), 160));
 const visibleText = computed(() => roomMessageVisibleText(props.message, attentionResponseAgentNames?.value));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
-const renderedMarkdown = computed(() => {
+const renderedMessage = computed(() => {
   const text = visibleText.value || "No message body.";
-  return renderMessageText(isAmbientSystem.value ? stripStatusPrefix(text) : text, "");
+  const urls: string[] = [];
+  const html = renderMessageText(isAmbientSystem.value ? stripStatusPrefix(text) : text, "", undefined, undefined, (url) => urls.push(url));
+  return { html, urls };
 });
+const previewContext = injectRoomMessageLinkPreviews();
+const linkPreviews = computed(() => previewContext?.previewsFor(props.message.id) ?? []);
+let stopTrackingPreviews: (() => void) | null = null;
+watch(() => [props.message.id, renderedMessage.value.urls, previewContext?.contextKey.value], () => {
+  stopTrackingPreviews?.();
+  stopTrackingPreviews = previewContext?.track({ id: props.message.id, urls: renderedMessage.value.urls }) ?? null;
+}, { immediate: true });
 const linkedText = computed(() => linkRenderedMessageReferences(
-  renderedMarkdown.value,
+  renderedMessage.value.html,
   props.messageReferenceIds,
   props.taskReferenceIds,
 ));
@@ -925,6 +942,7 @@ function normalizedSelectedText(selection: Selection | null): string {
 
 onBeforeUnmount(() => {
   stopTrackingReactions?.();
+  stopTrackingPreviews?.();
   window.removeEventListener("keydown", handleContextMenuKeydown);
   window.removeEventListener("pointerdown", closeContextMenuFromOutside);
   removeSelectionOutsidePointerListener();

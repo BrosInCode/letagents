@@ -32,6 +32,7 @@ export interface RoomMessageRouteDeps {
   getMessageThread?: typeof import("../../../db.js").getMessageThread;
   resolveMessageActivationIdentity?: typeof import("./activation-identity.js").resolveMessageActivationIdentity;
   messagePinStore?: import("./pins.js").MessagePinStore;
+  getMessageLinkPreviews?: typeof import("../../../db/messages/link-previews.js").getMessageLinkPreviews;
   queueMessagePinInvalidation?(roomId: string): void;
   messageReactionStore?: import("./reactions.js").MessageReactionStore;
   queueMessageReactionInvalidation?(roomId: string): void;

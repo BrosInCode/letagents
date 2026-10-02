@@ -10,6 +10,7 @@ import {
 } from '../../../../../shared/room-resource-invalidation.mjs'
 import { publishMessageInfoInvalidation } from '../../components/room/messageInfoInvalidation'
 import { publishAgentApprovalInvalidation } from '../roomAgentApprovalInvalidation'
+import { publishMessageLinkPreviewInvalidation } from '../roomMessageLinkPreviews'
 import { publishMessagePinInvalidation } from '../roomMessagePins'
 import { publishMessageReactionInvalidation } from '../roomMessageReactionInvalidation'
 import { publishWakeRuleInvalidation } from '../roomWakeRuleInvalidation'
@@ -278,6 +279,7 @@ export function createRoomStream(
             publishWakeRuleInvalidation(passRoom)
             publishMessageReactionInvalidation(passRoom)
             publishMessagePinInvalidation(passRoom)
+            publishMessageLinkPreviewInvalidation(passRoom)
             if (replayBufferedGapEvents(passRoom)) {
               clearGapRepairRetry()
               commitPendingGapCursor(passRoom)
@@ -473,6 +475,7 @@ export function createRoomStream(
       if (!isCurrentSource()) return
       publishMessagePinInvalidation(roomIdentifier)
       receiveRoomTyping(roomIdentifier)
+      publishMessageLinkPreviewInvalidation(roomIdentifier)
       openRoomIdentifier = roomIdentifier
       handlers.setConnectionState('live')
       handlers.setStreaming(true)
@@ -554,6 +557,7 @@ export function createRoomStream(
           handlers.onGitHubEvent(
             typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier,
           )
+          publishMessageLinkPreviewInvalidation(roomIdentifier)
         }, streamEventBytes(event))
       } catch {
         repairMalformedTypedEvent(roomIdentifier, event)
@@ -569,6 +573,7 @@ export function createRoomStream(
           handlers.onArtifactUpdate(
             typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier,
           )
+          publishMessageLinkPreviewInvalidation(roomIdentifier)
         }, streamEventBytes(event))
       } catch {
         repairMalformedTypedEvent(roomIdentifier, event)
