@@ -96,6 +96,62 @@ test("announces a worker holding work offline past the threshold", () => {
   assert.ok(transitions[0]!.offline_for_ms >= OFFLINE_ANNOUNCE_AFTER_MS);
 });
 
+test("a worker still making requests is not offline, however quiet its message channel", () => {
+  // Reported case: the channel had been quiet for 31 minutes because the
+  // agent was busy working, and it claimed a task 3 minutes ago.
+  const working = {
+    ...candidate(buildSession()),
+    agent_heard_at: isoMinutesAgo(3),
+  };
+  assert.deepEqual(selectLivenessTransitions({ candidates: [working], now: NOW }), []);
+
+  // Offline time is measured from the last request once those stop too.
+  const stopped = {
+    ...candidate(buildSession({
+      last_disconnected_at: isoMinutesAgo(45),
+      reconnect_grace_expires_at: isoMinutesAgo(45),
+      updated_at: isoMinutesAgo(45),
+    })),
+    agent_heard_at: isoMinutesAgo(33),
+  };
+  const [transition] = selectLivenessTransitions({ candidates: [stopped], now: NOW });
+  assert.equal(transition?.kind, "offline");
+  assert.equal(transition?.offline_for_ms, 33 * 60_000);
+});
+
+test("a worker that kept working long after its channel went quiet is announced once it stops", () => {
+  // Channel quiet for 75 minutes (past the channel-only hour), last request
+  // 31 minutes ago: the outage is measured from the request.
+  const stopped = {
+    ...candidate(buildSession({
+      last_disconnected_at: isoMinutesAgo(75),
+      reconnect_grace_expires_at: isoMinutesAgo(75),
+      updated_at: isoMinutesAgo(75),
+    })),
+    agent_heard_at: isoMinutesAgo(31),
+  };
+  const [transition] = selectLivenessTransitions({ candidates: [stopped], now: NOW });
+  assert.equal(transition?.kind, "offline");
+  assert.equal(transition?.offline_for_ms, 31 * 60_000);
+});
+
+test("sweepOnce rechecks a working worker when its last request would turn stale", async () => {
+  const working = {
+    ...candidate(buildSession()),
+    agent_heard_at: isoMinutesAgo(3),
+    claimed_check_at: isoMinutesAgo(0),
+  };
+  const rescheduled: Array<string | null> = [];
+  const { deps, announcedOffline } = buildFakeDeps({ candidates: [working] });
+  deps.rescheduleCandidate = async (input) => {
+    rescheduled.push(input.next_check_at);
+  };
+
+  await createLivenessSweeper(deps).sweepOnce();
+  assert.deepEqual(announcedOffline, []);
+  assert.deepEqual(rescheduled, [new Date(NOW + 27 * 60_000).toISOString()]);
+});
+
 test("never posts presence changes for a worker that holds no work", () => {
   const idle = candidate(buildSession(), null, null, []);
   assert.deepEqual(selectLivenessTransitions({ candidates: [idle], now: NOW }), []);

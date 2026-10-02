@@ -39,6 +39,12 @@ export async function resolveRequestAgentIdentity(input: {
   agent_session_id?: string | null;
   agent_session_token?: string | null;
   room_id?: string | null;
+  /**
+   * False for requests made about the agent rather than by it (native
+   * harness activity reports): those must not count as the agent being
+   * heard from.
+   */
+  record_heard?: boolean;
 }): Promise<ResolvedRequestAgentIdentity | null> {
   const sessionId = normalizeOptionalString(input.agent_session_id);
   const sessionToken = normalizeOptionalString(input.agent_session_token);
@@ -63,6 +69,13 @@ export async function resolveRequestAgentIdentity(input: {
       if (!bodySession || bodySession.session_id !== bearer.agent_session_id) {
         return null;
       }
+    }
+    // A bearer request is the agent acting, exactly like the owner-token
+    // path below: record that it was heard from. The middleware already
+    // authenticated the bearer, so this is bookkeeping only and must never
+    // fail the agent's request.
+    if (input.record_heard !== false) {
+      await touchRoomAgentSession(bearer.agent_session_id).catch(() => undefined);
     }
     return {
       actor_label: bearer.actor_label,
@@ -185,6 +198,7 @@ export async function requireWorkerRequestAgentIdentity(input: {
   req: AuthenticatedRequest;
   body: Record<string, unknown>;
   room_id: string;
+  record_heard?: boolean;
 }): Promise<WorkerRequestAgentIdentityResult> {
   const sessionId = normalizeOptionalString(
     typeof input.body.agent_session_id === "string" ? input.body.agent_session_id : null
@@ -198,6 +212,7 @@ export async function requireWorkerRequestAgentIdentity(input: {
       agent_session_id: sessionId,
       agent_session_token: sessionToken,
       room_id: input.room_id,
+      record_heard: input.record_heard,
     });
     if (!identity) {
       return {

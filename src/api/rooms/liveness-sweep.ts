@@ -104,6 +104,19 @@ function getOutageEpochAt(session: RoomAgentDeliverySession): number | null {
   return parseTime(session.last_disconnected_at) ?? parseTime(session.updated_at);
 }
 
+/**
+ * When the room last heard from the worker by any route: its message channel
+ * or any authenticated request. "Offline" is measured from here, so an agent
+ * that is working (claiming tasks, posting) but not polling for messages is
+ * never announced as offline.
+ */
+function getLastHeardAt(candidate: LivenessAnnouncementCandidate): number | null {
+  const channelAt = parseTime(getRoomAgentDeliverySessionLastSeenAt(candidate.session));
+  const requestAt = parseTime(candidate.agent_heard_at);
+  if (channelAt === null) return requestAt;
+  return requestAt === null ? channelAt : Math.max(channelAt, requestAt);
+}
+
 export function selectLivenessTransitions(input: {
   candidates: readonly LivenessAnnouncementCandidate[];
   suppressedActors?: ReadonlySet<string>;
@@ -165,7 +178,7 @@ export function selectLivenessTransitions(input: {
       continue;
     }
 
-    const lastSeenAt = parseTime(getRoomAgentDeliverySessionLastSeenAt(session));
+    const lastSeenAt = getLastHeardAt(candidate);
     if (lastSeenAt === null) {
       continue;
     }
@@ -373,7 +386,7 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
         const actorLabel = normalizeRoomActorLabel(session.actor_label);
         const suppressed = Boolean(actorLabel && suppressedActors.has(actorLabel));
         if (!candidate.agent_session_ended_at && !candidate.supervisor_managed && !suppressed) {
-          const lastSeenAt = parseTime(getRoomAgentDeliverySessionLastSeenAt(session));
+          const lastSeenAt = getLastHeardAt(candidate);
           const outageAt = getOutageEpochAt(session);
           const announcedAt = parseTime(session.offline_announced_at);
           if (isRoomAgentDeliverySessionReachable(session, now)) {

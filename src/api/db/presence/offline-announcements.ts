@@ -12,6 +12,13 @@ export interface LivenessAnnouncementCandidate {
   /** Set when the linked worker session was ended deliberately (clean exit). */
   agent_session_ended_at: string | null;
   /**
+   * Last authenticated request from the worker itself (any API call, e.g. a
+   * task claim). An agent busy working often stops polling for messages, so
+   * its delivery channel goes quiet while this keeps moving. Server-side
+   * bookkeeping never moves it.
+   */
+  agent_heard_at?: string | null;
+  /**
    * Supervisor-grant workers are daemon-owned. Their recoverable lifecycle is
    * surfaced through the daemon inspector/inbox rather than room chat.
    */
@@ -52,6 +59,7 @@ const activeWorkTaskIds = sql<string[]>`COALESCE((
 const candidateSelection = {
   session: room_agent_delivery_sessions,
   agent_session_ended_at: room_agent_sessions.ended_at,
+  agent_heard_at: room_agent_sessions.agent_heard_at,
   supervisor_managed: sql<boolean>`${room_agent_sessions.supervisor_grant_id} IS NOT NULL`,
   runtime_last_active_at: runtimeLastActiveAt,
   native_last_active_at: runtimeLastActiveAt,
@@ -61,6 +69,7 @@ const candidateSelection = {
 function toCandidate(row: {
   session: typeof room_agent_delivery_sessions.$inferSelect;
   agent_session_ended_at: string | null;
+  agent_heard_at: string | null;
   supervisor_managed: boolean;
   runtime_last_active_at: string | null;
   native_last_active_at: string | null;
@@ -69,6 +78,7 @@ function toCandidate(row: {
   return {
     session: toRoomAgentDeliverySession(row.session as RoomAgentDeliverySessionRow),
     agent_session_ended_at: row.agent_session_ended_at ?? null,
+    agent_heard_at: row.agent_heard_at ?? null,
     supervisor_managed: Boolean(row.supervisor_managed),
     runtime_last_active_at: row.runtime_last_active_at ?? null,
     native_last_active_at: row.native_last_active_at ?? null,
@@ -81,6 +91,11 @@ function toCandidate(row: {
  * index replaces the former scan of every row touched in the last hour;
  * transition semantics remain in the sweeper and a claim is retryable after
  * one minute if its worker crashes before evaluation completes.
+ *
+ * A row stays eligible while the worker was heard from in the last hour by
+ * either route (channel write or its own request). Counting only channel
+ * writes would drop a worker that keeps working past the hour with a quiet
+ * channel, and it could then die holding work without the room being told.
  */
 export async function listLivenessAnnouncementCandidates(options?: {
   now?: number;
@@ -97,7 +112,13 @@ export async function listLivenessAnnouncementCandidates(options?: {
   }>(sql`
     WITH due AS (
       SELECT ${room_agent_delivery_sessions.room_id}, ${room_agent_delivery_sessions.delivery_key},
-             ${room_agent_delivery_sessions.updated_at} >= ${new Date(now - 60 * 60_000).toISOString()}::timestamptz AS eligible
+             GREATEST(
+               ${room_agent_delivery_sessions.updated_at},
+               COALESCE((
+                 SELECT heard.agent_heard_at FROM room_agent_sessions heard
+                  WHERE heard.session_id = ${room_agent_delivery_sessions.agent_session_id}
+               ), ${room_agent_delivery_sessions.updated_at})
+             ) >= ${new Date(now - 60 * 60_000).toISOString()}::timestamptz AS eligible
         FROM ${room_agent_delivery_sessions}
        WHERE ${room_agent_delivery_sessions.session_kind} = 'worker'
          AND ${room_agent_delivery_sessions.next_liveness_check_at} <= ${new Date(now).toISOString()}::timestamptz

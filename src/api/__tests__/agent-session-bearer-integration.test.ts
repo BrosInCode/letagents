@@ -320,9 +320,19 @@ test("native activity accepts the scoped worker bearer without a legacy session 
     }, res);
     return res;
   };
+  const heardBefore = new Date(Date.now() - 40 * 60_000).toISOString();
+  await db!.update(room_agent_sessions!).set({ agent_heard_at: heardBefore })
+    .where(eq(room_agent_sessions!.session_id, session.session_id));
   const accepted = await invoke(session.session_id);
   assert.equal(accepted.statusCode, 200);
   assert.equal((accepted.body as { presence: { status: string } }).presence.status, "idle");
+  const [afterNative] = await db!.select({ agent_heard_at: room_agent_sessions!.agent_heard_at }).from(room_agent_sessions!)
+    .where(eq(room_agent_sessions!.session_id, session.session_id));
+  assert.equal(
+    Date.parse(afterNative!.agent_heard_at!),
+    Date.parse(heardBefore),
+    "native activity is reported about the agent, so a bearer on it must not count as the agent being heard"
+  );
   assert.equal((await invoke("agent_session_other")).statusCode, 403, "a bearer remains scoped to its own session");
 });
 
@@ -586,6 +596,22 @@ test("bearer and body credentials must identify the same worker session", { skip
     agent_session_token: second.session_token,
   });
   assert.equal(identity, null);
+});
+
+test("a bearer request records that the agent was heard from", { skip: requiresDatabase }, async () => {
+  const { session, room } = await seed();
+  const stale = new Date(Date.now() - 40 * 60_000).toISOString();
+  await db!.update(room_agent_sessions!).set({ agent_heard_at: stale, last_seen_at: stale })
+    .where(eq(room_agent_sessions!.session_id, session.session_id));
+  const auth = await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never);
+  const identity = await resolveRequestAgentIdentity({ req: auth as never, room_id: room.id });
+  assert.equal(identity?.agent_session_id, session.session_id);
+  const [row] = await db!.select({ agent_heard_at: room_agent_sessions!.agent_heard_at }).from(room_agent_sessions!)
+    .where(eq(room_agent_sessions!.session_id, session.session_id));
+  assert.ok(
+    row?.agent_heard_at && Date.parse(row.agent_heard_at) > Date.parse(stale),
+    "the liveness sweep relies on this to tell a working agent from an offline one"
+  );
 });
 
 // Reproduces the Hollow Wood workflow through real HTTP middleware, worker

@@ -1036,7 +1036,9 @@ export function registerAgentSessionRoutes(
     if (req.authKind === "agent_session") {
       // Scoped worker bearers authenticate in the HTTP middleware. Do not
       // reinterpret that bearer as the legacy owner-capable session token.
-      const worker = await requireWorkerRequestAgentIdentity({ req, body: {}, room_id: project.id });
+      // Native activity is reported about the agent, not by it, so it must
+      // not refresh the session's own liveness (same as the body path below).
+      const worker = await requireWorkerRequestAgentIdentity({ req, body: {}, room_id: project.id, record_heard: false });
       if (!worker.ok) {
         res.status(worker.status).json({ error: worker.error });
         return;

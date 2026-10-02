@@ -422,6 +422,44 @@ test(
     });
     assert.deepEqual(candidate?.active_work_task_ids, ["task_3", "task_9"]);
 
+    // The session's last authenticated request rides along: a worker that is
+    // still calling the API is not offline, however quiet its channel is.
+    const { touchRoomAgentSession, listLivenessAnnouncementCandidates } = dbModule!;
+    await touchRoomAgentSession!(session.session_id);
+    candidate = await getLivenessAnnouncementCandidate!({
+      room_id: project.id,
+      delivery_key: deliveryKey,
+    });
+    assert.ok(candidate?.agent_heard_at, "the agent's last request must surface on the candidate");
+    assert.deepEqual(
+      selectLivenessTransitions({ candidates: [candidate!] }),
+      [],
+      "an agent that just made a request is not offline"
+    );
+
+    // Working well past the hour with a quiet channel must not drop the row
+    // from the sweep: it is still due while the agent is heard from.
+    await backdateDelivery(project.id, deliveryKey, { updated_at: 90, last_disconnected_at: 90, reconnect_grace_expires_at: 90 });
+    await pool!.query(
+      "UPDATE room_agent_delivery_sessions SET next_liveness_check_at = now() - interval '1 minute' WHERE room_id = $1 AND delivery_key = $2",
+      [project.id, deliveryKey]
+    );
+    assert.ok(
+      (await listLivenessAnnouncementCandidates!()).some((entry) => entry.session.delivery_key === deliveryKey),
+      "a worker heard from in the last hour stays eligible despite an old channel"
+    );
+    // ...and once it goes silent, the room hears about it.
+    await pool!.query(
+      "UPDATE room_agent_sessions SET agent_heard_at = $2 WHERE session_id = $1",
+      [session.session_id, new Date(Date.now() - 40 * 60_000)]
+    );
+    candidate = await getLivenessAnnouncementCandidate!({
+      room_id: project.id,
+      delivery_key: deliveryKey,
+    });
+    assert.equal(selectLivenessTransitions({ candidates: [candidate!] })[0]?.kind, "offline");
+    await backdateDelivery(project.id, deliveryKey, { updated_at: 31, last_disconnected_at: 31, reconnect_grace_expires_at: 31 });
+
     // Generic MCP/session traffic cannot prove native execution activity and
     // therefore cannot suppress a workplace-reachability notice.
     await upsertRoomAgentLivenessObservation!({
