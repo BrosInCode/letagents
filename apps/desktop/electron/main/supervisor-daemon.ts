@@ -186,6 +186,7 @@ type WireEntry = {
   permission_profile_id: string | null;
   delivery_mode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
   polling_contract?: "custodial_polling_v1" | null;
+  home_harness?: string;
   provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
@@ -1323,6 +1324,42 @@ export class SupervisorDaemonClient {
     return { outcome: result.outcome, configuration: mapAgentConfiguration(record(result.configuration) ?? {}, input.entryId, input.daemonGeneration) };
   }
 
+  /**
+   * Let one agent use the owner's own provider setup, or stop it. The request
+   * is signed with the desktop app's own key, so the daemon accepts it from
+   * nothing else that can reach its socket: not an agent, and not an agent's
+   * tools.
+   */
+  async setAgentHomeHarness(
+    input: import("../ipc-types/agents.js").DesktopSupervisorAgentHomeHarnessInput,
+    assertCaller?: () => void,
+  ): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentHomeHarnessResult> {
+    const value = z.strictObject({
+      entryId: approvalId, daemonGeneration: z.number().int().positive().safe(),
+      expectedRevision: z.number().int().positive().safe(), enabled: z.boolean(),
+    }).parse(input);
+    assertCaller?.();
+    await this.waitForStartup();
+    const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+    if (rawChallenge === null) {
+      return { outcome: "invalid", error: "This app could not prove the change came from you. Unlock secure storage and restart the background service, then try again." };
+    }
+    const challenge = approvalChallenge.parse(rawChallenge);
+    const signer = await this.signerForApproval(challenge);
+    assertCaller?.();
+    const result = record(await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "set_home_harness", value),
+      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller)) ?? {};
+    if (result.outcome === "invalid") {
+      if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
+      return { outcome: "invalid", error: result.error };
+    }
+    if (result.outcome !== "updated" && result.outcome !== "conflict") throw new Error("Supervisor returned an invalid configuration update result.");
+    // Present only when turning it off met a process that still had the owner's setup.
+    const restart = !Object.hasOwn(result, "apply") ? {}
+      : { restart: result.apply === "restarting" ? "restarting" as const : result.apply === "busy_active_turn" ? "busy" as const : "not_restarted" as const };
+    return { outcome: result.outcome, configuration: mapAgentConfiguration(record(result.configuration) ?? {}, value.entryId, value.daemonGeneration), ...restart };
+  }
+
   async applyAgentConfiguration(input: import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyResult> {
     if (!input || !nonEmptyString(input.entryId)
       || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1
@@ -2242,7 +2279,19 @@ function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, 
     reasoningEffort: effort as import("../ipc-types/agents.js").DesktopManagedAgentEffort | null, charter: value.charter,
     permissionProfileId: value.permission_profile_id as string | null,
     supervisedPermissionProfiles: value.supervised_permission_profiles.map((profile) => mapSupervisedPermissionProfile(profile)),
-    providerLaunchPolicy: value.provider_launch_policy, configRevision: value.config_revision as number, runtimeConfigurationRevision: value.runtime_configuration_revision as number };
+    providerLaunchPolicy: value.provider_launch_policy, configRevision: value.config_revision as number, runtimeConfigurationRevision: value.runtime_configuration_revision as number,
+    ...mapHomeHarness(value) };
+}
+
+/** Absent from an older background service, and anything unreadable is off. */
+function mapHomeHarness(value: Record<string, unknown>): Pick<import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration, "homeHarness"> {
+  const availability = value.home_harness_availability;
+  if (availability !== "available" && availability !== "rental" && availability !== "unsupported" && availability !== "polling") return {};
+  return { homeHarness: {
+    enabled: availability === "available" && value.home_harness === true,
+    pending: availability === "available" && value.home_harness_pending === true,
+    availability,
+  } };
 }
 
 function mapSupervisedPermissionProfile(value: unknown): import("../ipc-types/agents.js").DesktopManagedAgentPermissionProfile {
@@ -2420,6 +2469,8 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
     permissionProfileId: entry.permission_profile_id,
     deliveryMode: entry.delivery_mode ?? "mcp_polling",
     ...(entry.polling_contract === "custodial_polling_v1" ? { pollingContract: entry.polling_contract } : {}),
+    ...(entry.home_harness === "on" || entry.home_harness === "after_restart" || entry.home_harness === "until_restart"
+      ? { homeHarness: entry.home_harness } : {}),
     createdBy: entry.created_by,
     createdAt: entry.created_at,
     sourceRepoPath: entry.source_repo_path ?? null,

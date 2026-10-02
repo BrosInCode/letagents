@@ -276,6 +276,16 @@ test("provider-result authority failures are redacted, journaled, and notified",
   assert.equal(harness.notifications, 1);
 });
 
+test("a repair refused for an agent with its owner's setup says why on the waiting message", async () => {
+  // What the Codex adapter throws after it stopped the agent instead of letting Codex load a changed project.
+  const reason = "LetAgents could not check what this project adds to your own setup (timed out), so it stopped the agent "
+    + "before Codex could load the project's configuration. It starts again by itself.";
+  const harness = fixture({ repair: async () => { throw new Error(reason); }, failRejects: true });
+  assert.equal(await harness.subject.restore(harness.input), "failed");
+  assert.deepEqual(harness.failures, [`Couldn't restore this agent's provider conversation. ${reason}`]);
+  assert.equal(harness.notifications, 1, "and the room is told at once");
+});
+
 test("a replacement cannot be promoted before its manifest continuation is durable", async () => {
   const harness = fixture({
     repair: async () => ({

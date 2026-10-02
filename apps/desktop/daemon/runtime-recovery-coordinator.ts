@@ -1,3 +1,4 @@
+import { ownerSetupRef } from "./provider-configuration.js";
 import type { SupervisorGrantHttp } from "./cloud-http.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import type { ManifestStore } from "./manifest-store.js";
@@ -706,7 +707,8 @@ async function boundedRecoveryWait(pending: Promise<void>): Promise<void> {
   } finally { if (timer) clearTimeout(timer); }
 }
 
-function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
+/** The reference recovery attaches with. Exported so its record of how the process was started can be checked. */
+export function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
   if (!entry.work_attempt_id || !entry.provider_ref) {
     throw new Error("Provider reference is unavailable.");
   }
@@ -715,6 +717,7 @@ function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
     providerContinuationId: entry.provider_ref.provider_continuation_id,
     provider: entry.provider,
     providerConnection: entry.provider_ref.provider_connection,
+    ...ownerSetupRef(entry),
   };
 }
 

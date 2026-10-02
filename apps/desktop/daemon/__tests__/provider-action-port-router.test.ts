@@ -1742,3 +1742,29 @@ test("a provider's launch notices reach the daemon with its handle", async () =>
     .spawn({ provider: "codex", workAttemptId: "quiet", roomId: "room", cwd: "/repo", launchPolicy: {} });
   assert.equal(quiet.launchNotices, undefined);
 });
+
+test("a handle says its process was started with the owner's setup exactly when the provider's own handle does, and the record on a reference reaches the provider", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const spawn = adapter.spawn.bind(adapter);
+  adapter.spawn = async (request) => Object.assign(await spawn(request), { ownerSetup: request.homeHarness === true });
+  const attached: Array<boolean | undefined> = [];
+  const attach = adapter.attach.bind(adapter);
+  adapter.attach = async (ref) => { attached.push(ref.ownerSetup); return attach(ref); };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const withSetup = await router.spawn({ provider: "codex", workAttemptId: "owner", roomId: "room", cwd: "/repo", launchPolicy: {}, homeHarness: true });
+  assert.equal(withSetup.ownerSetup, true);
+  // Every later view of the same process says the same, a re-attach included.
+  assert.equal((await router.attachAction("none", "owner")).state, "absent");
+  const again = await router.attach({ workAttemptId: "owner", providerContinuationId: "continuation:owner", provider: "codex", ownerSetup: true });
+  assert.ok(again && !("state" in again));
+  assert.equal(again.ownerSetup, true);
+
+  const without = await router.spawn({ provider: "codex", workAttemptId: "plain", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  assert.equal(Object.hasOwn(without, "ownerSetup"), false, "an agent without the setup carries no such key at all");
+
+  // A process the router does not hold yet: the daemon's record goes to the provider with the reference, as it is.
+  const fresh = new ProviderActionPortRouter({ codex: async () => adapter });
+  await fresh.attach({ workAttemptId: "owner", providerContinuationId: "continuation:owner", provider: "codex", ownerSetup: true });
+  await fresh.attach({ workAttemptId: "plain", providerContinuationId: "continuation:plain", provider: "codex" });
+  assert.deepEqual(attached, [true, undefined]);
+});

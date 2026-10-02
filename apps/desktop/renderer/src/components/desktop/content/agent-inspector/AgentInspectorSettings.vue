@@ -38,10 +38,19 @@
               <strong>{{ profile.label }}</strong>
               <small>{{ resource.draft.permissionProfileId === profile.id ? `Selected · ${profile.description}` : profile.description }}</small>
               <small v-if="profile.detail || profile.status !== 'available'">{{ profile.detail || (profile.status === 'gated' ? 'This access option is not available yet.' : 'This agent app does not support this access option.') }}</small>
-              <small v-if="supervisedPermissionProfileLimits(resource.configuration.provider, profile)" class="agent-inspector-permission-limits">{{ supervisedPermissionProfileLimits(resource.configuration.provider, profile) }}</small>
+              <small v-if="profileLimits(profile)" class="agent-inspector-permission-limits">{{ profileLimits(profile) }}</small>
             </span>
           </label>
         </fieldset>
+        <AgentInspectorHomeHarness
+          v-if="resource.configuration.homeHarness && desktopIpc.supervisor?.setAgentHomeHarness"
+          :configuration="resource.configuration"
+          :state="resource.configuration.homeHarness"
+          :disabled="busy || !settingsEditable || retired"
+          :unsaved-edits="unsavedEdits"
+          :saved-rules="toolRules.length"
+          @changed="reloadSettings"
+        />
         <section v-if="desktopIpc.supervisor?.listHostToolRules" class="agent-inspector-permissions" aria-label="Always allowed tools">
           <strong>Always allowed</strong>
           <p v-if="toolRulesLoading" class="agent-inspector-settings-note" role="status">Loading…</p>
@@ -61,6 +70,7 @@
         <div class="agent-inspector-section-heading"><p id="agent-inspector-move-title">Move room</p></div>
         <p v-if="!moveAvailable || move.status === 'unavailable'" class="agent-inspector-settings-note">{{ move.error || AGENT_INSPECTOR_ROOM_MOVE_UNAVAILABLE }}</p>
         <template v-else>
+          <p v-if="resource.configuration.homeHarness?.enabled" class="agent-inspector-settings-note" data-tone="warning" role="alert" data-testid="agent-inspector-move-own-setup">{{ homeHarnessMoveNote(resource.configuration.provider) }}</p>
           <p class="agent-inspector-settings-note">If a move is interrupted, reopen these settings to resume it.</p>
           <p v-if="move.status === 'loading' && !move.move" class="agent-inspector-settings-note" role="status">Checking for a saved room move…</p>
           <label class="agent-inspector-field"><span>Destination room</span><select v-model="destination" :disabled="busy || move.status === 'loading' || Boolean(move.move && !moveTerminal)"><option value="">Choose a room</option><option v-for="room in destinations" :key="room.identifier" :value="room.identifier">{{ room.displayName }}</option></select></label>
@@ -97,11 +107,12 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import type { DesktopAgentProvider, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
+import type { DesktopAgentProvider, DesktopFocusRoomInfo, DesktopManagedAgentPermissionProfileId } from "../../../../../../electron/ipc-types";
 import {
   AGENT_INSPECTOR_RETIRE_CONFIRMATION,
   AGENT_INSPECTOR_ROOM_MOVE_UNAVAILABLE,
   agentInspectorProviderSupportsEffort,
+  configurationDraft,
   configurationHasRuntimeLag,
   inspectorEffortOptions,
   roomMovePresentation,
@@ -109,9 +120,11 @@ import {
   type AgentInspectorConfigurationResource,
   type AgentInspectorRoomMoveResource,
 } from "../../../../domain/agent-inspector-settings";
+import { homeHarnessMoveNote } from "../../../../domain/agent-home-harness";
 import { supervisedPermissionProfileLimits } from "../../../../domain/managed-agents";
 import { desktopIpc } from "../../../../ipc";
 import type { HostToolRule } from "../../../../../../shared/host-tool-rules";
+import AgentInspectorHomeHarness from "./AgentInspectorHomeHarness.vue";
 const props = defineProps<{ entryId: string; displayName: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; applyPending: boolean; conflict: boolean }>();
 const emit = defineEmits<{ patch: [patch: Partial<AgentInspectorConfigurationDraft>]; save: [overwrite: boolean]; apply: []; reload: []; "prepare-move": [destination: string]; "commit-move": []; retire: []; purge: [] }>();
 const destination = ref(""); const purgeConfirmation = ref(""); const confirmRetire = ref(false);
@@ -121,9 +134,20 @@ const canEditEffort = computed(() => agentInspectorProviderSupportsEffort(provid
 const runtimeLag = computed(() => configurationHasRuntimeLag(props.resource.configuration));
 const settingsEditable = computed(() => props.resource.status === "ready");
 const validDraft = computed(() => Boolean(props.resource.draft));
+const unsavedEdits = computed(() => {
+  const { configuration, draft } = props.resource;
+  if (!configuration || !draft) return false;
+  const saved = configurationDraft(configuration);
+  return (Object.keys(saved) as Array<keyof AgentInspectorConfigurationDraft>).some((key) => saved[key] !== draft[key]);
+});
 const movePresentation = computed(() => props.move.move ? roomMovePresentation(props.move.move) : null);
 const moveTerminal = computed(() => Boolean(movePresentation.value?.terminal));
 function patch(value: Partial<AgentInspectorConfigurationDraft>) { emit("patch", value); }
+/** What an access level withholds, for this agent: its owner's own setup, when on, is outside those limits. */
+function profileLimits(profile: { id: DesktopManagedAgentPermissionProfileId; status: "available" | "gated" | "unsupported" }): string | null {
+  const configuration = props.resource.configuration;
+  return configuration ? supervisedPermissionProfileLimits(configuration.provider, profile, configuration.homeHarness?.enabled === true) : null;
+}
 function confirmRetireAgent(): void { confirmRetire.value = false; emit("retire"); }
 watch(() => props.entryId, () => { destination.value = ""; purgeConfirmation.value = ""; confirmRetire.value = false; });
 const toolRules = ref<HostToolRule[]>([]);
