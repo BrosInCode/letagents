@@ -42,7 +42,7 @@ describe("durable room delivery UI contracts", () => {
         { id: "agent-b", roomId: "room-b", displayName: "CedarRidge" }] },
       { room: { identifier: "room-a" } }, (_event: string, id: string) => unavailable.push(id),
       (request: { supervisorEntryId: string }) => opened.push(request), initialTab,
-      (id: string) => selected.push(id), async (id: string) => { revealed.push(id); return true; },
+      (id: string) => selected.push(id), async (id: string) => { revealed.push(id); return "revealed"; },
       revealedMessageId, async () => undefined, initialMessageInspectorRequest,
     ) as (id: string) => Promise<void>;
     await reveal("desktop-initial-message:agent-a");

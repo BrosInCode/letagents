@@ -67,6 +67,7 @@ import { buildMessageThreadSummaries } from './messageThreading'
 import { createReadEvidenceReporter } from './readEvidence'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
+import { decideMessageRevealAction } from './messageReveal'
 
 const activeInfoMessage = ref<RoomMessage | null>(null)
 const infoSurfaceOpen = ref(false)
@@ -81,6 +82,7 @@ const props = defineProps<{
   roomIdentifier?: string
   reasoningSessions?: readonly RoomReasoningSession[]
   hasOlderMessages?: boolean
+  messagesLoaded?: boolean
   isLoadingOlderMessages?: boolean
   searchQuery?: string
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
@@ -97,7 +99,7 @@ const emit = defineEmits<{
   openTask: [taskId: string]
   revealed: [messageId: string]
   /** The requested message is further back than the list will load to reach it. */
-  revealUnavailable: [messageId: string]
+  revealUnavailable: [messageId: string, reason?: 'too_far_back' | 'unavailable']
 }>()
 
 const messagesEl = ref<HTMLElement | null>(null)
@@ -261,33 +263,59 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
 
 // A requested message may be older than the loaded page: load a few older
 // pages to find it, then give up quietly rather than paging the whole room.
-const MAX_REVEAL_OLDER_PAGES = 5
+const MAX_REVEAL_OLDER_PAGES = 20
 let initialScrollSettled = false
 let revealOlderPagesRequested = 0
 
 function revealRequestedMessage() {
   const messageId = props.revealMessageId
-  if (!messageId || !initialScrollSettled) return
-  if (findMessageElement(messageId)) {
-    scrollToMessage(messageId)
-  } else if (props.hasOlderMessages && revealOlderPagesRequested < MAX_REVEAL_OLDER_PAGES) {
-    if (!props.isLoadingOlderMessages) {
+  if (!messageId) return
+
+  const historyReady =
+    initialScrollSettled &&
+    (props.messagesLoaded ?? (props.messages.length > 0 || !props.hasOlderMessages))
+  const found = Boolean(findMessageElement(messageId))
+
+  const action = decideMessageRevealAction({
+    found,
+    historyReady,
+    hasOlder: Boolean(props.hasOlderMessages),
+    loading: Boolean(props.isLoadingOlderMessages),
+    pagesRequested: revealOlderPagesRequested,
+    maxPages: MAX_REVEAL_OLDER_PAGES,
+  })
+
+  switch (action) {
+    case 'scroll':
+      scrollToMessage(messageId)
+      revealOlderPagesRequested = 0
+      emit('revealed', messageId)
+      break
+    case 'wait':
+      // Still waiting for initial history, or a page load is currently in flight.
+      break
+    case 'load_older':
       revealOlderPagesRequested += 1
       emit('loadOlder')
-    }
-    return
-  } else {
-    emit('revealUnavailable', messageId)
+      break
+    case 'too_far_back':
+      revealOlderPagesRequested = 0
+      emit('revealUnavailable', messageId, 'too_far_back')
+      emit('revealed', messageId)
+      break
+    case 'unavailable':
+      revealOlderPagesRequested = 0
+      emit('revealUnavailable', messageId, 'unavailable')
+      emit('revealed', messageId)
+      break
   }
-  revealOlderPagesRequested = 0
-  emit('revealed', messageId)
 }
 
 watch(() => props.revealMessageId, () => { revealOlderPagesRequested = 0 })
 // Registered after the messages watcher so a prepend has restored its scroll
 // position before the reveal scrolls.
 watch(
-  () => [props.revealMessageId, props.messages, props.messages.length, props.isLoadingOlderMessages] as const,
+  () => [props.revealMessageId, props.messages, props.messages.length, props.isLoadingOlderMessages, props.messagesLoaded] as const,
   () => { void nextTick(revealRequestedMessage) },
 )
 
