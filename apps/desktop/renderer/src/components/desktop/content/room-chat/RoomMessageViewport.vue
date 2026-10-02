@@ -149,6 +149,7 @@
 
 <script setup lang="ts">
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
+import { injectRoomMessageReactions } from "../../../../composables/useRoomMessageReactions";
 import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
 import type {
   DesktopAgentPresence,
@@ -578,6 +579,17 @@ watch(
     shouldRestoreInitialScroll = hasInitialScrollPosition();
   },
 );
+
+// A reaction row appearing under a message makes the list taller without a
+// new message. A reader at the newest message stays there.
+const messageReactions = injectRoomMessageReactions();
+if (messageReactions) {
+  watch(messageReactions.revision, async () => {
+    if (!isScrolledToBottom || !props.active) return;
+    await nextTick();
+    jumpToBottom();
+  });
+}
 
 // The composer below can grow (an approval, a reply, a longer draft). A reader
 // at the newest message stays there instead of having it covered.

@@ -1,5 +1,6 @@
 <template>
   <article
+    ref="messageElement"
     class="room-chat-message"
     tabindex="-1"
     :class="{
@@ -12,6 +13,7 @@
       'is-ambient-system-message': isAmbientSystem || isWakeNotice,
       'is-wake-notice': isWakeNotice,
       'is-arriving': animateArrival,
+      'is-reacting': reactionPickerAnchor !== null,
       'is-thread-context': context !== 'timeline',
       'is-thread-root-context': context === 'thread-root',
       'is-thread-reply-context': context === 'thread-reply',
@@ -53,6 +55,18 @@
           />
         </div>
         <div class="room-message-meta-tail">
+          <button
+            v-if="reactable"
+            class="room-message-reply-action room-message-react-action"
+            type="button"
+            title="Add reaction"
+            aria-label="Add reaction"
+            aria-haspopup="dialog"
+            :aria-expanded="reactionPickerAnchor !== null"
+            @click="openReactionPicker"
+          >
+            <SmilePlus :size="14" aria-hidden="true" />
+          </button>
           <button
             class="room-message-reply-action room-message-copy-action"
             type="button"
@@ -132,6 +146,17 @@
           @open-image="$emit('open-image', $event)"
         />
       </div>
+
+      <MessageReactionBar
+        v-if="reactions.length"
+        :reactions="reactions"
+        :viewer-login="reactionContext?.viewerLogin.value ?? null"
+        :viewer-reacted="viewerReacted"
+        :can-react="reactable"
+        :picker-open="reactionPickerAnchor !== null"
+        @toggle="toggleReaction"
+        @add="openReactionPicker"
+      />
 
       <ul
         v-if="visibleDeliveryReceipts.length"
@@ -264,12 +289,24 @@
           <button type="button" role="menuitem" @click="tertiaryActionFromContext">
             <span>{{ tertiaryActionLabel }}</span>
           </button>
+          <button v-if="reactable" type="button" role="menuitem" @click="reactFromContext">
+            <span>Add reaction…</span>
+          </button>
           <div class="room-message-context-menu-separator" role="separator" />
           <button type="button" role="menuitem" @click="messageInfoFromContext">
             <span>Message info</span>
           </button>
         </template>
       </div>
+
+      <MessageReactionPicker
+        v-if="reactionPickerAnchor"
+        :anchor="reactionPickerAnchor"
+        :viewer-reacted="viewerReacted"
+        :instant="reactionPickerInstant"
+        @select="toggleReaction"
+        @close="closeReactionPicker"
+      />
 
       <div
         v-if="selectionPopoverOpen"
@@ -288,9 +325,9 @@
 
 <script setup lang="ts">
 import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
-import { computed, inject, nextTick, onBeforeUnmount, ref } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
-import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
+import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
 import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
@@ -322,7 +359,10 @@ import {
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
+import MessageReactionBar from "../../../../../../../shared/ui/MessageReactionBar.vue";
+import MessageReactionPicker, { type MessageReactionPickerAnchor } from "../../../../../../../shared/ui/MessageReactionPicker.vue";
 import WakeGlyph from "../../../../../../../shared/ui/WakeGlyph.vue";
+import { injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
 
 const props = withDefaults(defineProps<{
@@ -564,10 +604,11 @@ function openContextMenu(event: MouseEvent): void {
   contextMenuInvoker.value = target?.closest<HTMLElement>("button, a, [tabindex]") || article;
   closeSelectionPopover();
   const menuWidth = 180;
-  // Link variant: 3 rows + separator; message variant: 4 rows + separator.
-  // The estimate must cover the tallest variant or the last row ("Message
-  // info") clips below the viewport near the bottom edge.
-  const menuHeight = linkHref ? 140 : 176;
+  // Link variant: 3 rows + separator; message variant: 4 rows + separator,
+  // plus a row when the message can be reacted to. The estimate must
+  // cover the tallest variant or the last row ("Message info") clips below
+  // the viewport near the bottom edge.
+  const menuHeight = linkHref ? 140 : reactable.value ? 208 : 176;
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -616,6 +657,73 @@ function focusContextMenuItem(direction: 1 | -1): void {
 function quoteReplyFromContext(): void {
   closeContextMenu("action");
   emit("quote-reply", props.message.id);
+}
+
+// Reactions exist only inside a room that provides them (not in previews or
+// tests), and only on a message the server sent with its reactions: a room
+// kept on this computer, or an older server, has none.
+const reactionContext = injectRoomMessageReactions();
+const reactions = computed(() => reactionContext?.reactionsFor(props.message.id) ?? []);
+const reactable = computed(() => Boolean(reactionContext?.canReact.value)
+  && props.message.reactions !== undefined
+  && !props.message.outgoing
+  && !isWakeNotice.value
+  && /^msg_\d+$/.test(props.message.id));
+const viewerReacted = (emoji: string): boolean => reactionContext?.viewerReacted(props.message.id, emoji) ?? false;
+
+// A row keeps its component when a sent message is confirmed and takes its
+// server id, so the registration follows the id.
+let stopTrackingReactions: (() => void) | null = null;
+watch(() => [props.message.id, props.message.reactions !== undefined] as const, () => {
+  stopTrackingReactions?.();
+  stopTrackingReactions = reactionContext?.track(props.message) ?? null;
+}, { immediate: true });
+
+const messageElement = ref<HTMLElement | null>(null);
+const reactionPickerAnchor = ref<MessageReactionPickerAnchor | null>(null);
+const reactionPickerInstant = ref(false);
+let reactionPickerInvoker: HTMLElement | null = null;
+let reactionPickerClosedByPress: { invoker: HTMLElement; at: number } | null = null;
+
+function toggleReaction(emoji: string): void {
+  reactionContext?.toggle(props.message.id, emoji);
+}
+
+function showReactionPicker(anchor: MessageReactionPickerAnchor, invoker: HTMLElement | null, instant: boolean): void {
+  if (!reactable.value) return;
+  closeSelectionPopover();
+  reactionPickerInvoker = invoker;
+  reactionPickerInstant.value = instant;
+  reactionPickerAnchor.value = anchor;
+}
+
+function openReactionPicker(event: MouseEvent): void {
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  if (!trigger) return;
+  // The press that starts this click already closed the picker this control
+  // had open: the control is a toggle, so do not open it again.
+  const closed = reactionPickerClosedByPress;
+  reactionPickerClosedByPress = null;
+  if (closed?.invoker === trigger && performance.now() - closed.at < 500) return;
+  // A click with no pointer detail came from the keyboard.
+  showReactionPicker({ element: trigger }, trigger, event.detail === 0);
+}
+
+function closeReactionPicker(restoreFocus: boolean, pressed?: EventTarget | null): void {
+  const invoker = reactionPickerInvoker;
+  reactionPickerAnchor.value = null;
+  reactionPickerInvoker = null;
+  reactionPickerClosedByPress = invoker && pressed instanceof Node && invoker.contains(pressed)
+    ? { invoker, at: performance.now() }
+    : null;
+  if (restoreFocus && invoker?.isConnected) invoker.focus({ preventScroll: true });
+}
+
+function reactFromContext(): void {
+  const { x, y } = contextMenuPosition.value;
+  const invoker = contextMenuInvoker.value;
+  closeContextMenu("action");
+  if (messageElement.value) showReactionPicker({ element: messageElement.value, point: { x, y } }, invoker, true);
 }
 
 function tertiaryActionFromContext(): void {
@@ -765,6 +873,7 @@ function normalizedSelectedText(selection: Selection | null): string {
 }
 
 onBeforeUnmount(() => {
+  stopTrackingReactions?.();
   window.removeEventListener("keydown", handleContextMenuKeydown);
   window.removeEventListener("pointerdown", closeContextMenuFromOutside);
   removeSelectionOutsidePointerListener();

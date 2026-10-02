@@ -10,6 +10,23 @@
       </span>
     </div>
     <div class="message-meta-tail">
+      <button
+        v-if="canReact"
+        class="reply-action react-action"
+        type="button"
+        aria-label="Add reaction"
+        title="Add reaction"
+        aria-haspopup="dialog"
+        :aria-expanded="pickerOpen ?? false"
+        @click="emit('react', $event)"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M22 11v1a10 10 0 1 1-9-10" />
+          <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+          <path d="M9 9h.01M15 9h.01" />
+          <path d="M16 5h6M19 2v6" />
+        </svg>
+      </button>
       <button class="reply-action" type="button" aria-label="Reply to message" title="Reply" @click="emit('reply')">
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M6.5 4.5L2.5 8l4 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
@@ -48,11 +65,15 @@ defineProps<{
   provenanceBadge?: ProvenanceBadge | null
   inlinePromptInjection: boolean
   formattedTime: string
+  canReact?: boolean
+  pickerOpen?: boolean
 }>()
 
 const emit = defineEmits<{
   reply: []
   info: []
+  /** The click that asked for the reaction picker; its target is the anchor. */
+  react: [event: MouseEvent]
 }>()
 </script>
 

@@ -560,3 +560,33 @@ export const message_human_read_ranges = pgTable(
     batch_uq: uniqueIndex("message_human_read_ranges_batch_uq").on(table.room_id, table.account_id, table.client_batch_id),
   })
 );
+
+/**
+ * Emoji reactions people leave on room messages. A reaction is not a message:
+ * it is never routed to an agent and never notifies anyone.
+ */
+export const message_reactions = pgTable(
+  "message_reactions",
+  {
+    room_id: text("room_id").notNull(),
+    message_number: integer("message_number").notNull(),
+    account_id: text("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    emoji: text("emoji").notNull(),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "message_reactions_pk",
+      columns: [table.room_id, table.message_number, table.account_id, table.emoji],
+    }),
+    message_fk: foreignKey({
+      name: "message_reactions_message_fk",
+      columns: [table.room_id, table.message_number],
+      foreignColumns: [messages.room_id, messages.number],
+    }).onDelete("cascade").onUpdate("cascade"),
+    account_idx: index("message_reactions_account_idx").on(table.account_id),
+    emoji_check: check("message_reactions_emoji_check", sql`octet_length(${table.emoji}) BETWEEN 1 AND 64`),
+  })
+);

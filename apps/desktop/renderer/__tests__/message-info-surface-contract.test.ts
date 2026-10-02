@@ -101,6 +101,6 @@ test("the dialog takes initial focus on open", () => {
 });
 
 test("the menu position clamp accounts for the taller message variant", () => {
-  assert.match(chatMessage, /const menuHeight = linkHref \? 140 : 176/);
+  assert.match(chatMessage, /const menuHeight = linkHref \? 140 : reactable\.value \? 208 : 176/);
   assert.doesNotMatch(chatMessage, /const menuHeight = 122/);
 });

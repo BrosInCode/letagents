@@ -1,5 +1,6 @@
 <template>
   <div
+    ref="messageElement"
     class="message"
     :class="{
       'system-message': isSystem,
@@ -37,8 +38,11 @@
         :provenance-badge="provenanceBadge"
         :inline-prompt-injection="inlinePromptInjection"
         :formatted-time="formattedTime"
+        :can-react="reactable"
+        :picker-open="reactionPickerAnchor !== null"
         @reply="emit('reply', message)"
         @info="emit('info', message)"
+        @react="openReactionPicker"
       />
       <div
         class="message-bubble"
@@ -92,6 +96,16 @@
           @toggle="handleToggleStalePromptMute"
         />
       </div>
+      <MessageReactionBar
+        v-if="reactions.length"
+        :reactions="reactions"
+        :viewer-login="reactionContext?.viewerLogin.value ?? null"
+        :viewer-reacted="viewerReacted"
+        :can-react="reactable"
+        :picker-open="reactionPickerAnchor !== null"
+        @toggle="toggleReaction"
+        @add="openReactionPicker"
+      />
       <ThreadMarker
         v-if="hasThread"
         :latest-id="threadLatestId"
@@ -125,15 +139,24 @@
       >
         <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
         <button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
+        <button v-if="reactable" type="button" role="menuitem" @click="reactFromMenu">Add reaction…</button>
         <div class="web-message-context-menu-separator" role="separator" />
         <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
       </div>
+      <MessageReactionPicker
+        v-if="reactionPickerAnchor"
+        :anchor="reactionPickerAnchor"
+        :viewer-reacted="viewerReacted"
+        :instant="reactionPickerInstant"
+        @select="toggleReaction"
+        @close="closeReactionPicker"
+      />
     </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
@@ -144,7 +167,10 @@ import ReasoningAnchor from './chat-message/ReasoningAnchor.vue'
 import ReplyPreview from './chat-message/ReplyPreview.vue'
 import StalePromptActions from './chat-message/StalePromptActions.vue'
 import ThreadMarker from './chat-message/ThreadMarker.vue'
+import MessageReactionBar from '../../../../../shared/ui/MessageReactionBar.vue'
+import MessageReactionPicker, { type MessageReactionPickerAnchor } from '../../../../../shared/ui/MessageReactionPicker.vue'
 import WakeGlyph from '../../../../../shared/ui/WakeGlyph.vue'
+import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 import { WAKE_NOTICE_SOURCE } from '../../../../../shared/wake-rules.mjs'
 import {
   formatMessageTime,
@@ -212,7 +238,7 @@ function openContextMenu(event: MouseEvent) {
   contextMenuRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
   contextMenuPosition.value = {
     x: Math.min(event.clientX, window.innerWidth - 190),
-    y: Math.min(event.clientY, window.innerHeight - 170),
+    y: Math.min(event.clientY, window.innerHeight - (reactable.value ? 202 : 170)),
   }
   contextMenuOpen.value = true
   void nextTick(() => {
@@ -244,6 +270,68 @@ function replyFromMenu() {
 function messageInfoFromMenu() {
   closeContextMenu()
   emit('info', props.message)
+}
+
+// Reactions exist only inside a room that provides them (not in previews or
+// tests), and only on a message the server sent with its reactions.
+const reactionContext = injectRoomMessageReactions()
+const reactions = computed(() => reactionContext?.reactionsFor(props.message.id) ?? [])
+const reactable = computed(() => Boolean(reactionContext?.canReact.value)
+  && props.message.reactions !== undefined
+  && !isWakeNotice.value
+  && /^msg_\d+$/.test(props.message.id))
+const viewerReacted = (emoji: string): boolean => reactionContext?.viewerReacted(props.message.id, emoji) ?? false
+
+let stopTrackingReactions: (() => void) | null = null
+watch(() => [props.message.id, props.message.reactions !== undefined] as const, () => {
+  stopTrackingReactions?.()
+  stopTrackingReactions = reactionContext?.track(props.message) ?? null
+}, { immediate: true })
+
+const messageElement = ref<HTMLElement | null>(null)
+const reactionPickerAnchor = ref<MessageReactionPickerAnchor | null>(null)
+const reactionPickerInstant = ref(false)
+let reactionPickerInvoker: HTMLElement | null = null
+let reactionPickerClosedByPress: { invoker: HTMLElement; at: number } | null = null
+
+function toggleReaction(emoji: string) {
+  reactionContext?.toggle(props.message.id, emoji)
+}
+
+function showReactionPicker(anchor: MessageReactionPickerAnchor, invoker: HTMLElement | null, instant: boolean) {
+  if (!reactable.value) return
+  reactionPickerInvoker = invoker
+  reactionPickerInstant.value = instant
+  reactionPickerAnchor.value = anchor
+}
+
+function openReactionPicker(event: MouseEvent) {
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  if (!trigger) return
+  // The press that starts this click already closed the picker this control
+  // had open: the control is a toggle, so do not open it again.
+  const closed = reactionPickerClosedByPress
+  reactionPickerClosedByPress = null
+  if (closed?.invoker === trigger && performance.now() - closed.at < 500) return
+  // A click with no pointer detail came from the keyboard.
+  showReactionPicker({ element: trigger }, trigger, event.detail === 0)
+}
+
+function closeReactionPicker(restoreFocus: boolean, pressed?: EventTarget | null) {
+  const invoker = reactionPickerInvoker
+  reactionPickerAnchor.value = null
+  reactionPickerInvoker = null
+  reactionPickerClosedByPress = invoker && pressed instanceof Node && invoker.contains(pressed)
+    ? { invoker, at: performance.now() }
+    : null
+  if (restoreFocus && invoker?.isConnected) invoker.focus({ preventScroll: true })
+}
+
+function reactFromMenu() {
+  const { x, y } = contextMenuPosition.value
+  const invoker = contextMenuRestoreFocus
+  closeContextMenu()
+  if (messageElement.value) showReactionPicker({ element: messageElement.value, point: { x, y } }, invoker, true)
 }
 
 function handleMenuKeydown(event: KeyboardEvent) {
@@ -282,6 +370,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopTrackingReactions?.()
   document.removeEventListener('pointerdown', handleMenuDismiss, true)
   document.removeEventListener('keydown', handleMenuDismiss, true)
   window.removeEventListener('blur', handleMenuDismiss)
