@@ -135,6 +135,15 @@ function toggleSearch() {
   }
 }
 
+function openSearch(): boolean {
+  if (!canSearch.value) return false
+  searchActive.value = true
+  void nextTick(() => searchInputEl.value?.focus())
+  return true
+}
+
+defineExpose({ openSearch })
+
 function closeSearch() {
   searchActive.value = false
 }

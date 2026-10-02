@@ -1,6 +1,8 @@
-import { computed, ref, watch, type Ref } from "vue";
+import { computed, getCurrentInstance, provide, ref, watch, type InjectionKey, type Ref } from "vue";
 import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 import { roomMessageVisibleText } from "../../../../domain/attention-response";
+
+export const roomSearchCommandKey: InjectionKey<(query: string) => void> = Symbol("room-search-command");
 
 export function useDesktopRoomSearch(
   messages: Readonly<Ref<readonly DesktopRoomMessage[]>>,
@@ -57,6 +59,14 @@ export function useDesktopRoomSearch(
     activeSearchIndex.value = (activeSearchIndex.value + delta + count) % count;
   }
 
+  function openSearchWithQuery(query: string): void {
+    searchOpen.value = true;
+    searchQuery.value = query;
+    activeSearchIndex.value = 0;
+  }
+
+  if (getCurrentInstance()) provide(roomSearchCommandKey, openSearchWithQuery);
+
   return {
     searchOpen,
     searchQuery,
@@ -66,5 +76,6 @@ export function useDesktopRoomSearch(
     toggleSearch,
     closeSearch,
     moveSearch,
+    openSearchWithQuery,
   };
 }

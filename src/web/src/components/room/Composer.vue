@@ -45,9 +45,9 @@
             v-model="text"
             role="combobox"
             aria-autocomplete="list"
-            :aria-expanded="mentionMenuOpen"
+            :aria-expanded="suggestionsOpen"
             aria-controls="composer-mention-listbox"
-            :aria-activedescendant="mentionMenuOpen ? `composer-mention-option-${filteredMentionCandidates[mentionActiveIndex]?.key}` : undefined"
+            :aria-activedescendant="suggestionsOpen ? `composer-mention-option-${suggestions[suggestionIndex]?.key}` : undefined"
             @input="handleTypingInput"
             @click="syncMentionContext"
             @select="syncMentionContext"
@@ -146,18 +146,22 @@
       </div>
     </div>
     <MentionPanel
-      v-if="mentionMenuOpen"
-      :candidates="filteredMentionCandidates"
-      :active-index="mentionActiveIndex"
-      @select="selectMention"
+      v-if="suggestionsOpen"
+      :candidates="suggestions"
+      :active-index="suggestionIndex"
+      :aria-label="slash.open.value ? 'Command suggestions' : 'Mention suggestions'"
+      :hint="slash.hint.value"
+      @select="selectSuggestion"
     />
   </form>
 </template>
 
 <script setup lang="ts">
+import { useComposerSlashCommands } from '../../../../../shared/ui/useComposerSlashCommands'
+import { useToast } from '@/composables/useToast'
 import TypingIndicator from '../../../../../shared/ui/TypingIndicator.vue'
 import { useRoomTyping } from '@/composables/roomTyping'
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import {
   type OutgoingMessageAttachment,
   type RoomAgentPresence,
@@ -184,6 +188,8 @@ const props = withDefaults(defineProps<{
   isSignedIn?: boolean
   attachmentsEnabled?: boolean
   roomIdentifier?: string
+  createTask?: (title: string) => Promise<boolean>
+  openSearch?: (query: string) => boolean
   submitMessage?: (text: string, agentPromptKind: string | null, replyTo: string | null, attachments?: OutgoingMessageAttachment[]) => Promise<boolean>
   stageAttachmentDraft?: (roomIdentifier: string, attachment: OutgoingMessageAttachment, signal?: AbortSignal) => Promise<{ upload_id: string }>
   discardAttachmentDraft?: (roomIdentifier: string, uploadId: string) => Promise<void>
@@ -218,8 +224,16 @@ const isSending = ref(false)
 
 const roomIdentifierRef = computed(() => props.roomIdentifier)
 const typing = useRoomTyping(roomIdentifierRef)
-watch(text, value => { if (!value) typing.stop() })
-function handleTypingInput() { typing.input(Boolean(text.value.trim())); syncMentionContext() }
+watch(text, value => {
+  if (!value) {
+    typing.stop()
+    resetMentionContext()
+  }
+})
+function handleTypingInput() {
+  typing.input(Boolean(text.value.trim()) && !slash.open.value)
+  syncMentionContext()
+}
 const disabledRef = computed(() => props.disabled)
 const attachmentsAvailable = computed(() => props.attachmentsEnabled !== false)
 
@@ -320,15 +334,51 @@ const {
   refreshReachability: computed(() => props.refreshReachability),
 })
 
+const toast = useToast()
+const slash = useComposerSlashCommands({
+  text,
+  platform: 'web',
+  scope: () => props.roomIdentifier,
+  hasAttachments: () => attachmentDrafts.value.length > 0,
+  isReply: () => Boolean(props.replyTo),
+  focus: () => { void nextTick(() => textareaEl.value?.focus()) },
+  onError: () => toast.error('Command could not be completed. Your draft is still here.'),
+  run: async (command, argument) => {
+    if (command.name === 'task') {
+      if (!props.createTask || !await props.createTask(argument)) throw new Error('Task creation failed')
+      toast.success('Task created')
+    } else if (command.name === 'search') {
+      if (!props.openSearch?.(argument)) throw new Error('Search is unavailable')
+    }
+    return true
+  },
+})
+const suggestionsOpen = computed(() => slash.open.value || mentionMenuOpen.value)
+const suggestions = computed(() => slash.open.value ? slash.candidates.value : filteredMentionCandidates.value)
+const suggestionIndex = computed(() => slash.open.value ? slash.activeIndex.value : mentionActiveIndex.value)
+function selectSuggestion(candidate: { key: string }) {
+  if (slash.open.value) slash.complete(slash.candidates.value.findIndex(item => item.key === candidate.key))
+  else {
+    const mention = filteredMentionCandidates.value.find(item => item.key === candidate.key)
+    if (mention) selectMention(mention)
+  }
+}
+
 const canSend = computed(() =>
   !props.disabled
   && !isSending.value
+  && !slash.busy.value
   && !hasUploadingAttachments.value
   && !hasFailedAttachments.value
   && (text.value.trim().length > 0 || attachmentDrafts.value.length > 0)
 )
 
 async function handleSend() {
+  if (!canSend.value) return
+  await slash.submit(sendRoomMessage)
+}
+
+async function sendRoomMessage() {
   const trimmed = text.value.trim()
   if (!canSend.value) return
   if (!attachmentsAvailable.value && attachmentDrafts.value.length > 0) {
@@ -357,7 +407,12 @@ async function handleSend() {
 }
 
 function handleKeyDown(e: KeyboardEvent) {
-  if (mentionMenuOpen.value) {
+  if (e.isComposing) return
+  if (slash.handleKey(e)) {
+    resetMentionContext()
+    return
+  }
+  if (!slash.open.value && mentionMenuOpen.value) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
       moveMentionSelection(1)

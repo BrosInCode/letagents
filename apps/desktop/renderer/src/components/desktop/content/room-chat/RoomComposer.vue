@@ -194,17 +194,13 @@
         :aria-label="composerInputLabel"
         role="combobox"
         aria-autocomplete="list"
-        :aria-expanded="mentionOpen"
+        :aria-expanded="suggestionsOpen"
         aria-controls="desktop-mention-listbox"
-        :aria-activedescendant="mentionOpen ? `desktop-mention-option-${mentionCandidates[activeMentionIndex]?.participantKey}` : undefined"
+        :aria-activedescendant="suggestionsOpen ? `desktop-mention-option-${suggestions[suggestionIndex]?.key}` : undefined"
         :disabled="roomLoading || !roomIdentifier"
         data-testid="desktop-composer-input"
         @input="handleDraftInput"
-        @keydown.down="moveMentionSelection($event, 1)"
-        @keydown.up="moveMentionSelection($event, -1)"
-        @keydown.tab="closeMentionForTab"
-        @keydown.enter="handleEnterKey"
-        @keydown.escape="mentionOpen = false"
+        @keydown="handleComposerKey"
       />
       <button
         class="desktop-composer-attach"
@@ -225,7 +221,7 @@
         type="submit"
         :aria-label="sending ? 'Sending message' : 'Send message'"
         :title="sending ? 'Sending message' : 'Send message'"
-        :disabled="roomLoading || sending || !canSend"
+        :disabled="roomLoading || sending || slash.busy.value || !canSend"
         data-testid="desktop-composer-send"
       >
         <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
@@ -238,28 +234,31 @@
       @remove="$emit('remove-attachment', $event)"
     />
     <div
-      v-if="mentionOpen"
+      v-if="suggestionsOpen"
       id="desktop-mention-listbox"
       class="desktop-mention-panel"
       role="listbox"
+      :aria-label="slash.open.value ? 'Command suggestions' : 'Mention suggestions'"
       data-testid="desktop-mention-panel"
     >
       <button
-        v-for="(candidate, index) in mentionCandidates"
-        :key="candidate.participantKey"
+        v-for="(candidate, index) in suggestions"
+        :key="candidate.key"
         class="desktop-mention-option"
-        :id="`desktop-mention-option-${candidate.participantKey}`"
+        :id="`desktop-mention-option-${candidate.key}`"
         role="option"
         tabindex="-1"
-        :aria-selected="index === activeMentionIndex"
-        :data-active="index === activeMentionIndex"
-        :data-testid="`desktop-mention-option-${candidate.participantKey}`"
+        :aria-selected="index === suggestionIndex"
+        :data-active="index === suggestionIndex"
+        :data-testid="`desktop-mention-option-${candidate.key}`"
         type="button"
-        @click="insertMention(candidate.insertText)"
+        @pointerdown.prevent
+        @click="selectSuggestion(index)"
       >
-        <span>{{ candidate.displayName }}</span>
-        <small>{{ candidate.label }}</small>
+        <span>{{ candidate.label }}</span>
+        <small>{{ candidate.meta }}</small>
       </button>
+      <p v-if="slash.hint.value" role="status">{{ slash.hint.value }}</p>
     </div>
     <div v-if="sendError || attachmentError" class="desktop-composer-footer">
       <p class="desktop-composer-error" data-testid="desktop-composer-error">
@@ -271,6 +270,10 @@
 
 <script setup lang="ts">
 import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
+import { useComposerSlashCommands } from "../../../../../../../../shared/ui/useComposerSlashCommands";
+import { roomSearchCommandKey } from "../room-shell/useDesktopRoomSearch";
+import { desktopIpc } from "../../../../ipc/index.js";
+import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 import { useRoomTyping } from "../../../../composables/useRoomTyping";
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, Plus, X } from "@lucide/vue";
@@ -500,6 +503,43 @@ const mentionCandidates = computed(() => {
   return roomMentionCandidates(props.participants, mentionQuery.value);
 });
 
+const openRoomSearch = inject(roomSearchCommandKey, null);
+const { pushActionToast } = useDesktopActionToasts();
+const slash = useComposerSlashCommands({
+  text: draft,
+  platform: "desktop",
+  scope: () => props.messageNamespace || props.roomIdentifier,
+  hasAttachments: () => props.attaching || props.attachmentDrafts.length > 0 || props.pendingAttachmentDrafts.length > 0,
+  isReply: () => Boolean(props.replyTo),
+  focus: () => { void nextTick(() => textareaElement.value?.focus()); },
+  onError: () => pushActionToast("Command could not be completed. Your draft is still here.", "error"),
+  run: async (command, argument) => {
+    if (!props.roomIdentifier) return false;
+    if (command.name === "task") {
+      await desktopIpc.room.addTask(props.roomIdentifier, { title: argument, description: null });
+      pushActionToast("Task created", "success");
+    } else if (command.name === "search") {
+      if (!openRoomSearch) throw new Error("Room search is unavailable");
+      openRoomSearch(argument);
+    } else {
+      emit("open-add-agent");
+    }
+    return true;
+  },
+});
+const suggestionsOpen = computed(() => slash.open.value || mentionOpen.value);
+const suggestions = computed(() => slash.open.value ? slash.candidates.value : mentionCandidates.value.map(candidate => ({
+  key: candidate.participantKey, label: candidate.displayName, meta: candidate.label,
+})));
+const suggestionIndex = computed(() => slash.open.value ? slash.activeIndex.value : activeMentionIndex.value);
+function selectSuggestion(index: number): void {
+  if (slash.open.value) slash.complete(index);
+  else {
+    const candidate = mentionCandidates.value[index];
+    if (candidate) insertMention(candidate.insertText);
+  }
+}
+
 watch(
   () => props.roomIdentifier,
   () => {
@@ -539,7 +579,12 @@ onBeforeUnmount(() => {
   if (approvalSettleTimer) clearTimeout(approvalSettleTimer);
 });
 
-function submitMessage(): void {
+async function submitMessage(): Promise<void> {
+  if (!canSend.value || props.sending) return;
+  await slash.submit(sendRoomMessage);
+}
+
+function sendRoomMessage(): void {
   const text = draft.value.trim();
   if ((!text && props.attachmentDrafts.length === 0) || props.sending) return;
   const replyTarget = props.replyTo;
@@ -593,10 +638,23 @@ function insertNewlineAtCursor(): void {
   });
 }
 
+function handleComposerKey(event: KeyboardEvent): void {
+  if (event.isComposing) return;
+  if (slash.handleKey(event)) {
+    mentionOpen.value = false;
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    moveMentionSelection(event, event.key === "ArrowDown" ? 1 : -1);
+  } else if (event.key === "Tab" || event.key === "Escape") {
+    mentionOpen.value = false;
+  } else if (event.key === "Enter") handleEnterKey(event);
+}
+
 function handleEnterKey(event: KeyboardEvent): void {
   if (event.isComposing) return;
   event.preventDefault();
-  if (mentionOpen.value) {
+  if (!slash.open.value && mentionOpen.value) {
     const candidate = mentionCandidates.value[activeMentionIndex.value];
     if (candidate) insertMention(candidate.insertText);
     return;
@@ -615,8 +673,9 @@ function syncMentionQuery(): void {
 }
 
 function handleDraftInput(): void {
-  typing.input(Boolean(draft.value.trim()));
-  syncMentionQuery();
+  typing.input(Boolean(draft.value.trim()) && !slash.open.value);
+  if (slash.open.value) mentionQuery.value = null;
+  else syncMentionQuery();
 }
 
 function moveMentionSelection(event: KeyboardEvent, delta: number): void {
@@ -625,10 +684,6 @@ function moveMentionSelection(event: KeyboardEvent, delta: number): void {
   const count = mentionCandidates.value.length;
   if (!count) return;
   activeMentionIndex.value = (activeMentionIndex.value + delta + count) % count;
-}
-
-function closeMentionForTab(): void {
-  if (mentionOpen.value) mentionQuery.value = null;
 }
 
 function insertMention(mentionText: string): void {
