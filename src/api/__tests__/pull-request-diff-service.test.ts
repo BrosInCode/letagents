@@ -197,3 +197,99 @@ test("times out when GitHub stalls past the overall deadline", async () => {
   }) as typeof fetch;
   await expectCode(run(fetchImpl, undefined, 50), "timeout");
 });
+
+function filesFetch(mode: "ok" | "failed" | "rate_limited" | "stalled" | "oversized" | "moved") {
+  const calls: string[] = [];
+  let heads = 0;
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    const path = String(url);
+    calls.push(path);
+    if (path.endsWith("/access_tokens")) return Response.json({ token: "tok" });
+    if (path.includes("/files?")) {
+      if (mode === "failed" || mode === "rate_limited") return new Response("", { status: mode === "failed" ? 500 : 429 });
+      if (mode === "stalled") return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+      if (mode === "oversized") return new Response("[]", { headers: { "content-length": String(6 * 1024 * 1024) } });
+      return Response.json([{ filename: "new.ts", previous_filename: "old.ts", status: "renamed", additions: 2, deletions: 1, patch: "ignored", raw_url: "http://127.0.0.1/" }]);
+    }
+    if ((init?.headers as Record<string, string>).Accept.includes("diff")) {
+      // In the successful enhancement fixture the files response finishes first.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      return new Response("diff --git a/old.ts b/new.ts", { headers: { "content-type": "text/x-diff" } });
+    }
+    heads++;
+    return Response.json({ head: { sha: mode === "moved" && heads === 2 ? "s2" : "s1" }, changed_files: 102 });
+  }) as typeof fetch;
+  return { fetchImpl, calls };
+}
+
+test("metadata opt-in makes exactly one extra bounded first-page request; default fetch makes none", async () => {
+  const { fetchImpl, calls } = filesFetch("ok");
+  const result = await fetchPullRequestUnifiedDiff({ owner: "octo", repo: "repo", number: 42, installationId: "inst_1", config, fetchImpl, includeFiles: true });
+  assert.deepEqual(result.fileList, { files: [{ path: "new.ts", previous_path: "old.ts", status: "renamed", additions: 2, deletions: 1 }], total_files: 102 });
+  assert.deepEqual(calls.filter(url => url.includes("/files")), ["https://api.github.com/repos/octo/repo/pulls/42/files?per_page=100&page=1"]);
+  const defaultFetch = filesFetch("ok");
+  const plain = await run(defaultFetch.fetchImpl);
+  assert.deepEqual(Object.keys(plain).sort(), ["diff", "headSha"]);
+  assert.equal(defaultFetch.calls.some(url => url.includes("/files")), false);
+});
+
+for (const mode of ["failed", "rate_limited", "stalled", "oversized"] as const) {
+  test(`a ${mode} files request never discards a successful diff`, async () => {
+    const { fetchImpl, calls } = filesFetch(mode);
+    const result = await fetchPullRequestUnifiedDiff({
+      owner: "octo", repo: "repo", number: 42, installationId: "inst_1", config, fetchImpl, includeFiles: true, timeoutMs: 300,
+    });
+    assert.equal(result.diff, "diff --git a/old.ts b/new.ts");
+    assert.equal(result.fileList, null);
+    assert.equal(calls.filter(url => url.includes("/files")).length, 1);
+  });
+}
+
+test("a changed head also rejects enhanced metadata", async () => {
+  await expectCode(fetchPullRequestUnifiedDiff({
+    owner: "octo", repo: "repo", number: 42, installationId: "inst_1", config, fetchImpl: filesFetch("moved").fetchImpl, includeFiles: true,
+  }), "moved");
+});
+
+test("GitHub rate-limit 403 is distinguished from withdrawn permission", async () => {
+  const fallback = mockFetch({});
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    if ((init?.headers as Record<string, string>).Accept.includes("diff")) {
+      return new Response("", { status: 403, headers: { "x-ratelimit-remaining": "0" } });
+    }
+    return fallback(url, init);
+  }) as typeof fetch;
+  await expectCode(run(fetchImpl), "rate_limited");
+});
+
+test("optional file metadata cannot delay the final head verification", async () => {
+  const fallback = filesFetch("ok").fetchImpl;
+  let heads = 0;
+  let finishFiles: ((value: Response) => void) | undefined;
+  let filesSettled = false;
+  const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+    if (init?.signal?.aborted) throw new DOMException("aborted", "AbortError");
+    if (String(url).includes("/files?")) {
+      return new Promise<Response>((resolve, reject) => {
+        finishFiles = resolve;
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }).finally(() => { filesSettled = true; });
+    }
+    if (String(url).includes("/pulls/") && (init?.headers as Record<string, string>).Accept.includes("json")) {
+      heads++;
+      // A slow enhancement has not completed when the diff is ready.
+      if (heads === 2) {
+        assert.equal(filesSettled, false, "required validation must not wait for optional metadata");
+        finishFiles?.(new Response("", { status: 503 }));
+      }
+    }
+    return fallback(url, init);
+  }) as typeof fetch;
+  const result = await fetchPullRequestUnifiedDiff({
+    owner: "octo", repo: "repo", number: 42, installationId: "inst_1", config, fetchImpl, includeFiles: true, timeoutMs: 200,
+  });
+  assert.equal(result.headSha, "s1");
+  assert.equal(result.fileList, null);
+});

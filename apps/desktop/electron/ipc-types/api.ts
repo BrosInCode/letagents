@@ -350,6 +350,7 @@ export interface DesktopApi {
     ) => Promise<DesktopFocusRoomMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
+    getPullRequestDiff?: (roomIdentifier: string, number: number) => Promise<import("./room.js").DesktopPullRequestDiffResult>;
     getGitHubEvents: (
       roomIdentifier: string,
       query?: DesktopGitHubEventsQuery,
