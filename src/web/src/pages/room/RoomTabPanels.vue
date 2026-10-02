@@ -1,5 +1,19 @@
 <template>
   <div class="room-view-viewport">
+    <div v-if="activeTab === 'chat' && historySearch.state.value.status !== 'idle'" class="room-history-search">
+      <MessageSearchResults
+        :status="historySearch.state.value.status"
+        :hits="historySearch.hits.value"
+        :terms="historySearch.state.value.terms"
+        :has-more="historySearch.state.value.hasMore"
+        :loading-more="historySearch.state.value.loadingMore"
+        :error="historySearch.state.value.error"
+        :loaded-match-count="matchCount"
+        :format-time="formatMessageTime"
+        @show="openMessageInChat"
+        @more="historySearch.loadMore()"
+      />
+    </div>
     <Transition :name="tabTransitionName">
       <MessageList
         v-if="activeTab === 'chat'"
@@ -22,6 +36,7 @@
         @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
         @openTask="emit('openTask', $event)"
         @revealed="handleMessageRevealed"
+        @revealUnavailable="handleMessageRevealUnavailable"
       />
 
       <GitHubEventFeed
@@ -122,7 +137,10 @@ import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
 import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
 import MessageList from '@/components/room/MessageList.vue'
-import { attentionResponseAgentNames } from '@/components/room/chat-message/formatting'
+import { attentionResponseAgentNames, formatMessageTime } from '@/components/room/chat-message/formatting'
+import MessageSearchResults from '../../../../../shared/ui/MessageSearchResults.vue'
+import { useRoomHistorySearch } from '@/composables/roomHistorySearch'
+import { useToast } from '@/composables/useToast'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 import type {
   FocusRoomConclusionDetails,
@@ -240,6 +258,16 @@ function handleMessageRevealed(messageId: string) {
   if (revealMessageId.value === messageId) revealMessageId.value = null
 }
 
+// Every match in the room's history, while the header search has a query.
+const historySearch = useRoomHistorySearch(
+  computed(() => props.room?.identifier || ''),
+  computed(() => props.searchQuery),
+)
+const toast = useToast()
+function handleMessageRevealUnavailable() {
+  toast.info('That message is too far back to open here. Expand the search result to read it.', 5000)
+}
+
 watch(() => props.activeTab, (tab) => {
   if (tab !== 'chat') revealMessageId.value = null
 })
@@ -265,6 +293,28 @@ defineExpose({ matchCount })
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+/* Drops down from the header search, over the top of the message list. */
+.room-history-search {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  max-width: 720px;
+  max-height: min(46%, 380px);
+  margin: 0 auto;
+  padding: 10px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.room-history-search > .history-search {
+  flex: 1;
 }
 
 .room-tab-panel {

@@ -1,5 +1,6 @@
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
 import { getDesktopMessageReactions, setDesktopMessageReaction } from "../rooms/reactions.js";
+import { searchDesktopRoomMessages } from "../rooms/search.js";
 import { getAccountActivityState, restartAccountActivityStream, stopAccountActivityStream } from "../account-activity-stream.js";
 import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
 import { cancelDesktopRoomWakeRule, getDesktopRoomWakeRules, restoreDesktopRoomWakeRule } from "../rooms/wake-rules.js";
@@ -445,6 +446,8 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     getDesktopMessageReactions(roomIdentifier, firstMessageId, lastMessageId));
   targetIpcMain.handle("desktop:room:set-message-reaction", (_event, roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) =>
     setDesktopMessageReaction(roomIdentifier, messageId, emoji, reacted));
+  targetIpcMain.handle("desktop:room:search-messages", (_event, roomIdentifier: string, query: string, beforeMessageId?: string | null) =>
+    searchDesktopRoomMessages(roomIdentifier, query, beforeMessageId));
   targetIpcMain.handle("desktop:room:get-account-activity", () => getAccountActivityState());
   targetIpcMain.handle("desktop:room:restart-account-activity", () => restartAccountActivityStream());
   targetIpcMain.handle("desktop:room:stop-account-activity", () => stopAccountActivityStream());
