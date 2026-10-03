@@ -30,8 +30,7 @@ const {
 } = await import("../main/agents/managed-agent-commit-identity.js");
 const { getDesktopAuthStatus, signOutDesktopAuth } = await import("../main/auth.js");
 const { minimalOpenCodeEnvironment } = await import("../main/agents/opencode-launch-contract.js");
-const { cursorDaemonChildEnv } = await import("../main/agents/cursor-provider-adapter.js");
-const { runCursorTurn } = await import("../main/agents/cursor-runner.js");
+const { cursorDaemonChildEnv, runCursorTurn } = await import("../main/agents/cursor-runner.js");
 
 const FAKE_ACCOUNT = { provider: "github", providerUserId: "424242", login: "octo-fake" };
 const FAKE_IDENTITY = { name: "octo-fake", email: "424242+octo-fake@users.noreply.github.com" };
