@@ -130,8 +130,8 @@ const cursorProfiles: readonly SupervisedPermissionProfile[] = [
     status: "available", risk: "medium", detail: "Cursor restricts file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and project access settings stay protected.", isDefault: true,
   },
   {
-    id: "full_access", label: "Workspace writes (compatibility)", description: "Turns off Cursor’s own command restrictions so more project tools can run.",
-    status: "available", risk: "high", detail: "Cursor still works in a separate copy and cannot write directly to files on this Mac. LetAgents checks for conflicts before copying changes back. Files ignored by Git are not copied back.", isDefault: false,
+    id: "full_access", label: "Full access", description: "Can change files on this Mac and run commands without approval prompts.",
+    status: "available", risk: "high", detail: "Changes apply directly to the agent's working directory. Commands can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.", isDefault: false,
   },
 ];
 

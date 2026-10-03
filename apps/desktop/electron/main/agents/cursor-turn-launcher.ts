@@ -91,6 +91,8 @@ export function defaultLaunchTurn(input: {
   mcpRuntimeEnv?: Readonly<Record<string, string>>;
   providerAuthorization?: string;
   restrictRemoteAuthority?: boolean;
+  /** Attested Full access profile: retain turn supervision without an OS sandbox. */
+  fullAccess?: boolean;
   /** Exact continuation already held by the supervised adapter, never a prompt value. */
   nativeResumeSessionId?: string;
   /** Injectable only through direct unit tests; adapter production never sets it. */
@@ -232,7 +234,7 @@ const https = require("node:https");
 const net = require("node:net");
 const path = require("node:path");
 const { StringDecoder } = require("node:string_decoder");
-const [bin, statePath, workspaceGenerationManifestPath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, deniedExecSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, allowedInternalUnixSocketRootsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, mcpCapabilityTimeoutMsValue, restrictRemoteAuthorityValue, ...args] = process.argv.slice(1);
+const [bin, statePath, workspaceGenerationManifestPath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, deniedExecSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, allowedInternalUnixSocketRootsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, mcpCapabilityTimeoutMsValue, restrictRemoteAuthorityValue, fullAccessValue, ...args] = process.argv.slice(1);
 const deniedReadPaths = JSON.parse(deniedReadPathsJson || "[]");
 const deniedReadSubpaths = JSON.parse(deniedReadSubpathsJson || "[]");
 const deniedReadMetadataPaths = JSON.parse(deniedReadMetadataPathsJson || "[]");
@@ -247,6 +249,7 @@ const allowedReadSubpaths = JSON.parse(allowedReadSubpathsJson || "[]");
 const allowedNetworkUnixSockets = JSON.parse(allowedNetworkUnixSocketsJson || "[]");
 const allowedInternalUnixSocketRoots = JSON.parse(allowedInternalUnixSocketRootsJson || "[]");
 const restrictRemoteAuthority = restrictRemoteAuthorityValue === "1";
+const fullAccess = fullAccessValue === "1";
 const mcpCapabilityTimeoutMs = Number(mcpCapabilityTimeoutMsValue);
 if (!Number.isSafeInteger(mcpCapabilityTimeoutMs)
   || mcpCapabilityTimeoutMs < 1
@@ -1769,7 +1772,7 @@ async function start() {
   // Wrapper-only: packaged Electron needs this to execute the inline Node
   // wrapper, but an Electron-backed Cursor binary must never inherit it.
   delete nativeEnv.ELECTRON_RUN_AS_NODE;
-  const sandboxed = process.platform === "darwin"
+  const sandboxed = !fullAccess && process.platform === "darwin"
     && (restrictRemoteAuthority
       || deniedReadPaths.length > 0
       || deniedReadSubpaths.length > 0
@@ -2084,6 +2087,7 @@ if (process.send) process.send({ type: "prepared" });
     testStartupBarrier?.stage ?? "",
     String(mcpCapabilityTimeoutMs),
     restrictRemoteAuthority ? "1" : "0",
+    input.fullAccess === true ? "1" : "0",
     ...input.args,
   ], {
     cwd: input.cwd,

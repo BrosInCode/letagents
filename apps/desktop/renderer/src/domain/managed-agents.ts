@@ -1188,9 +1188,9 @@ export function supervisedCursorPermissionProfilePresentation(
   if (profile.id === "full_access") {
     return {
       ...profile,
-      label: "Workspace writes (compatibility)",
-      description: "Turns off Cursor’s own command restrictions so more project tools can run.",
-      detail: "Cursor still works in a separate copy of your project and cannot write directly to files on this Mac. LetAgents checks for conflicts before copying changes back. Files ignored by Git are not copied back, and Git history is kept.",
+      label: "Full access",
+      description: "Can change files on this Mac and run commands without approval prompts.",
+      detail: "Changes apply directly to the agent's working directory. Commands can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.",
     };
   }
   if (profile.id === "read_only") {
@@ -1282,12 +1282,11 @@ const SUPERVISED_PERMISSION_PROFILE_LIMITS: Partial<Record<
     ask_before_write: "Can't run commands or change files until you approve each one.",
     auto_review: "Can't open files outside the project. Commands that delete, publish, install or reach the network ask you first.",
   },
-  // Cursor runs inside a macOS sandbox that denies network on every level;
-  // compatibility lifts Cursor's own command restrictions, not that sandbox.
+  // Only Cursor's restricted profiles use the outer macOS sandbox.
   cursor: {
     read_only: `Can't edit files. ${CURSOR_NO_NETWORK}`,
     sandboxed_write: `Can't write to files on this Mac directly. ${CURSOR_NO_NETWORK}`,
-    full_access: `Can't write to files on this Mac directly. ${CURSOR_NO_NETWORK}`,
+    full_access: NOTHING_BLOCKED,
   },
 };
 
