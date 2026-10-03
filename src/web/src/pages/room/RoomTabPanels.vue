@@ -14,7 +14,7 @@
         @more="historySearch.loadMore()"
       />
     </div>
-    <PinnedMessages v-if="activeTab === 'chat' && messagePins" :pins="messagePins.state.value.pins"
+    <PinnedMessages v-if="activeTab === 'chat' && messagePins" :key="room?.identifier" :pins="messagePins.state.value.pins"
       :loading="messagePins.state.value.loading" :error="messagePins.state.value.error"
       @refresh="messagePins.refresh" @reveal="openMessageInChat" />
     <Transition :name="tabTransitionName">
