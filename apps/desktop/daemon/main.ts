@@ -388,7 +388,7 @@ export class SupervisorDaemon {
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeManifest: (operation) => this.serializeManifestMutation(operation),
       transition: (entryId, state, condition, detail, actor) => this.transition(entryId, state, condition, detail, actor),
-      appendNativeActivity: (entryId, event, activityOnly) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly),
+      appendNativeActivity: (entryId, event, activityOnly, position) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly, position),
       publishNativeActivity: (entryId, method, status, observedAt) => this.publishNativeActivity(entryId, method, status, observedAt),
       handleTerminal: (installation, _bindingIdentity, terminal) =>
         this.providerTerminals.handleTerminal(installation, terminal),
@@ -1062,8 +1062,8 @@ export class SupervisorDaemon {
 
   async stop(): Promise<void> {
     // Stop is final for this daemon instance. Fence late delivery/cutover
-    // continuations before awaiting any drain so they cannot retain a socket
-    // or SQLite handle after the caller has observed shutdown.
+    // continuations before awaiting any drain, and close the socket and stores
+    // even when a drain fails: an open socket would keep the process alive.
     this.handoffScheduled = true;
     this.convergencePacer.close();
     this.providerTerminals.close();
@@ -1082,15 +1082,15 @@ export class SupervisorDaemon {
     await this.fenceAndDrainRoomMoveReconciliations();
     await this.boundedEffects.drainJournalReservations();
     this.providerExecution?.clearRecoveryTimers();
-    await this.providerReconciliation?.disposeAll();
-    await this.providerExecution?.drainConvergence();
-    await this.providerStreams.disposeAll();
+    const drain = await Promise.resolve().then(() => this.providerReconciliation?.disposeAll()).then(() => this.providerExecution?.drainConvergence())
+      .then(() => this.providerStreams.disposeAll()).then(() => undefined, (error: unknown) => ({ error }));
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
     await this.store.close();
     await this.durability.close();
     await this.workerBindings.close();
     await this.supervisedInbox.close();
+    if (drain) throw drain.error;
   }
 
   /**
