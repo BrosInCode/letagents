@@ -281,7 +281,7 @@ export async function runDesktopCursorProviderPreflight(
         };
       }
     }
-    if (supervised && workspaceRoot && (permissionProfile.id === "sandboxed_write" || permissionProfile.id === "full_access")) {
+    if (supervised && workspaceRoot && permissionProfile.id === "sandboxed_write") {
       try {
         await (options.workspaceGenerationSupportChecker ?? assertSupervisedWorkspaceGenerationSupported)(workspaceRoot);
       } catch (error) {
@@ -431,7 +431,7 @@ export async function runDesktopCursorProviderPreflight(
         supervised && permissionProfile.id === "sandboxed_write"
           ? "Workspace writes"
           : supervised && permissionProfile.id === "full_access"
-            ? "Workspace writes (compatibility)"
+            ? "Full access"
             : permissionProfile.label
       }.`,
       detail: cursorPreflightReadyDetail(cursorMcpPolicy, mcpStatus, permissionProfile.id, supervised),
