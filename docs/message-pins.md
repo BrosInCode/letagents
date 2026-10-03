@@ -67,13 +67,17 @@ mounts it in `RoomTabPanels.vue`. The rail is positioned outside document flow,
 so pinning, hiding, or revealing markers does not add a row or change the height
 of the conversation. The message gutter reserves space for the markers.
 
-Hovering or focusing a marker shows a bounded text preview with a short author
-label and date. Common inline Markdown is reduced to plain text; Vue still
-escapes all content. Clicking a marker or pressing Enter/Space reveals through
-the existing message-reveal path. Arrow keys/Home/End move between markers;
-Tab leaves normally, and Escape dismisses the preview even when opened by mouse.
-The last selected marker is longer and brighter. The rail scrolls when needed
-for the existing 50-pin limit. There is no animation, including keyboard use.
+Hovering the rail or focusing a marker expands the same rail into a compact
+list: each bar has a single-line message preview beside it, and the hovered or
+focused row is highlighted. Long previews use an ellipsis. Common Markdown is
+reduced to plain text; Vue still escapes all content. Clicking a row or pressing
+Enter/Space reveals through the existing message-reveal path and collapses the
+list. Arrow keys/Home/End move between rows; Tab leaves normally. Escape and
+outside presses dismiss it, including when opened by mouse. Pointer movement
+across rows does not close the panel; leaving it closes after a short grace
+period unless keyboard focus remains inside. The last selected marker is
+longer and brighter. The rail scrolls when needed for the existing 50-pin limit
+and stays within the message area. There is no animation, including keyboard use.
 
 “Hide pinned messages” in desktop Room settings → General and the web room drawer
 is off by default. It hides the markers in all rooms for that client and device,
@@ -146,8 +150,8 @@ Live checks for the reviewer; shell, SSR and handler tests do not perform them:
 
 1. On desktop and web, pin/unpin from context menus. Check menu order, bottom-edge
    clipping, signed-out/local/unsent action hiding, and markers in timeline/thread.
-2. Use the edge markers with pointer and keyboard. Verify escaped previews,
-   attribution, newest-first order, bounded scrolling, arrow/Enter behavior,
+2. Use the edge markers with pointer and keyboard. Verify the compact list of
+   escaped previews, newest-first order, bounded scrolling, arrow/Enter behavior,
    Escape dismissal, normal Tab navigation, and no timeline shift.
 3. Reveal recent, older and thread-reply entries; verify highlight and the shared
    history/thread path. A target beyond the existing bound shows its usual notice.
