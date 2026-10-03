@@ -113,7 +113,7 @@ import {
   cursorMcpInspectionEnv,
 } from "./cursor-mcp-authority.js";
 import { resolveLetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
-import { buildCursorChildEnv } from "./cursor-runner.js";
+import { buildCursorChildEnv, cursorDaemonChildEnv } from "./cursor-runner.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { cursorPermissionProfileInstructionLines } from "./cursor-permission-profile.js";
 import {
@@ -333,45 +333,6 @@ export function cursorLaunchPolicyArgs(value: unknown): string[] {
     }
   }
   return args;
-}
-
-export function cursorDaemonChildEnv(
-  profileEnv: Record<string, string>, commitEnvironment: Record<string, string> = {},
-  fullAccess = false,
-): NodeJS.ProcessEnv {
-  // Supervised children get the Cursor runtime allowlist plus the commit identity;
-  // Electron often carries unrelated GitHub/cloud/npm/database credentials.
-  const env = buildCursorChildEnv(profileEnv);
-  if (fullAccess) {
-    // Preserve existing Git/gh authentication without importing the owner's
-    // Cursor configuration or the daemon's room credentials into the profile.
-    for (const [key, value] of Object.entries({ ...desktopRuntimeEnvironment(), ...profileEnv })) {
-      if (key.startsWith("GIT_") || [
-        "GH_CONFIG_DIR", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN",
-        "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "SSH_AUTH_SOCK",
-      ].includes(key)) env[key] = value;
-    }
-  }
-  // A bounded provider turn borrows only the daemon's exact-generation tool
-  // authority. Ambient desktop owner/fixed-worker credentials and stale
-  // supervisor coordinates must never leak into the Cursor child or its MCPs.
-  for (const key of Object.keys(env)) {
-    const normalizedKey = key.toUpperCase();
-    if (normalizedKey === "LETAGENTS_TOKEN"
-      || normalizedKey === "LETAGENTS_AGENT_SESSION_BEARER"
-      || normalizedKey === "CURSOR_API_KEY"
-      || normalizedKey === "CURSOR_AUTH_TOKEN"
-      || normalizedKey === "NODE_EXTRA_CA_CERTS"
-      || normalizedKey === "SSL_CERT_DIR"
-      || normalizedKey === "SSL_CERT_FILE"
-      || normalizedKey.startsWith("LETAGENTS_SUPERVISOR_")
-      || normalizedKey === "LETAGENTS_SUPERVISED_BOUNDED_TURNS"
-      || normalizedKey === "LETAGENTS_EXECUTION_PROFILE"
-      || normalizedKey === "LETAGENTS_PERMISSION_PROFILE_ID") {
-      delete env[key];
-    }
-  }
-  return { ...env, ...commitEnvironment };
 }
 
 function cursorSupervisorMcpEnv(
