@@ -16,6 +16,12 @@ export function parseGitHubLinkReference(value) {
   } catch { return null; }
 }
 
+/** The event card already represents its main PR/issue; keep any other links. */
+export function excludeGitHubEventLink(urls, eventUrl) {
+  const represented = parseGitHubLinkReference(eventUrl);
+  return urls.filter(url => !represented || parseGitHubLinkReference(url)?.url !== represented.url);
+}
+
 export function normalizePreviewRepository(value) {
   if (typeof value !== "string") return null;
   const name = value.replace(/^https:\/\//i, "").replace(/^github\.com\//i, "").replace(/\/$/, "");
