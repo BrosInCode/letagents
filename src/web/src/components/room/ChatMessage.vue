@@ -184,7 +184,7 @@ import WakeGlyph from '../../../../../shared/ui/WakeGlyph.vue'
 import { isPinMessageId } from '../../../../../shared/message-pins.mjs'
 import { unreadMenuKey } from '../../../../../shared/room-unread-client'
 import { injectRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
-import { linkPreviewPresentation } from '../../../../../shared/message-link-previews.mjs'
+import { excludeGitHubEventLink, linkPreviewPresentation } from '../../../../../shared/message-link-previews.mjs'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 import { WAKE_NOTICE_SOURCE } from '../../../../../shared/wake-rules.mjs'
@@ -546,12 +546,13 @@ const renderedMessage = computed(() => {
     props.taskReferenceIds, (url) => urls.push(url))
   return { html, urls }
 })
+const previewUrls = computed(() => excludeGitHubEventLink(renderedMessage.value.urls, githubEvent.value?.url))
 const previewContext = injectRoomMessageLinkPreviews()
 const linkPreviews = computed(() => previewContext?.previewsFor(props.message.id) ?? [])
 let stopTrackingPreviews: (() => void) | null = null
-watch(() => [props.message.id, renderedMessage.value.urls, previewContext?.contextKey.value], () => {
+watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.value], () => {
   stopTrackingPreviews?.()
-  stopTrackingPreviews = previewContext?.track({ id: props.message.id, urls: renderedMessage.value.urls }) ?? null
+  stopTrackingPreviews = previewContext?.track({ id: props.message.id, urls: previewUrls.value }) ?? null
 }, { immediate: true })
 </script>
 
