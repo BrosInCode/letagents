@@ -45,6 +45,7 @@
     "test:electron": "node --import tsx --test --test-concurrency=1 --experimental-test-module-mocks electron/__tests__/*.test.ts",
     "test:daemon": "node --import tsx --test --test-timeout=180000 daemon/__tests__/*.test.ts",
     "test:packaging": "node --test electron/scripts/*.test.mjs",
+    "verify:mcp-runtime-digest": "node --import tsx electron/scripts/verify-mcp-runtime-digest.mjs",
     "lint:vue-components": "eslint \"renderer/src/**/*.vue\"",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
   },

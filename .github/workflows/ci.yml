@@ -108,6 +108,13 @@ jobs:
       - name: Audit desktop dependency advisories
         run: node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents
 
+      # The packaged MCP runtime is sealed into the desktop code as a digest
+      # of the tree its committed lock installs. The release build refuses to
+      # package when they differ; check it here so the change that moved one
+      # without the other fails, not the release.
+      - name: Verify packaged MCP runtime digest
+        run: npm --prefix apps/desktop run verify:mcp-runtime-digest
+
       - name: Run verified desktop dependency lifecycle scripts
         run: npm rebuild --prefix apps/desktop
 
