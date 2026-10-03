@@ -4,91 +4,131 @@ import { fileURLToPath } from "node:url";
 import { computed, createRenderer, createSSRApp, effectScope, h, nextTick, reactive, ref, shallowRef, ssrContextKey } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer } from "vite";
-let Message: any, Panel: any, provider: any;
+let Message: any, Panel: any, provider: any, visibility: any;
 const pin = { message_id: "msg_1", sender: "<Ada>", timestamp: "2026-10-02T00:00:00Z", snippet: "<script>bad</script>", pinned_by: { name: "<Owner>" } };
 before(async () => {
   const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   try {
     Message = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue")).default;
     Panel = (await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/PinnedMessages.vue", import.meta.url)))).default;
+    visibility = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/usePinnedMessageVisibility.ts", import.meta.url)));
     provider = await vite.ssrLoadModule("/renderer/src/composables/useRoomMessagePins.ts");
   } finally { await vite.close(); }
 });
-test("zero pins render no row; pins render one compact accessible trigger", async () => {
+test("zero pins render nothing; each pin has a labelled keyboard-accessible edge marker", async () => {
   assert.equal(await renderToString(createSSRApp({ render: () => h(Panel, { pins: [] }) })), "<!---->");
-  const html = await renderToString(createSSRApp({ render: () => h(Panel, { pins: [pin] }) }));
-  assert.match(html, /Pinned \(1\)/); assert.match(html, /aria-expanded="false"/);
-  assert.doesNotMatch(html, /message-pins-panel/);
+  const html = await renderToString(createSSRApp({ render: () => h(Panel, { pins: [pin, { ...pin, message_id: "msg_2" }] }) }));
+  assert.match(html, /<nav[^>]*aria-label="Pinned messages"/);
+  assert.equal((html.match(/data-pin-entry/g) || []).length, 2);
+  assert.equal((html.match(/tabindex="0"/g) || []).length, 1);
+  assert.match(html, /Pinned message from &lt;Ada&gt;/);
+  assert.doesNotMatch(html, /Pinned \(2\)|message-pins-trigger|message-pin-preview/);
+  assert.doesNotMatch(html, / data-message-id=/, "markers must not match timeline focus-restoration selectors");
+  const failed = await renderToString(createSSRApp({ render: () => h(Panel, { pins: [pin], error: "Offline" }) }));
+  assert.match(failed, /<button[^>]*aria-label="Offline Retry loading pinned messages"[^>]*>Retry<\/button>/);
 });
-test("the open list escapes snippets, names and attribution as text", async () => {
-  const oldDocument = globalThis.document, oldWindow = globalThis.window;
-  Object.assign(globalThis, { document: { addEventListener() {}, removeEventListener() {} },
-    window: { addEventListener() {}, removeEventListener() {} } });
+test("the preview escapes content and turns Markdown and actor metadata into readable text", async () => {
   let vm: any;
   const OpenPanel = { ...Panel, setup(props: any, context: any) {
-    vm = Panel.setup(props, context); vm.open.value = true; return vm;
+    vm = Panel.setup(props, context); vm.previewId.value = "msg_1"; return vm;
   } };
-  try {
-    const context: any = {};
-    await renderToString(createSSRApp({ render: () => h(OpenPanel, { pins: [pin] }) }), context);
-    const html = context.teleports.body;
-    assert.match(html, /&lt;script&gt;bad&lt;\/script&gt;/);
-    assert.match(html, /&lt;Ada&gt;/); assert.match(html, /Pinned by &lt;Owner&gt;/);
-    assert.doesNotMatch(html, /<script>/);
-  } finally { vm?.cleanup(); Object.assign(globalThis, { document: oldDocument, window: oldWindow }); }
+  const context: any = {};
+  await renderToString(createSSRApp({ render: () => h(OpenPanel, { pins: [pin] }) }), context);
+  const html = context.teleports.body;
+  assert.match(html, /&lt;script&gt;bad&lt;\/script&gt;/);
+  assert.match(html, /&lt;Ada&gt;/); assert.match(html, /Pinned by &lt;Owner&gt;/);
+  assert.doesNotMatch(html, /<script>/);
+  assert.equal(vm.senderLabel("Ada | Owner's agent | Codex"), "Ada");
+  assert.equal(vm.previewText("**Merged** `abc` [review](https://example.com/long-link)"), "Merged abc review");
 });
 test("the shared message marks timeline and thread replies without changing message data", async () => {
   for (const context of ["timeline", "thread-reply"]) {
     const html = await renderToString(createSSRApp({
       setup() {
         provider.provideRoomMessagePins({ state: shallowRef({ pins: [pin] }), canPin: computed(() => true), isPinned: (id: string) => id === "msg_1", toggle() {}, refresh() {} });
-        return () => h(Message, { context, highlightQuery: "", searchActive: false, message: { id: "msg_1", sender: "Ada", text: "Hello", source: "browser", timestamp: pin.timestamp, attachments: [], agentIdentity: null }, threadSummary: { count: 0, unreadCount: 0, participants: [] } });
+        return () => h(Message, { context, activeThreadRoot: false, highlightQuery: "", searchActive: false, message: { id: "msg_1", sender: "Ada", text: "Hello", source: "browser", timestamp: pin.timestamp, attachments: [], agentIdentity: null }, threadSummary: { count: 0, unreadCount: 0, participants: [] } });
       },
     }));
     assert.match(html, /aria-label="Pinned message"[^>]*><svg[^>]*aria-hidden="true"/);
     assert.doesNotMatch(html, /📌/);
   }
 });
-test("overlay dismissal preserves outside clicks and handles keyboard focus through the real setup handlers", async (t) => {
+test("edge markers reveal directly, navigate by keyboard, dismiss previews, and retain focus as pins change", async () => {
   const oldWindow = globalThis.window, oldDocument = globalThis.document;
-  const listeners = new Map<string, Function>(); const focus: string[] = []; const emitted: unknown[][] = [];
-  Object.assign(globalThis, { window: { innerWidth: 900, innerHeight: 600, addEventListener() {}, removeEventListener() {} },
-    document: { activeElement: null, addEventListener: (type: string, fn: Function) => listeners.set(type, fn), removeEventListener: (type: string) => listeners.delete(type) } });
+  const listeners = new Map<string, Function>(), focus: string[] = [], emitted: unknown[][] = [];
+  Object.assign(globalThis, { window: { innerWidth: 900, innerHeight: 600,
+    addEventListener: (type: string, fn: Function) => listeners.set(type, fn), removeEventListener: (type: string) => listeners.delete(type) },
+    document: { activeElement: null,
+      addEventListener: (type: string, fn: Function) => listeners.set(type, fn), removeEventListener: (type: string) => listeners.delete(type) } });
   const props = reactive({ pins: [pin, { ...pin, message_id: "msg_2" }] });
   let vm: any;
   const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null });
   const app = renderer.createApp({ setup() { vm = Panel.setup(props, { expose() {}, emit: (...args: unknown[]) => emitted.push(args) }); return () => h("div"); } });
   app.provide(ssrContextKey, { modules: new Set() });
+  const anchor = { getBoundingClientRect: () => ({ right: 35, top: 570, bottom: 594 }) };
+  let focusedInside = false;
   try {
     app.mount({});
-    vm.trigger.value = { getBoundingClientRect: () => ({ left: 12, bottom: 40 }), focus: () => focus.push("trigger"), contains: () => false };
-    vm.panel.value = { contains: () => false, querySelectorAll: () => [0, 1].map((i) => ({ focus: () => focus.push(String(i)) })) };
-    await vm.toggle(); assert.equal(vm.open.value, true); assert.equal(focus.at(-1), "0");
-    vm.onKeydown({ key: "ArrowUp", preventDefault() {} }); assert.equal(focus.at(-1), "1");
-    vm.onKeydown({ key: "Home", preventDefault() {} }); assert.equal(focus.at(-1), "0");
-    vm.onKeydown({ key: "Escape", preventDefault() {}, stopPropagation() {} }); assert.equal(vm.open.value, false); assert.equal(focus.at(-1), "trigger");
-    await t.test("outside press closes without cancelling the target or restoring trigger focus", async () => {
-      await vm.toggle();
-      const before = focus.length;
-      let prevented = false;
-      listeners.get("pointerdown")!({ target: {}, preventDefault() { prevented = true; } });
-      assert.equal(vm.open.value, false);
-      assert.equal(prevented, false);
-      assert.equal(focus.length, before);
-    });
-    await t.test("Tab and Shift+Tab dismiss and return focus to the trigger", async () => {
-      for (const shiftKey of [false, true]) {
-        await vm.toggle();
-        let prevented = false, stopped = false;
-        vm.onKeydown({ key: "Tab", shiftKey, preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
-        assert.equal(vm.open.value, false);
-        assert.equal(focus.at(-1), "trigger");
-        assert.equal(prevented, true); assert.equal(stopped, true);
-      }
-    });
-    await vm.toggle(); vm.choose("msg_2"); assert.deepEqual(emitted, [["reveal", "msg_2"]]);
-    assert.equal(listeners.size, 0);
+    vm.rail.value = { getBoundingClientRect: () => ({ top: 100, bottom: 600 }), contains: () => focusedInside, parentElement: { focus: () => focus.push("room") },
+      querySelectorAll: () => props.pins.map((p) => ({ focus: () => focus.push(p.message_id) })) };
+    vm.panel.value = { offsetHeight: 180, contains: () => false };
+    await vm.showPreview("msg_1", { currentTarget: anchor });
+    assert.equal(vm.preview.value.message_id, "msg_1");
+    assert.equal(vm.top.value, 412, "preview stays inside the bottom edge");
+    assert.ok(listeners.has("resize"));
+    Object.assign(document, { activeElement: anchor });
+    vm.onRailScroll(); assert.equal(vm.preview.value.message_id, "msg_1", "scrolling a focused marker into view retains its preview");
+    Object.assign(document, { activeElement: null });
+    vm.onRailScroll(); assert.equal(vm.preview.value, undefined, "manual rail scrolling dismisses a hover preview");
+    await vm.showPreview("msg_1", { currentTarget: anchor });
+    listeners.get("keydown")!({ key: "Escape", preventDefault() {}, stopPropagation() {} });
+    assert.equal(vm.preview.value, undefined, "Escape dismisses a mouse-opened preview while focus is elsewhere");
+    await vm.showPreview("msg_1", { currentTarget: anchor });
+    vm.onKeydown({ key: "ArrowUp", preventDefault() {} }); assert.equal(focus.at(-1), "msg_2");
+    vm.onKeydown({ key: "Home", preventDefault() {} }); assert.equal(focus.at(-1), "msg_1");
+    vm.onKeydown({ key: "End", preventDefault() {} }); assert.equal(focus.at(-1), "msg_2");
+    let tabPrevented = false;
+    vm.onKeydown({ key: "Tab", preventDefault() { tabPrevented = true; } });
+    assert.equal(tabPrevented, false, "Tab can leave the rail normally");
+    vm.onKeydown({ key: "Escape", preventDefault() {}, stopPropagation() {} });
+    assert.equal(vm.preview.value, undefined);
+    await nextTick(); assert.equal(listeners.size, 0);
+    await vm.showPreview("msg_2", { currentTarget: anchor }); vm.choose("msg_2");
+    assert.deepEqual(emitted, [["reveal", "msg_2"]]);
+    assert.equal(vm.selectedId.value, "msg_2"); assert.equal(vm.preview.value, undefined);
+    focusedInside = true;
+    props.pins = [{ ...pin, message_id: "msg_3" }, ...props.pins]; await nextTick(); await nextTick();
+    assert.equal(focus.at(-1), "msg_2", "a newly pinned message does not displace the focused marker");
+    props.pins = [pin]; await nextTick(); await nextTick();
+    assert.equal(focus.at(-1), "msg_1"); assert.equal(vm.selectedId.value, null);
+    props.pins = []; await nextTick(); await nextTick();
+    assert.equal(focus.at(-1), "room", "removing the final pin preserves keyboard focus");
   } finally { app.unmount(); Object.assign(globalThis, { window: oldWindow, document: oldDocument }); }
+});
+test("Hide pinned messages is off by default, persists, hides the rail, and preserves pin membership", async () => {
+  const oldWindow = globalThis.window;
+  const saved = new Map<string, string>();
+  Object.assign(globalThis, { window: { localStorage: { getItem: (key: string) => saved.get(key) ?? null, setItem: (key: string, value: string) => saved.set(key, value) } } });
+  const { pinnedMessagesHidden, togglePinnedMessages } = visibility.usePinnedMessageVisibility();
+  const pins = [pin];
+  try {
+    assert.equal(visibility.readPinnedMessagesHidden(), false);
+    assert.equal(pinnedMessagesHidden.value, false);
+    togglePinnedMessages();
+    assert.equal(visibility.readPinnedMessagesHidden(), true, "a new app session reads the saved preference");
+    assert.equal(await renderToString(createSSRApp({ render: () => h(Panel, { pins }) })), "<!---->");
+    assert.deepEqual(pins, [pin]);
+    togglePinnedMessages();
+    assert.equal(visibility.readPinnedMessagesHidden(), false);
+    assert.match(await renderToString(createSSRApp({ render: () => h(Panel, { pins }) })), /data-pin-entry/);
+    Object.assign(window, { localStorage: { getItem() { throw Error("unavailable"); }, setItem() { throw Error("unavailable"); } } });
+    assert.equal(visibility.readPinnedMessagesHidden(), false);
+    togglePinnedMessages(); assert.equal(pinnedMessagesHidden.value, true);
+    togglePinnedMessages();
+  } finally {
+    if (pinnedMessagesHidden.value) togglePinnedMessages();
+    Object.assign(globalThis, { window: oldWindow });
+  }
 });
 test("desktop provider captures the room, clears on account changes, and refreshes after reconnect", async () => {
   const oldWindow = globalThis.window; const calls: string[] = [];

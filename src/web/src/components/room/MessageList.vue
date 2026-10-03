@@ -66,7 +66,6 @@ import MessageInfoSurface from './MessageInfoSurface.vue'
 import { mergeMessageArrivalIds, watchMessageListGrowth } from './messageArrival'
 import { buildMessageThreadSummaries } from './messageThreading'
 import { createReadEvidenceReporter } from './readEvidence'
-import { injectRoomMessagePins } from '@/composables/roomMessagePins'
 import { injectRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 import { decideMessageRevealAction } from './messageReveal'
@@ -310,11 +309,9 @@ watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
 })
 
 // Coalesce layout changes into one follow, cancelled by navigation or scrolling.
-const messagePins = injectRoomMessagePins()
 const messageReactions = injectRoomMessageReactions()
 const messageLinkPreviews = injectRoomMessageLinkPreviews()
 watch([
-  () => Boolean(messagePins?.state.value.pins.length),
   () => messageReactions?.revision.value,
   () => messageLinkPreviews?.revision.value,
 ], followLatestAfterLayout)
@@ -571,6 +568,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 16px 20px;
+  padding-left: 44px;
   scroll-behavior: smooth;
 }
 
@@ -694,7 +692,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .empty-state-card p { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
 
 @media (max-width: 768px) {
-  .messages { padding: 12px 12px; }
+  .messages { padding: 12px 12px 12px 44px; }
   .new-messages-pill { bottom: 8px; font-size: 0.7rem; padding: 5px 12px; }
   .empty-state { padding: 24px 16px; }
   .load-older-btn, .new-messages-pill { min-height: 44px; }

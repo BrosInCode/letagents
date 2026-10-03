@@ -61,36 +61,33 @@ lock while sending a message and separately verifies the three-second timeout.
 
 ## Client behavior
 
-The desktop row lives in `RoomChatView.vue`; the web row lives in
-`RoomTabPanels.vue`. Zero pins render nothing above the timeline. With pins,
-one compact Pinned (n) button opens an anchored, bounded, independently scrolling
-overlay. Opening the overlay does not resize the timeline. It has no animation,
-including keyboard opening. Arrow keys/Home/End move between entries; Enter
-reveals through the existing message-reveal path. Escape, Tab/Shift+Tab and
-choosing an entry close it and restore the trigger. An outside press only closes the list: it
-keeps the pressed target's default action and focus. If the final pin disappears
-while focus is in the list, focus returns to the room region because the trigger no longer exists.
+The shared `PinnedMessages.vue` component renders one horizontal marker per pin
+along the left edge of the chat. Desktop mounts it in `RoomChatView.vue`; web
+mounts it in `RoomTabPanels.vue`. The rail is positioned outside document flow,
+so pinning, hiding, or revealing markers does not add a row or change the height
+of the conversation. The message gutter reserves space for the markers.
 
-Desktop's existing `RoomMessageViewport.vue:596–619` ResizeObserver watches the
-message list's own height. `keepLatestInViewOnResize` compares the old observed
-height with the new height and uses the old height to decide whether the reader
-was at the bottom, even if a scroll event has already measured the smaller list.
-It calls `jumpToBottom` only for an active viewport that was following the latest
-message; scrolled-up readers receive no scroll write. The new row is inside
-`.room-chat-main`, above that viewport, so its 0↔1 transition uses this same path.
-The sibling thread panel's height is unaffected; its inline SVG pin marker has
-no extra row or vertical margin. No second desktop watcher is needed.
+Hovering or focusing a marker shows a bounded text preview with a short author
+label and date. Common inline Markdown is reduced to plain text; Vue still
+escapes all content. Clicking a marker or pressing Enter/Space reveals through
+the existing message-reveal path. Arrow keys/Home/End move between markers;
+Tab leaves normally, and Escape dismisses the preview even when opened by mouse.
+The last selected marker is longer and brighter. The rail scrolls when needed
+for the existing 50-pin limit. There is no animation, including keyboard use.
 
-Web uses the same pre-layout bottom check/next-tick scroll used by reactions, watching the transition between zero and nonzero
-pins. Scrolled-up readers retain their scroll offset. No lines are added to
-`DesktopRoomShell.vue`. Pin selection does not change reveal limits.
+“Hide pinned messages” in desktop Room settings → General and the web room drawer
+is off by default. It hides the markers in all rooms for that client and device,
+persisting in local storage. It does not unpin messages, change anyone else's
+view, or alter the message reveal limits. Switching it off restores the rail.
+Room changes reset the selected marker and preview. Removing a focused marker
+moves focus to a remaining marker, or to the room when the last pin disappears.
 
 The same message components render markers in the timeline and threads.
 Pin/Unpin appears before Add reaction in the context menu. The permalink
 feature's Copy link item must be preserved when branches are integrated.
 While a write is pending, further pin actions are disabled. Errors keep the
 previous list and explain the refusal; background reads retry on the next
-invalidation/reconnect or the overlay's Retry button.
+invalidation/reconnect or the rail's Retry button.
 
 The shared store reads one complete room list; it does not seed from message
 payloads. Epochs clear room/account state immediately and reject late answers.
@@ -149,23 +146,23 @@ Live checks for the reviewer; shell, SSR and handler tests do not perform them:
 
 1. On desktop and web, pin/unpin from context menus. Check menu order, bottom-edge
    clipping, signed-out/local/unsent action hiding, and markers in timeline/thread.
-2. Open Pinned (4) with pointer and keyboard. Verify escaped snippet, attribution,
-   newest-first order, bounded scrolling, arrow/Enter behavior, Escape/Tab focus
-   restoration, outside press into the composer without stolen focus, and no
-   animation or timeline shift when opening.
+2. Use the edge markers with pointer and keyboard. Verify escaped previews,
+   attribution, newest-first order, bounded scrolling, arrow/Enter behavior,
+   Escape dismissal, normal Tab navigation, and no timeline shift.
 3. Reveal recent, older and thread-reply entries; verify highlight and the shared
    history/thread path. A target beyond the existing bound shows its usual notice.
 4. With two clients, add/remove pins and reconnect one. Changes arrive without
    a chat message, receipt, push or agent wake. Switch accounts/rooms during a
    delayed request and verify old pins do not appear.
-5. Remove all pins: no row remains. Exercise 0→1→0 while at the bottom and while
-   scrolled up. Verify bottom attachment and reading position respectively.
+5. Remove all pins: no markers remain. Exercise 0→1→0 while at the bottom and
+   while scrolled up. Hide/show the markers in Settings, reload, and verify the
+   saved preference and unchanged pin membership and reading position.
 6. Fill 50 pins, attempt a 51st, and check the clear refusal. Repeating a pin
    retains its attribution. Remove a pin and retry. Simulate an offline write
    and verify the prior membership remains. Desktop errors must contain no IPC
    wrapper; the 50-pin notice must match the documented text.
 7. Switch through board, activity and other tabs: their layout must be unchanged
-   by the chat-only pin row. Check the opaque panel, SVG pins, hover, active and
+   by the chat-only markers. Check the opaque preview, hover, active and
    keyboard focus states in light and dark themes.
 
 Server suites are explicitly registered in CI. Automated proof also includes
