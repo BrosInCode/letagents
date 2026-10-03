@@ -21,7 +21,7 @@
           <span>Drop files to attach</span>
         </div>
 
-        <PinnedMessages :pins="messagePins.state.value.pins" :loading="messagePins.state.value.loading"
+        <PinnedMessages :key="roomIdentifier ?? ''" :pins="messagePins.state.value.pins" :loading="messagePins.state.value.loading"
           :error="messagePins.state.value.error" @refresh="messagePins.refresh" @reveal="jumpToMessage" />
         <RoomMessageViewport
           ref="messageViewport"

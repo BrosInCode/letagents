@@ -73,6 +73,7 @@
   height: 100%;
   overflow-y: auto;
   padding: 18px var(--room-chat-side-gutter) 24px;
+  padding-left: max(44px, var(--room-chat-side-gutter));
   scroll-behavior: smooth;
 }
 

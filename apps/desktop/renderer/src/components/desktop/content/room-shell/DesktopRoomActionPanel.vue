@@ -50,6 +50,16 @@
       <section class="room-settings-section" data-section="general" aria-labelledby="room-settings-heading-general">
         <h3 id="room-settings-heading-general">General</h3>
         <div class="room-settings-list">
+          <div class="room-settings-row" data-inline="true" data-testid="desktop-room-hide-pins">
+            <div class="room-settings-row-copy">
+              <p id="room-settings-pins-title" class="room-settings-row-title">Hide pinned messages</p>
+              <p id="room-settings-pins-description" class="room-settings-row-description">Hide the edge markers in all rooms on this device. Your messages stay pinned.</p>
+            </div>
+            <div class="room-settings-row-action">
+              <DesktopSwitch labelledby="room-settings-pins-title" describedby="room-settings-pins-description"
+                :checked="pinnedMessagesHidden" @toggle="togglePinnedMessages" />
+            </div>
+          </div>
           <form class="room-settings-row" data-testid="desktop-room-rename-card" @submit.prevent="submitRename">
             <div class="room-settings-row-copy">
               <label class="room-settings-row-title" for="room-settings-name">Name</label>
@@ -355,6 +365,7 @@ import RoomConversationRouting from "./RoomConversationRouting.vue";
 import RoomGitHubEventFilter from "./RoomGitHubEventFilter.vue";
 import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
+import { usePinnedMessageVisibility } from "../../../../../../../../shared/ui/usePinnedMessageVisibility";
 import { useSectionScrollSpy } from "./useSectionScrollSpy";
 import type {
   DesktopGitHubIntegrationStatus,
@@ -402,6 +413,7 @@ const emit = defineEmits<{
   close: [];
 }>();
 
+const { pinnedMessagesHidden, togglePinnedMessages } = usePinnedMessageVisibility();
 const renameDraft = ref(props.room.displayName);
 const renameSaved = ref(false);
 const routingSummary = ref<string | null>(null);
