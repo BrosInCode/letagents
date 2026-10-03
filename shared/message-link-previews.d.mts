@@ -5,6 +5,7 @@ export interface GitHubLinkReference extends LinkPreviewReference { repository: 
 export interface MessageLinkPreview extends GitHubLinkReference { title: string; state: "merged" | "closed" | "draft" | "open" }
 export interface MessageLinkPreviewsResponse { room_id: string; previews: MessageLinkPreview[]; available?: boolean }
 export function parseGitHubLinkReference(value: unknown): GitHubLinkReference | null;
+export function excludeGitHubEventLink(urls: readonly string[], eventUrl: string | null | undefined): string[];
 export function normalizePreviewRepository(value: unknown): string | null;
 export function linkPreviewKey(reference: LinkPreviewReference): string;
 export function parseLinkPreviewReferences(value: unknown): LinkPreviewReference[] | null;
