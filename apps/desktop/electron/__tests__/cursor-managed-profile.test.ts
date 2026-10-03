@@ -303,6 +303,43 @@ test("supervised Cursor write profiles admit only the selected workspace and pro
   }
 });
 
+test("Full access preserves host Git configuration and gh discovery without copying credentials", () => {
+  const sourceHomeDir = join(tempDir, "full-access-git-home");
+  const workspaceRoot = join(tempDir, "full-access-git-workspace");
+  const sourceConfigDir = join(tempDir, "full-access-owner-xdg");
+  mkdirSync(sourceHomeDir, { recursive: true });
+  mkdirSync(workspaceRoot, { recursive: true });
+  mkdirSync(join(sourceConfigDir, "git"), { recursive: true });
+  writeFileSync(join(sourceConfigDir, "git", "config"), "[user]\nname = XDG Name\n[credential]\nhelper = fixture-helper\n");
+  writeFileSync(join(sourceHomeDir, ".gitconfig"), "[user]\nname = Home Name\nemail = owner@example.test\n");
+  const previousXdg = process.env.XDG_CONFIG_HOME;
+  const previousGh = process.env.GH_CONFIG_DIR;
+  process.env.XDG_CONFIG_HOME = sourceConfigDir;
+  delete process.env.GH_CONFIG_DIR;
+  try {
+    const options = {
+      workAttemptId: "full-access-git-config", apiBaseUrl: "https://desktop.letagents.example",
+      workspaceRoot, sourceHomeDir, profileRoot: join(tempDir, "full-access-git-profile"), includeAuth: false,
+    };
+    const profile = prepareCursorSupervisedProfile({ ...options, permissionProfileId: "full_access" });
+    const gitEnv = { ...process.env, ...profile.env, GIT_CONFIG_GLOBAL: undefined, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_COUNT: "0" };
+    const get = (key: string) => spawnSync("git", ["config", "--get", key], { cwd: workspaceRoot, env: gitEnv, encoding: "utf8" });
+    assert.equal(get("user.name").stdout.trim(), "Home Name", "home config overrides XDG config");
+    assert.equal(get("credential.helper").stdout.trim(), "fixture-helper", "XDG credential helper remains discoverable");
+    assert.equal(profile.env.GH_CONFIG_DIR, join(sourceConfigDir, "gh"));
+    const config = readFileSync(join(profile.homeDir, ".gitconfig"), "utf8");
+    assert.doesNotMatch(config, /owner@example|fixture-helper/, "the profile includes source paths instead of copying settings");
+    writeFileSync(join(sourceHomeDir, ".gitconfig"), "[user]\nname = Updated Name\n");
+    assert.equal(get("user.name").stdout.trim(), "Updated Name", "host changes remain visible");
+    const restricted = prepareCursorSupervisedProfile({ ...options, permissionProfileId: "sandboxed_write" });
+    assert.equal(existsSync(join(restricted.homeDir, ".gitconfig")), false, "resealing a restricted profile removes host includes");
+    assert.equal(restricted.env.GH_CONFIG_DIR, undefined);
+  } finally {
+    if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previousXdg;
+    if (previousGh === undefined) delete process.env.GH_CONFIG_DIR; else process.env.GH_CONFIG_DIR = previousGh;
+  }
+});
+
 test("a non-authoritative supervised inspection profile contains no Cursor login material", () => {
   const sourceHome = join(tempDir, "source-home-supervised-inspection");
   mkdirSync(join(sourceHome, ".cursor"), { recursive: true });

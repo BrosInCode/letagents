@@ -5503,7 +5503,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("the real supervised boundary starts without inventorying pre-existing project files", {
+test("the real supervised boundary distinguishes Full access from restricted profiles", {
   skip: process.platform !== "darwin",
 }, async () => {
   for (const [permissionProfileId, sandbox, workspaceWritable] of [
@@ -5512,6 +5512,9 @@ test("the real supervised boundary starts without inventorying pre-existing proj
     ["full_access", "disabled", true],
   ] as const) {
     const root = mkdtempSync(join(tmpdir(), `letagents-cursor-${permissionProfileId}-boundary-`));
+    const networkServer = createHttpServer((_request, response) => response.end("reachable"));
+    await new Promise<void>((resolve) => networkServer.listen(0, "127.0.0.1", resolve));
+    const networkPort = (networkServer.address() as { port: number }).port;
     try {
       const workspace = join(root, "workspace");
       const sourceHomeDir = join(root, "source-home");
@@ -5524,10 +5527,13 @@ test("the real supervised boundary starts without inventorying pre-existing proj
       const preexistingWorkspaceAlias = join(workspace, "preexisting-outside-alias.txt");
       const cursorAuthority = join(workspace, ".cursor", "mcp.json");
       const executable = join(root, "fake-cursor-agent");
+      const remote = join(root, "remote.git");
+      assert.equal(spawnSync("git", ["init", "--bare", "--quiet", remote]).status, 0);
       initializeGitWorkspace(workspace);
       mkdirSync(dirname(cursorAuthority), { recursive: true });
       writeFileSync(join(workspace, ".cursor", ".keep"), "");
       mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+      writeFileSync(join(sourceHomeDir, ".gitconfig"), "[user]\nname = Cursor Test\nemail = cursor@example.test\n");
       writeFileSync(workspaceHardlinkSource, "inside-original\n");
       writeFileSync(preexistingOutsideTarget, "preexisting-outside\n");
       linkSync(preexistingOutsideTarget, preexistingWorkspaceAlias);
@@ -5556,9 +5562,24 @@ const outcome = {
   hardlinkCreate: link(path.join(workspace, "hardlink-source.txt"), path.join(workspace, "hardlink-escape.txt")),
   authority: write(path.join(workspace, ".cursor", "mcp.json")),
 };
+if (${permissionProfileId === "full_access"}) {
+  const git = (...args) => require("node:child_process").spawnSync("git", ["-C", workspace, ...args]).status;
+  outcome.add = git("add", "agent-change.txt");
+  outcome.commit = git("commit", "--quiet", "-m", "full access change");
+  outcome.push = git("push", ${JSON.stringify(remote)}, "HEAD:refs/heads/full-access");
+}
+const request = require("node:http").get("http://127.0.0.1:${networkPort}", response => {
+  response.resume();
+  response.on("end", () => finish("allowed"));
+});
+request.on("error", () => finish("blocked"));
+request.setTimeout(2000, () => request.destroy());
+function finish(network) {
+outcome.network = network;
 ${cursorConversationStoreFixtureSource("sess-write-boundary")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-write-boundary" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-write-boundary" }) + "\\n");
+}
 `);
       chmodSync(executable, 0o700);
       let launchArgs: string[] = [];
@@ -5599,19 +5620,26 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       })));
       assert.deepEqual(JSON.parse(result.text!), {
         workspace: workspaceWritable ? "allowed" : "blocked",
-        outside: "blocked",
-        hardlinkCreate: "blocked",
-        authority: "blocked",
+        outside: permissionProfileId === "full_access" ? "allowed" : "blocked",
+        hardlinkCreate: permissionProfileId === "full_access" ? "allowed" : "blocked",
+        authority: permissionProfileId === "full_access" ? "allowed" : "blocked",
+        network: permissionProfileId === "full_access" ? "allowed" : "blocked",
+        ...(permissionProfileId === "full_access" ? { add: 0, commit: 0, push: 0 } : {}),
       });
       assert.equal(launchArgs.includes("--force"), permissionProfileId !== "read_only");
       assert.equal(argValue(launchArgs, "--sandbox"), sandbox);
       assert.equal(existsSync(workspaceFile), workspaceWritable);
-      assert.equal(existsSync(outsideFile), false);
+      assert.equal(existsSync(outsideFile), permissionProfileId === "full_access");
       assert.equal(existsSync(join(root, "symlink-escape.txt")), false);
       assert.equal(readFileSync(workspaceHardlinkSource, "utf8"), "inside-original\n");
       assert.equal(readFileSync(preexistingOutsideTarget, "utf8"), "preexisting-outside\n");
-      assert.equal(existsSync(cursorAuthority), false);
+      assert.equal(existsSync(cursorAuthority), permissionProfileId === "full_access");
+      if (permissionProfileId === "full_access") {
+        assert.equal(spawnSync("git", ["-C", workspace, "log", "-1", "--format=%s"], { encoding: "utf8" }).stdout.trim(), "full access change");
+        assert.equal(spawnSync("git", ["--git-dir", remote, "show", "full-access:agent-change.txt"], { encoding: "utf8" }).stdout, "changed\n");
+      }
     } finally {
+      await new Promise<void>((resolve, reject) => networkServer.close(error => error ? reject(error) : resolve()));
       rmSync(root, { recursive: true, force: true });
     }
   }
@@ -6940,6 +6968,9 @@ test("daemon Cursor restart-resume preserves exact write authority and sandbox f
     assert.equal(launch.args.includes("--force"), true);
     assert.equal(argValue(launch.args, "--sandbox"), sandbox);
     assert.equal(launch.mcpRuntimeEnv?.LETAGENTS_PERMISSION_PROFILE_ID, permissionProfileId);
+    assert.equal(launch.fullAccess === true, permissionProfileId === "full_access");
+    if (permissionProfileId === "full_access") assert.equal(argValue(launch.args, "--workspace"), request.cwd);
+    assert.equal(Boolean(launch.workspaceGenerationManifestPath), permissionProfileId !== "full_access");
     assert.equal(harness.profilePreparations.at(-1)?.permissionProfileId, permissionProfileId);
 
     harness.children[0]!.emit({
@@ -7023,8 +7054,9 @@ test("daemon Cursor rejects missing supervisor coordinates and preserves selecte
     assert.equal(argValue(harness.launches[0]!.args, "--sandbox"), sandbox);
     assert.match(harness.launches[0]!.args.at(-1) ?? "", /You may edit files and run local commands/);
     if (permissionProfileId === "full_access") {
-      assert.match(harness.launches[0]!.args.at(-1) ?? "", /Keep all local changes inside the selected repository\/workspace/);
-      assert.doesNotMatch(harness.launches[0]!.args.at(-1) ?? "", /broader local changes/);
+      assert.match(harness.launches[0]!.args.at(-1) ?? "", /filesystem and network operations outside the working directory/);
+      assert.match(harness.launches[0]!.args.at(-1) ?? "", /create commits, push branches, and open pull requests/);
+      assert.doesNotMatch(harness.launches[0]!.args.at(-1) ?? "", /Do not create commits/);
     }
     for (let index = 0; index < 100 && !harness.children[0]?.isReleased; index += 1) await flush();
     assert.equal(harness.children[0]?.isReleased, true);

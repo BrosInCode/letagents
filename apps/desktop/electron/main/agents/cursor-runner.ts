@@ -199,6 +199,45 @@ export function buildCursorChildEnv(
   return env;
 }
 
+export function cursorDaemonChildEnv(
+  profileEnv: Record<string, string>, commitEnvironment: Record<string, string> = {},
+  fullAccess = false,
+): NodeJS.ProcessEnv {
+  // Supervised children get the Cursor runtime allowlist plus the commit identity;
+  // Electron often carries unrelated GitHub/cloud/npm/database credentials.
+  const env = buildCursorChildEnv(profileEnv);
+  if (fullAccess) {
+    // Preserve existing Git/gh authentication without importing the owner's
+    // Cursor configuration or the daemon's room credentials into the profile.
+    for (const [key, value] of Object.entries({ ...desktopRuntimeEnvironment(), ...profileEnv })) {
+      if (key.startsWith("GIT_") || [
+        "GH_CONFIG_DIR", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "SSH_AUTH_SOCK",
+      ].includes(key)) env[key] = value;
+    }
+  }
+  // A bounded provider turn borrows only the daemon's exact-generation tool
+  // authority. Ambient desktop owner/fixed-worker credentials and stale
+  // supervisor coordinates must never leak into the Cursor child or its MCPs.
+  for (const key of Object.keys(env)) {
+    const normalizedKey = key.toUpperCase();
+    if (normalizedKey === "LETAGENTS_TOKEN"
+      || normalizedKey === "LETAGENTS_AGENT_SESSION_BEARER"
+      || normalizedKey === "CURSOR_API_KEY"
+      || normalizedKey === "CURSOR_AUTH_TOKEN"
+      || normalizedKey === "NODE_EXTRA_CA_CERTS"
+      || normalizedKey === "SSL_CERT_DIR"
+      || normalizedKey === "SSL_CERT_FILE"
+      || normalizedKey.startsWith("LETAGENTS_SUPERVISOR_")
+      || normalizedKey === "LETAGENTS_SUPERVISED_BOUNDED_TURNS"
+      || normalizedKey === "LETAGENTS_EXECUTION_PROFILE"
+      || normalizedKey === "LETAGENTS_PERMISSION_PROFILE_ID") {
+      delete env[key];
+    }
+  }
+  return { ...env, ...commitEnvironment };
+}
+
 const CURSOR_CHILD_ENV_ALLOWLIST = new Set([
   "COMSPEC",
   "CURSOR_API_KEY",

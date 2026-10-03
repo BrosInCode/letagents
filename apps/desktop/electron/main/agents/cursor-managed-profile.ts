@@ -85,7 +85,7 @@ export interface CursorSupervisedProfileOptions {
   workspaceRoot: string;
   /** Exact scratch workspaces must never inherit an ancestor repository boundary. */
   exactWorkspaceOnly?: boolean;
-  /** Attested native authority; write profiles remain confined to this workspace. */
+  /** Attested native authority; only sandboxed_write remains confined to this workspace. */
   permissionProfileId?: DesktopManagedAgentPermissionProfileId;
   sourceHomeDir?: string | null;
   /** Auth-only source refreshed by a just-completed live identity attestation. */
@@ -443,6 +443,19 @@ export function prepareCursorSupervisedProfile(
       bridgeCacheDir,
     ]),
   ]);
+  // Full access keeps Cursor's private HOME, but ordinary Git commands must
+  // still discover the owner's identity, signing and credential helpers. Use
+  // includes rather than copying credentials, in Git's normal precedence order.
+  const gitConfigPath = join(homeDir, ".gitconfig");
+  const sourceConfigDir = process.env.XDG_CONFIG_HOME || join(sourceHomeDir, ".config");
+  if (permissionProfileId === "full_access") {
+    writePrivateFileAtomic(gitConfigPath, [
+      join(sourceConfigDir, "git", "config"),
+      join(sourceHomeDir, ".gitconfig"),
+    ].map(path => `[include]\n\tpath = ${JSON.stringify(path)}\n`).join(""));
+  } else {
+    removePrivateProfileAuthorityEntry(gitConfigPath);
+  }
   // Cursor persists MCP approvals outside both mcp.json and cli-config.json.
   // An approval written by an older CLI launch would otherwise survive our
   // per-turn reseal and silently start a workspace server before any tool is
@@ -691,6 +704,9 @@ export function prepareCursorSupervisedProfile(
       CURSOR_DATA_DIR: join(dataDir, "cursor"),
       NODE_COMPILE_CACHE: join(cacheDir, "node-compile-cache"),
       TMPDIR: tempDir,
+      ...(permissionProfileId === "full_access" ? {
+        GH_CONFIG_DIR: process.env.GH_CONFIG_DIR || join(sourceConfigDir, "gh"),
+      } : {}),
     },
     mcpServerName,
     authReadRoots,

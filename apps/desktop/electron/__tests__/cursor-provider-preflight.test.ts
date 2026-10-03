@@ -241,7 +241,7 @@ test("Cursor supervised preflight preserves explicit read-only and full-access c
   setFakeCursorMcpMode("ready");
   for (const [name, permissionProfileId, label] of [
     ["supervised-explicit-read-only", "read_only", "Read-only"],
-    ["supervised-explicit-full-access", "full_access", "Workspace writes (compatibility)"],
+    ["supervised-explicit-full-access", "full_access", "Full access"],
   ] as const) {
     const workspace = workspaceFixture(name);
     const result = await runPreflight({
@@ -256,7 +256,7 @@ test("Cursor supervised preflight preserves explicit read-only and full-access c
   setFakeCursorMcpMode(null);
 });
 
-test("Cursor supervised preflight gates writable generations without gating read-only", async () => {
+test("Cursor supervised preflight gates writable generations without gating read-only or Full access", async () => {
   const workspace = workspaceFixture("supervised-generation-gate");
   let checks = 0;
   const unsupported: NonNullable<DesktopCursorPreflightOptions["workspaceGenerationSupportChecker"]> = async () => {
@@ -282,7 +282,14 @@ test("Cursor supervised preflight gates writable generations without gating read
     }, unsupported);
     assert.equal(readOnly.status, "ready");
     assert.equal(readOnly.canStart, true);
-    assert.equal(checks, 1, "read-only never needs a writable generation");
+    const fullAccess = await runPreflight({
+      repoRootPath: workspace,
+      launchMode: "supervised",
+      permissionProfileId: "full_access",
+    }, unsupported);
+    assert.equal(fullAccess.status, "ready");
+    assert.equal(fullAccess.canStart, true);
+    assert.equal(checks, 1, "only Workspace writes needs a writable generation");
   } finally {
     setFakeCursorMcpMode(null);
   }
@@ -355,7 +362,7 @@ test("Cursor supervised preflight does not traverse project files before launch"
 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
-  assert.equal(result.message, "Cursor Agent is ready to start supervised with Workspace writes (compatibility).");
+  assert.equal(result.message, "Cursor Agent is ready to start supervised with Full access.");
 });
 
 test("Cursor supervised preflight fails closed when the bridge is not visible", async () => {
