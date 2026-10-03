@@ -162,7 +162,7 @@ type CursorStreamMessage = Record<string, unknown> & {
 };
 
 export interface CursorProviderAdapterDependencies {
-  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; workspaceGenerationManifestPath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; allowedInternalUnixSocketRoots?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; nativeResumeSessionId?: string; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testMcpCapabilityTimeoutMs?: number; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
+  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; workspaceGenerationManifestPath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; allowedInternalUnixSocketRoots?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; fullAccess?: boolean; nativeResumeSessionId?: string; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testMcpCapabilityTimeoutMs?: number; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
   attestSupervisedMcp(input: {
     cursorBin: string;
     cwd: string;
@@ -337,10 +337,21 @@ export function cursorLaunchPolicyArgs(value: unknown): string[] {
 
 export function cursorDaemonChildEnv(
   profileEnv: Record<string, string>, commitEnvironment: Record<string, string> = {},
+  fullAccess = false,
 ): NodeJS.ProcessEnv {
   // Supervised children get the Cursor runtime allowlist plus the commit identity;
   // Electron often carries unrelated GitHub/cloud/npm/database credentials.
   const env = buildCursorChildEnv(profileEnv);
+  if (fullAccess) {
+    // Preserve existing Git/gh authentication without importing the owner's
+    // Cursor configuration or the daemon's room credentials into the profile.
+    for (const [key, value] of Object.entries({ ...desktopRuntimeEnvironment(), ...profileEnv })) {
+      if (key.startsWith("GIT_") || [
+        "GH_CONFIG_DIR", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "SSH_AUTH_SOCK",
+      ].includes(key)) env[key] = value;
+    }
+  }
   // A bounded provider turn borrows only the daemon's exact-generation tool
   // authority. Ambient desktop owner/fixed-worker credentials and stale
   // supervisor coordinates must never leak into the Cursor child or its MCPs.
@@ -1882,7 +1893,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
             mcpConnectorSocketPath,
           });
           this.deps.bindPersonalIdentity(profile, personalIdentity);
-          childEnv = cursorDaemonChildEnv(profile.env, await managedCommitEnvironmentFor(handle.spawnRequest));
+          childEnv = cursorDaemonChildEnv(
+            profile.env,
+            await managedCommitEnvironmentFor(handle.spawnRequest),
+            handle.spawnRequest.permissionProfileId === "full_access",
+          );
           const toolchainPath = cursorSandboxToolchainBinPaths();
           if (toolchainPath.length > 0) {
             // Apple's /usr/bin compiler drivers are xcrun shims, which require
@@ -1986,12 +2001,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
         // load an MCP server. Without it the sealed HOME letagents MCP never
         // loads, so complete_room_turn is never exposed and the turn can never
         // attest (its "did not attest ... before model authority" timeout). This
-        // is scoped, not blanket: the sealed profile is the sole MCP surface --
-        // the HOME profile mcp.json holds only the letagents server, and every
-        // workspace .cursor/mcp.json is denied-read by the native sandbox (see
+        // Restricted profiles keep the sealed HOME as the sole MCP surface:
+        // its mcp.json holds only the letagents server, and the outer sandbox
+        // denies reads of workspace .cursor/mcp.json (see
         // SUPERVISED_CURSOR_PROJECT_HIDDEN_AUTHORITY_FILES -> nativeDeniedReadPaths),
         // so a checked-in or concurrently-added project server cannot be read,
-        // let alone approved. --approve-mcps therefore approves exactly one MCP.
+        // let alone approved. Full access intentionally removes that boundary.
         ...(handle.deliveryMode === "daemon_inbox" ? ["--approve-mcps"] : []),
         "--trust",
         // Read-only has no native sandbox field in its durable policy, so add
@@ -2023,10 +2038,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
         // Start inside the sealed private profile so no ambient launch cwd can
         // contribute config before Cursor resolves --workspace. Cursor later
         // changes into that workspace and can discover a concurrently-added
-        // project MCP; the unpredictable bridge alias, approval-state purge, and
-        // the native sandbox denying every workspace .cursor/mcp.json read keep
+        // project MCP; restricted profiles use the unpredictable bridge alias,
+        // approval-state purge, and sandbox denial of workspace .cursor/mcp.json to keep
         // such a late server unreadable, so --approve-mcps (above) can only ever
-        // approve the sealed HOME letagents server.
+        // approve the sealed HOME letagents server. Full access permits host
+        // configuration reads and does not claim this isolation guarantee.
         cwd: handle.deliveryMode === "daemon_inbox" && handle.supervisedProfile
           ? dirname(handle.supervisedProfile.homeDir)
           : handle.cwd,

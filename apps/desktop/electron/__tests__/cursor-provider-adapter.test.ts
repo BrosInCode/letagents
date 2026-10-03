@@ -5533,6 +5533,7 @@ test("the real supervised boundary distinguishes Full access from restricted pro
       mkdirSync(dirname(cursorAuthority), { recursive: true });
       writeFileSync(join(workspace, ".cursor", ".keep"), "");
       mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+      writeFileSync(join(sourceHomeDir, ".gitconfig"), "[user]\nname = Cursor Test\nemail = cursor@example.test\n");
       writeFileSync(workspaceHardlinkSource, "inside-original\n");
       writeFileSync(preexistingOutsideTarget, "preexisting-outside\n");
       linkSync(preexistingOutsideTarget, preexistingWorkspaceAlias);
@@ -5564,7 +5565,7 @@ const outcome = {
 if (${permissionProfileId === "full_access"}) {
   const git = (...args) => require("node:child_process").spawnSync("git", ["-C", workspace, ...args]).status;
   outcome.add = git("add", "agent-change.txt");
-  outcome.commit = git("-c", "user.name=Cursor Test", "-c", "user.email=cursor@example.test", "commit", "--quiet", "-m", "full access change");
+  outcome.commit = git("commit", "--quiet", "-m", "full access change");
   outcome.push = git("push", ${JSON.stringify(remote)}, "HEAD:refs/heads/full-access");
 }
 const request = require("node:http").get("http://127.0.0.1:${networkPort}", response => {
