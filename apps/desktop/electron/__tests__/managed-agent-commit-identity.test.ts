@@ -270,6 +270,21 @@ test("each provider's environment builder carries the identity it is given", () 
   assert.equal(cursor.HOME, "/profile/home");
   assert.equal(cursor.LETAGENTS_TOKEN, undefined);
   assert.equal(cursorDaemonChildEnv({ HOME: "/profile/home" }).GIT_AUTHOR_EMAIL, undefined, "identity probes get none");
+
+  const gitAuth = {
+    HOME: "/profile/home", GH_CONFIG_DIR: "/owner/gh", GH_TOKEN: "fake-gh-token",
+    SSH_AUTH_SOCK: "/owner/ssh.sock", GIT_CONFIG_GLOBAL: "/owner/custom.gitconfig",
+    LETAGENTS_TOKEN: "owner-secret-fake", CURSOR_API_KEY: "fake-cursor-key",
+  };
+  const fullAccess = cursorDaemonChildEnv(gitAuth, FAKE_GIT_ENV, true);
+  for (const key of ["GH_CONFIG_DIR", "GH_TOKEN", "SSH_AUTH_SOCK", "GIT_CONFIG_GLOBAL"] as const) {
+    assert.equal(fullAccess[key], gitAuth[key]);
+    assert.equal(cursorDaemonChildEnv(gitAuth)[key], undefined, `restricted Cursor omits ${key}`);
+  }
+  assert.equal(fullAccess.LETAGENTS_TOKEN, undefined);
+  assert.equal(fullAccess.CURSOR_API_KEY, undefined);
+  assert.equal(fullAccess.HOME, "/profile/home");
+  assert.equal(fullAccess.GIT_AUTHOR_EMAIL, FAKE_IDENTITY.email);
 });
 
 /** Point the daemon's own environment at a scratch home and identity file for one test. */
