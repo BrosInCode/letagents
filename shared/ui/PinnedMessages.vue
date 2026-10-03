@@ -1,124 +1,159 @@
 <template>
-  <div v-if="pins.length" class="message-pins-row">
-    <button ref="trigger" type="button" class="message-pins-trigger" aria-haspopup="dialog"
-      :aria-expanded="open" @click="toggle">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" />
-      </svg>
-      Pinned ({{ pins.length }})
+  <nav v-if="pins.length && !pinnedMessagesHidden" ref="rail" class="message-pin-rail" aria-label="Pinned messages"
+    @keydown="onKeydown" @pointerleave="scheduleClose" @scroll.passive="onRailScroll">
+    <button v-for="(pin, index) in pins" :key="pin.message_id" type="button" class="message-pin-tick"
+      data-pin-entry :data-pinned-message-id="pin.message_id" :tabindex="index === active ? 0 : -1"
+      :aria-label="`Pinned message from ${senderLabel(pin.sender)}: ${previewText(pin.snippet)}`"
+      :aria-describedby="previewId === pin.message_id ? tooltipId : undefined"
+      :aria-current="selectedId === pin.message_id ? 'location' : undefined"
+      :data-active="previewId === pin.message_id || selectedId === pin.message_id"
+      @pointerenter="showPreview(pin.message_id, $event)" @focus="active = index; showPreview(pin.message_id, $event)"
+      @blur="closePreview" @click="choose(pin.message_id)">
+      <span aria-hidden="true" />
     </button>
+    <button v-if="error" type="button" class="message-pin-retry" :aria-label="`${error} Retry loading pinned messages`"
+      @click="$emit('refresh')">Retry</button>
     <Teleport to="body">
-      <section v-if="open" ref="panel" class="message-pins-panel" role="dialog" aria-label="Pinned messages"
-        :style="position" @keydown="onKeydown">
+      <aside v-if="preview" :id="tooltipId" ref="panel" class="message-pin-preview" role="tooltip"
+        :style="position" @pointerenter="cancelClose" @pointerleave="scheduleClose">
+        <div class="message-pin-byline"><strong>{{ senderLabel(preview.sender) }}</strong><time :datetime="preview.timestamp">{{ timeLabel(preview.timestamp) }}</time></div>
+        <p class="message-pin-snippet">{{ previewText(preview.snippet) }}</p>
+        <span class="message-pin-attribution">Pinned by {{ preview.pinned_by.name }}</span>
+        <span class="message-pin-hint">Click the marker to jump to this message</span>
         <p v-if="loading" role="status">Updating pins…</p>
-        <p v-if="error" role="alert">{{ error }} <button type="button" @click="$emit('refresh')">Retry</button></p>
-        <ol aria-label="Pinned messages">
-          <li v-for="(pin, index) in pins" :key="pin.message_id">
-            <button type="button" data-pin-entry :tabindex="index === active ? 0 : -1"
-              @focus="active = index" @click="choose(pin.message_id)">
-              <span class="message-pin-byline"><strong>{{ pin.sender }}</strong> <time :datetime="pin.timestamp">{{ timeLabel(pin.timestamp) }}</time></span>
-              <span class="message-pin-snippet">{{ pin.snippet || 'Message without text' }}</span>
-              <span class="message-pin-attribution">Pinned by {{ pin.pinned_by.name }}</span>
-            </button>
-          </li>
-        </ol>
-      </section>
+        <p v-if="error" role="alert">{{ error }}</p>
+      </aside>
     </Teleport>
-  </div>
+  </nav>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from "vue";
 import type { MessagePin } from "../message-pins.mjs";
+import { usePinnedMessageVisibility } from "./usePinnedMessageVisibility";
 
 const props = defineProps<{ pins: readonly MessagePin[]; loading?: boolean; error?: string | null }>();
 const emit = defineEmits<{ reveal: [messageId: string]; refresh: [] }>();
-const trigger = ref<HTMLButtonElement | null>(null);
+const { pinnedMessagesHidden } = usePinnedMessageVisibility();
+const rail = ref<HTMLElement | null>(null);
 const panel = ref<HTMLElement | null>(null);
-const open = ref(false);
 const active = ref(0);
-const left = ref(8);
-const top = ref(8);
-const maxHeight = ref(360);
+const selectedId = ref<string | null>(null);
+const previewId = ref<string | null>(null);
+const preview = computed(() => props.pins.find(pin => pin.message_id === previewId.value));
+const tooltipId = `pin-preview-${useId()}`;
+const left = ref(8), top = ref(8), maxHeight = ref(360);
 const position = computed(() => ({ left: `${left.value}px`, top: `${top.value}px`, maxHeight: `${maxHeight.value}px` }));
+let anchor: HTMLElement | null = null;
+let closeTimer: ReturnType<typeof setTimeout> | undefined;
+
 function place(): void {
-  const bounds = trigger.value?.getBoundingClientRect();
+  const bounds = anchor?.getBoundingClientRect();
   if (!bounds) return;
-  left.value = Math.max(8, Math.min(bounds.left, window.innerWidth - Math.min(420, window.innerWidth - 16) - 8));
-  top.value = Math.min(bounds.bottom + 4, window.innerHeight - 80);
-  maxHeight.value = Math.max(64, Math.min(360, window.innerHeight - top.value - 8));
+  const width = Math.min(340, window.innerWidth - 16);
+  left.value = Math.max(8, Math.min(bounds.right + 8, window.innerWidth - width - 8));
+  const height = panel.value?.offsetHeight || 180;
+  top.value = Math.max(8, Math.min(bounds.top, window.innerHeight - height - 8));
+  maxHeight.value = Math.max(0, window.innerHeight - top.value - 8);
 }
-function focusEntry(): void {
-  panel.value?.querySelectorAll<HTMLButtonElement>("[data-pin-entry]")[active.value]?.focus();
-}
-async function toggle(): Promise<void> {
-  if (open.value) { close(); return; }
-  active.value = 0;
+function cancelClose(): void { clearTimeout(closeTimer); }
+async function showPreview(id: string, event: Event): Promise<void> {
+  cancelClose();
+  anchor = event.currentTarget as HTMLElement;
+  previewId.value = id;
   place();
-  open.value = true;
   await nextTick();
-  focusEntry();
+  place();
 }
-function close(restoreFocus = true): void {
-  open.value = false;
-  if (restoreFocus) trigger.value?.focus();
+function closePreview(): void { cancelClose(); previewId.value = null; anchor = null; }
+function onRailScroll(): void {
+  const bounds = anchor?.getBoundingClientRect();
+  const viewport = rail.value?.getBoundingClientRect();
+  if (anchor === document.activeElement && bounds && viewport && bounds.bottom > viewport.top && bounds.top < viewport.bottom) place();
+  else closePreview();
 }
-function choose(id: string): void { close(); emit("reveal", id); }
+function dismissOnEscape(event: KeyboardEvent): void {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  event.stopPropagation();
+  closePreview();
+}
+function scheduleClose(): void {
+  cancelClose();
+  closeTimer = setTimeout(() => {
+    if (!rail.value?.contains(document.activeElement) && !panel.value?.contains(document.activeElement)) closePreview();
+  }, 100);
+}
+function choose(id: string): void {
+  selectedId.value = id;
+  closePreview();
+  emit("reveal", id);
+}
 function onKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape" || event.key === "Tab") { event.preventDefault(); event.stopPropagation(); close(); return; }
-  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closePreview(); return; }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || !props.pins.length) return;
   event.preventDefault();
   active.value = event.key === "Home" ? 0 : event.key === "End" ? props.pins.length - 1
     : (active.value + (event.key === "ArrowDown" ? 1 : -1) + props.pins.length) % props.pins.length;
-  focusEntry();
+  rail.value?.querySelectorAll<HTMLButtonElement>("[data-pin-entry]")[active.value]?.focus();
 }
-function outside(event: PointerEvent): void {
-  const target = event.target as Node | null;
-  if (target && !trigger.value?.contains(target) && !panel.value?.contains(target)) { close(false); }
+function senderLabel(value: string): string { return value.split("|")[0].trim(); }
+function previewText(value: string): string {
+  return value.replace(/!?\[([^\]]*)\]\([^)]*(?:\)|$)/g, "$1").replace(/\*\*|__|~~|`+/g, "") || "Message without text";
 }
 function timeLabel(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
-watch(open, (value) => {
-  if (value) {
-    document.addEventListener("pointerdown", outside, true);
+watch(previewId, (id) => {
+  if (id) {
     window.addEventListener("resize", place);
-  } else cleanup();
-}, { flush: "sync" });
-watch(() => props.pins.length, (length) => {
-  if (!length) {
-    const region = trigger.value?.parentElement?.parentElement;
-    const focusWasInside = panel.value?.contains(document.activeElement) || document.activeElement === trigger.value;
-    close(false);
-    if (focusWasInside && region) {
-      region.tabIndex = -1;
-      void nextTick(() => region.focus({ preventScroll: true }));
-    }
+    document.addEventListener("keydown", dismissOnEscape, true);
+  } else {
+    window.removeEventListener("resize", place);
+    document.removeEventListener("keydown", dismissOnEscape, true);
   }
-  else active.value = Math.min(active.value, length - 1);
 });
-function cleanup(): void {
-  document.removeEventListener("pointerdown", outside, true);
+watch([() => props.pins.map(pin => pin.message_id), pinnedMessagesHidden], ([ids, hidden], [previousIds]) => {
+  const focusWasInside = rail.value?.contains(document.activeElement) || panel.value?.contains(document.activeElement);
+  const region = rail.value?.parentElement;
+  if (hidden || !ids.includes(previewId.value || "")) closePreview();
+  if (!ids.includes(selectedId.value || "")) selectedId.value = null;
+  const retainedIndex = ids.indexOf(previousIds[active.value]);
+  active.value = retainedIndex >= 0 ? retainedIndex : Math.min(active.value, Math.max(0, ids.length - 1));
+  if (focusWasInside) {
+    void nextTick(() => {
+      if (!hidden && ids.length) rail.value?.querySelectorAll<HTMLButtonElement>("[data-pin-entry]")[active.value]?.focus();
+      else if (region) { region.tabIndex = -1; region.focus({ preventScroll: true }); }
+    });
+  }
+});
+onBeforeUnmount(() => {
+  cancelClose();
   window.removeEventListener("resize", place);
-}
-onBeforeUnmount(cleanup);
+  document.removeEventListener("keydown", dismissOnEscape, true);
+});
 </script>
 
 <style>
-.message-pins-row { flex: 0 0 auto; position: relative; padding: 3px 12px; border-bottom: 1px solid var(--border); }
-.message-pins-trigger { display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 4px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer; padding: 4px; }
-.message-pins-panel { position: fixed; z-index: 1200; box-sizing: border-box; width: min(420px, calc(100vw - 16px)); overflow-y: auto; overscroll-behavior: contain; padding: 8px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-elevated); color: var(--text); box-shadow: var(--shadow-lg); font-family: var(--font-sans, inherit); font-size: 13px; }
-.message-pins-panel ol { list-style: none; margin: 0; padding: 0; }
-.message-pins-panel [data-pin-entry] { display: flex; flex-direction: column; gap: 4px; width: 100%; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; padding: 9px; cursor: pointer; }
-.message-pins-trigger:focus-visible, .message-pins-panel button:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.message-pin-rail { position: absolute; grid-area: 1 / 1 / 2 / 2; top: 12px; left: 4px; z-index: 4; display: flex; flex-direction: column; width: 32px; max-height: calc(100% - 24px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; }
+.message-pin-rail::-webkit-scrollbar { display: none; }
+.message-pin-tick { display: flex; align-items: center; flex: 0 0 24px; width: 32px; height: 24px; padding: 0 6px; border: 0; border-radius: 4px; background: transparent; color: var(--text-secondary); cursor: pointer; }
+.message-pin-tick > span { width: 12px; height: 2px; border-radius: 2px; background: currentColor; opacity: .55; }
+.message-pin-tick[data-active="true"] > span, .message-pin-tick:focus-visible > span { width: 20px; opacity: 1; }
+.message-pin-tick:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.message-pin-tick:active { background: var(--accent-active); }
+.message-pin-retry { flex: 0 0 auto; border: 0; padding: 8px 0; border-radius: 4px; background: var(--bg-elevated); color: var(--text); font: inherit; font-size: 10px; cursor: pointer; }
+.message-pin-retry:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 @media (hover: hover) and (pointer: fine) {
-  .message-pins-trigger:hover, .message-pins-panel [data-pin-entry]:hover { background: var(--accent-hover); color: var(--text); }
+  .message-pin-tick:hover > span { width: 20px; opacity: 1; }
 }
-.message-pins-trigger:active, .message-pins-panel [data-pin-entry]:active { background: var(--accent-active); color: var(--text); }
-.message-pin-byline { display: flex; flex-wrap: wrap; gap: 8px; }
-.message-pin-byline time, .message-pin-attribution { font-size: 11px; color: var(--text-secondary); }
-.message-pin-snippet { overflow-wrap: anywhere; white-space: pre-wrap; }
+@media (pointer: coarse) { .message-pin-tick { flex-basis: 44px; height: 44px; } }
+.message-pin-preview { position: fixed; z-index: 1200; box-sizing: border-box; width: min(340px, calc(100vw - 16px)); overflow-y: auto; overscroll-behavior: contain; padding: 14px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-elevated); color: var(--text); box-shadow: var(--shadow-lg); font-family: var(--font-sans, inherit); font-size: 13px; }
+.message-pin-byline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.message-pin-byline time, .message-pin-attribution, .message-pin-hint { font-size: 11px; color: var(--text-secondary); }
+.message-pin-snippet { margin: 10px 0; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.message-pin-hint { display: block; margin-top: 8px; }
 .message-pin-marker { display: inline-flex; vertical-align: middle; color: var(--text-secondary); margin-inline: 4px; }
-.message-pin-marker svg, .message-pins-trigger svg { display: block; width: 13px; height: 13px; flex: 0 0 auto; }
+.message-pin-marker svg { display: block; width: 13px; height: 13px; flex: 0 0 auto; }
 </style>

@@ -16,10 +16,17 @@
         Export
       </button>
     </div>
+    <label class="pinned-messages-setting">
+      <input type="checkbox" :checked="pinnedMessagesHidden" @change="togglePinnedMessages" />
+      <span>Hide pinned messages<small>Hide the edge markers on this device. Your messages stay pinned.</small></span>
+    </label>
   </div>
 </template>
 
 <script setup lang="ts">
+import { usePinnedMessageVisibility } from '../../../../../../shared/ui/usePinnedMessageVisibility'
+const { pinnedMessagesHidden, togglePinnedMessages } = usePinnedMessageVisibility()
+
 defineProps<{
   soundEnabled: boolean
   statusText: string
@@ -30,3 +37,8 @@ defineEmits<{
   toggleSound: []
 }>()
 </script>
+
+<style scoped>
+.pinned-messages-setting { display: flex; align-items: flex-start; gap: 8px; margin-top: 16px; font-size: 13px; cursor: pointer; }
+.pinned-messages-setting small { display: block; margin-top: 4px; color: var(--text-secondary); font-size: 11px; line-height: 1.4; }
+</style>
