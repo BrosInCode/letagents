@@ -7,6 +7,7 @@ import {
   bindingMatchesRoomAgentGeneration,
   hasExactRoomAgentDeliveryOwner,
   projectRoomAgentManifestEntry,
+  RECORD_RESTART_PENDING_DETAIL,
   type RoomAgentStateProjectionInput,
 } from "../room-agent-state-projection.js";
 import type { SupervisedInboxReceiptWithTimeline } from "../supervised-agent-inbox-store.js";
@@ -246,6 +247,41 @@ test("typed admission gates the room view without rewriting lifecycle or claimin
       entry: { ...recovering, desired_state }, lifecycleAdmission: "unavailable",
     }));
     assert.equal(inactive.condition, "none", "an inactive agent does not inherit a live admission blocker");
+  }
+});
+
+test("a record the daemon is about to get past by itself is progress; one it could not get past needs the owner, with the reason", () => {
+  const idle = { ...entry, observed_state: "idle" as const };
+  // No word on a restart: the long-standing blocker, as before.
+  const unexplained = projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission: "unavailable" }));
+  assert.equal(unexplained.condition, "coordination_blocked");
+  assert.match(unexplained.last_error ?? "", /readiness evidence is unavailable/);
+
+  const restarting = projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission: "unavailable", recordRecovery: null }));
+  assert.equal(restarting.condition, "none", "the daemon is going to restart the agent: nothing for the owner to do");
+  assert.equal(restarting.last_error ?? null, idle.last_error ?? null);
+  assert.equal(restarting.room_agent_state?.inbox.state, "queued", "its messages wait; they are not blocked");
+  assert.equal(restarting.room_agent_state?.connection.state, "reconnecting");
+  assert.equal(restarting.room_agent_state?.ingress.state, "starting");
+  assert.equal(restarting.room_agent_state?.inbox.detail, RECORD_RESTART_PENDING_DETAIL);
+  assert.equal(agentInspectorOverallState(mapEntry(restarting)), "reconnecting");
+  assert.equal(hasExactRoomAgentDeliveryOwner(facts({ entry: idle, lifecycleAdmission: "unavailable", recordRecovery: null })), false,
+    "delivery is still not admitted");
+
+  const reason = "Part of this agent's activity record is missing, and restarting the agent did not get past it. Messages wait until you use Restart and resume in Diagnostics.";
+  const waiting = projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission: "unavailable", recordRecovery: reason }));
+  assert.equal(waiting.condition, "coordination_blocked");
+  assert.equal(waiting.last_error, reason);
+  assert.equal(waiting.room_agent_state?.inbox.state, "blocked");
+  assert.equal(waiting.room_agent_state?.inbox.detail, reason);
+  assert.equal(agentInspectorOverallState(mapEntry(waiting)), "needs_attention");
+  const inspector = projectAgentInspector(mapEntry({ ...waiting, runtime_generation_id: "exact-runtime" }), { roomId: entry.room_id })!;
+  assert.equal(inspector.actions.find(action => action.kind === "recovery_options")?.available, true, "with the manual recovery actions");
+
+  // The word on a restart never overrides an admission that is not blocked.
+  for (const lifecycleAdmission of ["pending", "ready"] as const) {
+    assert.deepEqual(projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission, recordRecovery: reason })),
+      projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission })));
   }
 });
 

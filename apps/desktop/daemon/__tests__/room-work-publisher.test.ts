@@ -196,6 +196,180 @@ test("a failed delivery that capture never recorded is published as failed from 
   assert.equal(f.row(1).revision, 1);
 });
 
+for (const gap of ["with", "without"] as const) {
+  test(`a summary published as complete is published again as incomplete once the daemon carries on past a boundary, ${gap} a gap, although nothing new was recorded for it`, async t => {
+    const f = await fixture(t);
+    f.captureMessage();
+    f.operation(1);
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0]!.summary.evidence_incomplete, false, "what the room was first told");
+
+    // The runtime ends and the daemon archives it: its observer as it stands, a new epoch, its open turn lost.
+    if (gap === "with") f.db.exec("UPDATE execution_observers SET max_observed_sequence=last_source_sequence+5");
+    const archived = JSON.stringify(f.db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get());
+    f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('automatic-1','agent','room','generation','runtime','resume','complete','{}',?,'2026-08-31T00:00:02Z','2026-08-31T00:00:02Z')").run(archived);
+    f.db.exec(`UPDATE execution_observers SET observer_epoch=observer_epoch+1;
+      UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=200;
+      UPDATE execution_turns SET state='lost',ended_at_ms=200`);
+    f.capture.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
+      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 201 });
+    f.capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "next-runtime", observerRuntimeGenerationId: "next-runtime",
+      sourceId: "next-source", daemonGenerationId: "1", expectedEpoch: 2, boundAtMs: 201 });
+    f.publisher.changed("agent");
+    await f.publisher.flush();
+
+    assert.equal(f.summary().summary.evidence_incomplete, true, "the record itself says the message's activity is incomplete");
+    assert.equal(f.sent.length, 2, "and the room is told again");
+    assert.equal(f.sent[1]!.summary.evidence_incomplete, true);
+    assert.equal(f.row().summary?.evidence_incomplete, true, "what the room holds is what the record says");
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 2, "once");
+  });
+}
+
+test("a gap that opens in the current record publishes again a summary the room was told is complete", async t => {
+  const f = await fixture(t);
+  f.captureMessage();
+  f.operation(1);
+  await f.publisher.flush();
+  assert.equal(f.sent[0]!.summary.evidence_incomplete, false);
+  // A position is used up without a fact: nothing new is recorded for the message, and its record is no longer whole.
+  f.db.exec("UPDATE execution_observers SET max_observed_sequence=last_source_sequence+1");
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.equal(f.summary().summary.evidence_incomplete, true);
+  assert.equal(f.sent.length, 2, "the room is told again");
+  assert.equal(f.row().summary?.evidence_incomplete, true);
+});
+
+for (const gap of ["with", "without"] as const) {
+  test(`a second boundary, ${gap} a gap, publishes again a summary the room was told is complete`, async t => {
+    const f = await fixture(t);
+    // An earlier runtime of the agent was archived long ago; the observer has moved on from it.
+    f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('automatic-0','agent','room','generation','runtime-long-ago','resume','complete','{}',NULL,'2026-08-30T00:00:00Z','2026-08-30T00:00:00Z')").run();
+    f.captureMessage();
+    f.operation(1);
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 1);
+    assert.equal(f.sent[0]!.summary.evidence_incomplete, false, "the message's own runtime was whole");
+
+    // Now the message's own runtime is archived, and a successor starts a clean observer.
+    if (gap === "with") f.db.exec("UPDATE execution_observers SET max_observed_sequence=last_source_sequence+5");
+    const archived = JSON.stringify(f.db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get());
+    f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('automatic-1','agent','room','generation','runtime','resume','complete','{}',?,'2026-08-31T00:00:02Z','2026-08-31T00:00:02Z')").run(archived);
+    f.db.exec(`UPDATE execution_observers SET observer_epoch=observer_epoch+1;
+      UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=200;
+      UPDATE execution_turns SET state='lost',ended_at_ms=200`);
+    f.capture.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
+      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 201 });
+    f.capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "next-runtime", observerRuntimeGenerationId: "next-runtime",
+      sourceId: "next-source", daemonGenerationId: "1", expectedEpoch: 2, boundAtMs: 201 });
+    f.publisher.changed("agent");
+    await f.publisher.flush();
+
+    assert.equal(f.summary().summary.evidence_incomplete, true);
+    assert.equal(f.sent.length, 2, "the room is told again");
+    assert.equal(f.row().summary?.evidence_incomplete, true, "and holds what the record says");
+  });
+}
+
+test("a message recorded after an agent's first ten thousand facts is published: the publisher reads the newest of them", async t => {
+  const f = await fixture(t);
+  f.captureMessage(1);
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1);
+
+  // Weeks of work fill the record, and a recovery boundary lets the next runtime start a new window behind it.
+  f.db.exec(`WITH RECURSIVE positions(value) AS (SELECT 1000001 UNION ALL SELECT value+1 FROM positions WHERE value<1010000)
+    INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+      source_sequence,domain,kind,state,side_effects,observed_at_ms)
+    SELECT 'filler-'||value,'agent','generation','runtime',1,value,'control','state_changed','responsive','none',value FROM positions`);
+  const archived = JSON.stringify(f.db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get());
+  f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('automatic-1','agent','room','generation','runtime','resume','complete','{}',?,'2026-08-31T00:00:02Z','2026-08-31T00:00:02Z')").run(archived);
+  f.db.exec(`UPDATE execution_observers SET observer_epoch=observer_epoch+1;
+    UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',ended_at_ms=200;
+    UPDATE execution_turns SET state='lost',ended_at_ms=200 WHERE state IN ('none','active')`);
+  f.capture.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
+    provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 201 });
+  const next = f.capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "next-runtime", observerRuntimeGenerationId: "next-runtime",
+    sourceId: "next-source", daemonGenerationId: "1", expectedEpoch: 2, boundAtMs: 201 });
+
+  // The next message, on the next runtime: its facts come after all of those.
+  f.publisher.observeNewSources(f.agent)?.(["msg_2"]);
+  const attemptId = f.capture.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "msg_2",
+    executionGenerationId: "next-generation", workspaceId: "workspace", createdAtMs: 300 });
+  const turn = { turnId: "turn-2", providerContinuationId: "conversation", providerTurnId: "native-2" };
+  f.capture.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime",
+    attemptId, ...turn, createdAtMs: 300 });
+  assert.equal(f.capture.ingest("next-source", next, parseExecutionFact({ factId: "later-1", agentId: "agent", executionGenerationId: "next-generation",
+    runtimeGenerationId: "next-runtime", observerEpoch: next.epoch, sourceSequence: 1, observedAtMs: 301, ...turn,
+    domain: "turn", kind: "state_changed", state: "active", sideEffects: "none" })).status, "accepted");
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.ok(f.sent.some(input => input.sourceMessageId === "msg_2"), "the newest message's activity reaches the room");
+  assert.deepEqual(f.diagnostics, [], "and a record of more than ten thousand facts is not an error");
+});
+
+test("after a daemon restart, a message on a runtime past one window's worth is published as incomplete, never with fewer commands as complete", async t => {
+  const f = await fixture(t);
+  f.captureMessage(1);
+  f.operation(1, { executionId: "a" });
+  f.operation(1, { executionId: "a", kind: "completed", outcome: "succeeded" });
+  const fill = (from: number, to: number, epoch = 1) => f.db.prepare(`WITH RECURSIVE positions(value) AS (SELECT ? UNION ALL SELECT value+1 FROM positions WHERE value<?)
+    INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+      source_sequence,domain,kind,state,side_effects,observed_at_ms)
+    SELECT 'filler-'||value,'agent','generation','runtime',?,value,'control','state_changed','responsive','none',value FROM positions`).run(from, to, epoch);
+  fill(4, 9_995);
+  // A second command of the same long turn, after all of that.
+  const columns = "agent_id,execution_generation_id,runtime_generation_id,observer_epoch,native_event_id,turn_id,execution_id,domain,kind,state,operation,outcome,side_effects,output_bytes,exit_code,signal_number,observed_at_ms,turn_outcome,control_evidence";
+  f.db.exec(`INSERT INTO execution_facts(fact_id,source_sequence,${columns})
+    SELECT 'b-'||kind, 9994+source_sequence, ${columns.replace("execution_id", "'command-b'")} FROM execution_facts WHERE execution_id='a' ORDER BY sequence`);
+  f.db.exec("UPDATE execution_observers SET last_source_sequence=9997,max_observed_sequence=9997");
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.deepEqual([f.row(1).summary!.operation_counts.succeeded, f.row(1).summary!.evidence_incomplete], [2, false]);
+
+  // An earlier runtime of the agent is archived: its boundary starts a new window under this runtime, which records on.
+  // Then an update restarts the daemon, whose publisher keeps nothing it staged.
+  const archived = JSON.stringify(f.db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get());
+  f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('automatic-0','agent','room','generation','runtime-long-ago','resume','complete','{}',?,'2026-08-31T00:00:02Z','2026-08-31T00:00:02Z')").run(archived);
+  f.db.exec("UPDATE execution_observers SET observer_epoch=observer_epoch+1");
+  fill(9_998, 10_020, 2);
+  f.db.exec("UPDATE execution_observers SET last_source_sequence=10020,max_observed_sequence=10020");
+  f.restart();
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  const latest = f.row(1).summary!;
+  assert.ok(latest.operation_counts.succeeded === 2 || latest.evidence_incomplete, `the room is not told a smaller count as complete: ${JSON.stringify(latest)}`);
+  assert.equal(latest.evidence_incomplete, true);
+  assert.equal(f.sent.at(-1)!.summary.evidence_incomplete, true, "and the room is told so");
+});
+
+test("a delivery that failed inside a gap is still published as failed after the daemon carried on past the gap", async t => {
+  const f = await fixture(t);
+  f.publisher.observeNewSources(f.agent)?.(["msg_1"]);
+  f.db.prepare(`INSERT INTO supervised_agent_inbox
+    (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,
+     action_id,reply_client_message_id,provider_turn_id,outcome,last_error,created_at,updated_at,acknowledged_at)
+    VALUES ('inbox-1','agent','room','msg_1','{"id":"msg_1"}','{}',1,'acknowledged_failed',1,'action-1','reply-1','native-1',NULL,NULL,
+      '2026-08-31T00:00:00Z','2026-08-31T00:00:01Z','2026-08-31T00:00:01Z')`).run();
+
+  // The record is whole again: a replacement runtime has a clean observer.
+  await f.publisher.flush();
+  assert.equal(f.row(1).revision, 0, "a whole record derives nothing from a receipt");
+
+  // It got there over a recovery boundary: the gap the message failed in is archived, not closed.
+  const observer = f.db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get()!;
+  f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('automatic-1','agent','room',?,?,'resume','complete','{}',?,?,?)")
+    .run(String(observer.execution_generation_id), "runtime-before-the-boundary",
+      JSON.stringify({ ...observer, max_observed_sequence: Number(observer.last_source_sequence) + 1 }), "2026-08-31T00:00:02Z", "2026-08-31T00:00:02Z");
+  f.publisher.changed("agent");
+  await f.publisher.flush();
+  assert.equal(f.sent.find(input => input.sourceMessageId === "msg_1")?.summary.recorded_state, "failed");
+  assert.equal(f.sent.find(input => input.sourceMessageId === "msg_1")?.summary.evidence_incomplete, true);
+});
+
 test("failed deliveries behind any number of answered ones are all published from their receipts, a few per pass", async t => {
   const f = await fixture(t);
   const receipt = (id: string, state: string) => f.db.prepare(`INSERT INTO supervised_agent_inbox

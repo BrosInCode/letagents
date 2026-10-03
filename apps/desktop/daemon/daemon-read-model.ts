@@ -42,6 +42,12 @@ export type DaemonReadModelPorts = {
   };
   recoveryDiagnostics(): ProviderRecoveryDiagnostics;
   deliveryAdmission(entry: DaemonManifestEntry): LifecycleCaptureAdmissionStatus | null;
+  /**
+   * For an entry whose delivery is held because its execution record cannot
+   * be continued: null while the daemon is still going to restart the agent
+   * by itself, or why it now waits for its owner. Undefined otherwise.
+   */
+  recordRecovery?(entry: DaemonManifestEntry): string | null | undefined;
   manifest: {
     pendingRuntimeRecovery(agentId: string): Promise<import("./runtime-recovery-journal.js").RuntimeRecoveryRecord | null>;
     load(): Promise<{ entries: DaemonManifestEntry[] }>;
@@ -165,6 +171,7 @@ export class DaemonReadModel {
       credentialAvailable: Boolean(credential),
       liveHandle: liveHandle ?? null,
       lifecycleAdmission: this.ports.deliveryAdmission(entry),
+      recordRecovery: this.ports.recordRecovery?.(entry),
     };
     const activeTurn = hasExactRoomAgentDeliveryOwner(authorityFacts)
       && binding

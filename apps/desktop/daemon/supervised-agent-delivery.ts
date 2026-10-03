@@ -233,6 +233,8 @@ export class SupervisedAgentDelivery {
     private readonly releaseWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<void>,
     private readonly onDeliverySettled?: (agentId: string) => void,
     private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent, demand: object) => Promise<boolean>,
+    /** Archive, in the agent's execution record, what its ended runtimes left open and no message still needs. */
+    private readonly archiveEndedRuntimes?: (agentId: string) => Promise<void>,
   ) {}
 
   /**
@@ -1486,6 +1488,15 @@ export class SupervisedAgentDelivery {
         await this.inbox.transition(item.inbox_item_id, "pending");
       }
     };
+    /**
+     * Set when the saved turn was started by a process that has since ended.
+     * A turn that the conversation's own record shows as started and never
+     * ended was then cut off by that exit: the adapter says so instead of
+     * leaving a result that will never come to be waited for.
+     */
+    let originProcessEnded = false;
+    /** The saved turn's own conversation, when it is not the one this runtime continues. */
+    let earlierContinuationId: string | null = null;
     try {
       if (await this.inbox.nativeFailure(item.inbox_item_id)) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
@@ -1532,10 +1543,24 @@ export class SupervisedAgentDelivery {
           || binding.work_attempt_id !== agent.workAttemptId
           || binding.provider_continuation_id !== currentContinuation
           || binding.provider_turn_id !== item.provider_turn_id) {
-          await this.inbox.transition(item.inbox_item_id, "blocked", {
-            last_error: "The saved provider turn belongs to a different or unverifiable provider authority and was not recovered.",
-          });
-          return;
+          // An Open Model process starts a new session; the sessions of the
+          // processes before it stay in the agent's own runtime directory.
+          // Once the process that ran this turn has ended, its replacement
+          // reads this exact turn there. Nothing else differs from the binding.
+          const readsEarlierConversation = agent.provider === "open-model" && binding !== null && binding !== undefined
+            && binding.agent_id === agent.agentId && binding.room_id === agent.roomId
+            && binding.work_attempt_id === agent.workAttemptId && binding.provider_turn_id === item.provider_turn_id
+            && await this.inbox.providerTurnProcessEnded(item.inbox_item_id, agent.executionGenerationId);
+          if (!readsEarlierConversation) {
+            await this.inbox.transition(item.inbox_item_id, "blocked", {
+              last_error: "The saved provider turn belongs to a different or unverifiable provider authority and was not recovered.",
+            });
+            return;
+          }
+          earlierContinuationId = binding!.provider_continuation_id;
+          originProcessEnded = true;
+        } else if (agent.provider !== "cursor") {
+          originProcessEnded = await this.inbox.providerTurnProcessEnded(item.inbox_item_id, agent.executionGenerationId);
         }
         providerTurnOriginExecutionGenerationId = binding.origin_execution_generation_id;
         // Close the read-to-use window: a replacement may have landed while
@@ -1544,7 +1569,13 @@ export class SupervisedAgentDelivery {
         if (!await hasProviderAuthority()) return;
       }
       if (recovering) setActive("responding");
-      else setActive("dispatching");
+      else {
+        // A turn an earlier process left open, whose message has since been
+        // settled, would refuse this one in the agent's execution record.
+        try { await this.archiveEndedRuntimes?.(agent.agentId); } catch { /* The record is optional; the turn is not. */ }
+        if (!await hasProviderAuthority()) return;
+        setActive("dispatching");
+      }
       const observedContext = recovering
         ? []
         : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
@@ -1567,7 +1598,7 @@ export class SupervisedAgentDelivery {
       let settledCursorEnding: ProviderRoomTurnCheckpointDisposition | null = null;
       const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<ProviderRoomTurnCheckpointDisposition> => {
         if (settledCursorEnding) return settledCursorEnding;
-        const providerContinuationId = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
+        const providerContinuationId = earlierContinuationId ?? agent.handle?.providerContinuationId ?? agent.providerContinuationId;
         if (result.outcome === "failed" || result.outcome === "interrupted") {
           // Failure is exact native evidence, never an exception classifier or
           // a terminal callback that fabricates the missing dispatch boundary.
@@ -1762,11 +1793,19 @@ export class SupervisedAgentDelivery {
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         await this.inbox.checkpointDispatchIntent(item.inbox_item_id, this.http.ownedTasks ? agent.agentSessionId : undefined, observedContext);
       };
+      // A turn the execution record holds open is closed there by its ending.
+      // One the record never saw start has nothing to close, and its ending
+      // would be a fact about a turn the record cannot place.
+      const recordEnding = recovering
+        && await this.inbox.recordedTurnIsOpen(item.inbox_item_id).catch(() => false);
       providerCallEntered = true;
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
           inboxItemId: item.inbox_item_id,
           providerTurnId: item.provider_turn_id!,
+          ...(recordEnding ? { recordEnding: true } : {}),
+          ...(originProcessEnded ? { originProcessEnded: true } : {}),
+          ...(earlierContinuationId ? { providerContinuationId: earlierContinuationId } : {}),
         }, { detachSignal: turnController.signal, checkpointProviderState, settleLifecycleBeforeIdle, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,

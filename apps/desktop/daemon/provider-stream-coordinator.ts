@@ -10,6 +10,7 @@ import type {
   ProviderActionTerminal,
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import { DaemonFenceLostError } from "./singleton.js";
 import {
   isCorrelatedNonemptyWaitResult,
   isHumanRoomActivityEvent,
@@ -186,6 +187,16 @@ export type ProviderStreamTransition = (
   actor: string,
 ) => Promise<void>;
 
+/**
+ * How long a stopping daemon waits for stream callbacks that are still
+ * running before it closes its socket and stores anyway. A callback writes
+ * one observation to local stores and takes milliseconds; ten seconds is
+ * far beyond that, and short enough that a stop whose callback never returns
+ * still releases what its successor needs. A callback still running then
+ * fails against the closed stores, which is how a fenced callback ends too.
+ */
+export const STOP_CALLBACKS_DEADLINE_MS = 10_000;
+
 export type ProviderStreamCoordinatorOptions = {
   /** Optional compatibility map shared with the temporarily-thin daemon facade. */
   liveHandles?: Map<string, ProviderActionHandle>;
@@ -200,6 +211,8 @@ export type ProviderStreamCoordinatorOptions = {
   lifecycleProjectionDiagnostics?(): LifecycleProjectionDiagnostics;
   captureAdmission?(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus;
   typedLifecycleAdmission?(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus;
+  /** A lasting reason this installation's execution record cannot be continued, or null. */
+  recordBlock?(installation: ProviderInstallationToken): string | null;
   /** Operational approvals have their own lifetime, independent of optional capture. */
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   manifest: ProviderStreamManifest;
@@ -540,6 +553,19 @@ export class ProviderStreamCoordinator {
     if (!installation) return false;
     return !this.typedDaemonInboxInstallations.has(installation)
       || this.typedOperationalInstallations.has(installation);
+  }
+
+  /**
+   * Why the entry's running agent cannot be admitted for delivery: its
+   * execution record cannot be continued. Null for a runtime that is
+   * admitted, is still being admitted, or does not wait on its record.
+   */
+  recordBlock(entry: DaemonManifestEntry): string | null {
+    const installation = this.latestInstallations.get(entry.id);
+    if (!installation || !this.typedDaemonInboxInstallations.has(installation)
+      || this.typedOperationalInstallations.has(installation)
+      || !this.isCurrentInstallation(installation) || !this.entryMatchesInstallation(entry, installation)) return null;
+    try { return this.options.recordBlock?.(installation) ?? null; } catch { return null; }
   }
 
   /** Read-model witness from the same exact-birth latch that owns delivery. */
@@ -1592,10 +1618,25 @@ export class ProviderStreamCoordinator {
     await Promise.all([...this.callbacks]);
   }
 
-  async disposeAll(): Promise<void> {
+  async disposeAll(deadlineMs = STOP_CALLBACKS_DEADLINE_MS): Promise<void> {
     this.latestInstallations.clear();
     const failures = this.disposeEveryListener();
-    try { await this.drainCallbacks(); } catch (error) { failures.push(error); }
+    // Every callback is waited for, not only up to the first that fails: the
+    // stores close after this. A callback the stopping daemon's own fence
+    // refused has ended the way a fenced callback should; counting it as a
+    // failure made a stop give up with its socket and stores still open.
+    // The wait ends at the deadline, and what is still running is reported.
+    const running = [...this.callbacks];
+    const settled = Promise.all(running.map((callback) => callback.catch((reason: unknown) => {
+      if (!(reason instanceof DaemonFenceLostError)) failures.push(reason);
+    }))).then(() => true);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race([settled, new Promise<false>((resolve) => { deadline = setTimeout(() => resolve(false), deadlineMs); })]);
+    clearTimeout(deadline);
+    if (!drained) {
+      console.warn("[provider_stream_stop]", JSON.stringify({ deadline_ms: deadlineMs,
+        callbacks_still_running: running.filter((callback) => this.callbacks.has(callback)).length }));
+    }
     this.throwCleanupFailures(failures, "Provider stream disposal failed.");
   }
 

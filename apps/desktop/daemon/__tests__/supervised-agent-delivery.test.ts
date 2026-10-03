@@ -5211,6 +5211,97 @@ test("startup recovery rejects an exact turn after its provider continuation is 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+/** The saved turn's own execution, `generation-1` of work attempt `attempt`, with or without a recorded terminal. */
+function recordExecution(database: { exec(sql: string): void; prepare(sql: string): { run(...values: Array<string | null>): unknown } }, ended: boolean): void {
+  database.exec(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+    VALUES('attempt','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','2026-08-31T00:00:00.000Z')`);
+  database.prepare("INSERT INTO work_attempt_executions VALUES('generation-1','attempt','2026-08-31T00:00:00.000Z','test',1,?)")
+    .run(ended ? JSON.stringify({ ended_at: "2026-08-31T00:01:00.000Z", terminal_cause: "crashed" }) : null);
+}
+
+test("a saved turn is recovered as one whose process has ended only when a later runtime recovers it and that process's terminal is on record", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-process-ended-"));
+  const { DatabaseSync } = await import("node:sqlite");
+  try {
+    /** Recover one saved turn of `generation-1` with a runtime of `runsIn`, the turn's own process ended or not. */
+    const recover = async (name: string, runsIn: string, ended: boolean) => {
+      const path = join(root, `${name}.sqlite`);
+      const store = new SupervisedAgentInboxStore(path);
+      const item = await enqueue(store);
+      await store.checkpointTurnStarted(item.inbox_item_id, "turn-saved", TEST_PROVIDER_TURN_AUTHORITY);
+      const database = new DatabaseSync(path);
+      recordExecution(database, ended);
+      database.close();
+      const requests: Array<Record<string, unknown>> = [];
+      const delivery = new SupervisedAgentDelivery(store, provider(
+        async () => { throw new Error("must not rerun"); },
+        async (_handle, request) => { requests.push({ ...request }); return { turnId: "turn-saved", outcome: "reply", text: "recovered" }; },
+      ), { poll: async () => ({}), publish: async (input) => ({ messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }) }, currentAuthority, 0);
+      await delivery.pump({ ...agent, executionGenerationId: runsIn });
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+      await store.close();
+      return requests[0]!;
+    };
+    assert.equal((await recover("later-runtime-ended", "generation-2", true)).originProcessEnded, true);
+    assert.equal((await recover("later-runtime-alive", "generation-2", false)).originProcessEnded, undefined,
+      "a process with no recorded terminal may still be running the turn");
+    assert.equal((await recover("own-runtime", "generation-1", true)).originProcessEnded, undefined,
+      "a runtime is never told that its own process has ended");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a turn of a session an ended Open Model process ran is read in that session by its replacement; no other mismatch of authority is", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-earlier-session-"));
+  const { DatabaseSync } = await import("node:sqlite");
+  const reason = "The agent's process ended during this turn, and the turn's result could not be recovered. The message was not run again.";
+  try {
+    const recover = async (name: string, input: { provider: string; ended: boolean; workAttemptId?: string }) => {
+      const path = join(root, `${name}.sqlite`);
+      const store = new SupervisedAgentInboxStore(path);
+      const item = await enqueue(store);
+      await store.checkpointTurnStarted(item.inbox_item_id, "turn-old-session", { ...TEST_PROVIDER_TURN_AUTHORITY, provider_continuation_id: "session-old" });
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      const database = new DatabaseSync(path);
+      recordExecution(database, input.ended);
+      database.close();
+      const requests: Array<Record<string, unknown>> = [];
+      const successor = { ...agent, provider: input.provider, executionGenerationId: "generation-2", providerContinuationId: "session-new",
+        workAttemptId: input.workAttemptId ?? agent.workAttemptId,
+        handle: { ...agent.handle, providerContinuationId: "session-new", workAttemptId: input.workAttemptId ?? agent.workAttemptId } };
+      const delivery = new SupervisedAgentDelivery(store, provider(
+        async () => { throw new Error("must not rerun"); },
+        async (_handle, request, options) => {
+          requests.push({ ...request });
+          const result = { turnId: "turn-old-session", providerContinuationId: "session-old", outcome: "interrupted" as const, text: null, evidence: "transcript" as const, error: reason };
+          await options?.checkpointTerminalResult?.(result);
+          return result;
+        },
+      ), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 0);
+      await delivery.pump(successor);
+      const receipt = (await store.receipts(agent.agentId))[0]!;
+      await store.close();
+      return { receipt, requests };
+    };
+    const read = await recover("open-model-ended", { provider: "open-model", ended: true });
+    assert.deepEqual(read.requests.map((request) => [request.providerTurnId, request.providerContinuationId, request.originProcessEnded]),
+      [["turn-old-session", "session-old", true]], "the adapter is given the turn's own session");
+    assert.equal(read.receipt.state, "acknowledged_failed");
+    assert.equal(read.receipt.last_error, reason, "and the message settles with what the session showed");
+
+    for (const [name, input] of Object.entries({
+      "open-model-alive": { provider: "open-model", ended: false },
+      "codex-ended": { provider: "codex", ended: true },
+      "claude-ended": { provider: "claude-code", ended: true },
+      "another-work-attempt": { provider: "open-model", ended: true, workAttemptId: "another-attempt" },
+    })) {
+      const refused = await recover(name, input);
+      assert.deepEqual(refused.requests, [], `${name}: the turn is not read through another authority`);
+      assert.equal(refused.receipt.state, "blocked", name);
+      assert.match(refused.receipt.last_error ?? "", /different or unverifiable provider authority/i, name);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("same-continuation successor recovery preserves the provider turn's origin generation", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-origin-generation-"));
   try {

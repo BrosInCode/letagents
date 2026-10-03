@@ -47,7 +47,7 @@ import {
   type SelectDelegatedApproval,
 } from "./execution-delegated-approval.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
-import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery, recordInterruptedCursorRecovery,
+import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, archiveExitedRuntimes, exitedRuntimesToArchive, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery, recordInterruptedCursorRecovery,
   type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "./runtime-recovery-journal.js";
 import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
@@ -1607,6 +1607,14 @@ export class ManifestStore {
       }, entry, retired, identity);
       return checkpointRuntimeStopped(database, operationId, entry);
     }, commitFence);
+  }
+
+  /** Archive what the agent's exited runtimes left unfinished in its execution record; see the journal. */
+  async archiveExitedRuntimes(agentId: string, commitFence: (commit: () => Promise<void>) => Promise<void>, identity?: ProcessIdentity): Promise<string[]> {
+    // Asked on every convergence pass, and nearly always with nothing to do: look before taking the write lock.
+    const database = await this.getDatabase();
+    if (!exitedRuntimesToArchive(database, this.readEntryFromDatabase(database, agentId), identity).length) return [];
+    return this.writeOperationalJournal(current => archiveExitedRuntimes(current, this.readEntryFromDatabase(current, agentId), identity), commitFence);
   }
 
   async completeRuntimeRecovery(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>) {

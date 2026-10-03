@@ -169,7 +169,24 @@ export type ProviderRoomTurnCheckpointDisposition = {
   acceptedResult: ProviderRoomTurnResult;
   cleanupRecoveryEvidence: boolean;
 };
-export type ProviderRoomTurnRecoveryRequest = { inboxItemId: string; providerTurnId: string };
+export type ProviderRoomTurnRecoveryRequest = {
+  inboxItemId: string;
+  providerTurnId: string;
+  /**
+   * The execution record holds this turn without an ending: it was recorded
+   * as started, or as lost with the runtime that ran it. The ending that is
+   * read back is then to be recorded too, so the record closes the turn.
+   */
+  recordEnding?: boolean;
+  /**
+   * The process that ran this turn has ended; the daemon holds its recorded
+   * terminal. A turn the conversation's own record shows as started and
+   * never ended was cut off by that exit, and is reported as interrupted.
+   */
+  originProcessEnded?: boolean;
+  /** The turn's own conversation, when it is not the one this runtime continues. */
+  providerContinuationId?: string;
+};
 export type ProviderExactTurnControlResult = { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null };
 export type ProviderContinuationRepairRequest = {
   workAttemptId: string;
