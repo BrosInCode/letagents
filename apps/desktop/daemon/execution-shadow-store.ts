@@ -7,7 +7,7 @@ import { parseRoomAgentWorkSummary, ROOM_WORK_OPERATION_OUTCOMES, type RoomAgent
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
 import { emptyExecutionProjection, reduceExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
 import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
-import { hasRuntimeRecoveryBoundary, recoveredRuntime, runtimeRecoveryStorageAvailable } from "./runtime-recovery-journal.js";
+import { executionRecordWindowStart, hasRuntimeRecoveryBoundary, recoveredRuntime, runtimeRecoveryStorageAvailable } from "./runtime-recovery-journal.js";
 import { LifecycleProjectionLedger, type LifecycleProjectionDiagnostics, type LifecycleProjectionObservation,
   type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
 
@@ -270,8 +270,10 @@ export class ExecutionShadowStore {
     if (!budget) {
       // Aggregate in SQLite, not a JS array. The extra row proves oversize
       // without scanning an arbitrarily large pre-existing agent journal.
+      // Only the agent's current record window counts: see its start.
       const row = this.required(`SELECT COUNT(*) AS facts,COALESCE(SUM(${FACT_BYTE_COST_SQL}),0) AS bytes
-        FROM (SELECT ${FACT_TEXT_COLUMNS.join(",")} FROM execution_facts WHERE agent_id=? LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1})`, agentId);
+        FROM (SELECT ${FACT_TEXT_COLUMNS.join(",")} FROM execution_facts WHERE agent_id=? AND sequence>? LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1})`,
+      agentId, executionRecordWindowStart(this.database, agentId));
       budget = { facts: Number(row.facts), bytes: Number(row.bytes) };
     }
     this.rememberBudget(agentId, budget);
@@ -662,6 +664,15 @@ export class ExecutionShadowStore {
     });
   }
 
+  /**
+   * Whether the agent's record holds more facts than one window's worth: it
+   * has rolled over at a recovery boundary into a later window.
+   */
+  private recordRolledOver(agentId: string): boolean {
+    return Boolean(this.row(`SELECT 1 FROM execution_facts INDEXED BY execution_facts_agent_sequence
+      WHERE agent_id=? ORDER BY sequence DESC LIMIT 1 OFFSET ${MAX_RETAINED_FACTS_PER_AGENT}`, agentId));
+  }
+
   /** A bounded, coherent view of retained evidence, never provider authority. */
   retainedMessageExecution(agentId: string, roomId: string, sourceMessageId: string): RetainedExecutionDetail {
     let ownsSnapshot = false;
@@ -672,16 +683,28 @@ export class ExecutionShadowStore {
       if (exceededBudget(this.retainedBudget(agentId))) throw new ExecutionProtocolError("retention_limit");
       // Bound the driving relation before filtering. Approval-only identities
       // are not capped; starting from turns would make LIMIT 33 an output-only bound.
-      const rows = this.database.prepare(`WITH captured AS MATERIALIZED (
+      // A record that has rolled over into later windows holds more facts than
+      // that bound, and a message in an earlier window is then found through
+      // its own turns instead, or it would read as never saved.
+      const rows = (this.recordRolledOver(agentId) ? this.database.prepare(`SELECT DISTINCT t.turn_id,t.runtime_generation_id,t.created_at_ms
+        FROM execution_message_attempts a
+        CROSS JOIN execution_turns t ON t.agent_id=a.agent_id AND t.attempt_id=a.attempt_id AND t.room_id=a.room_id
+        CROSS JOIN execution_attempt_generations g ON g.attempt_id=a.attempt_id AND g.execution_generation_id=t.execution_generation_id
+          AND g.agent_id=a.agent_id AND g.room_id=a.room_id
+        WHERE a.agent_id=? AND a.room_id=? AND a.source_message_id=?
+          AND EXISTS (SELECT 1 FROM execution_facts f INDEXED BY execution_facts_turn_sequence WHERE f.turn_id=t.turn_id
+            AND f.agent_id=t.agent_id AND f.runtime_generation_id=t.runtime_generation_id AND f.domain IN ('turn','execution'))
+        ORDER BY t.created_at_ms DESC,t.turn_id DESC LIMIT 33`).all(agentId, roomId, sourceMessageId)
+        : this.database.prepare(`WITH captured AS MATERIALIZED (
           SELECT agent_id,turn_id,runtime_generation_id,domain FROM execution_facts
-          INDEXED BY execution_facts_agent_sequence WHERE agent_id=? ORDER BY sequence LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}
+          INDEXED BY execution_facts_agent_sequence WHERE agent_id=? ORDER BY sequence DESC LIMIT ${MAX_RETAINED_FACTS_PER_AGENT}
         ) SELECT DISTINCT t.turn_id,t.runtime_generation_id,t.created_at_ms FROM captured f
         CROSS JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id AND t.runtime_generation_id=f.runtime_generation_id
         CROSS JOIN execution_message_attempts a ON a.attempt_id=t.attempt_id AND a.agent_id=t.agent_id AND a.room_id=t.room_id
         CROSS JOIN execution_attempt_generations g ON g.attempt_id=a.attempt_id AND g.execution_generation_id=t.execution_generation_id
           AND g.agent_id=a.agent_id AND g.room_id=a.room_id
         WHERE f.domain IN ('turn','execution') AND a.room_id=? AND a.source_message_id=?
-        ORDER BY t.created_at_ms DESC,t.turn_id DESC LIMIT 33`).all(agentId, roomId, sourceMessageId) as Row[];
+        ORDER BY t.created_at_ms DESC,t.turn_id DESC LIMIT 33`).all(agentId, roomId, sourceMessageId)) as Row[];
       let result: RetainedExecutionDetail = { availability: "not_captured" };
       if (rows.length) {
         const turns: Extract<RetainedExecutionDetail, { availability: "available" }>["turns"] = [];
@@ -753,6 +776,8 @@ export class ExecutionShadowStore {
           captured = true;
           const runtime = this.replayRows(runtimeRows);
           incomplete ||= runtime.unverifiedFacts > 0;
+          // Only a runtime's most recent window's worth is replayed: what it recorded before then is not counted.
+          incomplete ||= Number(runtimeRows[0]!.runtime_facts ?? 0) > MAX_RETAINED_FACTS_PER_AGENT;
           const recovered = recoveredRuntime(this.database, agentId, String(runtimeRows[0]!.runtime_generation_id));
           incomplete ||= recovered?.incomplete ?? false;
           for (const turnId of selected) {
@@ -765,13 +790,29 @@ export class ExecutionShadowStore {
         // Bound facts before joins. Approval-only turn identities have no fact
         // cap and must never become the driving relation. Grouping once avoids
         // an N+1 full runtime replay for messages spanning many generations.
-        const rows = this.database.prepare(`WITH captured AS MATERIALIZED (
+        // A record that has rolled over into later windows is read for the
+        // runtimes this message ran on, each up to one window's worth of its
+        // most recent facts, as a runtime's replay needs: a message in an
+        // earlier window would otherwise read as never saved.
+        const rows = (this.recordRolledOver(agentId) ? this.database.prepare(`WITH runtimes AS MATERIALIZED (
+            SELECT DISTINCT runtime_generation_id FROM execution_turns WHERE agent_id=? AND attempt_id=?
+          ), recent AS MATERIALIZED (
+            SELECT * FROM (SELECT f.*, ROW_NUMBER() OVER (PARTITION BY f.runtime_generation_id ORDER BY f.sequence DESC) AS recency,
+                COUNT(*) OVER (PARTITION BY f.runtime_generation_id) AS runtime_facts
+              FROM execution_facts f INDEXED BY execution_facts_agent_sequence
+              WHERE f.agent_id=? AND f.runtime_generation_id IN (SELECT runtime_generation_id FROM runtimes))
+            WHERE recency <= ${MAX_RETAINED_FACTS_PER_AGENT}
+          ) SELECT f.*,t.provider_continuation_id,t.provider_turn_id,t.attempt_id AS message_attempt_id
+          FROM recent f LEFT JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
+            AND t.execution_generation_id=f.execution_generation_id AND t.runtime_generation_id=f.runtime_generation_id
+          ORDER BY f.runtime_generation_id,f.sequence`).iterate(agentId, attempt.attempt_id, agentId)
+          : this.database.prepare(`WITH captured AS MATERIALIZED (
             SELECT * FROM execution_facts INDEXED BY execution_facts_agent_sequence
-            WHERE agent_id=? ORDER BY sequence LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}
+            WHERE agent_id=? ORDER BY sequence DESC LIMIT ${MAX_RETAINED_FACTS_PER_AGENT}
           ) SELECT f.*,t.provider_continuation_id,t.provider_turn_id,t.attempt_id AS message_attempt_id
           FROM captured f LEFT JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
             AND t.execution_generation_id=f.execution_generation_id AND t.runtime_generation_id=f.runtime_generation_id
-          ORDER BY f.runtime_generation_id,f.sequence`).iterate(agentId) as Iterable<Row>;
+          ORDER BY f.runtime_generation_id,f.sequence`).iterate(agentId)) as Iterable<Row>;
         for (const row of rows) {
           if (runtimeRows.length && runtimeRows[0]!.runtime_generation_id !== row.runtime_generation_id) {
             summarizeRuntime(); runtimeRows = [];

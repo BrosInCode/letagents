@@ -2,7 +2,7 @@ import { ClaudeCompaction } from "../main/agents/claude-compaction.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +13,7 @@ import {
   claudeSessionTranscriptCandidates,
   claudeChildEnvironment,
   claudeCliEnv,
+  claudeTranscriptsRoot,
   claudeCliLaunchArgs,
   claudeLaunchPolicyArgs,
   claudeOwnerSetupReadsProjectInstructionsOnly,
@@ -31,6 +32,7 @@ import type {
   ProviderTerminalPayload,
   NativeExecutionObservation,
 } from "../main/agents/provider-adapter.js";
+import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
 import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
@@ -1985,6 +1987,526 @@ test("Claude exact-turn recovery reads only the durable transcript and never dis
   assert.equal(checkpointed, true);
   assert.equal(harness.children[0]!.written.length, writesBeforeRecovery, "recovery never starts another native turn");
 });
+
+for (const recordEnding of [true, false] as const) {
+  test(`a Claude turn whose process exited under it ${recordEnding ? "is closed in the record when" : "stays lost in the record unless"} the daemon asks its replacement to record the ending it reads from the session`, async () => {
+    // The real adapter over the fake CLI, feeding the real execution capture and shadow store.
+    const { DatabaseSync } = await import("node:sqlite");
+    const { DaemonStateSchema } = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
+    const { ExecutionCaptureCoordinator } = await import(new URL("../../daemon/execution-capture-coordinator.ts", import.meta.url).href);
+    const { ExecutionShadowStore, executionRuntimeStorageIdentity } = await import(new URL("../../daemon/execution-shadow-store.ts", import.meta.url).href);
+    const sessionRows: Array<Record<string, unknown>> = [];
+    const harness = createHarness({ sessionRows });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const at = "2026-08-31T00:00:00.000Z";
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys=ON");
+    new DaemonStateSchema().createSchema(db);
+    db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${at}',0);
+      INSERT INTO agent_configurations(agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,config_revision,runtime_configuration_revision)
+        VALUES('agent','claude-code','charter','daemon_inbox',0,0,1,1);
+      INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+        VALUES('wa-claude-1','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${at}');
+      INSERT INTO work_attempt_executions VALUES('generation','wa-claude-1','${at}','test',1,NULL);`);
+    type Native = Awaited<ReturnType<typeof adapter.spawn>>;
+    const natives = new Map<object, Native>();
+    let current: { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection: Native["providerConnection"]; observedState: "idle"; appliedConfigurationRevision: number } | undefined;
+    const diagnostics: string[] = [];
+    const capture = new ExecutionCaptureCoordinator(db, {
+      provider: { onExecution: (handle: object, listener: (event: NativeExecutionObservation) => void) => adapter.onExecution(natives.get(handle)!, listener) },
+      currentHandle: () => current, daemonGeneration: () => 1, diagnostic: (_id: string, code: string) => diagnostics.push(code),
+    });
+    /** What the daemon does when it installs a runtime: record its birth, and observe it. */
+    const install = (native: Native) => {
+      const connection = native.providerConnection!;
+      current = { workAttemptId: native.workAttemptId, pid: native.pid, providerContinuationId: native.providerContinuationId,
+        providerConnection: connection, observedState: "idle", appliedConfigurationRevision: 1 };
+      natives.set(current, native);
+      db.prepare("DELETE FROM runtime_deployments").run();
+      db.prepare(`INSERT INTO runtime_deployments(agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
+        provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,provider_connection_pid,
+        provider_process_identity_present,provider_process_identity,provider_execution_generation_id,workplace_liveness_present,native_liveness_present,activity_present)
+        VALUES('agent','idle',0,1,'wa-claude-1',1,'wa-claude-1',?,'claude_cli',?,1,?,'generation',0,0,0)`)
+        .run(native.providerContinuationId, connection.pid, connection.processIdentity!);
+      new ExecutionShadowStore(db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
+        runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "claude_cli", connection.pid!, connection.processIdentity!),
+        provider: "claude-code", authorityMode: "typed", configRevision: 1, createdAtMs: Date.parse(at) });
+      capture.install(Object.freeze({ nonce: Symbol("installation"), listenerLeaseNonce: Symbol("lease"), entryId: "agent", handle: current,
+        executionGenerationId: "generation", workAttemptId: native.workAttemptId, providerContinuationId: native.providerContinuationId!,
+        providerConnection: { ...connection }, configurationRevision: 1, authorityMode: "typed" }));
+    };
+    /** The daemon saves which message a native turn belongs to before the turn's first event can arrive. */
+    const bindTurn = (turnId: string, continuation: string) => {
+      const order = Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1;
+      db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
+        VALUES(?,'agent','room',?,'{}','{}',?,'awaiting_result',1,?,?,?,?,?)`).run(turnId, `message-${order}`, order, `action-${order}`, `reply-${order}`, turnId, at, at);
+      db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room','wa-claude-1','generation',?,?)").run(turnId, continuation, turnId);
+    };
+    const turns = () => db.prepare("SELECT provider_turn_id,state FROM execution_turns ORDER BY rowid").all().map((turn) => ({ ...turn }));
+    const startTurn = async (native: Native, child: FakeClaudeChild, inboxItemId: string) => {
+      const running = adapter.runRoomTurn!(native, { inboxItemId, actionId: inboxItemId, sourceMessage: {}, activation: {} },
+        { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+      void running.catch(() => undefined);
+      await flush();
+      const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+      bindTurn(turnId, native.providerContinuationId!);
+      child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: native.providerContinuationId });
+      await flush();
+      return { running, turnId };
+    };
+    try {
+      const first = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+      install(first);
+      const one = await startTurn(first, harness.children[0]!, "inbox-1");
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "active" }]);
+
+      // The process dies under the turn. Its session file shows the turn had finished.
+      sessionRows.push(
+        { type: "user", uuid: one.turnId, sessionId: first.providerContinuationId, message: { content: [{ type: "text", text: "source" }] } },
+        { type: "assistant", sessionId: first.providerContinuationId,
+          message: { id: "assistant-1", stop_reason: "end_turn", content: [{ type: "text", text: "Finished before the exit." }] } });
+      harness.identities.set(first.pid!, null);
+      harness.children[0]!.resolveExit({ type: "exit", code: 1, signal: null });
+      await assert.rejects(one.running);
+      await flush();
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "lost" }]);
+
+      // Its replacement resumes the conversation and reads the turn's ending back.
+      const second = await adapter.resume({ workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId! },
+        spawnRequest({ lifecycleAuthorityMode: "typed" }));
+      install(second);
+      await flush();
+      const recovered = await adapter.recoverRoomTurn!(second, { inboxItemId: "inbox-1", providerTurnId: one.turnId, ...(recordEnding ? { recordEnding: true } : {}) },
+        { checkpointTerminalResult: async () => {} });
+      assert.deepEqual(recovered, { turnId: one.turnId, outcome: "reply", text: "Finished before the exit.", evidence: "transcript" });
+      db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged' WHERE inbox_item_id=?").run(one.turnId);
+      capture.refresh("agent");
+      await flush();
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: recordEnding ? "terminal" : "lost" }]);
+
+      // The next turn.
+      const two = await startTurn(second, harness.children[1]!, "inbox-2");
+      const position = { ...db.prepare("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers").get()! };
+      if (recordEnding) {
+        assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "terminal" }, { provider_turn_id: two.turnId, state: "active" }],
+          "the next turn is recorded");
+        assert.equal(position.max, position.last, "with no gap");
+        assert.deepEqual(diagnostics.filter((code) => ["source_gap", "invalid_observation", "retention_limit"].includes(code)), [],
+          "and the record never stops");
+      } else {
+        assert.deepEqual(turns().map((turn) => turn.state), ["lost"], "the open turn refuses the next one");
+        assert.ok(Number(position.max) > Number(position.last), "and the record has a gap from here on");
+        assert.ok(diagnostics.includes("invalid_observation"));
+      }
+    } finally {
+      capture.close();
+    }
+  });
+}
+
+/**
+ * A real daemon supervising one Claude Code agent: the real adapter, action
+ * router, delivery, execution capture and stores, over the fake CLI. Only the
+ * room, the server and the processes are doubles.
+ */
+async function claudeDaemonFixture() {
+  const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
+  const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
+  const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
+  const { createConnection } = await import("node:net");
+  const { DatabaseSync } = await import("node:sqlite");
+  const root = await mkdtemp(join(tmpdir(), "claude-daemon-"));
+  const id = "claude_agent";
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+  };
+  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
+    const socket = createConnection(paths.socketPath);
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk) => {
+      received += chunk;
+      if (!received.includes("\n")) return;
+      socket.end();
+      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
+    });
+    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
+  });
+  const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!await check()) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  const workAttemptId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const workspace = join(root, "worktrees", "repo", workAttemptId);
+  await mkdir(join(root, "repos", "repo.git"), { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo",
+    work_attempt_id: workAttemptId, task_id: id, remote_url: "https://example.invalid/repo", resolved_revision: "a".repeat(40),
+    bare_path: join(root, "repos", "repo.git") }));
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace, workAttemptId });
+  await durability.close();
+
+  /** The session file every process of this agent appends to and resumes from. */
+  const sessionRows: Array<Record<string, unknown>> = [];
+  const harness = createHarness({ sessionRows });
+  /** Whether the session file is found where the CLI keeps it, and where the adapter looked for it. */
+  const transcript = { found: true, readFrom: [] as Array<string | undefined> };
+  harness.dependencies.readSessionRows = async (_sessionId, transcriptsRoot) => {
+    transcript.readFrom.push(transcriptsRoot);
+    return transcript.found ? sessionRows : null;
+  };
+  /** Every room turn a process was asked to run: the frame after its bootstrap, and each one after that. */
+  const turns: Array<{ id: string; child: FakeClaudeChild }> = [];
+  const launchChild = harness.dependencies.launchChild;
+  harness.dependencies.launchChild = (input) => {
+    const child = launchChild(input) as FakeClaudeChild;
+    const write = child.writeLine.bind(child);
+    let bootstrapped = false;
+    child.writeLine = (json: string) => {
+      const frame = JSON.parse(json) as { type?: string; uuid?: string };
+      if (!bootstrapped) bootstrapped = true;
+      else if (frame.type === "user" && frame.uuid) turns.push({ id: frame.uuid, child });
+      write(json);
+    };
+    return child;
+  };
+  /** What a test makes the adapter's reading back of a turn wait on, and what the daemon asked of it. */
+  const recovery = { held: null as Promise<void> | null, requests: [] as Array<Record<string, unknown>> };
+  /** What a test makes the first saving of a turn's result fail with. */
+  let failNextResultCheckpoint: Error | null = null;
+  const makeAdapter = () => {
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: { ...harness.dependencies, now: () => new Date().toISOString() } });
+    const recover = adapter.recoverRoomTurn!.bind(adapter);
+    adapter.recoverRoomTurn = async (handle, turn, options) => {
+      recovery.requests.push({ ...turn });
+      await recovery.held;
+      return recover(handle, turn, options);
+    };
+    const run = adapter.runRoomTurn!.bind(adapter);
+    adapter.runRoomTurn = (handle, turn, options = {}) => run(handle, turn, { ...options, checkpointTerminalResult: async (result) => {
+      const failure = failNextResultCheckpoint;
+      failNextResultCheckpoint = null;
+      if (failure) throw failure;
+      return options.checkpointTerminalResult!(result);
+    } });
+    return adapter;
+  };
+  let adapter = makeAdapter();
+  const roomMessages: Array<Record<string, unknown>> = [];
+  const published: string[] = [];
+  let mints = 0;
+  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ "claude-code": async () => adapter }), true,
+    50, undefined, {}, {
+      poll: async ({ afterMessageId, signal }: { afterMessageId: string | null; signal: AbortSignal }) => {
+        const from = afterMessageId ? roomMessages.findIndex((message) => message.id === afterMessageId) + 1 : 0;
+        if (roomMessages.length > from) return { messages: roomMessages.slice(from) };
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 20);
+          signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+        return { messages: [] };
+      },
+      publish: async (input: { text: string; roomId: string }) => {
+        published.push(input.text);
+        return { messageId: `msg_${900 + published.length}`, roomId: input.roomId };
+      },
+    }, {
+      listWorkLeases: async () => [], readWorkLease: async () => null,
+      attestWorkLease: async () => { throw new Error("unused"); },
+      rebindWorkLease: async () => { throw new Error("unused"); },
+      createWorkerSession: async () => {
+        mints += 1;
+        return { sessionId: `${id}-session`, bearer: `${id}-bearer-${mints}`, bearerId: `${id}-bearer-id-${mints}`,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
+      },
+    });
+  let daemon = makeDaemon();
+  const read = <T>(sql: string): T[] => {
+    const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    try { return database.prepare(sql).all(id).map((row) => ({ ...row })) as T[]; } finally { database.close(); }
+  };
+  const cleanup = async () => {
+    await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  };
+  type Receipt = { source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null };
+  const inbox = () => (daemon as unknown as { supervisedInbox: {
+    bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<unknown>;
+    receipts(agentId: string): Promise<Receipt[]>;
+  } }).supervisedInbox;
+  const startDaemon = async () => {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const generation = (await request("daemon.status")).result.generation;
+    return async () => assert.equal((await request("supervisor.install_host_grant", {
+      entry_id: id, room_id: "room_1", agent_key: "owner/agent", grant_id: `grant-${id}`,
+      supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+    })).ok, true);
+  };
+  try {
+    const installGrant = await startDaemon();
+    assert.equal((await request("manifest.put", { entry: {
+      id, room_id: "room_1", display_name: "Agent", provider: "claude-code", model: null, charter: "test",
+      desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: null,
+      created_by: "test", created_at: "2026-01-01T00:00:00.000Z", delivery_mode: "daemon_inbox",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await inbox().bootstrapCursor({ agent_id: id, room_id: "room_1", last_observed_message_id: null });
+    await installGrant();
+    const view = async () => (await request("manifest.list")).result[0] as {
+      observed_state: string; condition: string; last_error: string | null; provider_ref: { provider_continuation_id: string };
+      room_agent_state: { ingress: { state: string }; inbox: { state: string; detail: string | null } };
+    };
+    await eventually(() => harness.children.length === 1, "the CLI is launched");
+    await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
+    const sessionId = (await view()).provider_ref.provider_continuation_id;
+    const receipt = async (messageId: string) => (await inbox().receipts(id)).find((item) => item.source_message_id === messageId);
+    /** Send the agent its nth room message and wait until its process has been asked to run the turn. */
+    const begin = async (ordinal: number) => {
+      roomMessages.push({ id: `msg_${ordinal}`, sender: "someone", text: `request ${ordinal}`, activation: { for_current_agent: { decision: "activate" } } });
+      await eventually(async () => turns.length === ordinal && Boolean((await receipt(`msg_${ordinal}`))?.provider_turn_id), `msg_${ordinal} starts its turn`).catch(async (error) => {
+        const current = await view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); inbox ${current.room_agent_state.inbox.state} (${current.room_agent_state.inbox.detail})`);
+      });
+      return turns[ordinal - 1]!;
+    };
+    return { id, harness, request, eventually, view, read, published, roomMessages, turns, sessionRows, sessionId, receipt, begin, cleanup, recovery, transcript,
+      receipts: () => inbox().receipts(id),
+      /** The CLI reports that the turn has started. */
+      reportStarted: (turn: { id: string; child: FakeClaudeChild }) =>
+        turn.child.emit({ type: "command_lifecycle", state: "started", command_uuid: turn.id, session_id: sessionId }),
+      /** The CLI reports the turn's result. */
+      answer: (turn: { id: string; child: FakeClaudeChild }, text: string) =>
+        turn.child.emit({ type: "result", subtype: "success", is_error: false, session_id: sessionId, user_message_uuid: turn.id, result: text }),
+      /** The agent's newest process ends now, as it does when it crashes. */
+      exitProcess: () => {
+        const child = harness.children.at(-1)!;
+        harness.identities.set(child.pid!, null);
+        child.resolveExit({ type: "exit", code: 1, signal: null });
+      },
+      /** The first saving of the next turn result fails, as it does when the daemon dies between the result and its checkpoint. */
+      failNextResultCheckpoint: (error: Error) => { failNextResultCheckpoint = error; },
+      /** From here on the reading back of a saved turn waits until the returned function lets it go. */
+      holdRecovery: () => {
+        let release!: () => void;
+        recovery.held = new Promise<void>((resolve) => { release = resolve; });
+        return () => { recovery.held = null; release(); };
+      },
+      /** The daemon ends and a new one, with a new adapter, takes the agent over. */
+      restartDaemon: async () => {
+        await daemon.stop();
+        adapter = makeAdapter();
+        daemon = makeDaemon();
+        await (await startDaemon())();
+      },
+      /** The turns in the agent's execution record, and whether the record has a gap. */
+      recorded: () => ({
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        endings: read<{ provider_turn_id: string; n: number; outcome: string | null }>(`SELECT t.provider_turn_id, COUNT(*) AS n, MIN(f.turn_outcome) AS outcome
+          FROM execution_facts f JOIN execution_turns t USING(turn_id)
+          WHERE f.agent_id=? AND f.domain='turn' AND f.state='terminal' GROUP BY t.provider_turn_id ORDER BY MIN(f.sequence)`),
+        gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
+          .filter((observer) => observer.max !== observer.last).length,
+      }) };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+/** What a Claude session holds of a turn whose process ended under it. */
+const CLAUDE_SESSION_AFTER_EXIT = {
+  "its answer": (sessionId: string, turnId: string, ordinal: number) => [
+    { type: "user", uuid: turnId, sessionId, message: { content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", sessionId, message: { id: `assistant-${ordinal}`, stop_reason: "end_turn", content: [{ type: "text", text: `Recovered ${ordinal}.` }] } }],
+  "half an answer": (sessionId: string, turnId: string, ordinal: number) => [
+    { type: "user", uuid: turnId, sessionId, message: { content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", sessionId, message: { id: `assistant-${ordinal}`, stop_reason: null, content: [{ type: "text", text: "Half of" }] } }],
+  "a tool call that never returned": (sessionId: string, turnId: string, ordinal: number) => [
+    { type: "user", uuid: turnId, sessionId, message: { content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", sessionId, message: { id: `assistant-${ordinal}`, stop_reason: "tool_use", content: [{ type: "tool_use", id: `tool-${ordinal}`, name: "Bash", input: {} }] } }],
+  "a transcript that holds nothing of the turn": () => [],
+  // The shape Claude Code 2.1.278 writes when it gives up on a request the provider refused.
+  "the provider's error": (sessionId: string, turnId: string, ordinal: number) => [
+    { type: "user", uuid: turnId, sessionId, message: { role: "user", content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", uuid: `api-error-${ordinal}`, parentUuid: turnId, sessionId, isApiErrorMessage: true, apiErrorStatus: 400, error: "unknown",
+      message: { id: `synthetic-${ordinal}`, role: "assistant", model: "<synthetic>", stop_reason: "stop_sequence",
+        content: [{ type: "text", text: "API Error: 400 LOCAL_PROVIDER_FAILURE_1517" }] } }],
+} as const;
+
+for (const [left, rows] of Object.entries(CLAUDE_SESSION_AFTER_EXIT)) {
+  test(`a Claude agent whose process ends during two turns in a row, leaving ${left} in the session, settles both, records both endings and answers its next message`, async () => {
+    const agent = await claudeDaemonFixture();
+    try {
+      for (const ordinal of [1, 2]) {
+        const turn = await agent.begin(ordinal);
+        agent.reportStarted(turn);
+        await agent.eventually(() => agent.recorded().turns.at(-1)?.state === "active", `turn ${ordinal} is recorded as started`);
+        agent.sessionRows.push(...rows(agent.sessionId, turn.id, ordinal));
+        agent.exitProcess();
+        await agent.eventually(() => agent.harness.children.length === ordinal + 1, `process ${ordinal + 1} replaces it`);
+        const settled = left === "its answer" ? "acknowledged" : "acknowledged_failed";
+        await agent.eventually(async () => (await agent.receipt(`msg_${ordinal}`))?.state === settled, `msg_${ordinal} settles ${settled}`).catch(async (error) => {
+          const row = await agent.receipt(`msg_${ordinal}`);
+          throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+        });
+        if (left === "the provider's error") {
+          const reason = (await agent.receipt(`msg_${ordinal}`))!.last_error ?? "";
+          assert.match(reason, /LOCAL_PROVIDER_FAILURE_1517/, "the reason shown is the provider's, as the session kept it");
+        } else if (left !== "its answer") {
+          assert.equal((await agent.receipt(`msg_${ordinal}`))!.last_error, PROCESS_ENDED_DURING_TURN,
+            "the room and the owner read why the message has no answer");
+        }
+        assert.equal(agent.recovery.requests.at(-1)?.recordEnding, true, "the daemon asks for the ending to be recorded: its record holds the turn open");
+      }
+      // The third process takes the next message.
+      const third = await agent.begin(3);
+      agent.reportStarted(third);
+      agent.answer(third, "Answer 3.");
+      await agent.eventually(async () => (await agent.receipt("msg_3"))?.state === "acknowledged", "msg_3 is answered");
+
+      assert.deepEqual(agent.published, left === "its answer" ? ["Recovered 1.", "Recovered 2.", "Answer 3."] : ["Answer 3."],
+        "a turn that was cut off is never run again, and never answered with something it did not say");
+      await agent.eventually(() => agent.recorded().turns.every((turn) => turn.state === "terminal"), "every turn has its ending in the record");
+      const record = agent.recorded();
+      assert.deepEqual(record.turns.map((turn) => turn.provider_turn_id), agent.turns.map((turn) => turn.id), "all three turns are in the record");
+      assert.deepEqual(record.endings.map((ending) => ending.n), [1, 1, 1], "each with one ending");
+      assert.deepEqual(record.endings.map((ending) => ending.outcome), left === "its answer" ? ["completed", "completed", "completed"]
+        : left === "the provider's error" ? ["failed", "failed", "completed"]
+          : ["interrupted", "interrupted", "completed"], "which says how the turn ended: answered, failed at the provider, or cut off");
+      assert.equal(record.gaps, 0, "and the record has no gap");
+      assert.equal(agent.harness.children.length, 3, "two replacements");
+      const current = await agent.view();
+      assert.equal(current.condition, "none", current.last_error ?? "");
+      assert.equal(current.room_agent_state.inbox.state, "empty", "nothing waits behind a message that needs a person");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+test("a Claude turn whose transcript is not found where its CLI keeps it is left for its owner, not settled as cut off", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    const turn = await agent.begin(1);
+    agent.reportStarted(turn);
+    await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
+    // Its answer may well be in a session file; none is found where the CLI was told to keep it.
+    agent.transcript.found = false;
+    agent.exitProcess();
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "blocked", "msg_1 waits for its owner");
+    assert.match((await agent.receipt("msg_1"))!.last_error ?? "", /found no transcript/, "with the reason");
+    assert.deepEqual(agent.published, [], "nothing is published, and nothing is settled as failed");
+    assert.equal(agent.transcript.readFrom.at(-1), claudeTranscriptsRoot(claudeChildEnvironment({})),
+      "the adapter looked where a CLI started with the desktop's environment writes its transcripts");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("Claude transcripts are read where the CLI writes them: its configured directory, or its home's", () => {
+  const base = { HOME: "/home/owner", PATH: "/usr/bin" };
+  assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({}, base)), "/home/owner/.claude/projects");
+  assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({}, { ...base, CLAUDE_CONFIG_DIR: "/data/claude" })), "/data/claude/projects",
+    "an owner who sets CLAUDE_CONFIG_DIR has their transcripts there");
+  assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({ ownerSetup: true }, { ...base, CLAUDE_CONFIG_DIR: "/data/claude" })), "/data/claude/projects",
+    "so does an agent that runs with its owner's setup");
+  assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({ env: { LETAGENTS_RENTAL_CREDENTIAL_ISOLATION: "1" } }, { ...base, CLAUDE_CONFIG_DIR: "/data/claude" })),
+    "/home/owner/.claude/projects", "a rented agent's CLI is not given the owner's directory, and writes in its home");
+});
+
+test("a Claude turn that ended before its process did is not given a second ending when its replacement reads it back", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    const turn = await agent.begin(1);
+    agent.reportStarted(turn);
+    // The CLI reports the answer, and the daemon fails to save it: the message is still to be settled when the process ends.
+    agent.failNextResultCheckpoint(new Error("the result could not be saved"));
+    agent.answer(turn, "Answer 1.");
+    await agent.eventually(() => agent.recorded().turns[0]?.state === "terminal", "the turn's ending is in the record");
+    agent.sessionRows.push(...CLAUDE_SESSION_AFTER_EXIT["its answer"](agent.sessionId, turn.id, 1));
+    agent.exitProcess();
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered from the session");
+    assert.equal(agent.recovery.requests.at(-1)?.recordEnding, undefined, "the record already has the ending; nothing asks for another");
+
+    const next = await agent.begin(2);
+    agent.reportStarted(next);
+    agent.answer(next, "Answer 2.");
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+    await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
+    assert.deepEqual(agent.recorded().endings.map((ending) => ending.n), [1, 1], "one ending each");
+    assert.equal(agent.recorded().gaps, 0);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a Claude turn whose process ended before it reported the turn started is in the record as lost, and is closed once when its replacement reads it back", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    // The process ends before it has reported the turn started. The adapter
+    // names the turn it was asked to run when it reports the exit, so the
+    // record holds the turn as lost although it never saw it start.
+    const letRecoveryGo = agent.holdRecovery();
+    const turn = await agent.begin(1);
+    assert.deepEqual(agent.recorded().turns, [], "nothing is recorded for a turn that was only asked for");
+    agent.sessionRows.push(...CLAUDE_SESSION_AFTER_EXIT["its answer"](agent.sessionId, turn.id, 1));
+    agent.exitProcess();
+    await agent.eventually(() => agent.recorded().turns[0]?.state === "lost", "the turn is recorded as lost with its process");
+    letRecoveryGo();
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered from the session");
+    assert.equal(agent.recovery.requests.at(-1)?.recordEnding, true, "the record holds the turn open, so its ending is asked for");
+
+    const next = await agent.begin(2);
+    agent.reportStarted(next);
+    agent.answer(next, "Answer 2.");
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+    await agent.eventually(() => agent.recorded().turns.length === 2 && agent.recorded().turns.every((recorded) => recorded.state === "terminal"),
+      "both turns are closed in the record");
+    assert.deepEqual(agent.recorded().endings.map((ending) => ending.n), [1, 1], "one ending each");
+    assert.equal(agent.recorded().gaps, 0);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const left of ["its answer", "half an answer"] as const) {
+  test(`a Claude turn left lost by a daemon that ended before reading it back, with ${left} in the session, is closed by the next daemon`, async () => {
+    const agent = await claudeDaemonFixture();
+    try {
+      const turn = await agent.begin(1);
+      agent.reportStarted(turn);
+      await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
+      agent.sessionRows.push(...CLAUDE_SESSION_AFTER_EXIT[left](agent.sessionId, turn.id, 1));
+      const letRecoveryGo = agent.holdRecovery();
+      agent.exitProcess();
+      await agent.eventually(() => agent.recorded().turns[0]?.state === "lost", "the turn is lost with its process, and that is saved");
+      await agent.restartDaemon();
+      letRecoveryGo();
+
+      const settled = left === "its answer" ? "acknowledged" : "acknowledged_failed";
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === settled, `msg_1 settles ${settled}`);
+      assert.equal(agent.recovery.requests.at(-1)?.recordEnding, true, "the new daemon reads from its saved record that the turn is open");
+      const next = await agent.begin(2);
+      agent.reportStarted(next);
+      agent.answer(next, "Answer 2.");
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+      await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
+      assert.deepEqual(agent.recorded().endings.map((ending) => ending.n), [1, 1]);
+      assert.equal(agent.recorded().gaps, 0);
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
 
 test("Claude keeps an exact stream result when terminal checkpointing fails so recovery cannot redispatch", async () => {
   const harness = createHarness();

@@ -12,6 +12,9 @@ export type RoomAgentLiveHandle = {
   providerContinuationId: string | null;
 };
 
+/** What an owner reads while the daemon is still going to get the agent past a gap in its record by itself. */
+export const RECORD_RESTART_PENDING_DETAIL = "Part of this agent's activity record is missing. LetAgents restarts the agent when it is idle and continues with a new record; messages wait until then.";
+
 export type RoomAgentIngressHealth = {
   room_id: string;
   state: "starting" | "observing" | "backoff" | "blocked" | "stopped";
@@ -33,6 +36,13 @@ export type RoomAgentStateProjectionInput = {
   currentHostGrantAvailable: boolean;
   liveHandle: RoomAgentLiveHandle | null;
   lifecycleAdmission?: LifecycleCaptureAdmissionStatus | null;
+  /**
+   * Set while admission is unavailable because the agent's execution record
+   * cannot be continued. Null: the daemon is still going to restart the
+   * agent by itself, so nothing needs its owner yet. A string: why it now
+   * does, in words for the owner.
+   */
+  recordRecovery?: string | null;
   ingressHealth: RoomAgentIngressHealth | null;
   continuationRepair: Pick<ProviderContinuationRepair, "inbox_item_id" | "phase"> | null;
   receipts: readonly SupervisedInboxReceiptProjection[];
@@ -126,9 +136,13 @@ export function projectRoomAgentManifestEntry(
   const admissionHeld = entry.delivery_mode === "daemon_inbox" && entry.desired_state === "running"
     && ["starting", "recovering", "working", "idle"].includes(entry.observed_state)
     && (input.lifecycleAdmission === "pending" || input.lifecycleAdmission === "unavailable");
-  const admissionDetail = input.lifecycleAdmission === "unavailable"
-    ? "The agent's readiness evidence is unavailable. Delivery is blocked until recovery is verified."
-    : "Waiting for verified agent readiness evidence before delivery can start.";
+  // A record the daemon is about to get past by itself holds delivery like a
+  // start that is still being verified: it is not yet a matter for the owner.
+  const admission = input.lifecycleAdmission === "unavailable" && input.recordRecovery === null ? "pending" : input.lifecycleAdmission;
+  const admissionDetail = input.lifecycleAdmission !== "unavailable"
+    ? "Waiting for verified agent readiness evidence before delivery can start."
+    : input.recordRecovery === null ? RECORD_RESTART_PENDING_DETAIL
+      : input.recordRecovery ?? "The agent's readiness evidence is unavailable. Delivery is blocked until recovery is verified.";
   const inbox = cutoverNeedsAttention
     ? {
         state: "blocked" as const,
@@ -145,7 +159,7 @@ export function projectRoomAgentManifestEntry(
         }
       : admissionHeld && !blocked
         ? {
-            state: input.lifecycleAdmission === "unavailable" ? "blocked" as const
+            state: admission === "unavailable" ? "blocked" as const
               : nonfinal.length ? "queued" as const : "empty" as const,
             pending_count: nonfinal.length,
             blocked_by_message_id: null,
@@ -183,7 +197,7 @@ export function projectRoomAgentManifestEntry(
   const hasLiveDeliveryOwner = hasExactRoomAgentDeliveryOwner(input);
   const connection = admissionHeld
     ? {
-        state: input.lifecycleAdmission === "pending" ? "reconnecting" as const : "disconnected" as const,
+        state: admission === "pending" ? "reconnecting" as const : "disconnected" as const,
         observed_at: entry.native_liveness?.observed_at ?? null,
         detail: admissionDetail,
       }
@@ -218,7 +232,7 @@ export function projectRoomAgentManifestEntry(
   const hasLiveIngressOwner = Boolean(hasCurrentBinding && credentialAvailable && ingressMatches);
   const ingress = admissionHeld
     ? {
-        state: input.lifecycleAdmission === "unavailable" ? "blocked" as const : "starting" as const,
+        state: admission === "unavailable" ? "blocked" as const : "starting" as const,
         observed_at: entry.native_liveness?.observed_at ?? null,
         detail: admissionDetail,
       }
@@ -277,7 +291,7 @@ export function projectRoomAgentManifestEntry(
 
   return {
     ...entry,
-    ...(admissionHeld && input.lifecycleAdmission === "unavailable" && entry.condition === "none"
+    ...(admissionHeld && admission === "unavailable" && entry.condition === "none"
       ? { condition: "coordination_blocked" as const, last_error: blocked?.last_error ?? admissionDetail }
       : {}),
     // A replacement Cursor lane can be idle without a native process while

@@ -10,6 +10,7 @@ import {
   CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS,
   lifecycleLocalConformanceEligibility,
   ProviderStreamCoordinator,
+  STOP_CALLBACKS_DEADLINE_MS,
   type ProviderInstallationToken,
   type ProviderStreamCoordinatorOptions,
 } from "../provider-stream-coordinator.js";
@@ -1900,4 +1901,62 @@ test("coordinator normalizes only the redacted display copy of a failed native c
   assert.doesNotMatch(JSON.stringify(displayed), /secret_canary_not_real_1234567890/);
   assert.notEqual(harness.getManifest().observed_state, "failed");
   await harness.coordinator.disposeAll();
+});
+
+test("stopping waits for every stream callback, and one that the stop's own fence refused is not a failure of the stop", async () => {
+  const { DaemonFenceLostError } = await import("../singleton.js");
+  const harness = coordinatorHarness({});
+  let finish!: () => void;
+  let finished = false;
+  // One callback is refused by the fence the stopping daemon has raised; another is still writing.
+  harness.coordinator.track(Promise.reject(new DaemonFenceLostError("Supervisor handoff fenced a stale daemon-owned commit.")));
+  harness.coordinator.track(new Promise<void>((resolve) => { finish = () => { finished = true; resolve(); }; }));
+  let disposed = false;
+  const disposal = harness.coordinator.disposeAll().then(() => { disposed = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(disposed, false, "the stores are not closed under a callback that is still running");
+  finish();
+  await disposal;
+  assert.equal(finished, true);
+
+  // Any other failure of a callback is still the stop's to report.
+  harness.coordinator.track(Promise.reject(new Error("activity storage fault")));
+  await assert.rejects(harness.coordinator.disposeAll(), /activity storage fault/);
+});
+
+test("stopping waits for stream callbacks no longer than its deadline, then goes on and reports what still runs", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); });
+  const flush = async () => { for (let turn = 0; turn < 4; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve)); };
+  const harness = coordinatorHarness({});
+  assert.equal(STOP_CALLBACKS_DEADLINE_MS, 10_000);
+  // One callback never returns; another ends at once.
+  harness.coordinator.track(new Promise<void>(() => {}));
+  harness.coordinator.track(Promise.resolve());
+  let disposed = false;
+  const disposal = harness.coordinator.disposeAll().then(() => { disposed = true; });
+  await flush();
+  t.mock.timers.tick(STOP_CALLBACKS_DEADLINE_MS - 1);
+  await flush();
+  assert.equal(disposed, false, "the stop waits for the deadline");
+  assert.deepEqual(warnings, []);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(disposed, true);
+  await disposal;
+  assert.deepEqual(warnings, ['[provider_stream_stop] {"deadline_ms":10000,"callbacks_still_running":1}'],
+    "and then goes on, reporting the callback that still runs");
+
+  // A callback that failed before the deadline is still the stop's to report, after the wait.
+  const failing = coordinatorHarness({});
+  failing.coordinator.track(new Promise<void>(() => {}));
+  failing.coordinator.track(Promise.reject(new Error("activity storage fault")));
+  let failure: unknown = null;
+  const failed = failing.coordinator.disposeAll().catch((error: unknown) => { failure = error; });
+  await flush();
+  t.mock.timers.tick(STOP_CALLBACKS_DEADLINE_MS);
+  await flush();
+  assert.match(String(failure), /activity storage fault/);
+  await failed;
 });

@@ -13,6 +13,8 @@ import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSu
 import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { projectRoomAgentManifestEntry } from "../room-agent-state-projection.js";
+import { archiveExitedRuntimes } from "../runtime-recovery-journal.js";
+import type { DaemonManifestEntry } from "../types.js";
 
 const now = "2026-08-31T00:00:00.000Z";
 const ready: NativeExecutionFact = { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" };
@@ -70,8 +72,10 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
   });
   const observer = new ProviderExecutionObserver(() => now);
   const diagnostics: string[] = [];
+  const stopped: string[] = [];
   const capture = new ExecutionCaptureCoordinator(db, { provider: { onExecution: onExecution ?? ((_handle, listener) => observer.subscribe(listener)) },
-    currentHandle: id => handles.get(id), daemonGeneration: () => 1, diagnostic: (_id, code) => diagnostics.push(code), changed });
+    currentHandle: id => handles.get(id), daemonGeneration: () => 1, diagnostic: (_id, code) => diagnostics.push(code),
+    recordStopped: id => stopped.push(id), changed });
   const tokens = new WeakMap<ProviderActionHandle, { identity: string; token: ProviderInstallationToken }>();
   const tokenFor = (current = handles.get("agent")!, generation = "generation"): ProviderInstallationToken => {
     const tokenAuthorityMode = current.providerConnection?.kind === "cursor_cli"
@@ -104,7 +108,7 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
       .run(turn, source, Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1, state, `action-${turn}`, `reply-${turn}`, turn, now, now);
     db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room','workspace','generation','continuation',?)").run(turn, turn);
   };
-  return { db, handle, handles, observer, capture, diagnostics, install, advance, admission, typedAdmission, tokenFor, emit, facts, position, bindTurn };
+  return { db, handle, handles, observer, capture, diagnostics, stopped, install, advance, admission, typedAdmission, tokenFor, emit, facts, position, bindTurn };
 }
 
 // A second independent capture lane in the same real store/coordinator.
@@ -979,6 +983,267 @@ test("planned capture handoff defers on a real storage lock without detaching ob
     if (competing.isTransaction) competing.exec("ROLLBACK");
     competing.close(); f.capture.close(); rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("a record that stops is reported for its owner once, and one that is only waiting is not", async () => {
+  const f = fixture();
+  try {
+    f.install();
+    // A turn the record cannot place yet: it may still be bound, so nothing has stopped.
+    f.emit(ready); f.emit(active); await flush();
+    assert.deepEqual(f.diagnostics, ["identity_unavailable"]);
+    assert.deepEqual(f.stopped, []);
+    assert.equal(f.capture.recordBlock(f.tokenFor()), "identity_unavailable", "though it holds delivery for as long as it lasts");
+    f.bindTurn(); f.capture.refresh("agent"); await flush();
+    assert.equal(f.capture.recordBlock(f.tokenFor()), null);
+
+    // A position that was used up without a fact: the record stops here.
+    f.observer.markUnavailable(); f.emit(terminal); await flush();
+    f.emit(ready); await flush();
+    assert.deepEqual(f.stopped, ["agent"]);
+    assert.equal(f.capture.recordBlock(f.tokenFor()), "source_gap");
+    assert.equal(f.capture.recordBlock({ ...f.tokenFor() }), null, "only for the exact runtime the record belongs to");
+  } finally { f.capture.close(); }
+});
+
+/** One execution source per runtime, as each provider process has. */
+function perRuntimeSources() {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const f = fixture("codex_app_server", (handle, listener) => {
+    if (!sources.has(handle)) sources.set(handle, new ProviderExecutionObserver(() => now));
+    return sources.get(handle)!.subscribe(listener);
+  });
+  sources.set(f.handle, f.observer);
+  const entry = (overrides: Partial<DaemonManifestEntry> = {}) => ({ id: "agent", room_id: "room", delivery_mode: "daemon_inbox",
+    desired_state: "running", provider: "codex", provider_ref: null, ...overrides }) as DaemonManifestEntry;
+  /** What the daemon does before it starts a successor, in the fenced transaction it uses. */
+  const archive = (manifestEntry = entry(), identity?: Parameters<typeof archiveExitedRuntimes>[2]) => {
+    f.db.exec("BEGIN IMMEDIATE");
+    try { const archived = archiveExitedRuntimes(f.db, manifestEntry, identity); f.db.exec("COMMIT"); return archived; }
+    catch (error) { f.db.exec("ROLLBACK"); throw error; }
+  };
+  const endGeneration = (death?: { pid: number; processIdentity: string }) => f.db.prepare("UPDATE work_attempt_executions SET terminal_json=?")
+    .run(JSON.stringify({ ended_at: now, exit_code: null, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "crashed",
+      actor: "test", generation: 1, provider_continuation_id: "continuation",
+      ...(death ? { native_runtime_death: { kind: "codex_app_server", ...death } } : {}) }));
+  const runtimeOf = (handle: ProviderActionHandle) => executionRuntimeStorageIdentity("agent", "generation", handle.providerConnection!.kind,
+    handle.providerConnection!.pid!, handle.providerConnection!.processIdentity!);
+  const emitFrom = (handle: ProviderActionHandle, fact: NativeExecutionFact) => sources.get(handle)!.emit(fact,
+    handle.providerConnection!.processIdentity!, handle.providerConnection!.pid!);
+  return { ...f, sources, entry, archive, endGeneration, runtimeOf, emitFrom };
+}
+
+test("the daemon archives an exited runtime only when nothing else can complete its record, once, and never invents its ending", async () => {
+  const f = perRuntimeSources();
+  try {
+    f.install(); f.emit(ready); await flush();
+    f.bindTurn(); f.emit(active); await flush();
+    const first = f.runtimeOf(f.handle);
+    f.observer.markUnavailable(); f.emit(terminal); await flush();
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 2, max_observed_sequence: 4 }, "a gap under an open turn");
+
+    assert.deepEqual(f.archive(), [], "a generation that has not ended is left alone");
+    f.endGeneration({ pid: 42, processIdentity: "birth-secret" });
+    f.db.prepare("INSERT INTO agent_runtime_recoveries VALUES('manual','agent','room','generation','another-runtime','resume','prepared','{}',NULL,?,?)").run(now, now);
+    assert.deepEqual(f.archive(), [], "a recovery a person started is theirs to finish");
+    f.db.prepare("DELETE FROM agent_runtime_recoveries").run();
+    assert.deepEqual(f.archive(f.entry({ delivery_mode: "mcp_polling" })), [], "a lane that polls for itself has no such record to continue");
+
+    const before = { ...f.db.prepare("SELECT * FROM execution_observers").get()! };
+    assert.deepEqual(f.archive(), [first]);
+    const row = f.db.prepare("SELECT * FROM agent_runtime_recoveries").get()!;
+    assert.deepEqual([row.agent_id, row.room_id, row.execution_generation_id, row.runtime_generation_id, row.mode, row.phase],
+      ["agent", "room", "generation", first, "resume", "complete"]);
+    assert.deepEqual(JSON.parse(String(row.observer_json)), before, "the observer is kept as it stood, gap included");
+    assert.deepEqual(JSON.parse(String(row.provider_ref_json)), { work_attempt_id: "workspace", execution_generation_id: "generation",
+      provider_continuation_id: "continuation", provider_connection: null,
+      native_runtime_death: { kind: "codex_app_server", pid: 42, processIdentity: "birth-secret" } });
+    assert.equal(f.db.prepare("SELECT observer_epoch FROM execution_observers").get()!.observer_epoch, Number(before.observer_epoch) + 1);
+    assert.deepEqual({ ...f.db.prepare("SELECT runtime_state,control_state FROM execution_runtime_generations WHERE runtime_generation_id=?").get(first) },
+      { runtime_state: "exited", control_state: "lost" });
+    assert.deepEqual(f.db.prepare("SELECT state FROM execution_turns").all().map(turn => turn.state), ["lost"], "its open turn is lost, not finished");
+    assert.equal(f.facts().length, 2, "no fact is added");
+    assert.equal(f.db.prepare("SELECT state FROM supervised_agent_inbox").get()!.state, "awaiting_result", "and no message is cancelled");
+    assert.equal(f.db.prepare("SELECT state FROM execution_message_attempts").get()!.state, "active", "nor any attempt marked lost");
+    assert.deepEqual(f.archive(), [], "one boundary per runtime");
+  } finally { f.capture.close(); }
+});
+
+test("a turn whose message is still to be settled is left for its replacement, and a process that is still running is never archived", async () => {
+  const f = perRuntimeSources();
+  try {
+    f.install(); f.emit(ready); await flush();
+    f.bindTurn("native-turn", "message", "result_recovery"); f.emit(active); await flush();
+    f.emit({ ...active, state: "lost" }); await flush();
+    f.endGeneration();
+    assert.deepEqual(f.archive(), [], "the replacement reads this turn's ending back and records it");
+    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_failed'").run();
+    const first = f.runtimeOf(f.handle);
+
+    // The runtime the manifest still names is checked against the operating system.
+    const birth = "Mon Jan  5 10:00:00 2026";
+    const identity = (alive: boolean) => ({ probe: () => { if (!alive) throw Object.assign(new Error("gone"), { code: "ESRCH" }); },
+      readBirthIdentity: () => birth, sameBirthIdentity: (actual: string, expected: string) => actual.trim() === expected.trim() });
+    const second = successor(f, birth);
+    f.install(second); f.emitFrom(second, ready); await flush();
+    f.sources.get(second)!.markUnavailable(); f.emitFrom(second, ready); await flush();
+    const saved = f.entry({ provider_ref: { work_attempt_id: "workspace", execution_generation_id: "generation",
+      provider_continuation_id: "continuation", provider_connection: second.providerConnection! } });
+    assert.deepEqual(f.archive(saved, identity(true)), [first], "the settled turn's runtime is archived; the running process is not");
+    assert.deepEqual(f.archive(saved, identity(false)), [f.runtimeOf(second)], "once the process is gone its gap is archived too");
+    const boundaries = f.db.prepare("SELECT runtime_generation_id,observer_json,provider_ref_json FROM agent_runtime_recoveries ORDER BY rowid").all();
+    assert.equal(boundaries[0]!.observer_json, null, "a runtime the observer has left carries no observer");
+    assert.equal(JSON.parse(String(boundaries[1]!.observer_json)).observer_runtime_generation_id, f.runtimeOf(second));
+    assert.equal("native_runtime_death" in JSON.parse(String(boundaries[1]!.provider_ref_json)), false,
+      "an ending recorded without process evidence is archived without any");
+  } finally { f.capture.close(); }
+});
+
+test("the runtime the saved reference names is archived only once its process is known to have ended, never while that cannot be told", async () => {
+  const birth = "Mon Jan  5 10:00:00 2026";
+  /** What the operating system answers for the saved process. */
+  const identities = {
+    "still running": { probe: () => {}, readBirthIdentity: () => birth, sameBirthIdentity: (actual: string, expected: string) => actual.trim() === expected.trim() },
+    "not readable (EPERM)": { probe: () => { throw Object.assign(new Error("not permitted"), { code: "EPERM" }); }, readBirthIdentity: () => birth,
+      sameBirthIdentity: (actual: string, expected: string) => actual.trim() === expected.trim() },
+    "running, with a birth that cannot be read": { probe: () => {}, readBirthIdentity: (): string => { throw new Error("ps failed"); },
+      sameBirthIdentity: (actual: string, expected: string) => actual.trim() === expected.trim() },
+    "gone": { probe: () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); }, readBirthIdentity: () => birth,
+      sameBirthIdentity: (actual: string, expected: string) => actual.trim() === expected.trim() },
+    "another process under its id": { probe: () => {}, readBirthIdentity: () => "Tue Jan  6 11:00:00 2026",
+      sameBirthIdentity: (actual: string, expected: string) => actual.trim() === expected.trim() },
+  } as const;
+  for (const [answer, identity] of Object.entries(identities)) for (const witnessed of [false, true]) {
+    const f = perRuntimeSources();
+    try {
+      // The saved runtime has a gap, and its generation has a recorded terminal.
+      const saved = successor(f, birth);
+      f.install(saved); f.emitFrom(saved, ready); await flush();
+      f.sources.get(saved)!.markUnavailable(); f.emitFrom(saved, ready); await flush();
+      f.endGeneration(witnessed ? { pid: saved.providerConnection!.pid!, processIdentity: birth } : undefined);
+      const entry = f.entry({ provider_ref: { work_attempt_id: "workspace", execution_generation_id: "generation",
+        provider_continuation_id: "continuation", provider_connection: saved.providerConnection! } });
+      const verified = answer === "gone" || answer === "another process under its id" || (witnessed && answer !== "still running");
+      assert.deepEqual(f.archive(entry, identity).includes(f.runtimeOf(saved)), verified,
+        `${answer}, ${witnessed ? "with" : "without"} the death in its terminal: ${verified ? "archived" : "left alone"}`);
+      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE runtime_generation_id=?").get(f.runtimeOf(saved))!.n, verified ? 1 : 0);
+    } finally { f.capture.close(); }
+  }
+});
+
+test("a Cursor child whose turn a replaced daemon left open is archived once the lane has moved off it and its message is settled", async () => {
+  // Cursor runs a child per turn in one generation, which has no terminal while the lane lives.
+  const f = fixture("cursor_cli");
+  try {
+    f.install(); f.emit(ready); await flush();
+    f.bindTurn(); f.emit(active); await flush();
+    const child = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 42, "birth-secret");
+    assert.deepEqual(f.db.prepare("SELECT state FROM execution_turns").all().map(turn => turn.state), ["active"],
+      "the daemon that saw the turn start was replaced before it saw the turn end");
+    const lane = (connection: ProviderActionConnectionRef) => ({ id: "agent", room_id: "room", delivery_mode: "daemon_inbox",
+      desired_state: "running", provider: "cursor", provider_ref: { work_attempt_id: "workspace", execution_generation_id: "generation",
+        provider_continuation_id: "continuation", provider_connection: connection } }) as DaemonManifestEntry;
+    const idle = lane({ kind: "cursor_cli", pid: null, processIdentity: null });
+    const archive = (entry: DaemonManifestEntry, identity?: Parameters<typeof archiveExitedRuntimes>[2]) => {
+      f.db.exec("BEGIN IMMEDIATE");
+      try { const archived = archiveExitedRuntimes(f.db, entry, identity); f.db.exec("COMMIT"); return archived; }
+      catch (error) { f.db.exec("ROLLBACK"); throw error; }
+    };
+
+    assert.deepEqual(archive(lane(f.handle.providerConnection!)), [], "the child the saved reference names is the lane's own");
+    assert.deepEqual(archive(idle), [], "a turn whose message is still to be settled is left for its recovery to read back");
+    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged'").run();
+    assert.deepEqual(archive(lane(f.handle.providerConnection!)), [], "nor while the saved reference still names the child");
+    assert.deepEqual(archive(idle), [child],
+      "once the lane is idle again and the message is settled, the child is archived");
+    assert.deepEqual(f.db.prepare("SELECT state FROM execution_turns").all().map(turn => turn.state), ["lost"], "its open turn is lost, not finished");
+    assert.deepEqual({ ...f.db.prepare("SELECT runtime_state FROM execution_runtime_generations WHERE runtime_generation_id=?").get(child) },
+      { runtime_state: "exited" });
+    assert.equal(f.db.prepare("SELECT terminal_json FROM work_attempt_executions").get()!.terminal_json, null, "the lane's generation goes on");
+    assert.equal(f.db.prepare("SELECT state FROM supervised_agent_inbox").get()!.state, "acknowledged", "and no message is changed");
+    assert.deepEqual(archive(idle), [], "one boundary per child");
+
+    // A child the saved reference still names is the lane's own until the lane has settled its exit, even once its
+    // process is gone: the lane may still be recording that child's last facts, which a boundary would refuse.
+    const store = new ExecutionShadowStore(f.db);
+    const birth = "Mon Jan  5 10:00:00 2026";
+    const gone = { probe: () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); }, readBirthIdentity: () => birth,
+      sameBirthIdentity: (actual: string, expected: string) => actual.trim() === expected.trim() };
+    const ended = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 44, birth);
+    store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: ended,
+      provider: "cursor", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+    store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation", runtimeGenerationId: ended,
+      attemptId: store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "ended-message", executionGenerationId: "generation",
+        workspaceId: "workspace", createdAtMs: Date.parse(now) }),
+      turnId: "ended-turn", providerContinuationId: "continuation", providerTurnId: "ended-native-turn", createdAtMs: Date.parse(now) });
+    assert.deepEqual(archive(lane({ kind: "cursor_cli", pid: 44, processIdentity: birth }), gone), [], "the child the saved reference names is not archived");
+    assert.deepEqual(archive(idle, gone), [ended], "once the lane has moved off it, it is");
+
+    // The next child's turn is no longer refused by the one left open, and that child is the lane's own.
+    const next = executionRuntimeStorageIdentity("agent", "generation", "cursor_cli", 43, "birth-next");
+    store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: next,
+      provider: "cursor", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+    f.bindTurn("next-native-turn", "next-message", "dispatching");
+    const attemptId = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "next-message",
+      executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: Date.parse(now) });
+    assert.doesNotThrow(() => store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation",
+      runtimeGenerationId: next, attemptId, turnId: "next-turn", providerContinuationId: "continuation", providerTurnId: "next-native-turn",
+      createdAtMs: Date.parse(now) }));
+    assert.deepEqual(archive(lane({ kind: "cursor_cli", pid: 43, processIdentity: "birth-next" })), [], "the running child is never archived");
+  } finally { f.capture.close(); }
+});
+
+test("outside Cursor, a runtime of a generation without a recorded terminal is never archived", async () => {
+  for (const kind of ["codex_app_server", "claude_cli", "opencode_server"] as const) {
+    const f = fixture(kind);
+    try {
+      // Another runtime of the agent's live generation, with a turn left open for a message that is settled.
+      const store = new ExecutionShadowStore(f.db);
+      const provider = { codex_app_server: "codex", claude_cli: "claude-code", opencode_server: "open-model" } as const;
+      const other = executionRuntimeStorageIdentity("agent", "generation", kind, 43, "birth-other");
+      store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: other,
+        provider: provider[kind], authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+      store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation", runtimeGenerationId: other,
+        attemptId: store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "settled-message", executionGenerationId: "generation",
+          workspaceId: "workspace", createdAtMs: Date.parse(now) }),
+        turnId: "open-turn", providerContinuationId: "continuation", providerTurnId: "open-native-turn", createdAtMs: Date.parse(now) });
+      const entry = { id: "agent", room_id: "room", delivery_mode: "daemon_inbox", desired_state: "running", provider: provider[kind],
+        provider_ref: { work_attempt_id: "workspace", execution_generation_id: "generation", provider_continuation_id: "continuation",
+          provider_connection: f.handle.providerConnection! } } as DaemonManifestEntry;
+      const archive = () => {
+        f.db.exec("BEGIN IMMEDIATE");
+        try { const archived = archiveExitedRuntimes(f.db, entry); f.db.exec("COMMIT"); return archived; }
+        catch (error) { f.db.exec("ROLLBACK"); throw error; }
+      };
+      assert.deepEqual(archive(), [], `${kind}: its generation has not ended`);
+      f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'").run(JSON.stringify({
+        ended_at: now, exit_code: 0, signal: null, stdio_archive_ref: null, stdio_tail: "", terminal_cause: "exited", actor: "test", generation: 1,
+        provider_continuation_id: "continuation" }));
+      assert.deepEqual(archive(), [other], `${kind}: once it has, that runtime is archived`);
+    } finally { f.capture.close(); }
+  }
+});
+
+test("a recovery boundary lifts an agent's suspended record for the runtime that starts behind it", async () => {
+  const f = perRuntimeSources();
+  try {
+    f.install(); f.emit(ready); await flush();
+    f.observer.markUnavailable(); f.emit(ready); await flush();
+    // Two replacements in quick succession: the second is installed while the first lane is still retiring.
+    const second = successor(f, "birth-2"); f.install(second);
+    const third = successor(f, "birth-3"); f.install(third);
+    await flush();
+    assert.equal(f.admission(third), "unavailable", "the agent's record is suspended");
+    assert.equal(f.capture.recordBlock(f.tokenFor(third)), "suspended", "which holds the delivery of a runtime that was given no lane at all");
+
+    f.endGeneration();
+    assert.deepEqual(f.archive(), [f.runtimeOf(f.handle)]);
+    const fourth = successor(f, "birth-4");
+    f.install(fourth); f.emitFrom(fourth, ready); await flush();
+    assert.equal(f.admission(fourth), "ready", "the next runtime is recorded");
+    assert.equal(f.db.prepare("SELECT observer_runtime_generation_id FROM execution_observers").get()!.observer_runtime_generation_id, f.runtimeOf(fourth));
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 1 });
+  } finally { f.capture.close(); }
 });
 
 test("planned capture handoff preserves a preexisting suspended gap without requiring recovery", async () => {

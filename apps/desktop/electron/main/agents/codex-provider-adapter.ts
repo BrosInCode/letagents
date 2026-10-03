@@ -84,6 +84,7 @@ import {
   type ProviderContinuationRepairRequest,
   type ProviderContinuationRepairResult,
   ProviderContinuationMissingError,
+  PROCESS_ENDED_DURING_TURN,
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
@@ -237,8 +238,21 @@ export interface CodexProviderAdapterDependencies {
   sleep(ms: number): Promise<void>;
 }
 
+/**
+ * How long a command's output is added up before it is recorded, when no
+ * other fact comes first. The record keeps only how many bytes a command
+ * printed, so nothing is lost by waiting, and a byte budget would bound
+ * nothing; the wait only bounds how stale the shown byte count may be. Five
+ * seconds keeps a command that streams for an hour at about 720 facts, where
+ * one fact per chunk filled the record's 10,000 facts within minutes. A
+ * command's end, its turn's end and its process's exit record it at once.
+ */
+export const COMMAND_OUTPUT_WINDOW_MS = 5_000;
+
 export interface CodexProviderAdapterOptions {
   codexBin?: string;
+  /** See COMMAND_OUTPUT_WINDOW_MS; tests shorten it. */
+  commandOutputWindowMs?: number;
   dependencies?: Partial<CodexProviderAdapterDependencies>;
   activitySink?: (event: ProviderActivityEvent) => void;
   streamSink?: (event: ProviderStreamEvent) => void;
@@ -824,6 +838,9 @@ class CodexProviderHandle implements ProviderHandle {
   readonly execution: ProviderExecutionObserver;
   readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
   readonly nativeActiveOperations = new Map<string, Extract<NativeExecutionFact, { domain: "execution" }>>();
+  /** Output that is not in the record yet: for each command that printed, its chunks so far, added up. */
+  readonly pendingCommandOutput = new Map<string, { providerContinuationId: string; providerTurnId: string; executionId: string; outputBytes: number }>();
+  pendingCommandOutputTimer: ReturnType<typeof setTimeout> | null = null;
   nativeRuntimeUnavailable: HardControlEvidence | null = null;
   state: ProviderObservedState = "starting";
   stopRequested = false;
@@ -953,7 +970,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;
+    this.commandOutputWindowMs = options.commandOutputWindowMs ?? COMMAND_OUTPUT_WINDOW_MS;
   }
+  private readonly commandOutputWindowMs: number;
 
   capabilities(): ProviderAdapterCapabilities {
     return {
@@ -1631,12 +1650,38 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const read = await handle.client.request<ThreadReadResult>("thread/read", { threadId: handle.providerContinuationId, includeTurns: true });
     if (read.thread?.id !== handle.providerContinuationId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery resolved a different continuation thread.");
     const turn = read.thread?.turns?.find((candidate) => candidate.id === turnId);
+    // The process that ran this turn has ended, and this one runs no turn it
+    // was not asked for. A turn the thread does not hold, or still shows as
+    // running, was cut off by that exit: nothing will ever end it, so it is
+    // reported as interrupted instead of being looked for or waited for.
+    const cutOffByExit = (shown?: ThreadReadTurn): Promise<ProviderRoomTurnResult> => {
+      const ended = { ...(shown ?? { id: turnId, items: [] }), status: "interrupted", error: { message: PROCESS_ENDED_DURING_TURN } } as ThreadReadTurn;
+      if (request.recordEnding) {
+        this.consumeNotification(handle, { method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId, turn: ended } });
+      }
+      handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
+      return this.roomTurnResultFromTerminal(handle, turnId, "interrupted", ended, options.checkpointTerminalResult);
+    };
     if (!turn) {
+      if (request.originProcessEnded) return cutOffByExit();
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw new CodexRoomTurnRecoveryError("Codex room-turn recovery cannot find the persisted exact turn.");
     }
     const status = String(typeof turn.status === "string" ? turn.status : turn.status?.status ?? "").toLowerCase();
     if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) {
+      // The runtime that ran this turn may have exited before it reported how
+      // the turn ended, and this one is sent no notification for a turn that
+      // ended before it started. The thread's own record is then the only
+      // place the ending exists, so it is taken from there exactly as its
+      // notification would have brought it. Left open, the turn refuses every
+      // later turn of this agent in the execution record. Only the daemon
+      // knows whether its record holds the turn open, so it says so.
+      if (request.recordEnding) {
+        this.consumeNotification(handle, {
+          method: "turn/completed",
+          params: { threadId: handle.providerContinuationId, turnId, turn: { ...turn, status } },
+        });
+      }
       handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
       return this.roomTurnResultFromTerminal(handle, turnId, status, turn, options.checkpointTerminalResult);
     }
@@ -1644,6 +1689,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw new CodexRoomTurnRecoveryError("Codex room-turn recovery found an unknown exact turn state.");
     }
+    if (request.originProcessEnded) return cutOffByExit(turn);
     handle.setLiveState("working");
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
     return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
@@ -2561,7 +2607,51 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return params.threadId === handle.providerContinuationId;
   }
 
+  /**
+   * A command can print thousands of chunks in one burst, and each chunk used
+   * to be one fact in the execution record. A burst larger than the record's
+   * intake holds overflowed it, and the agent's record had a gap from then on.
+   * Adding up only what one read held was not enough: a command that streams
+   * a chunk every few milliseconds, as an install or a test run does, filled
+   * the record just the same. The chunks of one command are now added up for
+   * up to COMMAND_OUTPUT_WINDOW_MS and recorded as one fact: before the next
+   * fact of any other kind (the command's own end, a turn's end, the process
+   * exiting), and at the latest when the window closes. Commands that print
+   * in turn are each added up on their own, in the order they first printed
+   * in the window, so a window is as many facts as commands printed in it.
+   */
+  private noteCommandOutput(
+    handle: CodexProviderHandle,
+    identity: { providerContinuationId: string; providerTurnId: string },
+    executionId: string,
+    outputBytes: number,
+  ): void {
+    if (handle.nativeRuntimeUnavailable) return;
+    const key = JSON.stringify([identity.providerContinuationId, identity.providerTurnId, executionId]);
+    const pending = handle.pendingCommandOutput.get(key);
+    if (pending) {
+      pending.outputBytes += outputBytes;
+      return;
+    }
+    if (!handle.pendingCommandOutput.size) {
+      handle.pendingCommandOutputTimer = setTimeout(() => this.recordCommandOutput(handle), this.commandOutputWindowMs);
+      handle.pendingCommandOutputTimer.unref?.();
+    }
+    handle.pendingCommandOutput.set(key, { ...identity, executionId, outputBytes });
+  }
+
+  private recordCommandOutput(handle: CodexProviderHandle): void {
+    if (handle.pendingCommandOutputTimer) { clearTimeout(handle.pendingCommandOutputTimer); handle.pendingCommandOutputTimer = null; }
+    if (!handle.pendingCommandOutput.size) return;
+    const pending = [...handle.pendingCommandOutput.values()];
+    handle.pendingCommandOutput.clear();
+    for (const output of pending) {
+      this.emitNativeExecution(handle, { ...output, domain: "execution", operation: "command", kind: "output", sideEffects: "possible" });
+    }
+  }
+
   private emitNativeExecution(handle: CodexProviderHandle, fact: NativeExecutionFact): void {
+    this.recordCommandOutput(handle);
     if (handle.nativeRuntimeUnavailable) return;
     if (fact.domain === "execution") {
       const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId, fact.executionId]);
@@ -2754,7 +2844,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     if (notification.method === "item/commandExecution/outputDelta") {
       if (nativeExecutionId(params.itemId) && typeof params.delta === "string" && params.delta.length > 0) {
-        emit({ ...identity, domain: "execution", executionId: params.itemId, operation: "command", kind: "output", outputBytes: Buffer.byteLength(params.delta), sideEffects: "possible" });
+        this.noteCommandOutput(handle, identity, params.itemId, Buffer.byteLength(params.delta));
       }
       return null;
     }
@@ -2786,6 +2876,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   private markNativeExecutionUnavailable(handle: CodexProviderHandle): void {
+    this.recordCommandOutput(handle);
     handle.execution.markUnavailable();
     handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
       handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
@@ -2796,6 +2887,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     controlEvidence: "process_exit" | "native_session_terminated",
   ): void {
     if (handle.nativeRuntimeUnavailable) return;
+    this.recordCommandOutput(handle);
     handle.nativeRuntimeUnavailable = controlEvidence;
     handle.permissionFileChangeProposals.clear();
     handle.state = "failed";

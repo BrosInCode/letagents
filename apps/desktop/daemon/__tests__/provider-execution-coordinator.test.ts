@@ -1841,6 +1841,32 @@ test("a live generation without an attachable handle re-checks with capped backo
   assert.equal(transitions, 1, "repeated checks of an unchanged state do not rewrite the manifest");
 });
 
+for (const desired of ["running", "paused"] as const) test(`while a ${desired} entry's exit is being settled, a pass neither attaches its exited runtime nor starts or stops anything`, async () => {
+  const runtime = ownedRecoveryHarness();
+  runtime.setEntry({ ...runtime.entry(), desired_state: desired, observed_state: "idle", condition: "none", last_error: null });
+  const calls: string[] = [];
+  runtime.options.provider.attach = async () => { calls.push("attach"); return returnedHandle; };
+  runtime.options.provider.resume = async () => { calls.push("resume"); return returnedHandle; };
+  runtime.options.provider.spawn = async () => { calls.push("spawn"); return returnedHandle; };
+  runtime.options.provider.stop = async (current) => { calls.push("stop"); return terminal(current); };
+  const transition = runtime.options.transition;
+  runtime.options.transition = async (...args) => { calls.push(`transition:${args[1]}`); return transition(...args); };
+  let settling = true;
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options, exitSettling: () => settling });
+
+  // The exit let go of the runtime; its generation has no terminal yet.
+  await coordinator.converge("agent-1");
+  assert.equal(await coordinator.attachLiveProvider(runtime.entry()), null, "nor does any other caller get the exited runtime");
+  assert.deepEqual(calls, [], "the settlement owns the entry until the exit is recorded");
+  assert.deepEqual(runtime.installed, []);
+  assert.equal(runtime.entry().observed_state, "idle");
+
+  // Once the exit is recorded the same pass acts as it always did.
+  settling = false;
+  await coordinator.converge("agent-1");
+  assert.equal(calls[0], "attach");
+});
+
 test("a sooner recovery replaces a pending later one and never the reverse", async () => {
   const runtime = harness({});
   const scheduled: number[] = [];
@@ -2360,6 +2386,52 @@ test("a provider's launch notices are recorded in the agent's activity", async (
   assert.equal(notices.length, 1);
   assert.equal(notices[0]!.summary, "Plugin boundary not in effect: no git on the launch's PATH.");
   assert.equal(notices[0]!.method, "workspace_boundary");
+});
+
+test("an agent whose record stops under a running runtime, or was carried past a gap at its start, says so once in its activity", async () => {
+  const stopped = "LetAgents stopped recording this agent's activity: part of the record could not be kept. The agent keeps working, and its messages are not affected.";
+  const continued = "Part of this agent's activity record is missing; LetAgents continued with a new record.";
+  let installed: ProviderInstallationToken | undefined;
+  let archived: string[] = ["runtime-with-a-gap"];
+  const runtime = harness({
+    entry: { ...baseEntry(), provider: "open-model", delivery_mode: "daemon_inbox", source_repo_path: null },
+    workspaceIdentity: scratchWorkspaceIdentity,
+    provider: provider({ spawn: async () => openModelHandle }),
+    currentInstallation: () => installed,
+  });
+  const fences: unknown[] = [];
+  runtime.options.store.archiveExitedRuntimes = async (_agentId, commitFence) => { fences.push(commitFence); const now = archived; archived = []; return now; };
+  const notices = () => (runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice").map((event) => event.summary);
+  const settled = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  runtime.coordinator.noteRecordStopped("agent-1");
+  await settled();
+  assert.deepEqual(notices(), [], "a record that stopped for a runtime that is gone is its replacement's to report");
+
+  // The daemon starts the agent: what its ended runtimes left unfinished is archived first, under the daemon's own fence.
+  await runtime.coordinator.converge("agent-1");
+  assert.deepEqual(fences, [runtime.options.authority.fenceCommit]);
+  assert.deepEqual(notices(), [continued]);
+
+  installed = { entryId: "agent-1" } as ProviderInstallationToken;
+  for (let report = 0; report < 3; report += 1) runtime.coordinator.noteRecordStopped("agent-1");
+  await settled();
+  assert.deepEqual(notices(), [continued, stopped], "however often the record reports it");
+  assert.equal(runtime.entry().observed_state === "failed" || runtime.entry().condition !== "none", false, "and nothing is asked of the owner");
+});
+
+test("a start goes ahead when the agent's ended runtimes cannot be archived, and says nothing when there was nothing to archive", async () => {
+  for (const archive of [async () => { throw new Error("the journal is busy"); }, async () => [] as string[]]) {
+    const runtime = harness({
+      entry: { ...baseEntry(), provider: "open-model", delivery_mode: "daemon_inbox", source_repo_path: null },
+      workspaceIdentity: scratchWorkspaceIdentity,
+      provider: provider({ spawn: async () => openModelHandle }),
+    });
+    runtime.options.store.archiveExitedRuntimes = archive;
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(runtime.installed.length, 1, "the agent is started");
+    assert.deepEqual((runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice"), []);
+  }
 });
 
 test("a launch carries the owner's own setup only for the owner's own agent, and never the stored key", async () => {

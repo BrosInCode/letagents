@@ -2447,6 +2447,22 @@ for (const mismatch of ["kind", "extra", "entry_id", "room_id", "work_attempt_id
   });
 }
 
+test("a runtime the daemon archived on its own counts as recovered, and still moves a lease only once its process's death was witnessed", async () => {
+  // The row the daemon writes when it archives an ended runtime marks that
+  // generation's recovery complete, as an operator's checked recovery does.
+  // A process found gone is enough to archive its runtime; a lease needs the
+  // death on the generation's terminal as well.
+  for (const witnessed of [true, false]) {
+    const terminal = { ...terminalExecution(), terminal_cause: "crashed" as const,
+      ...(witnessed ? { native_runtime_death: { kind: "claude_cli" as const, pid: 42, processIdentity: "exact-old-birth" } } : {}) };
+    const f = retiredLeaseFixture({ executions: [execution(terminal)],
+      predecessors: [{ execution_generation_id: "execution-1", agent_session_id: "session-old", authority: null, legacy_recovery_complete: true }] });
+    assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry), "the agent gets its room access back either way");
+    assert.deepEqual([f.current.epoch, f.mutations.length], witnessed ? [5, 2] : [4, 0],
+      witnessed ? "a witnessed death moves the lease" : "without a witnessed death the lease is not moved");
+  }
+});
+
 test("completed legacy recovery may restore its exact published predecessor", async () => {
   const f = retiredLeaseFixture({ predecessors: [{ execution_generation_id: "execution-1", agent_session_id: "session-old", authority: null, legacy_recovery_complete: true }] });
   assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry));
