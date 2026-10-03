@@ -145,7 +145,7 @@ import {
 function cursorPermissionUsesWorkspaceGeneration(
   permissionProfileId: ProviderSpawnRequest["permissionProfileId"],
 ): boolean {
-  return permissionProfileId === "sandboxed_write" || permissionProfileId === "full_access";
+  return permissionProfileId === "sandboxed_write";
 }
 
 function usesExactScratchWorkspace(request: ProviderSpawnRequest): boolean {
@@ -1996,8 +1996,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
         "--trust",
         // Read-only has no native sandbox field in its durable policy, so add
         // the supervised outer boundary explicitly. Write profiles carry their
-        // exact enabled/disabled native choice in policyArgs; both stay inside
-        // the independent OS workspace/process/network boundary.
+        // exact enabled/disabled native choice in policyArgs. Only restricted
+        // profiles also use the independent OS workspace/process/network boundary.
         ...(handle.deliveryMode === "daemon_inbox" && handle.spawnRequest.permissionProfileId === "read_only"
           ? ["--sandbox", "enabled"]
           : []),
@@ -2057,6 +2057,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
         ...(providerAuthorization ? { providerAuthorization } : {}),
         ...(handle.deliveryMode === "daemon_inbox" ? { deferStart: true } : {}),
         ...(handle.deliveryMode === "daemon_inbox" ? { restrictRemoteAuthority: true } : {}),
+        // Derive host access from the attested profile, never from CLI flags or
+        // a prompt. Keep the wrapper's room bridge and recovery journal in both modes.
+        ...(handle.deliveryMode === "daemon_inbox" && handle.spawnRequest.permissionProfileId === "full_access"
+          ? { fullAccess: true }
+          : {}),
         ...(handle.deliveryMode === "daemon_inbox" && nativeResumeSession
           && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nativeResumeSession)
           ? { nativeResumeSessionId: nativeResumeSession }
