@@ -99,7 +99,6 @@ const statusLabel = computed(() => {
 <style scoped>
 .github-event-card {
   --event-accent: var(--text-secondary);
-  container-type: inline-size;
   display: grid;
   gap: 10px;
   width: 100%;
@@ -113,6 +112,7 @@ const statusLabel = computed(() => {
   color: var(--text);
   font-family: var(--font-sans);
 }
+.github-event-card:not(.is-preview) { container-type: inline-size; }
 .github-event-card[data-tone="violet"] { --event-accent: var(--task-assigned); }
 .github-event-card[data-tone="emerald"] { --event-accent: var(--green-text); }
 .github-event-card[data-tone="rose"] { --event-accent: var(--red-text); }
