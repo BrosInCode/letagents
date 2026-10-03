@@ -102,6 +102,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   private readonly adapters = new Map<string, Promise<NativeProviderAdapter>>();
   private readonly handles = new Map<string, { provider: string; adapter: NativeProviderAdapter; handle: NativeHandle | null }>();
   private readonly actions = new Map<string, string>();
+  /** Whether each remembered native handle's process has exited. One that has stays remembered for custody, and is never attached again. */
+  private readonly exits = new WeakMap<NativeHandle, { exited: boolean }>();
 
   constructor(private readonly adapterLoaders: Readonly<Record<string, ProviderAdapterLoader>> = {}) {}
 
@@ -162,7 +164,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       ref.provider,
       providerFromConnection(ref.providerConnection),
     );
-    if (remembered?.handle) {
+    // A handle whose process has exited is evidence of that exit, not a
+    // runtime. The adapter answers for it from the durable reference, as it
+    // does for a daemon that never held the handle.
+    if (remembered?.handle && !this.exits.get(remembered.handle)?.exited) {
       const handle = remembered.handle;
       if (
         handle.providerContinuationId !== ref.providerContinuationId
@@ -187,6 +192,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const handle = await adapter.attach(ref);
     if (!handle || isAttachTerminal(handle)) return handle;
     this.handles.set(ref.workAttemptId, { provider, adapter, handle });
+    this.watchExit(adapter, handle);
     return publicHandle(handle);
   }
 
@@ -476,6 +482,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       throw new Error("Provider replacement must establish a different conversation.");
     }
     this.handles.set(workAttemptId, { ...remembered, handle: repaired.handle });
+    this.watchExit(adapter, repaired.handle);
     return {
       ...repaired,
       handle: publicHandle(repaired.handle, handle.appliedConfigurationRevision),
@@ -607,7 +614,17 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   private remember(provider: string, adapter: NativeProviderAdapter, request: ProviderActionSpawn, handle: NativeHandle): void {
     this.handles.set(request.workAttemptId, { provider, adapter, handle });
+    this.watchExit(adapter, handle);
     if (request.actionId) this.actions.set(request.actionId, request.workAttemptId);
+  }
+
+  /** Learn of the exit from the adapter itself; a handle's reported state cannot tell a stopped process from a failed turn. */
+  private watchExit(adapter: NativeProviderAdapter, handle: NativeHandle): void {
+    if (this.exits.has(handle)) return;
+    const exit = { exited: false };
+    this.exits.set(handle, exit);
+    try { adapter.onExit(handle, () => { exit.exited = true; }); }
+    catch { /* An adapter that cannot report this exit keeps the handle attachable, as before. */ }
   }
 
   private required(handle: ProviderActionHandle): { provider: string; adapter: NativeProviderAdapter; handle: NativeHandle } {

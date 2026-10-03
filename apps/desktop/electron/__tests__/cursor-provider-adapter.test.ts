@@ -8233,3 +8233,251 @@ test("Cursor typed shell completion preserves native exit codes and does not com
   assert.doesNotMatch(JSON.stringify(events), /secret-command|secret-output|secret-reason|secret-error/);
   assert.deepEqual(harness.signals, [], "a nonzero shell exit cannot signal the provider");
 });
+
+/**
+ * A real daemon supervising one Cursor agent: the real adapter, action router,
+ * delivery, execution capture and stores, over the fake wrapper harness. Only
+ * the room, the server and the processes are doubles.
+ */
+async function cursorDaemonFixture() {
+  const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
+  const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
+  const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
+  const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+  const { createConnection } = await import("node:net");
+  const { DatabaseSync } = await import("node:sqlite");
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const root = realpathSync(await mkdtemp(join(tmpdir(), "cursor-daemon-")));
+  const id = "cursor_agent";
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+  };
+  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolveRequest, reject) => {
+    const socket = createConnection(paths.socketPath);
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk) => {
+      received += chunk;
+      if (!received.includes("\n")) return;
+      socket.end();
+      resolveRequest(JSON.parse(received.slice(0, received.indexOf("\n"))));
+    });
+    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
+  });
+  const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!await check()) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+      await new Promise((wake) => setTimeout(wake, 10));
+    }
+  };
+  const workAttemptId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const workspace = join(root, "worktrees", "repo", workAttemptId);
+  await mkdir(join(root, "repos", "repo.git"), { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo",
+    work_attempt_id: workAttemptId, task_id: id, remote_url: "https://example.invalid/repo", resolved_revision: "a".repeat(40),
+    bare_path: join(root, "repos", "repo.git") }));
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace, workAttemptId });
+  await durability.close();
+
+  const harness = createHarness();
+  /** The agent's profile, where its wrapper writes each turn's durable terminal; every adapter of the agent reads it there. */
+  const profileRoot = join(root, "profile");
+  const configDir = join(profileRoot, "config");
+  mkdirSync(configDir, { recursive: true });
+  /** What the daemon asked of the adapter's reading back of a saved turn. */
+  const recovery = { requests: [] as Array<Record<string, unknown>> };
+  const makeAdapter = () => {
+    const adapter = new CursorProviderAdapter({
+      dependencies: { ...harness.dependencies, now: () => new Date().toISOString() },
+      supervisedProfileFactory: (input) => {
+        const base = input.profileRoot ?? profileRoot;
+        return {
+          homeDir: join(base, "home"), configDir: join(base, "config"), dataDir: join(base, "data"), cacheDir: join(base, "cache"),
+          env: { HOME: join(base, "home"), CURSOR_CONFIG_DIR: join(base, "config", "cursor") },
+          ...(input.inspectionOnly ? {} : {
+            mcpRuntimeEntryPath: "/Applications/LetAgents.app/runtime/letagents/server.js",
+            mcpRuntimeReadRoots: ["/Applications/LetAgents.app/runtime/letagents"],
+            mcpRuntimeEnv: { ELECTRON_RUN_AS_NODE: "1", LETAGENTS_API_URL: input.apiBaseUrl, HOME: join(base, "bridge-home") },
+          }),
+          mcpServerName: cursorSupervisedMcpServerName(input.workAttemptId),
+        };
+      },
+    });
+    const recover = adapter.recoverRoomTurn.bind(adapter);
+    adapter.recoverRoomTurn = async (handle, turn, options) => {
+      recovery.requests.push({ ...turn });
+      return recover(handle, turn, options);
+    };
+    return adapter;
+  };
+  let adapter = makeAdapter();
+  const roomMessages: Array<Record<string, unknown>> = [];
+  const published: string[] = [];
+  let mints = 0;
+  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ cursor: async () => adapter }), true,
+    50, undefined, {}, {
+      poll: async ({ afterMessageId, signal }: { afterMessageId: string | null; signal: AbortSignal }) => {
+        const from = afterMessageId ? roomMessages.findIndex((message) => message.id === afterMessageId) + 1 : 0;
+        if (roomMessages.length > from) return { messages: roomMessages.slice(from) };
+        await new Promise<void>((wake) => {
+          const timer = setTimeout(wake, 20);
+          signal.addEventListener("abort", () => { clearTimeout(timer); wake(); }, { once: true });
+        });
+        return { messages: [] };
+      },
+      publish: async (input: { text: string; roomId: string }) => {
+        published.push(input.text);
+        return { messageId: `msg_${900 + published.length}`, roomId: input.roomId };
+      },
+    }, {
+      listWorkLeases: async () => [], readWorkLease: async () => null,
+      attestWorkLease: async () => { throw new Error("unused"); },
+      rebindWorkLease: async () => { throw new Error("unused"); },
+      createWorkerSession: async () => {
+        mints += 1;
+        return { sessionId: `${id}-session`, bearer: `${id}-bearer-${mints}`, bearerId: `${id}-bearer-id-${mints}`,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
+      },
+    });
+  let daemon = makeDaemon();
+  const read = <T>(sql: string): T[] => {
+    const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    try { return database.prepare(sql).all(id).map((row) => ({ ...row })) as T[]; } finally { database.close(); }
+  };
+  const cleanup = async () => {
+    await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  };
+  type Receipt = { source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null };
+  const inbox = () => (daemon as unknown as { supervisedInbox: {
+    bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<unknown>;
+    receipts(agentId: string): Promise<Receipt[]>;
+    prepareEffect(input: Record<string, unknown>): Promise<{ effect: { state: string } }>;
+  } }).supervisedInbox;
+  const startDaemon = async () => {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const generation = (await request("daemon.status")).result.generation;
+    return async () => assert.equal((await request("supervisor.install_host_grant", {
+      entry_id: id, room_id: "room_1", agent_key: "owner/agent", grant_id: `grant-${id}`,
+      supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+    })).ok, true);
+  };
+  try {
+    const installGrant = await startDaemon();
+    assert.equal((await request("manifest.put", { entry: {
+      id, room_id: "room_1", display_name: "Agent", provider: "cursor", model: null, charter: "test",
+      desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: "read_only",
+      created_by: "test", created_at: "2026-01-01T00:00:00.000Z", delivery_mode: "daemon_inbox",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await inbox().bootstrapCursor({ agent_id: id, room_id: "room_1", last_observed_message_id: null });
+    await installGrant();
+    const view = async () => (await request("manifest.list")).result[0] as {
+      observed_state: string; condition: string; last_error: string | null;
+      room_agent_state: { ingress: { state: string }; inbox: { state: string; detail: string | null } };
+    };
+    await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
+    const receipt = async (messageId: string) => (await inbox().receipts(id)).find((item) => item.source_message_id === messageId);
+    /** Send the agent its nth room message and wait until that turn's wrapper is released. */
+    const begin = async (ordinal: number) => {
+      roomMessages.push({ id: `msg_${ordinal}`, sender: "someone", text: `request ${ordinal}`, activation: { for_current_agent: { decision: "activate" } } });
+      await eventually(async () => harness.children[ordinal - 1]?.isReleased === true && Boolean((await receipt(`msg_${ordinal}`))?.provider_turn_id),
+        `msg_${ordinal} starts its turn`).catch(async (error) => {
+        const current = await view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); inbox ${current.room_agent_state.inbox.state} (${current.room_agent_state.inbox.detail})`);
+      });
+      return { child: harness.children[ordinal - 1]!, id: (await receipt(`msg_${ordinal}`))!.provider_turn_id! };
+    };
+    const sessionId = "sess-cursor-1";
+    return { harness, eventually, view, published, receipt, begin, cleanup, recovery, sessionId,
+      /** The agent completes its room turn with this answer, through complete_room_turn. */
+      complete: async (turnId: string, text: string) => {
+        const [binding] = read<{ work_attempt_id: string; origin_execution_generation_id: string; provider_continuation_id: string }>(
+          `SELECT work_attempt_id,origin_execution_generation_id,provider_continuation_id FROM supervised_agent_provider_turn_bindings
+            WHERE agent_id=? AND provider_turn_id=${JSON.stringify(turnId).replaceAll('"', "'")}`);
+        const prepared = await inbox().prepareEffect({ agent_id: id, room_id: "room_1", execution_generation_id: binding!.origin_execution_generation_id,
+          provider_turn_id: turnId, work_attempt_id: binding!.work_attempt_id, current_execution_generation_id: binding!.origin_execution_generation_id,
+          provider_continuation_id: binding!.provider_continuation_id, mcp_request_id: `complete:${turnId}`, tool_name: "complete_room_turn",
+          request: { outcome: "reply", text }, mutation: true });
+        assert.equal(prepared.effect.state, "completed");
+      },
+      /** The wrapper writes the exact durable terminal of this turn, as it does once its native process group is reaped. */
+      writeTerminal: (turnId: string, result: Record<string, unknown>) => {
+        const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+        writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+          type: "exit", code: 0, signal: null,
+          native_process_group_reaped: true, reap_scope: "native_process_group", remote_authority_revoked: true,
+          session_contract_valid: true, stream_contract_complete: true, turn_contract_version: 1,
+          init: { type: "system", subtype: "init", session_id: sessionId }, result,
+        }));
+      },
+      /** This turn's wrapper ends now. */
+      exitChild: (child: FakeCursorChild) => {
+        harness.identities.set(child.pid!, null);
+        child.resolveExit({ type: "exit", code: 0, signal: null });
+      },
+      /** The daemon ends and a new one, with a new adapter, takes the agent over. */
+      restartDaemon: async () => {
+        await daemon.stop();
+        adapter = makeAdapter();
+        daemon = makeDaemon();
+        await (await startDaemon())();
+      },
+      /** The agent's execution record: its turns, recovery boundaries, and whether its observer has a gap. */
+      recorded: () => ({
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        boundaries: read<{ phase: string }>("SELECT phase FROM agent_runtime_recoveries WHERE agent_id=?").map((row) => row.phase),
+        gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
+          .filter((observer) => observer.max !== observer.last).length,
+      }) };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+test("a Cursor turn that finished while its daemon was replaced is answered from its terminal, and the agent answers its next message", { timeout: 60_000 }, async () => {
+  const agent = await cursorDaemonFixture();
+  try {
+    const first = await agent.begin(1);
+    await agent.complete(first.id, "Answer 1.");
+    await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "turn 1 is recorded as started");
+    await agent.restartDaemon();
+    // While no daemon watched it, the wrapper finished the turn and wrote its terminal.
+    agent.writeTerminal(first.id, { type: "result", subtype: "success", is_error: false, result: "Answer 1.", session_id: agent.sessionId });
+    agent.exitChild(first.child);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered from the durable terminal");
+    assert.equal(agent.recovery.requests.at(-1)?.recordEnding, true, "the new daemon reads from its saved record that the turn is open");
+    assert.equal(agent.recorded().turns[0]?.state, "active", "a successor's Cursor adapter has no child to record that ending with");
+
+    // The child that ran turn 1 is gone, and Cursor's lane keeps its generation: nothing else will end that turn in the record.
+    const second = await agent.begin(2);
+    await agent.complete(second.id, "Answer 2.");
+    second.child.emit({ type: "result", subtype: "success", is_error: false, result: "Answer 2.", session_id: agent.sessionId });
+    agent.exitChild(second.child);
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered").catch(async (error) => {
+      const row = await agent.receipt("msg_2");
+      throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+    });
+    assert.deepEqual(agent.published, ["Answer 1.", "Answer 2."], "turn 1 is not run again");
+    assert.equal(agent.harness.launches.length, 2);
+    const record = agent.recorded();
+    assert.deepEqual(record.turns.map((turn) => turn.state), ["lost", "terminal"],
+      "turn 1 is archived behind a recovery boundary, lost rather than finished; turn 2 is recorded in full");
+    assert.deepEqual(record.boundaries, ["complete"]);
+    assert.equal(record.gaps, 0);
+    const current = await agent.view();
+    assert.equal(current.condition, "none", current.last_error ?? "");
+    assert.equal(current.room_agent_state.inbox.state, "empty", "nothing waits for a person");
+  } finally {
+    await agent.cleanup();
+  }
+});

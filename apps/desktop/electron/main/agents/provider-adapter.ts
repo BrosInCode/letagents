@@ -428,7 +428,22 @@ export type ProviderRoomTurnCheckpointDisposition = {
   acceptedResult: ProviderRoomTurnResult;
   cleanupRecoveryEvidence: boolean;
 };
-export interface ProviderRoomTurnRecoveryRequest { inboxItemId: string; providerTurnId: string; }
+/** Why a turn that was cut off by the exit of the process that ran it is reported as interrupted. */
+export const PROCESS_ENDED_DURING_TURN = "The agent's process ended during this turn, and the turn's result could not be recovered. The message was not run again.";
+export interface ProviderRoomTurnRecoveryRequest {
+  inboxItemId: string;
+  providerTurnId: string;
+  /** The execution record holds this turn without an ending; the ending that is read back is to be recorded too. */
+  recordEnding?: boolean;
+  /**
+   * The process that ran this turn has ended; the daemon holds its recorded
+   * terminal. A turn the conversation's own record shows as started and
+   * never ended was cut off by that exit, and is reported as interrupted.
+   */
+  originProcessEnded?: boolean;
+  /** The turn's own conversation, when it is not the one this runtime continues. */
+  providerContinuationId?: string;
+}
 export interface ProviderContinuationRepairRequest {
   workAttemptId: string;
   expectedProviderContinuationId: string;

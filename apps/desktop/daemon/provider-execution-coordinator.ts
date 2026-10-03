@@ -58,6 +58,8 @@ import type { ProviderInstallationToken } from "./provider-stream-coordinator.js
 import type { SupervisedAgentInboxStore, SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
+import { ACTIVITY_RECORD_CONTINUED_NOTICE, ACTIVITY_RECORD_STOPPED_NOTICE } from "./runtime-recovery-journal.js";
+import { EXIT_UNSETTLED_NOTICE } from "./provider-terminal-coordinator.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 import type { ConvergencePacing } from "./convergence-pacer.js";
 
@@ -104,6 +106,8 @@ export type ProviderExecutionConfiguration = {
 
 export type ProviderExecutionStore = {
   pendingRuntimeRecovery(agentId: string): Promise<unknown>;
+  /** Archive what the agent's exited runtimes left unfinished in its execution record. Resolves with the runtimes archived. */
+  archiveExitedRuntimes?(agentId: string, commitFence: CommitFence): Promise<string[]>;
   unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
   unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null>;
   load(): Promise<{ generation: number; entries: DaemonManifestEntry[] }>;
@@ -213,6 +217,8 @@ export type ProviderExecutionCoordinatorOptions = {
   settleRuntimeApprovals(entryId: string): Promise<void>;
   /** Resolves with when to converge again while a replacement is still owed, and what to tell the owner meanwhile. */
   refreshManagedRuntime?(entryId: string): Promise<void | { retryAfterMs: number; notice?: string }>;
+  /** The entry's runtime has exited and that exit is still being recorded. Whoever records it converges the entry again. */
+  exitSettling?(entryId: string): boolean;
   observeProviderExit(
     entryId: string,
     terminal: ProviderActionTerminal,
@@ -492,8 +498,35 @@ export class ProviderExecutionCoordinator {
    * Puts a provider's launch warnings in the agent's activity, which the
    * agent inspector shows, instead of only in the daemon's discarded output.
    */
-  private async recordLaunchNotices(entryId: string, notices: readonly string[]): Promise<void> {
+  /**
+   * An agent's execution record stopped under a runtime that keeps working.
+   * Nothing is wrong with the agent, and nothing asks for its owner: they are
+   * told once, in the agent's activity, and not again until a new record has
+   * been started.
+   */
+  noteRecordStopped(entryId: string): void {
+    if (!this.options.streams.currentInstallation(entryId)) return;
+    void this.recordLaunchNotices(entryId, [ACTIVITY_RECORD_STOPPED_NOTICE], true).catch(() => undefined);
+  }
+
+  /** For delivery, before a new turn: see `archiveExitedRuntimes`. */
+  archiveEndedRuntimes(entryId: string): Promise<void> {
+    return this.archiveExitedRuntimes(entryId);
+  }
+
+  /**
+   * The daemon stopped waiting for an exit of this entry to be recorded in
+   * full. One line in the agent's activity says so, once for each exit: a
+   * later exit that cannot be recorded either is told again.
+   */
+  noteExitUnsettled(entryId: string, exitId: string): void {
+    void this.recordLaunchNotices(entryId, [EXIT_UNSETTLED_NOTICE], false, exitId).catch(() => undefined);
+  }
+
+  private async recordLaunchNotices(entryId: string, notices: readonly string[], unlessLatest = false, exit?: string): Promise<void> {
     await this.options.updateManifestEntry(entryId, (current) => {
+      if (unlessLatest && current.activity?.filter((event) => event.kind === "launch_notice").at(-1)?.summary === notices.at(-1)) return current;
+      if (exit && current.activity?.some((event) => event.kind === "launch_notice" && (event.payload as { exit?: unknown } | null)?.exit === exit)) return current;
       let sequence = current.activity?.at(-1)?.sequence ?? 0;
       const observedAt = new Date(this.options.nowMs()).toISOString();
       const events = notices.map((notice): DaemonActivityEvent => sanitizeDaemonActivityEvent({
@@ -504,13 +537,34 @@ export class ProviderExecutionCoordinator {
         method: "workspace_boundary",
         summary: notice.slice(0, 500),
         status: "idle",
-        payload: { notice },
+        payload: exit ? { notice, exit } : { notice },
         payload_truncated: false,
         payload_redacted: false,
         durable_payload_ref: null,
       }));
       return { ...current, activity: [...(current.activity ?? []), ...events].slice(-200) };
     });
+  }
+
+  /**
+   * Every earlier generation of this agent has ended, and nothing can still
+   * complete its execution record. A gap or an open turn left there would
+   * keep the runtime that is about to start from being recorded, and the
+   * agent from taking messages, until a person used "Restart and resume". The
+   * daemon records that same boundary itself and says so once in the agent's
+   * activity. A failure here is not a reason to keep the agent down: the
+   * launch goes ahead, and a runtime that then cannot be recorded is
+   * recovered by the pass that finds it blocked.
+   */
+  private async archiveExitedRuntimes(entryId: string): Promise<void> {
+    let archived: string[] = [];
+    try {
+      archived = await this.options.store.archiveExitedRuntimes?.(entryId, this.options.authority.fenceCommit) ?? [];
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      return;
+    }
+    if (archived.length) await this.recordLaunchNotices(entryId, [ACTIVITY_RECORD_CONTINUED_NOTICE]);
   }
 
   async ensureWorkAttempt(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
@@ -880,6 +934,8 @@ export class ProviderExecutionCoordinator {
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return null;
     const ref = entry.provider_ref;
     if (!ref) return null;
+    // The runtime this reference names has exited and its exit is not recorded yet.
+    if (!this.options.streams.get(entry.id) && this.options.exitSettling?.(entry.id)) return null;
     // Attachment can acquire native channels (or retire an old child). Reserve
     // before the first await so handoff drains direct control/grant callers too.
     const reservation = this.reserveDispatch(entry.id, ref.execution_generation_id);
@@ -1197,6 +1253,12 @@ export class ProviderExecutionCoordinator {
     if (!currentAfterAttempt) return;
     entry = currentAfterAttempt;
     let handle = this.options.streams.get(entry.id) ?? null;
+    // The daemon lets go of a runtime the moment its process exits, and
+    // records the exit after this pass. Until then the generation has no
+    // terminal: attaching would take the exited runtime back and deliver its
+    // exit a second time, and launching would report a live generation with
+    // nothing to attach. The settlement converges this entry when it is done.
+    if (!handle && this.options.exitSettling?.(entry.id)) return;
     if (!handle && entry.provider_ref) {
       try {
         handle = await this.attachLiveProvider(entry);
@@ -1375,6 +1437,9 @@ export class ProviderExecutionCoordinator {
       return;
     }
     if (entry.desired_state === "running" && entry.delivery_mode === "daemon_inbox") {
+      // A turn an earlier runtime left open, once its message is settled, would
+      // refuse the next turn of this one. It is archived as soon as it is seen.
+      await this.archiveExitedRuntimes(entry.id);
       await this.options.delivery.start(entry.id, "ensure");
     }
   }
@@ -1528,6 +1593,7 @@ export class ProviderExecutionCoordinator {
       return;
     }
     this.unattachableRechecks.delete(entry.id);
+    await this.archiveExitedRuntimes(entry.id);
     if (!activeExecution && entry.turn_control && entry.turn_control.status !== "completed") {
       entry = await this.options.completeTurnControlForRuntimeRecovery(entry);
     }
@@ -2059,6 +2125,8 @@ export class ProviderExecutionCoordinator {
 
   private async convergeStopped(entry: DaemonManifestEntry): Promise<void> {
     let handle = this.options.streams.get(entry.id) ?? null;
+    // The exit being recorded is what stops or pauses this entry.
+    if (!handle && this.options.exitSettling?.(entry.id)) return;
     const activation = await this.options.store.unresolvedPollingActivation(entry.id);
     if (activation && !matchesPollingActivationRuntime(activation, entry, handle ?? undefined)) return;
     if (activation && !this.options.provider.stopRef) throw new Error("Polling activation requires exact-reference provider stop.");

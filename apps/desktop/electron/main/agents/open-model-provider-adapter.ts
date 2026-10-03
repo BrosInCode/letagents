@@ -12,6 +12,7 @@ import { probeScratchWorkspaceGit } from "../../../../../shared/scratch-workspac
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
 import {
   ProviderContinuationMissingError,
+  PROCESS_ENDED_DURING_TURN,
   sameProviderConnectionIdentity,
   synthesizeTerminalPayload,
   type ProviderActivityEvent,
@@ -202,6 +203,19 @@ type TurnStep = {
 function deniedToolState(state: JsonRecord | null): boolean {
   return state?.status === "error" && typeof state.error === "string"
     && state.error.startsWith(OPENCODE_PERMISSION_REJECTED);
+}
+
+/** Why a turn whose last step's tool calls never returned has no answer. */
+const TOOL_CALLS_UNFINISHED = "The turn ended while a tool call it made was still running, so it has no answer.";
+
+/**
+ * A step that ended on tool calls, some of which never returned a result.
+ * Its text is what the model said before it called them, not an answer:
+ * the turn was meant to go on once the results came back.
+ */
+function unfinishedToolCalls(message: OpenCodeMessage | null): boolean {
+  return messageFinishReason(message) === "tool-calls" && (message?.parts ?? []).some((part) => part.type === "tool"
+    && !["completed", "error"].includes(String(record(part.state)?.status ?? "")));
 }
 
 function deniedToolCall(message: OpenCodeMessage): boolean {
@@ -1056,11 +1070,17 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     options: Pick<ProviderRoomTurnOptions, "detachSignal" | "checkpointTerminalResult"> = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.required(rawHandle);
+    if (request.originProcessEnded && request.providerContinuationId
+      && request.providerContinuationId !== handle.providerContinuationId) {
+      const result = await this.readEarlierSessionTurn(handle, request.providerContinuationId, request.providerTurnId);
+      await options.checkpointTerminalResult?.(result);
+      return result;
+    }
     handle.activeRoomTurnId = request.providerTurnId;
     if (handle.observedTurn?.id !== request.providerTurnId) handle.observedTurn = { id: request.providerTurnId, terminal: null };
     this.emitTurnActive(handle, request.providerTurnId);
     try {
-      const result = await this.awaitExactTurn(handle, request.providerTurnId, options.detachSignal, true);
+      const result = await this.awaitExactTurn(handle, request.providerTurnId, options.detachSignal, true, request.recordEnding === true);
       await options.checkpointTerminalResult?.(result);
       handle.activeRoomTurnId = null;
       handle.setState("idle");
@@ -1087,6 +1107,45 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       }
       throw error;
     }
+  }
+
+  /**
+   * A turn of a session that an earlier process of this agent ran. Every
+   * process starts a session of its own, and the sessions of the processes
+   * before it stay in the agent's runtime directory, where this one can read
+   * them. The process that ran the turn has ended, so the turn is over: this
+   * only reads what its session kept of it. An answer is the answer, an
+   * error is the failure, and a turn that the session shows without either
+   * was cut off by the exit. Nothing is recorded for the running session.
+   */
+  private async readEarlierSessionTurn(handle: OpenModelHandle, sessionId: string, turnId: string): Promise<ProviderRoomTurnResult> {
+    if (!nativeExecutionId(sessionId) || !nativeExecutionId(turnId)) {
+      throw new Error("Open Model turn recovery requires an exact session and turn.");
+    }
+    const messages = await handle.client.messages(sessionId);
+    const turnUserIds = turnUserMessageIds(messages, turnId);
+    const finalAssistant = finalAssistantFor(messages, turnId, turnUserIds);
+    const failure = safeProviderErrorMessage(finalAssistant);
+    if (failure) {
+      return { turnId, providerContinuationId: sessionId, outcome: "failed", text: null, evidence: "transcript", error: failure };
+    }
+    // A last step that called tools is not where the turn ends: it was to go
+    // on with their results, and the process ended first. What the model said
+    // before the calls is not an answer. Only a call that was refused ends
+    // the turn there, as the live turn does, whatever was said before it. And
+    // only the turn's last step can end it: a finished step with a later one
+    // begun is half-way. A last step that ended without an answer (at the
+    // output limit, filtered, or empty) says why, as the live turn does.
+    const last = finalAssistant !== null && finalAssistant === assistantsFor(messages, turnId, turnUserIds).at(-1);
+    const refused = !last ? null
+      : messageFinishReason(finalAssistant) === "tool-calls" && deniedToolCall(finalAssistant) ? NO_REPLY_FAILURE.deniedTool
+        : unansweredCompletionReason(finalAssistant);
+    if (refused) return { turnId, providerContinuationId: sessionId, outcome: "failed", text: null, evidence: "transcript", error: refused };
+    const answered = last && messageCompleted(finalAssistant) && messageFinishReason(finalAssistant) !== "tool-calls"
+      ? classifyTurn(turnId, messageText(finalAssistant)) : null;
+    if (answered && answered.outcome !== "unreadable") return answered;
+    return { turnId, providerContinuationId: sessionId, outcome: "interrupted", text: null, evidence: "transcript",
+      error: PROCESS_ENDED_DURING_TURN };
   }
 
   async inspectTurn(rawHandle: ProviderHandle, turnId: string): Promise<"active" | "terminal" | "unknown"> {
@@ -1529,6 +1588,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     turnId: string,
     signal?: AbortSignal,
     recovery = false,
+    recordEnding = false,
   ): Promise<ProviderRoomTurnResult> {
     const deadline = Date.now() + this.turnTimeoutMs;
     const softBounds = handle.lifecycleAuthorityMode === "typed";
@@ -1653,6 +1713,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       assistantCount: number;
       result: ProviderRoomTurnResult | null;
       terminalOutcome: TurnOutcome | null;
+      endedOutcome: TurnOutcome | null;
     }> => {
       const messages = await handle.client.messages(
         handle.providerContinuationId,
@@ -1709,21 +1770,39 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           evidence: "transcript",
           error: unanswered,
         }
+        // At the session's boundary, a last step whose tool calls never
+        // returned leaves the turn without an answer; its text came before them.
+        : unfinishedToolCalls(completed) ? {
+          turnId,
+          providerContinuationId: handle.providerContinuationId,
+          outcome: "interrupted",
+          text: null,
+          evidence: "transcript",
+          error: TOOL_CALLS_UNFINISHED,
+        }
         : classifyTurn(turnId, messageText(completed));
+      const endedOutcome: TurnOutcome | null = exactSession && result
+        ? result.outcome === "unreadable" || result.outcome === "failed" || result.outcome === "interrupted" ? result.outcome : "completed" : null;
       return {
         assistantCount: assistants.length,
         result,
         // A step settled by a denied tool call is the turn's last, despite its finish reason.
-        terminalOutcome: exactSession && result && (messageFinishReason(finalAssistant) !== "tool-calls" || unanswered)
-          ? result.outcome === "unreadable" || result.outcome === "failed" ? result.outcome : "completed" : null,
+        terminalOutcome: messageFinishReason(finalAssistant) !== "tool-calls" || unanswered ? endedOutcome : null,
+        endedOutcome,
       };
     };
     const resultAtSessionBoundary = (
       observed: Awaited<ReturnType<typeof snapshot>>,
+      ended = false,
     ): ProviderRoomTurnResult => {
       // Legacy session-status fallbacks remain unchanged, but typed authority
       // must not invent a native terminal from a missing/busy status entry.
-      if (observed.terminalOutcome) this.emitTurnTerminal(handle, turnId, observed.terminalOutcome);
+      // A last step that ended on tool calls is the turn's ending only when
+      // it is known to be: OpenCode reported this session idle, or the daemon
+      // re-reads a turn its record still holds open. Left open there, the
+      // turn refuses the agent's next one and stops its record.
+      const outcome = observed.terminalOutcome ?? (ended ? observed.endedOutcome : null);
+      if (outcome) this.emitTurnTerminal(handle, turnId, outcome);
       return observed.result ?? { turnId, outcome: "unreadable", text: null, evidence: "none" };
     };
 
@@ -1736,7 +1815,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       const initial = await snapshot();
       if (await handle.client.status(handle.providerContinuationId) !== "busy"
         && (recovery || initial.assistantCount > 0)) {
-        return resultAtSessionBoundary(initial);
+        return resultAtSessionBoundary(initial, recordEnding);
       }
       if (keepsRetryingDeniedCalls()) return await this.endDeniedTurn(handle, turnId);
 
@@ -1748,7 +1827,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         if (next.done) {
           const repaired = await snapshot();
           if (await handle.client.status(handle.providerContinuationId) !== "busy") {
-            return resultAtSessionBoundary(repaired);
+            return resultAtSessionBoundary(repaired, recordEnding);
           }
           throw new Error("OpenCode event stream ended before the bounded turn completed.");
         }
@@ -1824,7 +1903,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           continue;
         }
         if (event.type === "session.idle") {
-          return resultAtSessionBoundary(await snapshot());
+          return resultAtSessionBoundary(await snapshot(), true);
         }
         if (event.type === "session.error") {
           await snapshot();

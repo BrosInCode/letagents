@@ -15,6 +15,7 @@ import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 import {
   synthesizeTerminalPayload,
   sameProviderConnectionIdentity,
+  PROCESS_ENDED_DURING_TURN,
   type ProviderActivityEvent,
   type ProviderAdapter,
   type ProviderAdapterCapabilities,
@@ -72,6 +73,7 @@ import {
   CLAUDE_NO_ROOM_REPLY_SENTINEL,
   exactClaudeStreamTerminal,
   recoverExactClaudeTurnFromSession,
+  recoverExactClaudeTurnFailureFromSession,
   type ClaudeEvidenceRecord,
   type ClaudeExactTurnFailure,
   type ClaudeExactTurnResult,
@@ -239,7 +241,12 @@ export interface ClaudeCodeProviderAdapterDependencies {
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<ProviderProcessExit>;
-  readSessionRows(sessionId: string): Promise<ClaudeEvidenceRecord[]>;
+  /**
+   * The rows of a session's transcript, read where the CLI that ran it wrote
+   * it (`transcriptsRoot`, its `projects` directory). Null when no transcript
+   * for the session is found there: that proves nothing about the turn.
+   */
+  readSessionRows(sessionId: string, transcriptsRoot?: string): Promise<ClaudeEvidenceRecord[] | null>;
   /** The managed commit identity for this work attempt, or none. */
   resolveCommitEnvironment(req: ProviderSpawnRequest): Promise<Record<string, string>>;
   /** The owner's own `MCP_TIMEOUT`, when their environment sets one. Defaults to the desktop's environment. */
@@ -934,13 +941,23 @@ export function claudeSessionTranscriptCandidates(entries: string[], sessionId: 
   return entries.filter((entry) => entry.split(/[\\/]/).at(-1) === suffix);
 }
 
-async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidenceRecord[]> {
-  const projectsRoot = join(homedir(), ".claude", "projects");
+/**
+ * Where a Claude CLI started with this environment keeps its session
+ * transcripts: `CLAUDE_CONFIG_DIR` when it is set, otherwise `.claude` in its
+ * home directory, as Claude Code resolves it.
+ */
+export function claudeTranscriptsRoot(environment: NodeJS.ProcessEnv): string {
+  const configDir = environment.CLAUDE_CONFIG_DIR?.trim();
+  return configDir ? join(configDir, "projects") : join(environment.HOME?.trim() || homedir(), ".claude", "projects");
+}
+
+async function defaultReadSessionRows(sessionId: string, transcriptsRoot = claudeTranscriptsRoot(claudeCliEnv())): Promise<ClaudeEvidenceRecord[] | null> {
+  const projectsRoot = transcriptsRoot;
   let entries: string[];
   try {
     entries = await readdir(projectsRoot, { recursive: true });
   } catch {
-    return [];
+    return null;
   }
   const matches = claudeSessionTranscriptCandidates(entries, sessionId);
   if (matches.length > 1) {
@@ -948,7 +965,7 @@ async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidence
       "Claude room-turn recovery found more than one transcript for the exact continuation.",
     );
   }
-  if (!matches[0]) return [];
+  if (!matches[0]) return null;
   const text = await readFile(join(projectsRoot, matches[0]), "utf8");
   return text.split(/\r?\n/).flatMap((line) => {
     const trimmed = line.trim();
@@ -983,6 +1000,8 @@ class ClaudeProviderHandle implements ProviderHandle {
   launchNotices: readonly string[] = [];
   /** The process was started with its owner's own Claude Code setup. */
   ownerSetup = false;
+  /** Where this process writes its session transcripts, as its environment decides. */
+  transcriptsRoot: string | undefined;
   state: ProviderObservedState = "starting";
   stopRequested = false;
   protocolError = false;
@@ -1320,9 +1339,43 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (!terminal && handle.activeRoomTurnId === turnId) {
       terminal = await this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
     }
+    let cutOffByExit = false;
+    let providerErrorInSession = false;
     if (!terminal) {
-      const rows = await this.deps.readSessionRows(handle.providerContinuationId);
+      const rows = await this.deps.readSessionRows(handle.providerContinuationId, handle.transcriptsRoot);
+      // No transcript where the CLI writes it proves nothing about the turn:
+      // it is left for its owner, as before, rather than settled as cut off.
+      if (rows === null) {
+        throw new ClaudeRoomTurnRecoveryError("Claude room-turn recovery found no transcript for the conversation where the CLI keeps it.");
+      }
       terminal = recoverExactClaudeTurnFromSession(rows, turnId, handle.providerContinuationId);
+      // A turn that ended on a provider error has it in the session; that
+      // is how it ended, and its reason is the provider's.
+      if (!terminal) {
+        terminal = recoverExactClaudeTurnFailureFromSession(rows, turnId, handle.providerContinuationId);
+        providerErrorInSession = terminal !== null;
+      }
+      // The session holds no ending for this turn, and the process that ran
+      // it has ended: no ending will ever be written. The turn was cut off by
+      // that exit, and is reported as that instead of being waited for.
+      if (!terminal && request.originProcessEnded) {
+        cutOffByExit = true;
+        terminal = { turnId, nativeOutcome: "interrupted", error: PROCESS_ENDED_DURING_TURN };
+      }
+      // The process that ran this turn exited before it reported the turn's
+      // result, and this one is sent no result for a turn that ended before
+      // it started. The session's own record is then the only place the
+      // ending exists. The daemon says when its execution record still holds
+      // the turn open; the ending is recorded there too, or the turn would
+      // refuse every later turn of this agent.
+      if (terminal && request.recordEnding && nativeExecutionId(handle.providerContinuationId) && nativeExecutionId(turnId)) {
+        handle.execution.emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none",
+          providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
+          turnOutcome: "error" in terminal ? terminal.nativeOutcome ?? "failed"
+            : terminal.outcome === "unreadable" ? "unreadable" : "completed" },
+        handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined,
+        handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.pid ?? undefined : undefined);
+      }
     }
     if (!terminal) {
       throw new ClaudeRoomTurnRecoveryError(
@@ -1330,7 +1383,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       );
     }
 
-    const result = this.providerRoomTurnResult(handle, terminal);
+    // What was read is the session's own record of the turn, not a stream.
+    const result: ProviderRoomTurnResult = cutOffByExit
+      ? { turnId, providerContinuationId: handle.providerContinuationId, outcome: "interrupted", text: null, evidence: "transcript", error: PROCESS_ENDED_DURING_TURN }
+      : providerErrorInSession ? { ...this.providerRoomTurnResult(handle, terminal), evidence: "transcript" } as ProviderRoomTurnResult
+        : this.providerRoomTurnResult(handle, terminal);
     await options.checkpointTerminalResult?.(result);
     if (!("error" in terminal) || options.checkpointTerminalResult) handle.roomTurnResults.delete(turnId);
     return result;
@@ -1815,6 +1872,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         handle.launchNotices = [...ownerMcpServerNotices(observedInit), ...(unused ? [unused] : [])];
       }
       handle.ownerSetup = homeHarness;
+      handle.transcriptsRoot = claudeTranscriptsRoot(claudeChildEnvironment({ env: launchEnv, ...(homeHarness ? { ownerSetup: true as const } : {}) }));
       this.handles.set(req.workAttemptId, handle);
       this.handleCompactions.set(handle, compaction);
       const exitPromise = handle.exitEvidence.then((exit) => this.observeExit(handle!, exit));
