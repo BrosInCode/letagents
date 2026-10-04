@@ -1102,8 +1102,20 @@ test("an idle viewport skips work history tracking and resumes causal reply supp
     await nextTick();
     assert.equal(echoes().length, 0, "a later exact-agent reply clears work even when input history is unordered");
 
+    props.messages = [...props.messages, message("msg_4")];
+    props.localAgentWork = [{ ...props.localAgentWork[0]!, sourceMessageId: "msg_4" }];
+    await nextTick();
+    assert.equal(echoes().length, 1, "a new source begins another work turn");
     props.localAgentWork = [];
     await nextTick();
+    assert.equal(echoes().length, 1, "a cleared turn retains its indicator briefly for an incoming reply");
+    props.threadMessages = [
+      { ...message("msg_5"), agentIdentity: { agentSessionId: "session-a" } },
+      message("msg_4"), reply, message("msg_2"), message("msg_1"),
+    ] as typeof props.threadMessages;
+    await nextTick();
+    assert.equal(echoes().length, 0, "an unordered thread reply consumes the pending handoff immediately");
+
     historyReads = 0;
     props.threadMessages = [message("msg_4")];
     await nextTick();
