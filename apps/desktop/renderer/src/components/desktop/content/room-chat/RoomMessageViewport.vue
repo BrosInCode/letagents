@@ -785,6 +785,9 @@ function maybeAutoFillViewport(): void {
 function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   unreadTimeline.programmaticScroll();
   if (!messagesElement.value) return;
+  // Choosing latest settles initial navigation too. The parent feeds our live
+  // scroll reports back as initialScrollTop; they must not re-arm restoration.
+  hasAppliedInitialScroll = true;
   shouldRestoreInitialScroll = false;
   cancelMessageReveal();
   if (behavior === "auto") {
