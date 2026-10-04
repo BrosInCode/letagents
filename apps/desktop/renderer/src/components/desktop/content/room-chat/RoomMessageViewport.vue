@@ -363,6 +363,8 @@ watch(
     const oldLastMessage = oldMessages?.[oldMessages.length - 1] || null;
     const newLastMessage = newMessages[newMessages.length - 1] || null;
     const newLastId = newMessages[newMessages.length - 1]?.id;
+    const isAcknowledgement = Boolean(oldLastMessage?.clientMessageId
+      && oldLastMessage.clientMessageId === newLastMessage?.clientMessageId);
     const oldFirstIndexInNew = oldFirstId
       ? newMessages.findIndex((message) => message.id === oldFirstId)
       : -1;
@@ -375,7 +377,7 @@ watch(
     );
     const prependAnchor = isPrepend ? captureScrollAnchor() : null;
     const revision = scrollRevision;
-    if (!isPrepend && oldLastId && newLastId !== oldLastId) followLatestAfterLayout();
+    if (!isPrepend && oldLastId && newLastId !== oldLastId && !isAcknowledgement) followLatestAfterLayout();
 
     await nextTick();
     if (revision !== scrollRevision) return;
@@ -408,7 +410,7 @@ watch(
       updateScrollState();
       return;
     }
-    if (newLastId === oldLastId) {
+    if (newLastId === oldLastId || isAcknowledgement) {
       if (!bottomFollowQueued) updateScrollState();
       return;
     }
@@ -423,8 +425,11 @@ watch(
 const messageMotion = useRoomMessageMotion({
   element: messagesElement,
   scope: () => props.messageNamespace,
-  ready: () => props.active && !props.roomLoading && !props.loadingOlderMessages && !shouldRestoreInitialScroll,
+  // Loading older history must not disable navigation for a new own send.
+  // The motion watcher independently excludes prepended/historical messages.
+  ready: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll,
   following: () => isScrolledToBottom,
+  scrollToLatest: () => scrollToBottom("auto"),
   messages: () => props.messages.map(message => ({
     id: message.id, stableId: message.clientMessageId || message.id, text: message.text,
     outgoing: message.outgoing?.status === 'pending',

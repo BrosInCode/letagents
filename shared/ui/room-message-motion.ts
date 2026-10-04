@@ -67,15 +67,15 @@ export function createRoomMessageAnimator(viewport: () => HTMLElement | null) {
     positions.forEach((before, element) => {
       if (!element.isConnected) return;
       const delta = before.top - element.getBoundingClientRect().top;
-      if (Math.abs(delta) > 1) animate(element, [{ transform: `translateY(${delta}px)` }, { transform: 'none' }], { duration: 350, easing: ease });
+      if (Math.abs(delta) > 1) animate(element, [{ transform: `translateY(${delta}px)` }, { transform: 'none' }], { duration: 260, easing: ease });
     });
   }
-  function send(row: HTMLElement, source: DOMRect, composer: HTMLElement | null, keyboard: boolean) {
+  function send(row: HTMLElement, source: DOMRect, keyboard: boolean) {
     const bubble = row.querySelector<HTMLElement>(bubbleSelector), stream = viewport();
     if (!bubble || !stream) return;
     const target = bubble.getBoundingClientRect();
     if (target.height > stream.clientHeight * .65) { reveal(row); return; }
-    const duration = keyboard ? 420 : 520;
+    const duration = keyboard ? 280 : 360;
     const overlay = layer();
     const clone = bubble.cloneNode(true) as HTMLElement;
     // Copy inherited typography/tokens too: the flight lives outside the room's theme scope.
@@ -90,23 +90,20 @@ export function createRoomMessageAnimator(viewport: () => HTMLElement | null) {
     const dx = source.left - target.left - parseFloat(style.paddingLeft);
     const dy = source.top - target.top - parseFloat(style.paddingTop);
     const flight = animate(clone, [
-      { transform: `translate(${dx}px,${dy}px) scale(.96)`, opacity: .8, offset: 0 },
-      { transform: `translate(${dx}px,${dy}px) scale(.96)`, opacity: 1, offset: .12, easing: ease },
-      { transform: 'translateY(-2px) scale(1.008)', opacity: 1, offset: .78, easing: 'ease-out' },
+      { transform: `translate(${dx}px,${dy}px) scale(.98)`, opacity: .8, easing: ease },
       { transform: 'none', opacity: 1 },
     ], { duration });
     if (flight) flight.finished.then(restore, restore); else restore();
     for (const selector of [metaSelector, avatarSelector]) animate(row.querySelector(selector), [
       { opacity: 0, transform: 'translateY(5px)' }, { opacity: 1, transform: 'none' },
     ], { duration: duration * .45, delay: duration * .35, fill: 'backwards', easing: ease });
-    animate(composer, [{ transform: 'none' }, { transform: 'translateY(2px) scale(.996)', offset: .25 }, { transform: 'none' }], { duration: duration * .62, easing: ease });
   }
   function reply(row: HTMLElement, source: WorkGeometry) {
     const bubble = row.querySelector<HTMLElement>(bubbleSelector), stream = viewport();
     if (!bubble || !stream) return;
     const target = bubble.getBoundingClientRect(), bounds = stream.getBoundingClientRect();
     if (source.bounds.bottom < bounds.top || source.bounds.top > bounds.bottom || target.height > bounds.height * .8) { reveal(row); return; }
-    const duration = 680, style = getComputedStyle(bubble);
+    const duration = 440, style = getComputedStyle(bubble);
     const overlay = layer();
     Object.assign(overlay.element.style, { inset: 'auto', left: `${bounds.left}px`, top: `${bounds.top}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });
     const shell = document.createElement('div');
@@ -116,9 +113,9 @@ export function createRoomMessageAnimator(viewport: () => HTMLElement | null) {
     ghost.querySelectorAll<HTMLElement>('.room-local-agent-work-pulse, strong').forEach(element => { element.style.visibility = 'hidden'; });
     overlay.element.append(shell, ghost);
     const seed = source.summary;
-    const start = { left: `${seed.left - bounds.left - 9}px`, top: `${seed.top - bounds.top - 5}px`, width: `${source.bounds.right - seed.left + 9}px`, height: `${seed.height + 10}px`, borderRadius: '14px' };
-    const end = { left: `${target.left - bounds.left}px`, top: `${target.top - bounds.top}px`, width: `${target.width}px`, height: `${target.height}px`, borderRadius: style.borderRadius };
-    const surface = animate(shell, [{ ...start, opacity: 0, offset: 0 }, { ...start, opacity: .85, offset: .1, easing: ease }, { ...end, opacity: 1, offset: .7 }, { ...end, opacity: 0 }], { duration });
+    Object.assign(shell.style, { left: `${target.left - bounds.left}px`, top: `${target.top - bounds.top}px`, width: `${target.width}px`, height: `${target.height}px`, transformOrigin: '0 0' });
+    const start = `translate(${seed.left - target.left - 9}px,${seed.top - target.top - 5}px) scale(${(source.bounds.right - seed.left + 9) / target.width},${(seed.height + 10) / target.height})`;
+    const surface = animate(shell, [{ transform: start, opacity: .8, easing: ease }, { transform: 'none', opacity: 1, offset: .7 }, { transform: 'none', opacity: 0 }], { duration });
     surface?.finished.then(overlay.cleanup, overlay.cleanup);
     for (const [selector, before] of [[avatarSelector, source.pulse], [`${metaSelector.split(',')[0]} strong, .room-message-author-button, .message-sender strong`, source.name]] as const) {
       const element = row.querySelector(selector);
@@ -131,10 +128,10 @@ export function createRoomMessageAnimator(viewport: () => HTMLElement | null) {
       dot.style.animation = 'none';
       animate(dot, [source.dots[index] || { opacity: 1 }, { opacity: 1, transform: `translateX(${-index * 6}px) scale(1.3)`, offset: .6 }, { opacity: 0, transform: `translateX(${-index * 6}px) scale(.8)` }], { duration: duration * .38, easing: ease, fill: 'forwards' });
     });
-    animate(bubble, [{ opacity: 0 }, { opacity: 0, offset: .5 }, { opacity: 1 }], { duration });
+    animate(bubble, [{ opacity: 0 }, { opacity: 0, offset: .2 }, { opacity: 1 }], { duration });
     animate(bubble.querySelector('.desktop-long-message, .long-message-content, .md-content') || bubble.firstElementChild,
-      [{ opacity: 0, clipPath: 'inset(0 0 100% 0)', transform: 'translateY(6px)' }, { opacity: 1, clipPath: 'inset(0)', transform: 'none' }],
-      { duration: duration * .5, delay: duration * .4, fill: 'backwards', easing: ease });
+      [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }],
+      { duration: duration * .5, delay: duration * .2, fill: 'backwards', easing: ease });
   }
   return { cancel, move, send, reply, reveal };
 }
