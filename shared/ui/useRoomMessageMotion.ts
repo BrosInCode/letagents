@@ -57,15 +57,19 @@ export function useRoomMessageMotion(options: {
   watch(options.scope, () => { cancel(); previous = options.messages().map(message => message.stableId); }, { flush: 'sync' });
   watch(options.ready, ready => { if (!ready) cancel(); });
   watch([options.messages, () => send?.revision.value], async ([messages]) => {
+    const seen = new Set(previous);
     const appended = appendedMotionMessages(previous, messages);
     previous = messages.map(message => message.stableId);
     // A first message in an empty room is allowed only when this composer sent it.
-    // Exact API acknowledgements also handle a websocket echo winning the race.
+    // A late acknowledgement consumes the origin without replaying an earlier echo.
     const outgoing = messages.find(message => message.id === send?.peekId() || message.outgoing);
     const candidates = [...appended];
     if (outgoing && !candidates.includes(outgoing)) candidates.push(outgoing);
     const sends = new Map<string, SendOrigin>();
-    for (const message of candidates) { const source = send?.consume(message); if (source) sends.set(message.id, source); }
+    for (const message of candidates) {
+      const source = send?.consume(message);
+      if (source && !seen.has(message.stableId)) sends.set(message.id, source);
+    }
     if (!appended.length && !sends.size) return;
     cancel();
     const currentRevision = revision;

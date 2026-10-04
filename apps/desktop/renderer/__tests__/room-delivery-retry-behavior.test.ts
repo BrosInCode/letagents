@@ -27,6 +27,7 @@ interface HostNode {
   focus: (_options?: FocusOptions) => void;
   scrollTo: (_options?: ScrollToOptions) => void;
   querySelector: (_selector: string) => null;
+  querySelectorAll: (_selector: string) => HostNode[];
   addEventListener: (_name: string, _listener: EventListener) => void;
   removeEventListener: (_name: string, _listener: EventListener) => void;
 }
@@ -37,6 +38,7 @@ function hostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
     kind, type, text, children: [], parent: null, props: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0, style: {},
     classList: { add: () => undefined, remove: () => undefined }, focus: () => undefined, scrollTo: () => undefined,
     querySelector: () => null,
+    querySelectorAll: () => [],
     addEventListener: () => undefined, removeEventListener: () => undefined,
   };
 }

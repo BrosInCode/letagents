@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { effectScope, nextTick, readonly, ref } from 'vue'
+import { before, test } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { createServer } from 'vite'
+import { createRenderer, defineComponent, effectScope, h, nextTick, readonly, ref } from 'vue'
 
 import {
   type MessageListGrowth,
@@ -80,6 +82,13 @@ test('message list growth diffs a push and a replace in the same tick once', asy
 
 import { appendedMotionMessages, sameMotionAgent } from '../../../shared/ui/room-message-motion'
 import { useRoomWorkIndicators } from '../src/components/room/roomWorkIndicators'
+let motion: typeof import('../../../shared/ui/useRoomMessageMotion')
+before(async () => {
+  // Load shared Vue code through the app's normal dependency deduplication.
+  const vite = await createServer({root:fileURLToPath(new URL('..', import.meta.url)),appType:'custom',logLevel:'silent',server:{middlewareMode:true}})
+  try { motion = await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/useRoomMessageMotion.ts', import.meta.url))) as typeof motion }
+  finally { await vite.close() }
+})
 
 test('motion follows optimistic identity through acknowledgement and skips history/re-entry', () => {
   const m = (id: string, stableId = id) => ({ id, stableId, text: id })
@@ -121,6 +130,112 @@ test('web thinking retires only after its agent replies and resets on a new turn
   room.value = 'two'; presence.value = []; messages.value = []; await nextTick()
   assert.equal(indicators!.value.length, 0)
   scope.stop()
+})
+
+test('web thinking recovers a missed idle transition only with a new request and fresh work', async () => {
+  const at = (second: number) => new Date(Date.UTC(2026, 9, 4, 0, 0, second)).toISOString()
+  const identity = { agent_session_id: 'one', agent_key: 'owner/agent' }
+  const agent = {...identity, display_name: 'Willow', status: 'working', freshness: 'active', updated_at: at(1)}
+  const presence = ref<any[]>([agent]), messages = ref<any[]>([{id:'request-1',source:'browser',timestamp:at(0)}])
+  const scope = effectScope()
+  const indicators = scope.run(() => useRoomWorkIndicators(() => presence.value, () => messages.value, () => 'room'))!
+  try {
+    messages.value.push({id:'reply-1',source:'agent',timestamp:at(2),agent_identity:identity})
+    await nextTick()
+    assert.equal(indicators.value.length, 0)
+    presence.value = [{...agent,updated_at:at(3)}]
+    await nextTick()
+    assert.equal(indicators.value.length, 0, 'a newer heartbeat without a request stays retired')
+    messages.value.push({id:'github-event',source:'github',timestamp:at(4)})
+    messages.value.push({id:'own-followup',source:'agent',timestamp:at(5),agent_identity:identity})
+    presence.value = [{...agent,updated_at:at(6)}]
+    await nextTick()
+    assert.equal(indicators.value.length, 0, 'ambient events and the same agent cannot rearm work')
+    messages.value.push({id:'request-2',source:'browser',timestamp:at(7)})
+    await nextTick()
+    assert.equal(indicators.value.length, 0, 'a new request with cached working presence stays retired')
+    presence.value = [{...agent,updated_at:at(8)}]
+    await nextTick()
+    assert.equal(indicators.value.length, 1)
+    assert.equal(indicators.value[0].after, 'request-2')
+    messages.value.push({id:'reply-2',source:'agent',timestamp:at(9),agent_identity:identity})
+    await nextTick()
+    assert.equal(indicators.value.length, 0)
+    messages.value.push({id:'request-3',source:'browser',timestamp:at(10)})
+    messages.value.push({id:'reply-3',source:'agent',timestamp:at(11),agent_identity:identity})
+    presence.value = [{...agent,updated_at:at(12)}]
+    await nextTick()
+    assert.equal(indicators.value.length, 0, 'an already-completed turn never flashes a new indicator')
+  } finally { scope.stop() }
+})
+
+test('real send watcher animates each message once across echo/ack order and empty rooms', async () => {
+  const saved = { document: globalThis.document, window: globalThis.window, getComputedStyle: globalThis.getComputedStyle }
+  const calls: {name:string; duration:number}[] = []
+  const rect = {left:20,top:100,right:220,bottom:150,width:200,height:50}
+  function element(name: string): any {
+    return {
+      style: {opacity:''}, dataset:{}, isConnected:true, clientHeight:600,
+      getBoundingClientRect: () => rect, querySelectorAll: () => [], querySelector: () => null,
+      setAttribute() {}, removeAttribute() {}, append() {}, remove() {}, addEventListener() {}, removeEventListener() {},
+      cloneNode: () => element(`${name} clone`),
+      animate(_frames: unknown, options: {duration:number}) {
+        calls.push({name,duration:options.duration})
+        let reject!: (error:Error) => void
+        return {finished:new Promise((_resolve, r) => {reject=r}), cancel:() => reject(new Error('cancelled'))}
+      },
+    }
+  }
+  const bubble = element('bubble'), row = element('row'), composer = element('composer'), viewport = element('viewport'), input = element('input')
+  row.dataset.messageId = 'new'
+  row.querySelector = (selector:string) => selector.includes('bubble') ? bubble : null
+  viewport.querySelectorAll = (selector:string) => selector === '[data-motion-work]' ? [] : [row]
+  input.closest = () => composer
+  Object.assign(globalThis, {
+    document:{activeElement:input,visibilityState:'visible',body:{append() {}},createElement:() => element('layer')},
+    window:{matchMedia:() => ({matches:false,addEventListener() {},removeEventListener() {}}),addEventListener() {},removeEventListener() {}},
+    getComputedStyle:() => ({paddingLeft:'13px',paddingTop:'9px',[Symbol.iterator]:function* () {}}),
+  })
+  const renderer = createRenderer({
+    createComment:() => ({}), createText:() => ({}), createElement:() => ({}),
+    insert() {}, remove() {}, setText() {}, setElementText() {}, patchProp() {}, parentNode:() => null, nextSibling:() => null,
+  })
+  const settle = async () => { await nextTick(); await nextTick(); await nextTick() }
+  try {
+    for (const ordering of ['echo-first', 'ack-first', 'empty-room'] as const) {
+      calls.length = 0
+      const messages = ref(ordering === 'empty-room' ? [] : [{id:'old',stableId:'old',text:'Old'}])
+      let context!: ReturnType<typeof motion.provideRoomMessageMotion>
+      const Child = defineComponent({setup() {
+        motion.useRoomMessageMotion({element:ref(viewport),messages:() => messages.value,scope:() => 'room',ready:() => true,following:() => true})
+        return () => null
+      }})
+      const Parent = defineComponent({setup() {context = motion.provideRoomMessageMotion(() => 'room'); return () => h(Child)}})
+      const app = renderer.createApp(Parent)
+      app.mount({})
+      try {
+        context.capture('Hello', input)
+        const ack = context.confirmation('Hello')
+        if (ordering !== 'echo-first') ack('new')
+        messages.value = [...messages.value, {id:'new',stableId:'new',text:'Hello'}]
+        await settle()
+        const firstArrival = [...calls]
+        if (ordering === 'echo-first') {
+          assert.deepEqual(firstArrival, [{name:'row',duration:200}])
+          ack('new')
+          await settle()
+          assert.deepEqual(calls, firstArrival, 'a late ack must not replay the visible echo')
+        } else {
+          assert.equal(calls.filter(call => call.name === 'bubble clone' && call.duration === 420).length, 1)
+        }
+        assert.equal(context.peekId(), undefined, 'the pending composer origin is consumed')
+        messages.value = [...messages.value]
+        await settle()
+        assert.deepEqual(calls, firstArrival, 'subsequent updates do not replay the message')
+      } finally { app.unmount() }
+      await settle()
+    }
+  } finally { Object.assign(globalThis, saved) }
 })
 
 import { createRoomMessageAnimator } from '../../../shared/ui/room-message-motion'
