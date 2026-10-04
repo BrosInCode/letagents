@@ -155,7 +155,7 @@
 </template>
 
 <script setup lang="ts">
-import { useRoomMessageMotion } from "../../../../../../../../shared/ui/useRoomMessageMotion";
+import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import { provide } from "vue";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
@@ -422,6 +422,12 @@ watch(
   { immediate: true },
 );
 
+const motionMessages = () => props.messages.map(message => ({
+  id: message.id, stableId: message.clientMessageId || message.id, text: message.text,
+  outgoing: message.outgoing?.status === 'pending',
+  session: message.agentIdentity?.agentSessionId, key: message.agentIdentity?.agentKey,
+}));
+
 const messageMotion = useRoomMessageMotion({
   element: messagesElement,
   scope: () => props.messageNamespace,
@@ -430,11 +436,8 @@ const messageMotion = useRoomMessageMotion({
   ready: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll,
   following: () => isScrolledToBottom,
   scrollToLatest: () => scrollToBottom("auto"),
-  messages: () => props.messages.map(message => ({
-    id: message.id, stableId: message.clientMessageId || message.id, text: message.text,
-    outgoing: message.outgoing?.status === 'pending',
-    session: message.agentIdentity?.agentSessionId, key: message.agentIdentity?.agentKey,
-  })),
+  messages: motionMessages,
+  onInterrupt: () => workHandoff.clear(),
 });
 
 // A no-reply turn can add a contribution without adding a chat message.
@@ -466,10 +469,19 @@ const currentLocalAgentWork = computed(() => {
   return props.localAgentWork.filter((work) => !workIndicatorSupersededByAgentMessage(work, visibleMessages));
 });
 
+const workHandoff = useRoomWorkHandoff({
+  work: () => currentLocalAgentWork.value,
+  identity: work => ({ session: work.agentSessionId, key: work.agentKey }),
+  after: work => work.sourceMessageId,
+  messages: motionMessages,
+  scope: () => props.messageNamespace,
+  enabled: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll && isScrolledToBottom,
+});
+
 function applyEchoCoalescing(): void {
   const { state, indicators, hasPending } = coalesceWorkIndicatorEchoes(
     echoState,
-    currentLocalAgentWork.value,
+    workHandoff.work.value,
     Date.now(),
     WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   );
@@ -485,7 +497,7 @@ function applyEchoCoalescing(): void {
 }
 
 watch(
-  currentLocalAgentWork,
+  workHandoff.work,
   () => applyEchoCoalescing(),
   { immediate: true, deep: true },
 );
