@@ -27,6 +27,7 @@
         :roomIdentifier="room?.identifier || ''"
         :unreadRoomId="room?.projectId || ''"
         :reasoningSessions="reasoningSessions"
+        :presence="presence"
         :hasOlderMessages="messagesHasOlder"
         :messagesLoaded="messagesLoaded"
         :isLoadingOlderMessages="isLoadingOlderMessages"
