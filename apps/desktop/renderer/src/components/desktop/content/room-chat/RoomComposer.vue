@@ -269,6 +269,7 @@
 </template>
 
 <script setup lang="ts">
+import { injectRoomMessageMotion } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
 import { useComposerSlashCommands } from "../../../../../../../../shared/ui/useComposerSlashCommands";
 import { roomSearchCommandKey } from "../room-shell/useDesktopRoomSearch";
@@ -584,6 +585,8 @@ async function submitMessage(): Promise<void> {
   await slash.submit(sendRoomMessage);
 }
 
+const messageMotion = injectRoomMessageMotion();
+
 function sendRoomMessage(): void {
   const text = draft.value.trim();
   if ((!text && props.attachmentDrafts.length === 0) || props.sending) return;
@@ -592,12 +595,14 @@ function sendRoomMessage(): void {
     ? applySelectedTextQuoteToDraft(text, replyTarget.text, replyTarget.sourceMessageId)
     : text;
   const clearSubmittedText = captureSubmittedDraft();
+  const finishMotion = messageMotion?.capture(messageText, textareaElement.value);
   emit(
     "send-message",
     messageText,
     replyTarget?.isSelection ? null : replyTarget?.id || null,
     props.attachmentDrafts.map((attachment) => ({ upload_id: attachment.uploadId })),
     (sent) => {
+      void nextTick(() => finishMotion?.());
       if (!sent) return;
       typing.stop();
       clearSubmittedText();

@@ -158,6 +158,7 @@
 </template>
 
 <script setup lang="ts">
+import { provideRoomMessageMotion } from "../../../../shared/ui/useRoomMessageMotion";
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
@@ -415,6 +416,8 @@ function openRulesFromDrawer() {
   rulesBoardOpen.value = true
 }
 
+const messageMotion = provideRoomMessageMotion(() => room.value?.identifier)
+
 async function handleSend(
   text: string,
   agentPromptKind: string | null,
@@ -425,7 +428,7 @@ async function handleSend(
   // thread; replying to a top-level message stays a quote-reply by design.
   const replyTarget = replyTo && selectedReply.value?.id === replyTo ? selectedReply.value : null
   const threadRootId = replyTarget ? messageThreadParentId(replyTarget) : null
-  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments, threadRootId)
+  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments, threadRootId, messageMotion.confirmation(text))
   if (sent) {
     selectedReply.value = null
     return true

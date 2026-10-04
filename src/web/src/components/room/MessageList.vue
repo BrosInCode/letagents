@@ -10,7 +10,7 @@
       >
         {{ isLoadingOlderMessages ? 'Loading older messages...' : 'Load older messages' }}
       </button>
-      <TransitionGroup name="message-arrival" @after-enter="handleAfterEnter">
+
         <template v-for="msg in messages" :key="msg.id">
         <div v-if="msg.id === unreadTimeline.dividerId.value" class="explicit-unread" role="separator">New messages</div>
         <ChatMessage
@@ -31,7 +31,16 @@
           @openTask="emit('openTask', $event)"
         />
         </template>
-      </TransitionGroup>
+
+      <div v-if="agentWork.length" class="room-local-agent-work-list" role="status" aria-live="polite">
+        <div v-for="work in agentWork.slice(0, 3)" :key="work.id" class="room-local-agent-work"
+          data-motion-work :data-motion-session="work.session" :data-motion-agent="work.key" :data-motion-after="work.after">
+          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+          <span class="room-local-agent-work-copy"><strong>{{ work.name }}</strong><span>{{ work.summary }}</span></span>
+          <span class="room-local-agent-work-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        </div>
+        <p v-if="agentWork.length > 3" class="room-local-agent-work-overflow">+{{ agentWork.length - 3 }} more agents working</p>
+      </div>
     </div>
     <button
       v-if="unreadCount > 0 || isScrolledFarUp"
@@ -41,7 +50,7 @@
       <span v-if="unreadCount > 0">↓ {{ unreadCount }} new messages</span>
       <span v-else>↓ Scroll to latest</span>
     </button>
-    <div v-if="messages.length === 0" class="empty-state">
+    <div v-if="messages.length === 0 && !agentWork.length" class="empty-state">
       <div class="empty-state-card">
         <h3>Open a room to begin</h3>
         <p>Create a room for your agents, copy the join code, and watch messages appear in real time.</p>
@@ -58,8 +67,11 @@
 </template>
 
 <script setup lang="ts">
+import "../../../../../shared/ui/room-agent-work.css";
+import { useRoomWorkIndicators } from "./roomWorkIndicators";
+import { useRoomMessageMotion } from "../../../../../shared/ui/useRoomMessageMotion";
 import { provide, ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
+import { type RoomAgentPresence, type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
 import { messageMatchesSearch } from './chat-message/formatting'
 import MessageInfoSurface from './MessageInfoSurface.vue'
@@ -84,6 +96,7 @@ const props = defineProps<{
   messages: readonly RoomMessage[]
   roomIdentifier?: string
   unreadRoomId?: string
+  presence?: readonly RoomAgentPresence[]
   reasoningSessions?: readonly RoomReasoningSession[]
   hasOlderMessages?: boolean
   messagesLoaded?: boolean
@@ -105,6 +118,8 @@ const emit = defineEmits<{
   /** The requested message is further back than the list will load to reach it. */
   revealUnavailable: [messageId: string, reason?: 'too_far_back' | 'unavailable']
 }>()
+
+const agentWork = useRoomWorkIndicators(() => props.presence || [], () => props.messages, () => props.roomIdentifier)
 
 const messagesEl = ref<HTMLElement | null>(null)
 const unreadRoom = computed(() => props.unreadRoomId)
@@ -188,12 +203,23 @@ function messageClasses(msg: RoomMessage): Record<string, boolean> {
   return classes
 }
 
-function handleAfterEnter(element: Element) {
-  const messageId = (element as HTMLElement).dataset.msgId
-  if (!messageId || !arrivingMessageIds.value.has(messageId)) return
-  const nextIds = new Set(arrivingMessageIds.value)
-  nextIds.delete(messageId)
-  arrivingMessageIds.value = nextIds
+const arrivalTimers = new Map<string, ReturnType<typeof setTimeout>>()
+function markArrivals(ids: string[]) {
+  arrivingMessageIds.value = mergeMessageArrivalIds(arrivingMessageIds.value, ids)
+  for (const id of ids) {
+    clearTimeout(arrivalTimers.get(id))
+    arrivalTimers.set(id, setTimeout(() => {
+      arrivalTimers.delete(id)
+      const remaining = new Set(arrivingMessageIds.value)
+      remaining.delete(id)
+      arrivingMessageIds.value = remaining
+    }, 320))
+  }
+}
+function clearArrivals() {
+  arrivalTimers.forEach(clearTimeout)
+  arrivalTimers.clear()
+  arrivingMessageIds.value = new Set()
 }
 
 function handleScroll() {
@@ -268,6 +294,7 @@ function findMessageElement(messageId: string): HTMLElement | null {
 }
 
 function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth') {
+  messageMotion.cancel()
   unreadTimeline.programmaticScroll()
   const target = findMessageElement(messageId)
   if (!target) return
@@ -298,7 +325,7 @@ watch(() => props.searchQuery, async () => {
 watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
   scrollRevision++
   cancelMessageReveal()
-  arrivingMessageIds.value = new Set()
+  clearArrivals()
   // Retire the old room's reporter: cancel its 600ms qualification timers
   // (rows are no longer visible), flush its gathered evidence against the
   // room it was captured in, and start Room B with clean per-room state.
@@ -315,6 +342,8 @@ watch([
   () => messageReactions?.revision.value,
   () => messageLinkPreviews?.revision.value,
 ], followLatestAfterLayout)
+
+watch(() => agentWork.value.map(work => work.id).join('|'), followLatestAfterLayout)
 
 // Typing and composer growth resize the list without changing its messages.
 let viewportResizeObserver: ResizeObserver | null = null
@@ -345,7 +374,7 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
   }
 
   if (appendedIds.length > 0) {
-    arrivingMessageIds.value = mergeMessageArrivalIds(arrivingMessageIds.value, appendedIds)
+    markArrivals(appendedIds)
   }
 
   if (isScrolledToBottom) {
@@ -357,6 +386,17 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
     if (readObserver) observeMessageRows()
     else setupReadObserver()
   })
+})
+
+const messageMotion = useRoomMessageMotion({
+  element: messagesEl,
+  scope: () => props.roomIdentifier,
+  ready: () => Boolean(props.messagesLoaded) && !props.isLoadingOlderMessages,
+  following: () => isScrolledToBottom,
+  messages: () => props.messages.map(message => ({
+    id: message.id, stableId: message.id, text: message.text,
+    session: message.agent_identity?.agent_session_id, key: message.agent_identity?.agent_key,
+  })),
 })
 
 // A requested message may be older than the loaded page: load a few older
@@ -542,6 +582,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  clearArrivals()
   scrollRevision++
   cancelMessageReveal()
   viewportResizeObserver?.disconnect()
@@ -561,6 +602,8 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 <style scoped>
 .explicit-unread { transition: none !important; animation: none !important; display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
 .explicit-unread::before, .explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
+.room-local-agent-work-list { margin: 6px auto 8px; }
+.room-local-agent-work { cursor: default; }
 .messages-wrap { position: relative; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
 
 .messages {
@@ -568,73 +611,8 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 16px 20px;
-  padding-left: 44px;
+  --room-chat-content-max: 720px;
   scroll-behavior: smooth;
-}
-
-.message-arrival-enter-active.animate-arrival {
-  will-change: transform, opacity;
-  transition:
-    opacity 190ms ease-out,
-    transform 280ms cubic-bezier(0.22, 0.8, 0.2, 1);
-}
-
-.message-arrival-enter-from.animate-arrival {
-  opacity: 0;
-  transform: translateY(12px) scale(0.985);
-}
-
-.message-arrival-enter-to.animate-arrival {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-}
-
-.message-arrival-enter-active.animate-arrival :deep(.message-avatar) {
-  will-change: transform, opacity;
-  transition:
-    opacity 170ms ease-out 25ms,
-    transform 210ms cubic-bezier(0.22, 0.8, 0.2, 1) 25ms;
-}
-
-.message-arrival-enter-from.animate-arrival :deep(.message-avatar) {
-  opacity: 0;
-  transform: translateY(5px) scale(0.72);
-}
-
-.message-arrival-enter-active.animate-arrival :deep(.message-meta) {
-  will-change: transform, opacity;
-  transition:
-    opacity 170ms ease-out 35ms,
-    transform 190ms cubic-bezier(0.22, 0.8, 0.2, 1) 35ms;
-}
-
-.message-arrival-enter-from.animate-arrival :deep(.message-meta) {
-  opacity: 0;
-  transform: translateY(7px);
-}
-
-.message-arrival-enter-active.animate-arrival :deep(.message-bubble) {
-  transform-origin: 14px 100%;
-  will-change: transform, opacity;
-  transition:
-    opacity 190ms ease-out 25ms,
-    transform 250ms cubic-bezier(0.22, 0.8, 0.2, 1) 25ms;
-}
-
-.message-arrival-enter-from.animate-arrival :deep(.message-bubble) {
-  opacity: 0;
-  transform: translateY(7px) scale(0.98);
-}
-
-.message-arrival-enter-active.animate-arrival :deep(.mention-token) {
-  transform-origin: 50% 70%;
-  animation: web-message-mention-arrive 210ms 55ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-@keyframes web-message-mention-arrive {
-  from { opacity: 0; transform: translateY(3px) scale(0.9); }
-  58% { opacity: 1; transform: translateY(0) scale(1.035); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .load-older-btn {
@@ -692,7 +670,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .empty-state-card p { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
 
 @media (max-width: 768px) {
-  .messages { padding: 12px 12px 12px 44px; }
+  .messages { padding: 12px 18px; }
   .new-messages-pill { bottom: 8px; font-size: 0.7rem; padding: 5px 12px; }
   .empty-state { padding: 24px 16px; }
   .load-older-btn, .new-messages-pill { min-height: 44px; }
@@ -701,36 +679,6 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 @media (prefers-reduced-motion: reduce) {
   .messages { scroll-behavior: auto; }
 
-  .message-arrival-enter-active.animate-arrival {
-    transition: opacity 160ms ease-out;
-  }
-
-  .message-arrival-enter-from.animate-arrival {
-    transform: none;
-  }
-
-  .message-arrival-enter-active.animate-arrival :deep(.message-avatar),
-  .message-arrival-enter-active.animate-arrival :deep(.message-meta),
-  .message-arrival-enter-active.animate-arrival :deep(.message-bubble) {
-    transition: none;
-  }
-
-  .message-arrival-enter-active.animate-arrival :deep(.mention-token) {
-    transform: none;
-    animation: web-message-mention-arrive-reduced 120ms ease-out both;
-  }
-
-  .message-arrival-enter-from.animate-arrival :deep(.message-avatar),
-  .message-arrival-enter-from.animate-arrival :deep(.message-meta),
-  .message-arrival-enter-from.animate-arrival :deep(.message-bubble) {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes web-message-mention-arrive-reduced {
-  from { opacity: 0; }
-  to { opacity: 1; }
 }
 </style>
 

@@ -54,6 +54,7 @@ test("the shared message marks timeline and thread replies without changing mess
       },
     }));
     assert.match(html, /aria-label="Pinned message"[^>]*><svg[^>]*aria-hidden="true"/);
+    assert.match(html, /class="room-message-reply-action room-message-pin-action"[^>]*aria-label="Unpin message"[^>]*aria-pressed="true"/);
     assert.doesNotMatch(html, /📌/);
   }
 });

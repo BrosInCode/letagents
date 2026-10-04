@@ -69,6 +69,10 @@
         <button
           v-for="work in collapsedAgentWork.visible"
           :key="work.id"
+          data-motion-work
+          :data-motion-session="work.agentSessionId"
+          :data-motion-agent="work.agentKey"
+          :data-motion-after="work.sourceMessageId"
           type="button"
           class="room-local-agent-work"
           :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"
@@ -151,6 +155,7 @@
 </template>
 
 <script setup lang="ts">
+import { useRoomMessageMotion } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import { provide } from "vue";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
@@ -414,6 +419,18 @@ watch(
   },
   { immediate: true },
 );
+
+const messageMotion = useRoomMessageMotion({
+  element: messagesElement,
+  scope: () => props.messageNamespace,
+  ready: () => props.active && !props.roomLoading && !props.loadingOlderMessages && !shouldRestoreInitialScroll,
+  following: () => isScrolledToBottom,
+  messages: () => props.messages.map(message => ({
+    id: message.id, stableId: message.clientMessageId || message.id, text: message.text,
+    outgoing: message.outgoing?.status === 'pending',
+    session: message.agentIdentity?.agentSessionId, key: message.agentIdentity?.agentKey,
+  })),
+});
 
 // A no-reply turn can add a contribution without adding a chat message.
 watch(() => timelineEntries.value.filter(entry => entry.type === 'contribution').map(entry => entry.id).join('|'), async () => {
@@ -1026,6 +1043,7 @@ function revealOrScrollToMessage(messageId: string | null): void {
 }
 
 function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "smooth"): boolean {
+  messageMotion.cancel();
   unreadTimeline.programmaticScroll();
   if (!messageId || !messagesElement.value) return false;
   const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
