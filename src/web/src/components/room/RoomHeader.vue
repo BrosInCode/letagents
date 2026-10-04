@@ -133,7 +133,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleFindShortcut))
 </script>
 
 <style scoped>
-.chat-header { position: relative; z-index: 20; display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 20px 24px 0; border-bottom: 1px solid var(--line, #27272a); background: var(--surface, #18181b); }
+.chat-header { position: relative; z-index: 20; display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 20px 24px 0; border-bottom: 1px solid var(--line, #27272a); background: var(--bg-0, #09090b); }
 .chat-header svg { width: 17px; height: 17px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
 .header-main, .header-navigation { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-width: 0; }
 .chat-title { flex: 1; min-width: 0; }
@@ -148,7 +148,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleFindShortcut))
 .action-btn, .title-rename-btn, .search-close { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; min-width: 36px; padding: 0 7px; background: transparent; border: 0; border-radius: 6px; color: var(--muted, #a1a1aa); font: inherit; font-size: 0.8rem; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
 .title-rename-btn { min-width: 28px; min-height: 28px; }
 .title-rename-btn svg { width: 13px; height: 13px; }
-.action-btn[aria-expanded="true"] { background: var(--bg-0, #09090b); color: var(--text, #fafafa); }
+.action-btn[aria-expanded="true"] { background: var(--accent-hover); color: var(--text, #fafafa); }
 .action-btn:disabled { opacity: .45; cursor: default; }
 .find-button kbd { padding: 1px 5px; margin-left: 6px; border: 1px solid var(--line, #27272a); border-radius: 4px; font: inherit; font-size: 0.68rem; }
 .tool-divider { width: 1px; height: 16px; margin: 0 4px; background: var(--line, #27272a); }
@@ -168,7 +168,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleFindShortcut))
 .presence[data-state="error"] { color: var(--danger, #f87171); }
 @media (hover: hover) and (pointer: fine) {
   .tab-bar button:hover { color: var(--text, #fafafa); }
-  .action-btn:hover:not(:disabled), .title-rename-btn:hover, .search-close:hover { background: var(--bg-0, #09090b); color: var(--text, #fafafa); }
+  .action-btn:hover:not(:disabled), .title-rename-btn:hover, .search-close:hover { background: var(--accent-hover); color: var(--text, #fafafa); }
 }
 @media (max-width: 980px) {
   .chat-header { flex-direction: row; align-items: center; gap: 8px; padding: 8px 12px; }
