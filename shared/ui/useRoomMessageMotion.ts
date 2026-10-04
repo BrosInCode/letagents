@@ -2,7 +2,7 @@ import { inject, nextTick, onBeforeUnmount, onDeactivated, onMounted, provide, r
 import { appendedMotionMessages, captureWork, createRoomMessageAnimator, sameMotionAgent, type MotionMessage, type WorkGeometry } from './room-message-motion';
 
 interface SendOrigin {
-  text: string; bounds: DOMRect; composer: HTMLElement | null; keyboard: boolean; messageId?: string;
+  text: string; bounds: DOMRect; keyboard: boolean; messageId?: string;
 }
 function createSendContext() {
   const revision = ref(0);
@@ -11,7 +11,7 @@ function createSendContext() {
     revision,
     capture(text: string, input: HTMLTextAreaElement | null) {
       if (!input) return () => {};
-      const origin = { text, bounds: input.getBoundingClientRect(), composer: input.closest<HTMLElement>('form, .desktop-composer, .composer-card'), keyboard: document.activeElement === input };
+      const origin = { text, bounds: input.getBoundingClientRect(), keyboard: document.activeElement === input };
       pending = origin;
       return () => { if (pending === origin) pending = null; };
     },
@@ -40,13 +40,14 @@ export function provideRoomMessageMotion(scope: () => string | null | undefined)
 }
 export function injectRoomMessageMotion() { return inject(sendKey, null); }
 
-/** The list still owns scrolling/history. Motion observes only fresh, visible arrivals. */
+/** Lists own scrolling/history; an own send requests latest before measuring its landing. */
 export function useRoomMessageMotion(options: {
   element: Ref<HTMLElement | null>;
   messages: () => MotionMessage[];
   scope: () => string | null | undefined;
   ready: () => boolean;
   following: () => boolean;
+  scrollToLatest: () => void;
 }) {
   const send = injectRoomMessageMotion();
   const animator = createRoomMessageAnimator(() => options.element.value);
@@ -68,14 +69,24 @@ export function useRoomMessageMotion(options: {
     const sends = new Map<string, SendOrigin>();
     for (const message of candidates) {
       const source = send?.consume(message);
-      if (source && !seen.has(message.stableId)) sends.set(message.id, source);
+      if (source) sends.set(message.id, source);
     }
     if (!appended.length && !sends.size) return;
+    const element = options.element.value;
+    const following = options.following();
+    // Capture the current presentation before cancelling a previous flight, so
+    // rapid arrivals continue from where the visible rows actually are.
+    const viewport = element?.getBoundingClientRect();
+    const positions = new Map<HTMLElement, DOMRect>();
+    if (element && viewport && following && options.ready()) {
+      for (const row of element.querySelectorAll<HTMLElement>('[data-message-id], [data-msg-id]')) {
+        const bounds = row.getBoundingClientRect();
+        if (bounds.bottom > viewport.top && bounds.top < viewport.bottom) positions.set(row, bounds);
+      }
+    }
     cancel();
     const currentRevision = revision;
-    const element = options.element.value;
-    if (!element || !options.ready() || !options.following() || media?.matches || document.visibilityState === 'hidden') return;
-    const positions = new Map([...element.querySelectorAll<HTMLElement>('[data-message-id], [data-msg-id]')].map(row => [row, row.getBoundingClientRect()]));
+    if (!element || !options.ready() || (!following && !sends.size)) return;
     const sources = new Map<string, WorkGeometry>();
     const used = new Set<HTMLElement>();
     const workRows = [...element.querySelectorAll<HTMLElement>('[data-motion-work]')];
@@ -89,7 +100,11 @@ export function useRoomMessageMotion(options: {
     await nextTick();
     // Scroll followers may themselves be queued by this render (e.g. an API acknowledgement).
     await nextTick();
-    if (currentRevision !== revision || !options.ready() || media?.matches || element !== options.element.value) return;
+    if (currentRevision !== revision || !options.ready() || element !== options.element.value) return;
+    // This is navigation requested by the sender, including reduced motion and
+    // a late web acknowledgement after its stream echo. Never replay that echo.
+    if (sends.size) options.scrollToLatest();
+    if (media?.matches || document.visibilityState === 'hidden') return;
     animator.move(positions);
     const rows = [...element.querySelectorAll<HTMLElement>('[data-message-id], [data-msg-id]')];
     for (const message of candidates) {
@@ -98,7 +113,7 @@ export function useRoomMessageMotion(options: {
       const bounds = row.getBoundingClientRect(), viewport = element.getBoundingClientRect();
       if (bounds.bottom < viewport.top || bounds.top > viewport.bottom) continue;
       const origin = sends.get(message.id), work = sources.get(message.id);
-      if (origin) animator.send(row, origin.bounds, origin.composer, origin.keyboard);
+      if (origin && !seen.has(message.stableId)) animator.send(row, origin.bounds, origin.keyboard);
       else if (work) animator.reply(row, work);
       else if (appended.includes(message)) animator.reveal(row);
     }

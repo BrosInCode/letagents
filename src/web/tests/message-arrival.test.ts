@@ -186,11 +186,10 @@ test('real send watcher animates each message once across echo/ack order and emp
       },
     }
   }
-  const bubble = element('bubble'), row = element('row'), composer = element('composer'), viewport = element('viewport'), input = element('input')
+  const bubble = element('bubble'), row = element('row'), viewport = element('viewport'), input = element('input')
   row.dataset.messageId = 'new'
   row.querySelector = (selector:string) => selector.includes('bubble') ? bubble : null
   viewport.querySelectorAll = (selector:string) => selector === '[data-motion-work]' ? [] : [row]
-  input.closest = () => composer
   Object.assign(globalThis, {
     document:{activeElement:input,visibilityState:'visible',body:{append() {}},createElement:() => element('layer')},
     window:{matchMedia:() => ({matches:false,addEventListener() {},removeEventListener() {}}),addEventListener() {},removeEventListener() {}},
@@ -202,12 +201,16 @@ test('real send watcher animates each message once across echo/ack order and emp
   })
   const settle = async () => { await nextTick(); await nextTick(); await nextTick() }
   try {
-    for (const ordering of ['echo-first', 'ack-first', 'empty-room'] as const) {
+    for (const ordering of ['echo-first', 'ack-first', 'empty-room', 'scrolled-up', 'reduced-motion'] as const) {
       calls.length = 0
+      let following = ordering !== 'scrolled-up'
+      let follows = 0
+      window.matchMedia = (() => ({ matches: ordering === 'reduced-motion', addEventListener() {}, removeEventListener() {} })) as any
       const messages = ref(ordering === 'empty-room' ? [] : [{id:'old',stableId:'old',text:'Old'}])
       let context!: ReturnType<typeof motion.provideRoomMessageMotion>
       const Child = defineComponent({setup() {
-        motion.useRoomMessageMotion({element:ref(viewport),messages:() => messages.value,scope:() => 'room',ready:() => true,following:() => true})
+        motion.useRoomMessageMotion({element:ref(viewport),messages:() => messages.value,scope:() => 'room',ready:() => true,following:() => following,
+          scrollToLatest:() => { follows++; following = true }})
         return () => null
       }})
       const Parent = defineComponent({setup() {context = motion.provideRoomMessageMotion(() => 'room'); return () => h(Child)}})
@@ -225,13 +228,21 @@ test('real send watcher animates each message once across echo/ack order and emp
           ack('new')
           await settle()
           assert.deepEqual(calls, firstArrival, 'a late ack must not replay the visible echo')
+        } else if (ordering === 'reduced-motion') {
+          assert.deepEqual(calls, [], 'reduced motion still navigates to the sent message without movement')
         } else {
-          assert.equal(calls.filter(call => call.name === 'bubble clone' && call.duration === 420).length, 1)
+          assert.equal(calls.filter(call => call.name === 'bubble clone' && call.duration === 280).length, 1)
         }
+        assert.equal(follows, 1, 'an own send navigates once, even from history or with a late acknowledgement')
         assert.equal(context.peekId(), undefined, 'the pending composer origin is consumed')
         messages.value = [...messages.value]
         await settle()
         assert.deepEqual(calls, firstArrival, 'subsequent updates do not replay the message')
+        following = false
+        messages.value = [...messages.value, {id:'incoming',stableId:'incoming',text:'Someone else replied'}]
+        await settle()
+        assert.equal(follows, 1, 'incoming messages never pull a reader away from history')
+        assert.deepEqual(calls, firstArrival, 'incoming messages off-screen do not animate')
       } finally { app.unmount() }
       await settle()
     }
@@ -260,7 +271,7 @@ test('interrupting a send restores the real bubble and removes inert animation c
       },
     }
   }
-  const bubble = element(), row = element(), composer = element(), viewport = element()
+  const bubble = element(), row = element(), viewport = element()
   viewport.clientHeight = 600
   row.querySelector = (selector: string) => selector.includes('bubble') ? bubble : null
   const style: any = {paddingLeft:'13px',paddingTop:'9px', [Symbol.iterator]: function* () {}}
@@ -270,7 +281,7 @@ test('interrupting a send restores the real bubble and removes inert animation c
   })
   try {
     const animator = createRoomMessageAnimator(() => viewport)
-    animator.send(row, {...rect, top:500} as DOMRect, composer, false)
+    animator.send(row, {...rect, top:500} as DOMRect, false)
     assert.equal(bubble.style.opacity, '0')
     assert.equal(layers[0].inert, true)
     assert.equal(layers[0].attributes['aria-hidden'], 'true')
