@@ -601,7 +601,7 @@ watch(
   color: var(--text, #fafafa);
 }
 
-.room-shell[data-compact-viewport="true"] :deep(.chat-header) { height: 44px; }
+.room-shell[data-compact-viewport="true"] :deep(.chat-header) { min-height: 44px; padding-block: 0; }
 .room-shell[data-compact-viewport="true"] :deep(.chat-title p) { display: none; }
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
 
