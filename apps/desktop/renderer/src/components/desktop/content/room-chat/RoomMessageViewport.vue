@@ -422,11 +422,12 @@ watch(
   { immediate: true },
 );
 
-const motionMessages = () => props.messages.map(message => ({
+const toMotionMessage = (message: DesktopRoomMessage) => ({
   id: message.id, stableId: message.clientMessageId || message.id, text: message.text,
   outgoing: message.outgoing?.status === 'pending',
   session: message.agentIdentity?.agentSessionId, key: message.agentIdentity?.agentKey,
-}));
+});
+const motionMessages = () => props.messages.map(toMotionMessage);
 
 const messageMotion = useRoomMessageMotion({
   element: messagesElement,
@@ -473,7 +474,9 @@ const workHandoff = useRoomWorkHandoff({
   work: () => currentLocalAgentWork.value,
   identity: work => ({ session: work.agentSessionId, key: work.agentKey }),
   after: work => work.sourceMessageId,
-  messages: motionMessages,
+  // A thread reply retires its source work just like a main-timeline reply.
+  // Keep the animation watcher above restricted to rows rendered in this list.
+  messages: () => [...props.messages, ...props.threadMessages].sort(compareRoomMessages).map(toMotionMessage),
   scope: () => props.messageNamespace,
   enabled: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll && isScrolledToBottom,
 });
