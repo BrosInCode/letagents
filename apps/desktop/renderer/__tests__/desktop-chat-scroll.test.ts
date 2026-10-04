@@ -56,7 +56,7 @@ const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove(
 const flush = async () => { await nextTick(); await new Promise(resolve => setImmediate(resolve)); await nextTick(); };
 const message = (id: string) => ({ id, sender: "Ada", source: "browser", text: id, timestamp: "2026-10-02T00:00:00Z", attachments: [], agentIdentity: null });
 
-async function scrollSurface(thread = false) {
+async function scrollSurface(thread = false, rememberPosition = false, initialScrollTop: number | null = null) {
   const old = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver };
   let resize = () => {};
   let now = 0, nextHandle = 0;
@@ -87,6 +87,7 @@ async function scrollSurface(thread = false) {
   const props = reactive<any>({
     active: true, messages: [message("msg_1"), message("msg_2")], threadMessages: [], localAgentWork: [],
     hasOlderMessages: false, loadingOlderMessages: false, roomLoading: false, roomIdentifier: "room", messageNamespace: "room", searchQuery: "", activeSearchMessageId: null,
+    initialScrollTop,
     parent: message("msg_1"), replies: [message("msg_2")], initialThreadSummary: null, participants: [], attachmentDrafts: [], pendingAttachmentDrafts: [], taskReferenceIds: new Set(), deliveryReceiptsByMessage: {},
   });
   const reactions = { revision: ref(0) }, previews = { revision: ref(0) };
@@ -95,7 +96,12 @@ async function scrollSurface(thread = false) {
     provideReactions(reactions); providePreviews(previews);
     motion = provideMotion(() => props.messageNamespace);
     return () => h({ setup() {
-      vm = (thread ? Thread : Viewport).setup(props, { expose() {}, emit() {} });
+      vm = (thread ? Thread : Viewport).setup(props, { expose() {}, emit(event: string, value: unknown) {
+        // DesktopRoomShell stores each live report and passes it back through
+        // initialChatScrollTop on the next parent render, including when the
+        // room had no saved position.
+        if (rememberPosition && event === "scroll-position") void nextTick(() => { props.initialScrollTop = value; });
+      } });
       if (thread) { vm.bodyElement.value = el; vm.panelElement.value = el; }
       else vm.messagesElement.value = el;
       return () => h("div");
@@ -105,9 +111,10 @@ async function scrollSurface(thread = false) {
   app.mount({}); await flush(); calls.length = 0;
   el.addEventListener("scroll", () => vm.handleScroll?.());
   return { vm, props, reactions, previews, el, calls, resize: () => resize(),
-    send: () => {
-      motion.capture("my message", { getBoundingClientRect: () => ({ top: 500 }), closest: () => null });
-      props.messages = [...props.messages, { ...message("pending_1"), text: "my message", clientMessageId: "send_1", outgoing: { status: "pending" } }];
+    send: (number = 1) => {
+      const finish = motion.capture("my message", { getBoundingClientRect: () => ({ top: 500 }), closest: () => null });
+      props.messages = [...props.messages, { ...message(`pending_${number}`), text: "my message", clientMessageId: `send_${number}`, outgoing: { status: "pending" } }];
+      void nextTick(finish); // The composer releases the origin after local acceptance.
     },
     setRevealTop: (value: number | null) => { revealTop = value; },
     frame: () => { for (const [handle, callback] of [...frames]) { frames.delete(handle); callback(); } },
@@ -199,6 +206,41 @@ for (const loadingOlder of [false, true]) test(`timeline: own send follows lates
     await flush();
     assert.equal(s.el.scrollTop, loadingOlder ? 2000 : 1800);
     assert.equal(s.vm.unreadCount.value, 0);
+  } finally { s.close(); }
+});
+
+for (const fromHistory of [false, true]) test(`timeline: live scroll-memory feedback cannot disable subsequent sends, history=${fromHistory}`, async () => {
+  const s = await scrollSurface(false, true);
+  try {
+    for (const number of [1, 2, 3]) {
+      if (fromHistory) { s.up(); await flush(); }
+      s.send(number);
+      await Promise.resolve(); s.el.scrollHeight += 200; await flush();
+      assert.equal(s.el.scrollTop, s.el.scrollHeight - s.el.clientHeight, `send ${number} stays visible`);
+      assert.equal(s.vm.unreadCount.value, 0);
+      s.calls.length = 0;
+      s.props.messages = s.props.messages.map((message: any) => message.id === `pending_${number}`
+        ? { ...message, id: `msg_${number + 2}`, outgoing: undefined } : message);
+      await flush();
+      assert.deepEqual(s.calls, [], `ack ${number} does not navigate again`);
+    }
+    s.up(); await flush();
+    s.props.messages = [...s.props.messages, message("msg_6")];
+    await Promise.resolve(); s.el.scrollHeight += 200; await flush();
+    assert.equal(s.el.scrollTop, 100, "incoming messages preserve the older reading position");
+    assert.equal(s.vm.unreadCount.value, 1);
+  } finally { s.close(); }
+});
+
+test("timeline: an existing saved position still restores once before own-send navigation", async () => {
+  const s = await scrollSurface(false, true, 420);
+  try {
+    assert.equal(s.el.scrollTop, 420);
+    s.send();
+    await Promise.resolve(); s.el.scrollHeight += 200; await flush();
+    assert.equal(s.el.scrollTop, 1800);
+    s.up(); await flush();
+    assert.equal(s.el.scrollTop, 100, "later memory feedback does not restore the old position");
   } finally { s.close(); }
 });
 test("timeline: a pending layout anchor cannot undo a reveal", async () => {

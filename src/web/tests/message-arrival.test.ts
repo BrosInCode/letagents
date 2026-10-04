@@ -293,3 +293,124 @@ test('interrupting a send restores the real bubble and removes inert animation c
     assert.equal(bubble.style.opacity, '', 'cancel remains safe after animation rejection cleanup')
   } finally { Object.assign(globalThis, saved) }
 })
+
+test('work handoff stays visible briefly, consumes only its causal agent reply, and expires or clears safely', async (t) => {
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 1000 })
+  const messages = ref<any[]>([{ id: 'request', stableId: 'request', text: 'Request' }])
+  const a = { session: 'a', key: 'owner/a', after: 'request' }, b = { session: 'b', key: 'owner/b', after: 'request' }
+  const active = ref([a, b]), room = ref('one'), enabled = ref(true)
+  const scope = effectScope()
+  const handoff = scope.run(() => motion.useRoomWorkHandoff({ work: () => active.value, identity: value => value,
+    after: value => value.after, messages: () => messages.value, scope: () => room.value, enabled: () => enabled.value }))!
+  const reply = (id: string, session: string, key = `owner/${session}`) => ({ id, stableId: id, text: id, session, key })
+  try {
+    active.value = []; await nextTick()
+    t.mock.timers.tick(600)
+    assert.equal(handoff.work.value.length, 2, 'both actual work rows bridge a separate work-clear update')
+    messages.value.push({ id:'github-event', stableId:'github-event', text:'Unrelated room activity' }); await nextTick()
+    assert.equal(handoff.work.value.length,2,'ambient messages do not end another agent’s turn')
+    messages.value.push(reply('b-reply', 'b')); await nextTick()
+    assert.deepEqual(handoff.work.value.map(item => item.session), ['a'], 'B cannot consume A’s thinking row')
+    messages.value.push(reply('wrong-session', 'new-a', 'owner/a')); await nextTick()
+    assert.equal(handoff.work.value.length, 1, 'exact sessions take precedence over a matching durable key')
+    messages.value.push(reply('a-reply', 'a')); await nextTick()
+    assert.equal(handoff.work.value.length, 0)
+    messages.value = [...messages.value]; await nextTick()
+    assert.equal(handoff.work.value.length, 0, 'a replay cannot restore a consumed turn')
+
+    messages.value.push({ id: 'request-2', stableId: 'request-2', text: 'Again' })
+    active.value = [{ ...a, after: 'request-2' }]; await nextTick()
+    active.value = []; await nextTick()
+    t.mock.timers.tick(1001)
+    assert.equal(handoff.work.value.length, 0, 'no-reply turns expire after one second')
+    messages.value = [...messages.value]; await nextTick()
+    assert.equal(handoff.work.value.length, 0, 'later metadata updates cannot rearm expired work')
+
+    for (const boundary of ['new-turn', 'room', 'history', 'interrupt'] as const) {
+      messages.value = [{ id: 'request', stableId: 'request', text: 'Request' }]
+      active.value = [a]; enabled.value = true; await nextTick()
+      active.value = []; await nextTick()
+      assert.equal(handoff.work.value.length, 1)
+      if (boundary === 'new-turn') messages.value.push({ id: 'next', stableId: 'next', text: 'Next' })
+      if (boundary === 'new-turn') active.value = [{ ...a, after: 'next' }]
+      if (boundary === 'room') room.value = 'other'
+      if (boundary === 'history') enabled.value = false
+      if (boundary === 'interrupt') handoff.clear()
+      await nextTick()
+      assert.equal(handoff.work.value.some(item => item.after === 'request'), false, boundary)
+    }
+  } finally { scope.stop(); t.mock.timers.reset() }
+})
+
+test('real reply watcher transforms retained work once across split updates and repeated turns', async () => {
+  const saved = { document: globalThis.document, window: globalThis.window, getComputedStyle: globalThis.getComputedStyle }
+  const calls: {name:string;duration:number}[] = []
+  const rect = {left:20,top:100,right:220,bottom:150,width:200,height:50}
+  function element(name:string): any {
+    return { style:{opacity:''}, dataset:{}, isConnected:true, clientHeight:600,
+      getBoundingClientRect:() => ({...rect}), querySelectorAll:() => [], querySelector:() => null,
+      setAttribute() {}, removeAttribute() {}, append() {}, remove() {}, addEventListener() {}, removeEventListener() {},
+      cloneNode:() => element(`${name} clone`),
+      animate(_frames:unknown, options:{duration:number}) {
+        calls.push({name,duration:options.duration})
+        let reject!: (error:Error) => void
+        return {finished:new Promise((_resolve,r) => {reject=r}),cancel:() => reject(new Error('cancelled'))}
+      } }
+  }
+  let workRows:any[] = [], rows:any[] = [], following = true, reduced = false, follows = 0
+  const viewport = element('viewport')
+  viewport.getBoundingClientRect = () => ({...rect,bottom:700,height:600})
+  viewport.querySelectorAll = (selector:string) => selector === '[data-motion-work]' ? workRows : rows
+  Object.assign(globalThis, {
+    document:{visibilityState:'visible',body:{append() {}},createElement:() => element('overlay')},
+    window:{matchMedia:() => ({get matches() {return reduced},addEventListener() {},removeEventListener() {}}),addEventListener() {},removeEventListener() {}},
+    getComputedStyle:() => ({[Symbol.iterator]:function* () {}}),
+  })
+  const renderer = createRenderer({createComment:() => ({}),createText:() => ({}),createElement:() => ({}),insert() {},remove() {},setText() {},setElementText() {},patchProp() {},parentNode:() => null,nextSibling:() => null})
+  const messages = ref<any[]>([{id:'request',stableId:'request',text:'Request'}]), active = ref<any[]>([])
+  let handoff!: ReturnType<typeof motion.useRoomWorkHandoff<any>>
+  const Component = defineComponent({setup() {
+    handoff = motion.useRoomWorkHandoff({work:() => active.value,identity:value => value,after:value => value.after,
+      messages:() => messages.value,scope:() => 'room',enabled:() => following})
+    motion.useRoomMessageMotion({element:ref(viewport),messages:() => messages.value.map(message => ({...message})),scope:() => 'room',ready:() => true,
+      following:() => following,scrollToLatest:() => {follows++},onInterrupt:handoff.clear})
+    return () => {
+      workRows = handoff.work.value.map(value => {
+        const work = element('work'); work.dataset = {motionSession:value.session,motionAgent:value.key,motionAfter:value.after}
+        work.querySelector = () => element('work detail'); return work
+      })
+      rows = messages.value.map(value => {
+        const row = element(value.id), bubble = element(`${value.id} bubble`); row.dataset.messageId = value.id
+        row.querySelector = (selector:string) => selector.includes('bubble') ? bubble : null; return row
+      })
+      return null
+    }
+  }})
+  const app = renderer.createApp(Component)
+  const settle = async () => {await nextTick();await nextTick();await nextTick()}
+  try {
+    app.mount({})
+    for (const turn of [1,2]) {
+      active.value = [{session:'a',key:'owner/a',after:messages.value.at(-1).id}]; await settle()
+      active.value = []; await settle()
+      assert.equal(workRows.length,1,'work remains in the actual rendered set during the handoff gap')
+      const id=`reply-${turn}`
+      messages.value.push({id,stableId:id,text:'Reply',session:'a',key:'owner/a'}); await settle()
+      assert.equal(workRows.length,0,'reply replaces the retained row')
+      assert.equal(calls.filter(call => call.name===`${id} bubble`&&call.duration===440).length,1)
+      const count=calls.length
+      messages.value=[...messages.value]; await settle()
+      assert.equal(calls.length,count,'replaying the reply never repeats entrance')
+    }
+    for(const mode of ['history','reduced'] as const) {
+      active.value=[{session:'a',key:'owner/a',after:messages.value.at(-1).id}]; await settle()
+      following=mode!=='history'; reduced=mode==='reduced'
+      active.value=[]; await settle()
+      assert.equal(workRows.length,0,'navigation/reduced motion does not preserve a stale visual origin')
+      const count=calls.length
+      messages.value.push({id:mode,stableId:mode,text:'Reply',session:'a',key:'owner/a'}); await settle()
+      assert.equal(calls.length,count)
+    }
+    assert.equal(follows,0,'incoming replies never request scrolling to latest')
+  } finally {app.unmount();Object.assign(globalThis,saved)}
+})
