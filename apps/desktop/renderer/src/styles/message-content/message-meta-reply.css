@@ -7,7 +7,7 @@
 
 .room-message-meta {
   flex-wrap: wrap;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   min-width: 0;
   margin-bottom: 0;
@@ -26,8 +26,8 @@
   min-width: 0;
   overflow: hidden;
   color: var(--text);
-  font-size: 0.86rem;
-  font-weight: 730;
+  font-size: 13px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -40,8 +40,8 @@
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 0.86rem;
-  font-weight: 730;
+  font-size: 13px;
+  font-weight: 600;
   text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -102,7 +102,7 @@
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .room-chat-message.is-compact-continuation .room-message-meta-tail {
@@ -148,10 +148,6 @@
   transition: opacity var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out);
 }
 
-.room-message-copy-action {
-  opacity: 0.72;
-  transform: none;
-}
 
 .room-message-reply-action svg {
   width: 14px;
@@ -526,4 +522,13 @@
   text-decoration: underline;
   text-underline-offset: 3px;
   padding: 2px 4px;
+}
+
+.room-message-meta-tail { flex-wrap: wrap; max-width: 100%; }
+.room-message-meta time { order: -1; margin-right: 5px; font-size: 10px; }
+.room-message-meta .room-message-provenance { display: none; }
+.room-message-reply-action:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+.room-message-reply-action:disabled { cursor: default; opacity: .45; }
+@media (hover: none), (pointer: coarse) {
+  .room-message-reply-action { width: 44px; height: 44px; opacity: 1; transform: none; }
 }

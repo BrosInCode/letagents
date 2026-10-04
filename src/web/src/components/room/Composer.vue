@@ -157,6 +157,7 @@
 </template>
 
 <script setup lang="ts">
+import { injectRoomMessageMotion } from "../../../../../shared/ui/useRoomMessageMotion";
 import { useComposerSlashCommands } from '../../../../../shared/ui/useComposerSlashCommands'
 import { useToast } from '@/composables/useToast'
 import TypingIndicator from '../../../../../shared/ui/TypingIndicator.vue'
@@ -378,6 +379,8 @@ async function handleSend() {
   await slash.submit(sendRoomMessage)
 }
 
+const messageMotion = injectRoomMessageMotion()
+
 async function sendRoomMessage() {
   const trimmed = text.value.trim()
   if (!canSend.value) return
@@ -387,6 +390,7 @@ async function sendRoomMessage() {
     return
   }
 
+  const finishMotion = messageMotion?.capture(trimmed, textareaEl.value)
   const kind = injectPrompt.value ? 'inline' : null
   isSending.value = true
   try {
@@ -402,6 +406,8 @@ async function sendRoomMessage() {
       textareaEl.value.style.height = 'auto'
     }
   } finally {
+    await nextTick()
+    finishMotion?.()
     isSending.value = false
   }
 }

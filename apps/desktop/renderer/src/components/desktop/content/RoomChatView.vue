@@ -220,6 +220,7 @@
 </template>
 
 <script setup lang="ts">
+import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoomMessageMotion";
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, toRef, watch } from "vue";
 import type { CSSProperties } from "vue";
@@ -382,6 +383,8 @@ const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
 const threadRevealTargetId = ref<string | null>(null);
 const { quote: replyTarget } = useDesktopMessageDraft(() => props.messageNamespace);
+provideRoomMessageMotion(() => props.messageNamespace);
+
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
 const roomComposer = ref<InstanceType<typeof RoomComposer> | null>(null);
 const threadLayoutElement = ref<HTMLElement | null>(null);
