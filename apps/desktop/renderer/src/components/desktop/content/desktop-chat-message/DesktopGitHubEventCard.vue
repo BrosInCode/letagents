@@ -3,6 +3,7 @@
     class="desktop-github-event"
     :event="event"
     :compact="compact"
+    :room="room"
     :task-link-enabled="taskLinkEnabled"
     show-event-link
     @open-task="$emit('open-task', $event)"
@@ -22,6 +23,7 @@ import PullRequestChangesButton from "../room-events/PullRequestChangesButton.vu
 defineProps<{
   event: GitHubEventPresentation;
   taskLinkEnabled?: boolean;
+  room?: boolean
   compact?: boolean;
 }>();
 

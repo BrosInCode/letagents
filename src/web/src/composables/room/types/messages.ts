@@ -68,6 +68,8 @@ export interface RoomMessage {
    */
   reactions?: unknown
   agent_identity?: {
+    agent_key?: string | null
+    agent_session_id?: string | null
     name: string
     display_name: string
     owner_label: string

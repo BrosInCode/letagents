@@ -1,5 +1,5 @@
 <template>
-  <article class="github-event-card" :class="{ 'is-preview': compact }" :data-tone="event.tone" :data-kind="event.kind" :data-status="event.statusLabel">
+  <article class="github-event-card" :class="{ 'is-preview': compact, 'is-room-event': room, 'is-activity': room && !['pull-request', 'issue'].includes(event.kind) }" :data-tone="event.tone" :data-kind="event.kind" :data-status="event.statusLabel">
     <div class="github-event-header">
       <svg class="github-event-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <template v-if="event.kind === 'pull-request'">
@@ -23,12 +23,13 @@
         <path v-else-if="event.kind === 'repository'" d="M2.5 4h4l1.5 2h5.5v6.5h-11z" />
         <template v-else><circle cx="8" cy="8" r="5.5" /><path d="M8 5v3M8 11h.01" /></template>
       </svg>
-      <span class="github-event-kind">{{ event.kindLabel }}</span>
+      <p v-if="room" class="github-event-title">{{ title }}</p>
+      <span v-else class="github-event-kind">{{ event.kindLabel }}</span>
       <span v-if="event.statusLabel" class="github-event-status">{{ statusLabel }}</span>
     </div>
 
-    <div class="github-event-content">
-      <p class="github-event-title">{{ title }}</p>
+    <div v-if="!room || description" class="github-event-content">
+      <p v-if="!room" class="github-event-title">{{ title }}</p>
       <p v-if="description" class="github-event-description">{{ description }}</p>
     </div>
 
@@ -77,6 +78,7 @@ const props = defineProps<{
     urlLabel: string;
   };
   compact?: boolean;
+  room?: boolean;
   taskLinkEnabled?: boolean;
   showEventLink?: boolean;
 }>();
@@ -190,5 +192,38 @@ button.github-event-task:focus-visible { outline: 2px solid var(--blue-text); ou
 @media (prefers-contrast: more) {
   .github-event-card { border-color: var(--text-secondary); }
   .github-event-status { outline: 1px solid var(--event-accent); }
+}
+/* Room events share the conversation column, with flat, semantic borders. */
+.github-event-card.is-room-event {
+  max-width: 100%;
+  gap: 6px;
+  padding: 11px 14px 8px;
+  border-color: color-mix(in srgb, var(--event-accent) 45%, var(--border-strong));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--bg-card) 65%, var(--bg));
+  box-shadow: none;
+}
+.is-room-event .github-event-title { font-size: 13px; font-weight: 550; }
+.is-room-event .github-event-description { font-size: 11px; }
+.is-room-event .github-event-actions { border: 0; padding-top: 0; gap: 8px; }
+.is-room-event .github-event-action,
+.is-room-event .github-event-actions :deep(.pull-request-changes-button) {
+  min-height: 26px; padding: 3px 0; border: 0; background: transparent; font-size: 11px;
+}
+.is-activity { display: flex; flex-wrap: wrap; align-items: center; column-gap: 12px; }
+.is-activity .github-event-header { flex: 1 1 220px; }
+.is-activity .github-event-kind { display: none; }
+.is-activity .github-event-status { margin-left: 0; }
+.is-activity .github-event-content { display: none; }
+.is-activity .github-event-title { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+.is-activity .github-event-description, .is-activity .github-event-repository, .is-activity .github-event-separator { display: none; }
+.is-activity .github-event-context,
+.is-activity .github-event-actions { grid-column: 1 / -1; }
+@media (pointer: coarse) {
+  .is-room-event .github-event-action,
+  .is-room-event .github-event-actions :deep(.pull-request-changes-button) { min-height: 44px; }
+}
+@media (prefers-contrast: more) {
+  .github-event-card.is-room-event { border-color: var(--event-accent); }
 }
 </style>

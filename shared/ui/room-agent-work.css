@@ -1,0 +1,134 @@
+.room-local-agent-work-list {
+  display: grid;
+  gap: 4px;
+  align-self: center;
+  width: min(var(--room-chat-content-max), 100%);
+  margin: 6px 0 8px;
+}
+
+.room-local-agent-work {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  padding: 5px 8px 5px 3px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  box-shadow: none;
+  appearance: none;
+}
+
+.room-local-agent-work:focus-visible {
+  outline: 2px solid var(--blue, #3b82f6);
+  outline-offset: 1px;
+}
+
+.room-local-agent-work:active {
+  background: var(--accent-active);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .room-local-agent-work:hover {
+    background: var(--accent-hover);
+  }
+}
+
+.room-local-agent-work-pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #34d399;
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.08);
+  animation: local-agent-work-pulse 1.8s ease-in-out infinite;
+}
+
+.room-local-agent-work-copy {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.room-local-agent-work strong {
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.room-local-agent-work-copy span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 0.73rem;
+  font-weight: 640;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-local-agent-work-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.room-local-agent-work-dots i {
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.32;
+  animation: local-agent-work-dot 1.1s ease-in-out infinite;
+}
+
+.room-local-agent-work-dots i:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.room-local-agent-work-dots i:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+.room-local-agent-work-overflow {
+  margin: 2px 0 0;
+  padding-left: 4px;
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 640;
+}
+
+@keyframes local-agent-work-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+    transform: scale(0.88);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes local-agent-work-dot {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  45% {
+    opacity: 0.82;
+    transform: translateY(-1px);
+  }
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .room-local-agent-work-pulse, .room-local-agent-work-dots i { animation: none; }
+}
