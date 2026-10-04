@@ -1,5 +1,5 @@
-import { inject, nextTick, onBeforeUnmount, onDeactivated, onMounted, provide, ref, watch, type InjectionKey, type Ref } from 'vue';
-import { appendedMotionMessages, captureWork, createRoomMessageAnimator, sameMotionAgent, type MotionMessage, type WorkGeometry } from './room-message-motion';
+import { inject, nextTick, onBeforeUnmount, onDeactivated, onMounted, onScopeDispose, provide, ref, shallowRef, watch, type InjectionKey, type Ref } from 'vue';
+import { appendedMotionMessages, captureWork, createRoomMessageAnimator, sameMotionAgent, type MotionMessage, type MessageMotionIdentity, type WorkGeometry } from './room-message-motion';
 
 interface SendOrigin {
   text: string; bounds: DOMRect; keyboard: boolean; messageId?: string;
@@ -40,6 +40,57 @@ export function provideRoomMessageMotion(scope: () => string | null | undefined)
 }
 export function injectRoomMessageMotion() { return inject(sendKey, null); }
 
+/** Keep the visible origin across independently delivered work/message updates.
+ * One second covers a brief stream handoff, without leaving no-reply turns working.
+ * This is presentation only: it never changes agent state or room messages.
+ */
+export function useRoomWorkHandoff<T>(options: {
+  work: () => readonly T[];
+  identity: (work: T) => MessageMotionIdentity;
+  after: (work: T) => string | null | undefined;
+  messages: () => readonly MotionMessage[];
+  scope: () => string | null | undefined;
+  enabled: () => boolean;
+}) {
+  const work = shallowRef<readonly T[]>([]);
+  let pending: { value: T; expires: number }[] = [];
+  let previous: readonly T[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const clear = () => {
+    clearTimeout(timer); timer = undefined; pending = [];
+    work.value = previous = options.work();
+  };
+  const sameTurn = (a: T, b: T) => sameMotionAgent(options.identity(a), options.identity(b)) && options.after(a) === options.after(b);
+  function update() {
+    clearTimeout(timer); timer = undefined;
+    const current = options.work(), messages = options.messages(), now = Date.now();
+    if (!options.enabled() || (typeof document !== 'undefined' && document.visibilityState === 'hidden')
+      || (typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches)) { clear(); return; }
+    const eligible = (value: T) => {
+      const after = options.after(value), start = messages.findIndex(message => message.id === after);
+      if (!after || start < 0) return false;
+      // A matching reply consumes this turn. A new source from the same
+      // agent must not inherit a previous turn's presentation.
+      return !messages.slice(start + 1).some(message => sameMotionAgent(options.identity(value), message))
+        && !current.some(item => sameMotionAgent(options.identity(item), options.identity(value)) && !sameTurn(item, value));
+    };
+    pending = pending.filter(item => item.expires > now && eligible(item.value) && !current.some(value => sameTurn(value, item.value)));
+    for (const value of previous) {
+      if (!current.some(item => sameTurn(item, value)) && !pending.some(item => sameTurn(item.value, value)) && eligible(value)) {
+        pending.push({ value, expires: now + 1000 });
+      }
+    }
+    previous = current;
+    work.value = [...current, ...pending.map(item => item.value)];
+    if (pending.length) timer = setTimeout(update, Math.max(0, Math.min(...pending.map(item => item.expires)) - now));
+  }
+  watch([options.work, options.messages], update, { immediate: true, deep: true });
+  watch(options.scope, () => { clear(); work.value = previous = []; }, { flush: 'sync' });
+  watch(options.enabled, enabled => { if (!enabled) clear(); }, { flush: 'sync' });
+  onScopeDispose(() => { clearTimeout(timer); });
+  return { work, clear };
+}
+
 /** Lists own scrolling/history; an own send requests latest before measuring its landing. */
 export function useRoomMessageMotion(options: {
   element: Ref<HTMLElement | null>;
@@ -48,6 +99,7 @@ export function useRoomMessageMotion(options: {
   ready: () => boolean;
   following: () => boolean;
   scrollToLatest: () => void;
+  onInterrupt?: () => void;
 }) {
   const send = injectRoomMessageMotion();
   const animator = createRoomMessageAnimator(() => options.element.value);
@@ -55,8 +107,9 @@ export function useRoomMessageMotion(options: {
   let revision = 0;
   let media: MediaQueryList | null = null;
   const cancel = () => { revision++; animator.cancel(); };
-  watch(options.scope, () => { cancel(); previous = options.messages().map(message => message.stableId); }, { flush: 'sync' });
-  watch(options.ready, ready => { if (!ready) cancel(); });
+  const interrupt = () => { cancel(); options.onInterrupt?.(); };
+  watch(options.scope, () => { interrupt(); previous = options.messages().map(message => message.stableId); }, { flush: 'sync' });
+  watch(options.ready, ready => { if (!ready) interrupt(); });
   watch([options.messages, () => send?.revision.value], async ([messages]) => {
     const seen = new Set(previous);
     const appended = appendedMotionMessages(previous, messages);
@@ -118,23 +171,23 @@ export function useRoomMessageMotion(options: {
       else if (appended.includes(message)) animator.reveal(row);
     }
   });
-  const onKey = (event: KeyboardEvent) => { if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown'].includes(event.key)) cancel(); };
+  const onKey = (event: KeyboardEvent) => { if (['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown'].includes(event.key)) interrupt(); };
   onMounted(() => {
     media = typeof window.matchMedia === 'function' ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
-    media?.addEventListener('change', cancel);
-    window.addEventListener('resize', cancel);
-    options.element.value?.addEventListener('wheel', cancel, { passive: true });
-    options.element.value?.addEventListener('touchstart', cancel, { passive: true });
-    options.element.value?.addEventListener('pointerdown', cancel, { passive: true });
+    media?.addEventListener('change', interrupt);
+    window.addEventListener('resize', interrupt);
+    options.element.value?.addEventListener('wheel', interrupt, { passive: true });
+    options.element.value?.addEventListener('touchstart', interrupt, { passive: true });
+    options.element.value?.addEventListener('pointerdown', interrupt, { passive: true });
     options.element.value?.addEventListener('keydown', onKey);
   });
-  onDeactivated(cancel);
+  onDeactivated(interrupt);
   onBeforeUnmount(() => {
-    cancel(); media?.removeEventListener('change', cancel); window.removeEventListener('resize', cancel);
-    options.element.value?.removeEventListener('wheel', cancel);
-    options.element.value?.removeEventListener('touchstart', cancel);
-    options.element.value?.removeEventListener('pointerdown', cancel);
+    interrupt(); media?.removeEventListener('change', interrupt); window.removeEventListener('resize', interrupt);
+    options.element.value?.removeEventListener('wheel', interrupt);
+    options.element.value?.removeEventListener('touchstart', interrupt);
+    options.element.value?.removeEventListener('pointerdown', interrupt);
     options.element.value?.removeEventListener('keydown', onKey);
   });
-  return { cancel };
+  return { cancel: interrupt };
 }
