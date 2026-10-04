@@ -391,8 +391,9 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
 const messageMotion = useRoomMessageMotion({
   element: messagesEl,
   scope: () => props.roomIdentifier,
-  ready: () => Boolean(props.messagesLoaded) && !props.isLoadingOlderMessages,
+  ready: () => Boolean(props.messagesLoaded),
   following: () => isScrolledToBottom,
+  scrollToLatest: () => scrollToBottom('instant'),
   messages: () => props.messages.map(message => ({
     id: message.id, stableId: message.id, text: message.text,
     session: message.agent_identity?.agent_session_id, key: message.agent_identity?.agent_key,
