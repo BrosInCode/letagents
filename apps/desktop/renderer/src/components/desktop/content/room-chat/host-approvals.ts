@@ -20,6 +20,7 @@ export interface HostApprovalRoomState {
  */
 const rooms = reactive(new Map<string, HostApprovalRoomState>());
 const mutations = new Map<string, number>();
+const pendingReads = new Map<string, Promise<void>>();
 const EMPTY_ROOM: Readonly<HostApprovalRoomState> = Object.freeze({
   approvals: [], error: null, loading: false, busy: null, firstSeenAt: {}, stale: false,
 });
@@ -49,6 +50,7 @@ export function resetHostApprovals(): void {
   generation += 1;
   rooms.clear();
   mutations.clear();
+  pendingReads.clear();
 }
 
 function roomState(roomIdentifier: string): HostApprovalRoomState {
@@ -58,7 +60,16 @@ function roomState(roomIdentifier: string): HostApprovalRoomState {
   return rooms.get(roomIdentifier)!;
 }
 
-export async function refreshHostApprovals(roomIdentifier: string): Promise<void> {
+export function refreshHostApprovals(roomIdentifier: string): Promise<void> {
+  const pending = pendingReads.get(roomIdentifier);
+  if (pending) return pending;
+  const read = readHostApprovals(roomIdentifier);
+  pendingReads.set(roomIdentifier, read);
+  void read.then(() => { if (pendingReads.get(roomIdentifier) === read) pendingReads.delete(roomIdentifier); });
+  return read;
+}
+
+async function readHostApprovals(roomIdentifier: string): Promise<void> {
   const read = desktopIpc.supervisor?.listHostApprovals;
   if (!roomIdentifier || !read) return;
   const state = roomState(roomIdentifier);

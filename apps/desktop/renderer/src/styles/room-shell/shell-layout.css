@@ -71,6 +71,45 @@
 .desktop-room-badge { padding: 2px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-secondary); font-size: 0.68rem; }
 .desktop-room-project-connect { min-height: 32px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--text-secondary); font: inherit; font-size: 0.78rem; cursor: pointer; }
 
+.desktop-room-needs-you {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 13px;
+  border: 1px solid #ffce8b;
+  border-radius: 10px;
+  background: #f3bd73;
+  color: #281907;
+  box-shadow: inset 0 1px 0 #ffffff30, 0 2px 5px #0000001a;
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 140ms ease, transform 100ms ease-out;
+}
+.desktop-room-needs-you:active { transform: scale(0.98); }
+.desktop-room-needs-you-count { min-width: 21px; padding: 1px 5px; border-radius: 5px; background: #2819071a; font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.desktop-room-needs-you-wave { position: absolute; inset: -1px; border: 1.5px solid #f3bd73; border-radius: inherit; pointer-events: none; opacity: 0; }
+.desktop-room-needs-you[data-pulse="true"] .desktop-room-needs-you-wave { animation: desktop-needs-you-wave 3s cubic-bezier(.16,1,.3,1) infinite; }
+.desktop-room-needs-you[data-pulse="true"] .desktop-room-needs-you-wave:nth-child(2) { animation-delay: 190ms; }
+.desktop-room-header .desktop-room-needs-you:focus-visible { outline: 2px solid #281907; outline-offset: -4px; border-radius: 10px; }
+@keyframes desktop-needs-you-wave {
+  0% { opacity: .85; transform: scale(1); }
+  37%, 100% { opacity: 0; transform: scale(1.22, 1.9); }
+}
+@media (hover: hover) and (pointer: fine) {
+  .desktop-room-needs-you:hover { background: #ffca85; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .desktop-room-needs-you[data-pulse="true"] .desktop-room-needs-you-wave { animation: none; }
+  .desktop-room-needs-you:active { transform: none; }
+}
+
 .desktop-room-tabs { position: relative; display: flex; align-items: center; gap: 24px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .desktop-room-tabs::-webkit-scrollbar { display: none; }
 .desktop-room-tab { display: inline-flex; align-items: center; gap: 7px; flex: 0 0 auto; min-height: 44px; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: 0.82rem; font-weight: 500; white-space: nowrap; cursor: pointer; transition: color 140ms ease; }

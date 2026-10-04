@@ -234,7 +234,7 @@
               <p id="room-settings-sound-title" class="room-settings-row-title">Sound effects</p>
               <Transition name="room-settings-text" mode="out-in">
                 <p id="room-settings-sound-description" :key="String(soundEnabled)" class="room-settings-row-description">
-                  {{ soundEnabled ? "Message and send sounds are on." : "Room sounds are muted." }}
+                  {{ soundEnabled ? "Message, send, and Needs you sounds are on." : "Room sounds are muted." }}
                 </p>
               </Transition>
             </div>
