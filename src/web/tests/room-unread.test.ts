@@ -70,6 +70,7 @@ test("the actual web list reuses bounded reveal for an older bookmark and retain
   let vm: any, olderReads = 0;
   const el = Object.assign(new EventTarget(), {
     scrollHeight: 1500, clientHeight: 400, scrollTop: 1100,
+    getBoundingClientRect: () => ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }),
     scrollTo: () => { el.scrollTop = 1100; },
     querySelectorAll: () => [],
     querySelector: (selector: string) => {
@@ -244,6 +245,7 @@ async function webScrollSurface() {
   const calls: string[] = [];
   let revealTop: number | null = 100;
   const el = Object.assign(new EventTarget(), { scrollHeight: 2000, clientHeight: 400, scrollTop: 1600,
+    getBoundingClientRect: () => ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }),
     scrollTo: () => { el.scrollTop = el.scrollHeight - el.clientHeight; calls.push("bottom"); },
     querySelectorAll: () => [], querySelector: () => ({ scrollIntoView: () => { if (revealTop !== null) el.scrollTop = revealTop; calls.push("reveal"); }, classList: { add() {}, remove() {} } }),
   });

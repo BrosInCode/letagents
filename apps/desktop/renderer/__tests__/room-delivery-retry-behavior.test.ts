@@ -22,6 +22,7 @@ interface HostNode {
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
+  getBoundingClientRect: () => Pick<DOMRect, "top" | "bottom" | "left" | "right" | "width" | "height">;
   style: Record<string, string>;
   classList: { add: (...names: string[]) => void; remove: (...names: string[]) => void };
   focus: (_options?: FocusOptions) => void;
@@ -36,6 +37,7 @@ function hostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
   return {
     getRootNode: () => ({ activeElement: null }),
     kind, type, text, children: [], parent: null, props: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0, style: {},
+    getBoundingClientRect() { return { top: 0, bottom: this.clientHeight, left: 0, right: 800, width: 800, height: this.clientHeight }; },
     classList: { add: () => undefined, remove: () => undefined }, focus: () => undefined, scrollTo: () => undefined,
     querySelector: () => null,
     querySelectorAll: () => [],
