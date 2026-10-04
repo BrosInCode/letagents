@@ -69,7 +69,7 @@
 <script setup lang="ts">
 import "../../../../../shared/ui/room-agent-work.css";
 import { useRoomWorkIndicators } from "./roomWorkIndicators";
-import { useRoomMessageMotion } from "../../../../../shared/ui/useRoomMessageMotion";
+import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../shared/ui/useRoomMessageMotion";
 import { provide, ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomAgentPresence, type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
@@ -119,7 +119,7 @@ const emit = defineEmits<{
   revealUnavailable: [messageId: string, reason?: 'too_far_back' | 'unavailable']
 }>()
 
-const agentWork = useRoomWorkIndicators(() => props.presence || [], () => props.messages, () => props.roomIdentifier)
+const currentAgentWork = useRoomWorkIndicators(() => props.presence || [], () => props.messages, () => props.roomIdentifier)
 
 const messagesEl = ref<HTMLElement | null>(null)
 const unreadRoom = computed(() => props.unreadRoomId)
@@ -343,7 +343,6 @@ watch([
   () => messageLinkPreviews?.revision.value,
 ], followLatestAfterLayout)
 
-watch(() => agentWork.value.map(work => work.id).join('|'), followLatestAfterLayout)
 
 // Typing and composer growth resize the list without changing its messages.
 let viewportResizeObserver: ResizeObserver | null = null
@@ -388,16 +387,30 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
   })
 })
 
+const motionMessages = () => props.messages.map(message => ({
+  id: message.id, stableId: message.id, text: message.text,
+  session: message.agent_identity?.agent_session_id, key: message.agent_identity?.agent_key,
+}))
+
+const workHandoff = useRoomWorkHandoff({
+  work: () => currentAgentWork.value,
+  identity: work => work,
+  after: work => work.after,
+  messages: motionMessages,
+  scope: () => props.roomIdentifier,
+  enabled: () => Boolean(props.messagesLoaded) && isScrolledToBottom,
+})
+const agentWork = workHandoff.work
+watch(() => agentWork.value.map(work => work.id).join('|'), followLatestAfterLayout)
+
 const messageMotion = useRoomMessageMotion({
   element: messagesEl,
   scope: () => props.roomIdentifier,
   ready: () => Boolean(props.messagesLoaded),
   following: () => isScrolledToBottom,
   scrollToLatest: () => scrollToBottom('instant'),
-  messages: () => props.messages.map(message => ({
-    id: message.id, stableId: message.id, text: message.text,
-    session: message.agent_identity?.agent_session_id, key: message.agent_identity?.agent_key,
-  })),
+  messages: motionMessages,
+  onInterrupt: () => workHandoff.clear(),
 })
 
 // A requested message may be older than the loaded page: load a few older
