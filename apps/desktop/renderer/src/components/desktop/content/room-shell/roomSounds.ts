@@ -42,6 +42,7 @@ export function createNeedsYouChime() {
         for (const [frequency, delay, duration] of [[659.25, 0, 0.38], [987.77, 0.115, 0.5]]) {
           const oscillator = context.createOscillator();
           const gain = context.createGain();
+          gain.gain.value = 0.0001;
           oscillator.type = 'sine';
           oscillator.frequency.value = frequency;
           gain.gain.setValueAtTime(0.0001, start + delay);
