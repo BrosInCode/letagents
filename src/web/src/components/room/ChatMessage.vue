@@ -40,6 +40,10 @@
         :inline-prompt-injection="inlinePromptInjection"
         :formatted-time="formattedTime"
         :pinned="pinned"
+        :can-pin="pinnable"
+        :pin-pending="Boolean(pinContext?.state.value.pending)"
+        @pin="pinContext?.toggle(message.id)"
+        @copy="copyMessageFromMenu"
         :can-react="reactable"
         :picker-open="reactionPickerAnchor !== null"
         @reply="emit('reply', message)"
@@ -69,6 +73,7 @@
         />
         <GitHubEventCard
           v-if="githubEvent"
+          room
           :event="githubEvent"
           :taskLinkEnabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
           @openTask="emit('openTask', $event)"
@@ -561,7 +566,9 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 13px 0;
+  width: min(100%, 720px);
+  margin: 0 auto;
+  padding: 12px 0;
 }
 
 .message-avatar {
@@ -580,24 +587,25 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 }
 
 .message-body {
-  flex: 0 1 72ch;
-  width: min(100%, 72ch);
+  flex: 1;
   min-width: 0;
 }
 
 .message-bubble {
-  --message-surface: color-mix(in srgb, var(--surface, #18181b) 96%, var(--sender-color, #71717a) 4%);
   width: fit-content;
-  max-width: 100%;
+  max-width: min(64ch, 100%);
   min-width: 0;
-  padding: 11px 15px 12px;
-  border: none;
-  border-radius: 16px 16px 16px 6px;
-  background: var(--message-surface);
-  color: color-mix(in srgb, var(--text, #fafafa) 94%, transparent);
+  box-sizing: border-box;
+  padding: 9px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--bg-subtle);
+  color: var(--text);
   box-shadow:
-    inset 0 1px color-mix(in srgb, white 5%, transparent),
-    0 1px 2px color-mix(in srgb, black 22%, transparent);
+    inset 0 1px 0 light-dark(rgba(255,255,255,.8),rgba(255,255,255,.045)),
+    0 2px 3px light-dark(rgba(9,9,11,.08),rgba(0,0,0,.6)),
+    0 8px 18px -4px light-dark(rgba(9,9,11,.15),rgba(0,0,0,.55)),
+    0 20px 34px -12px light-dark(rgba(9,9,11,.2),rgba(0,0,0,.7));
 }
 
 .message-bubble.github-message-bubble {
@@ -628,8 +636,8 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 }
 
 .message-bubble :deep(.md-content) {
-  font-size: 0.96rem;
-  line-height: 1.62;
+  font-size: 14px;
+  line-height: 1.65;
   overflow-wrap: anywhere;
   word-break: normal;
 }

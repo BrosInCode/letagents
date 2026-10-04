@@ -39,9 +39,12 @@ test("an agent's visible reply cancels its older coalesced progress echo", () =>
   assert.match(viewportSource, /v-if="displayedAgentWork\.length && !roomLoading"/);
 });
 
-const cssSource = readFileSync(fileURLToPath(new URL(
+const streamCssSource = readFileSync(fileURLToPath(new URL(
   "../src/styles/04-room-chat-stream.css",
   import.meta.url,
+)), "utf8");
+const cssSource = readFileSync(fileURLToPath(new URL(
+  "../../../../shared/ui/room-agent-work.css", import.meta.url,
 )), "utf8");
 
 const hostSource = readFileSync(fileURLToPath(new URL(
@@ -67,6 +70,7 @@ test("the work indicator renders as a clickable button with accessible name and 
 });
 
 test("work indicator button has interactive styling, accessible focus, and theme tokens with no dead selectors", () => {
+  assert.match(streamCssSource, /@import "\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/shared\/ui\/room-agent-work\.css"/);
   assert.match(cssSource, /\.room-local-agent-work\s*\{[\s\S]*?cursor:\s*pointer;/);
   assert.doesNotMatch(cssSource, /button\.room-local-agent-work/);
   assert.doesNotMatch(cssSource, /\.room-local-agent-work div/);

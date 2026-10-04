@@ -98,6 +98,16 @@
             <LocateFixed v-if="context !== 'timeline'" :size="14" aria-hidden="true" />
             <MessageSquare v-else :size="14" aria-hidden="true" />
           </button>
+          <button
+            v-if="pinnable"
+            class="room-message-reply-action room-message-pin-action"
+            type="button"
+            :title="pinned ? 'Unpin message' : 'Pin message'"
+            :aria-label="pinned ? 'Unpin message' : 'Pin message'"
+            :aria-pressed="pinned"
+            :disabled="Boolean(pinContext?.state.value.pending)"
+            @click="pinContext?.toggle(message.id)"
+          ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></button>
           <span v-if="provenanceLabel" class="room-message-provenance" :data-kind="ownerKind">
             {{ provenanceLabel }}
           </span>
@@ -125,6 +135,7 @@
 
         <DesktopGitHubEventCard
           v-if="githubEvent"
+          room
           :event="githubEvent"
           :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
           @open-event="$emit('open-github-event', $event)"
