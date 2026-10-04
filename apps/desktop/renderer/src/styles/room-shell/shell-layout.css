@@ -46,7 +46,7 @@
   min-width: 0;
   padding: 20px 24px 0;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-elevated);
+  background: var(--bg);
 }
 
 .desktop-room-header-main,
@@ -131,7 +131,7 @@
   display: grid;
   min-height: 0;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-elevated);
+  background: var(--bg);
 }
 
 .desktop-room-environment-popover {

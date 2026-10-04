@@ -30,7 +30,7 @@
   overscroll-behavior: contain;
   padding: 12px 8px 10px;
   border-right: 1px solid var(--border);
-  background: var(--bg-subtle);
+  background: var(--bg);
 }
 
 .desktop-shell[data-sidebar-mode="expanded"] .app-sidebar {
@@ -865,7 +865,7 @@
 
 @media (prefers-reduced-transparency: reduce) {
   .app-sidebar {
-    background: var(--bg-subtle);
+    background: var(--bg);
   }
 }
 
