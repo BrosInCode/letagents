@@ -1,90 +1,72 @@
 <template>
   <header class="chat-header">
-    <button class="menu-btn" @click="$emit('toggleDrawer')" type="button" aria-label="Open menu">
-      <svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-    </button>
-
-    <div v-show="!searchActive || !canSearch" class="chat-title">
-      <div class="chat-title-heading">
-        <h2>{{ title }}</h2>
-        <button
-          v-if="canRename"
-          class="title-rename-btn"
-          @click="$emit('rename')"
-          type="button"
-          aria-label="Rename room"
-          title="Rename room"
-        >
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
-        </button>
+    <div class="header-main">
+      <div class="chat-title">
+        <div class="chat-title-heading">
+          <span class="room-mark" aria-hidden="true">#</span>
+          <h2 :title="title">{{ title }}</h2>
+          <button v-if="canRename" class="title-rename-btn" @click="$emit('rename')" type="button" aria-label="Rename room" title="Rename room">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+          </button>
+        </div>
+        <p v-if="gitRoom" class="header-repository" :title="repositoryTitle">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 13H3V3h5l2 2h3v3M9 9v4m0-2h3m0 0V9m0 2v2" /></svg>
+          <span>{{ gitRoom.repository.full_name }}</span>
+          <span v-if="!gitRoom.ref.is_default" class="repository-ref">· {{ gitRoomRefLabel(gitRoom) }}</span>
+        </p>
+        <p v-else :title="subtitle">{{ subtitle }}</p>
       </div>
-      <p>{{ subtitle }}</p>
+      <span v-if="connectionState !== 'live'" class="presence" :data-state="connectionState" role="status">{{ presenceLabel }}</span>
     </div>
 
-    <GitRoomHeaderMeta
-      v-if="gitRoom && (!searchActive || !canSearch)"
-      :gitRoom="gitRoom"
-      class="header-git-room"
-    />
-
-    <!-- Inline search bar -->
-    <div v-show="searchActive && canSearch" class="header-search">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      <input
-        ref="searchInputEl"
-        type="text"
-        class="input"
-        placeholder="Search messages..."
-        aria-label="Search messages"
-        autocomplete="off"
-        :value="searchQuery"
-        @input="$emit('update:searchQuery', ($event.target as HTMLInputElement).value)"
-      />
-      <span v-if="searchQuery" class="search-count">{{ matchCount }} match{{ matchCount !== 1 ? 'es' : '' }}</span>
-      <button class="search-close" @click="closeSearch" type="button" aria-label="Close search">&times;</button>
-    </div>
-
-    <div class="header-actions">
-      <!-- Search toggle -->
-      <button v-if="canSearch && !searchActive" class="action-btn" @click="toggleSearch" type="button" aria-label="Search messages" title="Search messages">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-      </button>
-
-      <div
-        class="tab-bar"
-        role="tablist"
-        :style="tabBarStyle"
-      >
+    <div class="header-navigation">
+      <nav ref="tabsElement" class="tab-bar" aria-label="Room navigation">
         <button
           v-for="tab in visibleTabs"
           :key="tab.id"
-          role="tab"
-          :aria-selected="activeTab === tab.id"
-          @click="$emit('update:activeTab', tab.id)"
+          :aria-current="activeTab === tab.id ? 'page' : undefined"
+          @click="prepareTabChange($event, tab.id); $emit('update:activeTab', tab.id)"
           type="button"
-        >{{ tab.label }}</button>
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path :d="tab.icon" /></svg>
+          <span>{{ tab.label }}</span>
+        </button>
+        <span ref="indicatorElement" class="tab-underline" style="visibility: hidden" aria-hidden="true" />
+      </nav>
+      <div class="header-actions">
+        <button ref="searchToggleEl" class="action-btn find-button" @click="toggleSearch" type="button" aria-label="Find in room" aria-keyshortcuts="Meta+f Control+f" :aria-expanded="searchActive && canSearch" :disabled="!canSearch" :title="canSearch ? 'Find in room' : 'Open Chat to find messages'">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" /></svg>
+          <span>Find</span><kbd aria-hidden="true">{{ findShortcut }}</kbd>
+        </button>
+        <span class="tool-divider" aria-hidden="true" />
+        <button class="action-btn" @click="$emit('toggleDrawer')" type="button" aria-label="Room settings" title="Room settings">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12M5 2.5v3M11 6.5v3M6 10.5v3" /></svg>
+        </button>
       </div>
+    </div>
 
-      <div class="presence" :data-state="connectionState">
-        {{ presenceLabel }}
-      </div>
+    <div v-show="searchActive && canSearch" class="header-search" @keydown.escape.stop.prevent="closeSearch">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" /></svg>
+      <input ref="searchInputEl" type="text" class="input" placeholder="Search messages…" aria-label="Search messages" autocomplete="off" :value="searchQuery" @input="$emit('update:searchQuery', ($event.target as HTMLInputElement).value)" />
+      <span v-if="searchQuery" class="search-count">{{ matchCount }} match{{ matchCount !== 1 ? 'es' : '' }}</span>
+      <button class="search-close" @click="closeSearch" type="button" aria-label="Close search">&times;</button>
     </div>
   </header>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, nextTick } from 'vue'
-import GitRoomHeaderMeta from './GitRoomHeaderMeta.vue'
+import { computed, ref, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import type { GitRoomInfo } from '@/composables/useRoom'
+import { gitRoomRefLabel, gitRoomAccessLabel } from './gitRoomLabels'
+import { useSlidingTabIndicator } from '../../../../../shared/ui/useSlidingTabIndicator'
 
 type RoomTab = 'chat' | 'events' | 'board' | 'activity' | 'rooms'
-
-const BASE_TABS: ReadonlyArray<{ id: RoomTab; label: string; requiresEvents?: boolean }> = [
-  { id: 'chat', label: 'Chat' },
-  { id: 'events', label: 'Events', requiresEvents: true },
-  { id: 'board', label: 'Board' },
-  { id: 'activity', label: 'Activity' },
-  { id: 'rooms', label: 'Rooms' },
+const BASE_TABS: ReadonlyArray<{ id: RoomTab; label: string; icon: string; requiresEvents?: boolean }> = [
+  { id: 'chat', label: 'Chat', icon: 'M3 3h10v7H7l-4 3V3Z' },
+  { id: 'events', label: 'Events', icon: 'M5 5v8m6-2V7a3 3 0 0 0-3-3M3 3a2 2 0 1 0 4 0 2 2 0 0 0-4 0Zm6 10a2 2 0 1 0 4 0 2 2 0 0 0-4 0Z', requiresEvents: true },
+  { id: 'board', label: 'Board', icon: 'M3 2.5h10v11H3zM6.5 2.5v11M10 2.5v11' },
+  { id: 'activity', label: 'Activity', icon: 'M2 8h3l1.5-5 3 10L11 8h3' },
+  { id: 'rooms', label: 'Rooms', icon: 'M2.5 2.5h11v11h-11zM2.5 6h11M7 6v7.5' },
 ]
 
 const props = defineProps<{
@@ -108,16 +90,12 @@ defineEmits<{
 
 const searchActive = ref(false)
 const searchInputEl = ref<HTMLInputElement | null>(null)
+const searchToggleEl = ref<HTMLButtonElement | null>(null)
+const findShortcut = ref('Ctrl F')
 const canSearch = computed(() => props.activeTab === 'chat')
-const visibleTabs = computed(() =>
-  BASE_TABS.filter(tab => !tab.requiresEvents || props.showEventsTab)
-)
-const activeTabIndex = computed(() => Math.max(0, visibleTabs.value.findIndex(tab => tab.id === props.activeTab)))
-const tabBarStyle = computed(() => ({
-  '--tab-count': String(visibleTabs.value.length),
-  '--tab-index': String(activeTabIndex.value),
-}))
-
+const visibleTabs = computed(() => BASE_TABS.filter(tab => !tab.requiresEvents || props.showEventsTab))
+const { tabsElement, indicatorElement, prepareTabChange } = useSlidingTabIndicator(() => props.activeTab)
+const repositoryTitle = computed(() => props.gitRoom ? `${props.gitRoom.repository.full_name} · ${gitRoomRefLabel(props.gitRoom)} · ${gitRoomAccessLabel(props.gitRoom)}` : '')
 const presenceLabel = computed(() => {
   switch (props.connectionState) {
     case 'live': return 'Connected'
@@ -129,253 +107,84 @@ const presenceLabel = computed(() => {
 
 function toggleSearch() {
   if (!canSearch.value) return
-  searchActive.value = !searchActive.value
-  if (searchActive.value) {
-    nextTick(() => searchInputEl.value?.focus())
-  }
+  if (searchActive.value) closeSearch()
+  else openSearch()
 }
-
 function openSearch(): boolean {
   if (!canSearch.value) return false
   searchActive.value = true
   void nextTick(() => searchInputEl.value?.focus())
   return true
 }
-
 defineExpose({ openSearch })
-
 function closeSearch() {
   searchActive.value = false
+  searchToggleEl.value?.focus()
 }
+function handleFindShortcut(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.altKey || event.shiftKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'f') return
+  if (openSearch()) event.preventDefault()
+}
+onMounted(() => {
+  findShortcut.value = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ F' : 'Ctrl F'
+  window.addEventListener('keydown', handleFindShortcut)
+})
+onBeforeUnmount(() => window.removeEventListener('keydown', handleFindShortcut))
 </script>
 
 <style scoped>
-.chat-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 0 20px;
-  height: 56px;
-  border-bottom: 1px solid var(--line, #27272a);
-  background: var(--bg-0, #09090b);
-}
-
-.menu-btn {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
-  background: none;
-  border: none;
-  cursor: pointer;
-  transition: background 150ms;
-}
-.menu-btn:hover { background: var(--surface, #18181b); }
-.menu-btn svg {
-  width: 18px;
-  height: 18px;
-  stroke: var(--text, #fafafa);
-  fill: none;
-  stroke-width: 2;
-  stroke-linecap: round;
-}
-
+.chat-header { position: relative; z-index: 20; display: flex; flex-direction: column; gap: 14px; min-width: 0; padding: 20px 24px 0; border-bottom: 1px solid var(--line, #27272a); background: var(--surface, #18181b); }
+.chat-header svg { width: 17px; height: 17px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.header-main, .header-navigation { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-width: 0; }
 .chat-title { flex: 1; min-width: 0; }
-.chat-title-heading {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-.chat-title h2 {
-  min-width: 0;
-  font-size: 0.92rem;
-  font-weight: 700;
-  letter-spacing: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.title-rename-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  flex: 0 0 auto;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted, #71717a);
-  cursor: pointer;
-  opacity: 0.72;
-  transition: background 150ms, color 150ms, opacity 150ms;
-}
-.title-rename-btn:hover,
-.title-rename-btn:focus-visible {
-  background: var(--surface, #18181b);
-  color: var(--text, #fafafa);
-  opacity: 1;
-  outline: none;
-}
-.chat-title p {
-  font-size: 0.72rem;
-  color: var(--muted, #71717a);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* ── Inline search ── */
-.header-search {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 8px;
-  background: var(--surface, #18181b);
-  border: 1px solid var(--line, #27272a);
-  transition: border-color 200ms;
-}
-.header-search:focus-within { border-color: var(--text, #fafafa); }
-.header-search svg { flex-shrink: 0; opacity: 0.5; width: 14px; height: 14px; }
-.header-search .input {
-  flex: 1;
-  min-width: 0;
-  width: 100%;
-  border: none;
-  background: none;
-  color: var(--text, #fafafa);
-  font-size: 0.82rem;
-  outline: none;
-  font-family: inherit;
-}
-.header-search .input::placeholder { color: var(--muted, #71717a); }
-.search-count { font-size: 0.72rem; color: var(--muted, #71717a); white-space: nowrap; }
-.search-close {
-  background: none;
-  border: none;
-  color: var(--muted, #71717a);
-  cursor: pointer;
-  font-size: 1.1rem;
-  line-height: 1;
-  padding: 0 2px;
-  transition: color 150ms;
-}
-.search-close:hover { color: var(--text, #fafafa); }
-
-.chat-header .header-git-room {
-  flex: 0 1 auto;
-  max-width: min(320px, 24vw);
-}
-
+.chat-title-heading { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.room-mark { font-size: 1.3rem; font-weight: 450; color: var(--muted, #a1a1aa); }
+.chat-title h2 { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1.4rem; line-height: 1.2; font-weight: 700; letter-spacing: -0.035em; }
+.chat-title p { margin: 6px 0 0; font-size: 0.78rem; line-height: 1.4; color: var(--muted, #a1a1aa); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.header-repository { display: flex; align-items: center; gap: 8px; }
+.header-repository span { overflow: hidden; text-overflow: ellipsis; }
+.header-repository .repository-ref { flex-shrink: 1; }
 .header-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-
-.action-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 6px;
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: var(--muted, #71717a);
-  transition: background 150ms, color 150ms;
+.action-btn, .title-rename-btn, .search-close { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 36px; min-width: 36px; padding: 0 7px; background: transparent; border: 0; border-radius: 6px; color: var(--muted, #a1a1aa); font: inherit; font-size: 0.8rem; cursor: pointer; transition: color 140ms ease, background 140ms ease; }
+.title-rename-btn { min-width: 28px; min-height: 28px; }
+.title-rename-btn svg { width: 13px; height: 13px; }
+.action-btn[aria-expanded="true"] { background: var(--bg-0, #09090b); color: var(--text, #fafafa); }
+.action-btn:disabled { opacity: .45; cursor: default; }
+.find-button kbd { padding: 1px 5px; margin-left: 6px; border: 1px solid var(--line, #27272a); border-radius: 4px; font: inherit; font-size: 0.68rem; }
+.tool-divider { width: 1px; height: 16px; margin: 0 4px; background: var(--line, #27272a); }
+.tab-bar { position: relative; display: flex; align-items: center; gap: 24px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.tab-bar::-webkit-scrollbar { display: none; }
+.tab-bar button { display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; min-height: 44px; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--muted, #a1a1aa); font: inherit; font-size: 0.82rem; font-weight: 500; white-space: nowrap; cursor: pointer; transition: color 140ms ease; }
+.tab-bar button[aria-current="page"] { color: var(--text, #fafafa); }
+.tab-underline { position: absolute; top: 0; left: 0; height: 2px; border-radius: 2px; background: var(--text, #fafafa); transform-origin: left center; pointer-events: none; }
+.chat-header button:focus-visible { outline: 2px solid var(--text, #fafafa); outline-offset: -2px; border-radius: 4px; }
+.header-search { position: absolute; top: calc(100% + 8px); right: 24px; display: flex; align-items: center; gap: 8px; width: min(420px, calc(100% - 32px)); min-height: 44px; box-sizing: border-box; padding: 4px 6px 4px 12px; border: 1px solid var(--line, #27272a); border-radius: 10px; background: var(--surface, #18181b); box-shadow: 0 10px 30px #0003; }
+.header-search .input { flex: 1; min-width: 0; width: 100%; padding: 0; background: transparent; border: 0; outline: none; font: inherit; font-size: 0.82rem; color: var(--text, #fafafa); }
+.header-search:focus-within { border-color: var(--muted, #a1a1aa); }
+.header-search svg, .search-count { color: var(--muted, #a1a1aa); }
+.search-count { font-size: 0.72rem; white-space: nowrap; }
+.search-close { font-size: 1.25rem; }
+.presence { color: var(--muted, #a1a1aa); font-size: 0.72rem; white-space: nowrap; }
+.presence[data-state="error"] { color: var(--danger, #f87171); }
+@media (hover: hover) and (pointer: fine) {
+  .tab-bar button:hover { color: var(--text, #fafafa); }
+  .action-btn:hover:not(:disabled), .title-rename-btn:hover, .search-close:hover { background: var(--bg-0, #09090b); color: var(--text, #fafafa); }
 }
-.action-btn:hover { background: var(--surface, #18181b); color: var(--text, #fafafa); }
-
-.tab-bar {
-  display: grid;
-  grid-template-columns: repeat(var(--tab-count), minmax(0, 1fr));
-  padding: 3px;
-  border-radius: 8px;
-  background: var(--surface, #18181b);
-  position: relative;
-  isolation: isolate;
-  min-width: min(560px, 44vw);
-}
-.tab-bar::before {
-  content: '';
-  position: absolute;
-  top: 3px;
-  bottom: 3px;
-  left: 3px;
-  width: calc((100% - 6px) / var(--tab-count));
-  border-radius: 6px;
-  background: var(--bg-0, #09090b);
-  transform: translateX(calc(var(--tab-index) * 100%));
-  transition: transform 220ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
-  z-index: 0;
-}
-.tab-bar button {
-  padding: 5px 14px;
-  border-radius: 6px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--muted, #71717a);
-  background: none;
-  border: none;
-  cursor: pointer;
-  transition: color 150ms;
-  white-space: nowrap;
-  position: relative;
-  z-index: 1;
-}
-.tab-bar button[aria-selected="true"] {
-  color: var(--text, #fafafa);
-}
-.tab-bar button:hover:not([aria-selected="true"]) { color: var(--text, #fafafa); }
-
-.presence {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-size: 0.72rem;
-  color: var(--muted, #71717a);
-  white-space: nowrap;
-}
-.presence::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--warning, #fbbf24);
-  transition: background 150ms;
-}
-.presence[data-state="live"]::before { background: var(--success, #34d399); }
-.presence[data-state="error"]::before { background: var(--danger, #f87171); }
-
-@media (max-width: 1120px) {
-  .header-git-room { display: none; }
-}
-
 @media (max-width: 980px) {
-  .chat-header { padding: 0 8px; gap: 4px; height: 56px; }
-  .tab-bar { display: none; }
-  .chat-title h2 { font-size: 0.84rem; }
-  .chat-title p { font-size: 0.66rem; }
-  .menu-btn, .action-btn, .title-rename-btn, .search-close { width: 44px; height: 44px; flex-shrink: 0; }
-  .title-rename-btn { opacity: 1; }
-  .presence { width: 12px; padding: 0; font-size: 0; gap: 0; }
-  .header-search { height: 44px; padding: 0 0 0 10px; gap: 6px; }
+  .chat-header { flex-direction: row; align-items: center; gap: 8px; padding: 8px 12px; }
+  .header-main { flex: 1; min-width: 0; gap: 6px; }
+  .chat-title h2 { font-size: 1.05rem; }
+  .chat-title-heading { gap: 8px; }
+  .chat-title p { font-size: 0.7rem; }
+  .tab-bar, .find-button kbd, .presence { display: none; }
+  .action-btn, .title-rename-btn, .search-close { min-width: 44px; min-height: 44px; }
+  .title-rename-btn { min-width: 28px; padding: 0; }
+  .header-search { right: 12px; }
   .header-search .input { font-size: 16px; }
-  .search-count { font-size: 0.66rem; }
+  .header-repository .repository-ref { display: none; }
 }
-
-@media (pointer: coarse) and (min-width: 981px) {
-  .menu-btn, .action-btn, .title-rename-btn, .search-close { min-width: 44px; min-height: 44px; }
-  .tab-bar button { min-height: 44px; padding-inline: 10px; }
-  .header-search { height: 44px; }
+@media (pointer: coarse) {
+  .action-btn, .title-rename-btn, .search-close { min-width: 44px; min-height: 44px; }
   .header-search .input { font-size: 16px; }
 }
 </style>

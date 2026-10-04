@@ -273,3 +273,69 @@ test('P2 web late command success preserves a newer draft and its active mention
   assert.equal(vm.text.value, '@Bob ');
   assert.deepEqual(sent, []);
 });
+
+test('room header exposes Find and Settings while keeping room navigation and rename', async () => {
+  const html = await renderToString(createSSRApp({ render: () => h(Header, {
+    title: 'sky-lake', subtitle: 'Room: sky-lake', activeTab: 'chat', connectionState: 'live',
+    searchQuery: '', matchCount: 0, canRename: true, showEventsTab: true,
+  }) }));
+  assert.match(html, /aria-label="Find in room"/);
+  assert.match(html, /aria-label="Room settings"/);
+  assert.match(html, /aria-label="Rename room"/);
+  assert.match(html, /aria-label="Room navigation"/);
+  assert.match(html, /aria-current="page"/);
+  assert.doesNotMatch(html, /role="tab"|in this room|Open menu/);
+});
+
+test('room underline redirects from its visible position and skips keyboard and reduced motion', async t => {
+  const { header, headerProps } = mount(t);
+  const calls: Array<{ frames: any[]; cancelled: boolean }> = [];
+  const visible = { left: 180, top: 62, width: 80 };
+  const positions: Record<string, number> = { chat: 0, board: 160, rooms: 320 };
+  const indicator = {
+    style: {} as Record<string, string>,
+    getBoundingClientRect: () => visible,
+    animate(frames: any[]) {
+      const call = { frames, cancelled: false }; calls.push(call);
+      return { cancel() { call.cancelled = true; } };
+    },
+  };
+  header.indicatorElement.value = indicator;
+  header.tabsElement.value = {
+    scrollLeft: 0, scrollTop: 0,
+    getBoundingClientRect: () => ({ left: 20, top: 20 }),
+    querySelector: () => ({ offsetLeft: positions[headerProps.activeTab], offsetTop: 0, offsetWidth: 80, offsetHeight: 44 }),
+  };
+  headerProps.activeTab = 'board'; await nextTick();
+  assert.equal(indicator.style.transform, 'translate(160px, 42px)');
+  assert.equal(calls.length, 0, 'initial placement is immediate');
+  header.prepareTabChange({ detail: 1 }, 'rooms');
+  headerProps.activeTab = 'rooms'; await nextTick();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].frames[0].transform, 'translate(160px, 42px) scaleX(1)');
+  visible.left = 237; visible.width = 90;
+  header.prepareTabChange({ detail: 1 }, 'chat');
+  headerProps.activeTab = 'chat'; await nextTick();
+  assert.equal(calls[0].cancelled, true);
+  assert.equal(calls[1].frames[0].transform, 'translate(217px, 42px) scaleX(1.125)', 'redirect from the rendered underline, not the last tab target');
+  header.prepareTabChange({ detail: 0 }, 'board');
+  headerProps.activeTab = 'board'; await nextTick();
+  assert.equal(calls[1].cancelled, true);
+  assert.equal(calls.length, 2, 'keyboard changes snap');
+
+  const priorMatchMedia = window.matchMedia;
+  window.matchMedia = (() => ({ matches: true, addEventListener() {}, removeEventListener() {} })) as any;
+  t.after(() => { window.matchMedia = priorMatchMedia; });
+  const reduced = mount(t);
+  reduced.header.indicatorElement.value = indicator;
+  reduced.header.tabsElement.value = {
+    scrollLeft: 0, scrollTop: 0,
+    getBoundingClientRect: () => ({ left: 20, top: 20 }),
+    querySelector: () => ({ offsetLeft: positions[reduced.headerProps.activeTab], offsetTop: 0, offsetWidth: 80, offsetHeight: 44 }),
+  };
+  reduced.headerProps.activeTab = 'board'; await nextTick();
+  reduced.header.prepareTabChange({ detail: 1 }, 'rooms');
+  reduced.headerProps.activeTab = 'rooms'; await nextTick();
+  assert.equal(calls.length, 2, 'reduced motion does not animate');
+  assert.equal(indicator.style.transform, 'translate(320px, 42px)');
+});
