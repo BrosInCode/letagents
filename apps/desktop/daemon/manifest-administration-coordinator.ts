@@ -387,8 +387,16 @@ export class ManifestAdministrationCoordinator {
     });
   }
 
-  /** Preserve native event admission without hydrating an unused history result. */
-  async appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> {
+  /**
+   * Preserve native event admission without hydrating an unused history result.
+   * A provider stream's event takes its position from the agent's activity
+   * before its write is serialized, and a notice written meanwhile can take
+   * that position. With `after_latest` such an event is written after the
+   * newest instead of being refused and lost; any other position is admitted
+   * exactly as given.
+   */
+  async appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean,
+    position: "exact" | "after_latest" = "exact"): Promise<void> {
     if (!event || typeof event !== "object" || !event.observed_at) {
       throw new Error("A bounded activity event is required.");
     }
@@ -397,13 +405,14 @@ export class ManifestAdministrationCoordinator {
       await this.options.authority.assertCurrent();
       const state = await this.options.store.getActivityState(id);
       if (!state) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      if (sanitizedEvent.sequence <= state.last_sequence) {
-        throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${state.last_sequence}.`);
+      const sequence = position === "after_latest" ? Math.max(sanitizedEvent.sequence, state.last_sequence + 1) : sanitizedEvent.sequence;
+      if (sequence <= state.last_sequence) {
+        throw new Error(`Native activity sequence ${sequence} is not newer than ${state.last_sequence}.`);
       }
       const observedState = sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing"
         ? "working" : sanitizedEvent.status === "blocked" ? state.observed_state : "idle";
       const next = await this.options.store.recordActivity(
-        this.options.authority.currentManifestGeneration(), id, sanitizedEvent,
+        this.options.authority.currentManifestGeneration(), id, { ...sanitizedEvent, sequence },
         activityOnly ? null : { observedState, nativeLiveness: {
           state: sanitizedEvent.status === "idle" ? "idle" : "active",
           observed_at: sanitizedEvent.observed_at, detail: sanitizedEvent.summary,
