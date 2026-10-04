@@ -41,7 +41,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import { createRenderer, h, nextTick, reactive, ref, ssrContextKey } from "vue";
 
-let Viewport: any, Thread: any, provideReactions: any, providePreviews: any;
+let Viewport: any, Thread: any, provideReactions: any, providePreviews: any, provideMotion: any;
 before(async () => {
   const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   try {
@@ -49,6 +49,7 @@ before(async () => {
     Thread = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomThreadPanel.vue")).default;
     ({ provideRoomMessageReactions: provideReactions } = await vite.ssrLoadModule("/renderer/src/composables/useRoomMessageReactions.ts"));
     ({ provideRoomMessageLinkPreviews: providePreviews } = await vite.ssrLoadModule("/renderer/src/composables/useRoomMessageLinkPreviews.ts"));
+    ({ provideRoomMessageMotion: provideMotion } = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/useRoomMessageMotion.ts", import.meta.url))));
   } finally { await vite.close(); }
 });
 const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null });
@@ -89,9 +90,10 @@ async function scrollSurface(thread = false) {
     parent: message("msg_1"), replies: [message("msg_2")], initialThreadSummary: null, participants: [], attachmentDrafts: [], pendingAttachmentDrafts: [], taskReferenceIds: new Set(), deliveryReceiptsByMessage: {},
   });
   const reactions = { revision: ref(0) }, previews = { revision: ref(0) };
-  let vm: any;
+  let vm: any, motion: any;
   const app = renderer.createApp({ setup() {
     provideReactions(reactions); providePreviews(previews);
+    motion = provideMotion(() => props.messageNamespace);
     return () => h({ setup() {
       vm = (thread ? Thread : Viewport).setup(props, { expose() {}, emit() {} });
       if (thread) { vm.bodyElement.value = el; vm.panelElement.value = el; }
@@ -103,6 +105,10 @@ async function scrollSurface(thread = false) {
   app.mount({}); await flush(); calls.length = 0;
   el.addEventListener("scroll", () => vm.handleScroll?.());
   return { vm, props, reactions, previews, el, calls, resize: () => resize(),
+    send: () => {
+      motion.capture("my message", { getBoundingClientRect: () => ({ top: 500 }), closest: () => null });
+      props.messages = [...props.messages, { ...message("pending_1"), text: "my message", clientMessageId: "send_1", outgoing: { status: "pending" } }];
+    },
     setRevealTop: (value: number | null) => { revealTop = value; },
     frame: () => { for (const [handle, callback] of [...frames]) { frames.delete(handle); callback(); } },
     advance: (duration: number) => {
@@ -157,6 +163,42 @@ test("timeline: starting agent work must not pull a scrolled-up reader to latest
     s.up();
     s.props.localAgentWork = [{ id: "work", displayName: "Agent", summary: "Working", startedAt: "2026-10-03T00:00:00Z" }];
     await flush(); assert.equal(s.el.scrollTop, 100);
+  } finally { s.close(); }
+});
+
+test("timeline: a send acknowledgement does not count the same bubble as another unread message", async () => {
+  const s = await scrollSurface();
+  try {
+    s.up();
+    s.props.messages = [...s.props.messages, { ...message("pending_1"), clientMessageId: "send_1", outgoing: { status: "pending" } }];
+    await flush();
+    assert.equal(s.vm.unreadCount.value, 1);
+    s.props.messages = s.props.messages.map((message: any) => message.id === "pending_1" ? { ...message, id: "msg_3", outgoing: undefined } : message);
+    await flush();
+    assert.equal(s.vm.unreadCount.value, 1);
+    assert.equal(s.el.scrollTop, 100);
+  } finally { s.close(); }
+});
+
+for (const loadingOlder of [false, true]) test(`timeline: own send follows latest during history loading=${loadingOlder}; its ack stays there`, async () => {
+  const s = await scrollSurface();
+  try {
+    s.up();
+    s.props.loadingOlderMessages = loadingOlder;
+    s.send();
+    await Promise.resolve(); s.el.scrollHeight += 200; await flush();
+    assert.equal(s.el.scrollTop, 1800);
+    assert.equal(s.vm.unreadCount.value, 0);
+    if (loadingOlder) {
+      s.props.messages = [message("msg_0"), ...s.props.messages];
+      s.props.loadingOlderMessages = false;
+      await Promise.resolve(); s.el.scrollHeight += 200; await flush();
+      assert.equal(s.el.scrollTop, 2000, "finishing backfill preserves the new latest position");
+    }
+    s.props.messages = s.props.messages.map((message: any) => message.id === "pending_1" ? { ...message, id: "msg_3", outgoing: undefined } : message);
+    await flush();
+    assert.equal(s.el.scrollTop, loadingOlder ? 2000 : 1800);
+    assert.equal(s.vm.unreadCount.value, 0);
   } finally { s.close(); }
 });
 test("timeline: a pending layout anchor cannot undo a reveal", async () => {
