@@ -202,7 +202,7 @@
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
-          :attention-count="(needsYouData?.rooms.find(room => room.roomIdentifier === selectedRoomInfo.identifier)?.records.filter(record => !record.response).length ?? 0) + agentAttentionCountForRoom(selectedRoomInfo.identifier)"
+          :attention="roomAttention"
           @open-inbox="openNeedsYou(selectedRoomInfo.identifier)"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
@@ -508,6 +508,7 @@ import InboxView from "./components/desktop/content/InboxView.vue";
 import type { InboxSection } from "./components/desktop/content/room-inbox/universal";
 import type { DesktopRentalRequest } from "../../electron/ipc-types.js";
 import { useNeedsYou, useNeedsYouRoomActivity } from "./composables/useNeedsYou";
+import { useNeedsYouSignal } from "./composables/useNeedsYouSignal";
 import { useAgentAttention } from "./composables/useAgentAttention";
 import { resetHostApprovals } from "./components/desktop/content/room-chat/host-approvals";
 import { useInboxRoomFilter } from "./composables/useInboxRoomFilter";
@@ -590,7 +591,7 @@ function openMessages(id?: string) { openConversationId.value = typeof id === 's
 const inboxSection = ref<InboxSection>('needs-you');
 const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
 useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
-const { items: agentAttentionItems, countForRoom: agentAttentionCountForRoom, refreshApprovals: refreshAgentApprovals } = useAgentAttention(needsYouData);
+const { items: agentAttentionItems, refreshApprovals: refreshAgentApprovals, approvalsReady } = useAgentAttention(needsYouData);
 const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length);
 const attentionIntent = ref<AttentionNavigationIntent | null>(null);
 let needsYouInterval: number | null = null;
@@ -674,6 +675,13 @@ const {
   rootRoomSnapshot,
   selectedRootRoomIdentifier,
   selectedSnapshot,
+});
+
+const roomAttention = useNeedsYouSignal(needsYouData, agentAttentionItems, {
+  ready: () => approvalsReady.value,
+  account: () => inboxStorageKey.value,
+  activeRoom: () => activeEntry.value.type === "room" && !selectedNeedsAccess.value ? selectedRoomInfo.value.identifier : null,
+  inboxRooms: () => activeEntry.value.type === "inbox" && inboxSection.value === "needs-you" ? inboxRooms.value : null,
 });
 
 watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null, (account) => {
