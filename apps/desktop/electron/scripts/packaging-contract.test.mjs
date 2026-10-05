@@ -116,3 +116,20 @@ test("release workflow builds, attests, and publishes independent public R2 feed
   assert.doesNotMatch(workflow, /--latest(?:\s|$)/);
   assert.doesNotMatch(workflow, /desktop-feed-\$\{arch\}/);
 });
+
+test("monthly attempt checks gate both fresh Mac builds and failed-job retries", async () => {
+  const workflow = await source(join(repositoryRoot, ".github", "workflows", "desktop-release.yml"));
+  const preflight = workflow.slice(workflow.indexOf("  release-limit:"), workflow.indexOf("  build-macos:"));
+  const build = workflow.slice(workflow.indexOf("  build-macos:"), workflow.indexOf("  publish:"));
+  const publish = workflow.slice(workflow.indexOf("  publish:"));
+  assert.match(preflight, /runs-on: ubuntu-latest/);
+  assert.match(build, /needs: release-limit/);
+  for (const job of [preflight, build, publish]) {
+    assert.match(job, /actions: read/);
+    assert.match(job, /GH_TOKEN: \$\{\{ github.token \}\}/);
+    assert.match(job, /run: node apps\/desktop\/electron\/scripts\/release-monthly-limit\.mjs/);
+  }
+  assert.ok(build.indexOf("Enforce monthly release limit") < build.indexOf("Install dependencies without lifecycle scripts"));
+  assert.ok(publish.indexOf("Enforce monthly release limit") < publish.indexOf("Download both architecture artifacts"));
+  assert.match(workflow, /group: desktop-release\s+cancel-in-progress: false/);
+});
