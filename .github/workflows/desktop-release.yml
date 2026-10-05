@@ -12,11 +12,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-limit:
+    name: Check monthly release limit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Enforce monthly release limit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node apps/desktop/electron/scripts/release-monthly-limit.mjs
+
   build-macos:
+    needs: release-limit
     name: macOS ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      actions: read
       id-token: write
       attestations: write
       artifact-metadata: write
@@ -35,6 +56,13 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+
+      # Retrying failed jobs can reuse a successful release-limit job.
+      # Check the new attempt again before any dependency or packaging work.
+      - name: Enforce monthly release limit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node apps/desktop/electron/scripts/release-monthly-limit.mjs
 
       - name: Validate release ref, version, and runner architecture
         shell: bash
@@ -202,6 +230,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -209,6 +238,11 @@ jobs:
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
+
+      - name: Enforce monthly release limit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node apps/desktop/electron/scripts/release-monthly-limit.mjs
 
       - name: Validate release ref and version
         shell: bash
