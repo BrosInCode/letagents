@@ -36,7 +36,22 @@
         </div>
       </div>
       <div class="desktop-room-context-actions">
-        <button v-if="attentionCount" class="desktop-room-project-connect" type="button" :aria-label="`Open Inbox for ${room.displayName}, ${attentionCount} requests need you`" data-testid="room-inbox-shortcut" @click="emit('openInbox')">Needs you · {{ attentionCount }} ↗</button>
+        <button
+          v-if="attentionCount"
+          class="desktop-room-needs-you"
+          :data-pulse="attention?.pulse"
+          type="button"
+          :aria-label="`Open Inbox for ${room.displayName}, ${attentionCount} ${attentionCount === 1 ? 'request needs' : 'requests need'} you`"
+          data-testid="room-inbox-shortcut"
+          @click="emit('openInbox')"
+        >
+          <span class="desktop-room-needs-you-wave" aria-hidden="true" />
+          <span class="desktop-room-needs-you-wave" aria-hidden="true" />
+          <BellRing :size="17" :stroke-width="1.8" aria-hidden="true" />
+          <span>Needs you</span>
+          <span class="desktop-room-needs-you-count">{{ attentionCount }}</span>
+          <ArrowUpRight :size="16" :stroke-width="1.8" aria-hidden="true" />
+        </button>
         <button
           v-if="projectConnectionNeeded"
           class="desktop-room-project-connect"
@@ -141,6 +156,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { ArrowUpRight, BellRing } from "@lucide/vue";
 import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
 import DesktopStatusIndicator from "../../controls/DesktopStatusIndicator.vue";
 import type { SidebarMode } from "../../types";
@@ -156,7 +172,7 @@ const props = defineProps<{
   searchOpen: boolean;
   actionPanelOpen: boolean;
   projectConnectionNeeded?: boolean;
-  attentionCount?: number;
+  attention?: { count: number; pulse: boolean };
 }>();
 
 const emit = defineEmits<{
@@ -171,6 +187,7 @@ const emit = defineEmits<{
 const { tabsElement, indicatorElement, prepareTabChange } = useSlidingTabIndicator(() => props.activeTab);
 const findShortcut = ref("Ctrl F");
 const headerDisplayName = computed(() => compactRoomDisplayName(props.room.displayName));
+const attentionCount = computed(() => props.attention?.count ?? 0);
 
 function handleFindShortcut(event: KeyboardEvent): void {
   if (event.defaultPrevented || event.altKey || event.shiftKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f" || props.actionPanelOpen) return;

@@ -18,6 +18,11 @@ const CLOCK_TICK_MS = 15_000;
 /** Tool approvals, stuck agents and waiting board requests, counted with Needs you. */
 export function useAgentAttention(data: Ref<DesktopNeedsYou | null>) {
   const now = ref(Date.now());
+  const approvalsReady = ref(false);
+  let approvalEpoch = 0;
+  watch(data, (next) => {
+    if (!next) { approvalEpoch++; approvalsReady.value = false; }
+  }, { flush: 'sync' });
   let seen: ReturnType<typeof trackAgentAttention> = {};
   const agentFirstSeenAt = ref<Record<string, string>>({});
   // Agents as last reported: by each Needs you read and, in between, by the
@@ -53,6 +58,8 @@ export function useAgentAttention(data: Ref<DesktopNeedsYou | null>) {
    * made elsewhere clears it. The open room's composer keeps its own room fresh.
    */
   async function refreshApprovals(): Promise<void> {
+    if (!data.value) return;
+    const epoch = approvalEpoch;
     const rooms = new Set((agents.value ?? [])
       .filter(entry => APPROVAL_PROVIDERS.has(entry.provider) && ACTIVE_TURN_STATES.has(entry.roomAgentState?.turn.state ?? 'idle') && inAccount(entry.roomId))
       .map(entry => entry.roomId));
@@ -61,6 +68,7 @@ export function useAgentAttention(data: Ref<DesktopNeedsYou | null>) {
     await Promise.all(Array.from({ length: Math.min(APPROVAL_LIST_CONCURRENCY, queue.length) }, async () => {
       for (let room = queue.shift(); room; room = queue.shift()) await refreshHostApprovals(room);
     }));
+    if (epoch === approvalEpoch) approvalsReady.value = true;
   }
-  return { items, countForRoom, refreshApprovals };
+  return { items, countForRoom, refreshApprovals, approvalsReady };
 }

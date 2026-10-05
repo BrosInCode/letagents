@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp, effectScope, ref, type Ref } from "vue";
+import { createSSRApp, effectScope, nextTick, ref, type Ref } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer } from "vite";
 import { createKnowledgeRecord } from "../../../../shared/room-knowledge.mjs";
@@ -13,6 +13,7 @@ import { buildUniversalInbox, filterUniversalInbox, inboxCategoryLabel, inboxNav
 import { HOST_APPROVAL_BLOCKED_GRACE_MS, hostApprovalStopsTurn } from "../src/components/desktop/content/room-chat/host-approval-presentation";
 import { decideHostApproval, hostApprovalRoom, hostApprovalRooms, refreshHostApprovals, resetHostApprovals } from "../src/components/desktop/content/room-chat/host-approvals";
 import { useAgentAttention } from "../src/composables/useAgentAttention";
+import { useNeedsYouSignal } from "../src/composables/useNeedsYouSignal";
 
 const NOW = Date.parse("2026-09-30T16:30:00.000Z");
 const at = (msAgo: number) => new Date(NOW - msAgo).toISOString();
@@ -95,6 +96,50 @@ const responding = (overrides: Partial<DesktopSupervisorManifestEntry> = {}) => 
   const base = agent(overrides);
   return { ...base, roomAgentState: { ...base.roomAgentState!, turn: { ...base.roomAgentState!.turn, state: "responding" as const } } };
 };
+
+test("startup approvals stay silent even when the composer already started their listing", async () => {
+  for (const composerStarted of [false, true]) {
+    resetHostApprovals();
+    const pending: Array<(value: { available: boolean; approvals: DesktopHostApproval[]; error: null }) => void> = [];
+    Object.assign(globalThis, { window: { letagentsDesktop: { supervisor: {
+      listHostApprovals: () => new Promise(resolve => pending.push(resolve)),
+    } } } });
+    const current = ref<DesktopNeedsYou | null>(null);
+    const scope = effectScope();
+    let plays = 0;
+    const { attention, signal } = scope.run(() => {
+      const attention = useAgentAttention(current);
+      const signal = useNeedsYouSignal(current, attention.items, {
+        account: () => 'account', activeRoom: () => 'room-a', inboxRooms: () => null, ready: () => attention.approvalsReady.value,
+      }, { play: () => { plays++; }, stop() {}, dispose() {} });
+      return { attention, signal };
+    })!;
+    try {
+      await attention.refreshApprovals();
+      assert.equal(attention.approvalsReady.value, false, 'a coalesced request read cannot arm an empty startup snapshot');
+      current.value = needsYou({ agents: [responding()] }); await nextTick();
+      const composer = composerStarted ? refreshHostApprovals('room-a') : Promise.resolve();
+      const startup = attention.refreshApprovals();
+      await nextTick();
+      assert.equal(pending.length, 1, 'both surfaces await the same listing');
+      assert.equal(attention.approvalsReady.value, false);
+      pending.shift()!({ available: true, approvals: [approval()], error: null });
+      await Promise.all([startup, composer]); await nextTick();
+      assert.equal(attention.approvalsReady.value, true);
+      assert.deepEqual(signal.value, { count: 1, pulse: true });
+      assert.equal(plays, 0, 'existing approvals arriving after the request baseline are silent');
+      const fresh = attention.refreshApprovals();
+      pending.shift()!({ available: true, approvals: [approval({ id: 'new-request' })], error: null });
+      await fresh; await nextTick();
+      assert.equal(plays, 1, 'a later new approval chimes');
+      const oldAccount = attention.refreshApprovals();
+      current.value = null; resetHostApprovals();
+      pending.shift()!({ available: true, approvals: [approval()], error: null });
+      await oldAccount; await nextTick();
+      assert.equal(attention.approvalsReady.value, false, 'a stale account read cannot arm the new session');
+    } finally { scope.stop(); }
+  }
+});
 
 test("only live tool requests, stuck agents and long-waiting board requests need the owner", () => {
   const rooms = new Map([["room-a", { approvals: [

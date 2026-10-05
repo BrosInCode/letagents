@@ -10,7 +10,7 @@
       :storage="storage"
       :tabs="tabs"
       :active-tab="activeTab"
-      :attention-count="attentionCount"
+      :attention="attention"
       @open-inbox="emit('open-inbox')"
       :search-open="searchOpen"
       :action-panel-open="actionPanelOpen"
@@ -518,7 +518,7 @@ const props = defineProps<{
   notificationRevealMessageId?: string | null;
   notificationRevealNonce?: number;
   attentionIntent?: AttentionNavigationIntent | null;
-  attentionCount?: number;
+  attention?: { count: number; pulse: boolean };
   initialChatScrollTop?: number | null;
   onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
