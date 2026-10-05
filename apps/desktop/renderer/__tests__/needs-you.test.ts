@@ -1,18 +1,132 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createRenderer, createSSRApp } from 'vue';
+import { createRenderer, createSSRApp, effectScope, nextTick, ref } from 'vue';
 import { renderToString } from '@vue/server-renderer';
 import { createServer } from 'vite';
 import { useNeedsYou } from '../src/composables/useNeedsYou';
+import { useNeedsYouSignal } from '../src/composables/useNeedsYouSignal';
+import { roomNotificationPreferences } from '../src/composables/useRoomNotificationPreferences';
 import { createKnowledgeRecord } from '../../../../shared/room-knowledge.mjs';
 import type { DesktopNeedsYou } from '../../electron/ipc-types/knowledge.js';
 
 const record = createKnowledgeRecord('room', 'attention', { client_id: 'request-0001', category: 'decision', title: 'Choose a launch audience', body: '<script>malicious()</script>', recommendation: 'Small product teams', unblocks: 'Onboarding copy' }, { id: 'worker', label: 'Research agent', kind: 'agent' });
 const data: DesktopNeedsYou = { rooms: [{ roomIdentifier: 'room', displayName: 'Product launch', records: [record], tasks: [], truncated: false }], failures: [], limited: false, signedOut: false, cloudUnavailable: false };
+
+test('the header signal acknowledges requests without resolving them and detects same-count replacements', async () => {
+  const scope = effectScope();
+  const current = ref<DesktopNeedsYou | null>(null);
+  const activeRoom = ref<string | null>('room');
+  const inboxRooms = ref<string[] | null>(null);
+  const account = ref('first-account');
+  let plays = 0;
+  let disposed = false;
+  const signal = scope.run(() => useNeedsYouSignal(current, ref([]), {
+    ready: () => true, account: () => account.value, activeRoom: () => activeRoom.value, inboxRooms: () => inboxRooms.value,
+  }, { play: () => { plays++; }, stop() {}, dispose: () => { disposed = true; } }))!;
+  try {
+    current.value = structuredClone(data); await nextTick();
+    assert.deepEqual(signal.value, { count: 1, pulse: true });
+    assert.equal(plays, 0, 'startup backlog is silent');
+    inboxRooms.value = ['room']; activeRoom.value = null; await nextTick();
+    inboxRooms.value = null; activeRoom.value = 'room'; await nextTick();
+    assert.deepEqual(signal.value, { count: 1, pulse: false }, 'opening Inbox acknowledges, but does not answer');
+    activeRoom.value = 'elsewhere'; await nextTick(); activeRoom.value = 'room'; await nextTick();
+    assert.equal(plays, 0); assert.equal(signal.value.pulse, false);
+    current.value!.rooms[0].records = [{ ...record, id: 'replacement' }]; await nextTick();
+    assert.deepEqual(signal.value, { count: 1, pulse: true });
+    assert.equal(plays, 1, 'a different request alerts even with the same count');
+    current.value = structuredClone({ ...data, rooms: [{ ...data.rooms[0], records: [{ ...record, id: 'replacement' }] }] }); await nextTick();
+    assert.equal(plays, 1, 'polling the same request does not chime again');
+    current.value!.rooms[0].records = []; await nextTick();
+    assert.deepEqual(signal.value, { count: 0, pulse: false });
+    current.value = structuredClone(data); await nextTick();
+    assert.deepEqual(signal.value, { count: 1, pulse: false }, 'a transiently missing request retains acknowledgement');
+    account.value = 'second-account'; current.value = null; await nextTick();
+    current.value = structuredClone(data); await nextTick();
+    assert.deepEqual(signal.value, { count: 1, pulse: true }, 'acknowledgements are account scoped');
+    assert.equal(plays, 1, 'switching accounts establishes a silent baseline');
+  } finally { scope.stop(); }
+  assert.equal(disposed, true);
+});
+
+test('the signal respects sound mute, room snooze, visibility, and the actual Inbox filter', async () => {
+  const priorWindow = globalThis.window;
+  const priorDocument = globalThis.document;
+  let muted = false;
+  const page = Object.assign(new EventTarget(), { hidden: false });
+  Object.assign(globalThis, { document: page, window: { localStorage: { getItem: () => muted ? 'off' : null } } });
+  const scope = effectScope();
+  const current = ref<DesktopNeedsYou | null>(structuredClone(data));
+  const activeRoom = ref<string | null>('room');
+  const inboxRooms = ref<string[] | null>(null);
+  let plays = 0; let stops = 0;
+  const signal = scope.run(() => useNeedsYouSignal(current, ref([]), {
+    ready: () => true, account: () => 'account', activeRoom: () => activeRoom.value, inboxRooms: () => inboxRooms.value,
+  }, { play: () => { plays++; }, stop: () => { stops++; }, dispose() {} }))!;
+  const replace = async (id: string) => { current.value!.rooms[0].records = [{ ...record, id }]; await nextTick(); };
+  try {
+    muted = true; await replace('sound-muted'); assert.equal(plays, 0); assert.equal(signal.value.pulse, true);
+    muted = false;
+    roomNotificationPreferences.state('room').preference = { level: 'muted', snoozed_until: null };
+    await replace('room-muted'); assert.equal(plays, 0);
+    roomNotificationPreferences.state('room').preference = { level: 'all', snoozed_until: new Date(Date.now() + 60_000).toISOString() };
+    await replace('room-snoozed'); assert.equal(plays, 0);
+    roomNotificationPreferences.state('room').preference = { level: 'all', snoozed_until: null };
+    page.hidden = true; page.dispatchEvent(new Event('visibilitychange')); await nextTick();
+    await replace('while-hidden'); assert.equal(plays, 0); assert.equal(signal.value.pulse, false);
+    page.hidden = false; page.dispatchEvent(new Event('visibilitychange')); await nextTick();
+    assert.equal(plays, 0, 'returning does not play a queued chime'); assert.equal(signal.value.pulse, true);
+    inboxRooms.value = ['elsewhere']; activeRoom.value = null; await nextTick();
+    inboxRooms.value = null; activeRoom.value = 'room'; await nextTick();
+    assert.equal(signal.value.pulse, true, 'an Inbox filter excluding this room does not acknowledge it');
+    inboxRooms.value = []; activeRoom.value = null; await nextTick();
+    inboxRooms.value = null; activeRoom.value = 'room'; await nextTick();
+    assert.equal(signal.value.pulse, false);
+    await replace('new-visible'); assert.equal(plays, 1);
+    assert.ok(stops > 0, 'leaving or hiding stops in-flight sound');
+  } finally {
+    scope.stop();
+    roomNotificationPreferences.state('room').preference = { level: 'all', snoozed_until: null };
+    Object.assign(globalThis, { window: priorWindow, document: priorDocument });
+  }
+});
+
+test('new approval identities and new blocked-agent episodes rearm the signal', async () => {
+  const scope = effectScope();
+  const current = ref<DesktopNeedsYou | null>({ ...data, rooms: [{ ...data.rooms[0], records: [] }] });
+  const agents = ref<import('../src/components/desktop/content/room-inbox/agent-attention').AgentAttentionItem[]>([]);
+  const inboxRooms = ref<string[] | null>(null);
+  let plays = 0;
+  const signal = scope.run(() => useNeedsYouSignal(current, agents, {
+    ready: () => true, account: () => 'account', activeRoom: () => 'room', inboxRooms: () => inboxRooms.value,
+  }, { play: () => { plays++; }, stop() {}, dispose() {} }))!;
+  try {
+    // The signal needs only the identity, room and attention episode timestamp.
+    agents.value = [{ key: 'agent-1', kind: 'agent_attention', roomIdentifier: 'room', timestamp: 'first' } as typeof agents.value[number]];
+    await nextTick(); assert.equal(plays, 1);
+    inboxRooms.value = ['room']; await nextTick(); inboxRooms.value = null; await nextTick();
+    assert.equal(signal.value.pulse, false);
+    agents.value[0].timestamp = 'recovered-then-stuck-again'; await nextTick();
+    assert.equal(plays, 2); assert.equal(signal.value.pulse, true);
+    agents.value = [{ key: 'approval-1', kind: 'tool_approval', roomIdentifier: 'room', timestamp: 'first' } as typeof agents.value[number]];
+    await nextTick(); assert.equal(plays, 3);
+    agents.value[0].timestamp = 'refreshed'; await nextTick();
+    assert.equal(plays, 3, 'the same approval is not replayed when its listing refreshes');
+  } finally { scope.stop(); }
+});
 test('Needs you presents a human decision with context and escapes agent content', async () => {
   const vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
   try {
+    const header = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-shell/DesktopRoomHeader.vue')).default;
+    const headerProps = { sidebarMode: 'expanded', room: { displayName: 'Product launch' }, storage: { effectiveMode: 'cloud' }, tabs: [], activeTab: 'chat', searchOpen: false, actionPanelOpen: false };
+    const alertHtml = await renderToString(createSSRApp(header, { ...headerProps, attention: { count: 1, pulse: true } }));
+    assert.match(alertHtml, /data-pulse="true"/); assert.match(alertHtml, /Open Inbox for Product launch, 1 request needs you/);
+    assert.equal((alertHtml.match(/class="desktop-room-needs-you-wave"/g) ?? []).length, 2);
+    const acknowledgedHtml = await renderToString(createSSRApp(header, { ...headerProps, attention: { count: 1, pulse: false } }));
+    assert.match(acknowledgedHtml, /data-pulse="false"/); assert.match(acknowledgedHtml, /room-inbox-shortcut/);
+    const resolvedHtml = await renderToString(createSSRApp(header, { ...headerProps, attention: { count: 0, pulse: false } }));
+    assert.doesNotMatch(resolvedHtml, /room-inbox-shortcut/);
     const component = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/InboxView.vue')).default;
     const html = await renderToString(createSSRApp(component, { data, loading: false, error: '' }));
     assert.match(html, /Choose a launch audience/); assert.match(html, /Small product teams/); assert.match(html, /Onboarding copy/); assert.match(html, /Your response/);
