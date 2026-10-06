@@ -14,6 +14,8 @@ const sidebarSource = source("../src/components/desktop/sidebar/DesktopSidebar.v
 const typesSource = source("../src/components/desktop/types.ts");
 const layoutSource = source("../src/styles/app-shell/layout.css");
 const motionSource = source("../src/styles/app-shell/motion.css");
+const messagesSource = source("../../../../shared/ui/PrivateMessages.vue");
+const messagesStyles = source("../../../../shared/ui/private-messages.css");
 
 describe("desktop sidebar visibility contract", () => {
   it("toggles directly between visible and hidden states", () => {
@@ -54,6 +56,16 @@ describe("desktop sidebar visibility contract", () => {
     assert.match(motionSource, /\.desktop-sidebar-enter-active/);
     assert.match(motionSource, /\.desktop-sidebar-leave-active/);
     assert.doesNotMatch(`${layoutSource}\n${motionSource}`, /transition:\s*all\b/);
+  });
+
+  it("keeps a sidebar reveal control available throughout Messages without leaving one in its inactive view", () => {
+    const messages = appSource.match(/<PrivateMessages\b[\s\S]*?<\/PrivateMessages>/)?.[0];
+    assert.ok(messages);
+    assert.match(messages, /<template v-if="activeEntry.type === 'messages' && sidebarMode === 'hidden'" #navigation>/);
+    assert.match(messages, /aria-label="Show sidebar"[^>]*data-testid="sidebar-reveal-button"[^>]*@click="cycleSidebar"/);
+    // One control outside either responsive pane works in the list, a chat, and new-chat composition.
+    assert.match(messagesSource, /<div v-if="\$slots.navigation" class="conversation-navigation">\s*<slot name="navigation" \/>\s*<\/div>\s*<aside/);
+    assert.match(messagesStyles, /@container private-messages \(max-width: 640px\)[\s\S]*?\.has-navigation.chat-open \.conversation-header\s*\{\s*padding-left: 66px;/);
   });
 
   it("removes sidebar displacement when reduced motion is requested", () => {
