@@ -1,8 +1,11 @@
+import { desktopHighlighter } from "./code-highlighter";
+
 export interface DesktopMarkdownOptions {
   highlightQuery?: string;
   block?: boolean;
   mentions?: boolean;
   preservePaths?: boolean;
+  onLink?: (url: string) => void;
 }
 
 const MAX_BLOCKQUOTE_DEPTH = 8;
@@ -14,6 +17,12 @@ export function renderDesktopMarkdown(value: string, options: DesktopMarkdownOpt
 
 export function renderInlineMarkdown(value: string, options: DesktopMarkdownOptions = {}): string {
   const tokens: string[] = [];
+  const links = new Map<number, string>();
+  const linkToken = (url: string, html: string) => {
+    const token = markdownToken(tokens, html);
+    links.set(tokens.length - 1, url);
+    return token;
+  };
   // File references are display text here. Only the receipt's verified file actions
   // may open a local workspace; never turn a path supplied in prose into a URL.
   let tokenized = value.replace(/\u0000/g, "").replace(/`([^`\n]+)`/g, (_match, code: string) =>
@@ -22,13 +31,13 @@ export function renderInlineMarkdown(value: string, options: DesktopMarkdownOpti
   tokenized = tokenized.replace(/\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)/g, (match, label: string, target: string) => {
     const path = target.replace(/^<|>$/g, "");
     if (/^https?:\/\/[^\s]+$/.test(path)) {
-      return markdownToken(tokens, `<a href="${escapeAttr(path)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`);
+      return linkToken(path, `<a href="${escapeAttr(path)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`);
     }
     const filename = localFileName(path, true);
     return filename ? markdownToken(tokens, `<code>${escapeHtml(options.preservePaths ? path : filename)}</code>`) : match;
   });
   tokenized = tokenized.replace(/(https?:\/\/[^\s<>"']+)/g, (_match, url: string) =>
-    markdownToken(tokens, `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`)
+    linkToken(url, `<a href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`)
   );
   // Web links and inline code are already protected by tokens. Match only file
   // paths in prose, preserving punctuation and leaving API routes alone.
@@ -50,7 +59,10 @@ export function renderInlineMarkdown(value: string, options: DesktopMarkdownOpti
     rendered = rendered.replace(/(^|[\s(])@([A-Za-z0-9._:-]+(?:\/[A-Za-z0-9._-]+)*)/g, '$1<span class="mention-token">@$2</span>');
   }
 
-  return restoreMarkdownTokens(rendered, tokens);
+  return restoreMarkdownTokens(rendered, tokens, (index) => {
+    const url = links.get(index);
+    if (url) options.onLink?.(url);
+  });
 }
 
 function localFileName(value: string, linked = false): string | null {
@@ -86,8 +98,7 @@ function renderBlockMarkdown(value: string, options: DesktopMarkdownOptions, quo
         index += 1;
       }
       if (index < lines.length) index += 1;
-      const language = fence[1] ? ` class="language-${escapeAttr(fence[1])}"` : "";
-      blocks.push(`<pre><code${language}>${escapeHtml(code.join("\n"))}</code></pre>`);
+      blocks.push(desktopHighlighter.renderCodeBlock(code.join("\n"), fence[1]));
       continue;
     }
 
@@ -176,8 +187,8 @@ function markdownToken(tokens: string[], html: string): string {
   return `\u0000MD${index}\u0000`;
 }
 
-function restoreMarkdownTokens(value: string, tokens: string[]): string {
-  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => tokens[Number(index)] || "");
+function restoreMarkdownTokens(value: string, tokens: string[], onToken: (index: number) => void): string {
+  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => { onToken(Number(index)); return tokens[Number(index)] || ""; });
 }
 
 function escapeHtml(value: string): string {

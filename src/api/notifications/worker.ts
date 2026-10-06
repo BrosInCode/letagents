@@ -1,3 +1,4 @@
+import { enqueueDueReminders, loadReminderMessage, deleteMessageReminder } from "./reminders.js";
 import { randomUUID } from "node:crypto";
 import { canNotifyConversation } from "../conversations/store.js";
 
@@ -28,6 +29,7 @@ const CLEANUP_INTERVAL_MS = 60 * 60_000;
 
 export interface ClaimedNotification {
   id: string;
+  reminder_id?: string | null;
   device_id: string;
   account_id: string;
   device_token: string;
@@ -47,19 +49,30 @@ function retryDelayMs(attemptCount: number): number {
   return Math.floor(exponential * (0.8 + Math.random() * 0.4));
 }
 
-export async function claimNotifications(workerId: string): Promise<ClaimedNotification[]> {
+type DeliveryTable = "desktop_push_notifications" | "desktop_reminder_deliveries";
+function deliveryTable(notification: ClaimedNotification): DeliveryTable {
+  return notification.reminder_id ? "desktop_reminder_deliveries" : "desktop_push_notifications";
+}
+export function claimNotifications(workerId: string): Promise<ClaimedNotification[]> {
+  return claimDeliveryTable(workerId, "desktop_push_notifications");
+}
+export function claimReminderDeliveries(workerId: string): Promise<ClaimedNotification[]> {
+  return claimDeliveryTable(workerId, "desktop_reminder_deliveries");
+}
+async function claimDeliveryTable(workerId: string, table: DeliveryTable): Promise<ClaimedNotification[]> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query("SET LOCAL lock_timeout = '3s'");
     await client.query(`
-      UPDATE desktop_push_notifications
+      UPDATE ${table}
       SET state = 'retry', claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
       WHERE state = 'processing' AND claimed_at < NOW() - INTERVAL '5 minutes'
     `);
     const result = await client.query<ClaimedNotification>(`
       WITH ready AS (
         SELECT notification.id
-        FROM desktop_push_notifications AS notification
+        FROM ${table} AS notification
         INNER JOIN desktop_push_devices AS device ON device.id = notification.device_id
         WHERE notification.state IN ('queued', 'retry')
           AND notification.next_attempt_at <= NOW()
@@ -68,7 +81,7 @@ export async function claimNotifications(workerId: string): Promise<ClaimedNotif
         FOR UPDATE OF notification SKIP LOCKED
         LIMIT $1
       ), claimed AS (
-        UPDATE desktop_push_notifications AS notification
+        UPDATE ${table} AS notification
         SET state = 'processing',
             attempt_count = notification.attempt_count + 1,
             claimed_at = NOW(),
@@ -84,7 +97,7 @@ export async function claimNotifications(workerId: string): Promise<ClaimedNotif
              device.device_token,
              device.environment,
              claimed.room_id,
-             claimed.conversation_id,
+             ${table === "desktop_reminder_deliveries" ? "claimed.reminder_id, NULL::text AS conversation_id" : "NULL::text AS reminder_id, claimed.conversation_id"},
              claimed.room_display_name,
              claimed.message_number,
              claimed.thread_root_number,
@@ -146,7 +159,7 @@ export async function recordAuthorizationDenied(
   if (notification.conversation_id) {
     // DM eligibility includes this device's session and this message's read
     // cursor. One denied delivery says nothing about another device/message.
-    await pool.query(`UPDATE desktop_push_notifications
+    await pool.query(`UPDATE ${deliveryTable(notification)}
       SET state='dead', room_display_name='', sender='', body='',
           last_status=NULL, last_error='Private message notification is no longer eligible',
           claimed_at=NULL, claimed_by=NULL, updated_at=now()
@@ -154,7 +167,7 @@ export async function recordAuthorizationDenied(
     return;
   }
   await pool.query(`
-    UPDATE desktop_push_notifications AS notification
+    UPDATE ${deliveryTable(notification)} AS notification
     SET state = 'dead', room_display_name = '', sender = '', body = '',
         last_status = NULL, last_error = 'Room access is no longer authorized',
         claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
@@ -177,7 +190,7 @@ async function recordAuthorizationError(
   const message = `Room access check failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000);
   if (notification.attempt_count >= MAX_ATTEMPTS) {
     await pool.query(`
-      UPDATE desktop_push_notifications
+      UPDATE ${deliveryTable(notification)}
       SET state = 'dead', room_display_name = '', sender = '', body = '',
           last_status = NULL, last_error = $3,
           claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
@@ -188,7 +201,7 @@ async function recordAuthorizationError(
 
   const nextAttempt = new Date(Date.now() + retryDelayMs(notification.attempt_count)).toISOString();
   await pool.query(`
-    UPDATE desktop_push_notifications
+    UPDATE ${deliveryTable(notification)}
     SET state = 'retry', next_attempt_at = $3, last_status = NULL, last_error = $4,
         claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
     WHERE id = $1 AND claimed_by = $2
@@ -206,7 +219,7 @@ export async function recordResult(
 
   if (disposition === "delivered") {
     await pool.query(`
-      UPDATE desktop_push_notifications
+      UPDATE ${deliveryTable(notification)}
       SET state = 'delivered', delivered_at = NOW(), apns_id = $3,
           room_display_name = '', sender = '', body = '',
           last_status = $4, last_error = NULL, claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
@@ -249,29 +262,31 @@ export async function recordResult(
         WHERE id = $1
       `, [notification.device_id, error]);
       await client.query(`
-        UPDATE desktop_push_notifications
+        UPDATE ${deliveryTable(notification)}
         SET state = 'dead', room_display_name = '', sender = '', body = '',
             last_status = $3, last_error = $4,
             claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
         WHERE id = $1 AND claimed_by = $2
       `, [notification.id, workerId, result.status || null, error]);
-      await client.query(`
-        UPDATE desktop_push_notifications
-        SET state = 'dead', room_display_name = '', sender = '', body = '',
-            last_error = $2, updated_at = NOW()
-        WHERE device_id = $1 AND state IN ('queued', 'retry')
-      `, [notification.device_id, cascadeError]);
+      for (const table of ["desktop_push_notifications", "desktop_reminder_deliveries"] as const) {
+        await client.query(`
+          UPDATE ${table}
+          SET state = 'dead', room_display_name = '', sender = '', body = '',
+              last_error = $2, updated_at = NOW()
+          WHERE device_id = $1 AND state IN ('queued', 'retry')
+        `, [notification.device_id, cascadeError]);
+      }
     } else if (disposition === "retry") {
       const nextAttempt = new Date(Date.now() + retryDelayMs(notification.attempt_count)).toISOString();
       await client.query(`
-        UPDATE desktop_push_notifications
+        UPDATE ${deliveryTable(notification)}
         SET state = 'retry', next_attempt_at = $3, last_status = $4, last_error = $5,
             claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
         WHERE id = $1 AND claimed_by = $2
       `, [notification.id, workerId, nextAttempt, result.status || null, error]);
     } else {
       await client.query(`
-        UPDATE desktop_push_notifications
+        UPDATE ${deliveryTable(notification)}
         SET state = 'dead', room_display_name = '', sender = '', body = '',
             last_status = $3, last_error = $4,
             claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
@@ -287,8 +302,8 @@ export async function recordResult(
   }
 }
 
-async function deliverNotification(
-  client: ApnsClient,
+export async function deliverNotification(
+  client: Pick<ApnsClient, "send">,
   workerId: string,
   notification: ClaimedNotification,
   authorize: () => Promise<DesktopPushAuthorizationDecision>,
@@ -312,10 +327,24 @@ async function deliverNotification(
     return;
   }
 
+  if (notification.reminder_id) {
+    try {
+      const message = await loadReminderMessage(notification.room_id!, notification.message_number);
+      if (!message) {
+        await deleteMessageReminder(notification.account_id, notification.reminder_id);
+        return;
+      }
+      notification = { ...notification, room_display_name: message.roomName, sender: message.sender,
+        body: message.displayText ?? message.body, thread_root_number: message.threadRoot };
+      const current = await pool.query(`SELECT id FROM desktop_reminder_deliveries WHERE id = $1 AND claimed_by = $2`, [notification.id, workerId]);
+      if (!current.rowCount) return;
+    } catch (error) { await recordAuthorizationError(notification, workerId, error); return; }
+  }
   let result: ApnsSendResult;
   try {
     result = await client.send({
       notificationId: notification.id,
+      reminder: Boolean(notification.reminder_id),
       deviceToken: notification.device_token,
       environment: notification.environment,
       roomId: notification.room_id,
@@ -332,8 +361,14 @@ async function deliverNotification(
   await recordResult(notification, workerId, result);
 }
 
-async function processBatch(client: ApnsClient, workerId: string): Promise<void> {
-  const notifications = await claimNotifications(workerId);
+export function authorizeReminderAccess(accountId: string, roomId: string): Promise<DesktopPushAuthorizationDecision> {
+  return authorizeDesktopPushNotification({ accountId, roomId }, {
+    getProject: getProjectById, getAccount: getPushDeliveryAccount, resolveAccess: resolveProjectRepoRoomAccessDecision,
+  });
+}
+
+export async function processBatch(client: Pick<ApnsClient, "send">, workerId: string): Promise<void> {
+  const notifications = [...await claimNotifications(workerId), ...await claimReminderDeliveries(workerId)];
   const authorizationChecks = new Map<string, Promise<DesktopPushAuthorizationDecision>>();
   for (let index = 0; index < notifications.length; index += DELIVERY_CONCURRENCY) {
     await Promise.all(
@@ -346,14 +381,7 @@ async function processBatch(client: ApnsClient, workerId: string): Promise<void>
           const authorizationKey = `${notification.account_id}\u0000${notification.room_id}`;
           let authorization = authorizationChecks.get(authorizationKey);
           if (!authorization) {
-            authorization = authorizeDesktopPushNotification(
-              { accountId: notification.account_id, roomId: notification.room_id! },
-              {
-                getProject: getProjectById,
-                getAccount: getPushDeliveryAccount,
-                resolveAccess: resolveProjectRepoRoomAccessDecision,
-              },
-            );
+            authorization = authorizeReminderAccess(notification.account_id, notification.room_id!);
             authorizationChecks.set(authorizationKey, authorization);
           }
           return deliverNotification(client, workerId, notification, () => authorization);
@@ -362,18 +390,30 @@ async function processBatch(client: ApnsClient, workerId: string): Promise<void>
   }
 }
 
-async function cleanupTerminalNotifications(): Promise<void> {
+export async function cleanupTerminalNotifications(): Promise<void> {
+  // Deleting the personal entry also removes its deliveries through the FK.
   await pool.query(`
-    DELETE FROM desktop_push_notifications
+    DELETE FROM message_reminders
+    WHERE id IN (
+      SELECT id FROM message_reminders
+      WHERE state = 'due' AND due_at < NOW() - INTERVAL '30 days'
+      ORDER BY due_at ASC
+      LIMIT 5000
+    )
+  `);
+  for (const table of ["desktop_push_notifications", "desktop_reminder_deliveries"] as const) {
+    await pool.query(`
+    DELETE FROM ${table}
     WHERE id IN (
       SELECT id
-      FROM desktop_push_notifications
+      FROM ${table}
       WHERE (state = 'delivered' AND delivered_at < NOW() - INTERVAL '30 days')
          OR (state = 'dead' AND updated_at < NOW() - INTERVAL '90 days')
       ORDER BY updated_at ASC
       LIMIT 5000
     )
-  `);
+    `);
+  }
 }
 
 export function startDesktopPushWorker(): () => Promise<void> {
@@ -381,14 +421,12 @@ export function startDesktopPushWorker(): () => Promise<void> {
   try {
     credentials = readApnsCredentials();
   } catch (error) {
-    console.error(`[desktop-push] APNs credentials could not be loaded; delivery worker is disabled: ${error instanceof Error ? error.message : String(error)}`);
-    return async () => undefined;
+    console.error(`[desktop-push] APNs credentials could not be loaded; push delivery is disabled: ${error instanceof Error ? error.message : String(error)}`);
   }
   if (!credentials) {
-    console.warn("[desktop-push] APNs credentials are not configured; delivery worker is disabled.");
-    return async () => undefined;
+    console.warn("[desktop-push] APNs credentials are not configured; push delivery is disabled.");
   }
-  const client = new ApnsClient(credentials);
+  const client = credentials ? new ApnsClient(credentials) : null;
   const workerId = randomUUID();
   let running = false;
   let runningPromise: Promise<void> | null = null;
@@ -400,15 +438,16 @@ export function startDesktopPushWorker(): () => Promise<void> {
     running = true;
     const run = (async () => {
       try {
-      if (Date.now() - lastCleanupAt >= CLEANUP_INTERVAL_MS) {
-        await cleanupTerminalNotifications();
-        lastCleanupAt = Date.now();
-      }
-      await processBatch(client, workerId);
+        if (Date.now() - lastCleanupAt >= CLEANUP_INTERVAL_MS) {
+          await cleanupTerminalNotifications();
+          lastCleanupAt = Date.now();
+        }
+        await enqueueDueReminders();
+        if (client) await processBatch(client, workerId);
       } catch (error) {
-      console.error(`[desktop-push] Worker iteration failed: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`[desktop-push] Worker iteration failed: ${error instanceof Error ? error.message : String(error)}`);
       } finally {
-      running = false;
+        running = false;
       }
     })();
     const pending = run.finally(() => {
@@ -423,6 +462,6 @@ export function startDesktopPushWorker(): () => Promise<void> {
     stopped = true;
     clearInterval(interval);
     await runningPromise;
-    client.close();
+    client?.close();
   };
 }

@@ -1,3 +1,4 @@
+import { ROOM_TYPING, TYPING, parseTypingSignal } from "../../../../shared/room-typing.mjs";
 import type { PoolClient } from "pg";
 
 import { createBoundedExecutor } from "../../bounded-async.js";
@@ -19,6 +20,7 @@ import {
 } from "./envelope-codec.js";
 import { reportBridgeLoss } from "./loss-signals.js";
 
+let typingPublishActive = false;
 let lossRetryTimer: NodeJS.Timeout | null = null;
 let stopped = false;
 let bridgeActive = false;
@@ -42,6 +44,16 @@ function reportPublisherBridgeLoss(reason: string, roomId?: string | null): void
  * emitLocal so they are never re-published.
  */
 function publishBridgedEvent(lane: string, event: string, data: unknown): Promise<void> {
+  if (lane === ROOM_TYPING) {
+    // A separate NOTIFY channel/operation has no durable queue or loss marker.
+    const signal = parseTypingSignal(data);
+    if (typingPublishActive || !signal || signal.expires_at <= Date.now()) return Promise.resolve();
+    typingPublishActive = true;
+    return executeBridgePublish(async (client) => {
+      if (signal.expires_at > Date.now()) await queryBridgeClient(client, "SELECT pg_notify($1, $2)",
+        [ROOM_TYPING, JSON.stringify({ v: 1, origin: instanceId, lane, event, mode: "inline", data })], TYPING.interval);
+    }, TYPING.interval).catch(() => {}).finally(() => { typingPublishActive = false; });
+  }
   const roomId = roomIdFromBridgeValue(data);
   const envelope = buildBridgeEnvelope(lane, event, data);
   if (!envelope) {

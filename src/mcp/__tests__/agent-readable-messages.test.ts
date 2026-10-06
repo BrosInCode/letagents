@@ -264,3 +264,13 @@ test("readable approval copy does not replace the exact instructions delivered t
   assert.equal(approval.text, text);
   assert.equal(approval.display_text, display_text);
 });
+
+test("agents see who reacted, but not an empty reaction list on every message", () => {
+  const reactions = [{ emoji: "👍", count: 1, reactors: [{ login: "emmy", name: "Emmy", avatar_url: null }] }];
+  const [plain, reacted] = toAgentReadableMessages([
+    { id: "msg_1", sender: "Emmy", text: "Ship it?", reactions: [] },
+    { id: "msg_2", sender: "Ada", text: "Yes.", reactions },
+  ]) as Array<Record<string, unknown>>;
+  assert.equal("reactions" in plain!, false);
+  assert.deepEqual(reacted!.reactions, [{ emoji: "👍", count: 1, by: ["Emmy"] }], "names only: no logins or avatar addresses");
+});

@@ -59,7 +59,23 @@ export type ProviderTerminalPorts = {
   requestConvergence(entryId: string): void;
   settleRuntimeApprovals(entryId: string, commitFence?: TerminalCommitFence): Promise<void>;
   diagnostic?(entryId: string, error: unknown): void;
+  /** The daemon stopped waiting for this entry's exit, of the execution generation `exitId`, to be recorded in full; its owner is told. */
+  exitUnsettled?(entryId: string, exitId: string): void;
 };
+
+/**
+ * How long recording an exit may take. Until an exit is recorded its entry
+ * has no runtime and is given no other, so the wait has an end: after
+ * `settleMs` one last attempt is made that records the exit without the steps
+ * that keep failing; that attempt has `lastAttemptMs`, and after it the daemon
+ * stops waiting, whatever was recorded. An agent is then at most
+ * `settleMs + lastAttemptMs + recordMs`, 27 seconds, without a process on
+ * this account. That is inside the 30 seconds an app update waits for exits
+ * to be recorded, so an update is not deferred by an exit that cannot be.
+ */
+export const EXIT_SETTLEMENT_BOUNDS = { settleMs: 15_000, lastAttemptMs: 8_000, recordMs: 4_000 };
+/** The line an owner reads in the agent's activity when an exit could not be recorded in full. */
+export const EXIT_UNSETTLED_NOTICE = "LetAgents could not finish recording how this agent's last process ended, so it stopped waiting and carried on. Some of that process's last activity, or an approval it was waiting for, may be missing.";
 
 export type TerminalCommitFence = (commit: () => Promise<void>) => Promise<void>;
 
@@ -81,19 +97,47 @@ type TerminalSettlement = {
   failures: number;
   admitted: boolean;
   reportedCanonicalDifference?: boolean;
+  /** Ends the wait: first for the ordinary attempts, then for the last one. */
+  deadline: ReturnType<typeof setTimeout> | null;
+  /** Rejected when the wait ends, so that a step that never returns is left behind. */
+  cut: { promise: Promise<never>; reject(error: unknown): void };
+  /** The ordinary attempts ran out of time; `last` once the last attempt has begun. */
+  overdue: false | "due" | "last";
+  /** The exit was recorded without a step that kept failing. */
+  incomplete: boolean;
+  /** Set once the daemon has stopped waiting; resolves when it has let the entry go. */
+  abandoned: Promise<void> | null;
+  /** Resolves when the settlement has ended, recorded or not. */
+  ended: Promise<void>;
+  end(): void;
 };
 
 class TerminalOwnerLostError extends Error {}
+class TerminalSettlementOverdueError extends Error {}
+
+function settlementCut(): TerminalSettlement["cut"] {
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<never>((_resolve, decline) => { reject = decline; });
+  void promise.catch(() => undefined);
+  return { promise, reject };
+}
 
 /** Owns terminal evidence, exact-handle retirement, and exit-state projection. */
 export class ProviderTerminalCoordinator {
   private readonly pending = new Map<ProviderInstallationToken, TerminalSettlement>();
   private readonly completed = new WeakSet<ProviderInstallationToken>();
   private phase: "open" | "retiring" | "closed" = "open";
+  /** Entries whose convergence was turned away while their exit was being settled. */
+  private readonly convergenceOwed = new Set<string>();
+  /** Entries an owner's recovery has taken over from their exit's recording, until it ends. */
+  private readonly recoveries = new Map<string, number>();
   private readonly plannedConfigurationReplacements = new Map<
     ProviderInstallationToken,
     PlannedConfigurationReplacement
   >();
+
+  /** Tests shorten these. */
+  bounds = { ...EXIT_SETTLEMENT_BOUNDS };
 
   constructor(private readonly ports: ProviderTerminalPorts) {}
 
@@ -174,6 +218,26 @@ export class ProviderTerminalCoordinator {
     }
   }
 
+  /**
+   * Whether this entry's runtime has exited and that exit is not yet recorded.
+   * Until it is, the entry has no runtime and its generation has no terminal:
+   * attaching would take the exited runtime back, and launching would find a
+   * generation that still looks live. An entry whose caller is turned away
+   * is converged again when the settlement ends.
+   */
+  settling(entryId: string): boolean {
+    if (this.recoveries.has(entryId)) {
+      this.convergenceOwed.add(entryId);
+      return true;
+    }
+    for (const installation of this.pending.keys()) {
+      if (installation.entryId !== entryId) continue;
+      this.convergenceOwed.add(entryId);
+      return true;
+    }
+    return false;
+  }
+
   terminalPayload(
     terminal: ProviderActionTerminal,
     actor: string,
@@ -208,8 +272,13 @@ export class ProviderTerminalCoordinator {
       daemonGeneration: this.ports.currentDaemonGeneration(),
       replacement: this.plannedConfigurationReplacements.get(installation),
       operation: null, timer: null, failures: 0, admitted: this.phase === "retiring",
+      deadline: null, cut: settlementCut(), overdue: false, incomplete: false, abandoned: null,
+      ended: Promise.resolve(), end: () => {},
     };
+    owner.ended = new Promise<void>((resolve) => { owner.end = resolve; });
     this.pending.set(installation, owner);
+    owner.deadline = setTimeout(() => this.settlementOverdue(owner), this.bounds.settleMs);
+    owner.deadline.unref();
     try {
       if (!this.ports.streams.remove(installation)) {
         this.finishSettlement(owner, new TerminalOwnerLostError("Terminal removal lost its installation."));
@@ -246,10 +315,15 @@ export class ProviderTerminalCoordinator {
   }
 
   private attemptSettlement(owner: TerminalSettlement): Promise<void> {
+    if (owner.abandoned) return owner.abandoned;
     if (owner.operation) return owner.operation;
     if (owner.timer) { clearTimeout(owner.timer); owner.timer = null; }
-    const operation = this.settleOnce(owner).then(
-      () => this.finishSettlement(owner),
+    const operation = this.within(owner, this.settleOnce(owner)).then(
+      () => {
+        const told = owner.incomplete && this.pending.get(owner.installation) === owner && this.phase === "open";
+        this.finishSettlement(owner);
+        if (told) try { this.ports.exitUnsettled?.(owner.installation.entryId, owner.installation.executionGenerationId); } catch { /* Telling the owner is optional. */ }
+      },
       error => {
         this.failedSettlement(owner, error);
         // Emergency close cancels observer work without poisoning its drain.
@@ -274,9 +348,11 @@ export class ProviderTerminalCoordinator {
       return;
     }
     if (owner.timer) return;
-    // Retain the obligation while this owner remains valid; only the delay is
-    // capped. Retrying local bookkeeping never sends native work again.
-    const delay = Math.min(30_000, 25 * 2 ** Math.min(owner.failures++, 11));
+    if (owner.overdue === "last") { this.abandonSettlement(owner, error); return; }
+    // Retain the obligation while this owner remains valid and has time left.
+    // Retrying local bookkeeping never sends native work again.
+    if (owner.overdue === "due") owner.overdue = "last";
+    const delay = owner.overdue ? 0 : Math.min(30_000, 25 * 2 ** Math.min(owner.failures++, 11));
     owner.timer = setTimeout(() => {
       owner.timer = null;
       void this.attemptSettlement(owner).catch(() => undefined);
@@ -284,14 +360,114 @@ export class ProviderTerminalCoordinator {
     owner.timer.unref();
   }
 
+  /**
+   * The ordinary attempts have had their time. Whatever step is still
+   * running is left behind, and one last attempt records the exit without
+   * the steps that are not needed to give the entry a runtime again.
+   */
+  private settlementOverdue(owner: TerminalSettlement): void {
+    if (this.pending.get(owner.installation) !== owner || owner.overdue) return;
+    owner.overdue = "due";
+    const cut = owner.cut;
+    owner.cut = settlementCut();
+    owner.deadline = setTimeout(() => this.abandonSettlement(owner,
+      new TerminalSettlementOverdueError("The agent's last process ended, but LetAgents could not finish recording that in time. It stopped waiting and starts the agent again.")), this.bounds.lastAttemptMs);
+    owner.deadline.unref();
+    cut.reject(new TerminalSettlementOverdueError("The exit was not recorded in time; one last attempt follows."));
+    if (owner.operation) return; // Its failure starts the last attempt.
+    owner.overdue = "last";
+    void this.attemptSettlement(owner).catch(() => undefined);
+  }
+
+  /**
+   * The exit could not be recorded, or not in time. The daemon stops waiting:
+   * it saves the terminal it was given if it still can, tells the owner, and
+   * lets the entry converge. Convergence then finds the saved process gone
+   * and treats it as it does after a daemon restart.
+   */
+  private abandonSettlement(owner: TerminalSettlement, error: unknown): void {
+    if (this.pending.get(owner.installation) !== owner || owner.abandoned) return;
+    if (owner.timer) { clearTimeout(owner.timer); owner.timer = null; }
+    if (owner.deadline) { clearTimeout(owner.deadline); owner.deadline = null; }
+    const cut = owner.cut;
+    owner.cut = settlementCut();
+    cut.reject(error);
+    const give = setTimeout(() => owner.cut.reject(error), this.bounds.recordMs);
+    give.unref();
+    owner.abandoned = this.within(owner, this.recordAbandonedTerminal(owner)).catch(() => undefined).then(() => {
+      clearTimeout(give);
+      if (this.pending.get(owner.installation) !== owner) return;
+      const entryId = owner.installation.entryId;
+      try { this.ports.diagnostic?.(entryId, error); } catch { /* A diagnostic cannot change the outcome. */ }
+      // Whether or not a pass was turned away meanwhile, the entry is converged now.
+      this.convergenceOwed.add(entryId);
+      this.finishSettlement(owner, error);
+      if (this.phase !== "open") return;
+      try { this.ports.exitUnsettled?.(entryId, owner.installation.executionGenerationId); } catch { /* Telling the owner is not what lets the entry continue. */ }
+    });
+  }
+
+  /** Outside the entry's queue: the terminal of an ended process is a fact, and the queue may be what never answered. */
+  private async recordAbandonedTerminal(owner: TerminalSettlement): Promise<void> {
+    const { installation } = owner;
+    if (!installation.workAttemptId) return;
+    const attempt = await this.ports.durability.getAttempt(installation.workAttemptId);
+    const execution = attempt.execution_generations.find(candidate => candidate.execution_generation_id === installation.executionGenerationId);
+    if (!execution || execution.terminal) return;
+    await this.ports.durability.recordTerminal(installation.workAttemptId, installation.executionGenerationId,
+      { ...this.terminalPayload(owner.terminal, execution.actor, installation.providerConnection), generation: execution.generation },
+      undefined, this.fence(owner));
+  }
+
+  /** A step of a settlement, for as long as that settlement is waited for. */
+  private within<T>(owner: TerminalSettlement, step: Promise<T>): Promise<T> {
+    void step.catch(() => undefined);
+    return Promise.race([step, owner.cut.promise]);
+  }
+
+  /**
+   * An operator's recovery takes the entry over: it proves the process gone
+   * and saves its terminal itself. A settlement that was still waiting gives
+   * way to it at once, its waiting step let go of. Until the returned
+   * function is called the entry is held as that settlement held it, so no
+   * convergence pass races the recovery for the entry's runtime.
+   */
+  supersede(entryId: string): () => void {
+    this.recoveries.set(entryId, (this.recoveries.get(entryId) ?? 0) + 1);
+    for (const owner of [...this.pending.values()]) {
+      if (owner.installation.entryId !== entryId) continue;
+      owner.cut.reject(new TerminalOwnerLostError("Terminal settlement was superseded by a runtime recovery."));
+      this.finishSettlement(owner, new TerminalOwnerLostError("Terminal settlement was superseded by a runtime recovery."));
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const left = (this.recoveries.get(entryId) ?? 1) - 1;
+      if (left > 0) { this.recoveries.set(entryId, left); return; }
+      this.recoveries.delete(entryId);
+      // The recovery converges the entry itself as it ends.
+      this.convergenceOwed.delete(entryId);
+    };
+  }
+
   private finishSettlement(owner: TerminalSettlement, error?: unknown): void {
     if (this.pending.get(owner.installation) !== owner) return;
     if (owner.timer) clearTimeout(owner.timer);
+    if (owner.deadline) clearTimeout(owner.deadline);
     this.pending.delete(owner.installation);
+    owner.end();
     this.completed.add(owner.installation);
     const replacement = owner.replacement;
     if (replacement) {
       if (error === undefined) replacement.resolve(); else replacement.reject(error);
+    }
+    // A pass that was turned away is owed, unless a planned replacement
+    // completed: its owner converges the entry once it has released its
+    // exclusion, as it always has.
+    const entryId = owner.installation.entryId;
+    if (this.convergenceOwed.delete(entryId) && this.phase === "open" && !(replacement && error === undefined)) {
+      this.ports.requestConvergence(entryId);
     }
   }
 
@@ -299,11 +475,14 @@ export class ProviderTerminalCoordinator {
     const { installation, replacement } = owner;
     const { entryId, handle, executionGenerationId } = installation;
     let shouldStartDelivery = false;
+    // Every step is waited for only as long as the settlement is: a step that
+    // never returns must not keep the entry's queue, or the entry, for ever.
+    const within = <T>(step: Promise<T>) => this.within(owner, step);
     await this.ports.serializeEntry(entryId, async () => {
       this.assertOwner(owner);
-      await this.ports.authority.assertCurrent();
+      await within(this.ports.authority.assertCurrent());
       this.assertOwner(owner);
-      const entry = (await this.ports.manifest.load()).entries.find(candidate => candidate.id === entryId);
+      const entry = (await within(this.ports.manifest.load())).entries.find(candidate => candidate.id === entryId);
       this.assertOwner(owner);
       if (!entry || !this.matchesInstallation(entry, installation)) {
         throw new TerminalOwnerLostError("Terminal settlement lost its saved provider coordinates.");
@@ -311,7 +490,7 @@ export class ProviderTerminalCoordinator {
       this.ports.runtimeCustody.deletePendingResumeBinding(entryId);
       let terminal = owner.terminal;
       if (entry.work_attempt_id) {
-        const attempt = await this.ports.durability.getAttempt(entry.work_attempt_id);
+        const attempt = await within(this.ports.durability.getAttempt(entry.work_attempt_id));
         this.assertOwner(owner);
         const execution = attempt.execution_generations.find(candidate => candidate.execution_generation_id === executionGenerationId);
         if (!execution) throw new TerminalOwnerLostError("Terminal execution is no longer present.");
@@ -340,20 +519,35 @@ export class ProviderTerminalCoordinator {
             catch { /* A diagnostic cannot change the settlement outcome. */ }
           }
         } else {
-          await this.ports.durability.recordTerminal(entry.work_attempt_id, executionGenerationId, expected, undefined, this.fence(owner));
+          await within(this.ports.durability.recordTerminal(entry.work_attempt_id, executionGenerationId, expected, undefined, this.fence(owner)));
         }
         this.assertOwner(owner);
-        await this.ports.settleRuntimeApprovals(entryId, this.fence(owner));
+        try {
+          const approvals = this.ports.settleRuntimeApprovals(entryId, this.fence(owner));
+          // The last attempt gives this step half its time, and goes on without it.
+          await within(owner.overdue ? Promise.race([approvals, new Promise<never>((_resolve, reject) => {
+            setTimeout(() => reject(new Error("Closing the ended runtime's approvals did not finish in time.")), this.bounds.lastAttemptMs / 2).unref();
+          })]) : approvals);
+        } catch (error) {
+          // The last attempt records the exit without this step. The approvals
+          // of an ended runtime are closed again when its successor starts.
+          if (!owner.overdue || !this.owns(owner) || error instanceof TerminalOwnerLostError
+            || error instanceof DaemonFenceLostError || error instanceof TerminalSettlementOverdueError) throw error;
+          owner.incomplete = true;
+          try { this.ports.diagnostic?.(entryId, error); } catch { /* A diagnostic cannot change the settlement outcome. */ }
+        }
         this.assertOwner(owner);
         if (entry.desired_state === "stopped") {
-          await this.ports.durability.releaseTerminalExecutionFence(entry.work_attempt_id, executionGenerationId, this.fence(owner));
+          await within(this.ports.durability.releaseTerminalExecutionFence(entry.work_attempt_id, executionGenerationId, this.fence(owner)));
           this.assertOwner(owner);
         }
       }
-      await this.observeExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle,
-        installation, Boolean(replacement), this.fence(owner));
+      await within(this.observeExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle,
+        installation, Boolean(replacement), this.fence(owner)));
       this.assertOwner(owner);
       if (!replacement && !owner.admitted) {
+        // This is the convergence a pass that was turned away is owed.
+        this.convergenceOwed.delete(entryId);
         this.ports.requestConvergence(entryId);
         shouldStartDelivery = entry.desired_state === "running";
       }
@@ -363,8 +557,21 @@ export class ProviderTerminalCoordinator {
 
   /** Reversible update preparation; an error leaves every retained owner live. */
   async drain(): Promise<void> {
-    while (this.pending.size) await Promise.all([...this.pending.values()].map(owner => this.attemptSettlement(owner)));
+    await this.settleAll();
     this.assertNoReplacement();
+  }
+
+  /**
+   * Each exit is tried once more now. One that fails is tried again on its
+   * own schedule, and its wait ends within the bound whether it is recorded
+   * or not: an update or a retirement waits for that end, as it does for a
+   * step that never returns, instead of failing on the first attempt that fails.
+   */
+  private async settleAll(): Promise<void> {
+    while (this.pending.size) await Promise.all([...this.pending.values()].map(async (owner) => {
+      await this.attemptSettlement(owner).catch(() => undefined);
+      await owner.ended;
+    }));
   }
 
   beginRetirement(): void {
@@ -381,7 +588,7 @@ export class ProviderTerminalCoordinator {
   }
 
   async drainAndClose(detach: () => void): Promise<void> {
-    while (this.pending.size) await Promise.all([...this.pending.values()].map(owner => this.attemptSettlement(owner)));
+    await this.settleAll();
     this.assertNoReplacement();
     // No await between closing admission and detaching callbacks. Already
     // retained terminals must finish; later observations belong to no old owner.

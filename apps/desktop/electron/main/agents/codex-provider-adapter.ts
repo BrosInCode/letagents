@@ -1,19 +1,28 @@
 import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
+import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { isAbsolute } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import {
+  codexAppServerEnvironment,
   launchManagedCodexAppServer,
   resolveCodexAppServerUrl,
   waitForLaunchedCodexAppServer,
   type CodexAppServerExit,
   type CodexAppServerLaunch,
 } from "./codex-app-server.js";
+import {
+  assertLiveCodexProjectUnchanged,
+  codexProcessKeepsOwnerSetup,
+  readCodexCommandLine,
+  type CodexLiveProcess,
+} from "./codex-home-harness.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
@@ -28,7 +37,7 @@ import {
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { LETAGENTS_MCP_RUNTIME_TREE_SHA256, resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
-import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
+import { attestProviderSpawnPolicy, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
 import {
   ProviderExecutionObserver,
@@ -75,6 +84,7 @@ import {
   type ProviderContinuationRepairRequest,
   type ProviderContinuationRepairResult,
   ProviderContinuationMissingError,
+  PROCESS_ENDED_DURING_TURN,
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
@@ -92,7 +102,7 @@ import {
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
-type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown };
+type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown; cwd?: unknown };
 
 /**
  * The reviewer Codex reports must be the one this launch named. The owner's
@@ -107,6 +117,40 @@ function assertCodexReviewerApplied(policy: Record<string, unknown>, result: Cod
   }
   if (result.approvalsReviewer !== undefined && result.approvalsReviewer !== null && result.approvalsReviewer !== "user") {
     throw new Error("Codex would review approvals itself instead of asking you. Choose Auto to allow that, or remove the reviewer from your Codex settings.");
+  }
+}
+
+/**
+ * thread/start names no `cwd`. Codex takes a new thread in a named folder with
+ * a writable sandbox as the owner trusting that project: it records the trust
+ * in the owner's own config and loads the project's `.codex` config, its MCP
+ * servers included. Without `cwd` the thread starts where its app-server
+ * runs, which is the work attempt's folder; one that starts anywhere else is
+ * refused. thread/resume does none of this and still names the folder.
+ *
+ * A refused thread is never used. A launch stops its app-server; a repair
+ * leaves its running one alone, with the refused thread idle and unowned.
+ */
+function assertCodexThreadDirectory(cwd: string, result: CodexThreadResult): void {
+  if (!cwd.trim()) return;
+  const started = typeof result.cwd === "string" ? result.cwd : "";
+  if (!started) {
+    throw new Error("Codex did not report the folder this conversation opened in, so LetAgents will not use it. Update Codex.");
+  }
+  if (sameDirectory(started, cwd)) return;
+  throw new Error(`Codex opened this conversation in ${started}, not in the agent's folder ${cwd}, so LetAgents will not use it. Restart the agent.`);
+}
+
+function sameDirectory(left: string, right: string): boolean {
+  if (resolve(left) === resolve(right)) return true;
+  try {
+    if (realpathSync.native(left) === realpathSync.native(right)) return true;
+    // One folder can resolve to two paths (macOS firmlinks: /Users and
+    // /System/Volumes/Data/Users), but it has one device and inode.
+    const [first, second] = [statSync(left, { bigint: true }), statSync(right, { bigint: true })];
+    return first.dev === second.dev && first.ino === second.ino;
+  } catch {
+    return false;
   }
 }
 
@@ -132,6 +176,8 @@ export interface CodexAdapterRpc {
   onDisconnect(listener: () => void): () => void;
   currentConnectionId(): string | null;
   listPendingRequests(): readonly RpcServerRequest[];
+  /** Told of each server request as it arrives, before any observer of the pending set. */
+  onRequest?(listener: (request: RpcServerRequest) => void): () => void;
   onPendingRequestsChanged(listener: () => void): () => void;
   onRequestResolved(listener: (request: RpcServerRequest) => void): () => void;
   respond(request: RpcServerRequest, result: unknown): void;
@@ -158,7 +204,7 @@ export interface CodexProviderAdapterDependencies {
   launchServer(
     serverUrl: string,
     codexBin: string,
-    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string> },
+    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean },
   ): CodexAppServerLaunch | Promise<CodexAppServerLaunch>;
   waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
   createRpcClient(
@@ -169,6 +215,16 @@ export interface CodexProviderAdapterDependencies {
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<CodexAppServerExit>;
+  /**
+   * A running app-server's command line. Null when it cannot be read in time.
+   * Asked only for a process that has its owner's setup.
+   */
+  readCommandLine(pid: number): Promise<string | null>;
+  /**
+   * Throws when a running app-server that has its owner's setup would load
+   * project configuration it was not started with turned off.
+   */
+  assertLiveProjectUnchanged(codexBin: string, live: CodexLiveProcess): Promise<void>;
   writeSupervisorBridgeContext(
     cwd: string,
     context: {
@@ -182,8 +238,21 @@ export interface CodexProviderAdapterDependencies {
   sleep(ms: number): Promise<void>;
 }
 
+/**
+ * How long a command's output is added up before it is recorded, when no
+ * other fact comes first. The record keeps only how many bytes a command
+ * printed, so nothing is lost by waiting, and a byte budget would bound
+ * nothing; the wait only bounds how stale the shown byte count may be. Five
+ * seconds keeps a command that streams for an hour at about 720 facts, where
+ * one fact per chunk filled the record's 10,000 facts within minutes. A
+ * command's end, its turn's end and its process's exit record it at once.
+ */
+export const COMMAND_OUTPUT_WINDOW_MS = 5_000;
+
 export interface CodexProviderAdapterOptions {
   codexBin?: string;
+  /** See COMMAND_OUTPUT_WINDOW_MS; tests shorten it. */
+  commandOutputWindowMs?: number;
   dependencies?: Partial<CodexProviderAdapterDependencies>;
   activitySink?: (event: ProviderActivityEvent) => void;
   streamSink?: (event: ProviderStreamEvent) => void;
@@ -209,6 +278,8 @@ const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
 };
 
 const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input", "sandbox"]);
+/** What an access level decides for a Codex thread. With the owner's setup a thread is given these alone. */
+const CODEX_ACCESS_LEVEL_OPTIONS = ["approvalPolicy", "sandboxPolicy", "approvalsReviewer"] as const;
 const PS_BIRTH_EVIDENCE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
 
 function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
@@ -473,6 +544,30 @@ function permissionParams(request: RpcServerRequest): Record<string, unknown> | 
     ? params : null;
 }
 
+/**
+ * With the owner's own setup on, their MCP servers can ask a person for typed
+ * input or a browser sign-in, or send a tool approval too large to show.
+ * LetAgents can show only a tool approval of bounded size, so nobody could
+ * answer and the turn would wait forever. Without the owner's setup the only
+ * MCP server Codex runs is the room's, and the room's own requests are never
+ * answered here, so nothing changes for such an agent.
+ */
+function isUnanswerableOwnerElicitation(request: RpcServerRequest): boolean {
+  return request.method === "mcpServer/elicitation/request" && permissionParams(request) === null
+    && recordValue(request.params)?.serverName !== LETAGENTS_MCP_SERVER_NAME;
+}
+
+/** What the owner is told in the agent's activity about a request that was turned down for them. */
+function declinedOwnerRequestSummary(request: RpcServerRequest): string {
+  const params = recordValue(request.params);
+  const name = typeof params?.serverName === "string" ? params.serverName.trim().replace(/[^\x20-\x7e]/g, "?").slice(0, 64) : "";
+  const server = name ? `your MCP server ${JSON.stringify(name)}` : "one of your MCP servers";
+  if (recordValue(params?._meta)?.codex_approval_kind === "mcp_tool_call") {
+    return `Did not allow a tool of ${server}. Its approval request was too large or malformed to show.`;
+  }
+  return `Declined a request for ${params?.mode === "url" ? "a sign-in" : "typed input"} from ${server}. LetAgents cannot show it.`;
+}
+
 function permissionFileChanges(value: unknown): CodexPermissionFileChange[] | null {
   if (!Array.isArray(value) || !value.length || value.length > 128) return null;
   const path = (input: unknown): input is string => typeof input === "string" && input.trim().length > 0
@@ -516,6 +611,45 @@ function codexLifecycleStatus(value: unknown): "failed" | "idle" | "working" | n
     if (/^(?:active|inProgress|running|queued|pending)$/i.test(candidate)) return "working";
   }
   return null;
+}
+
+/**
+ * The provider's own reason for a failed turn, for the `error` notification
+ * the app-server sends before `turn/completed`. It is the one line the owner
+ * needs in this agent's activity; the generic summary only said "error". The
+ * activity is local to the owner's machine and is never posted to the room.
+ */
+function codexErrorActivitySummary(notification: RpcNotification): string | null {
+  if (notification.method !== "error") return null;
+  const message = recordValue(recordValue(notification.params)?.error)?.message;
+  if (typeof message !== "string" || !message.trim()) return null;
+  const safe = safeStreamPayload(message.replace(/\s+/g, " ").trim()).payload;
+  return typeof safe === "string" ? `Codex error: ${safe}`.slice(0, 500) : null;
+}
+
+/**
+ * The provider declined the turn's content. Unlike a rate limit or a rejected
+ * key, neither a retry nor the owner can make the same content go through.
+ */
+function isCodexPolicyRefusal(codexErrorInfo: unknown): boolean {
+  return codexErrorInfo === "cyberPolicy" || codexErrorInfo === "misalignmentPolicyViolation";
+}
+
+/**
+ * How long after a thread reports `systemError` its turn's own ending is
+ * awaited before the ending is read from the thread instead. The app-server
+ * sends the two within milliseconds of each other.
+ */
+const CODEX_SYSTEM_ERROR_SETTLE_MS = 2_000;
+
+/**
+ * A thread is between turns when it is `idle`, and also when it is in
+ * `systemError`: that is what a failed turn leaves on its thread, and the
+ * app-server keeps reporting it until the thread's next turn starts. Waiting
+ * for `idle` there waits for the turn this boundary is asked in order to allow.
+ */
+function isCodexThreadBetweenTurns(status: string | null): boolean {
+  return status === "idle" || status === "systemError";
 }
 
 function hasExplicitCodexSystemError(value: unknown): boolean {
@@ -678,6 +812,10 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
   observeProcessExit: defaultObserveProcessExit,
+  readCommandLine: readCodexCommandLine,
+  // The owner's own config is found as the launch found it: through the launch's environment.
+  assertLiveProjectUnchanged: (codexBin, live) =>
+    assertLiveCodexProjectUnchanged(codexBin, live, codexAppServerEnvironment({ homeHarness: true }).env),
   writeSupervisorBridgeContext: writeCodexSupervisorBridgeContext,
   now: () => new Date().toISOString(),
   sleep: delay,
@@ -689,11 +827,20 @@ function isCodexRuntimeUnavailable(state: ProviderObservedState): boolean {
 
 class CodexProviderHandle implements ProviderHandle {
   subscriptionAfterMaterialization = false;
+  /** Told what was turned down for the owner, so it can be shown in the agent's activity. */
+  ownerRequestDeclined: ((summary: string) => void) | null = null;
+  /** The process was started with its owner's own Codex setup, so it must never reload a project's config unchecked. */
+  ownerSetup = false;
+  /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
+  launchNotices: readonly string[] = [];
   custodyLaunchAgentSessionId?: string;
   managedLaunchContract?: string;
   readonly execution: ProviderExecutionObserver;
   readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
   readonly nativeActiveOperations = new Map<string, Extract<NativeExecutionFact, { domain: "execution" }>>();
+  /** Output that is not in the record yet: for each command that printed, its chunks so far, added up. */
+  readonly pendingCommandOutput = new Map<string, { providerContinuationId: string; providerTurnId: string; executionId: string; outputBytes: number }>();
+  pendingCommandOutputTimer: ReturnType<typeof setTimeout> | null = null;
   nativeRuntimeUnavailable: HardControlEvidence | null = null;
   state: ProviderObservedState = "starting";
   stopRequested = false;
@@ -717,6 +864,8 @@ class CodexProviderHandle implements ProviderHandle {
   threadIdleEpoch = 0;
   threadIdleReconciledEpoch = 0;
   threadIdleReconciliation: Promise<void> | null = null;
+  /** The one pending read after the thread reported `systemError`. */
+  systemErrorReconciliation: Promise<void> | null = null;
   readonly roomTurnResults = new CodexTurnResultAccumulator();
   providerContinuationId: string;
 
@@ -738,6 +887,12 @@ class CodexProviderHandle implements ProviderHandle {
       if (this.nativeRuntimeUnavailable) return;
       this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
         providerConnection.processIdentity ?? undefined, providerConnection.pid ?? undefined);
+    });
+    client.onRequest?.((request) => {
+      if (!isUnanswerableOwnerElicitation(request)) return;
+      // Declining is what the server sees when a person says no.
+      try { client.respond(request, { action: "decline", content: null, _meta: null }); } catch { return; /* It is no longer pending. */ }
+      try { this.ownerRequestDeclined?.(declinedOwnerRequestSummary(request)); } catch { /* Reporting never controls native work. */ }
     });
   }
 
@@ -815,7 +970,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;
+    this.commandOutputWindowMs = options.commandOutputWindowMs ?? COMMAND_OUTPUT_WINDOW_MS;
   }
+  private readonly commandOutputWindowMs: number;
 
   capabilities(): ProviderAdapterCapabilities {
     return {
@@ -1263,8 +1420,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       }
       if (active) return { state: "active", providerContinuationId: continuation, nativeProcessIdentity: identity, providerTurnId: active };
       // A cached handle state or an active thread with no visible turn cannot
-      // certify idle. Even a valid empty list requires native idle as well.
-      if (extractThreadStatus(read.thread) !== "idle") return { state: "unknown" };
+      // certify idle. Even a valid empty list requires the thread itself to
+      // be between turns.
+      if (!isCodexThreadBetweenTurns(extractThreadStatus(read.thread))) return { state: "unknown" };
       return { state: "idle", providerContinuationId: continuation, nativeProcessIdentity: identity, latestProviderTurnId: latest };
     } catch {
       // Timeouts and unavailable snapshots are uncertainty, not runtime failure.
@@ -1492,12 +1650,38 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const read = await handle.client.request<ThreadReadResult>("thread/read", { threadId: handle.providerContinuationId, includeTurns: true });
     if (read.thread?.id !== handle.providerContinuationId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery resolved a different continuation thread.");
     const turn = read.thread?.turns?.find((candidate) => candidate.id === turnId);
+    // The process that ran this turn has ended, and this one runs no turn it
+    // was not asked for. A turn the thread does not hold, or still shows as
+    // running, was cut off by that exit: nothing will ever end it, so it is
+    // reported as interrupted instead of being looked for or waited for.
+    const cutOffByExit = (shown?: ThreadReadTurn): Promise<ProviderRoomTurnResult> => {
+      const ended = { ...(shown ?? { id: turnId, items: [] }), status: "interrupted", error: { message: PROCESS_ENDED_DURING_TURN } } as ThreadReadTurn;
+      if (request.recordEnding) {
+        this.consumeNotification(handle, { method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId, turn: ended } });
+      }
+      handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
+      return this.roomTurnResultFromTerminal(handle, turnId, "interrupted", ended, options.checkpointTerminalResult);
+    };
     if (!turn) {
+      if (request.originProcessEnded) return cutOffByExit();
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw new CodexRoomTurnRecoveryError("Codex room-turn recovery cannot find the persisted exact turn.");
     }
     const status = String(typeof turn.status === "string" ? turn.status : turn.status?.status ?? "").toLowerCase();
     if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) {
+      // The runtime that ran this turn may have exited before it reported how
+      // the turn ended, and this one is sent no notification for a turn that
+      // ended before it started. The thread's own record is then the only
+      // place the ending exists, so it is taken from there exactly as its
+      // notification would have brought it. Left open, the turn refuses every
+      // later turn of this agent in the execution record. Only the daemon
+      // knows whether its record holds the turn open, so it says so.
+      if (request.recordEnding) {
+        this.consumeNotification(handle, {
+          method: "turn/completed",
+          params: { threadId: handle.providerContinuationId, turnId, turn: { ...turn, status } },
+        });
+      }
       handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
       return this.roomTurnResultFromTerminal(handle, turnId, status, turn, options.checkpointTerminalResult);
     }
@@ -1505,6 +1689,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw new CodexRoomTurnRecoveryError("Codex room-turn recovery found an unknown exact turn state.");
     }
+    if (request.originProcessEnded) return cutOffByExit(turn);
     handle.setLiveState("working");
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
     return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
@@ -1532,6 +1717,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     if (handle.terminal) throw new Error("Codex continuation repair requires a live provider process.");
     if (handle.turnWaiters.size) throw new Error("Codex continuation repair is unsafe while a provider turn is active.");
+    // Loading or starting a thread makes Codex read the project's config again.
+    if (handle.ownerSetup) await this.stopBeforeProjectReload(handle, request.cwd);
 
     const assertAttached = () => {
       if (options.detachSignal?.aborted) {
@@ -1548,7 +1735,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // advertised seven-second grace into eleven seconds).
     // A stored policy can predate the access level it was launched under. The
     // policy bound to this runtime is the one a replacement thread must keep.
-    const policy = normalizeLaunchPolicy({ ...(recordValue(request.launchPolicy) ?? {}), ...(handle.appliedTurnPolicy() ?? {}) });
+    // A thread of a process with its owner's setup is given the access level's
+    // own three options and nothing else the stored policy holds.
+    const stored = recordValue(request.launchPolicy) ?? {};
+    const policy = normalizeLaunchPolicy({
+      ...(handle.ownerSetup ? Object.fromEntries(CODEX_ACCESS_LEVEL_OPTIONS.filter((key) => Object.hasOwn(stored, key)).map((key) => [key, stored[key]])) : stored),
+      ...(handle.appliedTurnPolicy() ?? {}),
+    });
     const probeDelays = [0, 1_000, 2_000, 4_000];
     const probe = async (threadId: string): Promise<boolean> => {
       for (const waitMs of probeDelays) {
@@ -1611,13 +1804,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
     assertAttached();
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
-      cwd: request.cwd,
       ...policy,
       historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
       ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
     });
     assertCodexReviewerApplied(policy, started);
+    assertCodexThreadDirectory(request.cwd, started);
     const replacement = started.thread?.id?.trim();
     if (!replacement || replacement === expected) {
       throw new Error("Codex continuation repair did not return a distinct replacement thread.");
@@ -1849,6 +2042,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Codex spawn requires the durable agent display name from the manifest.");
     }
 
+    // With the owner's setup this is the access level's own options and nothing else the stored policy holds.
     const attestedPolicy = attestProviderSpawnPolicy("codex", req);
     const policy = normalizeLaunchPolicy(attestedPolicy);
     const turnPolicy = codexTurnPolicy(attestedPolicy);
@@ -1930,6 +2124,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const managedLaunchContract = boundedMcp && !req.devMcpServerEntryPath
       ? boundedLaunchContract(req.supervisorWorkerSession?.apiUrl || desktopApiUrl, custodialTools)
       : undefined;
+    // With the owner's own setup on, the app-server's environment carries none
+    // of the room agent's coordinates, so the room's server must be the sealed
+    // one that is given them in its own configuration.
+    const homeHarness = spawnUsesHomeHarness("codex", req);
+    if (homeHarness && !custodialRuntime) {
+      throw new Error("Codex can use its owner's own setup only as a daemon-supervised room agent.");
+    }
     const serverUrl = await this.deps.resolveServerUrl();
     const launch = await this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
@@ -1941,6 +2142,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
           }, custodialTools)]
         : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
       ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
+      // The owner's own Codex setup stays on for this agent's app-server.
+      ...(homeHarness ? { homeHarness: true } : {}),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {
@@ -2004,12 +2207,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
         }
       } else {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
-          cwd: req.cwd,
           ...policy,
           historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
           ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
         });
+        assertCodexThreadDirectory(req.cwd, threadResult);
       }
       assertCodexReviewerApplied(policy, threadResult);
       const threadId = threadResult.thread?.id;
@@ -2032,6 +2235,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
         turnPolicy,
       );
       handle.managedLaunchContract = managedLaunchContract;
+      handle.ownerSetup = homeHarness;
+      // A start with the owner's setup asks Codex nothing more that can fail it, so a line given here reaches the owner.
+      const unused = homeHarness
+        ? ownerSetupUnusedOptionsSaidOnce.whenChanged(req.supervisorEntryId, ownerSetupUnusedOptionsNotice("Codex", req.launchPolicy, attestedPolicy))
+        : null;
+      if (unused) handle.launchNotices = [unused];
+      this.reportDeclinedOwnerRequests(handle);
       handle.setLiveState("idle");
       this.emitNativeExecution(handle, {
         domain: "runtime",
@@ -2129,6 +2339,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
         },
       };
     }
+    // Whether this process has its owner's setup is what the daemon recorded
+    // when it started it, never something read off the process. For every
+    // other agent nothing below differs from an attach without the setup.
+    const ownerSetup = ref.ownerSetup === true;
     let handle: CodexProviderHandle | null = null;
     let exactEndpointVerified = false;
     const pendingNotifications: RpcNotification[] = [];
@@ -2138,7 +2352,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
     });
     try {
       await client.connect();
-      await requireLetAgentsWorkplace(client);
+      // Listing the app-server's MCP servers makes Codex read the project's
+      // config again, and what the project gained since this process started
+      // would load as the owner's. The list is only a look at a process that
+      // already runs, so a process with its owner's setup is not asked for it,
+      // and nor is one whose record cannot say. Nothing else here makes Codex
+      // read the project again.
+      if (ref.ownerSetup === undefined) await requireLetAgentsWorkplace(client);
       let read: ThreadReadResult;
       let continuationMissing = false;
       let exactEmptyFallback = false;
@@ -2225,6 +2445,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
         this.deps.now,
         turnPolicy,
       );
+      handle.ownerSetup = ownerSetup;
+      this.reportDeclinedOwnerRequests(handle);
       handle.setLiveState(continuationMissing ? "idle" : "working");
       handle.subscriptionAfterMaterialization = exactEmptyFallback;
       this.handles.set(ref.workAttemptId, handle);
@@ -2385,7 +2607,51 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return params.threadId === handle.providerContinuationId;
   }
 
+  /**
+   * A command can print thousands of chunks in one burst, and each chunk used
+   * to be one fact in the execution record. A burst larger than the record's
+   * intake holds overflowed it, and the agent's record had a gap from then on.
+   * Adding up only what one read held was not enough: a command that streams
+   * a chunk every few milliseconds, as an install or a test run does, filled
+   * the record just the same. The chunks of one command are now added up for
+   * up to COMMAND_OUTPUT_WINDOW_MS and recorded as one fact: before the next
+   * fact of any other kind (the command's own end, a turn's end, the process
+   * exiting), and at the latest when the window closes. Commands that print
+   * in turn are each added up on their own, in the order they first printed
+   * in the window, so a window is as many facts as commands printed in it.
+   */
+  private noteCommandOutput(
+    handle: CodexProviderHandle,
+    identity: { providerContinuationId: string; providerTurnId: string },
+    executionId: string,
+    outputBytes: number,
+  ): void {
+    if (handle.nativeRuntimeUnavailable) return;
+    const key = JSON.stringify([identity.providerContinuationId, identity.providerTurnId, executionId]);
+    const pending = handle.pendingCommandOutput.get(key);
+    if (pending) {
+      pending.outputBytes += outputBytes;
+      return;
+    }
+    if (!handle.pendingCommandOutput.size) {
+      handle.pendingCommandOutputTimer = setTimeout(() => this.recordCommandOutput(handle), this.commandOutputWindowMs);
+      handle.pendingCommandOutputTimer.unref?.();
+    }
+    handle.pendingCommandOutput.set(key, { ...identity, executionId, outputBytes });
+  }
+
+  private recordCommandOutput(handle: CodexProviderHandle): void {
+    if (handle.pendingCommandOutputTimer) { clearTimeout(handle.pendingCommandOutputTimer); handle.pendingCommandOutputTimer = null; }
+    if (!handle.pendingCommandOutput.size) return;
+    const pending = [...handle.pendingCommandOutput.values()];
+    handle.pendingCommandOutput.clear();
+    for (const output of pending) {
+      this.emitNativeExecution(handle, { ...output, domain: "execution", operation: "command", kind: "output", sideEffects: "possible" });
+    }
+  }
+
   private emitNativeExecution(handle: CodexProviderHandle, fact: NativeExecutionFact): void {
+    this.recordCommandOutput(handle);
     if (handle.nativeRuntimeUnavailable) return;
     if (fact.domain === "execution") {
       const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId, fact.executionId]);
@@ -2412,12 +2678,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     notification: RpcNotification,
     correlateLifecycle = true,
   ): void {
-    this.observePermissionFileChangeProposal(handle, notification);
-    const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);
-    handle.roomTurnResults.observe(notification.method, notification.params);
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
     const terminalMatch = /^turn\/(completed|interrupted|failed|cancelled|stopped)$/i.exec(notification.method);
+    this.observePermissionFileChangeProposal(handle, notification);
+    const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);
+    handle.roomTurnResults.observe(notification.method, notification.params);
     // Record the durable in-memory terminal edge first. Stream/activity
     // observers are best-effort and must never suppress exact turn settlement.
     if (exactTurnId && exactThreadId === handle.providerContinuationId && terminalMatch) {
@@ -2430,18 +2696,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     const threadStatus = recordValue(recordValue(notification.params)?.status)?.type
       ?? recordValue(notification.params)?.status;
-    if (notification.method === "thread/status/changed"
-      && exactThreadId === handle.providerContinuationId
-      && String(threadStatus ?? "").toLowerCase() === "idle") {
-      handle.threadIdleEpoch += 1;
-      this.reconcileExactTurnTerminalsAfterIdle(handle);
+    if (notification.method === "thread/status/changed" && exactThreadId === handle.providerContinuationId) {
+      const status = String(threadStatus ?? "").toLowerCase();
+      if (status === "idle") {
+        handle.threadIdleEpoch += 1;
+        this.reconcileExactTurnTerminalsAfterIdle(handle);
+      } else if (status === "systemerror") this.reconcileAfterSystemError(handle);
     }
     // Build the readable summary once and attach the same value to both the
     // ordered stream and the compact activity event. In particular, Codex's
     // approved summaryTextDelta stream is accumulated here; raw reasoning
     // textDelta content remains hidden by summarizeCodexRuntimeNotification.
+    // An `error` line in the ordered stream names the provider's reason.
     const summary = summarizeCodexRuntimeNotification(notification);
-    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary,
+    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method),
+      codexErrorActivitySummary(notification) ?? summary.summary,
       nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
     // Execution status belongs to the item, never to the reusable app-server.
     // Exact turn settlement above remains independent of this runtime state.
@@ -2508,10 +2777,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
   ): NativeLifecycleCheckpoint | null {
     if (handle.nativeRuntimeUnavailable) return null;
     const params = recordValue(notification.params);
+    // `systemError` is the status of a thread whose last turn failed: a
+    // provider refusal, a rejected key, a rate limit. The app-server stays up
+    // and the same thread takes the next turn. Where the daemon starts every
+    // turn that is a failed turn, reported by `turn/completed`, and never the
+    // end of the runtime: latching here cost the agent a usable conversation
+    // for each refusal. A lane that polls for itself has no one to start its
+    // next turn, so it keeps the latch and is restarted.
+    const threadSystemError = notification.method === "thread/status/changed"
+      && params?.threadId === handle.providerContinuationId
+      && hasExplicitCodexSystemError(params);
     const explicitRuntimeFailure = notification.method === "process/systemError"
-      || (notification.method === "thread/status/changed"
-        && params?.threadId === handle.providerContinuationId
-        && hasExplicitCodexSystemError(params));
+      || (threadSystemError && handle.lifecycleAuthorityMode !== "typed");
     if (explicitRuntimeFailure) {
       this.emitNativeRuntimeUnavailable(handle, "native_session_terminated");
       return null;
@@ -2567,7 +2844,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     if (notification.method === "item/commandExecution/outputDelta") {
       if (nativeExecutionId(params.itemId) && typeof params.delta === "string" && params.delta.length > 0) {
-        emit({ ...identity, domain: "execution", executionId: params.itemId, operation: "command", kind: "output", outputBytes: Buffer.byteLength(params.delta), sideEffects: "possible" });
+        this.noteCommandOutput(handle, identity, params.itemId, Buffer.byteLength(params.delta));
       }
       return null;
     }
@@ -2599,6 +2876,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   private markNativeExecutionUnavailable(handle: CodexProviderHandle): void {
+    this.recordCommandOutput(handle);
     handle.execution.markUnavailable();
     handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
       handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
@@ -2609,6 +2887,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     controlEvidence: "process_exit" | "native_session_terminated",
   ): void {
     if (handle.nativeRuntimeUnavailable) return;
+    this.recordCommandOutput(handle);
     handle.nativeRuntimeUnavailable = controlEvidence;
     handle.permissionFileChangeProposals.clear();
     handle.state = "failed";
@@ -2731,7 +3010,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ? { turnId, ...handle.roomTurnResults.normalize(handle.providerContinuationId, turnId, turn) }
       : { turnId, providerContinuationId: handle.providerContinuationId,
         outcome: status === "failed" ? "failed" : "interrupted", text: null, evidence: "transcript",
-        error: String(safeStreamPayload(turn.error?.message || `Codex bounded room turn ended ${status}.`).payload).slice(0, 2000) };
+        error: String(safeStreamPayload(turn.error?.message || `Codex bounded room turn ended ${status}.`).payload).slice(0, 2000),
+        ...(status === "failed" && isCodexPolicyRefusal(turn.error?.codexErrorInfo) ? { refusal: true as const } : {}) };
     await checkpointTerminalResult?.(terminalResult);
     handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
     return terminalResult;
@@ -2766,6 +3046,26 @@ export class CodexProviderAdapter implements ProviderAdapter {
     });
   }
 
+  /**
+   * A failed turn puts its thread in `systemError` just before its
+   * `turn/completed`. If that ending is lost, nothing else settles the turn:
+   * the thread does not go idle until its next turn, and the daemon starts no
+   * turn behind an open one. So read the thread once, a short stated time
+   * after the status, and take a waiting turn's ending from there.
+   */
+  private reconcileAfterSystemError(handle: CodexProviderHandle): void {
+    if (handle.systemErrorReconciliation) return;
+    const settle = () => {
+      handle.systemErrorReconciliation = null;
+      // Nothing waits: the ending arrived. Asking anyway would be remembered
+      // and make the next turn's waiter read the thread the moment it starts.
+      if (!handle.turnWaiters.size) return;
+      handle.threadIdleEpoch += 1;
+      this.reconcileExactTurnTerminalsAfterIdle(handle);
+    };
+    handle.systemErrorReconciliation = this.deps.sleep(CODEX_SYSTEM_ERROR_SETTLE_MS).then(settle, settle);
+  }
+
   private reconcileExactTurnTerminalsAfterIdle(handle: CodexProviderHandle): void {
     if (!handle.turnWaiters.size
       || handle.threadIdleReconciliation
@@ -2786,7 +3086,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
           if (!handle.turnWaiters.has(key)) continue;
           const status = String(extractTurnStatus(turn) ?? "").toLowerCase();
           if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) {
-            this.noteExactTurnTerminal(handle, key, status);
+            // The ending never arrived. Take it from the thread's own record
+            // exactly as its notification would have brought it: that wakes
+            // the waiter and also records the turn's ending, without which the
+            // agent would keep saying it is working. If the notification still
+            // comes, it repeats the same native event and changes nothing.
+            this.consumeNotification(handle, {
+              method: "turn/completed",
+              params: { threadId: handle.providerContinuationId, turnId: turn.id, turn: { ...turn, status } },
+            });
           }
         }
       } catch {
@@ -2837,6 +3145,47 @@ export class CodexProviderAdapter implements ProviderAdapter {
     };
     this.streamSink?.(event);
     for (const listener of handle.streamListeners) listener(event);
+  }
+
+  /**
+   * For a process that has its owner's setup: check the project still adds
+   * nothing the process was not started with turned off, and stop the process
+   * and refuse when it does, or when that cannot be checked. The caller then
+   * never makes the call that would have loaded the project's config as the
+   * owner's. The agent is idle here, and the owner is told why it stopped.
+   */
+  private async stopBeforeProjectReload(handle: CodexProviderHandle, cwd: string): Promise<void> {
+    const reason = await this.projectReloadRefusal(handle, cwd);
+    if (!reason) return;
+    // The daemon keeps an agent's activity from its stream, so this is said there before the process goes.
+    this.publishStream(handle, "ownerSetup/stopped", {}, "provider_event", `Stopped this agent. ${reason}`);
+    await this.stop(handle).catch(() => undefined);
+    throw new Error(reason);
+  }
+
+  /** Why a process with its owner's setup may not load the project's config again. Null when it may. */
+  private async projectReloadRefusal(handle: CodexProviderHandle, cwd: string): Promise<string | null> {
+    const commandLine = handle.pid === null ? null : await this.deps.readCommandLine(handle.pid);
+    if (!commandLine) {
+      return "LetAgents could not read how this agent's Codex was started, so it stopped the agent "
+        + "before Codex could load the project's configuration with your own setup. It starts again by itself.";
+    }
+    // LetAgents started this process with the owner's setup. A command line that says otherwise is not believed.
+    if (!codexProcessKeepsOwnerSetup(commandLine)) {
+      return "This agent's Codex is not running the way LetAgents started it, so LetAgents stopped the agent "
+        + "before Codex could load the project's configuration with your own setup. It starts again by itself.";
+    }
+    try {
+      await this.deps.assertLiveProjectUnchanged(this.codexBin, { commandLine, cwd });
+      return null;
+    } catch (error) {
+      return errorMessage(error);
+    }
+  }
+
+  private reportDeclinedOwnerRequests(handle: CodexProviderHandle): void {
+    // The daemon builds an agent's activity from its stream, so that is where it is said.
+    handle.ownerRequestDeclined = (summary) => this.publishStream(handle, "mcpServer/elicitation/declined", {}, "provider_event", summary);
   }
 
   private publishActivity(

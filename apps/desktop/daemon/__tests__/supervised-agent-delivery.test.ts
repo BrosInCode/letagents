@@ -1462,8 +1462,8 @@ async function enqueue(store: SupervisedAgentInboxStore, id = "1") {
   return (await store.claimHead(agent.agentId))!;
 }
 
-async function ingest(store: SupervisedAgentInboxStore, id = "1") {
-  await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: id, messages: [{ source_message_id: id, source_message: { id }, activation: {} }] });
+async function ingest(store: SupervisedAgentInboxStore, id = "1", activation: Record<string, unknown> = {}) {
+  await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: id, messages: [{ source_message_id: id, source_message: { id }, activation }] });
 }
 
 test("a transient provider failure continues its unfinished task without another room message", async () => {
@@ -1507,8 +1507,13 @@ test("a transient provider failure continues its unfinished task without another
 
 const continuityTask = { id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 };
 
-/** A lease holder whose provider turns end with `failures` in order, then succeed with no reply. */
-async function runNoReplyContinuity(failures: readonly string[], rounds: readonly (readonly string[])[]) {
+/**
+ * A lease holder whose provider turns end with `failures` in order, then succeed with no reply.
+ * A turn listed in `refusedTurns` (counted from one) is one the provider marked as a refusal.
+ */
+async function runNoReplyContinuity(failures: readonly string[], rounds: readonly (readonly string[])[], refusedTurns: readonly number[] = [],
+  /** What the room's messages carry as activation: everything in it comes from the server. */
+  activation: Record<string, unknown> = {}) {
   const root = await mkdtemp(join(tmpdir(), "continuity-no-reply-"));
   let tick = 0;
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"),
@@ -1523,13 +1528,14 @@ async function runNoReplyContinuity(failures: readonly string[], rounds: readonl
     await options?.checkpointTurnStarted?.(turnId);
     const error = failures[sources.length - 1];
     return error
-      ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "transcript", error }
+      ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "transcript", error,
+        ...(refusedTurns.includes(sources.length) ? { refusal: true as const } : {}) }
       : { turnId, outcome: "no_reply", text: null };
   }), { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] },
   currentAuthority, 0, async () => {});
   try {
     for (const ids of rounds) {
-      for (const id of ids) await ingest(store, id);
+      for (const id of ids) await ingest(store, id, activation);
       await delivery.pump(agent);
     }
     return { receipts: await store.receipts(agent.agentId), sources, prompts };
@@ -1569,6 +1575,49 @@ test("a content-filter failure is settled without a follow-up and without blocki
   assert.deepEqual(sources, ["1", "2"]);
   assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
   assert.match(receipts[0]!.last_error ?? "", /content filter.*not continued automatically/);
+});
+
+test("a provider's refusal of a lease holder's turn is settled with its reason and never blocks later messages", async () => {
+  const reason = "This content was flagged by the provider. Try rephrasing your request.";
+  const policy = taskFailurePolicy(reason, 1, true);
+  assert.deepEqual({ automatic: policy.automatic, settle: policy.settle }, { automatic: false, settle: true });
+  assert.ok(policy.detail.startsWith(reason), "the provider's own reason leads the message");
+  // A follow-up turn that is refused as well is settled the same way, however many came before it.
+  for (const attempt of [2, 3, 4, 9]) assert.deepEqual(taskFailurePolicy(reason, attempt, true), policy, `attempt ${attempt}`);
+
+  const { receipts, sources } = await runNoReplyContinuity([reason, reason], [["1"], ["2"], ["3"]], [1, 2]);
+  assert.deepEqual(sources, ["1", "2", "3"], "no follow-up turn repeats the refused context, and each next message still runs");
+  assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_failed", "acknowledged_no_reply"],
+    "a second refusal in a row is settled the same way; no blocked follow-up was queued");
+  for (const refused of receipts.slice(0, 2)) {
+    assert.equal(Object.hasOwn(refused.activation, "task_continuity_refusal"), false, "nothing is kept on the message that would need clearing");
+    assert.ok(refused.last_error?.startsWith(reason), refused.last_error ?? "");
+    assert.match(refused.last_error ?? "", /not continued automatically.*send a message to continue it/);
+  }
+});
+
+test("a lease holder's failure that the owner can clear still blocks until Retry delivery", async () => {
+  // The same wording without the provider's refusal mark is an unknown
+  // failure, and a rejected key is one only the owner can fix. Continuing is
+  // how the held task resumes after that, so the follow-up waits, blocked.
+  for (const reason of [
+    "This content was flagged by the provider. Try rephrasing your request.",
+    "unexpected status 401 Unauthorized: the provider rejected this key.",
+  ]) {
+    assert.equal(taskFailurePolicy(reason, 1).settle, undefined, reason);
+    const { receipts, sources } = await runNoReplyContinuity([reason], [["1"], ["2"]]);
+    assert.deepEqual(sources, ["1"], reason);
+    assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "blocked", "pending"], reason);
+    assert.match(receipts[1]!.last_error ?? "", /use Retry delivery to continue the existing task/, reason);
+  }
+});
+
+test("only the provider's own result marks a turn refused: a message that arrives claiming it is treated as any other", async () => {
+  const reason = "unexpected status 401 Unauthorized: the provider rejected this key.";
+  const { receipts, sources } = await runNoReplyContinuity([reason], [["1"], ["2"]], [], { task_continuity_refusal: true });
+  assert.deepEqual(sources, ["1"]);
+  assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "blocked", "pending"],
+    "the failure blocks until Retry delivery, as without the claim");
 });
 
 test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {
@@ -5159,6 +5208,97 @@ test("startup recovery rejects an exact turn after its provider continuation is 
     assert.equal(blocked.state, "blocked");
     assert.match(blocked.last_error ?? "", /different or unverifiable provider authority/i);
     await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+/** The saved turn's own execution, `generation-1` of work attempt `attempt`, with or without a recorded terminal. */
+function recordExecution(database: { exec(sql: string): void; prepare(sql: string): { run(...values: Array<string | null>): unknown } }, ended: boolean): void {
+  database.exec(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+    VALUES('attempt','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','2026-08-31T00:00:00.000Z')`);
+  database.prepare("INSERT INTO work_attempt_executions VALUES('generation-1','attempt','2026-08-31T00:00:00.000Z','test',1,?)")
+    .run(ended ? JSON.stringify({ ended_at: "2026-08-31T00:01:00.000Z", terminal_cause: "crashed" }) : null);
+}
+
+test("a saved turn is recovered as one whose process has ended only when a later runtime recovers it and that process's terminal is on record", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-process-ended-"));
+  const { DatabaseSync } = await import("node:sqlite");
+  try {
+    /** Recover one saved turn of `generation-1` with a runtime of `runsIn`, the turn's own process ended or not. */
+    const recover = async (name: string, runsIn: string, ended: boolean) => {
+      const path = join(root, `${name}.sqlite`);
+      const store = new SupervisedAgentInboxStore(path);
+      const item = await enqueue(store);
+      await store.checkpointTurnStarted(item.inbox_item_id, "turn-saved", TEST_PROVIDER_TURN_AUTHORITY);
+      const database = new DatabaseSync(path);
+      recordExecution(database, ended);
+      database.close();
+      const requests: Array<Record<string, unknown>> = [];
+      const delivery = new SupervisedAgentDelivery(store, provider(
+        async () => { throw new Error("must not rerun"); },
+        async (_handle, request) => { requests.push({ ...request }); return { turnId: "turn-saved", outcome: "reply", text: "recovered" }; },
+      ), { poll: async () => ({}), publish: async (input) => ({ messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }) }, currentAuthority, 0);
+      await delivery.pump({ ...agent, executionGenerationId: runsIn });
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+      await store.close();
+      return requests[0]!;
+    };
+    assert.equal((await recover("later-runtime-ended", "generation-2", true)).originProcessEnded, true);
+    assert.equal((await recover("later-runtime-alive", "generation-2", false)).originProcessEnded, undefined,
+      "a process with no recorded terminal may still be running the turn");
+    assert.equal((await recover("own-runtime", "generation-1", true)).originProcessEnded, undefined,
+      "a runtime is never told that its own process has ended");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a turn of a session an ended Open Model process ran is read in that session by its replacement; no other mismatch of authority is", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-earlier-session-"));
+  const { DatabaseSync } = await import("node:sqlite");
+  const reason = "The agent's process ended during this turn, and the turn's result could not be recovered. The message was not run again.";
+  try {
+    const recover = async (name: string, input: { provider: string; ended: boolean; workAttemptId?: string }) => {
+      const path = join(root, `${name}.sqlite`);
+      const store = new SupervisedAgentInboxStore(path);
+      const item = await enqueue(store);
+      await store.checkpointTurnStarted(item.inbox_item_id, "turn-old-session", { ...TEST_PROVIDER_TURN_AUTHORITY, provider_continuation_id: "session-old" });
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      const database = new DatabaseSync(path);
+      recordExecution(database, input.ended);
+      database.close();
+      const requests: Array<Record<string, unknown>> = [];
+      const successor = { ...agent, provider: input.provider, executionGenerationId: "generation-2", providerContinuationId: "session-new",
+        workAttemptId: input.workAttemptId ?? agent.workAttemptId,
+        handle: { ...agent.handle, providerContinuationId: "session-new", workAttemptId: input.workAttemptId ?? agent.workAttemptId } };
+      const delivery = new SupervisedAgentDelivery(store, provider(
+        async () => { throw new Error("must not rerun"); },
+        async (_handle, request, options) => {
+          requests.push({ ...request });
+          const result = { turnId: "turn-old-session", providerContinuationId: "session-old", outcome: "interrupted" as const, text: null, evidence: "transcript" as const, error: reason };
+          await options?.checkpointTerminalResult?.(result);
+          return result;
+        },
+      ), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 0);
+      await delivery.pump(successor);
+      const receipt = (await store.receipts(agent.agentId))[0]!;
+      await store.close();
+      return { receipt, requests };
+    };
+    const read = await recover("open-model-ended", { provider: "open-model", ended: true });
+    assert.deepEqual(read.requests.map((request) => [request.providerTurnId, request.providerContinuationId, request.originProcessEnded]),
+      [["turn-old-session", "session-old", true]], "the adapter is given the turn's own session");
+    assert.equal(read.receipt.state, "acknowledged_failed");
+    assert.equal(read.receipt.last_error, reason, "and the message settles with what the session showed");
+
+    for (const [name, input] of Object.entries({
+      "open-model-alive": { provider: "open-model", ended: false },
+      "codex-ended": { provider: "codex", ended: true },
+      "claude-ended": { provider: "claude-code", ended: true },
+      "another-work-attempt": { provider: "open-model", ended: true, workAttemptId: "another-attempt" },
+    })) {
+      const refused = await recover(name, input);
+      assert.deepEqual(refused.requests, [], `${name}: the turn is not read through another authority`);
+      assert.equal(refused.receipt.state, "blocked", name);
+      assert.match(refused.receipt.last_error ?? "", /different or unverifiable provider authority/i, name);
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

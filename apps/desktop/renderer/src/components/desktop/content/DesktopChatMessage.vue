@@ -1,5 +1,6 @@
 <template>
   <article
+    ref="messageElement"
     class="room-chat-message"
     tabindex="-1"
     :class="{
@@ -12,6 +13,7 @@
       'is-ambient-system-message': isAmbientSystem || isWakeNotice,
       'is-wake-notice': isWakeNotice,
       'is-arriving': animateArrival,
+      'is-reacting': reactionPickerAnchor !== null,
       'is-thread-context': context !== 'timeline',
       'is-thread-root-context': context === 'thread-root',
       'is-thread-reply-context': context === 'thread-reply',
@@ -54,6 +56,18 @@
         </div>
         <div class="room-message-meta-tail">
           <button
+            v-if="reactable"
+            class="room-message-reply-action room-message-react-action"
+            type="button"
+            title="Add reaction"
+            aria-label="Add reaction"
+            aria-haspopup="dialog"
+            :aria-expanded="reactionPickerAnchor !== null"
+            @click="openReactionPicker"
+          >
+            <SmilePlus :size="14" aria-hidden="true" />
+          </button>
+          <button
             class="room-message-reply-action room-message-copy-action"
             type="button"
             :title="copyButtonTitle"
@@ -84,9 +98,20 @@
             <LocateFixed v-if="context !== 'timeline'" :size="14" aria-hidden="true" />
             <MessageSquare v-else :size="14" aria-hidden="true" />
           </button>
+          <button
+            v-if="pinnable"
+            class="room-message-reply-action room-message-pin-action"
+            type="button"
+            :title="pinned ? 'Unpin message' : 'Pin message'"
+            :aria-label="pinned ? 'Unpin message' : 'Pin message'"
+            :aria-pressed="pinned"
+            :disabled="Boolean(pinContext?.state.value.pending)"
+            @click="pinContext?.toggle(message.id)"
+          ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></button>
           <span v-if="provenanceLabel" class="room-message-provenance" :data-kind="ownerKind">
             {{ provenanceLabel }}
           </span>
+          <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
           <time :datetime="message.timestamp">{{ formattedTime }}</time>
         </div>
       </div>
@@ -110,6 +135,7 @@
 
         <DesktopGitHubEventCard
           v-if="githubEvent"
+          room
           :event="githubEvent"
           :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
           @open-event="$emit('open-github-event', $event)"
@@ -121,10 +147,17 @@
           :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
+          :room-identifier="roomIdentifier"
           @message-reference-click="$emit('scroll-to-message', $event)"
           @task-reference-click="$emit('open-task', $event)"
         />
 
+        <DesktopGitHubEventCard
+          v-for="preview in linkPreviews"
+          :key="preview.url"
+          :event="linkPreviewPresentation(preview)"
+          compact
+        />
         <DesktopMessageAttachments
           v-if="message.attachments.length"
           :message-id="message.id"
@@ -132,6 +165,17 @@
           @open-image="$emit('open-image', $event)"
         />
       </div>
+
+      <MessageReactionBar
+        v-if="reactions.length"
+        :reactions="reactions"
+        :viewer-login="reactionContext?.viewerLogin.value ?? null"
+        :viewer-reacted="viewerReacted"
+        :can-react="reactable"
+        :picker-open="reactionPickerAnchor !== null"
+        @toggle="toggleReaction"
+        @add="openReactionPicker"
+      />
 
       <ul
         v-if="visibleDeliveryReceipts.length"
@@ -258,11 +302,24 @@
           <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
             <span>Copy message</span>
           </button>
+          <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromContext">
+            <span>Copy link to message</span>
+          </button>
           <button type="button" role="menuitem" @click="quoteReplyFromContext">
             <span>Quote reply</span>
           </button>
           <button type="button" role="menuitem" @click="tertiaryActionFromContext">
             <span>{{ tertiaryActionLabel }}</span>
+          </button>
+          <MessageReminderMenu v-if="remindable" :room="roomIdentifier ?? ''" :message="message.id" @scheduled="reminderScheduled" />
+          <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromContext">
+            <span>{{ pinned ? "Unpin message" : "Pin message" }}</span>
+          </button>
+          <button v-if="reactable" type="button" role="menuitem" @click="reactFromContext">
+            <span>Add reaction…</span>
+          </button>
+          <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromContext">
+            <span>Mark unread from here</span>
           </button>
           <div class="room-message-context-menu-separator" role="separator" />
           <button type="button" role="menuitem" @click="messageInfoFromContext">
@@ -270,6 +327,15 @@
           </button>
         </template>
       </div>
+
+      <MessageReactionPicker
+        v-if="reactionPickerAnchor"
+        :anchor="reactionPickerAnchor"
+        :viewer-reacted="viewerReacted"
+        :instant="reactionPickerInstant"
+        @select="toggleReaction"
+        @close="closeReactionPicker"
+      />
 
       <div
         v-if="selectionPopoverOpen"
@@ -287,15 +353,24 @@
 </template>
 
 <script setup lang="ts">
+import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
+import MessageReminderMenu from "./MessageReminderMenu.vue";
+import { reminderAccount } from "../../../composables/useMessageReminders";
 import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
-import { computed, inject, nextTick, onBeforeUnmount, ref } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
-import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
+import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
 import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
+import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
+import {
+  buildLetAgentsMessageUrl,
+  isLocalRoomIdentifier,
+  isValidMessageId,
+} from "../../../domain/room-urls";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
 import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
@@ -322,7 +397,14 @@ import {
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
+import MessageReactionBar from "../../../../../../../shared/ui/MessageReactionBar.vue";
+import MessageReactionPicker, { type MessageReactionPickerAnchor } from "../../../../../../../shared/ui/MessageReactionPicker.vue";
 import WakeGlyph from "../../../../../../../shared/ui/WakeGlyph.vue";
+import { isPinMessageId } from "../../../../../../../shared/message-pins.mjs";
+import { injectRoomMessageLinkPreviews } from "../../../composables/useRoomMessageLinkPreviews";
+import { excludeGitHubEventLink, linkPreviewPresentation } from "../../../../../../../shared/message-link-previews.mjs";
+import { injectRoomMessagePins } from "../../../composables/useRoomMessagePins";
+import { injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
 
 const props = withDefaults(defineProps<{
@@ -346,6 +428,7 @@ const props = withDefaults(defineProps<{
   continuationRepairKeys?: ReadonlySet<string>;
   roomDeliverySkipKeys?: ReadonlySet<string>;
   providerLabel?: string | null;
+  roomIdentifier?: string | null;
 }>(), {
   context: "timeline",
   deliveryReceipts: () => [],
@@ -441,6 +524,12 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   return `Waiting for ${receipt.agentName}`;
 }
 
+const remindable = computed(() => Boolean(reminderAccount.value && props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier) && isValidMessageId(props.message.id) && !props.message.outgoing));
+const { pushActionToast } = useDesktopActionToasts();
+function reminderScheduled(dueAt: string) {
+  pushActionToast(`Reminder set for ${new Date(dueAt).toLocaleString()}`, "success");
+  closeContextMenu("complete");
+}
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
@@ -489,12 +578,22 @@ const replyPreviewText = computed(() => truncate((props.message.replyTo
   : "").replace(/\s+/g, " ").trim(), 160));
 const visibleText = computed(() => roomMessageVisibleText(props.message, attentionResponseAgentNames?.value));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
-const renderedMarkdown = computed(() => {
+const renderedMessage = computed(() => {
   const text = visibleText.value || "No message body.";
-  return renderMessageText(isAmbientSystem.value ? stripStatusPrefix(text) : text, "");
+  const urls: string[] = [];
+  const html = renderMessageText(isAmbientSystem.value ? stripStatusPrefix(text) : text, "", undefined, undefined, (url) => urls.push(url));
+  return { html, urls };
 });
+const previewUrls = computed(() => excludeGitHubEventLink(renderedMessage.value.urls, githubEvent.value?.url));
+const previewContext = injectRoomMessageLinkPreviews();
+const linkPreviews = computed(() => previewContext?.previewsFor(props.message.id) ?? []);
+let stopTrackingPreviews: (() => void) | null = null;
+watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.value], () => {
+  stopTrackingPreviews?.();
+  stopTrackingPreviews = previewContext?.track({ id: props.message.id, urls: previewUrls.value }) ?? null;
+}, { immediate: true });
 const linkedText = computed(() => linkRenderedMessageReferences(
-  renderedMarkdown.value,
+  renderedMessage.value.html,
   props.messageReferenceIds,
   props.taskReferenceIds,
 ));
@@ -545,6 +644,12 @@ function participantInitials(value: string): string {
   return initials.toUpperCase();
 }
 
+const canCopyMessageLink = computed(() =>
+  !isLocalRoomIdentifier(props.roomIdentifier) &&
+  !props.message.outgoing &&
+  isValidMessageId(props.message.id)
+);
+
 function openContextMenu(event: MouseEvent): void {
   if (props.message.outgoing) return;
   const target = event.target instanceof HTMLElement ? event.target : null;
@@ -564,13 +669,16 @@ function openContextMenu(event: MouseEvent): void {
   contextMenuInvoker.value = target?.closest<HTMLElement>("button, a, [tabindex]") || article;
   closeSelectionPopover();
   const menuWidth = 180;
-  // Link variant: 3 rows + separator; message variant: 4 rows + separator.
-  // The estimate must cover the tallest variant or the last row ("Message
-  // info") clips below the viewport near the bottom edge.
-  const menuHeight = linkHref ? 140 : 176;
+  // Link variant: 3 rows + separator; message variant: 4 rows + separator,
+  // plus a row for each available pin/reaction action. The estimate must
+  // cover the tallest variant or the last row ("Message info") clips below
+  // the viewport near the bottom edge.
+  const menuHeight = linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0);
+  const clampedMenuHeight = menuHeight + (!linkHref && remindable.value ? 32 : 0) + (!linkHref && canCopyMessageLink.value ? 32 : 0)
+    + (!linkHref && canMarkUnread.value ? 32 : 0);
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - clampedMenuHeight - 8)),
   };
   contextMenuOpen.value = true;
   void nextTick(() => firstContextMenuButton.value?.focus());
@@ -606,7 +714,7 @@ function handleContextMenuKeydown(event: KeyboardEvent): void {
 }
 
 function focusContextMenuItem(direction: 1 | -1): void {
-  const items = Array.from(document.querySelectorAll<HTMLButtonElement>(".room-message-context-menu [role='menuitem']"));
+  const items = Array.from(firstContextMenuButton.value?.parentElement?.querySelectorAll<HTMLButtonElement>(":scope > [role='menuitem']:not(:disabled)") ?? []);
   if (!items.length) return;
   const currentIndex = Math.max(0, items.findIndex((item) => item === document.activeElement));
   const nextIndex = (currentIndex + direction + items.length) % items.length;
@@ -616,6 +724,87 @@ function focusContextMenuItem(direction: 1 | -1): void {
 function quoteReplyFromContext(): void {
   closeContextMenu("action");
   emit("quote-reply", props.message.id);
+}
+
+const unreadContext = inject(unreadMenuKey, null);
+const canMarkUnread = computed(() => Boolean(unreadContext?.client.account.value)
+  && props.context === "timeline" && !props.message.threadReplyToId
+  && (!props.message.threadRootId || props.message.threadRootId === props.message.id)
+  && !props.message.id.startsWith("pending:"));
+function markUnreadFromContext(): void {
+  closeContextMenu("complete");
+  if (canMarkUnread.value) unreadContext?.client.mark(unreadContext.room.value, props.message.id);
+}
+const pinContext = injectRoomMessagePins();
+const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id));
+const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false);
+function pinFromContext(): void { closeContextMenu("complete"); pinContext?.toggle(props.message.id); }
+
+// Reactions exist only inside a room that provides them (not in previews or
+// tests), and only on a message the server sent with its reactions: a room
+// kept on this computer, or an older server, has none.
+const reactionContext = injectRoomMessageReactions();
+const reactions = computed(() => reactionContext?.reactionsFor(props.message.id) ?? []);
+const reactable = computed(() => Boolean(reactionContext?.canReact.value)
+  && props.message.reactions !== undefined
+  && !props.message.outgoing
+  && !isWakeNotice.value
+  && /^msg_\d+$/.test(props.message.id));
+const viewerReacted = (emoji: string): boolean => reactionContext?.viewerReacted(props.message.id, emoji) ?? false;
+
+// A row keeps its component when a sent message is confirmed and takes its
+// server id, so the registration follows the id.
+let stopTrackingReactions: (() => void) | null = null;
+watch(() => [props.message.id, props.message.reactions !== undefined] as const, () => {
+  stopTrackingReactions?.();
+  stopTrackingReactions = reactionContext?.track(props.message) ?? null;
+}, { immediate: true });
+
+const messageElement = ref<HTMLElement | null>(null);
+const reactionPickerAnchor = ref<MessageReactionPickerAnchor | null>(null);
+const reactionPickerInstant = ref(false);
+let reactionPickerInvoker: HTMLElement | null = null;
+let reactionPickerClosedByPress: { invoker: HTMLElement; at: number } | null = null;
+
+function toggleReaction(emoji: string): void {
+  reactionContext?.toggle(props.message.id, emoji);
+}
+
+function showReactionPicker(anchor: MessageReactionPickerAnchor, invoker: HTMLElement | null, instant: boolean): void {
+  if (!reactable.value) return;
+  closeSelectionPopover();
+  reactionPickerInvoker = invoker;
+  reactionPickerInstant.value = instant;
+  reactionPickerAnchor.value = anchor;
+}
+
+function openReactionPicker(event: MouseEvent): void {
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  if (!trigger) return;
+  // The press that starts this click already closed the picker this control
+  // had open: the control is a toggle, so do not open it again.
+  const closed = reactionPickerClosedByPress;
+  reactionPickerClosedByPress = null;
+  if (closed?.invoker === trigger && performance.now() - closed.at < 500) return;
+  // A click with no pointer detail came from the keyboard.
+  showReactionPicker({ element: trigger }, trigger, event.detail === 0);
+}
+
+function closeReactionPicker(restoreFocus: boolean, pressed?: EventTarget | null): void {
+  const invoker = reactionPickerInvoker;
+  reactionPickerAnchor.value = null;
+  reactionPickerInvoker = null;
+  reactionPickerClosedByPress = invoker && pressed instanceof Node && invoker.contains(pressed)
+    ? { invoker, at: performance.now() }
+    : null;
+  if (restoreFocus && invoker?.isConnected) invoker.focus({ preventScroll: true });
+}
+
+function reactFromContext(): void {
+  const { x, y } = contextMenuPosition.value;
+  const invoker = contextMenuInvoker.value;
+  closeContextMenu("action");
+  if (messageElement.value) showReactionPicker({ element: messageElement.value, point: { x, y } }, invoker, true);
 }
 
 function tertiaryActionFromContext(): void {
@@ -639,6 +828,15 @@ function messageInfoFromContext(): void {
 async function copyFromContext(): Promise<void> {
   closeContextMenu("copy");
   await copyMessage();
+}
+
+async function copyMessageLinkFromContext(): Promise<void> {
+  const invoker = contextMenuInvoker.value;
+  closeContextMenu("copy");
+  if (!props.roomIdentifier || !props.message.id) return;
+  const url = buildLetAgentsMessageUrl(props.roomIdentifier, props.message.id);
+  await copyToClipboard(url);
+  restoreContextMenuFocus(invoker);
 }
 
 async function openLinkFromContext(): Promise<void> {
@@ -765,6 +963,8 @@ function normalizedSelectedText(selection: Selection | null): string {
 }
 
 onBeforeUnmount(() => {
+  stopTrackingReactions?.();
+  stopTrackingPreviews?.();
   window.removeEventListener("keydown", handleContextMenuKeydown);
   window.removeEventListener("pointerdown", closeContextMenuFromOutside);
   removeSelectionOutsidePointerListener();

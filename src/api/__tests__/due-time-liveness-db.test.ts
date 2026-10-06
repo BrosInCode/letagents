@@ -12,7 +12,6 @@ const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
 const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const rolloutModule = testDatabaseUrl ? await import("../db/due-time-liveness-rollout.js") : null;
 const dueContextModule = testDatabaseUrl ? await import("../db/coordination/due-room-context.js") : null;
-const offlineModule = testDatabaseUrl ? await import("../db/presence/offline-announcements.js") : null;
 const utilsModule = testDatabaseUrl ? await import("../db/utils.js") : null;
 const pool = dbClientModule?.pool;
 const db = dbClientModule?.db;
@@ -290,53 +289,6 @@ test("accepted native harness activity pushes the indexed delivery deadline", sk
   assert.ok(Date.parse(due) >= before + 4 * 60_000);
 });
 
-test("concurrent candidate claims are disjoint and a stale claim cannot overwrite a heartbeat", skipOptions, async () => {
-  const { createProjectWithName, markRoomAgentDeliveryConnected, listLivenessAnnouncementCandidates } = dbModule!;
-  const { rescheduleLivenessAnnouncementCandidate } = offlineModule!;
-  const rooms = await Promise.all(["a", "b"].map((suffix) => createProjectWithName!(`due-claim-${suffix}`)));
-  for (const [index, room] of rooms.entries()) {
-    await markRoomAgentDeliveryConnected!({
-      room_id: room.id,
-      actor_label: `Worker ${index}`,
-      session_kind: "worker",
-      display_name: `Worker ${index}`,
-      transport: "long_poll",
-    });
-  }
-  await pool!.query(`UPDATE room_agent_delivery_sessions SET next_liveness_check_at = now() - interval '1 minute'`);
-  const now = Date.now();
-  const [left, right] = await Promise.all([
-    listLivenessAnnouncementCandidates!({ now, limit: 1 }),
-    listLivenessAnnouncementCandidates!({ now, limit: 1 }),
-  ]);
-  assert.equal(left.length, 1);
-  assert.equal(right.length, 1);
-  assert.notEqual(left[0]!.session.delivery_key + left[0]!.session.room_id,
-    right[0]!.session.delivery_key + right[0]!.session.room_id);
-
-  const claimed = left[0]!;
-  await pool!.query(
-    `UPDATE room_agent_delivery_sessions SET updated_at = now()
-      WHERE room_id = $1 AND delivery_key = $2`,
-    [claimed.session.room_id, claimed.session.delivery_key],
-  );
-  const scheduledAfterHeartbeat = (await pool!.query<{ next_liveness_check_at: string }>(
-    `SELECT next_liveness_check_at FROM room_agent_delivery_sessions WHERE room_id = $1 AND delivery_key = $2`,
-    [claimed.session.room_id, claimed.session.delivery_key],
-  )).rows[0]!.next_liveness_check_at;
-  await rescheduleLivenessAnnouncementCandidate!({
-    room_id: claimed.session.room_id,
-    delivery_key: claimed.session.delivery_key,
-    claimed_check_at: claimed.claimed_check_at!,
-    next_check_at: null,
-  });
-  const finalDue = (await pool!.query<{ next_liveness_check_at: string }>(
-    `SELECT next_liveness_check_at FROM room_agent_delivery_sessions WHERE room_id = $1 AND delivery_key = $2`,
-    [claimed.session.room_id, claimed.session.delivery_key],
-  )).rows[0]!.next_liveness_check_at;
-  assert.equal(new Date(finalDue).toISOString(), new Date(scheduledAfterHeartbeat).toISOString());
-});
-
 test("a stale stall claim cannot fence a drain after new work opens", skipOptions, async () => {
   const { createProjectWithName, createTask, listStalledRoomCandidates, markRoomStallNudgedTx } = dbModule!;
   const room = await createProjectWithName!("due-stall-race");
@@ -365,7 +317,7 @@ test("a stale stall claim cannot fence a drain after new work opens", skipOption
 test("due room context batches manager, delivery, and suppression state", skipOptions, async () => {
   const { createProjectWithName, createRoomAgentSession, markRoomAgentDeliveryConnected, setRoomLiveAgentSuppressed,
     assignBoardManager, upsertAccount } = dbModule!;
-  const { getDueRoomOperationalContext, getLivenessRoomContexts } = dueContextModule!;
+  const { getDueRoomOperationalContext } = dueContextModule!;
   const room = await createProjectWithName!("due-room-context");
   const account = await upsertAccount!({
     provider: "github",
@@ -416,8 +368,6 @@ test("due room context batches manager, delivery, and suppression state", skipOp
     context.reachable_manager_room_ids.has(room.id),
     "reminder suppression must not erase exact manager reachability authority",
   );
-  const liveness = await getLivenessRoomContexts!([room.id]);
-  assert.ok(liveness.get(room.id)!.suppressed_actor_labels.has("Oak | EmmyMay's agent | Codex"));
 });
 
 test("a dead assigned manager cannot permanently disable a drained-room nudge", skipOptions, async () => {

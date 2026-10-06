@@ -261,6 +261,21 @@ jobs:
       - name: Test agent wake rules and room resource invalidation
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wake-rules-contract.test.ts src/api/__tests__/wake-rules-evaluate.test.ts src/api/__tests__/wake-rules-db.test.ts src/api/__tests__/room-event-broker.test.ts
 
+      - name: Test message link previews
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-link-previews.test.ts src/api/__tests__/message-link-previews-routes.test.ts src/api/__tests__/message-link-previews-db.test.ts src/api/__tests__/room-message-routes.test.ts
+
+      - name: Test message pins
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-pins-routes.test.ts src/api/__tests__/message-pin-store.test.ts src/api/__tests__/message-pins-db.test.ts
+
+      - name: Test message reactions
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
+
+      - name: Test room message search
+        run: node --import tsx --test src/api/__tests__/message-search-routes.test.ts src/api/__tests__/message-search-db.test.ts src/api/__tests__/message-search-controller.test.ts
+
+      - name: Test ephemeral room typing and stream isolation
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-typing.test.ts src/api/__tests__/room-message-routes.test.ts src/api/__tests__/sse.test.ts src/api/__tests__/event-bridge.test.ts src/api/__tests__/event-bridge-domains.test.ts src/api/__tests__/event-bridge-pg.test.ts
+
       - name: Run message attachment tests
         run: >-
           node
@@ -281,7 +296,11 @@ jobs:
           node
           --import ./node_modules/tsx/dist/loader.mjs
           --test
+          --test-concurrency=1
           src/api/__tests__/desktop-push-worker-db.test.ts
+          src/api/__tests__/room-notification-preferences-routes.test.ts
+          src/api/__tests__/message-reminders-db.test.ts
+          src/api/__tests__/message-reminders-routes.test.ts
 
       - name: Run webhook integration tests
         run: >-
@@ -321,14 +340,6 @@ jobs:
           --import ./node_modules/tsx/dist/loader.mjs
           --test
           src/api/__tests__/coordination-db.test.ts
-
-      - name: Run liveness announcement tests
-        run: >-
-          node
-          --import ./node_modules/tsx/dist/loader.mjs
-          --test
-          src/api/__tests__/liveness-sweep.test.ts
-          src/api/__tests__/liveness-announcements-db.test.ts
 
       - name: Run room agent presence tests
         run: >-

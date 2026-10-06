@@ -1,15 +1,23 @@
+import { ROOM_TYPING } from "../../../../../shared/room-typing.mjs"
+import { receiveRoomTyping } from "../roomTyping"
 import {
   ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_INVALIDATION_CAPABILITY,
+  ROOM_RESOURCE_MESSAGE_PINS,
+  ROOM_RESOURCE_MESSAGE_REACTIONS,
   ROOM_RESOURCE_WAKE_RULES,
   parseRoomResourceInvalidation,
 } from '../../../../../shared/room-resource-invalidation.mjs'
 import { publishMessageInfoInvalidation } from '../../components/room/messageInfoInvalidation'
 import { publishAgentApprovalInvalidation } from '../roomAgentApprovalInvalidation'
+import { publishMessageLinkPreviewInvalidation } from '../roomMessageLinkPreviews'
+import { publishMessagePinInvalidation } from '../roomMessagePins'
+import { publishMessageReactionInvalidation } from '../roomMessageReactionInvalidation'
 import { publishWakeRuleInvalidation } from '../roomWakeRuleInvalidation'
 import { roomPath } from './api'
 import { isVisibleRoomMessage } from './identity'
 import { playNotificationSound } from './sound'
+import { roomNotificationPreferences } from './notificationPreferences'
 import type {
   RoomMessage,
   RoomReasoningSession,
@@ -268,8 +276,11 @@ export function createRoomStream(
             && passGeneration === fullReconcileRequestedGeneration
           ) {
             publishAgentApprovalInvalidation(passRoom)
-            // Pointers lost in the gap may have named wake rules too.
+            // Pointers lost in the gap may have named wake rules, reactions or pins too.
             publishWakeRuleInvalidation(passRoom)
+            publishMessageReactionInvalidation(passRoom)
+            publishMessagePinInvalidation(passRoom)
+            publishMessageLinkPreviewInvalidation(passRoom)
             if (replayBufferedGapEvents(passRoom)) {
               clearGapRepairRetry()
               commitPendingGapCursor(passRoom)
@@ -381,6 +392,7 @@ export function createRoomStream(
   }
 
   function stop(preserveStartupState = false) {
+    if (activeRoomIdentifier) receiveRoomTyping(activeRoomIdentifier)
     streamGeneration += 1
     resyncPromises.clear()
     eventSource?.close()
@@ -447,6 +459,7 @@ export function createRoomStream(
     const streamParams = new URLSearchParams()
     if (eventCursor) streamParams.set('event_cursor', eventCursor)
     streamParams.append('stream_capability', ROOM_RESOURCE_INVALIDATION_CAPABILITY)
+    streamParams.append('stream_capability', ROOM_TYPING)
     const source = new EventSource(
       `${roomPath(roomIdentifier)}/messages/stream?${streamParams.toString()}`,
     )
@@ -461,6 +474,9 @@ export function createRoomStream(
 
     source.onopen = () => {
       if (!isCurrentSource()) return
+      publishMessagePinInvalidation(roomIdentifier)
+      receiveRoomTyping(roomIdentifier)
+      publishMessageLinkPreviewInvalidation(roomIdentifier)
       openRoomIdentifier = roomIdentifier
       handlers.setConnectionState('live')
       handlers.setStreaming(true)
@@ -475,6 +491,11 @@ export function createRoomStream(
       if (bootstrapRoom !== roomIdentifier) startResyncLoop(roomIdentifier, true)
     }
 
+    source.addEventListener(ROOM_TYPING, (event) => {
+      if (!isCurrentSource()) return
+      try { receiveRoomTyping(roomIdentifier, JSON.parse(event.data)) } catch { /* No history repair for a hint. */ }
+    })
+
     source.addEventListener('message', (event) => {
       if (!isCurrentSource()) return
       try {
@@ -488,7 +509,9 @@ export function createRoomStream(
           if (!isVisibleRoomMessage(message)) return
           if (!handlers.appendMessage(message)) return
 
-          playNotificationSound()
+          void roomNotificationPreferences.allowsAfterRead(roomIdentifier, message.text).then((allowed) => {
+            if (allowed && isCurrentSource()) playNotificationSound()
+          })
           const source = (message.source || '').toLowerCase()
           const sender = (message.sender || '').toLowerCase()
 
@@ -537,6 +560,7 @@ export function createRoomStream(
           handlers.onGitHubEvent(
             typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier,
           )
+          publishMessageLinkPreviewInvalidation(roomIdentifier)
         }, streamEventBytes(event))
       } catch {
         repairMalformedTypedEvent(roomIdentifier, event)
@@ -552,6 +576,7 @@ export function createRoomStream(
           handlers.onArtifactUpdate(
             typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier,
           )
+          publishMessageLinkPreviewInvalidation(roomIdentifier)
         }, streamEventBytes(event))
       } catch {
         repairMalformedTypedEvent(roomIdentifier, event)
@@ -649,6 +674,14 @@ export function createRoomStream(
           bufferOrApplyRoomEvent(roomIdentifier, () => {
             publishWakeRuleInvalidation(roomIdentifier)
           }, streamEventBytes(event))
+        } else if (
+          result.status === 'supported'
+          && (result.pointer.resource === ROOM_RESOURCE_MESSAGE_REACTIONS || result.pointer.resource === ROOM_RESOURCE_MESSAGE_PINS)
+        ) {
+          bufferOrApplyRoomEvent(roomIdentifier, () => {
+            if (result.pointer.resource === ROOM_RESOURCE_MESSAGE_PINS) publishMessagePinInvalidation(roomIdentifier)
+            else publishMessageReactionInvalidation(roomIdentifier)
+          }, streamEventBytes(event))
         }
       } catch {
         repairMalformedTypedEvent(roomIdentifier, event)
@@ -696,6 +729,7 @@ export function createRoomStream(
 
     source.onerror = () => {
       if (!isCurrentSource()) return
+      receiveRoomTyping(roomIdentifier)
       handlers.setConnectionState('error')
       handlers.setStreaming(false)
       source.close()

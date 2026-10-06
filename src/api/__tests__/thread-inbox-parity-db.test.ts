@@ -3796,7 +3796,8 @@ test("PG thread inbox: bounded page over a ~2,000-message room", runOptions, asy
   assert.equal(page.threads.length, limit);
   assert.equal(page.has_more, true);
   assert.equal(page.unread_thread_count, projectedThreadCount);
-  assert.ok(queryCount > 0 && queryCount <= 5, `expected at most 5 bounded queries, got ${queryCount}`);
+  // One of these reads the page's reactions; like the rest it does not grow with the room.
+  assert.ok(queryCount > 0 && queryCount <= 6, `expected at most 6 bounded queries, got ${queryCount}`);
 
   const deepCursor = await pool!.query<{ latest_reply_number: number }>(
     `SELECT latest_reply_number

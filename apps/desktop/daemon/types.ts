@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.206";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.208";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -351,6 +351,11 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
   runtime_generation_id?: string | null;
   /** Read-only credential contract from configuration, never caller-owned manifest input. */
   polling_contract?: "custodial_polling_v1" | null;
+  /**
+   * Read-only: this agent uses its owner's own provider setup ("on"), will
+   * once it restarts, or still does until it restarts. Absent means off.
+   */
+  home_harness?: import("./provider-configuration.js").HomeHarnessState;
   worker_binding?: DaemonWorkerBindingProjection | null;
   /** Ephemeral causal delivery projection; never persisted in the manifest. */
   room_agent_state?: {

@@ -1,5 +1,22 @@
 <template>
   <div class="room-view-viewport">
+    <div v-if="activeTab === 'chat' && historySearch.state.value.status !== 'idle'" class="room-history-search">
+      <MessageSearchResults
+        :status="historySearch.state.value.status"
+        :hits="historySearch.hits.value"
+        :terms="historySearch.state.value.terms"
+        :has-more="historySearch.state.value.hasMore"
+        :loading-more="historySearch.state.value.loadingMore"
+        :error="historySearch.state.value.error"
+        :loaded-match-count="matchCount"
+        :format-time="formatMessageTime"
+        @show="openMessageInChat"
+        @more="historySearch.loadMore()"
+      />
+    </div>
+    <PinnedMessages v-if="activeTab === 'chat' && messagePins" :key="room?.identifier" :pins="messagePins.state.value.pins"
+      :loading="messagePins.state.value.loading" :error="messagePins.state.value.error"
+      @refresh="messagePins.refresh" @reveal="openMessageInChat" />
     <Transition :name="tabTransitionName">
       <MessageList
         v-if="activeTab === 'chat'"
@@ -8,8 +25,11 @@
         class="room-tab-panel"
         :messages="messages"
         :roomIdentifier="room?.identifier || ''"
+        :unreadRoomId="room?.projectId || ''"
         :reasoningSessions="reasoningSessions"
+        :presence="presence"
         :hasOlderMessages="messagesHasOlder"
+        :messagesLoaded="messagesLoaded"
         :isLoadingOlderMessages="isLoadingOlderMessages"
         :searchQuery="searchQuery"
         :stalePromptTaskStates="stalePromptTaskStates"
@@ -22,6 +42,7 @@
         @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
         @openTask="emit('openTask', $event)"
         @revealed="handleMessageRevealed"
+        @revealUnavailable="handleMessageRevealUnavailable"
       />
 
       <GitHubEventFeed
@@ -116,13 +137,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { onScopeDispose } from "vue";
+import { useRoomUnread } from "@/composables/roomUnread";
+import PinnedMessages from '../../../../../shared/ui/PinnedMessages.vue'
+import { injectRoomMessagePins } from '@/composables/roomMessagePins'
+import { computed, nextTick, ref, watch } from 'vue'
 
 import ActivityView from '@/components/room/ActivityView.vue'
 import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
 import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
 import MessageList from '@/components/room/MessageList.vue'
-import { attentionResponseAgentNames } from '@/components/room/chat-message/formatting'
+import { attentionResponseAgentNames, formatMessageTime } from '@/components/room/chat-message/formatting'
+import MessageSearchResults from '../../../../../shared/ui/MessageSearchResults.vue'
+import { useRoomHistorySearch } from '@/composables/roomHistorySearch'
+import { useToast } from '@/composables/useToast'
 import TaskBoard from '@/components/room/TaskBoard.vue'
 import type {
   FocusRoomConclusionDetails,
@@ -153,6 +181,7 @@ const props = defineProps<{
   tabTransitionName: string
   messages: readonly RoomMessage[]
   messagesHasOlder: boolean
+  messagesLoaded?: boolean
   isLoadingOlderMessages: boolean
   tasks: readonly RoomTask[]
   focusRooms: readonly FocusRoomInfo[]
@@ -220,6 +249,11 @@ const emit = defineEmits<{
   openChat: []
 }>()
 
+const messagePins = injectRoomMessagePins()
+const roomUnread = useRoomUnread();
+watch(() => props.room?.projectId, roomUnread.enter, { immediate: true, flush: "sync" });
+onScopeDispose(() => roomUnread.enter(null));
+
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>
@@ -232,12 +266,38 @@ const agentNames = computed(() => attentionResponseAgentNames([...props.particip
 const revealMessageId = ref<string | null>(null)
 
 function openMessageInChat(messageId: string) {
+  if (revealMessageId.value === messageId) {
+    revealMessageId.value = null
+    void nextTick(() => {
+      revealMessageId.value = messageId
+      emit('openChat')
+    })
+    return
+  }
   revealMessageId.value = messageId
   emit('openChat')
 }
 
 function handleMessageRevealed(messageId: string) {
   if (revealMessageId.value === messageId) revealMessageId.value = null
+}
+
+// Every match in the room's history, while the header search has a query.
+const historySearch = useRoomHistorySearch(
+  computed(() => props.room?.identifier || ''),
+  computed(() => props.searchQuery),
+)
+const toast = useToast()
+function handleMessageRevealUnavailable(_messageId: string, reason?: 'too_far_back' | 'unavailable') {
+  if (props.searchQuery) {
+    toast.info('That message is too far back to open here. Expand the search result to read it.', 5000)
+    return
+  }
+  if (reason === 'unavailable' || !props.messagesHasOlder) {
+    toast.info('That earlier message is not available in the loaded room history.')
+  } else {
+    toast.info('That message is too far back to open here yet.')
+  }
 }
 
 watch(() => props.activeTab, (tab) => {
@@ -255,11 +315,13 @@ function emitUpdateFocusSettings(focusKey: string, settings: FocusRoomSettings) 
   emit('updateFocusSettings', focusKey, settings)
 }
 
-defineExpose({ matchCount })
+defineExpose({ matchCount, openMessageInChat })
 </script>
 
 <style scoped>
 .room-view-viewport {
+  display: flex;
+  flex-direction: column;
   position: relative;
   height: 100%;
   min-width: 0;
@@ -267,8 +329,30 @@ defineExpose({ matchCount })
   overflow: hidden;
 }
 
+/* Drops down from the header search, over the top of the message list. */
+.room-history-search {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  max-width: 720px;
+  max-height: min(46%, 380px);
+  margin: 0 auto;
+  padding: 10px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.room-history-search > .history-search {
+  flex: 1;
+}
+
 .room-tab-panel {
-  height: 100%;
+  flex: 1;
   min-width: 0;
   min-height: 0;
 }

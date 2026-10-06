@@ -134,6 +134,37 @@ export function recoverExactClaudeTurnFromSession(
   turnId: string,
   sessionId: string,
 ): ClaudeExactTurnResult | null {
+  const turnRows = exactClaudeTurnRows(rows, turnId, sessionId);
+  if (!turnRows) return null;
+  return recoverFromTurnRows(turnRows, turnId);
+}
+
+/**
+ * The provider error a Claude command ended with, as its session JSONL keeps
+ * it: when Claude gives up on a request it writes the error as a synthetic
+ * assistant row marked `isApiErrorMessage`, whose text is the error. Null
+ * when the exact turn has no such row, or has its answer instead.
+ */
+export function recoverExactClaudeTurnFailureFromSession(
+  rows: ClaudeEvidenceRecord[],
+  turnId: string,
+  sessionId: string,
+): ClaudeExactTurnFailure | null {
+  const turnRows = exactClaudeTurnRows(rows, turnId, sessionId);
+  if (!turnRows || recoverFromTurnRows(turnRows, turnId)) return null;
+  const failure = [...turnRows].reverse().find((row) => row.type === "assistant" && row.isApiErrorMessage === true);
+  if (!failure) return null;
+  const text = assistantText(failure).join("").trim();
+  const status = typeof failure.apiErrorStatus === "number" ? ` (HTTP ${failure.apiErrorStatus})` : "";
+  return { turnId, nativeOutcome: "failed", error: text || `The model provider refused the request${status}.` };
+}
+
+/** The rows of one exact command in its session: from its user row to the next command's. */
+function exactClaudeTurnRows(
+  rows: ClaudeEvidenceRecord[],
+  turnId: string,
+  sessionId: string,
+): ClaudeEvidenceRecord[] | null {
   const sourceIndex = rows.findIndex((row) =>
     row.type === "user"
     && row.uuid === turnId
@@ -150,10 +181,12 @@ export function recoverExactClaudeTurnFromSession(
   const boundaryIndex = nextCommandOffset < 0
     ? rows.length
     : sourceIndex + nextCommandOffset + 1;
-  const turnRows = rows
+  return rows
     .slice(sourceIndex + 1, boundaryIndex)
     .filter((row) => sessionIdOf(row) === sessionId);
+}
 
+function recoverFromTurnRows(turnRows: ClaudeEvidenceRecord[], turnId: string): ClaudeExactTurnResult | null {
   const terminalMessageId = turnRows.reduce<string | null>((terminal, row) => {
     if (terminal || row.type !== "assistant") return terminal;
     const message = record(row.message);

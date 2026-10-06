@@ -1,3 +1,4 @@
+@import "../../../../../shared/ui/room-agent-work.css";
 
 .room-chat-layout {
   position: relative;
@@ -61,8 +62,7 @@
   position: relative;
   min-height: 0;
   overflow: hidden;
-  --room-chat-content-max: 78ch;
-  --room-chat-wide-content-max: 980px;
+  --room-chat-content-max: 720px;
   --room-chat-side-gutter: clamp(18px, 4vw, 56px);
 }
 
@@ -73,6 +73,7 @@
   height: 100%;
   overflow-y: auto;
   padding: 18px var(--room-chat-side-gutter) 24px;
+  padding-left: max(44px, var(--room-chat-side-gutter));
   scroll-behavior: smooth;
 }
 
@@ -116,117 +117,6 @@
   min-height: 100%;
   padding: 18px 0 28px;
   opacity: 0.76;
-}
-
-.room-local-agent-work-list {
-  display: grid;
-  gap: 4px;
-  align-self: center;
-  width: min(72ch, 100%);
-  margin: 6px 0 8px;
-}
-
-.room-local-agent-work {
-  display: grid;
-  grid-template-columns: 9px minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-  width: fit-content;
-  max-width: 100%;
-  padding: 5px 8px 5px 3px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-secondary);
-  box-shadow: none;
-}
-
-.room-local-agent-work-pulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: #34d399;
-  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.08);
-  animation: local-agent-work-pulse 1.8s ease-in-out infinite;
-}
-
-.room-local-agent-work div {
-  display: flex;
-  min-width: 0;
-  align-items: baseline;
-  gap: 7px;
-}
-
-.room-local-agent-work strong {
-  color: var(--text-secondary);
-  font-size: 0.74rem;
-  font-weight: 760;
-  white-space: nowrap;
-}
-
-.room-local-agent-work div span {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-tertiary);
-  font-size: 0.73rem;
-  font-weight: 640;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.room-local-agent-work-dots {
-  display: inline-flex;
-  gap: 3px;
-  align-items: center;
-}
-
-.room-local-agent-work-dots i {
-  width: 3px;
-  height: 3px;
-  border-radius: 999px;
-  background: currentColor;
-  opacity: 0.32;
-  animation: local-agent-work-dot 1.1s ease-in-out infinite;
-}
-
-.room-local-agent-work-dots i:nth-child(2) {
-  animation-delay: 120ms;
-}
-
-.room-local-agent-work-dots i:nth-child(3) {
-  animation-delay: 240ms;
-}
-
-.room-local-agent-work-overflow {
-  margin: 2px 0 0;
-  padding-left: 4px;
-  color: var(--text-tertiary);
-  font-size: 0.72rem;
-  font-weight: 640;
-}
-
-@keyframes local-agent-work-pulse {
-  0%,
-  100% {
-    opacity: 0.72;
-    transform: scale(0.88);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-@keyframes local-agent-work-dot {
-  0%,
-  100% {
-    opacity: 0.25;
-    transform: translateY(0);
-  }
-  45% {
-    opacity: 0.82;
-    transform: translateY(-1px);
-  }
 }
 
 .room-loading-message {
@@ -296,11 +186,11 @@
   gap: 10px;
   align-self: center;
   width: min(100%, var(--room-chat-content-max));
-  padding: 11px 0;
+  padding: 12px 0;
 }
 
 .room-chat-message[data-owner-kind="github"] {
-  width: min(100%, var(--room-chat-wide-content-max));
+  width: min(100%, var(--room-chat-content-max));
 }
 
 .room-chat-message.is-compact-continuation {
@@ -368,21 +258,17 @@
   position: relative;
   box-sizing: border-box;
   width: fit-content;
-  max-width: min(72ch, 100%);
-  margin-top: 7px;
-  padding: 11px 15px 12px;
-  border: 0;
-  border-radius: 16px 16px 16px 6px;
-  background:
-    linear-gradient(
-      135deg,
-      color-mix(in srgb, var(--message-accent) 7%, rgba(255, 255, 255, 0.056)),
-      rgba(255, 255, 255, 0.036) 44%,
-      rgba(255, 255, 255, 0.028)
-    );
+  max-width: min(64ch, 100%);
+  margin-top: 5px;
+  padding: 9px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--bg-subtle);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.055),
-    0 7px 24px rgba(0, 0, 0, 0.09);
+    inset 0 1px 0 light-dark(rgba(255,255,255,.8),rgba(255,255,255,.045)),
+    0 2px 3px light-dark(rgba(9,9,11,.08),rgba(0,0,0,.6)),
+    0 8px 18px -4px light-dark(rgba(9,9,11,.15),rgba(0,0,0,.55)),
+    0 20px 34px -12px light-dark(rgba(9,9,11,.2),rgba(0,0,0,.7));
 }
 
 .room-chat-message.is-compact-continuation .room-message-bubble {
@@ -391,21 +277,6 @@
 
 .room-message-bubble::before {
   display: none;
-}
-
-.room-chat-message.is-github-message .room-message-bubble,
-.room-chat-message.is-system-message .room-message-bubble {
-  background: rgba(255, 255, 255, 0.034);
-}
-
-.room-chat-message[data-owner-kind="human"] .room-message-bubble {
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--message-accent) 7%, rgba(255, 255, 255, 0.055)), rgba(255, 255, 255, 0.031));
-}
-
-.room-chat-message[data-owner-kind="agent"] .room-message-bubble {
-  background:
-    linear-gradient(135deg, color-mix(in srgb, var(--message-accent) 6%, rgba(255, 255, 255, 0.052)), rgba(255, 255, 255, 0.027));
 }
 
 .room-chat-message.is-ambient-system-message {
@@ -492,59 +363,8 @@
   flex-basis: 100%;
 }
 
-.room-chat-message.is-arriving {
-  transform-origin: 36px 0;
-  animation: desktop-message-arrive 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
-  will-change: transform, opacity;
-}
-
-.room-chat-message.is-arriving .room-chat-avatar {
-  animation: desktop-message-avatar-arrive 210ms 25ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.room-chat-message.is-arriving .room-message-meta {
-  animation: desktop-message-detail-arrive 190ms 35ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.room-chat-message.is-arriving .room-message-bubble {
-  transform-origin: 12px 0;
-  animation: desktop-message-materialize 250ms 25ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.room-chat-message.is-arriving .mention-token {
-  transform-origin: 50% 70%;
-  animation: desktop-message-mention-arrive 210ms 55ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-@keyframes desktop-message-arrive {
-  from { opacity: 0; transform: translateY(12px) scale(0.988); }
-  48% { opacity: 1; }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@keyframes desktop-message-avatar-arrive {
-  from { opacity: 0; transform: translateY(6px) scale(0.72); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@keyframes desktop-message-detail-arrive {
-  from { opacity: 0; transform: translateY(7px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@keyframes desktop-message-materialize {
-  from { opacity: 0; transform: translateY(7px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@keyframes desktop-message-mention-arrive {
-  from { opacity: 0; transform: translateY(3px) scale(0.9); }
-  58% { opacity: 1; transform: translateY(0) scale(1.035); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
 .room-chat-message[data-owner-kind="github"] .room-message-bubble {
-  width: min(820px, 100%);
+  width: 100%;
   max-width: 100%;
   padding: 0;
   border: 0;
@@ -556,39 +376,6 @@
   display: none;
 }
 
-.desktop-room-shell .room-message-bubble {
-  padding: 11px 15px 12px;
-  border: 0;
-  border-radius: 16px 16px 16px 6px;
-  background: rgba(255, 255, 255, 0.035);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
-}
-
-.desktop-room-shell .room-message-bubble::before {
-  display: none;
-}
-
-.desktop-room-shell .room-chat-message.is-github-message .room-message-bubble,
-.desktop-room-shell .room-chat-message.is-system-message .room-message-bubble {
-  border: 0;
-  border-radius: 16px 16px 16px 6px;
-  background: rgba(255, 255, 255, 0.034);
-}
-
-.desktop-room-shell .room-chat-message[data-owner-kind="human"] .room-message-bubble {
-  background: rgba(255, 255, 255, 0.034);
-}
-
-.desktop-room-shell .room-chat-message[data-owner-kind="agent"] .room-message-bubble {
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.desktop-room-shell .room-chat-message[data-owner-kind="github"] .room-message-bubble {
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
 .desktop-room-shell .room-chat-message.is-ambient-system-message .room-message-bubble {
   padding: 0;
   border: 0;
@@ -598,22 +385,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .room-chat-message.is-arriving {
-    transform: none;
-    animation: desktop-message-arrive-reduced 160ms ease-out both;
-  }
-
-  .room-chat-message.is-arriving :is(.room-chat-avatar, .room-message-meta, .room-message-bubble) {
-    transform: none;
-    filter: none;
-    animation: none;
-  }
-
-  .room-chat-message.is-arriving .mention-token {
-    transform: none;
-    animation: desktop-message-arrive-reduced 120ms ease-out both;
-  }
-
   .room-local-agent-work-pulse,
   .room-local-agent-work-dots i {
     animation: none;

@@ -557,6 +557,22 @@ export class SupervisedAgentInboxStore {
     });
   }
 
+  /**
+   * Whether the provider's own result for this message's turn says it declined
+   * the content. It is read from the saved result of the turn, which only the
+   * adapter writes: a message's activation comes from the room and is never
+   * asked, and nothing is kept that would later need clearing.
+   */
+  async providerRefusedTurn(inboxItemId: string): Promise<boolean> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT terminal_evidence_json FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+        .get(inboxItemId) as Row | undefined;
+      if (!row) return false;
+      try { return (JSON.parse(String(row.terminal_evidence_json)) as { refusal?: unknown } | null)?.refusal === true; }
+      catch { return false; }
+    });
+  }
+
   /** The considered marker and child commit together; a restart can fill the gap after terminal settlement. */
   async enqueueTaskContinuation(input: { parentId: string; agentId: string; roomId: string; workAttemptId: string;
     providerContinuationId: string; agentSessionId: string; tasks: ContinuityTask[] | null;
@@ -718,6 +734,36 @@ export class SupervisedAgentInboxStore {
       const row = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
         .get(inboxItemId) as Row | undefined;
       return row ? rowToProviderTurnBinding(row) : null;
+    });
+  }
+  /**
+   * Whether the execution record holds this item's exact native turn without
+   * an ending: recorded as started, or as lost with the runtime that ran it.
+   * A turn the record never saw start is not open; there is nothing to close.
+   */
+  async recordedTurnIsOpen(inboxItemId: string): Promise<boolean> {
+    return this.read(async (database) => {
+      try {
+        return Boolean(database.prepare(`SELECT 1 FROM supervised_agent_provider_turn_bindings b
+          JOIN execution_turns t ON t.agent_id=b.agent_id
+            AND t.provider_continuation_id=b.provider_continuation_id AND t.provider_turn_id=b.provider_turn_id
+          WHERE b.inbox_item_id=? AND t.state IN ('none','active','lost')`).get(inboxItemId));
+      } catch { return false; /* A database without an execution record has no turn to close. */ }
+    });
+  }
+  /**
+   * Whether the process that ran this item's saved turn has ended: the
+   * execution generation the turn started in is not the one given, and has a
+   * recorded terminal.
+   */
+  async providerTurnProcessEnded(inboxItemId: string, currentExecutionGenerationId: string): Promise<boolean> {
+    return this.read(async (database) => {
+      try {
+        return Boolean(database.prepare(`SELECT 1 FROM supervised_agent_provider_turn_bindings b
+          JOIN work_attempt_executions e ON e.execution_generation_id=b.origin_execution_generation_id AND e.work_attempt_id=b.work_attempt_id
+          WHERE b.inbox_item_id=? AND b.origin_execution_generation_id<>? AND e.terminal_json IS NOT NULL`)
+          .get(inboxItemId, currentExecutionGenerationId));
+      } catch { return false; /* Without the durable executions there is no proof that the process ended. */ }
     });
   }
   /** Completed routing controls carry no text and grant no publication authority.

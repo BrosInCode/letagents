@@ -10,6 +10,29 @@
       </span>
     </div>
     <div class="message-meta-tail">
+      <button
+        v-if="canReact"
+        class="reply-action react-action"
+        type="button"
+        aria-label="Add reaction"
+        title="Add reaction"
+        aria-haspopup="dialog"
+        :aria-expanded="pickerOpen ?? false"
+        @click="emit('react', $event)"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M22 11v1a10 10 0 1 1-9-10" />
+          <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+          <path d="M9 9h.01M15 9h.01" />
+          <path d="M16 5h6M19 2v6" />
+        </svg>
+      </button>
+      <button class="reply-action" type="button" aria-label="Copy message" title="Copy message" @click="emit('copy')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 9h11v11H9zM5 15H3V3h12v2" /></svg>
+      </button>
+      <button v-if="canPin" class="reply-action" type="button" :aria-label="pinned ? 'Unpin message' : 'Pin message'" :title="pinned ? 'Unpin message' : 'Pin message'" :aria-pressed="pinned" :disabled="pinPending" @click="emit('pin')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg>
+      </button>
       <button class="reply-action" type="button" aria-label="Reply to message" title="Reply" @click="emit('reply')">
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M6.5 4.5L2.5 8l4 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
@@ -32,6 +55,7 @@
       >
         Worker prompt
       </span>
+      <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
       <time>{{ formattedTime }}</time>
     </div>
   </div>
@@ -48,11 +72,20 @@ defineProps<{
   provenanceBadge?: ProvenanceBadge | null
   inlinePromptInjection: boolean
   formattedTime: string
+  canReact?: boolean
+  pickerOpen?: boolean
+  canPin?: boolean
+  pinPending?: boolean
+  pinned?: boolean
 }>()
 
 const emit = defineEmits<{
+  pin: []
+  copy: []
   reply: []
   info: []
+  /** The click that asked for the reaction picker; its target is the anchor. */
+  react: [event: MouseEvent]
 }>()
 </script>
 
@@ -76,14 +109,14 @@ const emit = defineEmits<{
   flex-wrap: wrap;
   line-height: 1.3;
 }
-.message-meta strong { font-size: 0.84rem; font-weight: 700; letter-spacing: -0.01em; }
+.message-meta strong { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .message-sender-subtitle { font-size: 0.72rem; color: var(--muted, #71717a); }
 
 .message-meta-tail {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin-left: auto;
+  margin-left: 0;
   max-width: 100%;
   flex-wrap: wrap;
 }
@@ -129,11 +162,13 @@ const emit = defineEmits<{
 .reply-action:focus-visible {
   background: color-mix(in srgb, var(--surface, #18181b) 88%, transparent);
   color: var(--text, #fafafa);
-  outline: none;
+  outline: 2px solid var(--blue-text);
+  outline-offset: 2px;
 }
-.message-meta time { font-size: 0.68rem; color: var(--muted, #71717a); }
+.message-meta time { order: -1; margin-right: 5px; font-size: 0.68rem; color: var(--muted, #71717a); }
 
 .provenance-badge {
+  display: none;
   padding: 3px 8px;
   border-radius: 999px;
   font-size: 0.62rem;
@@ -174,7 +209,7 @@ const emit = defineEmits<{
 @media (max-width: 768px) {
   .message-meta { gap: 4px; }
   .message-meta strong { font-size: 0.78rem; }
-  .message-meta time { font-size: 0.62rem; }
+  .message-meta time { order: -1; margin-right: 5px; font-size: 0.62rem; }
   .provenance-badge { padding: 2px 6px; font-size: 0.58rem; }
   .prompt-injection-badge { font-size: 0.58rem; }
   .reply-action { width: 44px; height: 44px; opacity: 1; pointer-events: auto; transform: none; }

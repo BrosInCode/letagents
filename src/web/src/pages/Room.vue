@@ -20,6 +20,7 @@
     />
 
     <RoomHeader
+      ref="roomHeader"
       :title="roomTitle"
       :subtitle="roomSubtitle"
       :activeTab="activeTab"
@@ -58,6 +59,7 @@
       :tabTransitionName="tabTransitionName"
       :messages="messages"
       :messagesHasOlder="messagesHasOlder"
+      :messagesLoaded="messagesLoaded"
       :isLoadingOlderMessages="isLoadingOlderMessages"
       :tasks="tasks"
       :focusRooms="focusRooms"
@@ -122,11 +124,14 @@
       :roomIdentifier="room?.identifier || ''"
       :attachmentsEnabled="room?.attachmentsEnabled !== false"
       :submitMessage="handleSend"
+      :createTask="addTask"
+      :openSearch="openComposerSearch"
       :stageAttachmentDraft="stageAttachmentUpload"
       :discardAttachmentDraft="discardAttachmentUpload"
       :replyTo="selectedReply"
       :messages="messages"
       :presence="presence"
+      :presenceReady="presenceLoaded"
       :participants="participants"
       :refreshReachability="refreshRoomReachability"
       :isSignedIn="auth.isSignedIn.value"
@@ -153,10 +158,15 @@
 </template>
 
 <script setup lang="ts">
+import { provideRoomMessageMotion } from "../../../../shared/ui/useRoomMessageMotion";
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
+import { getGitHubSupportIdentifier } from '@/composables/room/data'
+import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
+import { provideRoomMessagePins, useRoomMessagePins } from '@/composables/roomMessagePins'
+import { provideRoomMessageReactions, useRoomMessageReactions } from '@/composables/roomMessageReactions'
 import RoomHeader from '@/components/room/RoomHeader.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
@@ -174,6 +184,9 @@ import { useRoomPresentation } from './room/useRoomPresentation'
 import { useRoomTabs } from './room/useRoomTabs'
 import { useRoomTaskHandlers } from './room/useRoomTaskHandlers'
 import { useToast } from '@/composables/useToast'
+import { isValidMessageId } from '@/domain/roomRoutes'
+import { apiFetch, roomPath } from '@/composables/room/api'
+import { isVisibleRoomMessage } from '@/composables/room/identity'
 import type {
   OutgoingMessageAttachment,
   RoomMessage,
@@ -184,10 +197,12 @@ const router = useRouter()
 const {
   messages,
   messagesHasOlder,
+  messagesLoaded,
   isLoadingOlderMessages,
   tasks,
   focusRooms,
   presence,
+  presenceLoaded,
   boardHandoffPresence,
   participants,
   reasoningSessions,
@@ -237,6 +252,11 @@ const {
 } = useRoom()
 const auth = useAuth()
 const toast = useToast()
+provideRoomMessagePins(useRoomMessagePins(computed(() => room.value?.identifier || ''), (message) => toast.error(message)))
+provideRoomMessageReactions(useRoomMessageReactions(
+  computed(() => room.value?.identifier || ''),
+  (message) => toast.error(message),
+))
 const roomSessionValidated = ref(false)
 const roomAuthLifecycleReady = ref(false)
 
@@ -271,11 +291,18 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  messagePermalinkRequestId += 1
   window.visualViewport?.removeEventListener('resize', syncRoomViewport)
   window.visualViewport?.removeEventListener('scroll', syncRoomViewport)
 })
 
 const searchQuery = ref('')
+const roomHeader = ref<InstanceType<typeof RoomHeader> | null>(null)
+function openComposerSearch(query: string): boolean {
+  if (!roomHeader.value?.openSearch()) return false
+  searchQuery.value = query
+  return true
+}
 const roomTabPanelsRef = ref<InstanceType<typeof RoomTabPanels> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
 const selectedBoardTaskId = computed(() => {
@@ -339,6 +366,7 @@ const {
   connectionState,
   authUser: auth.user,
 })
+provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(computed(() => room.value?.identifier || ''), computed(() => getGitHubSupportIdentifier(room.value))))
 const {
   focusDraftTaskId,
   creatingFocusRoomTaskId,
@@ -388,6 +416,8 @@ function openRulesFromDrawer() {
   rulesBoardOpen.value = true
 }
 
+const messageMotion = provideRoomMessageMotion(() => room.value?.identifier)
+
 async function handleSend(
   text: string,
   agentPromptKind: string | null,
@@ -398,7 +428,7 @@ async function handleSend(
   // thread; replying to a top-level message stays a quote-reply by design.
   const replyTarget = replyTo && selectedReply.value?.id === replyTo ? selectedReply.value : null
   const threadRootId = replyTarget ? messageThreadParentId(replyTarget) : null
-  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments, threadRootId)
+  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments, threadRootId, messageMotion.confirmation(text))
   if (sent) {
     selectedReply.value = null
     return true
@@ -510,6 +540,54 @@ watch(activeTab, async (tab) => {
   }
 })
 
+let messagePermalinkRequestId = 0
+
+async function handleMessagePermalink(messageId: string) {
+  if (!isValidMessageId(messageId)) return
+  const currentRoomId = room.value?.identifier
+  const routeRoomId = route.params.roomId
+  if (!currentRoomId || (room.value?.requestedIdentifier ?? currentRoomId) !== routeRoomId
+    || route.query.message !== messageId) return
+  const requestId = ++messagePermalinkRequestId
+
+  let preflightNotFound = false
+  try {
+    const response = await apiFetch(`${roomPath(currentRoomId)}/messages/${encodeURIComponent(messageId)}`)
+    const targetMessage = (response?.message ?? response) as RoomMessage | null
+    if (!targetMessage || !isVisibleRoomMessage(targetMessage)) {
+      preflightNotFound = true
+    }
+  } catch (error: any) {
+    if (error?.status === 404) {
+      preflightNotFound = true
+    }
+  }
+
+  if (requestId !== messagePermalinkRequestId
+    || room.value?.identifier !== currentRoomId
+    || route.params.roomId !== routeRoomId
+    || route.query.message !== messageId) return
+
+  if (preflightNotFound) {
+    toast.info('That message is not available.')
+    void router.replace({ query: { ...route.query, message: undefined } })
+    return
+  }
+
+  setActiveTab('chat')
+  roomTabPanelsRef.value?.openMessageInChat(messageId)
+  void router.replace({ query: { ...route.query, message: undefined } })
+}
+
+watch(
+  [() => route.query.message, isConnected, messagesLoaded, () => route.params.roomId],
+  ([messageQuery, connected, loaded]) => {
+    messagePermalinkRequestId += 1
+    if (!connected || !loaded || typeof messageQuery !== 'string' || !isValidMessageId(messageQuery)) return
+    void handleMessagePermalink(messageQuery)
+  },
+  { immediate: true, flush: 'sync' },
+)
 </script>
 
 <style scoped>
@@ -526,7 +604,7 @@ watch(activeTab, async (tab) => {
   color: var(--text, #fafafa);
 }
 
-.room-shell[data-compact-viewport="true"] :deep(.chat-header) { height: 44px; }
+.room-shell[data-compact-viewport="true"] :deep(.chat-header) { min-height: 44px; padding-block: 0; }
 .room-shell[data-compact-viewport="true"] :deep(.chat-title p) { display: none; }
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
 

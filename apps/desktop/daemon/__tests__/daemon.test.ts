@@ -2023,6 +2023,25 @@ test("reverse drain socket and daemon restart preserve stop intent without a suc
     assert.equal(await env.internals.store.unresolvedDeliveryDrain(env.id), null);
     assert.deepEqual((await env.internals.store.getEntry(env.id))?.provider_ref, stored.provider_ref);
     assert.equal(env.internals.liveHandles.get(env.id)?.providerContinuationId, "observed-continuation");
+    // An agent that collects its own messages cannot be held back from its next turn, so it must never carry its
+    // owner's own setup. While the setup is on, the move to polling delivery is refused and nothing is prepared.
+    const policy = (value: string | null) => {
+      const database = new DatabaseSync(env.paths.manifestPath);
+      try {
+        database.prepare(`UPDATE agent_configurations SET provider_launch_policy_present=?, provider_launch_policy_undefined=0, provider_launch_policy_json=? WHERE agent_id=?`)
+          .run(value === null ? 0 : 1, value, env.id);
+      } finally { database.close(); }
+    };
+    for (const withSetup of ['{"letagentsOwnerIsolation":false}', '{"letagentsOwnerIsolationChangedAt999":false}']) {
+      // Saved on, or turned off while the running process still has it.
+      policy(withSetup);
+      const refused = await daemonRequest(env.paths.socketPath, "supervisor.prepare_delivery_drain", params);
+      assert.equal(refused.ok, false, withSetup);
+      assert.match(refused.error ?? "", /Turn off "Use your own Codex setup" for this agent and let it restart before moving it to polling delivery/);
+      assert.equal(await env.internals.store.unresolvedDeliveryDrain(env.id), null);
+      assert.equal(await env.internals.store.getDeliveryDrain("reverse-operation"), null);
+    }
+    policy(null);
     const prepared = await daemonRequest(env.paths.socketPath, "supervisor.prepare_delivery_drain", params);
     assert.equal(prepared.ok, true, prepared.error);
     const firstDriver = env.daemon as unknown as { deliveryCutovers: { start(id: string): Promise<void> } };
@@ -6041,7 +6060,7 @@ test("retained terminal approval failures retry locally without scheduling provi
   } finally { await env.cleanup(); }
 });
 
-for (const failure of ["none", "before-seal", "after-seal", "post-seal-timeout"] as const) test(`handoff retains exact terminal settlement across ${failure}`, async t => {
+for (const failure of ["none", "before-seal", "after-seal", "before-seal, cleared within the bound", "post-seal-timeout"] as const) test(`handoff retains exact terminal settlement across ${failure}`, async t => {
   let expire!: () => void, unblock!: () => void;
   const realSetTimeout = globalThis.setTimeout;
   const blocked = new Promise<void>(resolve => { unblock = resolve; });
@@ -6059,14 +6078,21 @@ for (const failure of ["none", "before-seal", "after-seal", "post-seal-timeout"]
     sourceId: "terminal-at-seal", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }),
     dispose: () => { disposeCalls++; if (failure !== "before-seal") fire(); },
   }), "codex", { onExit: async (_handle, listener) => { onExit = listener; return () => {}; } });
-  const internal = env.daemon as unknown as { handoffScheduled: boolean; providerTerminals: { drain(): Promise<void> } };
+  const internal = env.daemon as unknown as { handoffScheduled: boolean;
+    providerTerminals: { drain(): Promise<void>; bounds: { settleMs: number; lastAttemptMs: number; recordMs: number } } };
+  // An exit that cannot be saved holds the handoff no longer than its bound: fifteen, eight and four seconds outside tests.
+  const unsaved = failure === "before-seal" || failure === "after-seal";
+  if (failure !== "post-seal-timeout") internal.providerTerminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
   const inspection = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
   const record = env.internals.durability.recordTerminal.bind(env.internals.durability);
   let rejectWrites = failure !== "none", recordAttempts = 0;
   env.internals.durability.recordTerminal = async (...args) => {
     recordAttempts++;
     if (failure === "post-seal-timeout") await blocked;
-    else if (rejectWrites) throw new Error("fixture terminal storage unavailable");
+    else if (rejectWrites) {
+      if (failure === "before-seal, cleared within the bound") rejectWrites = false;
+      throw new Error("fixture terminal storage unavailable");
+    }
     return record(...args);
   };
   try {
@@ -6074,7 +6100,7 @@ for (const failure of ["none", "before-seal", "after-seal", "post-seal-timeout"]
     fire = () => onExit!({ endedAt: new Date().toISOString(), exitCode: 0, signal: null,
       terminalCause: "exited", providerContinuationId: env.handle.providerContinuationId! });
     assert.ok(onExit, "real stream terminal callback is installed");
-    if (failure === "before-seal") {
+    if (failure.startsWith("before-seal")) {
       fire();
       await eventually(async () => recordAttempts > 0, "first terminal attempts persistence before handoff");
     }
@@ -6084,11 +6110,10 @@ for (const failure of ["none", "before-seal", "after-seal", "post-seal-timeout"]
       expire();
     }
     const response = await preparing;
-    if (failure !== "none") {
+    if (failure === "post-seal-timeout") {
       assert.equal(response.ok, false, "unsettled terminal never authorizes a successful handoff");
-      assert.match(response.error ?? "", failure === "post-seal-timeout" ? /exit evidence is still being saved/ : /terminal storage unavailable/);
-      assert.equal(internal.handoffScheduled, failure !== "before-seal",
-        "only the pre-seal failure remains reversible");
+      assert.match(response.error ?? "", /exit evidence is still being saved/);
+      assert.equal(internal.handoffScheduled, true, "only the pre-seal failure remains reversible");
       assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true);
       rejectWrites = false;
       const retried = daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
@@ -6099,12 +6124,15 @@ for (const failure of ["none", "before-seal", "after-seal", "post-seal-timeout"]
       }
       const retry = await retried;
       assert.equal(retry.ok, true, retry.error);
-    } else assert.equal(response.ok, true, response.error);
+    } else assert.equal(response.ok, true, unsaved
+      ? `an exit whose terminal cannot be saved holds the handoff only until its bound ends, before or after the seal: ${response.error}`
+      : response.error);
     await within(env.daemon.waitForHandoff(), "retained terminal finishes before stores close");
     const saved = inspection.prepare("SELECT terminal_json FROM work_attempt_executions WHERE execution_generation_id=?").get(env.generation)!;
-    assert.equal(JSON.parse(String(saved.terminal_json)).terminal_cause, "exited");
+    if (unsaved) assert.equal(saved.terminal_json, null, "what could not be saved is not invented; the successor finds the process gone");
+    else assert.equal(JSON.parse(String(saved.terminal_json)).terminal_cause, "exited", "a terminal saved within the bound is the exact one");
     assert.equal(disposeCalls, 1, "capture seal and terminal removal share one disposer");
-    assert.ok(recordAttempts >= 1);
+    assert.ok(recordAttempts >= (unsaved || failure === "before-seal, cleared within the bound" ? 2 : 1), "a failed save is tried again within the bound");
   } finally { unblock(); inspection.close(); await env.cleanup(); }
 });
 

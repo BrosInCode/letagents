@@ -1,8 +1,23 @@
 export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
+/** Reactions of the messages in a requested range, in the shape the shared reaction store reads. */
+export interface DesktopMessageReactionsRange {
+  /** Only reacted messages appear. */
+  reactions: Record<string, MessageReaction[]>;
+  /** The emoji the signed-in person reacted with, per message. */
+  viewer_reactions?: Record<string, string[]>;
+  /** Null when the whole range was read; otherwise the message to continue from. */
+  next_first_message_id: string | null;
+}
+/** The message's reactions after the viewer added or removed one. */
+export interface DesktopMessageReactionChange { changed: boolean; reactions: MessageReaction[]; }
+/** One page of a room history search, newest first; the shape the shared search controller reads. */
+export interface DesktopRoomMessageSearchPage { terms: string[]; messages: DesktopRoomMessage[]; has_more: boolean; next_before: string | null; }
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
 import type { DesktopAccountActivityState } from "./account-activity.js";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
+import type { RoomNotificationPreferenceChange, RoomNotificationPreferenceEntry, RoomNotificationPreferenceList } from "../../../../shared/room-notification-preferences.mjs";
 import type { WakeRule, WakeRulePage } from "../../../../shared/wake-rules.mjs";
+import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
 import type { DesktopAttentionRoom, DesktopNeedsYou } from "./knowledge.js";
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
@@ -295,9 +310,24 @@ export interface DesktopApi {
     stopAccountActivity?: () => Promise<void>;
     onAccountActivity?: (callback: (state: DesktopAccountActivityState) => void) => () => void;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
+    /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */
+    getMessageLinkPreviews?: (roomIdentifier: string, references: import("../../../../shared/message-link-previews.mjs").LinkPreviewReference[]) => Promise<import("../../../../shared/message-link-previews.mjs").MessageLinkPreviewsResponse>;
+    getMessagePins?: (roomIdentifier: string) => Promise<import("../../../../shared/message-pins.mjs").MessagePinsResponse>;
+    createMessageReminder?: (room: string, message: string, dueAt: string) => Promise<{ reminder: import("./reminders.js").DesktopMessageReminder }>;
+    getMessageReminders?: (offset?: number) => Promise<import("./reminders.js").DesktopMessageRemindersPage>;
+    deleteMessageReminder?: (id: string) => Promise<{ ok: boolean }>;
+    setMessagePin?: (roomIdentifier: string, messageId: string, pinned: boolean) => Promise<import("../../../../shared/message-pins.mjs").MessagePinMutationResponse>;
+    reportTyping?: (roomIdentifier: string, input: import("../../../../shared/room-typing.mjs").TypingReport) => Promise<void>;
+    getMessageReactions?: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) => Promise<DesktopMessageReactionsRange>;
+    setMessageReaction?: (roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) => Promise<DesktopMessageReactionChange>;
+    /** Cloud rooms only. Optional so a renderer newer than its main process keeps its in-place find. */
+    searchMessages?: (roomIdentifier: string, query: string, beforeMessageId?: string | null) => Promise<DesktopRoomMessageSearchPage>;
     getGitHubEventFilter: (roomIdentifier: string) => Promise<GitHubRoomChatEventFilter>;
     setGitHubEventFilter: (roomIdentifier: string, enabledKinds: GitHubRoomChatEventKind[]) => Promise<GitHubRoomChatEventFilter>;
     getAgentGuidelines: (roomIdentifier: string) => Promise<RoomAgentGuidelines>;
+    listNotificationPreferences: () => Promise<RoomNotificationPreferenceList>;
+    getNotificationPreference: (identifier: string) => Promise<RoomNotificationPreferenceEntry>;
+    setNotificationPreference: (identifier: string, change: RoomNotificationPreferenceChange) => Promise<RoomNotificationPreferenceEntry>;
     setAgentGuidelines: (roomIdentifier: string, guidelines: string) => Promise<RoomAgentGuidelines>;
     getWakeRules: (roomIdentifier: string) => Promise<WakeRulePage>;
     cancelWakeRule: (roomIdentifier: string, ruleId: string) => Promise<WakeRule>;
@@ -320,6 +350,7 @@ export interface DesktopApi {
     ) => Promise<DesktopFocusRoomMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
+    getPullRequestDiff?: (roomIdentifier: string, number: number) => Promise<import("./room.js").DesktopPullRequestDiffResult>;
     getGitHubEvents: (
       roomIdentifier: string,
       query?: DesktopGitHubEventsQuery,
@@ -432,6 +463,7 @@ export interface DesktopApi {
     getAgentInspectorDetail: (input: import("./agents.js").DesktopSupervisorAgentInspectorDetailInput) => Promise<import("./agents.js").DesktopSupervisorAgentInspectorDetail>;
     getAgentConfiguration: (input: { entryId: string; daemonGeneration: number }) => Promise<DesktopSupervisorAgentConfiguration>;
     updateAgentConfiguration: (input: DesktopSupervisorAgentConfigurationUpdateInput) => Promise<DesktopSupervisorAgentConfigurationUpdateResult>;
+    setAgentHomeHarness?: (input: import("./agents.js").DesktopSupervisorAgentHomeHarnessInput) => Promise<import("./agents.js").DesktopSupervisorAgentHomeHarnessResult>;
     applyAgentConfiguration: (input: DesktopSupervisorAgentConfigurationApplyInput) => Promise<DesktopSupervisorAgentConfigurationApplyResult>;
     prepareRoomMove: (input: DesktopSupervisorRoomMovePrepareInput) => Promise<DesktopSupervisorRoomMove>;
     commitRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;

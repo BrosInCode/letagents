@@ -1,6 +1,7 @@
 export interface DirectoryRoom {
   id: string
   title: string
+  hasUnread?: boolean
   kind: 'topic' | 'task' | 'branch'
   kindLabel?: string
   closed: boolean

@@ -344,6 +344,7 @@ test("registerRoomMessageRoutes preserves canonical message route order", () => 
 
   assert.deepEqual(calls, [
     { method: "post", path: "/^\\/rooms\\/(.+)\\/messages$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/messages\\/link-previews$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/([^/]+)\\/attachments\\/([^/]+)$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads$/" },
     { method: "delete", path: "/^\\/rooms\\/(.+)\\/attachments\\/uploads\\/([^/]+)$/" },
@@ -356,8 +357,19 @@ test("registerRoomMessageRoutes preserves canonical message route order", () => 
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/stream$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/info$/" },
     { method: "put", path: "/^\\/rooms\\/(.+)\\/messages\\/read$/" },
+    { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/reactions$/" },
+    { method: "put", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/reactions\\/([^/]+)$/" },
+    { method: "delete", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/reactions\\/([^/]+)$/" },
+    { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/search$/" },
+    { method: "get", path: "/^\\/rooms\\/(.+)\\/messages\\/pins$/" },
+    { method: "put", path: "/^\\/rooms\\/(.+)\\/messages\\/([^/]+)\\/pin$/" },
+    { method: "delete", path: "/^\\/rooms\\/(.+)\\/messages\\/([^/]+)\\/pin$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_[^/]+)\\/reminders$/" },
+    { method: "get", path: "/desktop/reminders" },
+    { method: "delete", path: "/desktop/reminders/:id" },
     { method: "put", path: "/^\\/rooms\\/(.+)\\/messages\\/(msg_\\d+)\\/agent-receipts\\/self$/" },
     { method: "put", path: "/^\\/rooms\\/(.+)\\/agents\\/self\\/observation$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/typing$/" },
   ]);
 });
 
@@ -2268,4 +2280,152 @@ test("worker stream routing barrier retains frames, coalesces readers and releas
   assert.deepEqual(await Promise.all(frames), [true, true]);
   closed = true;
   assert.equal(await waitForMessageRouting({ roomId: "routing-stream", messageId: "msg_4", includePromptOnly: false, closed: () => closed, load }), false);
+});
+
+test('typing reaches only opted-in other people; agent SSE/poll stay parked and reconnect has no replay', async () => {
+  const { roomTyping } = await import('../server/room-typing.js');
+  const handlers = new Map<string, Function>();
+  const app = Object.fromEntries(['get', 'post', 'put', 'delete'].map(method => [method,
+    (path: RegExp, handler: Function) => handlers.set(`${method}:${path}`, handler)]));
+  const room = `typing-live-${Date.now()}`;
+  let historyReads = 0;
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => room,
+    resolveRoomOrReply: async (_id: string) => ({ id: room }),
+    requireParticipant: async () => true,
+    getMessagesAfter: async () => { historyReads++; return { messages: [], has_more: false }; },
+    beginRoomAgentDelivery: async () => null,
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  const stream = handlers.get('get:/^\\/rooms\\/(.+)\\/messages\\/stream$/')!;
+  const poll = handlers.get('get:/^\\/rooms\\/(.+)\\/messages\\/poll$/')!;
+  const requests: EventEmitter[] = [];
+  function open(account: string, auth = 'session', capability = true) {
+    const req = Object.assign(new EventEmitter(), { params: { 0: room },
+      query: capability ? { stream_capability: 'room_typing_v1' } : {}, headers: {},
+      authKind: auth, sessionAccount: { account_id: account }, get() {} });
+    requests.push(req);
+    const res = Object.assign(new EventEmitter(), { writes: [] as string[], writableLength: 0,
+      writableNeedDrain: false, writableEnded: false, headersSent: false,
+      socket: { setKeepAlive() {} }, setHeader() {}, flushHeaders() {},
+      status() { return this; }, json(value: unknown) { this.writes.push(JSON.stringify(value)); return this; },
+      write(value: string) { this.writes.push(value); return true; }, end() { this.writableEnded = true; } });
+    return { req, res };
+  }
+  const human = open('bea'), self = open('ada'), otherSelf = open('ada'), agent = open('agent', 'owner_token'), worker = open('worker', 'agent_session'), legacy = open('cy', 'session', false);
+  const agentPoll = open('agent', 'owner_token');
+  Object.assign(agentPoll.req.query, { after: 'msg_1', timeout: '60000' });
+  const all = [human, self, otherSelf, agent, worker, legacy];
+  try {
+    for (const pair of all) { await stream(pair.req, pair.res); pair.res.writes.length = 0; }
+    await poll(agentPoll.req, agentPoll.res);
+    const checkpoint = deps.roomEventBroker.subscribe(room);
+    const cursor = checkpoint.checkpointCursor;
+    checkpoint.close();
+    roomTyping.report(room, 'ada', 'Ada', { client_id: 'composer_test_live', sequence: 1, typing: true, ttl_ms: 5000 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(human.res.writes.join(''), /event: room_typing_v1/);
+    assert.doesNotMatch(human.res.writes.join(''), /^id: /m);
+    for (const pair of [self, otherSelf, agent, worker, legacy, agentPoll]) assert.equal(pair.res.writes.length, 0);
+    assert.equal(historyReads, 1, 'typing never wakes the actual long-poll handler');
+    const reconnect = open('bea');
+    await stream(reconnect.req, reconnect.res);
+    assert.doesNotMatch(reconnect.res.writes.join(''), /room_typing_v1/, 'no snapshot or replay');
+    const after = deps.roomEventBroker.subscribe(room);
+    assert.equal(after.checkpointCursor, cursor, 'no broker event or cursor');
+    after.close();
+    human.req.emit('close');
+    const before = human.res.writes.length;
+    roomTyping.report(room, 'ada', 'Ada', { client_id: 'composer_test_live', sequence: 2, typing: false, ttl_ms: 0 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(human.res.writes.length, before, 'subscription removed with connection');
+  } finally {
+    for (const req of requests) req.emit('close');
+    deps.roomEventBroker.close();
+  }
+});
+
+for (const failure of ['denied', 'throws'] as const) {
+  test(`typing authorization ${failure} drops only the hint; message delivery owns stream closure`, async (context) => {
+    context.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    const { roomTyping } = await import('../server/room-typing.js');
+    const handlers = new Map<string, Function>();
+    const app = Object.fromEntries(['get', 'post', 'put', 'delete'].map(method => [method,
+      (path: RegExp, handler: Function) => handlers.set(`${method}:${path}`, handler)]));
+    const room = `typing-authorization-${failure}-${Date.now()}`;
+    let failing = false;
+    const deps = {
+      ...createDeps(),
+      resolveCanonicalRoomRequestId: async () => room,
+      resolveRoomOrReply: async () => ({ id: room }),
+      requireParticipant: async () => true,
+      reauthorizeGitRoomParticipant: async () => {
+        if (failing && failure === 'throws') throw new Error('temporary dependency failure');
+        return !failing;
+      },
+    };
+    registerRoomMessageRoutes(app as never, deps as never);
+    const req = Object.assign(new EventEmitter(), { params: { 0: room },
+      query: { stream_capability: 'room_typing_v1' }, headers: {}, authKind: 'session',
+      sessionAccount: { account_id: 'bea' }, get() {} });
+    const res = Object.assign(new EventEmitter(), { writes: [] as string[], writableLength: 0,
+      writableNeedDrain: false, writableEnded: false, socket: { setKeepAlive() {} },
+      setHeader() {}, flushHeaders() {}, status() { return this; }, json() { return this; },
+      write(value: string) { this.writes.push(value); return true; }, end() { this.writableEnded = true; } });
+    const errorLog = context.mock.method(console, 'error', () => {});
+    try {
+      await handlers.get('get:/^\\/rooms\\/(.+)\\/messages\\/stream$/')!(req, res);
+      res.writes.length = 0;
+      failing = true;
+      context.mock.timers.tick(60001);
+      roomTyping.report(room, 'ada', 'Ada', { client_id: 'composer_auth_test', sequence: 1, typing: true, ttl_ms: 5000 });
+      await flushAsyncEvents();
+      assert.equal(res.writes.length, 0, 'denied/failed hint is dropped');
+      assert.equal(res.writableEnded, false, 'a hint cannot close the stream');
+      assert.equal(errorLog.mock.callCount(), failure === 'throws' ? 1 : 0);
+      // The next real room event still enforces the same existing authorization.
+      deps.roomEventBroker.publish({ kind: 'message_info_updated', roomId: room, messageIds: null });
+      await flushAsyncEvents();
+      assert.equal(res.writableEnded, true, 'real event keeps its authorization behavior');
+    } finally { req.emit('close'); deps.roomEventBroker.close(); }
+  });
+}
+
+test("preview reads leave message SSE frames unchanged and produce no agent-visible event", async () => {
+  const routes = new Map<string, Function>();
+  const app = Object.fromEntries(["get", "post", "put", "delete"].map(method => [method,
+    (path: RegExp, handler: Function) => routes.set(`${method}:${path}`, handler)]));
+  const deps = {
+    ...createDeps(), resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }), requireParticipant: async () => true,
+    getMessageLinkPreviews: async () => [{ kind: "pull", number: 1, repository: "org/repo", title: "Stored", state: "open", url: "https://github.com/org/repo/pull/1" }],
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  let close = () => {};
+  const req = { params: { 0: "room_1" }, query: {}, headers: {}, authKind: "session", sessionAccount: { account_id: "person" },
+    on(event: string, handler: () => void) { if (event === "close") close = handler; return this; } };
+  const res = { writes: [] as string[], writableEnded: false, socket: { setKeepAlive() {} },
+    setHeader() {}, flushHeaders() {}, write(chunk: string) { this.writes.push(chunk); return true; }, end() { this.writableEnded = true; } };
+  const stream = routes.get("get:/^\\/rooms\\/(.+)\\/messages\\/stream$/")!;
+  const previewRead = routes.get("post:/^\\/rooms\\/(.+)\\/messages\\/link-previews$/")!;
+  const agent = deps.roomEventBroker.subscribe("room_1", { kinds: new Set(["message_created"]) });
+  const message = { id: "msg_1", sender: "Ada", text: "https://github.com/org/repo/pull/1", source: "browser", timestamp: "2026-10-02T00:00:00Z" };
+  try {
+    await stream(req, res);
+    const emit = async () => { deps.messageEvents.emit("message:created", { projectId: "room_1", message }); await flushAsyncEvents(); await flushAsyncEvents(); };
+    await emit(); await agent.next();
+    const before = [...res.writes];
+    const output = { body: null as any, json(value: any) { this.body = value; } };
+    await previewRead({ ...req, body: { references: [{ kind: "pull", number: 1 }] } }, output);
+    assert.equal(output.body.previews[0].title, "Stored");
+    await flushAsyncEvents();
+    assert.deepEqual(res.writes, before, "a preview read emits no SSE event, receipt, notification or wake source");
+    assert.equal(await Promise.race([agent.next().then(() => true), flushAsyncEvents().then(() => false)]), false);
+    await emit();
+    const frames = res.writes.filter(frame => frame.includes('"text":'));
+    assert.equal(frames.length, 2);
+    assert.equal(frames[0]!.replace(/^id:.*\n/m, ""), frames[1]!.replace(/^id:.*\n/m, ""));
+    assert.doesNotMatch(frames.join(""), /previews|Stored/);
+  } finally { close(); agent.close(); deps.roomEventBroker.close(); }
 });

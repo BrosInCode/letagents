@@ -141,6 +141,25 @@ type ActiveDeliveryInterruptReservation = {
   disposition: "cancelled" | "resume" | "freeze" | null;
 };
 
+/**
+ * The room refused the worker bearer itself (HTTP 401 or 403), as opposed to
+ * a transport or server failure that the same bearer may survive.
+ */
+export class SupervisedRoomAuthorizationError extends Error {
+  constructor(message: string, readonly status: 401 | 403) {
+    super(message);
+    this.name = "SupervisedRoomAuthorizationError";
+  }
+}
+
+/**
+ * Shown while the room refuses the agent's bearer. It says what the daemon
+ * knows and names no cause or remedy: the server answers an expired bearer
+ * and a session a room admin ended identically, and a restarted runtime is
+ * given the same bearer while that bearer has time left.
+ */
+export const ROOM_REFUSED_ACCESS_DETAIL = "The room refused this agent's access, so it is not receiving room messages.";
+
 const SUCCESSFUL_POLL_PACE_MS = 25;
 const POLL_ERROR_BACKOFF_BASE_MS = 250;
 const POLL_ERROR_BACKOFF_CAP_MS = 30_000;
@@ -157,7 +176,7 @@ export class SupervisedAgentDelivery {
   private readonly loopEpochs = new Map<string, number>();
   /** Memory-only registration identity; only a same-session bearer rotation
    * changes it in place. The bearer is never logged or persisted. */
-  private readonly loopOwners = new Map<string, { context: string; bearer: string; agent: SupervisedIngressAgent }>();
+  private readonly loopOwners = new Map<string, { context: string; bearer: string; agent: SupervisedIngressAgent; roomRefused?: boolean }>();
   private readonly loopControllers = new Map<string, AbortController>();
   private readonly pumping = new Map<string, Promise<void>>();
   /** The live agent object each pump (and its admitted turn) authorizes with. */
@@ -214,6 +233,8 @@ export class SupervisedAgentDelivery {
     private readonly releaseWorkspace?: (agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string) => Promise<void>,
     private readonly onDeliverySettled?: (agentId: string) => void,
     private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent, demand: object) => Promise<boolean>,
+    /** Archive, in the agent's execution record, what its ended runtimes left open and no message still needs. */
+    private readonly archiveEndedRuntimes?: (agentId: string) => Promise<void>,
   ) {}
 
   /**
@@ -451,10 +472,11 @@ export class SupervisedAgentDelivery {
 
   private adoptRotatedBearer(
     agentId: string,
-    owner: { bearer: string; agent: SupervisedIngressAgent },
+    owner: { bearer: string; agent: SupervisedIngressAgent; roomRefused?: boolean },
     bearer: string,
   ): void {
     owner.bearer = bearer;
+    this.roomAcceptsAgain(agentId, owner);
     owner.agent.bearer = bearer;
     const pumpAgent = this.pumpAgents.get(agentId);
     if (pumpAgent) pumpAgent.bearer = bearer;
@@ -607,7 +629,16 @@ export class SupervisedAgentDelivery {
         consecutivePollErrors = 0;
       } catch (error) {
         consecutivePollErrors += 1;
-        await this.inbox.setIngressHealth({ agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: agent.executionGenerationId, state: "backoff", detail: error instanceof Error ? error.message : "Room observation failed." });
+        // A refusal is shown to the owner and asks for nothing. The same
+        // answer is all the daemon sees when a room admin has disconnected the
+        // agent, so a refusal must never lead to a new session or a new
+        // runtime. A bearer that is merely due is rotated on its schedule, by
+        // the heartbeat, whether or not the room has refused it yet. Until the
+        // room accepts a poll again, any failure leaves the refusal standing.
+        const refused = this.roomRefusesAccess(agent.agentId);
+        await this.inbox.setIngressHealth({ agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: agent.executionGenerationId,
+          ...(refused ? { state: "blocked" as const, detail: ROOM_REFUSED_ACCESS_DETAIL }
+            : { state: "backoff" as const, detail: error instanceof Error ? error.message : "Room observation failed." }) });
       }
       const delayMs = consecutivePollErrors
         ? pollErrorBackoffMs(consecutivePollErrors)
@@ -673,7 +704,17 @@ export class SupervisedAgentDelivery {
       // A later grant/room replacement cannot reattribute this source batch.
       let onInserted: ((sourceMessageIds: readonly string[]) => void) | undefined;
       try { onInserted = this.observeNewSources?.(agent); } catch { /* optional observation */ }
-      const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal });
+      // The lane notes whether the room refuses the bearer it holds. A
+      // rotation is adopted in place while a poll is in flight, and a refusal
+      // of the bearer the lane has already given up says nothing about the
+      // one it holds now.
+      const owner = this.loopOwners.get(agent.agentId);
+      const bearer = agent.bearer;
+      const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal }).catch((error: unknown) => {
+        if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer) owner.roomRefused = true;
+        throw error;
+      });
+      if (owner) this.roomAcceptsAgain(agent.agentId, owner);
       if (!await this.hasIngressAuthority(agent, controller)) return;
       const messages = activatedMessages(response.messages ?? []);
       await this.inbox.ingestSuccessfulPoll({
@@ -717,6 +758,26 @@ export class SupervisedAgentDelivery {
     };
     void operation.then(cleanup, cleanup);
     return operation;
+  }
+
+  /**
+   * A refusal that was standing is over: the room accepted a poll, or the lane
+   * holds a new bearer. A runtime that ended meanwhile was left as it was, so
+   * ask convergence once to look again. An ordinary poll asks for nothing.
+   */
+  private roomAcceptsAgain(agentId: string, owner: { roomRefused?: boolean }): void {
+    if (!owner.roomRefused) return;
+    owner.roomRefused = false;
+    this.onDeliverySettled?.(agentId);
+  }
+
+  /**
+   * True while the room refuses the bearer this agent polls with (HTTP 401 or
+   * 403). The daemon cannot tell why: an expired bearer and a session that a
+   * room admin ended are refused with the same answer.
+   */
+  roomRefusesAccess(agentId: string): boolean {
+    return this.loopOwners.get(agentId)?.roomRefused === true;
   }
 
   activeTurn(agent: SupervisedIngressAgent): { inboxItemId: string; sourceMessageId: string; phase: "dispatching" | "responding" | "publishing" } | null {
@@ -1232,7 +1293,7 @@ export class SupervisedAgentDelivery {
             if (binding?.work_attempt_id !== agent.workAttemptId || binding.provider_continuation_id !== agent.providerContinuationId) return;
             const prior = await this.inbox.taskContinuation(failed.inbox_item_id);
             const attempt = (prior?.attempt ?? 0) + 1;
-            const policy = taskFailurePolicy(failed.last_error, attempt);
+            const policy = taskFailurePolicy(failed.last_error, attempt, await this.inbox.providerRefusedTurn(failed.inbox_item_id));
             let tasks: ContinuityTask[] = [];
             let lookupError: string | null = null;
             try { tasks = await this.ownedTasks(agent, { taskIds: prior?.tasks?.map((task) => task.id), heldBefore: prior?.heldBefore ?? String(failed.activation.task_continuity_failed_at), signal: controller.signal }); }
@@ -1427,6 +1488,15 @@ export class SupervisedAgentDelivery {
         await this.inbox.transition(item.inbox_item_id, "pending");
       }
     };
+    /**
+     * Set when the saved turn was started by a process that has since ended.
+     * A turn that the conversation's own record shows as started and never
+     * ended was then cut off by that exit: the adapter says so instead of
+     * leaving a result that will never come to be waited for.
+     */
+    let originProcessEnded = false;
+    /** The saved turn's own conversation, when it is not the one this runtime continues. */
+    let earlierContinuationId: string | null = null;
     try {
       if (await this.inbox.nativeFailure(item.inbox_item_id)) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
@@ -1473,10 +1543,24 @@ export class SupervisedAgentDelivery {
           || binding.work_attempt_id !== agent.workAttemptId
           || binding.provider_continuation_id !== currentContinuation
           || binding.provider_turn_id !== item.provider_turn_id) {
-          await this.inbox.transition(item.inbox_item_id, "blocked", {
-            last_error: "The saved provider turn belongs to a different or unverifiable provider authority and was not recovered.",
-          });
-          return;
+          // An Open Model process starts a new session; the sessions of the
+          // processes before it stay in the agent's own runtime directory.
+          // Once the process that ran this turn has ended, its replacement
+          // reads this exact turn there. Nothing else differs from the binding.
+          const readsEarlierConversation = agent.provider === "open-model" && binding !== null && binding !== undefined
+            && binding.agent_id === agent.agentId && binding.room_id === agent.roomId
+            && binding.work_attempt_id === agent.workAttemptId && binding.provider_turn_id === item.provider_turn_id
+            && await this.inbox.providerTurnProcessEnded(item.inbox_item_id, agent.executionGenerationId);
+          if (!readsEarlierConversation) {
+            await this.inbox.transition(item.inbox_item_id, "blocked", {
+              last_error: "The saved provider turn belongs to a different or unverifiable provider authority and was not recovered.",
+            });
+            return;
+          }
+          earlierContinuationId = binding!.provider_continuation_id;
+          originProcessEnded = true;
+        } else if (agent.provider !== "cursor") {
+          originProcessEnded = await this.inbox.providerTurnProcessEnded(item.inbox_item_id, agent.executionGenerationId);
         }
         providerTurnOriginExecutionGenerationId = binding.origin_execution_generation_id;
         // Close the read-to-use window: a replacement may have landed while
@@ -1485,16 +1569,26 @@ export class SupervisedAgentDelivery {
         if (!await hasProviderAuthority()) return;
       }
       if (recovering) setActive("responding");
-      else setActive("dispatching");
+      else {
+        // A turn an earlier process left open, whose message has since been
+        // settled, would refuse this one in the agent's execution record.
+        try { await this.archiveEndedRuntimes?.(agent.agentId); } catch { /* The record is optional; the turn is not. */ }
+        if (!await hasProviderAuthority()) return;
+        setActive("dispatching");
+      }
       const observedContext = recovering
         ? []
         : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
       if (!await hasProviderAuthority()) return;
-      // A crashed Cursor lane can already be failed when it reports its turn's
-      // exact ending. The lane lease and the turn checks still prove that this
-      // owner may record that ending and settle the row instead of blocking it.
+      // A runtime can itself have ended by the time it reports its turn's
+      // exact ending: a crashed Cursor lane, or any provider whose handle
+      // failed during the turn. The lane lease and the turn checks still prove
+      // that this owner may record a failed or interrupted ending and settle
+      // the row. Requiring a healthy runtime for that left the row pending for
+      // ever behind an error about delivery authority instead of the
+      // provider's own. An answer still needs a runtime the daemon may use.
       const hasTerminalAuthority = (result: ProviderRoomTurnResult): Promise<boolean> =>
-        agent.provider === "cursor" && (result.outcome === "failed" || result.outcome === "interrupted")
+        result.outcome === "failed" || result.outcome === "interrupted"
           ? this.hasLaneAuthority(agent, turnController)
           : this.hasExecutionAuthority(agent, turnController);
       // Handoff may abandon observation only after the provider has committed
@@ -1504,7 +1598,7 @@ export class SupervisedAgentDelivery {
       let settledCursorEnding: ProviderRoomTurnCheckpointDisposition | null = null;
       const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<ProviderRoomTurnCheckpointDisposition> => {
         if (settledCursorEnding) return settledCursorEnding;
-        const providerContinuationId = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
+        const providerContinuationId = earlierContinuationId ?? agent.handle?.providerContinuationId ?? agent.providerContinuationId;
         if (result.outcome === "failed" || result.outcome === "interrupted") {
           // Failure is exact native evidence, never an exception classifier or
           // a terminal callback that fabricates the missing dispatch boundary.
@@ -1699,11 +1793,19 @@ export class SupervisedAgentDelivery {
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         await this.inbox.checkpointDispatchIntent(item.inbox_item_id, this.http.ownedTasks ? agent.agentSessionId : undefined, observedContext);
       };
+      // A turn the execution record holds open is closed there by its ending.
+      // One the record never saw start has nothing to close, and its ending
+      // would be a fact about a turn the record cannot place.
+      const recordEnding = recovering
+        && await this.inbox.recordedTurnIsOpen(item.inbox_item_id).catch(() => false);
       providerCallEntered = true;
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
           inboxItemId: item.inbox_item_id,
           providerTurnId: item.provider_turn_id!,
+          ...(recordEnding ? { recordEnding: true } : {}),
+          ...(originProcessEnded ? { originProcessEnded: true } : {}),
+          ...(earlierContinuationId ? { providerContinuationId: earlierContinuationId } : {}),
         }, { detachSignal: turnController.signal, checkpointProviderState, settleLifecycleBeforeIdle, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,

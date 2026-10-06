@@ -1,0 +1,254 @@
+/* Emoji reactions under a message, and the picker that adds one. Shared by the
+   desktop and web apps; every colour comes from tokens both apps define. */
+
+.message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.message-reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  box-sizing: border-box;
+  height: 24px;
+  min-height: 0;
+  margin: 0;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+button.message-reaction {
+  appearance: none;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    transform 120ms var(--ease-out, ease-out);
+}
+
+button.message-reaction:active {
+  transform: scale(0.96);
+}
+
+button.message-reaction:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.message-reaction[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+  color: var(--text);
+}
+
+.message-reaction-emoji {
+  font-size: 14px;
+  /* Emoji glyphs sit low in most system fonts; this centres them on the count. */
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+
+.message-reaction-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.message-reaction-add {
+  padding: 0 7px;
+  color: var(--text-tertiary);
+}
+
+.message-reaction-add svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  button.message-reaction:hover {
+    border-color: var(--border-strong);
+    color: var(--text);
+  }
+
+  button.message-reaction[aria-pressed="true"]:hover {
+    border-color: color-mix(in srgb, var(--blue) 75%, transparent);
+    background: color-mix(in srgb, var(--blue) 20%, transparent);
+  }
+}
+
+@media (pointer: coarse) {
+  .message-reaction {
+    height: 32px;
+    padding: 0 11px;
+  }
+}
+
+.message-reaction-picker {
+  position: fixed;
+  z-index: 1000;
+  box-sizing: border-box;
+  width: 284px;
+  max-width: calc(100vw - 16px);
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  font-family: var(--font-sans, inherit);
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity 140ms var(--ease-out, ease-out),
+    transform 140ms var(--ease-out, ease-out);
+}
+
+/* The picker grows out of the control that opened it. */
+.message-reaction-picker[data-side="above"][data-align="start"] { transform-origin: bottom left; }
+.message-reaction-picker[data-side="above"][data-align="end"] { transform-origin: bottom right; }
+.message-reaction-picker[data-side="below"][data-align="start"] { transform-origin: top left; }
+.message-reaction-picker[data-side="below"][data-align="end"] { transform-origin: top right; }
+
+@starting-style {
+  .message-reaction-picker {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+/* Opened from the keyboard, or not yet measured: no motion. */
+.message-reaction-picker[data-instant="true"],
+.message-reaction-picker[data-placed="false"] {
+  transition: none;
+}
+
+.message-reaction-picker[data-placed="false"] {
+  visibility: hidden;
+}
+
+.message-reaction-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 2px;
+}
+
+.message-reaction-picker-emoji {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 0;
+  aspect-ratio: 1;
+  margin: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 100ms ease, transform 120ms var(--ease-out, ease-out);
+}
+
+.message-reaction-picker-emoji:active {
+  transform: scale(0.92);
+}
+
+.message-reaction-picker-emoji:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+
+.message-reaction-picker-emoji[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .message-reaction-picker-emoji:hover {
+    background: var(--bg-subtle);
+  }
+}
+
+.message-reaction-picker-custom {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.message-reaction-picker-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 0;
+  height: 30px;
+  margin: 0;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.message-reaction-picker-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.message-reaction-picker-input:focus-visible {
+  border-color: var(--blue);
+  outline: 0;
+}
+
+.message-reaction-picker-input[aria-invalid="true"] {
+  border-color: var(--red-text);
+}
+
+.message-reaction-picker-hint {
+  margin: 0;
+  color: var(--red-text);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button.message-reaction,
+  .message-reaction-picker-emoji {
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+
+  button.message-reaction:active,
+  .message-reaction-picker-emoji:active {
+    transform: none;
+  }
+
+  .message-reaction-picker {
+    transition: opacity 140ms ease;
+    transform: none;
+  }
+
+  @starting-style {
+    .message-reaction-picker {
+      transform: none;
+    }
+  }
+}

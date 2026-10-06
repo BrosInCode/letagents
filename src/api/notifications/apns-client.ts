@@ -6,6 +6,7 @@ export type ApnsEnvironment = "production" | "sandbox";
 
 export interface ApnsNotificationInput {
   notificationId: string;
+  reminder?: boolean;
   deviceToken: string;
   environment: ApnsEnvironment;
   roomId: string | null;
@@ -77,7 +78,7 @@ export function buildApnsPayload(input: ApnsNotificationInput): Record<string, u
   return {
     aps: {
       alert: {
-        title: input.conversationId ? sender : `${sender} in ${truncateUtf8(input.roomDisplayName, 120)}`,
+        title: input.conversationId ? sender : `${input.reminder ? "Reminder: " : ""}${sender} in ${truncateUtf8(input.roomDisplayName, 120)}`,
         body: truncateUtf8(input.body, 1_800) || "Sent an attachment",
       },
       sound: "default",

@@ -266,6 +266,124 @@ function settleStoppedRuntimeWork(database: DatabaseSync,
     .run(Date.parse(at), record.agent_id, record.agent_id, record.runtime_generation_id);
 }
 
+/** The line an owner reads in the agent's activity when its record stops under a runtime that keeps working. */
+export const ACTIVITY_RECORD_STOPPED_NOTICE = "LetAgents stopped recording this agent's activity: part of the record could not be kept. The agent keeps working, and its messages are not affected.";
+/** The line an owner reads in the agent's activity when the daemon carried on past a gap in its record. */
+export const ACTIVITY_RECORD_CONTINUED_NOTICE = "Part of this agent's activity record is missing; LetAgents continued with a new record.";
+
+/**
+ * The daemon is about to start another runtime for this agent. It does that
+ * only once every earlier generation of the work attempt has ended, and the
+ * runtimes of those generations can still stop the new one from being
+ * recorded: one whose record has a gap refuses the next observer, and one
+ * with a turn left open refuses the next turn. Nothing else will ever
+ * complete either. So each is archived behind the same boundary that
+ * "Restart and resume" records: its observer as it stands, gap included, a
+ * new observer epoch, the runtime ended, its open turns lost. What is missing
+ * stays missing and the runtime reads as incomplete from then on.
+ *
+ * Unlike that action, nobody stopped anything here, so no message is
+ * cancelled and no attempt is marked lost: a turn whose message is still to
+ * be settled is left for its replacement to read back.
+ */
+export function archiveExitedRuntimes(database: DatabaseSync, entry: DaemonManifestEntry | undefined, identity?: ProcessIdentity): string[] {
+  if (!database.isTransaction) throw new Error("Runtime recovery requires a fenced transaction.");
+  const rows = exitedRuntimesToArchive(database, entry, identity);
+  return entry && rows.length ? archiveSelectedRuntimes(database, entry, rows) : [];
+}
+
+/**
+ * The ended runtimes of this agent that `archiveExitedRuntimes` would archive. It only reads.
+ *
+ * Each has a recorded terminal. The runtime the agent's saved reference still
+ * names is archived only once its process is known to have ended: the
+ * operating system says the process is gone (absent, or another process
+ * under its id), or it cannot tell and the terminal carries the evidence of
+ * the process's death. A process it shows running is never archived. When its
+ * liveness cannot be told, it is left alone; the restart for a blocked record
+ * stops it through its adapter, or its owner is shown why the agent waits.
+ * Every other runtime has been followed by a later one, which the daemon only
+ * starts once the process before it is proven gone.
+ *
+ * Cursor starts a child per turn in one generation, and that generation has
+ * a terminal only once the lane itself ends. A child of the lane's current
+ * generation is archived once the saved reference no longer names it: the
+ * daemon moves the reference off a child only after the child has exited, or
+ * after a successor found it gone. A turn it left open, after a daemon that
+ * was replaced under it, otherwise refuses every later turn of the lane.
+ */
+export function exitedRuntimesToArchive(database: DatabaseSync, entry: DaemonManifestEntry | undefined,
+  identity?: ProcessIdentity): Array<Record<string, string | number | null>> {
+  if (!entry || entry.delivery_mode !== "daemon_inbox" || !runtimeRecoveryStorageAvailable(database)
+    || pendingRuntimeRecovery(database, entry.id)) return [];
+  const saved = entry.provider_ref;
+  const savedRuntime = saved?.provider_connection?.pid && saved.provider_connection.processIdentity
+    ? executionRuntimeStorageIdentity(entry.id, saved.execution_generation_id, saved.provider_connection.kind,
+      saved.provider_connection.pid, saved.provider_connection.processIdentity) : null;
+  return (database.prepare(`SELECT r.runtime_generation_id,r.execution_generation_id,e.work_attempt_id,e.terminal_json,
+      (SELECT COUNT(*) FROM execution_observers o WHERE o.agent_id=r.agent_id AND o.observer_runtime_generation_id=r.runtime_generation_id) AS observes
+    FROM execution_runtime_generations r
+    JOIN work_attempt_executions e ON e.execution_generation_id=r.execution_generation_id
+    WHERE r.agent_id=? AND (e.terminal_json IS NOT NULL OR (r.provider='cursor' AND r.execution_generation_id=?))
+      AND NOT EXISTS (SELECT 1 FROM agent_runtime_recoveries done WHERE done.agent_id=r.agent_id
+        AND done.runtime_generation_id=r.runtime_generation_id AND done.phase IN ('stopped','complete'))
+      AND (EXISTS (SELECT 1 FROM execution_observers o WHERE o.agent_id=r.agent_id
+          AND o.observer_runtime_generation_id=r.runtime_generation_id
+          AND (o.source_id IS NULL OR o.max_observed_sequence > o.last_source_sequence))
+        OR EXISTS (SELECT 1 FROM execution_turns t JOIN execution_message_attempts a ON a.attempt_id=t.attempt_id
+          WHERE t.agent_id=r.agent_id AND t.runtime_generation_id=r.runtime_generation_id AND t.state IN ('none','active','lost')
+            AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox i WHERE i.agent_id=a.agent_id AND i.room_id=a.room_id
+              AND i.source_message_id=a.source_message_id
+              AND i.state IN ('pending','dispatching','awaiting_result','result_recovery','retryable','blocked'))))
+    ORDER BY r.runtime_generation_id`).all(entry.id, saved?.execution_generation_id ?? null) as Array<Record<string, string | number | null>>)
+    .filter(row => {
+      if (String(row.runtime_generation_id) !== savedRuntime) return true;
+      // The Cursor child the saved reference still names is the lane's own, until its exit is settled.
+      if (row.terminal_json === null) return false;
+      const birth = processBirthState(saved!.provider_connection!.pid, saved!.provider_connection!.processIdentity ?? null, identity);
+      // A process the operating system shows running is never archived, whatever its terminal says.
+      return birth === "gone" || (birth === "unknown" && witnessedDeath(entry, row) !== null);
+    });
+}
+
+/** The death of exactly this runtime's process, as its generation's terminal records it, if it does. */
+function witnessedDeath(entry: DaemonManifestEntry, row: Record<string, string | number | null>) {
+  let terminal: { native_runtime_death?: unknown };
+  try { terminal = JSON.parse(String(row.terminal_json)) as typeof terminal; } catch { return null; }
+  const witnessed = nativeRuntimeDeathSchema.safeParse(terminal?.native_runtime_death);
+  return witnessed.success && executionRuntimeStorageIdentity(entry.id, String(row.execution_generation_id), witnessed.data.kind,
+    witnessed.data.pid, witnessed.data.processIdentity) === String(row.runtime_generation_id) ? witnessed.data : null;
+}
+
+function archiveSelectedRuntimes(database: DatabaseSync, entry: DaemonManifestEntry,
+  rows: Array<Record<string, string | number | null>>): string[] {
+  const at = new Date().toISOString();
+  const archived: string[] = [];
+  for (const row of rows) {
+    const runtimeId = String(row.runtime_generation_id);
+    const generationId = String(row.execution_generation_id);
+    const terminal = (row.terminal_json === null ? {} : JSON.parse(String(row.terminal_json))) as { provider_continuation_id?: unknown; native_runtime_death?: unknown };
+    const death = witnessedDeath(entry, row);
+    const observer = row.observes ? database.prepare(`SELECT * FROM execution_observers
+      WHERE agent_id=? AND observer_runtime_generation_id=?`).get(entry.id, runtimeId) : undefined;
+    const ref = { work_attempt_id: String(row.work_attempt_id), execution_generation_id: generationId,
+      provider_continuation_id: typeof terminal.provider_continuation_id === "string" ? terminal.provider_continuation_id : null,
+      provider_connection: null, ...(death ? { native_runtime_death: death } : {}) };
+    database.prepare("INSERT INTO agent_runtime_recoveries VALUES(?,?,?,?,?,'resume','complete',?,?,?,?)")
+      .run(executionStorageIdentity("automatic-runtime-recovery", entry.id, runtimeId), entry.id, entry.room_id,
+        generationId, runtimeId, JSON.stringify(ref), observer ? JSON.stringify(observer) : null, at, at);
+    database.prepare(`UPDATE execution_observers SET observer_epoch=observer_epoch+1
+      WHERE agent_id=? AND observer_runtime_generation_id=?`).run(entry.id, runtimeId);
+    database.prepare(`UPDATE execution_runtime_generations SET runtime_state='exited',control_state='lost',
+      ended_at_ms=COALESCE(ended_at_ms,MAX(created_at_ms,?)) WHERE agent_id=? AND runtime_generation_id=?`)
+      .run(Date.parse(at), entry.id, runtimeId);
+    database.prepare(`UPDATE execution_turns SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+      WHERE agent_id=? AND runtime_generation_id=? AND state IN ('none','active')`).run(Date.parse(at), entry.id, runtimeId);
+    archived.push(runtimeId);
+  }
+  return archived;
+}
+
 export function recoveredRuntime(database: DatabaseSync, agentId: string, runtimeId: string): { incomplete: boolean } | null {
   if (!runtimeRecoveryStorageAvailable(database)) return null;
   const row = database.prepare(`SELECT observer_json FROM agent_runtime_recoveries
@@ -359,6 +477,29 @@ export function hasRuntimeRecoveryBoundary(database: DatabaseSync, agentId: stri
   return Boolean(database.prepare(`SELECT 1 FROM agent_runtime_recoveries WHERE agent_id=? AND runtime_generation_id=?
     AND phase IN ('stopped','complete') AND json_extract(observer_json,'$.observer_runtime_generation_id')=?
     AND json_extract(observer_json,'$.source_id') IS ? LIMIT 1`).get(agentId, oldRuntime, oldRuntime, sourceId));
+}
+
+/**
+ * Where an agent's current record window starts in the journal: after the
+ * last fact recorded before its latest recovery boundary, or at the beginning.
+ * A boundary closes the window before it. Those facts stay where they are,
+ * incomplete as they were left, and stop counting toward what the agent may
+ * retain. Without this a record that had filled up refused the first fact of
+ * every later runtime, boundary or not, and that agent could never be
+ * recorded, and so never take a message, again.
+ */
+export function executionRecordWindowStart(database: DatabaseSync, agentId: string): number {
+  if (!runtimeRecoveryStorageAvailable(database)) return 0;
+  // Only a boundary that has been reached holds the observer it archived.
+  const boundary = database.prepare(`SELECT MAX(CAST(json_extract(observer_json,'$.observer_epoch') AS INTEGER)) AS epoch
+    FROM agent_runtime_recoveries WHERE agent_id=? AND observer_json IS NOT NULL`)
+    .get(agentId) as { epoch: number | null } | undefined;
+  const epoch = Number(boundary?.epoch ?? 0);
+  if (!Number.isSafeInteger(epoch) || epoch < 1) return 0;
+  // Newest first: the scan ends at the first fact from before the boundary.
+  const last = database.prepare(`SELECT sequence FROM execution_facts INDEXED BY execution_facts_agent_sequence
+    WHERE agent_id=? AND observer_epoch<=? ORDER BY sequence DESC LIMIT 1`).get(agentId, epoch) as { sequence: number } | undefined;
+  return Number(last?.sequence ?? 0);
 }
 
 /** Standalone retained-history databases may predate operational recovery. */

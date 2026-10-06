@@ -882,7 +882,10 @@ describe("room chat helpers", () => {
       assert.equal(renderMessageText("`" + command + "`", ""), `<p><code>${command}</code></p>`);
     }
     assert.equal(renderMessageText('Run `cat /Users/emmy/project/App.tsx`. Route /api/health.', ""), '<p>Run <code>cat /Users/emmy/project/App.tsx</code>. Route /api/health.</p>');
-    assert.equal(renderMessageText('```sh\ncat /Users/emmy/project/App.tsx\n```', ""), '<pre><code class="language-sh">cat /Users/emmy/project/App.tsx</code></pre>');
+    assert.equal(
+      renderMessageText('```sh\ncat /Users/emmy/project/App.tsx\n```', ""),
+      '<div class="fenced-code-block"><div class="fenced-code-block-header"><span class="fenced-code-block-lang" data-lang="sh"></span><button type="button" class="fenced-code-block-copy" data-code-copy aria-label="Copy code"></button></div><pre><code class="fenced-code-block-content language-sh"><span class="hljs-built_in">cat</span> /Users/emmy/project/App.tsx</code></pre></div>',
+    );
     assert.equal(renderMessageText('[PR](https://github.com/owner/repo/pull/1)', ""), '<p><a href="https://github.com/owner/repo/pull/1" target="_blank" rel="noopener noreferrer">PR</a></p>');
   });
 
@@ -996,7 +999,7 @@ describe("room chat helpers", () => {
         'const safe = "<ok>"',
         "```",
       ].join("\n"), ""),
-      '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><pre><code class="language-ts">const safe = &quot;&lt;ok&gt;&quot;</code></pre>',
+      '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><div class="fenced-code-block"><div class="fenced-code-block-header"><span class="fenced-code-block-lang" data-lang="ts"></span><button type="button" class="fenced-code-block-copy" data-code-copy aria-label="Copy code"></button></div><pre><code class="fenced-code-block-content language-ts"><span class="hljs-keyword">const</span> safe = <span class="hljs-string">&quot;&lt;ok&gt;&quot;</span></code></pre></div>',
     );
   });
 

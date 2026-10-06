@@ -24,6 +24,8 @@ type Options = {
 type Row = Record<string, string | number | null>;
 const COALESCE_MS = 1_000;
 const RETRY_MS = 30_000;
+/** How many receipt-derived `failed` summaries one pass stages. */
+const FAILED_RECEIPTS_PER_PASS = 4;
 const canonicalSource = (id: string) => /^msg_[1-9]\d{0,9}$/.test(id) && Number(id.slice(4)) <= 2147483647;
 const key = (record: Pick<RoomWorkPublication, "agentId" | "roomId" | "sourceMessageId">) =>
   JSON.stringify([record.agentId, record.roomId, record.sourceMessageId]);
@@ -203,15 +205,22 @@ export class RoomWorkPublisher {
       ? this.workspaces.pendingPage(record.agentId, record.roomId, record.sourceMessageId) : null;
   }
 
+  /** The runtimes of this agent that a recovery boundary has archived. */
+  private archivedRuntimes(agentId: string): Set<string> {
+    try {
+      return new Set((this.database.prepare(`SELECT DISTINCT runtime_generation_id FROM agent_runtime_recoveries
+        WHERE agent_id=? AND phase IN ('stopped','complete')`).all(agentId) as Row[]).map(row => String(row.runtime_generation_id)));
+    } catch { return new Set(); /* A database without the recovery journal has no boundary. */ }
+  }
+
   /** Cheap, bounded change stamps avoid replaying every historical message on every output chunk. */
   private async stageChanged(agentId: string): Promise<boolean> {
     const records = this.store.list(agentId).filter(record => record.state === "open");
     if (!records.length) { this.stamps.delete(agentId); return false; }
     const facts = this.database.prepare(`SELECT f.sequence,f.runtime_generation_id,f.domain,t.attempt_id
-      FROM (SELECT * FROM execution_facts WHERE agent_id=? ORDER BY sequence LIMIT 10001) f
+      FROM (SELECT * FROM execution_facts WHERE agent_id=? ORDER BY sequence DESC LIMIT 10000) f
       LEFT JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
         AND t.execution_generation_id=f.execution_generation_id AND t.runtime_generation_id=f.runtime_generation_id`).all(agentId) as Row[];
-    if (facts.length > 10_000) throw new Error("Capture retention budget exceeded.");
     const attempts = new Map<string, { sequence: number; runtimes: Set<string> }>();
     const runtimeSequence = new Map<string, number>();
     for (const fact of facts) {
@@ -224,7 +233,11 @@ export class RoomWorkPublisher {
       } else runtimeSequence.set(runtime, Math.max(runtimeSequence.get(runtime) ?? 0, Number(fact.sequence)));
     }
     const observer = this.database.prepare("SELECT source_id,last_source_sequence,max_observed_sequence FROM execution_observers WHERE agent_id=?").get(agentId);
-    const incomplete = !observer || observer.source_id === null || Number(observer.max_observed_sequence) > Number(observer.last_source_sequence);
+    // A recovery boundary keeps an earlier gap on record after the next runtime
+    // starts a clean observer; the messages that failed inside it still do.
+    const archived = this.archivedRuntimes(agentId);
+    const incomplete = !observer || observer.source_id === null || Number(observer.max_observed_sequence) > Number(observer.last_source_sequence)
+      || archived.size > 0;
     const previous = this.stamps.get(agentId) ?? new Map<string, string>();
     this.stamps.set(agentId, previous);
     const candidates: Array<{ record: RoomWorkPublication; stamp: string }> = [];
@@ -240,9 +253,24 @@ export class RoomWorkPublisher {
       const evidence = attempts.get(String(attempt.attempt_id));
       if (!evidence) continue;
       const sequence = Math.max(evidence.sequence, ...[...evidence.runtimes].map(runtime => runtimeSequence.get(runtime) ?? 0));
-      const stamp = JSON.stringify([attempt.attempt_id, attempt.state, attempt.conclusion, sequence, incomplete]);
+      // Each boundary that archives a runtime this message ran on can make
+      // its evidence incomplete, the second as much as the first.
+      const boundaries = [...evidence.runtimes].filter(runtime => archived.has(runtime)).sort();
+      const stamp = JSON.stringify([attempt.attempt_id, attempt.state, attempt.conclusion, sequence, incomplete, boundaries]);
       const recordKey = key(record);
       if (previous.get(recordKey) !== stamp) candidates.push({ record, stamp });
+    }
+    // A capture gap means a message's turn was never recorded and never will
+    // be. Its delivery receipt still says whether it failed. A few per pass;
+    // each one staged leaves the set, so the rest follow on later passes.
+    if (incomplete) {
+      let unstaged: RoomWorkPublication[] = [];
+      try { unstaged = this.store.unstagedFailedReceipts(agentId, FAILED_RECEIPTS_PER_PASS); } catch { this.report("storage_unavailable"); }
+      for (const record of unstaged) {
+        await this.options.assertCurrent();
+        if (this.unavailable()) return false;
+        try { this.store.stageFailedReceipt(record); } catch { this.report("storage_unavailable"); }
+      }
     }
     const eligible = candidates.filter(({ record }) => {
       const prior = this.stagingAttemptedAt.get(key(record));

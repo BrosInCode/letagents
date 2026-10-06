@@ -479,7 +479,7 @@ test("a first task set with only a change event survives choosing another access
   // event. The access choice re-renders the form; it must not write the old
   // task back over the text.
   const sandboxed = { id: "sandboxed_write", label: "Workspace writes", risk: "medium", status: "available", description: "Edits a copy." };
-  const compatibility = { id: "full_access", label: "Workspace writes (compatibility)", risk: "high", status: "available", description: "More tools." };
+  const fullAccess = { id: "full_access", label: "Full access", risk: "high", status: "available", description: "Host files and network." };
   const charter = ref("Join the room, check the board, and help move the available work forward.");
   const selected = ref(sandboxed);
   await attachClientRender(AddAgentRuntimeSettings, "components/desktop/content/add-agent/AddAgentRuntimeSettings.vue");
@@ -489,7 +489,7 @@ test("a first task set with only a change event survives choosing another access
       provider: { id: "cursor", capabilities: ["supervised_runtime"] },
       executionDescription: "Runs on this Mac.",
       charter: charter.value,
-      permissionProfiles: [sandboxed, compatibility],
+      permissionProfiles: [sandboxed, fullAccess],
       selectedPermissionProfile: selected.value,
       "onUpdate:charter": (value: string) => { charter.value = value; },
       onSelectPermission: (profile: typeof sandboxed) => { selected.value = profile; },
@@ -501,18 +501,18 @@ test("a first task set with only a change event survives choosing another access
   assert.ok(field);
   assert.equal(typeof field.props.onChange, "function", "the first task must listen for change events");
   (field.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: "Review PR 4 at its latest head" } });
-  selected.value = compatibility;
+  selected.value = fullAccess;
   await nextTick();
   assert.equal(charter.value, "Review PR 4 at its latest head");
   assert.equal(findByTestId(root, "desktop-add-agent-supervised-charter")?.props.value, "Review PR 4 at its latest head");
   app.unmount();
 });
 
-test("every Cursor access card says it has no network, compatibility included", async () => {
+test("Cursor access cards distinguish restricted profiles from Full access", async () => {
   const profiles = [
     { id: "read_only", label: "Read-only", risk: "low", status: "available", description: "Inspect only." },
     { id: "sandboxed_write", label: "Workspace writes", risk: "medium", status: "available", description: "Edits a copy." },
-    { id: "full_access", label: "Workspace writes (compatibility)", risk: "high", status: "available", description: "More tools." },
+    { id: "full_access", label: "Full access", risk: "high", status: "available", description: "Host files and network." },
   ];
   const html = await renderToString(createSSRApp({
     render: () => h(AddAgentRuntimeSettings, {
@@ -525,5 +525,6 @@ test("every Cursor access card says it has no network, compatibility included", 
   }));
   const limits = [...html.matchAll(/data-testid="desktop-add-agent-permission-limits"[^>]*>([^<]*)</g)].map((match) => match[1]);
   assert.equal(limits.length, 3);
-  for (const line of limits) assert.match(line, /No network access: can(?:&#39;|')t push or open PRs\./);
+  for (const line of limits.slice(0, 2)) assert.match(line, /No network access: can(?:&#39;|')t push or open PRs\./);
+  assert.match(limits[2], /can reach the network and files outside the project/);
 });

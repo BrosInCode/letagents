@@ -114,6 +114,18 @@ describe("sidebar room context menu items", () => {
     assert.ok(!menuIds(read).includes("mark-room-read"));
   });
 
+  it("offers a local unread bookmark only for a signed-in room with a latest message", () => {
+    const menu = (latestMessageId: string | null, canManageRooms = true, hasUnread = false) => menuIds(buildSidebarRoomContextMenuItems({
+      entry: roomEntry({ latestMessageId, hasUnread }), canManageRooms,
+      isPrimaryRoom: false, hasProjectChildren: false, projectCollapsed: false,
+    }));
+    assert.ok(menu("msg_9").includes("mark-room-unread"));
+    assert.ok(!menu(null).includes("mark-room-unread"));
+    assert.ok(!menu("msg_9", false).includes("mark-room-unread"));
+    assert.ok(!menu("msg_9", true, true).includes("mark-room-unread"));
+    assert.ok(menu("msg_9", true, true).includes("mark-room-read"));
+  });
+
   it("keeps local navigation but hides account mutations while signed out", () => {
     const groups = buildSidebarRoomContextMenuItems({
       entry: roomEntry(),

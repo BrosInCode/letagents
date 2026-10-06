@@ -22,6 +22,8 @@ type CaptureOptions = {
   currentHandle(agentId: string): ProviderActionHandle | undefined;
   daemonGeneration(): number;
   diagnostic(agentId: string, code: CaptureCode): void;
+  /** This agent's record stops here for the runtime it has: a gap, a full record, or a fact the record refuses. */
+  recordStopped?(agentId: string): void;
   changed?(agentId: string): void;
 };
 type Lane = {
@@ -114,6 +116,7 @@ export class ExecutionCaptureCoordinator {
     const { entryId: agentId, handle, executionGenerationId: generation } = installation;
     const prior = this.lanes.get(agentId);
     if (prior) this.detach(prior);
+    this.releaseArchivedRuntime(agentId);
     if (this.closed || this.handoffSealed || this.suspendedAgents.has(agentId) || !this.options.provider.onExecution) return () => {};
     const lane: Lane = { agentId, generation, handle, installation, subscription: null, observer: null,
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
@@ -144,6 +147,23 @@ export class ExecutionCaptureCoordinator {
       }
     });
     return () => this.detach(lane);
+  }
+
+  /**
+   * A recovery boundary archived the runtime this agent's record stopped at.
+   * Nothing queued from that runtime is waited for any more, and the runtime
+   * being installed starts a new record: its lane must neither sit behind a
+   * retiring one that can never finish nor be refused as suspended.
+   */
+  private releaseArchivedRuntime(agentId: string): void {
+    if (this.closed || this.handoffSealed || (!this.suspendedAgents.has(agentId) && !this.retiring.has(agentId))) return;
+    try {
+      const observer = this.row("SELECT observer_runtime_generation_id FROM execution_observers WHERE agent_id=?", agentId);
+      if (!observer || !recoveredRuntime(this.database, agentId, String(observer.observer_runtime_generation_id))) return;
+    } catch { return; }
+    const retiring = this.retiring.get(agentId);
+    if (retiring) this.remove(retiring);
+    this.suspendedAgents.delete(agentId);
   }
 
   /** Keep the physical subscription while advancing its committed Cursor birth token. */
@@ -521,6 +541,23 @@ export class ExecutionCaptureCoordinator {
     } catch { return "unavailable"; }
   }
 
+  /**
+   * A lasting reason this installation's record cannot be continued, or null.
+   * A record that is only catching up, or whose storage is briefly busy, is
+   * not blocked. An unplaceable fact is reported here too: it may clear by
+   * itself, and whoever acts on it waits to see whether it does.
+   */
+  recordBlock(installation: ProviderInstallationToken): CaptureCode | "suspended" | null {
+    if (this.closed || this.handoffSealed) return null;
+    const lane = this.lanes.get(installation.entryId);
+    if (!lane) return this.suspendedAgents.has(installation.entryId) ? "suspended" : null;
+    if (lane.installation !== installation || lane.handle !== installation.handle || !this.current(lane)) return null;
+    if (lane.suspended || lane.overflow) return lane.diagnostic ?? "source_gap";
+    if (lane.subscriptionFailed) return "identity_unavailable";
+    return lane.diagnostic === null || lane.diagnostic === "settlement_unavailable" || lane.diagnostic === "storage_unavailable"
+      ? null : lane.diagnostic;
+  }
+
   /** A bare attach cannot promote an unrelated latest transcript turn. */
   private hasUnreconstructedCodexTurn(lane: Lane, observerEpoch: number): boolean {
     if (lane.installation.providerConnection.kind !== "codex_app_server") return false;
@@ -680,6 +717,9 @@ export class ExecutionCaptureCoordinator {
       if (provider) this.markLifecycleProjectionUnavailable(provider);
     }
     try { this.options.diagnostic(lane.agentId, code); } catch { /* never turn an observation failure into delivery failure */ }
+    if (code === "source_gap" || code === "retention_limit" || code === "invalid_observation") {
+      try { this.options.recordStopped?.(lane.agentId); } catch { /* telling the owner is optional too */ }
+    }
   }
   private enqueue(lane: Lane, event: NativeExecutionObservation): void {
     if (!this.current(lane) || lane.detached || lane.suspended) return;

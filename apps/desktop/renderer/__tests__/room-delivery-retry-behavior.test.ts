@@ -22,11 +22,13 @@ interface HostNode {
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
+  getBoundingClientRect: () => Pick<DOMRect, "top" | "bottom" | "left" | "right" | "width" | "height">;
   style: Record<string, string>;
   classList: { add: (...names: string[]) => void; remove: (...names: string[]) => void };
   focus: (_options?: FocusOptions) => void;
   scrollTo: (_options?: ScrollToOptions) => void;
   querySelector: (_selector: string) => null;
+  querySelectorAll: (_selector: string) => HostNode[];
   addEventListener: (_name: string, _listener: EventListener) => void;
   removeEventListener: (_name: string, _listener: EventListener) => void;
 }
@@ -35,8 +37,10 @@ function hostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
   return {
     getRootNode: () => ({ activeElement: null }),
     kind, type, text, children: [], parent: null, props: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0, style: {},
+    getBoundingClientRect() { return { top: 0, bottom: this.clientHeight, left: 0, right: 800, width: 800, height: this.clientHeight }; },
     classList: { add: () => undefined, remove: () => undefined }, focus: () => undefined, scrollTo: () => undefined,
     querySelector: () => null,
+    querySelectorAll: () => [],
     addEventListener: () => undefined, removeEventListener: () => undefined,
   };
 }
@@ -55,7 +59,7 @@ Object.assign(globalThis, {
     location: { href: "http://localhost/" }, getSelection: () => null,
     document: { documentElement: { style: { scrollBehavior: "" } } },
   },
-  document: { documentElement: { style: { scrollBehavior: "" } } },
+  document: { documentElement: { style: { scrollBehavior: "" } }, addEventListener() {}, removeEventListener() {}, visibilityState: "visible", hasFocus: () => true },
 });
 
 const renderer = createRenderer<HostNode, HostNode>({
@@ -995,7 +999,7 @@ test("history failure offers explicit retry without viewport or scroll retries",
   } finally { viewport.app.unmount(); }
 });
 
-test("a reader at the newest message keeps it in view when the composer below grows", async () => {
+test("viewport resizing for the composer or pin row keeps bottom readers attached and older readers in place", async () => {
   let resized: (() => void) | null = null;
   const observed: unknown[] = [];
   Object.assign(globalThis, { ResizeObserver: class {
@@ -1035,6 +1039,22 @@ test("a reader at the newest message keeps it in view when the composer below gr
     list.clientHeight = 330;
     resized!();
     assert.equal(list.scrollTop, 300);
+    // The last pin disappears: the viewport gains the row's height. Older
+    // readers keep their offset; no independent pin watcher is necessary.
+    list.clientHeight = 360;
+    resized!();
+    assert.equal(list.scrollTop, 300);
+    // Exercise the complete 0→1→0 pin row transition while following latest.
+    list.scrollTop = 1_640;
+    (list.props.onScroll as () => void)();
+    list.clientHeight = 330;
+    resized!();
+    assert.equal(list.scrollTop, 2_000);
+    list.scrollTop = 1_670;
+    (list.props.onScroll as () => void)();
+    list.clientHeight = 360;
+    resized!();
+    assert.equal(list.scrollTop, 2_000);
   } finally {
     viewport.app.unmount();
     delete (globalThis as Record<string, unknown>).ResizeObserver;
@@ -1082,8 +1102,20 @@ test("an idle viewport skips work history tracking and resumes causal reply supp
     await nextTick();
     assert.equal(echoes().length, 0, "a later exact-agent reply clears work even when input history is unordered");
 
+    props.messages = [...props.messages, message("msg_4")];
+    props.localAgentWork = [{ ...props.localAgentWork[0]!, sourceMessageId: "msg_4" }];
+    await nextTick();
+    assert.equal(echoes().length, 1, "a new source begins another work turn");
     props.localAgentWork = [];
     await nextTick();
+    assert.equal(echoes().length, 1, "a cleared turn retains its indicator briefly for an incoming reply");
+    props.threadMessages = [
+      { ...message("msg_5"), agentIdentity: { agentSessionId: "session-a" } },
+      message("msg_4"), reply, message("msg_2"), message("msg_1"),
+    ] as typeof props.threadMessages;
+    await nextTick();
+    assert.equal(echoes().length, 0, "an unordered thread reply consumes the pending handoff immediately");
+
     historyReads = 0;
     props.threadMessages = [message("msg_4")];
     await nextTick();
@@ -1401,7 +1433,7 @@ test("a Needs-you answer that opens with a block keeps the block apart from the 
     text: "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\n```sh\nnpm test\n```",
   }).html;
   assert.match(html, /<p><span class="mention-token">@SummitMisty<\/span><\/p>/);
-  assert.match(html, /<pre[^>]*><code[^>]*>npm test/);
+  assert.match(html, /<pre[^>]*>[\s\S]*<code[^>]*>npm <span class="hljs-built_in">test<\/span><\/code>/);
 });
 
 test("replies to a Needs-you answer preview it by agent name, in the message and in the composer", async () => {

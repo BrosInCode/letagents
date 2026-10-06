@@ -373,6 +373,7 @@ export class SupervisorDaemon {
         ?? unavailableLifecycleProjectionDiagnostics(),
       captureAdmission: (installation) => this.executionCapture?.captureAdmission(installation) ?? "unavailable",
       typedLifecycleAdmission: (installation) => this.executionCapture?.typedLifecycleAdmission(installation) ?? "unavailable",
+      recordBlock: (installation) => this.executionCapture?.recordBlock(installation) ?? null,
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
@@ -386,11 +387,9 @@ export class SupervisorDaemon {
       runtimeCustody: this.workerRuntimeCustody,
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeManifest: (operation) => this.serializeManifestMutation(operation),
-      transition: (entryId, state, condition, detail, actor) =>
-        this.transition(entryId, state, condition, detail, actor),
+      transition: (entryId, state, condition, detail, actor) => this.transition(entryId, state, condition, detail, actor),
       appendNativeActivity: (entryId, event, activityOnly) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly),
-      publishNativeActivity: (entryId, method, status, observedAt) =>
-        this.publishNativeActivity(entryId, method, status, observedAt),
+      publishNativeActivity: (entryId, method, status, observedAt) => this.publishNativeActivity(entryId, method, status, observedAt),
       handleTerminal: (installation, _bindingIdentity, terminal) =>
         this.providerTerminals.handleTerminal(installation, terminal),
       streams: {
@@ -422,8 +421,7 @@ export class SupervisorDaemon {
         load: () => this.store.load(),
         updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
       },
-      transitionOnce: (entryId, state, condition, cause, actor, reconciliation, notice, terminal) =>
-        this.transitionOnce(entryId, state, condition, cause, actor, reconciliation, notice, terminal),
+      transitionOnce: (entryId, state, condition, cause, actor, reconciliation, notice, terminal) => this.transitionOnce(entryId, state, condition, cause, actor, reconciliation, notice, terminal),
       audit: this.audit,
       scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
     });
@@ -431,6 +429,7 @@ export class SupervisorDaemon {
       ? new ProviderExecutionCoordinator({
         notifyProgressChanged: () => this.notifyStateChanged(),
         refreshManagedRuntime: (entryId) => this.runtimeConfigurationApply.refreshManaged(entryId),
+        exitSettling: (entryId) => this.providerTerminals.settling(entryId),
         settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
         provider: providerPort,
         store: this.store,
@@ -454,16 +453,15 @@ export class SupervisorDaemon {
           serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
         },
         updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
-        transition: (entryId, state, condition, detail, actor) =>
-          this.transition(entryId, state, condition, detail, actor),
+        transition: (entryId, state, condition, detail, actor) => this.transition(entryId, state, condition, detail, actor),
         terminalPayload: (terminal, actor, connection) => this.providerTerminals.terminalPayload(terminal, actor, connection),
         observeProviderExit: (entryId, terminal, actor, executionGenerationId, handle) =>
           this.observeProviderExitOnce(entryId, terminal, actor, executionGenerationId, handle),
-        completeTurnControlForRuntimeRecovery: (entry) =>
-          this.runtimeRecovery.completeTurnControl(entry),
+        completeTurnControlForRuntimeRecovery: (entry) => this.runtimeRecovery.completeTurnControl(entry),
         delivery: {
           stop: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
           start: (entryId, mode) => this.startSupervisedDelivery(entryId, mode ?? "refresh"),
+          roomRefusesAccess: (entryId) => this.supervisedDelivery?.roomRefusesAccess(entryId) ?? false,
         },
         inbox: {
           head: (entryId) => this.supervisedInbox.head(entryId),
@@ -636,11 +634,13 @@ export class SupervisorDaemon {
         async (agent, source, inbox) => { await this.roomWorkPublisher?.releaseWorkspace(agent, source, inbox); },
         (agentId) => this.requestConvergence(agentId),
         (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),
+        async (agentId) => { await this.providerExecution?.archiveEndedRuntimes(agentId); },
       ) : null;
     this.readModel = new DaemonReadModel({
       compactionProgress: (entry) => entry.work_attempt_id
         ? this.providerPort?.compactionProgress?.(entry.work_attempt_id, entry.provider) ?? null : null,
       deliveryAdmission: (entry) => this.providerStreams.deliveryAdmission(entry),
+      recordRecovery: (entry) => this.runtimeConfigurationApply.recordRecovery(entry),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),
       startedAt: this.startedAt,
@@ -691,6 +691,7 @@ export class SupervisorDaemon {
       },
       diagnostic: (entryId, error) => console.warn("[terminal_settlement]", entryId, redactCredentialText(String(error)).value),
       settleRuntimeApprovals: (entryId, fence) => this.settleRuntimeApprovals(entryId, fence),
+      exitUnsettled: (entryId, exitId) => this.providerExecution?.noteExitUnsettled(entryId, exitId),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),
       liveHandles: this.liveHandles,
@@ -701,9 +702,7 @@ export class SupervisorDaemon {
       durability: this.durability,
       runtimeCustody: this.workerRuntimeCustody,
       streams: this.providerStreams,
-      delivery: {
-        start: (entryId) => this.startSupervisedDelivery(entryId),
-      },
+      delivery: { start: (entryId) => this.startSupervisedDelivery(entryId) },
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeManifest: (operation) => this.serializeManifestMutation(operation),
       transitionOnce: (entryId, state, condition, cause, actor, reconciliation, notice, terminal, fence) =>
@@ -1036,6 +1035,7 @@ export class SupervisorDaemon {
       this.executionCapture = ExecutionCaptureCoordinator.open(this.stateDatabasePath, this.providerPort, {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
         changed: (agentId) => (this.roomWorkPublisher?.changed(agentId), this.typedLifecycleEffects?.changed(agentId), this.stateWatch.notify()),
+        recordStopped: (agentId) => this.providerExecution?.noteRecordStopped(agentId),
       });
       this.executionDelegations.start();
     }

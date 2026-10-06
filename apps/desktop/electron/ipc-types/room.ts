@@ -6,6 +6,7 @@ import type {
   ClearedRoomAgentWorkSummary,
   RoomAgentWorkSummary,
 } from "../../../../shared/room-agent-work.mjs";
+import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 
 export interface DesktopRoomAgentWork {
   attemptId: string;
@@ -337,6 +338,8 @@ export interface DesktopRoomMessage {
   threadReplyToId: string | null;
   thread: DesktopRoomMessageThreadSummary | null;
   replyTo: DesktopRoomMessageReply | null;
+  /** Emoji reactions as of this read, in the shape the shared reaction helpers use. */
+  reactions?: MessageReaction[];
   /** Trusted provenance retained only for local/forked dispatch decisions. */
   localControlAuthorized?: boolean;
   /** Account-scoped, non-rendered managed-agent dispatch metadata. */
@@ -413,6 +416,21 @@ export interface DesktopGitHubRoomEvent {
   linkedTaskId: string | null;
   createdAt: string;
 }
+
+export interface DesktopPullRequestDiff {
+  number: number;
+  head_sha: string;
+  diff: string;
+  github_url: string;
+  file_list: {
+    files: Array<{ path: string; previous_path: string | null; status: string; additions: number; deletions: number }>;
+    total_files: number;
+  } | null;
+}
+
+export type DesktopPullRequestDiffResult =
+  | { ok: true; value: DesktopPullRequestDiff }
+  | { ok: false; code: string };
 
 export interface DesktopGitHubEventsQuery {
   limit?: number;
@@ -624,6 +642,7 @@ export interface DesktopLocalRoomMutationResult {
 }
 
 export type DesktopRoomStreamEvent =
+  | { type: "typing"; roomIdentifier: string; signal: import("../../../../shared/room-typing.mjs").TypingSignal }
   | {
       type: "open";
       roomIdentifier: string;
@@ -687,7 +706,7 @@ export type DesktopRoomStreamEvent =
   | {
       type: "resource_invalidation";
       roomIdentifier: string;
-      resource: "agent_work" | "wake_rules";
+      resource: "agent_work" | "wake_rules" | "message_reactions" | "message_pins";
     }
   | {
       type: "rental_activity";

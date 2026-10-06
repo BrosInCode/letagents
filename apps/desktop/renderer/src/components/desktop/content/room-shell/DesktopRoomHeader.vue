@@ -17,8 +17,13 @@
       </button>
       <div class="desktop-room-heading">
         <h3 class="desktop-room-title" :title="room.displayName">
+          <span class="desktop-room-mark" aria-hidden="true">#</span>
           <span class="desktop-room-title-text">{{ headerDisplayName }}</span>
         </h3>
+        <p v-if="room.gitRoom" class="desktop-room-repository" :title="room.gitRoom.repository.fullName">
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 13H3V3h5l2 2h3v3M9 9v4m0-2h3m0 0V9m0 2v2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          <span>{{ room.gitRoom.repository.fullName }}</span>
+        </p>
         <div v-if="room.code || storage.effectiveMode === 'local'" class="desktop-room-badges">
           <span
             v-if="storage.effectiveMode === 'local'"
@@ -30,78 +35,37 @@
           <span v-if="room.code" class="desktop-room-badge" data-testid="desktop-room-code">{{ room.code }}</span>
         </div>
       </div>
+      <div class="desktop-room-context-actions">
+        <button
+          v-if="attentionCount"
+          class="desktop-room-needs-you"
+          :data-pulse="attention?.pulse"
+          type="button"
+          :aria-label="`Open Inbox for ${room.displayName}, ${attentionCount} ${attentionCount === 1 ? 'request needs' : 'requests need'} you`"
+          data-testid="room-inbox-shortcut"
+          @click="emit('openInbox')"
+        >
+          <span class="desktop-room-needs-you-wave" aria-hidden="true" />
+          <span class="desktop-room-needs-you-wave" aria-hidden="true" />
+          <BellRing :size="17" :stroke-width="1.8" aria-hidden="true" />
+          <span>Needs you</span>
+          <span class="desktop-room-needs-you-count">{{ attentionCount }}</span>
+          <ArrowUpRight :size="16" :stroke-width="1.8" aria-hidden="true" />
+        </button>
+        <button
+          v-if="projectConnectionNeeded"
+          class="desktop-room-project-connect"
+          type="button"
+          data-testid="desktop-room-connect-project"
+          @click="emit('connectProject')"
+        >
+          Connect project
+        </button>
+      </div>
     </div>
 
     <div class="desktop-room-header-actions">
-      <button v-if="attentionCount" class="desktop-room-project-connect" type="button" :aria-label="`Open Inbox for ${room.displayName}, ${attentionCount} requests need you`" data-testid="room-inbox-shortcut" @click="emit('openInbox')">Needs you · {{ attentionCount }} ↗</button>
-      <button
-        v-if="projectConnectionNeeded"
-        class="desktop-room-project-connect"
-        type="button"
-        data-testid="desktop-room-connect-project"
-        @click="emit('connectProject')"
-      >
-        Connect project
-      </button>
-      <div
-        ref="overflowMenuRoot"
-        class="desktop-room-overflow"
-        data-testid="desktop-room-tools"
-        @pointerdown.stop
-        @keydown.escape.stop="closeOverflowMenu"
-      >
-        <button
-          class="desktop-room-overflow-button"
-          type="button"
-          aria-label="Room actions"
-          aria-haspopup="menu"
-          :aria-expanded="overflowMenuOpen"
-          :data-active="overflowMenuOpen || searchOpen || actionPanelOpen"
-          data-testid="desktop-room-overflow-toggle"
-          @click.stop="toggleOverflowMenu"
-        >
-          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M4 8h.01M8 8h.01M12 8h.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-          </svg>
-        </button>
-        <Transition name="desktop-room-overflow-pop" @after-leave="handleOverflowMenuAfterLeave">
-          <div
-            v-if="overflowMenuOpen"
-            class="desktop-room-overflow-menu"
-            role="menu"
-            data-testid="desktop-room-overflow-menu"
-          >
-            <button
-              class="desktop-room-menu-item"
-              type="button"
-              role="menuitem"
-              :data-active="searchOpen"
-              data-testid="desktop-room-search-toggle"
-              @click.stop="selectOverflowAction('find')"
-            >
-              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-              </svg>
-              <span>Find</span>
-            </button>
-            <button
-              class="desktop-room-menu-item"
-              type="button"
-              role="menuitem"
-              :data-active="actionPanelOpen"
-              data-testid="desktop-room-actions-toggle"
-              @click.stop="selectOverflowAction('settings')"
-            >
-              <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M3 5h10M3 11h10M6 3v4M10 9v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-              </svg>
-              <span>Settings</span>
-            </button>
-          </div>
-        </Transition>
-      </div>
-
-      <nav class="desktop-room-tabs" aria-label="Room navigation" data-testid="desktop-room-tabs">
+      <nav ref="tabsElement" class="desktop-room-tabs" aria-label="Room navigation" data-testid="desktop-room-tabs">
         <button
           v-for="tab in tabs"
           :key="tab.id"
@@ -111,7 +75,7 @@
           :aria-current="activeTab === tab.id ? 'page' : undefined"
           :aria-label="tabAriaLabel(tab)"
           type="button"
-          @click="emit('selectTab', tab.id)"
+          @click="prepareTabChange($event, tab.id); emit('selectTab', tab.id)"
         >
           <svg class="desktop-room-tab-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
             <path
@@ -123,7 +87,7 @@
             />
             <path
               v-else-if="tab.id === 'events'"
-              d="M2.5 8h2.25l1.5-3.5 3 7 1.25-3.5h3M11.5 3.5h2v2"
+              d="M5 5v8m6-2V7a3 3 0 0 0-3-3M3 3a2 2 0 1 0 4 0 2 2 0 0 0-4 0Zm6 10a2 2 0 1 0 4 0 2 2 0 0 0-4 0Z"
               stroke="currentColor"
               stroke-width="1.4"
               stroke-linecap="round"
@@ -131,7 +95,7 @@
             />
             <path
               v-else-if="tab.id === 'board'"
-              d="M3.25 3.5h9.5M4.25 6h2.5v6h-2.5V6Zm5 0h2.5v3.75h-2.5V6Z"
+              d="M3 2.5h10v11H3zM6.5 2.5v11M10 2.5v11"
               stroke="currentColor"
               stroke-width="1.4"
               stroke-linecap="round"
@@ -147,7 +111,7 @@
             />
             <path
               v-else-if="tab.id === 'rooms'"
-              d="M5 3.5h7.5v7.5H5V3.5Zm-1.5 2v7h7"
+              d="M2.5 2.5h11v11h-11zM2.5 6h11M7 6v7.5"
               stroke="currentColor"
               stroke-width="1.4"
               stroke-linecap="round"
@@ -155,7 +119,7 @@
             />
             <path
               v-else
-              d="M8 7.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM3.5 13c.75-2.15 2.25-3.25 4.5-3.25 1.25 0 2.28.34 3.08 1.03M12.5 3.5v3M11 5h3"
+              d="M4 2.5h8v11l-4-2.5-4 2.5z"
               stroke="currentColor"
               stroke-width="1.4"
               stroke-linecap="round"
@@ -174,18 +138,30 @@
             :mode="tab.indicator.mode ?? 'dot'"
           />
         </button>
+        <span ref="indicatorElement" class="desktop-room-tab-underline" style="visibility: hidden" aria-hidden="true" />
       </nav>
-
+      <div class="desktop-room-tools" data-testid="desktop-room-tools">
+        <button class="desktop-room-find" type="button" aria-label="Find in room" aria-keyshortcuts="Meta+f Control+f" :aria-expanded="searchOpen" :data-active="searchOpen" data-testid="desktop-room-search-toggle" @click="emit('toggleSearch')">
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+          <span>Find</span><kbd aria-hidden="true">{{ findShortcut }}</kbd>
+        </button>
+        <span class="desktop-room-tool-divider" aria-hidden="true" />
+        <button class="desktop-room-settings-button" type="button" aria-label="Room settings" title="Room settings" aria-haspopup="dialog" :aria-expanded="actionPanelOpen" :data-active="actionPanelOpen" data-testid="desktop-room-actions-toggle" @click="emit('toggleActionPanel')">
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12M5 2.5v3M11 6.5v3M6 10.5v3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+        </button>
+      </div>
     </div>
   </header>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { ArrowUpRight, BellRing } from "@lucide/vue";
 import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
 import DesktopStatusIndicator from "../../controls/DesktopStatusIndicator.vue";
 import type { SidebarMode } from "../../types";
 import type { RoomTab, RoomTabId } from "./types";
+import { useSlidingTabIndicator } from "../../../../../../../../shared/ui/useSlidingTabIndicator";
 
 const props = defineProps<{
   sidebarMode: SidebarMode;
@@ -196,7 +172,7 @@ const props = defineProps<{
   searchOpen: boolean;
   actionPanelOpen: boolean;
   projectConnectionNeeded?: boolean;
-  attentionCount?: number;
+  attention?: { count: number; pulse: boolean };
 }>();
 
 const emit = defineEmits<{
@@ -208,50 +184,25 @@ const emit = defineEmits<{
   openInbox: [];
 }>();
 
-const overflowMenuOpen = ref(false);
-const overflowMenuRoot = ref<HTMLElement | null>(null);
-const pendingOverflowAction = ref<"find" | "settings" | null>(null);
+const { tabsElement, indicatorElement, prepareTabChange } = useSlidingTabIndicator(() => props.activeTab);
+const findShortcut = ref("Ctrl F");
+const headerDisplayName = computed(() => compactRoomDisplayName(props.room.displayName));
+const attentionCount = computed(() => props.attention?.count ?? 0);
 
-const headerDisplayName = computed(() =>
-  compactRoomDisplayName(props.room.displayName)
-);
-
-onMounted(() => {
-  document.addEventListener("pointerdown", handleDocumentPointerDown);
-});
-
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", handleDocumentPointerDown);
-});
-
-function toggleOverflowMenu(): void {
-  pendingOverflowAction.value = null;
-  overflowMenuOpen.value = !overflowMenuOpen.value;
-}
-
-function closeOverflowMenu(): void {
-  overflowMenuOpen.value = false;
-}
-
-function selectOverflowAction(action: "find" | "settings"): void {
-  pendingOverflowAction.value = action;
-  closeOverflowMenu();
-}
-
-function handleOverflowMenuAfterLeave(): void {
-  const action = pendingOverflowAction.value;
-  pendingOverflowAction.value = null;
-  if (action === null) return;
-  runOverflowAction(action);
-}
-
-function runOverflowAction(action: "find" | "settings"): void {
-  if (action === "find") {
+function handleFindShortcut(event: KeyboardEvent): void {
+  if (event.defaultPrevented || event.altKey || event.shiftKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "f" || props.actionPanelOpen) return;
+  event.preventDefault();
+  if (props.searchOpen) {
+    tabsElement.value?.closest(".desktop-room-shell")?.querySelector<HTMLInputElement>(".desktop-room-search-strip input")?.focus();
+  } else {
     emit("toggleSearch");
-    return;
   }
-  emit("toggleActionPanel");
 }
+onMounted(() => {
+  findShortcut.value = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ F" : "Ctrl F";
+  window.addEventListener("keydown", handleFindShortcut);
+});
+onBeforeUnmount(() => window.removeEventListener("keydown", handleFindShortcut));
 
 function tabAriaLabel(tab: RoomTab): string {
   const parts = [tab.label];
@@ -293,11 +244,4 @@ function compactMiddle(value: string, maxLength: number): string {
   return `${value.slice(0, leftLength)}...${value.slice(-rightLength)}`;
 }
 
-function handleDocumentPointerDown(event: PointerEvent): void {
-  const target = event.target;
-  if (!(target instanceof Node)) return;
-  if (overflowMenuOpen.value && !overflowMenuRoot.value?.contains(target)) {
-    closeOverflowMenu();
-  }
-}
 </script>

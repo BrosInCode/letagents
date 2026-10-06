@@ -187,9 +187,25 @@ const api: DesktopApi = {
       };
     },
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-conversation-routing", roomIdentifier, enabled),
+    getMessageLinkPreviews: (roomIdentifier, references) => ipcRenderer.invoke("desktop:room:get-message-link-previews", roomIdentifier, references),
+    getMessagePins: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-message-pins", roomIdentifier),
+    createMessageReminder: (room: string, message: string, dueAt: string) => ipcRenderer.invoke("desktop:room:create-message-reminder", room, message, dueAt),
+    getMessageReminders: (offset?: number) => ipcRenderer.invoke("desktop:room:get-message-reminders", offset),
+    deleteMessageReminder: (id: string) => ipcRenderer.invoke("desktop:room:delete-message-reminder", id),
+    setMessagePin: (roomIdentifier: string, messageId: string, pinned: boolean) => ipcRenderer.invoke("desktop:room:set-message-pin", roomIdentifier, messageId, pinned),
+    reportTyping: (roomIdentifier, input) => ipcRenderer.invoke("desktop:room:report-typing", roomIdentifier, input),
+    getMessageReactions: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) =>
+      ipcRenderer.invoke("desktop:room:get-message-reactions", roomIdentifier, firstMessageId, lastMessageId),
+    setMessageReaction: (roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) =>
+      ipcRenderer.invoke("desktop:room:set-message-reaction", roomIdentifier, messageId, emoji, reacted),
+    searchMessages: (roomIdentifier: string, query: string, beforeMessageId?: string | null) =>
+      ipcRenderer.invoke("desktop:room:search-messages", roomIdentifier, query, beforeMessageId),
     getGitHubEventFilter: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-github-event-filter", roomIdentifier),
     setGitHubEventFilter: (roomIdentifier: string, enabledKinds: string[]) => ipcRenderer.invoke("desktop:room:set-github-event-filter", roomIdentifier, enabledKinds),
     getAgentGuidelines: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-agent-guidelines", roomIdentifier),
+    listNotificationPreferences: () => ipcRenderer.invoke("desktop:room:list-notification-preferences"),
+    getNotificationPreference: (identifier: string) => ipcRenderer.invoke("desktop:room:get-notification-preference", identifier),
+    setNotificationPreference: (identifier: string, change: import("../../../shared/room-notification-preferences.mjs").RoomNotificationPreferenceChange) => ipcRenderer.invoke("desktop:room:set-notification-preference", identifier, change),
     setAgentGuidelines: (roomIdentifier: string, guidelines: string) => ipcRenderer.invoke("desktop:room:set-agent-guidelines", roomIdentifier, guidelines),
     getWakeRules: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-wake-rules", roomIdentifier),
     cancelWakeRule: (roomIdentifier: string, ruleId: string) => ipcRenderer.invoke("desktop:room:cancel-wake-rule", roomIdentifier, ruleId),
@@ -210,6 +226,8 @@ const api: DesktopApi = {
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
     createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),
+    getPullRequestDiff: (roomIdentifier: string, number: number) =>
+      ipcRenderer.invoke("desktop:room:get-pull-request-diff", roomIdentifier, number),
     getGitHubEvents: (roomIdentifier: string, query = {}) =>
       ipcRenderer.invoke("desktop:room:get-github-events", roomIdentifier, query),
     getArtifacts: (roomIdentifier: string) =>
@@ -374,6 +392,7 @@ const api: DesktopApi = {
     getAgentInspectorDetail: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-inspector-detail", input),
     getAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-configuration", input),
     updateAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:update-agent-configuration", input),
+    setAgentHomeHarness: (input) => ipcRenderer.invoke("desktop:supervisor:set-agent-home-harness", input),
     applyAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:apply-agent-configuration", input),
     prepareRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:prepare-room-move", input),
     commitRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:commit-room-move", input),

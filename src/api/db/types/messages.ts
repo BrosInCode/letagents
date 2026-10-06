@@ -1,3 +1,4 @@
+import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
 
 export interface Message {
@@ -17,6 +18,8 @@ export interface Message {
   thread: MessageThreadSummary | null;
   reply_to: MessageReplyReference | null;
   attachments: MessageAttachment[];
+  /** Emoji reactions as of this read; later changes arrive as a `message_reactions` invalidation. */
+  reactions: MessageReaction[];
   /** Account-scoped desktop dispatch metadata; omitted from shared events. */
   account_agent_routing?: MessageAccountAgentRouting | null;
   /**

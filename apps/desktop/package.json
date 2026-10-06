@@ -2,7 +2,7 @@
   "name": "letagents-desktop",
   "productName": "LetAgents",
   "private": true,
-  "version": "0.1.106",
+  "version": "0.1.112",
   "description": "A desktop control plane for collaborating AI agents.",
   "license": "BUSL-1.1",
   "repository": {
@@ -12,7 +12,7 @@
   "type": "module",
   "letagentsRuntime": {
     "openCodeVersion": "1.18.20",
-    "mcpVersion": "0.12.34"
+    "mcpVersion": "0.12.35"
   },
   "main": "dist-electron/main.js",
   "scripts": {
@@ -70,6 +70,7 @@
     "electron": "42.11.6",
     "eslint": "10.6.0",
     "eslint-plugin-vue": "10.9.2",
+    "highlight.js": "11.11.1",
     "monaco-editor": "0.56.0",
     "tsx": "4.23.0",
     "typescript": "5.9.3",

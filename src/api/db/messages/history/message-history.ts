@@ -24,6 +24,7 @@ import {
   messageReplySelection,
   messageRowSelection,
 } from "../selections.js";
+import { loadMessageReactions } from "../reactions.js";
 import { visibleMessageCondition } from "../visibility.js";
 import {
   buildEmptyThreadSummariesForRoots,
@@ -217,6 +218,8 @@ export async function hydrateMessageReplies(
     }
   }
 
+  const { reactions: reactionMap } = await loadMessageReactions(executor, roomId, { numbers: messageNumbers });
+
   const materializedSummaries = options?.threadSummaries ?? await buildThreadSummariesForRoots(
     roomId,
     Array.from(new Set(bounded.map((row) => row.thread_root_number ?? row.number))),
@@ -251,6 +254,7 @@ export async function hydrateMessageReplies(
       row.reply_to_number ? replyMap.get(row.reply_to_number) ?? null : null,
       attachmentMap.get(row.number) ?? [],
       threadSummary && (threadSummary.reply_count > 0 || row.thread_root_number) ? threadSummary : null,
+      reactionMap.get(row.number) ?? [],
     );
     return options?.accountId && options.accountAgentRouting
       ? { ...message, account_agent_routing: accountRouting.get(row.number) ?? null }

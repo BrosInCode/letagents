@@ -1,3 +1,4 @@
+import { ownerSetupRef } from "./provider-configuration.js";
 import type { SupervisorGrantHttp } from "./cloud-http.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import type { ManifestStore } from "./manifest-store.js";
@@ -52,7 +53,7 @@ export type RuntimeRecoveryCoordinatorOptions = {
   supervisorGrantHttp: SupervisorGrantHttp;
   provider?: ProviderActionPort;
   streams: Pick<ProviderStreamCoordinator, "currentInstallation" | "install" | "remove">;
-  terminals?: Pick<ProviderTerminalCoordinator, "handleTerminal">;
+  terminals?: Pick<ProviderTerminalCoordinator, "handleTerminal" | "supersede">;
   restartDelivery?: (entryId: string) => Promise<void>;
   releaseRecoveredObservation?: (entryId: string, runtimeId: string, stoppedCursorGeneration?: string) => void;
   processIdentity?: ProcessIdentity;
@@ -77,6 +78,8 @@ export type RuntimeRecoveryCoordinatorOptions = {
  * provider runtimes that are durably proven terminal.
  */
 export class RuntimeRecoveryCoordinator {
+  /** Entries whose exit recording an owner's recovery has taken over, until that recovery ends. */
+  private readonly exitHolds = new Map<string, () => void>();
   private readonly store: ManifestStore;
   private readonly durability: WorkDurabilityStore;
   private readonly inbox: SupervisedAgentInboxStore;
@@ -332,6 +335,8 @@ export class RuntimeRecoveryCoordinator {
       return await this.recoverAgentRuntimeExclusive(entryId, daemonGeneration);
     } finally {
       release();
+      this.exitHolds.get(entryId)?.();
+      this.exitHolds.delete(entryId);
       if (recovery) {
         this.requestConvergence(entryId);
         void this.options.restartDelivery?.(entryId).catch(() => undefined);
@@ -398,6 +403,13 @@ export class RuntimeRecoveryCoordinator {
         throw new Error("This provider does not yet support stopping an unreachable runtime safely. Stop it in its provider app, then retry recovery.");
       }
     }
+    // The owner's recovery proves the process gone and saves its terminal
+    // itself. An exit of that process the daemon is still recording gives way
+    // to it now, before this waits for the entry's queue: a step of that
+    // recording which never returns must not hold the owner's last resort.
+    // The entry stays held as the recording held it until this recovery ends.
+    const hold = this.options.terminals?.supersede(entryId);
+    if (hold) this.exitHolds.set(entryId, hold);
     const record = await this.serializeEntry(entryId, () => this.authority.serializeManifest(async () => {
       await assertAuthority();
       const prepared = await this.store.prepareRuntimeRecovery(this.authority.currentManifestGeneration(), request,
@@ -706,7 +718,8 @@ async function boundedRecoveryWait(pending: Promise<void>): Promise<void> {
   } finally { if (timer) clearTimeout(timer); }
 }
 
-function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
+/** The reference recovery attaches with. Exported so its record of how the process was started can be checked. */
+export function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
   if (!entry.work_attempt_id || !entry.provider_ref) {
     throw new Error("Provider reference is unavailable.");
   }
@@ -715,6 +728,7 @@ function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
     providerContinuationId: entry.provider_ref.provider_continuation_id,
     provider: entry.provider,
     providerConnection: entry.provider_ref.provider_connection,
+    ...ownerSetupRef(entry),
   };
 }
 

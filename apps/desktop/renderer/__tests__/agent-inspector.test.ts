@@ -194,6 +194,35 @@ test("truthful online state requires the exact delivery connection and preserves
   })), "reconnecting");
 });
 
+test("an agent its room refuses needs attention and says so, ahead of its queued messages", () => {
+  const detail = "The room refused this agent's access, so it is not receiving room messages.";
+  const refused = (inbox: NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["inbox"]) => entry({
+    observedState: "idle",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      ingress: { state: "blocked", observedAt: "2026-07-23T10:00:00.000Z", detail },
+      inbox,
+    },
+  });
+  for (const inbox of [
+    { state: "empty" as const, pendingCount: 0, blockedByMessageId: null, detail: null },
+    { state: "queued" as const, pendingCount: 2, blockedByMessageId: null, detail: "Room delivery is queued." },
+  ]) {
+    const agent = refused(inbox);
+    assert.equal(agentInspectorOverallState(agent), "needs_attention", "never shown as reconnecting or online");
+    const now = projectAgentInspector(agent, { roomId: "focus_1", deliveryRetryAvailable: false })?.now;
+    assert.deepEqual([now?.kind, now?.label, now?.summary], ["attention", "Needs attention", detail], inbox.state);
+  }
+  // Without a refusal, a queue is still described as a queue.
+  const reconnecting = entry({ observedState: "idle", roomAgentState: {
+    ...entry().roomAgentState!,
+    ingress: { state: "backoff", observedAt: null, detail: "Supervised room poll failed with HTTP 503." },
+    inbox: { state: "queued", pendingCount: 2, blockedByMessageId: null, detail: "Room delivery is queued." },
+  } });
+  const now = projectAgentInspector(reconnecting, { roomId: "focus_1", deliveryRetryAvailable: false })?.now;
+  assert.deepEqual([now?.label, now?.summary], ["Reconnecting", "Room delivery is queued."]);
+});
+
 test("a Claude usage-limit bootstrap failure explains the automatic retry instead of a raw diagnostic", () => {
   const limited = entry({
     observedState: "recovering",
@@ -230,6 +259,13 @@ test("a Claude startup deadline reads as one sentence naming the recovery contro
 
   const legacy = projectAgentInspector(stalled({ observedState: "failed", runtimeGenerationId: null }), { roomId: "focus_1" });
   assert.equal(legacy?.now?.summary, "Claude didn’t finish starting within 30 seconds. Recover the agent to try again.");
+
+  // With the owner's own setup on, the visible sentence says what of the owner's held the start up, not only Diagnostics.
+  const ownerSetup = (suffix: string) => projectAgentInspector(stalled({ lastError: lastError.replace("budget_ms=30000", "budget_ms=60000") + suffix }), { roomId: "focus_1" })?.now?.summary;
+  assert.equal(ownerSetup(" This agent starts with your own Claude Code setup, so one of your MCP servers or hooks may be holding the start up."),
+    "Claude didn’t finish starting within 60 seconds. One of your own MCP servers or hooks may be holding the start up. Open Recovery options to restart it.");
+  assert.equal(ownerSetup(' Your MCP server "owner_slow" did not start, so this agent is running without it.'),
+    "Claude didn’t finish starting within 60 seconds. Your MCP server \"owner_slow\" did not start, so this agent is running without it. Open Recovery options to restart it.");
   assert.equal(legacy?.actions.find((action) => action.kind === "recover")?.available, true);
 
   const summary = (detail: string) => projectAgentInspector(stalled({ lastError: detail }), { roomId: "focus_1" })?.now?.summary;
@@ -250,6 +286,17 @@ test("a Claude startup deadline reads as one sentence naming the recovery contro
     "Claude didn’t finish starting in time. Open Recovery options to restart it.",
     "compaction extends the startup budget, so no single duration is claimed",
   );
+});
+
+test("a start refused over the owner's own setup leads with the reason and the ways out, not with the scheduler", () => {
+  const reason = "This project's Codex config changes your MCP server \"owner_browser\", so LetAgents will not start Codex here with your own setup. "
+    + "Remove [mcp_servers.owner_browser] from the project's .codex/config.toml, stop trusting the project in Codex, or turn off \"Use your own Codex setup\" for this agent.";
+  const projection = projectAgentInspector(entry({
+    provider: "codex", observedState: "recovering", condition: "coordination_blocked",
+    lastError: `convergence scheduler failure: ${reason}`,
+  }), { roomId: "focus_1" });
+  assert.equal(projection?.now?.summary, reason);
+  assert.doesNotMatch(projection?.now?.summary ?? "", /convergence scheduler failure/);
 });
 
 test("only a trailing startup observation list is left out of the Now summary", () => {

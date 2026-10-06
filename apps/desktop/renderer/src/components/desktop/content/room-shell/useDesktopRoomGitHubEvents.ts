@@ -1,3 +1,4 @@
+import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import {
   computed,
   onBeforeUnmount,
@@ -14,6 +15,7 @@ import type {
 import { mergeDesktopGitHubEventsPage } from "../../../../domain/desktop-room-snapshots";
 import { roomSupportsGitHubIntegration } from "../../../../domain/git-rooms";
 import { desktopIpc } from "../../../../ipc/index.js";
+import { providePullRequestDiffContext } from "../../../../composables/usePullRequestDiffContext";
 import type { ComposerEventPreview } from "../room-chat/RoomComposerEventChips.vue";
 import { buildComposerEventPreview } from "../room-chat/composer-event-preview";
 import {
@@ -53,6 +55,14 @@ export function useDesktopRoomGitHubEvents(options: {
     || eventsPage.value?.githubRoomIdentifier
     || null
   );
+  provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(
+    computed(() => options.localGitRoom.value ? "" : options.room.value.identifier),
+    computed(() => options.room.value.gitRoom?.repository.fullName || githubRepository.value),
+  ));
+  providePullRequestDiffContext({
+    room: computed(() => options.room.value.identifier),
+    repository: computed(() => options.githubConnected.value ? githubRepository.value : null),
+  });
   const showEventsTab = computed(() =>
     !options.localGitRoom.value && (
       roomSupportsGitHubIntegration(options.room.value)

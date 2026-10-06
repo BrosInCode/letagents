@@ -365,3 +365,7 @@
   .send-btn { transition: none; }
   .send-btn:hover:not(:disabled), .send-btn:active:not(:disabled) { transform: none; }
 }
+
+/* The indicator fits inside the textarea’s existing 12–16px top padding. */
+.composer-typing-input { position: relative; }
+.composer-typing-input > textarea { display: block; }

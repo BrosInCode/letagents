@@ -1,3 +1,4 @@
+import { roomTyping } from "../server/room-typing.js";
 import { EventEmitter, once } from "node:events";
 
 import {
@@ -36,6 +37,12 @@ async function startBridge(): Promise<void> {
 
 async function runPublisher(): Promise<void> {
   await startBridge();
+  if (scenario === "typing") {
+    roomTyping.report(roomId!, "ada", "Ada", { client_id: "composer_bridge_1", sequence: 1, typing: true, ttl_ms: 5000 });
+    await stopRoomEventBridge();
+    send({ type: "publisher_done" });
+    return;
+  }
   if (scenario === "auth_invalidation") {
     clearGitHubRepoAccessCacheForRoom(roomId!);
     await stopRoomEventBridge();
@@ -104,6 +111,28 @@ async function runPublisher(): Promise<void> {
 }
 
 async function runSubscriber(): Promise<void> {
+  if (scenario === "typing") {
+    await startBridge();
+    const losses: unknown[] = [];
+    const onLoss = (value: unknown) => losses.push(value);
+    roomEventBridgeLossEvents.on("loss", onLoss);
+    let selfEcho = 0;
+    const stopSelf = roomTyping.subscribe(roomId!, "ada", () => { selfEcho++; });
+    const broker = new RoomEventBroker();
+    const agent = broker.subscribe(roomId!);
+    let agentWoke = false;
+    void agent.next().then(value => { if (value) agentWoke = true; });
+    let stop = () => {};
+    const signal = new Promise(resolve => { stop = roomTyping.subscribe(roomId!, "bea", resolve); });
+    send({ type: "subscriber_ready" });
+    const value = await signal;
+    await new Promise(resolve => setImmediate(resolve));
+    send({ type: "typing_result", signal: value, selfEcho, agentWoke, losses });
+    stop(); stopSelf(); agent.close(); broker.close();
+    roomEventBridgeLossEvents.off("loss", onLoss);
+    await stopRoomEventBridge();
+    return;
+  }
   if (scenario === "uninterested_ref") {
     // Register the same lane the API server owns. Interest filtering happens
     // before hydration, after the bridge has resolved the destination lane.

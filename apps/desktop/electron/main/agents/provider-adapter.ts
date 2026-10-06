@@ -151,6 +151,13 @@ export interface ProviderContinuationRef {
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   /** Durable native process endpoint used to reconnect without creating a second writer. */
   providerConnection?: ProviderConnectionRef | null;
+  /**
+   * The daemon's own records say this process was started with its owner's
+   * own provider setup, or ("unknown") cannot say how it was started. It is
+   * never read off the process, and it is absent for every agent that has
+   * never had that setup.
+   */
+  ownerSetup?: true | "unknown";
 }
 
 export type ProviderConnectionRef =
@@ -246,6 +253,13 @@ export interface ProviderSpawnRequest {
    * hands it to the native harness verbatim; LetAgents never reinterprets it.
    */
   launchPolicy: unknown;
+  /**
+   * The owner turned on their own provider setup for this agent: their MCP
+   * servers, plugins, skills, hooks and the rest of what the provider's CLI
+   * loads for them. Off unless exactly `true`. The daemon never sets it for a
+   * rental, and every adapter refuses it for one.
+   */
+  homeHarness?: boolean;
   /** Exact configuration snapshot selected before this native runtime starts. */
   model?: string | null;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
@@ -312,6 +326,8 @@ export interface ProviderHandle {
   readonly providerConnection?: ProviderConnectionRef | null;
   /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
   readonly launchNotices?: readonly string[];
+  /** The process was started with its owner's own provider setup. */
+  readonly ownerSetup?: boolean;
   observedState(): ProviderObservedState;
 }
 
@@ -404,13 +420,30 @@ export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   /** Exact native terminal proof; never synthesized from an exception or stream classifier. */
-  | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+  | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string;
+    /** The provider declined this turn's content on policy grounds; `error` carries its reason. */
+    refusal?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
 export type ProviderRoomTurnCheckpointDisposition = {
   acceptedResult: ProviderRoomTurnResult;
   cleanupRecoveryEvidence: boolean;
 };
-export interface ProviderRoomTurnRecoveryRequest { inboxItemId: string; providerTurnId: string; }
+/** Why a turn that was cut off by the exit of the process that ran it is reported as interrupted. */
+export const PROCESS_ENDED_DURING_TURN = "The agent's process ended during this turn, and the turn's result could not be recovered. The message was not run again.";
+export interface ProviderRoomTurnRecoveryRequest {
+  inboxItemId: string;
+  providerTurnId: string;
+  /** The execution record holds this turn without an ending; the ending that is read back is to be recorded too. */
+  recordEnding?: boolean;
+  /**
+   * The process that ran this turn has ended; the daemon holds its recorded
+   * terminal. A turn the conversation's own record shows as started and
+   * never ended was cut off by that exit, and is reported as interrupted.
+   */
+  originProcessEnded?: boolean;
+  /** The turn's own conversation, when it is not the one this runtime continues. */
+  providerContinuationId?: string;
+}
 export interface ProviderContinuationRepairRequest {
   workAttemptId: string;
   expectedProviderContinuationId: string;

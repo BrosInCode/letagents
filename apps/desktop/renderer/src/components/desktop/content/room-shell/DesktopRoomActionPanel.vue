@@ -50,6 +50,16 @@
       <section class="room-settings-section" data-section="general" aria-labelledby="room-settings-heading-general">
         <h3 id="room-settings-heading-general">General</h3>
         <div class="room-settings-list">
+          <div class="room-settings-row" data-inline="true" data-testid="desktop-room-hide-pins">
+            <div class="room-settings-row-copy">
+              <p id="room-settings-pins-title" class="room-settings-row-title">Hide pinned messages</p>
+              <p id="room-settings-pins-description" class="room-settings-row-description">Hide the edge markers in all rooms on this device. Your messages stay pinned.</p>
+            </div>
+            <div class="room-settings-row-action">
+              <DesktopSwitch labelledby="room-settings-pins-title" describedby="room-settings-pins-description"
+                :checked="pinnedMessagesHidden" @toggle="togglePinnedMessages" />
+            </div>
+          </div>
           <form class="room-settings-row" data-testid="desktop-room-rename-card" @submit.prevent="submitRename">
             <div class="room-settings-row-copy">
               <label class="room-settings-row-title" for="room-settings-name">Name</label>
@@ -218,12 +228,13 @@
       <section class="room-settings-section" data-section="alerts" aria-labelledby="room-settings-heading-alerts">
         <h3 id="room-settings-heading-alerts">Alerts</h3>
         <div class="room-settings-list">
+          <RoomNotificationSettings :room-identifier="room.identifier" :local-only="storage.effectiveMode === 'local'" />
           <div class="room-settings-row" data-inline="true" data-testid="desktop-room-sounds-card">
             <div class="room-settings-row-copy">
               <p id="room-settings-sound-title" class="room-settings-row-title">Sound effects</p>
               <Transition name="room-settings-text" mode="out-in">
                 <p id="room-settings-sound-description" :key="String(soundEnabled)" class="room-settings-row-description">
-                  {{ soundEnabled ? "Message and send sounds are on." : "Room sounds are muted." }}
+                  {{ soundEnabled ? "Message, send, and Needs you sounds are on." : "Room sounds are muted." }}
                 </p>
               </Transition>
             </div>
@@ -346,6 +357,7 @@
 </template>
 
 <script setup lang="ts">
+import RoomNotificationSettings from "./RoomNotificationSettings.vue";
 import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
@@ -353,6 +365,7 @@ import RoomConversationRouting from "./RoomConversationRouting.vue";
 import RoomGitHubEventFilter from "./RoomGitHubEventFilter.vue";
 import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
+import { usePinnedMessageVisibility } from "../../../../../../../../shared/ui/usePinnedMessageVisibility";
 import { useSectionScrollSpy } from "./useSectionScrollSpy";
 import type {
   DesktopGitHubIntegrationStatus,
@@ -400,6 +413,7 @@ const emit = defineEmits<{
   close: [];
 }>();
 
+const { pinnedMessagesHidden, togglePinnedMessages } = usePinnedMessageVisibility();
 const renameDraft = ref(props.room.displayName);
 const renameSaved = ref(false);
 const routingSummary = ref<string | null>(null);

@@ -67,8 +67,8 @@ export function cursorPermissionProfileInstructionLines(
     case "full_access":
       return [
         "- You may edit files and run local commands when the room event requires implementation work.",
-        "- Keep all local changes inside the selected repository/workspace. If broader changes are needed, explain the boundary instead of trying to bypass it.",
-        "- LetAgents carries ordinary nonignored file edits back after the turn. Do not create commits, switch branches, or rely on ignored build output being persisted.",
+        "- Full access permits filesystem and network operations outside the working directory when needed for the human's request.",
+        "- Changes apply directly to the working directory. You may create commits, push branches, and open pull requests with available credentials when the task calls for it.",
         "- Avoid destructive commands, secrets, keychains, global config, and LetAgents local state unless the human explicitly asks.",
       ];
     default:
@@ -104,7 +104,7 @@ export function cursorPermissionProfileReadyDetail(
       return "Cursor can edit files with its own file and command restrictions enabled. Connected tools follow the access you selected for them.";
     case "full_access":
       if (supervised) {
-        return "Cursor edits a separate copy of your project. Its own command restrictions are off for tool compatibility, but it cannot write directly to files on this Mac. LetAgents checks for conflicts before copying back changes to files tracked by Git or not ignored by it. Git history is kept.";
+        return "Cursor changes files directly and runs commands without approval prompts. It can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.";
       }
       return "Cursor can change files and run commands without its own restrictions or approval prompts. Connected tools follow the access you selected for them.";
     default:

@@ -88,9 +88,9 @@ export function sameProviderActionConnectionSnapshot(
   return true;
 }
 
-export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; launchPolicy?: unknown; provider?: string; providerConnection?: ProviderActionConnectionRef | null; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed" };
-export type ProviderActionSpawn = { onProgress?: () => void; /** The native process is up; the rest of startup is a remote model round trip. */ onNativeStarted?: () => void; workAttemptId: string; roomId: string; cwd: string; workspaceKind?: "git_worktree" | "room_scratch"; launchPolicy: unknown; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; pollingContract?: "custodial_polling_v1"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string } };
-export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; managedLaunchContract?: string; custodyLaunchAgentSessionId?: string; /** Owner-visible warnings from this launch, recorded in the agent's activity. */ launchNotices?: readonly string[]; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
+export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; launchPolicy?: unknown; provider?: string; providerConnection?: ProviderActionConnectionRef | null; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; /** The daemon's records say this process was started with its owner's own setup, or cannot say. Absent for an agent that never had it. */ ownerSetup?: true | "unknown" };
+export type ProviderActionSpawn = { onProgress?: () => void; /** The native process is up; the rest of startup is a remote model round trip. */ onNativeStarted?: () => void; workAttemptId: string; roomId: string; cwd: string; workspaceKind?: "git_worktree" | "room_scratch"; launchPolicy: unknown; /** The owner lets this agent use their own provider setup. Never set for a rental. */ homeHarness?: true; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed"; pollingContract?: "custodial_polling_v1"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string } };
+export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; managedLaunchContract?: string; custodyLaunchAgentSessionId?: string; /** Owner-visible warnings from this launch, recorded in the agent's activity. */ launchNotices?: readonly string[]; /** This process was started with its owner's own setup. */ ownerSetup?: true; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
 export type ProviderActionTerminal = { nativeRuntimeDeath?: import("../shared/execution-protocol.js").NativeRuntimeDeath; endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
 /** Validate death against the immutable handle/ref before retaining it as operational evidence. */
 export function validatedNativeRuntimeDeath(terminal: Pick<ProviderActionTerminal, "nativeRuntimeDeath">,
@@ -161,13 +161,32 @@ export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   /** Exact native terminal proof; never synthesized from an exception or stream classifier. */
-  | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+  | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string;
+    /** The provider declined this turn's content on policy grounds; `error` carries its reason. */
+    refusal?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
 export type ProviderRoomTurnCheckpointDisposition = {
   acceptedResult: ProviderRoomTurnResult;
   cleanupRecoveryEvidence: boolean;
 };
-export type ProviderRoomTurnRecoveryRequest = { inboxItemId: string; providerTurnId: string };
+export type ProviderRoomTurnRecoveryRequest = {
+  inboxItemId: string;
+  providerTurnId: string;
+  /**
+   * The execution record holds this turn without an ending: it was recorded
+   * as started, or as lost with the runtime that ran it. The ending that is
+   * read back is then to be recorded too, so the record closes the turn.
+   */
+  recordEnding?: boolean;
+  /**
+   * The process that ran this turn has ended; the daemon holds its recorded
+   * terminal. A turn the conversation's own record shows as started and
+   * never ended was cut off by that exit, and is reported as interrupted.
+   */
+  originProcessEnded?: boolean;
+  /** The turn's own conversation, when it is not the one this runtime continues. */
+  providerContinuationId?: string;
+};
 export type ProviderExactTurnControlResult = { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null };
 export type ProviderContinuationRepairRequest = {
   workAttemptId: string;

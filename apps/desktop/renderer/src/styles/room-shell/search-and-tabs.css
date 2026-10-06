@@ -46,6 +46,19 @@
   opacity: 0.45;
 }
 
+.desktop-room-search-results {
+  color-scheme: dark;
+  display: flex;
+  min-height: 0;
+  max-height: min(42vh, 360px);
+  padding: 2px 16px 12px;
+  background: rgba(7, 7, 7, 0.98);
+}
+
+.desktop-room-search-results > .history-search {
+  flex: 1;
+}
+
 .desktop-room-search-strip svg {
   width: 15px;
   height: 15px;
