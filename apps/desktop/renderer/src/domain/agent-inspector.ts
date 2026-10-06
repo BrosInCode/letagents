@@ -17,6 +17,7 @@ import {
   humanFacingSupervisorActivitySummary,
   isHumanVisibleSupervisorActivity,
 } from "./managed-agents";
+import { ownerSetupRefusalReason, ownerSetupStartHint } from "./agent-home-harness";
 import { supervisedAgentDisplayLabel } from "./codenames";
 
 export type AgentInspectorOverallState =
@@ -402,6 +403,9 @@ const STARTUP_OBSERVATIONS_TAIL = new RegExp(
 function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   const detail = entry.lastError?.trim() || null;
   if (!detail) return null;
+  // A start refused over the owner's own setup leads with what the launch said, not with the scheduler's prefix.
+  const refusal = ownerSetupRefusalReason(detail);
+  if (refusal) return refusal;
   if (/saved OpenCode process is no longer running|previous provider runtime is unavailable/i.test(detail)) {
     return "The provider process stopped. Recover the agent to continue with the same identity and workspace.";
   }
@@ -425,7 +429,9 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
     const recovery = roomAgentRecoveryAction(entry);
     const nextStep = recovery === "recovery_options" ? " Open Recovery options to restart it."
       : recovery === "recover" ? " Recover the agent to try again." : "";
-    return `Claude didn’t finish starting ${duration}.${nextStep}`;
+    // With the owner's own setup on, say which of their servers did not start, or that one may be the cause.
+    const ownerSetup = ownerSetupStartHint(detail);
+    return `Claude didn’t finish starting ${duration}.${ownerSetup ? ` ${ownerSetup}` : ""}${nextStep}`;
   }
   if (/waiting for desktop credential handoff/i.test(detail)) {
     return "Waiting for the desktop app to restore this agent’s room access.";
@@ -587,6 +593,8 @@ function nowProjection(
       kind: "attention",
       label: overallState === "reconnecting" ? "Reconnecting" : "Needs attention",
       summary: lifecycleDetail(entry)
+        // A room that refuses the agent is why its messages are only queued.
+        || (entry.roomAgentState?.ingress.state === "blocked" ? entry.roomAgentState.ingress.detail : null)
         || entry.roomAgentState?.inbox.detail
         || entry.roomAgentState?.ingress.detail
         || entry.roomAgentState?.connection.detail

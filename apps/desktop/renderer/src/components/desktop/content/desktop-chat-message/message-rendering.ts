@@ -31,8 +31,9 @@ export function renderMessageText(
   highlightQuery: string,
   messageReferenceIds?: ReadonlySet<string>,
   taskReferenceIds?: ReadonlySet<string>,
+  onLink?: (url: string) => void,
 ): string {
-  const rendered = renderDesktopMarkdown(value, { block: true });
+  const rendered = renderDesktopMarkdown(value, { block: true, onLink });
   const linked = linkRenderedMessageReferences(rendered, messageReferenceIds, taskReferenceIds);
   return highlightRenderedMessage(linked, highlightQuery);
 }

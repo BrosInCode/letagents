@@ -21,6 +21,8 @@
           <span>Drop files to attach</span>
         </div>
 
+        <PinnedMessages :key="roomIdentifier ?? ''" :pins="messagePins.state.value.pins" :loading="messagePins.state.value.loading"
+          :error="messagePins.state.value.error" @refresh="messagePins.refresh" @reveal="jumpToMessage" />
         <RoomMessageViewport
           ref="messageViewport"
           v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', workspaceAgentTarget($event, participants))"
@@ -92,6 +94,7 @@
           :attachment-drafts="attachmentDrafts"
           :attachment-error="attachmentError"
           :event-previews="composerEventPreviews"
+          :presence-chips="presenceChips"
           :message-namespace="messageNamespace"
           :participants="participants"
           :permission-approvals="permissionApprovals"
@@ -217,9 +220,14 @@
 </template>
 
 <script setup lang="ts">
+import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoomMessageMotion";
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, toRef, watch } from "vue";
 import type { CSSProperties } from "vue";
+import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
+import PinnedMessages from "../../../../../../../shared/ui/PinnedMessages.vue";
+import { provideRoomMessagePins, useRoomMessagePins } from "../../../composables/useRoomMessagePins";
+import { provideRoomMessageReactions, useRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import type {
   DesktopAgentPresence,
   DesktopManagedAgentPermissionDecisionBehavior,
@@ -245,6 +253,7 @@ import {
   isLowSignalGitHubCheckMessage,
 } from "./desktop-chat-message/github-event";
 import { useDesktopMessageDraft } from "../../../domain/desktop-message-drafts";
+import { useAgentPresenceChips } from "../../../composables/useAgentPresenceChips";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
 import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
@@ -311,6 +320,15 @@ const props = defineProps<{
   initialScrollTop?: number | null;
 }>();
 
+const { pushActionToast } = useDesktopActionToasts();
+const messagePins = useRoomMessagePins(computed(() => props.roomIdentifier ?? ""),
+  (message) => pushActionToast(message, "error", 6_000));
+provideRoomMessagePins(messagePins);
+provideRoomMessageReactions(useRoomMessageReactions(
+  computed(() => props.roomIdentifier ?? ""),
+  (message) => pushActionToast(message, "error", 6_000),
+));
+
 /*
  * Keep provider resolution anchored to the room currently being rendered.
  * The manifest is the authoritative local record even when older message and
@@ -351,6 +369,12 @@ const emit = defineEmits<{
   "stop-agent-turn": [agentId: string, approvalId: string];
 }>();
 
+const { chips: presenceChips } = useAgentPresenceChips({
+  presence: () => props.presence,
+  scope: () => props.roomIdentifier,
+  ready: () => !props.roomLoading,
+});
+
 const threadLayoutAnimationMs = 250;
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>
   new Set(props.tasks.map((task) => task.id))
@@ -359,6 +383,8 @@ const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
 const threadRevealTargetId = ref<string | null>(null);
 const { quote: replyTarget } = useDesktopMessageDraft(() => props.messageNamespace);
+provideRoomMessageMotion(() => props.messageNamespace);
+
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
 const roomComposer = ref<InstanceType<typeof RoomComposer> | null>(null);
 const threadLayoutElement = ref<HTMLElement | null>(null);

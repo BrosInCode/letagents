@@ -1,57 +1,60 @@
 <template>
-  <DesktopDialogShell
-    :open="open"
-    aria-label="Switch rooms"
-    backdrop-class="sidebar-switcher-backdrop"
-    panel-class="sidebar-switcher"
-    :show-close="false"
-    initial-focus="#sidebar-switcher-query"
-    test-id="sidebar-room-switcher"
-    @close="$emit('close')"
-  >
-    <div class="sidebar-switcher-search">
-      <Search aria-hidden="true" />
-      <input
-        id="sidebar-switcher-query"
-        v-model="query"
-        type="search"
-        placeholder="Switch to a room…"
-        aria-label="Search all rooms"
-        role="combobox"
-        aria-autocomplete="list"
-        :aria-expanded="Boolean(options.length)"
-        :aria-controls="options.length ? 'sidebar-switcher-results' : undefined"
-        :aria-activedescendant="options.length ? resultId(activeIndex) : undefined"
-        autocomplete="off"
-        spellcheck="false"
-        @keydown.down.prevent="move(1)"
-        @keydown.up.prevent="move(-1)"
-        @keydown.enter.prevent="chooseActive"
-      />
-      <button type="button" aria-label="Close room switcher" @click="$emit('close')"><X aria-hidden="true" /></button>
-    </div>
-    <div class="sidebar-switcher-caption"><span>{{ query.trim() ? 'Matching rooms' : 'Your rooms' }}</span><span><Focus aria-hidden="true" />Zen Mode stays on</span></div>
-    <div v-if="options.length" id="sidebar-switcher-results" class="sidebar-switcher-results" role="listbox" aria-label="Rooms">
-      <div
-        v-for="(option, index) in options"
-        :id="resultId(index)"
-        :key="option.entry.id"
-        role="option"
-        tabindex="-1"
-        :aria-selected="index === activeIndex"
-        class="sidebar-switcher-result"
-        @pointerenter="activeIndex = index"
-        @click="$emit('select', option.entry)"
-      >
-        <span class="sidebar-switcher-icon" aria-hidden="true"><GitBranch v-if="option.entry.kind === 'branch'" /><MessageSquare v-else-if="option.entry.kind === 'focus'" /><House v-else /></span>
-        <span class="sidebar-switcher-copy"><strong>{{ option.title }}</strong><small>{{ option.detail }}</small></span>
-        <span v-if="option.entry.id === activeEntryId || (option.entry.kind === 'parent' && option.projectId === activeProjectId)" class="sidebar-switcher-current">Current<Check aria-hidden="true" /></span>
-        <ChevronRight v-else class="sidebar-switcher-arrow" aria-hidden="true" />
+  <Teleport to="body">
+    <DesktopDialogShell
+      :open="open"
+      aria-label="Switch rooms"
+      backdrop-class="sidebar-switcher-backdrop"
+      panel-class="sidebar-switcher"
+      :show-close="false"
+      initial-focus="#sidebar-switcher-query"
+      test-id="sidebar-room-switcher"
+      :restore-focus="shouldRestoreFocus"
+      @close="$emit('close')"
+    >
+      <div class="sidebar-switcher-search">
+        <Search aria-hidden="true" />
+        <input
+          id="sidebar-switcher-query"
+          v-model="query"
+          type="search"
+          placeholder="Switch to a room…"
+          aria-label="Search all rooms"
+          role="combobox"
+          aria-autocomplete="list"
+          :aria-expanded="Boolean(options.length)"
+          :aria-controls="options.length ? 'sidebar-switcher-results' : undefined"
+          :aria-activedescendant="options.length ? resultId(activeIndex) : undefined"
+          autocomplete="off"
+          spellcheck="false"
+          @keydown.down.prevent="move(1)"
+          @keydown.up.prevent="move(-1)"
+          @keydown.enter.prevent="chooseActive"
+        />
+        <button type="button" aria-label="Close room switcher" @click="$emit('close')"><X aria-hidden="true" /></button>
       </div>
-    </div>
-    <p v-else class="sidebar-switcher-empty" role="status">{{ query.trim() ? `No rooms match “${query.trim()}”.` : 'No rooms available.' }}</p>
-    <footer class="sidebar-switcher-footer"><span><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></footer>
-  </DesktopDialogShell>
+      <div class="sidebar-switcher-caption"><span>{{ query.trim() ? 'Matching rooms' : 'Your rooms' }}</span><span v-if="zenMode"><Focus aria-hidden="true" />Zen Mode stays on</span></div>
+      <div v-if="options.length" id="sidebar-switcher-results" class="sidebar-switcher-results" role="listbox" aria-label="Rooms">
+        <div
+          v-for="(option, index) in options"
+          :id="resultId(index)"
+          :key="option.entry.id"
+          role="option"
+          tabindex="-1"
+          :aria-selected="index === activeIndex"
+          class="sidebar-switcher-result"
+          @pointerenter="activeIndex = index"
+          @click="chooseOption(option.entry)"
+        >
+          <span class="sidebar-switcher-icon" aria-hidden="true"><GitBranch v-if="option.entry.kind === 'branch'" /><MessageSquare v-else-if="option.entry.kind === 'focus'" /><House v-else /></span>
+          <span class="sidebar-switcher-copy"><strong>{{ option.title }}</strong><small>{{ option.detail }}</small></span>
+          <span v-if="option.entry.id === activeEntryId || (option.entry.kind === 'parent' && option.projectId === activeProjectId)" class="sidebar-switcher-current">Current<Check aria-hidden="true" /></span>
+          <ChevronRight v-else class="sidebar-switcher-arrow" aria-hidden="true" />
+        </div>
+      </div>
+      <p v-else class="sidebar-switcher-empty" role="status">{{ query.trim() ? `No rooms match “${query.trim()}”.` : 'No rooms available.' }}</p>
+      <footer class="sidebar-switcher-footer"><span><kbd>↑</kbd><kbd>↓</kbd> navigate <kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></footer>
+    </DesktopDialogShell>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -61,13 +64,28 @@ import DesktopDialogShell from '../content/DesktopDialogShell.vue';
 import type { ProjectGroup, RoomEntry } from '../types';
 import { sidebarRoomSwitchOptions } from '../../../domain/sidebar-zen-mode';
 
-const props = defineProps<{ open: boolean; projects: ProjectGroup[]; activeProjectId: string | null; activeEntryId: string }>();
+const props = withDefaults(defineProps<{
+  open: boolean;
+  projects: ProjectGroup[];
+  activeProjectId: string | null;
+  activeEntryId: string;
+  zenMode?: boolean;
+}>(), {
+  zenMode: false,
+});
 const emit = defineEmits<{ close: []; select: [entry: RoomEntry] }>();
 const query = ref('');
 const activeIndex = ref(0);
+const shouldRestoreFocus = ref(true);
 const options = computed(() => sidebarRoomSwitchOptions(props.projects, query.value));
 const resultId = (index: number) => `sidebar-switcher-result-${index}`;
-watch(() => props.open, (open) => { if (open) { query.value = ''; activeIndex.value = 0; } });
+watch(() => props.open, (open) => {
+  if (open) {
+    query.value = '';
+    activeIndex.value = 0;
+    shouldRestoreFocus.value = true;
+  }
+});
 watch(query, () => { activeIndex.value = 0; });
 watch(options, (entries) => { activeIndex.value = Math.min(activeIndex.value, Math.max(0, entries.length - 1)); });
 async function move(delta: number): Promise<void> {
@@ -76,9 +94,13 @@ async function move(delta: number): Promise<void> {
   await nextTick();
   document.getElementById(resultId(activeIndex.value))?.scrollIntoView({ block: 'nearest' });
 }
+function chooseOption(entry: RoomEntry): void {
+  shouldRestoreFocus.value = false;
+  emit('select', entry);
+}
 function chooseActive(): void {
   const option = options.value[activeIndex.value];
-  if (option) emit('select', option.entry);
+  if (option) chooseOption(option.entry);
 }
 </script>
 
@@ -218,6 +240,23 @@ function chooseActive(): void {
 }
 .sidebar-switcher-empty { margin: 0; padding: 40px 20px; color: var(--text-tertiary); font-size: 0.82rem; text-align: center; }
 .sidebar-switcher button:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.sidebar-switcher-backdrop.desktop-dialog-enter-active,
+.sidebar-switcher-backdrop.desktop-dialog-leave-active {
+  transition: none;
+}
+.sidebar-switcher-backdrop.desktop-dialog-enter-active > [role="dialog"],
+.sidebar-switcher-backdrop.desktop-dialog-leave-active > [role="dialog"] {
+  transition: none;
+}
+.sidebar-switcher-backdrop.desktop-dialog-enter-from,
+.sidebar-switcher-backdrop.desktop-dialog-leave-to {
+  opacity: 1;
+}
+.sidebar-switcher-backdrop.desktop-dialog-enter-from > [role="dialog"],
+.sidebar-switcher-backdrop.desktop-dialog-leave-to > [role="dialog"] {
+  opacity: 1;
+  transform: none;
+}
 @media (prefers-reduced-transparency: reduce) {
   .sidebar-switcher-backdrop { }
 }

@@ -1,6 +1,15 @@
+import { createDesktopMessageReminder, getDesktopMessageReminders, deleteDesktopMessageReminder } from "../rooms/reminders.js";
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
+import { getDesktopMessageLinkPreviews } from "../rooms/link-previews.js";
+import { getDesktopMessagePins, setDesktopMessagePin } from "../rooms/pins.js";
+import { reportDesktopRoomTyping } from "../rooms/typing.js";
+import { getDesktopPullRequestDiff } from "../rooms/pull-request-diff.js";
+import { getDesktopMessageReactions, setDesktopMessageReaction } from "../rooms/reactions.js";
+import { searchDesktopRoomMessages } from "../rooms/search.js";
 import { getAccountActivityState, restartAccountActivityStream, stopAccountActivityStream } from "../account-activity-stream.js";
 import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
+import { getDesktopRoomNotificationPreference, listDesktopRoomNotificationPreferences, setDesktopRoomNotificationPreference } from "../rooms/notification-preferences.js";
+import type { RoomNotificationPreferenceChange } from "../../../../../shared/room-notification-preferences.mjs";
 import { cancelDesktopRoomWakeRule, getDesktopRoomWakeRules, restoreDesktopRoomWakeRule } from "../rooms/wake-rules.js";
 import { getDesktopNeedsYou, getDesktopNeedsYouRoom, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
 import type { IpcMain } from "electron";
@@ -440,12 +449,28 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle("desktop:room:get-conversation-routing", (_event, roomIdentifier: string) => getDesktopConversationRouting(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
+  targetIpcMain.handle("desktop:room:get-message-link-previews", (_event, roomIdentifier: string, references) => getDesktopMessageLinkPreviews(roomIdentifier, references));
+  targetIpcMain.handle("desktop:room:get-message-pins", (_event, roomIdentifier: string) => getDesktopMessagePins(roomIdentifier));
+  targetIpcMain.handle("desktop:room:create-message-reminder", (_event, room: string, message: string, dueAt: string) => createDesktopMessageReminder(room, message, dueAt));
+  targetIpcMain.handle("desktop:room:get-message-reminders", (_event, offset?: number) => getDesktopMessageReminders(offset));
+  targetIpcMain.handle("desktop:room:delete-message-reminder", (_event, id: string) => deleteDesktopMessageReminder(id));
+  targetIpcMain.handle("desktop:room:set-message-pin", (_event, roomIdentifier: string, messageId: string, pinned: boolean) => setDesktopMessagePin(roomIdentifier, messageId, pinned));
+  targetIpcMain.handle("desktop:room:report-typing", (_event, room: string, input: unknown) => reportDesktopRoomTyping(room, input));
+  targetIpcMain.handle("desktop:room:get-message-reactions", (_event, roomIdentifier: string, firstMessageId: string, lastMessageId: string) =>
+    getDesktopMessageReactions(roomIdentifier, firstMessageId, lastMessageId));
+  targetIpcMain.handle("desktop:room:set-message-reaction", (_event, roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) =>
+    setDesktopMessageReaction(roomIdentifier, messageId, emoji, reacted));
+  targetIpcMain.handle("desktop:room:search-messages", (_event, roomIdentifier: string, query: string, beforeMessageId?: string | null) =>
+    searchDesktopRoomMessages(roomIdentifier, query, beforeMessageId));
   targetIpcMain.handle("desktop:room:get-account-activity", () => getAccountActivityState());
   targetIpcMain.handle("desktop:room:restart-account-activity", () => restartAccountActivityStream());
   targetIpcMain.handle("desktop:room:stop-account-activity", () => stopAccountActivityStream());
   targetIpcMain.handle("desktop:room:get-github-event-filter", (_event, roomIdentifier: string) => getDesktopGitHubEventFilter(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-github-event-filter", (_event, roomIdentifier: string, enabledKinds: unknown) => setDesktopGitHubEventFilter(roomIdentifier, enabledKinds));
   targetIpcMain.handle("desktop:room:get-agent-guidelines", (_event, roomIdentifier: string) => getDesktopRoomAgentGuidelines(roomIdentifier));
+  targetIpcMain.handle("desktop:room:list-notification-preferences", () => listDesktopRoomNotificationPreferences());
+  targetIpcMain.handle("desktop:room:get-notification-preference", (_event, identifier: string) => getDesktopRoomNotificationPreference(identifier));
+  targetIpcMain.handle("desktop:room:set-notification-preference", (_event, identifier: string, change: RoomNotificationPreferenceChange) => setDesktopRoomNotificationPreference(identifier, change));
   targetIpcMain.handle("desktop:room:set-agent-guidelines", (_event, roomIdentifier: string, guidelines: unknown) => setDesktopRoomAgentGuidelines(roomIdentifier, guidelines));
   targetIpcMain.handle("desktop:room:get-wake-rules", (_event, roomIdentifier: string) => getDesktopRoomWakeRules(roomIdentifier));
   targetIpcMain.handle("desktop:room:cancel-wake-rule", (_event, roomIdentifier: string, ruleId: string) => cancelDesktopRoomWakeRule(roomIdentifier, ruleId));
@@ -493,6 +518,10 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle(
     "desktop:room:create-invite-room",
     async (): Promise<DesktopInviteRoomCreation> => createDesktopInviteRoom(),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-pull-request-diff",
+    (_event, roomIdentifier: string, number: number) => getDesktopPullRequestDiff(roomIdentifier, number),
   );
   targetIpcMain.handle(
     "desktop:room:get-github-events",

@@ -655,17 +655,28 @@ async function waitForPath(path: string, timeoutMs = 5_000): Promise<boolean> {
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  // Native preparation includes async filesystem work. A 10 ms flush cannot
+  // prove the child exists or that checkpoints and stream listeners are ready.
   const deadline = Date.now() + timeoutMs;
   while (!predicate() && Date.now() < deadline) await flush();
   assert.equal(predicate(), true, "condition did not become true before the wait deadline");
 }
 
+const loopKeepAlives = new Set<ReturnType<typeof setInterval>>();
+test.afterEach(() => {
+  // A failed assertion can abandon the turn before withLoopAlive settles.
+  for (const keepAlive of loopKeepAlives) clearInterval(keepAlive);
+  loopKeepAlives.clear();
+});
+
 async function withLoopAlive<T>(work: Promise<T>): Promise<T> {
   const keepAlive = setInterval(() => {}, 20);
+  loopKeepAlives.add(keepAlive);
   try {
     return await work;
   } finally {
     clearInterval(keepAlive);
+    loopKeepAlives.delete(keepAlive);
   }
 }
 
@@ -903,7 +914,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     const turn = withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
       checkpointTurnStarted: async (value) => { turnId = value; },
     }));
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
     const launch = harness.launches[0]!;
     assert.equal(launch.args.includes("--force"), false, "daemon read-only Cursor never receives --force");
     assert.equal(harness.mcpAttestations.length, 2, "both registry shape and the real bridge are attested at the native turn boundary");
@@ -1129,7 +1140,7 @@ test("the production Cursor profile keeps supervisor coordinates out of native c
     const turn = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "inbox-production-profile" }), {
       checkpointTurnStarted: async (value) => { turnId = value; },
     });
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
 
     const profileRoot = join(
       dirname(statePath),
@@ -1197,7 +1208,7 @@ test("the production Cursor profile keeps supervisor coordinates out of native c
   }
 });
 
-test("the production wrapper hosts one exact MCP connector across fresh and resume turns, then revokes it", async () => {
+async function verifyMcpConnectorRetirement(slowMembershipProbe = false, gracefulDescendant = false): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-mcp-connector-e2e-"));
   const workspace = join(root, "workspace");
   const sourceHome = join(root, "source-home");
@@ -1206,6 +1217,7 @@ test("the production wrapper hosts one exact MCP connector across fresh and resu
   const runtimeEntry = join(runtimePackage, "dist", "mcp", "server.js");
   const runtimePidPath = join(root, "runtime.pid");
   const runtimeDescendantPidPath = join(root, "runtime-descendant.pid");
+  const preloadPath = join(root, "slow-membership-preload.cjs");
   const managedProfileRoot = join(
     dirname(statePath),
     "cursor-supervised",
@@ -1226,11 +1238,16 @@ const readline = require("node:readline");
 const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 fs.writeFileSync(${JSON.stringify(runtimePidPath)}, String(process.pid));
-process.on("SIGTERM", () => {});
+process.on("SIGTERM", () => { if (${gracefulDescendant}) process.exit(0); });
 setInterval(() => {}, 1000);
-const descendant = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
-  stdio: "ignore",
+const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(`
+process.on("SIGTERM", () => { ${gracefulDescendant ? "setTimeout(() => process.exit(0), 700);" : ""} });
+setInterval(() => {}, 1000);
+process.send("ready");
+`)}, ${JSON.stringify(runtimeEntry)}], {
+  stdio: ["ignore", "ignore", "ignore", "ipc"],
 });
+const descendantReady = new Promise((resolve) => descendant.once("message", () => { descendant.disconnect(); resolve(); }));
 descendant.unref();
 fs.writeFileSync(${JSON.stringify(runtimeDescendantPidPath)}, String(descendant.pid));
 const required = ["HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR", "NODE_COMPILE_CACHE"];
@@ -1247,7 +1264,8 @@ const boundaryValid = process.env.LETAGENTS_SUPERVISOR_ENTRY_ID === "supervised_
     catch { return false; }
   });
 const lines = readline.createInterface({ input: process.stdin });
-lines.on("line", (line) => {
+lines.on("line", async (line) => {
+  await descendantReady;
   const request = JSON.parse(line);
   const result = request.method === "initialize"
     ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
@@ -1346,6 +1364,29 @@ setTimeout(() => process.exit(73), 5000).unref();
 `);
   chmodSync(cursorBin, 0o700);
 
+  writeFileSync(preloadPath, `
+const fs = require("node:fs");
+const childProcess = require("node:child_process");
+const originalSpawnSync = childProcess.spawnSync;
+// The fault injection belongs to the wrapper, outside the native sandbox.
+delete process.env.NODE_OPTIONS;
+childProcess.spawnSync = function(command, args, options) {
+  if (command === "/bin/ps" && args[0] === "-axo" && args[1] === "pid=,pgid=") {
+    let runtimeAlive = false;
+    try {
+      const pid = Number(fs.readFileSync(${JSON.stringify(runtimePidPath)}, "utf8"));
+      process.kill(pid, 0);
+      runtimeAlive = true;
+    } catch {}
+    if (runtimeAlive) return {
+      status: null, stdout: "", stderr: "",
+      error: Object.assign(new Error("slow process-table scan"), { code: "ETIMEDOUT" }),
+    };
+  }
+  return originalSpawnSync.call(this, command, args, options);
+};
+`);
+
   const previousStatePath = process.env.LETAGENTS_STATE_PATH;
   const previousSourceHome = process.env.LETAGENTS_CURSOR_SOURCE_HOME;
   const previousDevMode = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
@@ -1363,7 +1404,9 @@ setTimeout(() => process.exit(73), 5000).unref();
         ...productionPersonalIdentityDependencies,
         launchTurn(input) {
           connectorRoots.push(dirname(input.mcpConnectorSocketPath!));
-          return defaultLaunchTurn(input);
+          return defaultLaunchTurn(slowMembershipProbe ? {
+            ...input, env: { ...input.env, NODE_OPTIONS: `--require=${preloadPath}` },
+          } : input);
         },
       },
     });
@@ -1441,6 +1484,12 @@ setTimeout(() => process.exit(73), 5000).unref();
     thirdRuntimePid = Number(readFileSync(runtimePidPath, "utf8"));
     thirdRuntimeDescendantPid = Number(readFileSync(runtimeDescendantPidPath, "utf8"));
     assert.notEqual(thirdRuntimePid, secondRuntimePid);
+    for (const pid of [thirdRuntimePid, thirdRuntimeDescendantPid, stubbornPid]) {
+      await waitFor(() => {
+        try { process.kill(pid, 0); return false; }
+        catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      });
+    }
     assert.throws(
       () => process.kill(thirdRuntimePid!, 0),
       (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
@@ -1463,6 +1512,17 @@ setTimeout(() => process.exit(73), 5000).unref();
       "adapter-owned exit cleanup removes the connector root when SIGKILL prevents wrapper cleanup",
     );
   } finally {
+    if (existsSync(runtimePidPath)) {
+      const pid = Number(readFileSync(runtimePidPath, "utf8"));
+      const observed = spawnSync("/bin/ps", ["-axo", "pid=,pgid=,command="], { encoding: "utf8", timeout: 1_000 });
+      const member = (observed.stdout ?? "").split("\n").some((line) => {
+        const fields = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+        return fields && Number(fields[2]) === pid && fields[3]!.split(/\s+/).includes(runtimeEntry);
+      });
+      if (Number.isSafeInteger(pid) && pid > 1 && member) {
+        try { process.kill(-pid, "SIGKILL"); } catch {}
+      }
+    }
     for (const pid of [thirdRuntimeDescendantPid, thirdRuntimePid, stubbornPid]) {
       if (pid && Number.isSafeInteger(pid)) {
         try { process.kill(pid, "SIGKILL"); } catch {}
@@ -1476,11 +1536,20 @@ setTimeout(() => process.exit(73), 5000).unref();
     else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = previousDevMode;
     rmSync(root, { recursive: true, force: true });
   }
-});
+}
 
-test("the production wrapper refuses a recycled MCP runtime process group before signaling", {
+test("the production wrapper hosts one exact MCP connector across fresh and resume turns, then revokes it",
+  () => verifyMcpConnectorRetirement());
+
+test("MCP retirement escalates a live exact runtime despite slow process-table scans", {
   skip: process.platform === "win32",
-}, async () => {
+}, () => verifyMcpConnectorRetirement(true));
+
+test("MCP retirement preserves the grace window after its leader exits before a descendant", {
+  skip: process.platform === "win32",
+}, () => verifyMcpConnectorRetirement(false, true));
+
+async function verifyMcpRuntimeSignalFence(probeMode: "recycled" | "absent" | "ambiguous_identity" | "ambiguous_kill_identity" | "ambiguous_group"): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-runtime-recycled-group-"));
   const statePath = join(root, "turn.jsonl");
   const cursorBin = join(root, "fake-cursor-agent");
@@ -1490,6 +1559,8 @@ test("the production wrapper refuses a recycled MCP runtime process group before
   const initialIdentityPath = join(root, "initial-identity.log");
   const identityProbePath = join(root, "identity-probe.log");
   const groupSignalPath = join(root, "group-signal.log");
+  const ambiguousProbePath = join(root, "ambiguous-probe.log");
+  const laterProbePath = join(root, "later-probe.log");
   const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
   const connectorSocketPath = join(connectorRoot, "stdio.sock");
   const runtimeDataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
@@ -1500,6 +1571,7 @@ test("the production wrapper refuses a recycled MCP runtime process group before
 const fs = require("node:fs");
 const readline = require("node:readline");
 fs.writeFileSync(${JSON.stringify(runtimePidPath)}, String(process.pid));
+process.on("SIGTERM", () => {});
 const lines = readline.createInterface({ input: process.stdin });
 lines.on("line", (line) => {
   const request = JSON.parse(line);
@@ -1519,8 +1591,10 @@ lines.on("line", (line) => {
           },
         }] }
       : {};
+  // Invalid startup contracts take the repeated finishNotStarted cleanup path.
+  if (request.method === "tools/list") result.tools = [];
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
-  if (request.method === "tools/list") setTimeout(() => process.exit(0), 25);
+  if (request.method === "tools/list") setTimeout(() => process.exit(0), 1_500);
 });
 `);
   writeFileSync(preloadPath, `
@@ -1530,6 +1604,15 @@ const originalSpawnSync = childProcess.spawnSync;
 const originalKill = process.kill.bind(process);
 fs.appendFileSync(${JSON.stringify(preloadLoadedPath)}, String(process.pid) + "\\n");
 let exactIdentityReads = 0;
+let capturedIdentity;
+let ambiguousGroupProbe = false;
+const probeMode = ${JSON.stringify(probeMode)};
+const retryIdentity = probeMode === "ambiguous_identity" || probeMode === "ambiguous_kill_identity";
+function ambiguousProbe() {
+  fs.writeFileSync(${JSON.stringify(ambiguousProbePath)}, fs.existsSync(${JSON.stringify(groupSignalPath)})
+    ? fs.readFileSync(${JSON.stringify(groupSignalPath)}, "utf8") : "");
+  return { status: null, stdout: "", stderr: "", error: Object.assign(new Error("probe timed out"), { code: "ETIMEDOUT" }) };
+}
 function runtimePid() {
   try { return Number(fs.readFileSync(${JSON.stringify(runtimePidPath)}, "utf8")); }
   catch { return null; }
@@ -1540,17 +1623,25 @@ childProcess.spawnSync = function(command, args, options) {
     exactIdentityReads += 1;
     if (exactIdentityReads === 1) {
       const observed = originalSpawnSync.call(this, command, args, options);
+      capturedIdentity = observed;
       fs.writeFileSync(${JSON.stringify(initialIdentityPath)}, JSON.stringify({
         args, status: observed.status, stdout: observed.stdout, error: observed.error && observed.error.message,
       }));
       return observed;
     }
+    if (probeMode === "ambiguous_identity" && exactIdentityReads === 2) return ambiguousProbe();
+    if (probeMode === "ambiguous_kill_identity" && exactIdentityReads === 3) return ambiguousProbe();
+    if (exactIdentityReads > 2 || retryIdentity || probeMode === "ambiguous_group") {
+      fs.appendFileSync(${JSON.stringify(laterProbePath)}, "identity\\n");
+      return capturedIdentity;
+    }
     const pid = Number(args[args.indexOf("-p") + 1]);
     fs.appendFileSync(${JSON.stringify(identityProbePath)}, "recycled\\n");
+    if (probeMode === "absent") return { status: 1, stdout: "", stderr: "" };
     return {
       pid: 0,
-      output: [null, pid + " 1 " + pid + " Thu Jan  1 00:00:00 1970\\n", ""],
-      stdout: pid + " 1 " + pid + " Thu Jan  1 00:00:00 1970\\n",
+      output: [null, pid + " " + process.pid + " " + pid + " Thu Jan  1 00:00:00 1970\\n", ""],
+      stdout: pid + " " + process.pid + " " + pid + " Thu Jan  1 00:00:00 1970\\n",
       stderr: "",
       status: 0,
       signal: null,
@@ -1559,7 +1650,12 @@ childProcess.spawnSync = function(command, args, options) {
   if (command === "/bin/ps" && Array.isArray(args)
     && args[0] === "-axo" && args[1] === "pid=,pgid=") {
     const pid = runtimePid();
-    if (pid) {
+    if (pid && !retryIdentity) {
+      if (probeMode === "ambiguous_group" && !ambiguousGroupProbe) {
+        ambiguousGroupProbe = true;
+        return ambiguousProbe();
+      }
+      fs.appendFileSync(${JSON.stringify(laterProbePath)}, "group\\n");
       const observed = originalSpawnSync.call(this, command, args, options);
       const stdout = String(observed.stdout || "")
         + String(pid + 100000) + " " + String(pid) + "\\n";
@@ -1579,7 +1675,7 @@ process.kill = function(target, signal) {
   const pid = runtimePid();
   if (pid && target === -pid) {
     fs.appendFileSync(${JSON.stringify(groupSignalPath)}, String(signal) + "\\n");
-    return true;
+    if (!retryIdentity) return true;
   }
   return originalKill(target, signal);
 };
@@ -1631,9 +1727,27 @@ attestFixtureMcp().then(() => setInterval(() => {}, 1000)).catch((error) => {
     const terminal = JSON.parse(readFileSync(`${statePath}.terminal.json`, "utf8"));
     assert.equal(existsSync(preloadLoadedPath), true, `the adversarial process shim loaded: ${child.stderrTail()}`);
     assert.equal(existsSync(initialIdentityPath), true, "spawn records the original runtime leader's exact birth and ancestry");
-    assert.equal(existsSync(identityProbePath), true, "retirement observes that the original group leader birth changed");
-    assert.equal(existsSync(groupSignalPath), false, "the recycled numeric PGID receives neither TERM nor KILL");
-    assert.equal(terminal.remote_authority_revoked, false, "ambiguous recycled-group retirement stays fail closed");
+    assert.equal(terminal.type, "not_started", "the invalid contract exercises cleanup before and after startup settles");
+    const signals = existsSync(groupSignalPath) ? readFileSync(groupSignalPath, "utf8").trim().split("\n") : [];
+    if (probeMode === "recycled" || probeMode === "absent") {
+      assert.equal(existsSync(identityProbePath), true, "retirement observes that the original group leader birth changed");
+      assert.equal(existsSync(groupSignalPath), false, "the recycled numeric PGID receives neither TERM nor KILL");
+      assert.equal(existsSync(laterProbePath), true, "cleanup continues probing group absence without restoring signal authority");
+    } else {
+      assert.equal(existsSync(ambiguousProbePath), true, "retirement encounters the injected probe timeout");
+      assert.equal(existsSync(laterProbePath), true, "retirement probes again after the timeout");
+      if (probeMode === "ambiguous_group") {
+        assert.equal(signals[0], "SIGTERM");
+        assert.ok(signals.length <= 2 && signals.slice(1).every((signal) => signal === "SIGKILL"));
+        assert.equal(readFileSync(groupSignalPath, "utf8"), readFileSync(ambiguousProbePath, "utf8"),
+          "cleanup retries cannot signal after losing group continuity, regardless of earlier escalation");
+      } else {
+        assert.deepEqual(signals, ["SIGTERM", "SIGKILL"], "a fresh matching identity permits the timed-out signal to retry");
+      }
+    }
+    assert.equal(terminal.remote_authority_revoked,
+      probeMode === "ambiguous_identity" || probeMode === "ambiguous_kill_identity",
+      "only successful retirement of a freshly verified runtime proves revoked authority");
   } finally {
     if (child?.pid) {
       try { process.kill(child.pid, "SIGKILL"); } catch {}
@@ -1642,6 +1756,19 @@ attestFixtureMcp().then(() => setInterval(() => {}, 1000)).catch((error) => {
     rmSync(runtimeDataRoot, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+test("the production wrapper refuses a recycled MCP runtime process group before signaling", {
+  skip: process.platform === "win32",
+}, () => verifyMcpRuntimeSignalFence("recycled"));
+
+test("MCP cleanup retries distinguish unavailable identity from lost process-group signal authority", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  await t.test("TERM identity timeout then success", () => verifyMcpRuntimeSignalFence("ambiguous_identity"));
+  await t.test("KILL identity timeout then success", () => verifyMcpRuntimeSignalFence("ambiguous_kill_identity"));
+  await t.test("confirmed absence permanently revokes signals", () => verifyMcpRuntimeSignalFence("absent"));
+  await t.test("group probe ambiguity", () => verifyMcpRuntimeSignalFence("ambiguous_group"));
 });
 
 test("the exact live Cursor connector rejects a swapped runtime with a missing or malformed completion contract", async () => {
@@ -1823,7 +1950,6 @@ setTimeout(() => {
             ...input,
             testAgentUpstreamEndpoint: "http://127.0.0.1:9",
             testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
-            testMcpCapabilityTimeoutMs: 500,
           });
         },
       },
@@ -2184,7 +2310,7 @@ test("a project MCP added after the final reseal gains no blanket approval or pe
     const adapter = supervisedAdapter(harness);
     const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({ cwd: workspace }));
     const turn = adapter.runRoomTurn(handle, roomTurnRequest());
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
 
     assert.equal(insertedAtLaunch, true, "the adversarial config appears only after the last reseal");
     harness.children[0]!.emit({
@@ -2666,7 +2792,7 @@ test("Cursor handoff never adopts a later PID birth when the prepared wrapper bi
   const handle = await spawnDaemonLane(adapter, harness);
   const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest());
   roomTurn.catch(() => {});
-  await flush();
+  await waitFor(() => identityReads >= 1);
   const child = harness.children[0]!;
 
   assert.equal(identityReads, 1, "cleanup may not re-read and adopt a later PID birth");
@@ -2705,7 +2831,7 @@ test("daemon-owned Cursor runs one exact bounded room turn and checkpoints befor
       order.push("terminal");
     },
   });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
 
   assert.match(persistedTurnId, /^cursor:/);
   assert.equal(harness.launches.length, 1);
@@ -2756,7 +2882,7 @@ test("Cursor checkpoints a proven native provider failure and reuses its exact s
   const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
     checkpointTerminalResult: async result => { checkpoints.push(result); },
   });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
   child.emit({ type: "result", subtype: "error_during_execution", is_error: true,
     result: "HTTP 503 service unavailable", session_id: "sess-cursor-1" });
@@ -2768,7 +2894,7 @@ test("Cursor checkpoints a proven native provider failure and reuses its exact s
   assert.deepEqual(checkpoints, [failure]);
   assert.equal(handle.observedState(), "idle");
   const next = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "continuation" }));
-  await flush();
+  await waitFor(() => harness.children[1]?.isReleased === true);
   assert.equal(argValue(harness.launches[1]!.args, "--resume"), "sess-cursor-1");
   harness.children[1]!.emit({ type: "result", subtype: "success", is_error: false,
     result: "finished", session_id: "sess-cursor-1" });
@@ -2798,7 +2924,7 @@ test("writable Cursor turns launch only in their private generation and retire i
   const pending = adapter.runRoomTurn(handle, roomTurnRequest(), {
     checkpointTerminalResult: async () => { terminalOrder.push("terminal"); },
   });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
 
   const launch = harness.launches[0]!;
   assert.equal(argValue(launch.args, "--workspace"), "/private/letagents-generation/live/project");
@@ -2830,7 +2956,7 @@ test("room scratch Cursor turns use their exact workspace without Git generation
   }));
 
   const pending = adapter.runRoomTurn(handle, roomTurnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
 
   const launch = harness.launches[0]!;
   assert.equal(argValue(launch.args, "--workspace"), scratchWorkspace);
@@ -2871,7 +2997,7 @@ test("Cursor bounded turns classify only the exact no-reply sentinel and preserv
   const handle = await spawnDaemonLane(adapter, harness);
 
   const noReply = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_no_reply" }));
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,
     result: CURSOR_NO_ROOM_REPLY_SENTINEL, session_id: "sess-cursor-1",
@@ -2888,7 +3014,7 @@ test("Cursor bounded turns classify only the exact no-reply sentinel and preserv
   });
 
   const unreadable = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_unreadable" }));
-  await flush();
+  await waitFor(() => harness.children[1]?.isReleased === true);
   harness.children[1]!.emit({
     type: "result", subtype: "success", is_error: false,
     result: null, session_id: "sess-cursor-1",
@@ -2901,7 +3027,7 @@ test("Cursor bounded turns classify only the exact no-reply sentinel and preserv
   assert.equal(unreadableResult.evidence, "none");
 
   const extraText = adapter.runRoomTurn(handle, roomTurnRequest({ actionId: "action_extra_text" }));
-  await flush();
+  await waitFor(() => harness.children[2]?.isReleased === true);
   harness.children[2]!.emit({
     type: "result", subtype: "success", is_error: false,
     result: `${CURSOR_NO_ROOM_REPLY_SENTINEL} because this is extra`, session_id: "sess-cursor-1",
@@ -2928,7 +3054,7 @@ test("Cursor handoff detaches observation while the same in-memory exact turn re
     checkpointTurnStarted: async (value) => { turnId = value; },
     detachSignal: abort.signal,
   });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   abort.abort();
   await assert.rejects(pending, /observation detached/);
 
@@ -2962,7 +3088,7 @@ test("Cursor retains terminal stream evidence when checkpointing fails and recov
     checkpointTerminalResult: async () => { throw new Error("database unavailable"); },
   });
   const rejected = assert.rejects(pending, /database unavailable/);
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,
     result: "Durable after retry", session_id: "sess-cursor-1",
@@ -2997,7 +3123,7 @@ test("Cursor cleanup follows the daemon-accepted structured result rather than t
       };
     },
   });
-  await flush();
+  await waitFor(() => acceptedHarness.children[0]?.isReleased === true);
   acceptedHarness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false, result: null, session_id: "sess-cursor-1",
   });
@@ -3023,7 +3149,7 @@ test("Cursor cleanup follows the daemon-accepted structured result rather than t
       cleanupRecoveryEvidence: false,
     }),
   });
-  await flush();
+  await waitFor(() => rejectedHarness.children[0]?.isReleased === true);
   rejectedHarness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false, result: "raw aggregate only", session_id: "sess-cursor-1",
   });
@@ -3068,7 +3194,7 @@ test("Cursor keeps a durable no-reply journal until fallible workspace receipt c
         cleanupRecoveryEvidence: true,
       }),
     });
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
     const launch = harness.launches[0]!;
     const sessionId = "sess-cursor-1";
     const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
@@ -4828,9 +4954,6 @@ function request(body, path = "/agent.v1.AgentService/Run") {
   const replacement = request("replacement-held");
   if ((await request("overflow-again").done).status !== 503) process.exit(92);
   const remaining = [...held.slice(1), replacement];
-  let attested = false;
-  let resolvedBeforeAttest = false;
-  for (const pending of remaining) pending.done.then(() => { if (!attested) resolvedBeforeAttest = true; });
   const init = { type: "system", subtype: "init", session_id: "sess-hold-admit" };
   const result = { type: "result", subtype: "success", is_error: false, result: "hold-admit-ok", session_id: "sess-hold-admit" };
   if (${terminalWhileHeld}) {
@@ -4840,10 +4963,10 @@ function request(body, path = "/agent.v1.AgentService/Run") {
     if ((await Promise.all(remaining.map((pending) => pending.done))).some((response) => response.status !== 503)) process.exit(93);
   }
   const connector = await attestFixtureMcp();
-  attested = true;
   if (!${terminalWhileHeld}) {
+    // Held Runs may finish once the MCP socket connects, before tools/list returns.
     const responses = await Promise.all(remaining.map((pending) => pending.done));
-    if (resolvedBeforeAttest || responses.some((response) => response.status !== 200 || response.body !== "held-upstream-ok")) process.exit(94);
+    if (responses.some((response) => response.status !== 200 || response.body !== "held-upstream-ok")) process.exit(94);
     if ((await request("background-completion").done).status !== 200) process.exit(95);
     process.stdout.write(JSON.stringify(init) + "\\n");
     process.stdout.write(JSON.stringify(result) + "\\n");
@@ -5380,7 +5503,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("the real supervised boundary starts without inventorying pre-existing project files", {
+test("the real supervised boundary distinguishes Full access from restricted profiles", {
   skip: process.platform !== "darwin",
 }, async () => {
   for (const [permissionProfileId, sandbox, workspaceWritable] of [
@@ -5389,6 +5512,9 @@ test("the real supervised boundary starts without inventorying pre-existing proj
     ["full_access", "disabled", true],
   ] as const) {
     const root = mkdtempSync(join(tmpdir(), `letagents-cursor-${permissionProfileId}-boundary-`));
+    const networkServer = createHttpServer((_request, response) => response.end("reachable"));
+    await new Promise<void>((resolve) => networkServer.listen(0, "127.0.0.1", resolve));
+    const networkPort = (networkServer.address() as { port: number }).port;
     try {
       const workspace = join(root, "workspace");
       const sourceHomeDir = join(root, "source-home");
@@ -5401,10 +5527,13 @@ test("the real supervised boundary starts without inventorying pre-existing proj
       const preexistingWorkspaceAlias = join(workspace, "preexisting-outside-alias.txt");
       const cursorAuthority = join(workspace, ".cursor", "mcp.json");
       const executable = join(root, "fake-cursor-agent");
+      const remote = join(root, "remote.git");
+      assert.equal(spawnSync("git", ["init", "--bare", "--quiet", remote]).status, 0);
       initializeGitWorkspace(workspace);
       mkdirSync(dirname(cursorAuthority), { recursive: true });
       writeFileSync(join(workspace, ".cursor", ".keep"), "");
       mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+      writeFileSync(join(sourceHomeDir, ".gitconfig"), "[user]\nname = Cursor Test\nemail = cursor@example.test\n");
       writeFileSync(workspaceHardlinkSource, "inside-original\n");
       writeFileSync(preexistingOutsideTarget, "preexisting-outside\n");
       linkSync(preexistingOutsideTarget, preexistingWorkspaceAlias);
@@ -5433,9 +5562,24 @@ const outcome = {
   hardlinkCreate: link(path.join(workspace, "hardlink-source.txt"), path.join(workspace, "hardlink-escape.txt")),
   authority: write(path.join(workspace, ".cursor", "mcp.json")),
 };
+if (${permissionProfileId === "full_access"}) {
+  const git = (...args) => require("node:child_process").spawnSync("git", ["-C", workspace, ...args]).status;
+  outcome.add = git("add", "agent-change.txt");
+  outcome.commit = git("commit", "--quiet", "-m", "full access change");
+  outcome.push = git("push", ${JSON.stringify(remote)}, "HEAD:refs/heads/full-access");
+}
+const request = require("node:http").get("http://127.0.0.1:${networkPort}", response => {
+  response.resume();
+  response.on("end", () => finish("allowed"));
+});
+request.on("error", () => finish("blocked"));
+request.setTimeout(2000, () => request.destroy());
+function finish(network) {
+outcome.network = network;
 ${cursorConversationStoreFixtureSource("sess-write-boundary")}
 process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-write-boundary" }) + "\\n");
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-write-boundary" }) + "\\n");
+}
 `);
       chmodSync(executable, 0o700);
       let launchArgs: string[] = [];
@@ -5476,19 +5620,26 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       })));
       assert.deepEqual(JSON.parse(result.text!), {
         workspace: workspaceWritable ? "allowed" : "blocked",
-        outside: "blocked",
-        hardlinkCreate: "blocked",
-        authority: "blocked",
+        outside: permissionProfileId === "full_access" ? "allowed" : "blocked",
+        hardlinkCreate: permissionProfileId === "full_access" ? "allowed" : "blocked",
+        authority: permissionProfileId === "full_access" ? "allowed" : "blocked",
+        network: permissionProfileId === "full_access" ? "allowed" : "blocked",
+        ...(permissionProfileId === "full_access" ? { add: 0, commit: 0, push: 0 } : {}),
       });
       assert.equal(launchArgs.includes("--force"), permissionProfileId !== "read_only");
       assert.equal(argValue(launchArgs, "--sandbox"), sandbox);
       assert.equal(existsSync(workspaceFile), workspaceWritable);
-      assert.equal(existsSync(outsideFile), false);
+      assert.equal(existsSync(outsideFile), permissionProfileId === "full_access");
       assert.equal(existsSync(join(root, "symlink-escape.txt")), false);
       assert.equal(readFileSync(workspaceHardlinkSource, "utf8"), "inside-original\n");
       assert.equal(readFileSync(preexistingOutsideTarget, "utf8"), "preexisting-outside\n");
-      assert.equal(existsSync(cursorAuthority), false);
+      assert.equal(existsSync(cursorAuthority), permissionProfileId === "full_access");
+      if (permissionProfileId === "full_access") {
+        assert.equal(spawnSync("git", ["-C", workspace, "log", "-1", "--format=%s"], { encoding: "utf8" }).stdout.trim(), "full access change");
+        assert.equal(spawnSync("git", ["--git-dir", remote, "show", "full-access:agent-change.txt"], { encoding: "utf8" }).stdout, "changed\n");
+      }
     } finally {
+      await new Promise<void>((resolve, reject) => networkServer.close(error => error ? reject(error) : resolve()));
       rmSync(root, { recursive: true, force: true });
     }
   }
@@ -6469,9 +6620,16 @@ process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_i
 process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "checkpoint recovered", session_id: "sess-checkpoint-real" }) + "\\n");
 `);
     chmodSync(executable, 0o700);
+    let child: CursorCliChild | undefined;
     const adapter = new CursorProviderAdapter({
       cursorBin: executable,
-      dependencies: productionPersonalIdentityDependencies,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          child = defaultLaunchTurn(input);
+          return child;
+        },
+      },
       supervisedProfileFactory: () => ({
         homeDir, configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
         env: { HOME: homeDir, NPM_CONFIG_CACHE: join(root, "npm-cache") },
@@ -6486,9 +6644,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       if (state.providerContinuationId === "sess-checkpoint-real") {
         realSessionCheckpoints += 1;
         if (realSessionCheckpoints === 1) {
-          // Let the already-emitted result drain so this covers recovery of
-          // a terminal first turn, not the separate interrupted-turn case.
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          // Wait for the wrapper to drain stdout and persist its terminal journal
+          // so this exercises a completed first turn even under slow teardown.
+          assert.ok(child);
+          await child.exited;
           throw new Error("transient manifest checkpoint failure");
         }
         if (realSessionCheckpoints === 3) {
@@ -6770,7 +6929,7 @@ test("daemon Cursor correction refuses an unjournaled side turn and native resum
   assert.equal(harness.launches.length, 0);
 
   const turn = adapter.runRoomTurn(handle, roomTurnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   assert.equal(argValue(harness.launches[0]!.args, "--resume"), "sess-cursor-existing");
   harness.children[0]!.emit({
     type: "result", subtype: "success", is_error: false,
@@ -6809,6 +6968,9 @@ test("daemon Cursor restart-resume preserves exact write authority and sandbox f
     assert.equal(launch.args.includes("--force"), true);
     assert.equal(argValue(launch.args, "--sandbox"), sandbox);
     assert.equal(launch.mcpRuntimeEnv?.LETAGENTS_PERMISSION_PROFILE_ID, permissionProfileId);
+    assert.equal(launch.fullAccess === true, permissionProfileId === "full_access");
+    if (permissionProfileId === "full_access") assert.equal(argValue(launch.args, "--workspace"), request.cwd);
+    assert.equal(Boolean(launch.workspaceGenerationManifestPath), permissionProfileId !== "full_access");
     assert.equal(harness.profilePreparations.at(-1)?.permissionProfileId, permissionProfileId);
 
     harness.children[0]!.emit({
@@ -6892,8 +7054,9 @@ test("daemon Cursor rejects missing supervisor coordinates and preserves selecte
     assert.equal(argValue(harness.launches[0]!.args, "--sandbox"), sandbox);
     assert.match(harness.launches[0]!.args.at(-1) ?? "", /You may edit files and run local commands/);
     if (permissionProfileId === "full_access") {
-      assert.match(harness.launches[0]!.args.at(-1) ?? "", /Keep all local changes inside the selected repository\/workspace/);
-      assert.doesNotMatch(harness.launches[0]!.args.at(-1) ?? "", /broader local changes/);
+      assert.match(harness.launches[0]!.args.at(-1) ?? "", /filesystem and network operations outside the working directory/);
+      assert.match(harness.launches[0]!.args.at(-1) ?? "", /create commits, push branches, and open pull requests/);
+      assert.doesNotMatch(harness.launches[0]!.args.at(-1) ?? "", /Do not create commits/);
     }
     for (let index = 0; index < 100 && !harness.children[0]?.isReleased; index += 1) await flush();
     assert.equal(harness.children[0]?.isReleased, true);
@@ -7333,7 +7496,7 @@ test("startup gates on a valid init, not arbitrary stdout bytes (msg_1758)", asy
     turnStartTimeoutMs: 500,
   });
   const spawning = adapter.spawn(spawnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
   child.emitRaw("cursor-agent: warming up model cache");
   await flush();
@@ -7347,7 +7510,7 @@ test("startup gates on a valid init, not arbitrary stdout bytes (msg_1758)", asy
   const rawOnlyAdapter = new CursorProviderAdapter({ dependencies: rawOnly.dependencies, turnStartTimeoutMs: 60, stopGraceMs: 30 });
   const rawSpawning = rawOnlyAdapter.spawn(spawnRequest({ workAttemptId: "wa-cursor-7" }));
   rawSpawning.catch(() => {});
-  await flush();
+  await waitFor(() => rawOnly.children[0]?.isReleased === true);
   rawOnly.children[0]!.emitRaw("just noise, never an init");
   await assert.rejects(rawSpawning, /no stream-json init within the startup bound/);
   assert.equal(rawOnly.children[0]!.alive, false, "the unobservable child was terminated and awaited");
@@ -7357,7 +7520,7 @@ test("only a genuine system/init with a session id satisfies readiness — other
   const harness = createHarness({ silent: true });
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
   const spawning = adapter.spawn(spawnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
 
   // A non-init system event — even one carrying a session id — must not start
@@ -7376,7 +7539,7 @@ test("an init that carries no session id is fenced immediately as a session-cont
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
   const spawning = adapter.spawn(spawnRequest());
   spawning.catch(() => {});
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.children[0]!.emit({ type: "system", subtype: "init" });
   await assert.rejects(spawning, /violated the session contract/);
   assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM"], "the sessionless child was fenced, not awaited to timeout");
@@ -7388,7 +7551,7 @@ test("a late Cursor protocol callback never signals a recycled wrapper PID", asy
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
   const spawning = adapter.spawn(spawnRequest());
   spawning.catch(() => {});
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.identities.set(5200, "unrelated-recycled-birth");
 
   harness.children[0]!.emit({ type: "system", subtype: "init" });
@@ -7403,7 +7566,7 @@ test("a child that exits before init rejects the launch and records terminal evi
   const adapter = new CursorProviderAdapter({ dependencies: harness.dependencies, turnStartTimeoutMs: 500 });
   const spawning = adapter.spawn(spawnRequest());
   spawning.catch(() => {});
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.identities.set(5200, null);
   harness.children[0]!.resolveExit({ type: "exit", code: 1, signal: null });
   await assert.rejects(spawning, /exited before reporting its stream-json init/);
@@ -7433,7 +7596,7 @@ test("post-release Cursor startup cleanup never signals a recycled wrapper PID",
   });
   const spawning = adapter.spawn(spawnRequest());
   spawning.catch(() => {});
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   harness.identities.set(5200, "unrelated-recycled-birth");
 
   await assert.rejects(spawning, /no stream-json init within the startup bound/);
@@ -7895,7 +8058,7 @@ test("Cursor typed observations fence each native child and exclude synthetic di
     settledBirths.push(birth);
   };
   const first = adapter.runRoomTurn(handle, roomTurnRequest(), { settleLifecycleBeforeIdle: settleExactBirth });
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
   const session_id = "sess-cursor-1";
   child.emit({ type: "system", subtype: "init", session_id, model: "cursor-fast" });
@@ -7934,7 +8097,7 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   const second = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "second" }), {
     settleLifecycleBeforeIdle: settleExactBirth,
   });
-  await flush();
+  await waitFor(() => harness.children[1]?.isReleased === true);
   const nextChild = harness.children[1]!;
   nextChild.emit(started);
   nextChild.emit({ type: "tool_call", subtype: "completed", call_id: "same-call", session_id,
@@ -8028,7 +8191,7 @@ test("Cursor typed child loss differs from an exact user interruption", async ()
           assert.match(result.error ?? "", /ended before.*terminal result/);
         })
         : assert.rejects(running, /ended before.*terminal result/);
-    await flush();
+    await waitFor(() => harness.children[0]?.isReleased === true);
     const child = harness.children[0]!;
     child.emit({ type: "tool_call", subtype: "started", call_id: "shell", session_id: "sess-cursor-1",
       tool_call: { shellToolCall: { args: { command: "slow-command" } } } });
@@ -8062,7 +8225,7 @@ test("Cursor typed shell completion preserves native exit codes and does not com
   const events: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, (event) => events.push(event));
   const running = adapter.runRoomTurn(handle, roomTurnRequest());
-  await flush();
+  await waitFor(() => harness.children[0]?.isReleased === true);
   const child = harness.children[0]!;
   const session_id = "sess-cursor-1";
   for (const [call_id, result] of [
@@ -8101,4 +8264,252 @@ test("Cursor typed shell completion preserves native exit codes and does not com
   assert.equal(events.filter(({ fact }) => fact.domain === "execution" && ["malformed", "background"].includes(fact.executionId)).length, 0);
   assert.doesNotMatch(JSON.stringify(events), /secret-command|secret-output|secret-reason|secret-error/);
   assert.deepEqual(harness.signals, [], "a nonzero shell exit cannot signal the provider");
+});
+
+/**
+ * A real daemon supervising one Cursor agent: the real adapter, action router,
+ * delivery, execution capture and stores, over the fake wrapper harness. Only
+ * the room, the server and the processes are doubles.
+ */
+async function cursorDaemonFixture() {
+  const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
+  const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
+  const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
+  const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+  const { createConnection } = await import("node:net");
+  const { DatabaseSync } = await import("node:sqlite");
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const root = realpathSync(await mkdtemp(join(tmpdir(), "cursor-daemon-")));
+  const id = "cursor_agent";
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+  };
+  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolveRequest, reject) => {
+    const socket = createConnection(paths.socketPath);
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk) => {
+      received += chunk;
+      if (!received.includes("\n")) return;
+      socket.end();
+      resolveRequest(JSON.parse(received.slice(0, received.indexOf("\n"))));
+    });
+    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
+  });
+  const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!await check()) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+      await new Promise((wake) => setTimeout(wake, 10));
+    }
+  };
+  const workAttemptId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const workspace = join(root, "worktrees", "repo", workAttemptId);
+  await mkdir(join(root, "repos", "repo.git"), { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo",
+    work_attempt_id: workAttemptId, task_id: id, remote_url: "https://example.invalid/repo", resolved_revision: "a".repeat(40),
+    bare_path: join(root, "repos", "repo.git") }));
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace, workAttemptId });
+  await durability.close();
+
+  const harness = createHarness();
+  /** The agent's profile, where its wrapper writes each turn's durable terminal; every adapter of the agent reads it there. */
+  const profileRoot = join(root, "profile");
+  const configDir = join(profileRoot, "config");
+  mkdirSync(configDir, { recursive: true });
+  /** What the daemon asked of the adapter's reading back of a saved turn. */
+  const recovery = { requests: [] as Array<Record<string, unknown>> };
+  const makeAdapter = () => {
+    const adapter = new CursorProviderAdapter({
+      dependencies: { ...harness.dependencies, now: () => new Date().toISOString() },
+      supervisedProfileFactory: (input) => {
+        const base = input.profileRoot ?? profileRoot;
+        return {
+          homeDir: join(base, "home"), configDir: join(base, "config"), dataDir: join(base, "data"), cacheDir: join(base, "cache"),
+          env: { HOME: join(base, "home"), CURSOR_CONFIG_DIR: join(base, "config", "cursor") },
+          ...(input.inspectionOnly ? {} : {
+            mcpRuntimeEntryPath: "/Applications/LetAgents.app/runtime/letagents/server.js",
+            mcpRuntimeReadRoots: ["/Applications/LetAgents.app/runtime/letagents"],
+            mcpRuntimeEnv: { ELECTRON_RUN_AS_NODE: "1", LETAGENTS_API_URL: input.apiBaseUrl, HOME: join(base, "bridge-home") },
+          }),
+          mcpServerName: cursorSupervisedMcpServerName(input.workAttemptId),
+        };
+      },
+    });
+    const recover = adapter.recoverRoomTurn.bind(adapter);
+    adapter.recoverRoomTurn = async (handle, turn, options) => {
+      recovery.requests.push({ ...turn });
+      return recover(handle, turn, options);
+    };
+    return adapter;
+  };
+  let adapter = makeAdapter();
+  const roomMessages: Array<Record<string, unknown>> = [];
+  const published: string[] = [];
+  let mints = 0;
+  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ cursor: async () => adapter }), true,
+    50, undefined, {}, {
+      poll: async ({ afterMessageId, signal }: { afterMessageId: string | null; signal: AbortSignal }) => {
+        const from = afterMessageId ? roomMessages.findIndex((message) => message.id === afterMessageId) + 1 : 0;
+        if (roomMessages.length > from) return { messages: roomMessages.slice(from) };
+        await new Promise<void>((wake) => {
+          const timer = setTimeout(wake, 20);
+          signal.addEventListener("abort", () => { clearTimeout(timer); wake(); }, { once: true });
+        });
+        return { messages: [] };
+      },
+      publish: async (input: { text: string; roomId: string }) => {
+        published.push(input.text);
+        return { messageId: `msg_${900 + published.length}`, roomId: input.roomId };
+      },
+    }, {
+      listWorkLeases: async () => [], readWorkLease: async () => null,
+      attestWorkLease: async () => { throw new Error("unused"); },
+      rebindWorkLease: async () => { throw new Error("unused"); },
+      createWorkerSession: async () => {
+        mints += 1;
+        return { sessionId: `${id}-session`, bearer: `${id}-bearer-${mints}`, bearerId: `${id}-bearer-id-${mints}`,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
+      },
+    });
+  let daemon = makeDaemon();
+  const read = <T>(sql: string): T[] => {
+    const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    try { return database.prepare(sql).all(id).map((row) => ({ ...row })) as T[]; } finally { database.close(); }
+  };
+  const cleanup = async () => {
+    await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  };
+  type Receipt = { source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null };
+  const inbox = () => (daemon as unknown as { supervisedInbox: {
+    bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<unknown>;
+    receipts(agentId: string): Promise<Receipt[]>;
+    prepareEffect(input: Record<string, unknown>): Promise<{ effect: { state: string } }>;
+  } }).supervisedInbox;
+  const startDaemon = async () => {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const generation = (await request("daemon.status")).result.generation;
+    return async () => assert.equal((await request("supervisor.install_host_grant", {
+      entry_id: id, room_id: "room_1", agent_key: "owner/agent", grant_id: `grant-${id}`,
+      supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+    })).ok, true);
+  };
+  try {
+    const installGrant = await startDaemon();
+    assert.equal((await request("manifest.put", { entry: {
+      id, room_id: "room_1", display_name: "Agent", provider: "cursor", model: null, charter: "test",
+      desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: "read_only",
+      created_by: "test", created_at: "2026-01-01T00:00:00.000Z", delivery_mode: "daemon_inbox",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await inbox().bootstrapCursor({ agent_id: id, room_id: "room_1", last_observed_message_id: null });
+    await installGrant();
+    const view = async () => (await request("manifest.list")).result[0] as {
+      observed_state: string; condition: string; last_error: string | null;
+      room_agent_state: { ingress: { state: string }; inbox: { state: string; detail: string | null } };
+    };
+    await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
+    const receipt = async (messageId: string) => (await inbox().receipts(id)).find((item) => item.source_message_id === messageId);
+    /** Send the agent its nth room message and wait until that turn's wrapper is released. */
+    const begin = async (ordinal: number) => {
+      roomMessages.push({ id: `msg_${ordinal}`, sender: "someone", text: `request ${ordinal}`, activation: { for_current_agent: { decision: "activate" } } });
+      await eventually(async () => harness.children[ordinal - 1]?.isReleased === true && Boolean((await receipt(`msg_${ordinal}`))?.provider_turn_id),
+        `msg_${ordinal} starts its turn`).catch(async (error) => {
+        const current = await view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); inbox ${current.room_agent_state.inbox.state} (${current.room_agent_state.inbox.detail})`);
+      });
+      return { child: harness.children[ordinal - 1]!, id: (await receipt(`msg_${ordinal}`))!.provider_turn_id! };
+    };
+    const sessionId = "sess-cursor-1";
+    return { harness, eventually, view, published, receipt, begin, cleanup, recovery, sessionId,
+      /** The agent completes its room turn with this answer, through complete_room_turn. */
+      complete: async (turnId: string, text: string) => {
+        const [binding] = read<{ work_attempt_id: string; origin_execution_generation_id: string; provider_continuation_id: string }>(
+          `SELECT work_attempt_id,origin_execution_generation_id,provider_continuation_id FROM supervised_agent_provider_turn_bindings
+            WHERE agent_id=? AND provider_turn_id=${JSON.stringify(turnId).replaceAll('"', "'")}`);
+        const prepared = await inbox().prepareEffect({ agent_id: id, room_id: "room_1", execution_generation_id: binding!.origin_execution_generation_id,
+          provider_turn_id: turnId, work_attempt_id: binding!.work_attempt_id, current_execution_generation_id: binding!.origin_execution_generation_id,
+          provider_continuation_id: binding!.provider_continuation_id, mcp_request_id: `complete:${turnId}`, tool_name: "complete_room_turn",
+          request: { outcome: "reply", text }, mutation: true });
+        assert.equal(prepared.effect.state, "completed");
+      },
+      /** The wrapper writes the exact durable terminal of this turn, as it does once its native process group is reaped. */
+      writeTerminal: (turnId: string, result: Record<string, unknown>) => {
+        const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+        writeFileSync(`${statePath}.terminal.json`, JSON.stringify({
+          type: "exit", code: 0, signal: null,
+          native_process_group_reaped: true, reap_scope: "native_process_group", remote_authority_revoked: true,
+          session_contract_valid: true, stream_contract_complete: true, turn_contract_version: 1,
+          init: { type: "system", subtype: "init", session_id: sessionId }, result,
+        }));
+      },
+      /** This turn's wrapper ends now. */
+      exitChild: (child: FakeCursorChild) => {
+        harness.identities.set(child.pid!, null);
+        child.resolveExit({ type: "exit", code: 0, signal: null });
+      },
+      /** The daemon ends and a new one, with a new adapter, takes the agent over. */
+      restartDaemon: async () => {
+        await daemon.stop();
+        adapter = makeAdapter();
+        daemon = makeDaemon();
+        await (await startDaemon())();
+      },
+      /** The agent's execution record: its turns, recovery boundaries, and whether its observer has a gap. */
+      recorded: () => ({
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        boundaries: read<{ phase: string }>("SELECT phase FROM agent_runtime_recoveries WHERE agent_id=?").map((row) => row.phase),
+        gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
+          .filter((observer) => observer.max !== observer.last).length,
+      }) };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+test("a Cursor turn that finished while its daemon was replaced is answered from its terminal, and the agent answers its next message", { timeout: 60_000 }, async () => {
+  const agent = await cursorDaemonFixture();
+  try {
+    const first = await agent.begin(1);
+    await agent.complete(first.id, "Answer 1.");
+    await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "turn 1 is recorded as started");
+    await agent.restartDaemon();
+    // While no daemon watched it, the wrapper finished the turn and wrote its terminal.
+    agent.writeTerminal(first.id, { type: "result", subtype: "success", is_error: false, result: "Answer 1.", session_id: agent.sessionId });
+    agent.exitChild(first.child);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered from the durable terminal");
+    assert.equal(agent.recovery.requests.at(-1)?.recordEnding, true, "the new daemon reads from its saved record that the turn is open");
+    assert.equal(agent.recorded().turns[0]?.state, "active", "a successor's Cursor adapter has no child to record that ending with");
+
+    // The child that ran turn 1 is gone, and Cursor's lane keeps its generation: nothing else will end that turn in the record.
+    const second = await agent.begin(2);
+    await agent.complete(second.id, "Answer 2.");
+    second.child.emit({ type: "result", subtype: "success", is_error: false, result: "Answer 2.", session_id: agent.sessionId });
+    agent.exitChild(second.child);
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered").catch(async (error) => {
+      const row = await agent.receipt("msg_2");
+      throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+    });
+    assert.deepEqual(agent.published, ["Answer 1.", "Answer 2."], "turn 1 is not run again");
+    assert.equal(agent.harness.launches.length, 2);
+    const record = agent.recorded();
+    assert.deepEqual(record.turns.map((turn) => turn.state), ["lost", "terminal"],
+      "turn 1 is archived behind a recovery boundary, lost rather than finished; turn 2 is recorded in full");
+    assert.deepEqual(record.boundaries, ["complete"]);
+    assert.equal(record.gaps, 0);
+    const current = await agent.view();
+    assert.equal(current.condition, "none", current.last_error ?? "");
+    assert.equal(current.room_agent_state.inbox.state, "empty", "nothing waits for a person");
+  } finally {
+    await agent.cleanup();
+  }
 });

@@ -1569,7 +1569,7 @@ test("managed permission profile helpers present available and gated modes", () 
   }), "Not available yet: Needs config isolation.");
 });
 
-test("supervised Cursor permission copy describes workspace scope instead of machine-wide access", () => {
+test("supervised Cursor permission copy distinguishes Full access from Workspace writes", () => {
   const base = {
     id: "full_access" as const,
     label: "Full access",
@@ -1579,10 +1579,10 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
     detail: "Broad access detail.",
     isDefault: false,
   };
-  const compatibility = supervisedCursorPermissionProfilePresentation(base);
-  assert.equal(compatibility.label, "Workspace writes (compatibility)");
-  assert.match(compatibility.detail ?? "", /separate copy of your project/i);
-  assert.match(compatibility.detail ?? "", /Git history is kept/i);
+  const fullAccess = supervisedCursorPermissionProfilePresentation(base);
+  assert.equal(fullAccess.label, "Full access");
+  assert.match(fullAccess.detail ?? "", /apply directly/i);
+  assert.match(fullAccess.detail ?? "", /outside the project and use the network/i);
 
   const writable = supervisedCursorPermissionProfilePresentation({
     ...base,
@@ -1609,9 +1609,13 @@ test("every access level a supervised agent can use states what it does not allo
   }
 });
 
-test("every Cursor access level says it has no network, including compatibility", () => {
+test("Cursor Full access permits network and host files while restricted profiles remain isolated", () => {
   for (const profile of supervisedPermissionProfilesForProvider("cursor")) {
     if (profile.status !== "available") continue;
+    if (profile.id === "full_access") {
+      assert.match(supervisedPermissionProfileLimits("cursor", profile) ?? "", /can reach the network and files outside the project/);
+      continue;
+    }
     assert.match(
       supervisedPermissionProfileLimits("cursor", profile as DesktopManagedAgentPermissionProfile) ?? "",
       /No network access: can't push or open PRs\./,

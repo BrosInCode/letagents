@@ -2,7 +2,7 @@ import { ClaudeCompaction } from "../main/agents/claude-compaction.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,10 +11,17 @@ import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../
 import {
   ClaudeCodeProviderAdapter,
   claudeSessionTranscriptCandidates,
+  claudeChildEnvironment,
   claudeCliEnv,
+  claudeTranscriptsRoot,
+  claudeCliLaunchArgs,
   claudeLaunchPolicyArgs,
+  claudeOwnerSetupReadsProjectInstructionsOnly,
+  claudeOwnerSetupStartEnvironment,
   createEphemeralClaudeMcpConfig,
   createManagedClaudeMcpConfig,
+  ownerMcpServerNotices,
+  ownerMcpStartupTimeoutMs,
   type ClaudeCliChild,
   type ClaudeCodeProviderAdapterDependencies,
 } from "../main/agents/claude-code-provider-adapter.js";
@@ -25,6 +32,7 @@ import type {
   ProviderTerminalPayload,
   NativeExecutionObservation,
 } from "../main/agents/provider-adapter.js";
+import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
 import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
@@ -107,6 +115,8 @@ interface HarnessOptions {
   initSessionId?: string;
   noInit?: boolean;
   noLetagents?: boolean;
+  /** The servers the CLI reports, when a test needs more than the room's own. */
+  mcpServers?: Array<Record<string, unknown>>;
   mcpStatus?: string;
   mcpTools?: string[];
   noApprovalLifecycle?: boolean;
@@ -137,7 +147,7 @@ function birthIdentity(pid: number): string {
 
 function createHarness(options: HarnessOptions = {}) {
   const children: FakeClaudeChild[] = [];
-  const launches: Array<{ claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }> = [];
+  const launches: Array<{ claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; ownerSetup?: true }> = [];
   const versionBins: string[] = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
@@ -145,6 +155,7 @@ function createHarness(options: HarnessOptions = {}) {
   let mcpConfigDisposals = 0;
   let versionReads = 0;
   const commitRequests: ProviderSpawnRequest[] = [];
+  const mcpConfigRequests: unknown[][] = [];
 
   const dependencies: ClaudeCodeProviderAdapterDependencies = {
     async readVersion(claudeBin) {
@@ -152,7 +163,8 @@ function createHarness(options: HarnessOptions = {}) {
       versionBins.push(claudeBin);
       return options.versionOutput ?? "2.1.220 (Claude Code)";
     },
-    async createLetAgentsMcpConfig() {
+    async createLetAgentsMcpConfig(...received) {
+      mcpConfigRequests.push(received);
       return {
         path: "/private/tmp/letagents-claude-mcp-test/mcp.json",
         async dispose() { mcpConfigDisposals += 1; },
@@ -187,7 +199,7 @@ function createHarness(options: HarnessOptions = {}) {
             capabilities: options.noApprovalLifecycle ? [] : ["msg_lifecycle_v1"],
             permissionMode: options.initPermissionMode ?? "default",
             cwd: input.cwd,
-            mcp_servers: options.noLetagents ? [] : [{ name: "letagents", status: options.mcpStatus ?? "connected" }],
+            mcp_servers: options.mcpServers ?? (options.noLetagents ? [] : [{ name: "letagents", status: options.mcpStatus ?? "connected" }]),
             tools: options.mcpTools ?? ["mcp__letagents__get_board", "mcp__letagents__read_messages", "mcp__letagents__send_message"],
           });
           const frame = JSON.parse(json) as { uuid?: string };
@@ -254,6 +266,7 @@ function createHarness(options: HarnessOptions = {}) {
     identities,
     dependencies,
     commitRequests,
+    mcpConfigRequests,
     get mcpConfigDisposals() { return mcpConfigDisposals; },
     get versionReads() { return versionReads; },
   };
@@ -1975,6 +1988,526 @@ test("Claude exact-turn recovery reads only the durable transcript and never dis
   assert.equal(harness.children[0]!.written.length, writesBeforeRecovery, "recovery never starts another native turn");
 });
 
+for (const recordEnding of [true, false] as const) {
+  test(`a Claude turn whose process exited under it ${recordEnding ? "is closed in the record when" : "stays lost in the record unless"} the daemon asks its replacement to record the ending it reads from the session`, async () => {
+    // The real adapter over the fake CLI, feeding the real execution capture and shadow store.
+    const { DatabaseSync } = await import("node:sqlite");
+    const { DaemonStateSchema } = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
+    const { ExecutionCaptureCoordinator } = await import(new URL("../../daemon/execution-capture-coordinator.ts", import.meta.url).href);
+    const { ExecutionShadowStore, executionRuntimeStorageIdentity } = await import(new URL("../../daemon/execution-shadow-store.ts", import.meta.url).href);
+    const sessionRows: Array<Record<string, unknown>> = [];
+    const harness = createHarness({ sessionRows });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const at = "2026-08-31T00:00:00.000Z";
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys=ON");
+    new DaemonStateSchema().createSchema(db);
+    db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${at}',0);
+      INSERT INTO agent_configurations(agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,config_revision,runtime_configuration_revision)
+        VALUES('agent','claude-code','charter','daemon_inbox',0,0,1,1);
+      INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+        VALUES('wa-claude-1','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${at}');
+      INSERT INTO work_attempt_executions VALUES('generation','wa-claude-1','${at}','test',1,NULL);`);
+    type Native = Awaited<ReturnType<typeof adapter.spawn>>;
+    const natives = new Map<object, Native>();
+    let current: { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection: Native["providerConnection"]; observedState: "idle"; appliedConfigurationRevision: number } | undefined;
+    const diagnostics: string[] = [];
+    const capture = new ExecutionCaptureCoordinator(db, {
+      provider: { onExecution: (handle: object, listener: (event: NativeExecutionObservation) => void) => adapter.onExecution(natives.get(handle)!, listener) },
+      currentHandle: () => current, daemonGeneration: () => 1, diagnostic: (_id: string, code: string) => diagnostics.push(code),
+    });
+    /** What the daemon does when it installs a runtime: record its birth, and observe it. */
+    const install = (native: Native) => {
+      const connection = native.providerConnection!;
+      current = { workAttemptId: native.workAttemptId, pid: native.pid, providerContinuationId: native.providerContinuationId,
+        providerConnection: connection, observedState: "idle", appliedConfigurationRevision: 1 };
+      natives.set(current, native);
+      db.prepare("DELETE FROM runtime_deployments").run();
+      db.prepare(`INSERT INTO runtime_deployments(agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
+        provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,provider_connection_pid,
+        provider_process_identity_present,provider_process_identity,provider_execution_generation_id,workplace_liveness_present,native_liveness_present,activity_present)
+        VALUES('agent','idle',0,1,'wa-claude-1',1,'wa-claude-1',?,'claude_cli',?,1,?,'generation',0,0,0)`)
+        .run(native.providerContinuationId, connection.pid, connection.processIdentity!);
+      new ExecutionShadowStore(db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
+        runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "claude_cli", connection.pid!, connection.processIdentity!),
+        provider: "claude-code", authorityMode: "typed", configRevision: 1, createdAtMs: Date.parse(at) });
+      capture.install(Object.freeze({ nonce: Symbol("installation"), listenerLeaseNonce: Symbol("lease"), entryId: "agent", handle: current,
+        executionGenerationId: "generation", workAttemptId: native.workAttemptId, providerContinuationId: native.providerContinuationId!,
+        providerConnection: { ...connection }, configurationRevision: 1, authorityMode: "typed" }));
+    };
+    /** The daemon saves which message a native turn belongs to before the turn's first event can arrive. */
+    const bindTurn = (turnId: string, continuation: string) => {
+      const order = Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1;
+      db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
+        VALUES(?,'agent','room',?,'{}','{}',?,'awaiting_result',1,?,?,?,?,?)`).run(turnId, `message-${order}`, order, `action-${order}`, `reply-${order}`, turnId, at, at);
+      db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room','wa-claude-1','generation',?,?)").run(turnId, continuation, turnId);
+    };
+    const turns = () => db.prepare("SELECT provider_turn_id,state FROM execution_turns ORDER BY rowid").all().map((turn) => ({ ...turn }));
+    const startTurn = async (native: Native, child: FakeClaudeChild, inboxItemId: string) => {
+      const running = adapter.runRoomTurn!(native, { inboxItemId, actionId: inboxItemId, sourceMessage: {}, activation: {} },
+        { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+      void running.catch(() => undefined);
+      await flush();
+      const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+      bindTurn(turnId, native.providerContinuationId!);
+      child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: native.providerContinuationId });
+      await flush();
+      return { running, turnId };
+    };
+    try {
+      const first = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+      install(first);
+      const one = await startTurn(first, harness.children[0]!, "inbox-1");
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "active" }]);
+
+      // The process dies under the turn. Its session file shows the turn had finished.
+      sessionRows.push(
+        { type: "user", uuid: one.turnId, sessionId: first.providerContinuationId, message: { content: [{ type: "text", text: "source" }] } },
+        { type: "assistant", sessionId: first.providerContinuationId,
+          message: { id: "assistant-1", stop_reason: "end_turn", content: [{ type: "text", text: "Finished before the exit." }] } });
+      harness.identities.set(first.pid!, null);
+      harness.children[0]!.resolveExit({ type: "exit", code: 1, signal: null });
+      await assert.rejects(one.running);
+      await flush();
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "lost" }]);
+
+      // Its replacement resumes the conversation and reads the turn's ending back.
+      const second = await adapter.resume({ workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId! },
+        spawnRequest({ lifecycleAuthorityMode: "typed" }));
+      install(second);
+      await flush();
+      const recovered = await adapter.recoverRoomTurn!(second, { inboxItemId: "inbox-1", providerTurnId: one.turnId, ...(recordEnding ? { recordEnding: true } : {}) },
+        { checkpointTerminalResult: async () => {} });
+      assert.deepEqual(recovered, { turnId: one.turnId, outcome: "reply", text: "Finished before the exit.", evidence: "transcript" });
+      db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged' WHERE inbox_item_id=?").run(one.turnId);
+      capture.refresh("agent");
+      await flush();
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: recordEnding ? "terminal" : "lost" }]);
+
+      // The next turn.
+      const two = await startTurn(second, harness.children[1]!, "inbox-2");
+      const position = { ...db.prepare("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers").get()! };
+      if (recordEnding) {
+        assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "terminal" }, { provider_turn_id: two.turnId, state: "active" }],
+          "the next turn is recorded");
+        assert.equal(position.max, position.last, "with no gap");
+        assert.deepEqual(diagnostics.filter((code) => ["source_gap", "invalid_observation", "retention_limit"].includes(code)), [],
+          "and the record never stops");
+      } else {
+        assert.deepEqual(turns().map((turn) => turn.state), ["lost"], "the open turn refuses the next one");
+        assert.ok(Number(position.max) > Number(position.last), "and the record has a gap from here on");
+        assert.ok(diagnostics.includes("invalid_observation"));
+      }
+    } finally {
+      capture.close();
+    }
+  });
+}
+
+/**
+ * A real daemon supervising one Claude Code agent: the real adapter, action
+ * router, delivery, execution capture and stores, over the fake CLI. Only the
+ * room, the server and the processes are doubles.
+ */
+async function claudeDaemonFixture() {
+  const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
+  const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
+  const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
+  const { createConnection } = await import("node:net");
+  const { DatabaseSync } = await import("node:sqlite");
+  const root = await mkdtemp(join(tmpdir(), "claude-daemon-"));
+  const id = "claude_agent";
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+  };
+  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
+    const socket = createConnection(paths.socketPath);
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk) => {
+      received += chunk;
+      if (!received.includes("\n")) return;
+      socket.end();
+      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
+    });
+    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
+  });
+  const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!await check()) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  const workAttemptId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const workspace = join(root, "worktrees", "repo", workAttemptId);
+  await mkdir(join(root, "repos", "repo.git"), { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo",
+    work_attempt_id: workAttemptId, task_id: id, remote_url: "https://example.invalid/repo", resolved_revision: "a".repeat(40),
+    bare_path: join(root, "repos", "repo.git") }));
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace, workAttemptId });
+  await durability.close();
+
+  /** The session file every process of this agent appends to and resumes from. */
+  const sessionRows: Array<Record<string, unknown>> = [];
+  const harness = createHarness({ sessionRows });
+  /** Whether the session file is found where the CLI keeps it, and where the adapter looked for it. */
+  const transcript = { found: true, readFrom: [] as Array<string | undefined> };
+  harness.dependencies.readSessionRows = async (_sessionId, transcriptsRoot) => {
+    transcript.readFrom.push(transcriptsRoot);
+    return transcript.found ? sessionRows : null;
+  };
+  /** Every room turn a process was asked to run: the frame after its bootstrap, and each one after that. */
+  const turns: Array<{ id: string; child: FakeClaudeChild }> = [];
+  const launchChild = harness.dependencies.launchChild;
+  harness.dependencies.launchChild = (input) => {
+    const child = launchChild(input) as FakeClaudeChild;
+    const write = child.writeLine.bind(child);
+    let bootstrapped = false;
+    child.writeLine = (json: string) => {
+      const frame = JSON.parse(json) as { type?: string; uuid?: string };
+      if (!bootstrapped) bootstrapped = true;
+      else if (frame.type === "user" && frame.uuid) turns.push({ id: frame.uuid, child });
+      write(json);
+    };
+    return child;
+  };
+  /** What a test makes the adapter's reading back of a turn wait on, and what the daemon asked of it. */
+  const recovery = { held: null as Promise<void> | null, requests: [] as Array<Record<string, unknown>> };
+  /** What a test makes the first saving of a turn's result fail with. */
+  let failNextResultCheckpoint: Error | null = null;
+  const makeAdapter = () => {
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: { ...harness.dependencies, now: () => new Date().toISOString() } });
+    const recover = adapter.recoverRoomTurn!.bind(adapter);
+    adapter.recoverRoomTurn = async (handle, turn, options) => {
+      recovery.requests.push({ ...turn });
+      await recovery.held;
+      return recover(handle, turn, options);
+    };
+    const run = adapter.runRoomTurn!.bind(adapter);
+    adapter.runRoomTurn = (handle, turn, options = {}) => run(handle, turn, { ...options, checkpointTerminalResult: async (result) => {
+      const failure = failNextResultCheckpoint;
+      failNextResultCheckpoint = null;
+      if (failure) throw failure;
+      return options.checkpointTerminalResult!(result);
+    } });
+    return adapter;
+  };
+  let adapter = makeAdapter();
+  const roomMessages: Array<Record<string, unknown>> = [];
+  const published: string[] = [];
+  let mints = 0;
+  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ "claude-code": async () => adapter }), true,
+    50, undefined, {}, {
+      poll: async ({ afterMessageId, signal }: { afterMessageId: string | null; signal: AbortSignal }) => {
+        const from = afterMessageId ? roomMessages.findIndex((message) => message.id === afterMessageId) + 1 : 0;
+        if (roomMessages.length > from) return { messages: roomMessages.slice(from) };
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 20);
+          signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+        return { messages: [] };
+      },
+      publish: async (input: { text: string; roomId: string }) => {
+        published.push(input.text);
+        return { messageId: `msg_${900 + published.length}`, roomId: input.roomId };
+      },
+    }, {
+      listWorkLeases: async () => [], readWorkLease: async () => null,
+      attestWorkLease: async () => { throw new Error("unused"); },
+      rebindWorkLease: async () => { throw new Error("unused"); },
+      createWorkerSession: async () => {
+        mints += 1;
+        return { sessionId: `${id}-session`, bearer: `${id}-bearer-${mints}`, bearerId: `${id}-bearer-id-${mints}`,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
+      },
+    });
+  let daemon = makeDaemon();
+  const read = <T>(sql: string): T[] => {
+    const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    try { return database.prepare(sql).all(id).map((row) => ({ ...row })) as T[]; } finally { database.close(); }
+  };
+  const cleanup = async () => {
+    await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  };
+  type Receipt = { source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null };
+  const inbox = () => (daemon as unknown as { supervisedInbox: {
+    bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<unknown>;
+    receipts(agentId: string): Promise<Receipt[]>;
+  } }).supervisedInbox;
+  const startDaemon = async () => {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    const generation = (await request("daemon.status")).result.generation;
+    return async () => assert.equal((await request("supervisor.install_host_grant", {
+      entry_id: id, room_id: "room_1", agent_key: "owner/agent", grant_id: `grant-${id}`,
+      supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: generation,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+    })).ok, true);
+  };
+  try {
+    const installGrant = await startDaemon();
+    assert.equal((await request("manifest.put", { entry: {
+      id, room_id: "room_1", display_name: "Agent", provider: "claude-code", model: null, charter: "test",
+      desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: null,
+      created_by: "test", created_at: "2026-01-01T00:00:00.000Z", delivery_mode: "daemon_inbox",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await inbox().bootstrapCursor({ agent_id: id, room_id: "room_1", last_observed_message_id: null });
+    await installGrant();
+    const view = async () => (await request("manifest.list")).result[0] as {
+      observed_state: string; condition: string; last_error: string | null; provider_ref: { provider_continuation_id: string };
+      room_agent_state: { ingress: { state: string }; inbox: { state: string; detail: string | null } };
+    };
+    await eventually(() => harness.children.length === 1, "the CLI is launched");
+    await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
+    const sessionId = (await view()).provider_ref.provider_continuation_id;
+    const receipt = async (messageId: string) => (await inbox().receipts(id)).find((item) => item.source_message_id === messageId);
+    /** Send the agent its nth room message and wait until its process has been asked to run the turn. */
+    const begin = async (ordinal: number) => {
+      roomMessages.push({ id: `msg_${ordinal}`, sender: "someone", text: `request ${ordinal}`, activation: { for_current_agent: { decision: "activate" } } });
+      await eventually(async () => turns.length === ordinal && Boolean((await receipt(`msg_${ordinal}`))?.provider_turn_id), `msg_${ordinal} starts its turn`).catch(async (error) => {
+        const current = await view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); inbox ${current.room_agent_state.inbox.state} (${current.room_agent_state.inbox.detail})`);
+      });
+      return turns[ordinal - 1]!;
+    };
+    return { id, harness, request, eventually, view, read, published, roomMessages, turns, sessionRows, sessionId, receipt, begin, cleanup, recovery, transcript,
+      receipts: () => inbox().receipts(id),
+      /** The CLI reports that the turn has started. */
+      reportStarted: (turn: { id: string; child: FakeClaudeChild }) =>
+        turn.child.emit({ type: "command_lifecycle", state: "started", command_uuid: turn.id, session_id: sessionId }),
+      /** The CLI reports the turn's result. */
+      answer: (turn: { id: string; child: FakeClaudeChild }, text: string) =>
+        turn.child.emit({ type: "result", subtype: "success", is_error: false, session_id: sessionId, user_message_uuid: turn.id, result: text }),
+      /** The agent's newest process ends now, as it does when it crashes. */
+      exitProcess: () => {
+        const child = harness.children.at(-1)!;
+        harness.identities.set(child.pid!, null);
+        child.resolveExit({ type: "exit", code: 1, signal: null });
+      },
+      /** The first saving of the next turn result fails, as it does when the daemon dies between the result and its checkpoint. */
+      failNextResultCheckpoint: (error: Error) => { failNextResultCheckpoint = error; },
+      /** From here on the reading back of a saved turn waits until the returned function lets it go. */
+      holdRecovery: () => {
+        let release!: () => void;
+        recovery.held = new Promise<void>((resolve) => { release = resolve; });
+        return () => { recovery.held = null; release(); };
+      },
+      /** The daemon ends and a new one, with a new adapter, takes the agent over. */
+      restartDaemon: async () => {
+        await daemon.stop();
+        adapter = makeAdapter();
+        daemon = makeDaemon();
+        await (await startDaemon())();
+      },
+      /** The turns in the agent's execution record, and whether the record has a gap. */
+      recorded: () => ({
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        endings: read<{ provider_turn_id: string; n: number; outcome: string | null }>(`SELECT t.provider_turn_id, COUNT(*) AS n, MIN(f.turn_outcome) AS outcome
+          FROM execution_facts f JOIN execution_turns t USING(turn_id)
+          WHERE f.agent_id=? AND f.domain='turn' AND f.state='terminal' GROUP BY t.provider_turn_id ORDER BY MIN(f.sequence)`),
+        gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
+          .filter((observer) => observer.max !== observer.last).length,
+      }) };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+/** What a Claude session holds of a turn whose process ended under it. */
+const CLAUDE_SESSION_AFTER_EXIT = {
+  "its answer": (sessionId: string, turnId: string, ordinal: number) => [
+    { type: "user", uuid: turnId, sessionId, message: { content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", sessionId, message: { id: `assistant-${ordinal}`, stop_reason: "end_turn", content: [{ type: "text", text: `Recovered ${ordinal}.` }] } }],
+  "half an answer": (sessionId: string, turnId: string, ordinal: number) => [
+    { type: "user", uuid: turnId, sessionId, message: { content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", sessionId, message: { id: `assistant-${ordinal}`, stop_reason: null, content: [{ type: "text", text: "Half of" }] } }],
+  "a tool call that never returned": (sessionId: string, turnId: string, ordinal: number) => [
+    { type: "user", uuid: turnId, sessionId, message: { content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", sessionId, message: { id: `assistant-${ordinal}`, stop_reason: "tool_use", content: [{ type: "tool_use", id: `tool-${ordinal}`, name: "Bash", input: {} }] } }],
+  "a transcript that holds nothing of the turn": () => [],
+  // The shape Claude Code 2.1.278 writes when it gives up on a request the provider refused.
+  "the provider's error": (sessionId: string, turnId: string, ordinal: number) => [
+    { type: "user", uuid: turnId, sessionId, message: { role: "user", content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", uuid: `api-error-${ordinal}`, parentUuid: turnId, sessionId, isApiErrorMessage: true, apiErrorStatus: 400, error: "unknown",
+      message: { id: `synthetic-${ordinal}`, role: "assistant", model: "<synthetic>", stop_reason: "stop_sequence",
+        content: [{ type: "text", text: "API Error: 400 LOCAL_PROVIDER_FAILURE_1517" }] } }],
+} as const;
+
+for (const [left, rows] of Object.entries(CLAUDE_SESSION_AFTER_EXIT)) {
+  test(`a Claude agent whose process ends during two turns in a row, leaving ${left} in the session, settles both, records both endings and answers its next message`, async () => {
+    const agent = await claudeDaemonFixture();
+    try {
+      for (const ordinal of [1, 2]) {
+        const turn = await agent.begin(ordinal);
+        agent.reportStarted(turn);
+        await agent.eventually(() => agent.recorded().turns.at(-1)?.state === "active", `turn ${ordinal} is recorded as started`);
+        agent.sessionRows.push(...rows(agent.sessionId, turn.id, ordinal));
+        agent.exitProcess();
+        await agent.eventually(() => agent.harness.children.length === ordinal + 1, `process ${ordinal + 1} replaces it`);
+        const settled = left === "its answer" ? "acknowledged" : "acknowledged_failed";
+        await agent.eventually(async () => (await agent.receipt(`msg_${ordinal}`))?.state === settled, `msg_${ordinal} settles ${settled}`).catch(async (error) => {
+          const row = await agent.receipt(`msg_${ordinal}`);
+          throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+        });
+        if (left === "the provider's error") {
+          const reason = (await agent.receipt(`msg_${ordinal}`))!.last_error ?? "";
+          assert.match(reason, /LOCAL_PROVIDER_FAILURE_1517/, "the reason shown is the provider's, as the session kept it");
+        } else if (left !== "its answer") {
+          assert.equal((await agent.receipt(`msg_${ordinal}`))!.last_error, PROCESS_ENDED_DURING_TURN,
+            "the room and the owner read why the message has no answer");
+        }
+        assert.equal(agent.recovery.requests.at(-1)?.recordEnding, true, "the daemon asks for the ending to be recorded: its record holds the turn open");
+      }
+      // The third process takes the next message.
+      const third = await agent.begin(3);
+      agent.reportStarted(third);
+      agent.answer(third, "Answer 3.");
+      await agent.eventually(async () => (await agent.receipt("msg_3"))?.state === "acknowledged", "msg_3 is answered");
+
+      assert.deepEqual(agent.published, left === "its answer" ? ["Recovered 1.", "Recovered 2.", "Answer 3."] : ["Answer 3."],
+        "a turn that was cut off is never run again, and never answered with something it did not say");
+      await agent.eventually(() => agent.recorded().turns.every((turn) => turn.state === "terminal"), "every turn has its ending in the record");
+      const record = agent.recorded();
+      assert.deepEqual(record.turns.map((turn) => turn.provider_turn_id), agent.turns.map((turn) => turn.id), "all three turns are in the record");
+      assert.deepEqual(record.endings.map((ending) => ending.n), [1, 1, 1], "each with one ending");
+      assert.deepEqual(record.endings.map((ending) => ending.outcome), left === "its answer" ? ["completed", "completed", "completed"]
+        : left === "the provider's error" ? ["failed", "failed", "completed"]
+          : ["interrupted", "interrupted", "completed"], "which says how the turn ended: answered, failed at the provider, or cut off");
+      assert.equal(record.gaps, 0, "and the record has no gap");
+      assert.equal(agent.harness.children.length, 3, "two replacements");
+      const current = await agent.view();
+      assert.equal(current.condition, "none", current.last_error ?? "");
+      assert.equal(current.room_agent_state.inbox.state, "empty", "nothing waits behind a message that needs a person");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+test("a Claude turn whose transcript is not found where its CLI keeps it is left for its owner, not settled as cut off", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    const turn = await agent.begin(1);
+    agent.reportStarted(turn);
+    await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
+    // Its answer may well be in a session file; none is found where the CLI was told to keep it.
+    agent.transcript.found = false;
+    agent.exitProcess();
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "blocked", "msg_1 waits for its owner");
+    assert.match((await agent.receipt("msg_1"))!.last_error ?? "", /found no transcript/, "with the reason");
+    assert.deepEqual(agent.published, [], "nothing is published, and nothing is settled as failed");
+    assert.equal(agent.transcript.readFrom.at(-1), claudeTranscriptsRoot(claudeChildEnvironment({})),
+      "the adapter looked where a CLI started with the desktop's environment writes its transcripts");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("Claude transcripts are read where the CLI writes them: its configured directory, or its home's", () => {
+  const base = { HOME: "/home/owner", PATH: "/usr/bin" };
+  assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({}, base)), "/home/owner/.claude/projects");
+  assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({}, { ...base, CLAUDE_CONFIG_DIR: "/data/claude" })), "/data/claude/projects",
+    "an owner who sets CLAUDE_CONFIG_DIR has their transcripts there");
+  assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({ ownerSetup: true }, { ...base, CLAUDE_CONFIG_DIR: "/data/claude" })), "/data/claude/projects",
+    "so does an agent that runs with its owner's setup");
+  assert.equal(claudeTranscriptsRoot(claudeChildEnvironment({ env: { LETAGENTS_RENTAL_CREDENTIAL_ISOLATION: "1" } }, { ...base, CLAUDE_CONFIG_DIR: "/data/claude" })),
+    "/home/owner/.claude/projects", "a rented agent's CLI is not given the owner's directory, and writes in its home");
+});
+
+test("a Claude turn that ended before its process did is not given a second ending when its replacement reads it back", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    const turn = await agent.begin(1);
+    agent.reportStarted(turn);
+    // The CLI reports the answer, and the daemon fails to save it: the message is still to be settled when the process ends.
+    agent.failNextResultCheckpoint(new Error("the result could not be saved"));
+    agent.answer(turn, "Answer 1.");
+    await agent.eventually(() => agent.recorded().turns[0]?.state === "terminal", "the turn's ending is in the record");
+    agent.sessionRows.push(...CLAUDE_SESSION_AFTER_EXIT["its answer"](agent.sessionId, turn.id, 1));
+    agent.exitProcess();
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered from the session");
+    assert.equal(agent.recovery.requests.at(-1)?.recordEnding, undefined, "the record already has the ending; nothing asks for another");
+
+    const next = await agent.begin(2);
+    agent.reportStarted(next);
+    agent.answer(next, "Answer 2.");
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+    await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
+    assert.deepEqual(agent.recorded().endings.map((ending) => ending.n), [1, 1], "one ending each");
+    assert.equal(agent.recorded().gaps, 0);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a Claude turn whose process ended before it reported the turn started is in the record as lost, and is closed once when its replacement reads it back", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    // The process ends before it has reported the turn started. The adapter
+    // names the turn it was asked to run when it reports the exit, so the
+    // record holds the turn as lost although it never saw it start.
+    const letRecoveryGo = agent.holdRecovery();
+    const turn = await agent.begin(1);
+    assert.deepEqual(agent.recorded().turns, [], "nothing is recorded for a turn that was only asked for");
+    agent.sessionRows.push(...CLAUDE_SESSION_AFTER_EXIT["its answer"](agent.sessionId, turn.id, 1));
+    agent.exitProcess();
+    await agent.eventually(() => agent.recorded().turns[0]?.state === "lost", "the turn is recorded as lost with its process");
+    letRecoveryGo();
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered from the session");
+    assert.equal(agent.recovery.requests.at(-1)?.recordEnding, true, "the record holds the turn open, so its ending is asked for");
+
+    const next = await agent.begin(2);
+    agent.reportStarted(next);
+    agent.answer(next, "Answer 2.");
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+    await agent.eventually(() => agent.recorded().turns.length === 2 && agent.recorded().turns.every((recorded) => recorded.state === "terminal"),
+      "both turns are closed in the record");
+    assert.deepEqual(agent.recorded().endings.map((ending) => ending.n), [1, 1], "one ending each");
+    assert.equal(agent.recorded().gaps, 0);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const left of ["its answer", "half an answer"] as const) {
+  test(`a Claude turn left lost by a daemon that ended before reading it back, with ${left} in the session, is closed by the next daemon`, async () => {
+    const agent = await claudeDaemonFixture();
+    try {
+      const turn = await agent.begin(1);
+      agent.reportStarted(turn);
+      await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
+      agent.sessionRows.push(...CLAUDE_SESSION_AFTER_EXIT[left](agent.sessionId, turn.id, 1));
+      const letRecoveryGo = agent.holdRecovery();
+      agent.exitProcess();
+      await agent.eventually(() => agent.recorded().turns[0]?.state === "lost", "the turn is lost with its process, and that is saved");
+      await agent.restartDaemon();
+      letRecoveryGo();
+
+      const settled = left === "its answer" ? "acknowledged" : "acknowledged_failed";
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === settled, `msg_1 settles ${settled}`);
+      assert.equal(agent.recovery.requests.at(-1)?.recordEnding, true, "the new daemon reads from its saved record that the turn is open");
+      const next = await agent.begin(2);
+      agent.reportStarted(next);
+      agent.answer(next, "Answer 2.");
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+      await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
+      assert.deepEqual(agent.recorded().endings.map((ending) => ending.n), [1, 1]);
+      assert.equal(agent.recorded().gaps, 0);
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
 test("Claude keeps an exact stream result when terminal checkpointing fails so recovery cannot redispatch", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
@@ -2968,4 +3501,603 @@ for (const sameBatchExit of [false, true]) test(`buffered explicit compaction fa
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   await assert.rejects(adapter.spawn(spawnRequest()), { reason: "compaction_failed" });
   assert.equal(adapter.compactionProgress("wa-claude-1"), null);
+});
+
+const ROOM_SERVER = { name: "letagents", status: "connected", source: "dynamic" };
+const OWNER_SERVER = { name: "owner_browser", status: "connected", source: "user" };
+const CLAUDE_TOOLS = ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"];
+/** How Claude is told to start MCP servers when it also starts the owner's: its own time limit, and all of them at once. */
+const OWNER_START_ENV = { MCP_TIMEOUT: "30000", MCP_SERVER_CONNECTION_BATCH_SIZE: "256", MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE: "256" };
+const OWNER_START_SETTINGS = JSON.stringify({ env: OWNER_START_ENV });
+/** The owner's own setup is only ever on for a daemon-supervised room agent. */
+const SUPERVISED = { supervisorEntryId: "supervised_owner", supervisorSocketPath: "/tmp/fake-daemon.sock", supervisorExecutionGenerationId: "generation-1" };
+const OWN_SETUP = { ...SUPERVISED, homeHarness: true };
+function ownSetupAskPolicy(homeHarness: boolean, permissionMode = "default") {
+  return {
+    permissionMode, dangerouslySkipPermissions: false, allowDangerouslySkipPermissions: false,
+    tools: homeHarness ? [...CLAUDE_TOOLS, "Skill"] : CLAUDE_TOOLS,
+    allowedTools: ["mcp__letagents__*"], settingSources: homeHarness ? "user" : "", settings: "{}",
+  };
+}
+
+test("Claude starts exactly as before without the owner's own setup, and reads the owner's servers and settings with it", async () => {
+  const launch = async (homeHarness: boolean, permissionProfileId: string, launchPolicy: Record<string, unknown>) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [OWNER_SERVER, ROOM_SERVER],
+      initPermissionMode: String(launchPolicy.permissionMode), commitEnvironment: { GIT_AUTHOR_NAME: "octo-fake" } });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    await adapter.spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId, launchPolicy,
+      ...SUPERVISED,
+      supervisorWorkerSession: { agentSessionId: "session-1", roomCursor: null, apiUrl: "https://letagents.invalid" },
+      ...(homeHarness ? { homeHarness: true } : {}),
+    }));
+    return { ...harness.launches[0]!, launch: harness.launches[0]!, mcpConfig: harness.mcpConfigRequests[0]! };
+  };
+  // What makes a process on this machine the room agent: the daemon answers whoever holds these.
+  const coordinates = {
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_owner",
+    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/fake-daemon.sock",
+    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "wa-claude-1",
+    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation-1",
+    LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "session-1",
+    LETAGENTS_SUPERVISOR_ROOM_ID: "github.com/example/repo",
+    LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "LanternRook",
+    LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+    LETAGENTS_PERMISSION_PROFILE_ID: "ask_before_write",
+  };
+
+  const off = await launch(false, "ask_before_write", ownSetupAskPolicy(false));
+  const session = argValue(off.args, "--session-id")!;
+  assert.deepEqual(off.args, [
+    "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--permission-prompt-tool", "stdio",
+    "--strict-mcp-config",
+    "--mcp-config", "/private/tmp/letagents-claude-mcp-test/mcp.json",
+    "--permission-mode", "default",
+    "--tools", "Read,Glob,Grep,Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch",
+    "--allowed-tools", "mcp__letagents__*",
+    "--setting-sources", "",
+    "--settings", "{}",
+    "--session-id", session,
+  ], "without the owner's setup the launch is exactly the isolated one");
+
+  const on = await launch(true, "ask_before_write", ownSetupAskPolicy(true));
+  assert.deepEqual(on.args, [
+    "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--permission-prompt-tool", "stdio",
+    "--mcp-config", "/private/tmp/letagents-claude-mcp-test/mcp.json",
+    "--permission-mode", "default",
+    "--tools", "Read,Glob,Grep,Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch,Skill",
+    "--allowed-tools", "mcp__letagents__*",
+    "--setting-sources", "user",
+    // Given on the command line so that the owner's own settings cannot replace them.
+    "--settings", OWNER_START_SETTINGS,
+    "--session-id", argValue(on.args, "--session-id")!,
+  ], "the room's server is still named, approvals still travel over stdio, and no project settings are read");
+  assert.equal(on.cwd, off.cwd);
+
+  // Without the owner's setup the coordinates are in the CLI's environment, where only the room's server inherits them.
+  assert.deepEqual(off.env, { GIT_AUTHOR_NAME: "octo-fake", ...coordinates });
+  assert.deepEqual(off.launch, { claudeBin: off.claudeBin, args: off.args, cwd: off.cwd, env: off.env }, "and the launch is marked in no other way");
+  assert.equal(off.mcpConfig.length, 1, "the room server's config is asked for exactly as before");
+  // With it, Claude hands its environment to the owner's servers and hooks too, so the coordinates go to the room's server alone.
+  assert.deepEqual(on.env, { GIT_AUTHOR_NAME: "octo-fake", ...OWNER_START_ENV },
+    "beside the commit identity, only how Claude is to start the owner's servers");
+  for (const name of Object.keys(OWNER_START_ENV)) assert.equal(Object.hasOwn(off.env ?? {}, name), false, name);
+  assert.equal(on.launch.ownerSetup, true);
+  assert.deepEqual(on.mcpConfig[1], coordinates);
+
+  // Full access names no setting sources: it reads the owner's, the project's and the folder's own.
+  const fullAccess = { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true };
+  const fullOff = await launch(false, "full_access", fullAccess);
+  const fullOn = await launch(true, "full_access", fullAccess);
+  assert.deepEqual(fullOff.args, [
+    "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--strict-mcp-config",
+    "--mcp-config", "/private/tmp/letagents-claude-mcp-test/mcp.json",
+    "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions",
+    "--session-id", argValue(fullOff.args, "--session-id")!,
+  ], "without the owner's setup a Full access launch is exactly what it was");
+  assert.deepEqual(fullOff.env, { GIT_AUTHOR_NAME: "octo-fake", ...coordinates, LETAGENTS_PERMISSION_PROFILE_ID: "full_access" });
+  // With the owner's setup it reads the owner's settings alone, so nothing of the project's runs beside the owner's tools,
+  // and it is given its own work folder as an added directory so that the project's CLAUDE.md still loads.
+  const withInstructions = { ...OWNER_START_ENV, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" };
+  assert.deepEqual(fullOn.args, [
+    "--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--mcp-config", "/private/tmp/letagents-claude-mcp-test/mcp.json",
+    "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions",
+    "--settings", JSON.stringify({ env: withInstructions }),
+    "--setting-sources", "user",
+    "--add-dir", fullOn.cwd,
+    "--session-id", argValue(fullOn.args, "--session-id")!,
+  ]);
+  assert.equal(fullOn.cwd, spawnRequest().cwd, "the added directory is the agent's own work folder and nothing else");
+  assert.deepEqual(fullOn.env, { GIT_AUTHOR_NAME: "octo-fake", ...withInstructions });
+  // The other access levels never read a project's instructions, so they are given no added directory.
+  assert.equal(on.args.includes("--add-dir"), false);
+  assert.equal(Object.hasOwn(on.env ?? {}, "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD"), false);
+});
+
+test("with the owner's own setup the Claude CLI's environment carries nothing that lets a process act as the room agent", () => {
+  const ambient = {
+    PATH: "/usr/bin", HOME: "/Users/fake", LETAGENTS_API_URL: "https://letagents.invalid",
+    // A desktop app started from inside an agent's shell has these in its own environment.
+    LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_other", LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/other.sock",
+    LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn", LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+    LETAGENTS_PERMISSION_PROFILE_ID: "full_access", LETAGENTS_TOKEN: "fake-owner-token", LETAGENTS_AGENT_SESSION_BEARER: "fake-bearer",
+  };
+  assert.deepEqual(claudeChildEnvironment({ env: { GIT_AUTHOR_NAME: "octo-fake" }, ownerSetup: true }, ambient), {
+    PATH: "/usr/bin", HOME: "/Users/fake", LETAGENTS_API_URL: "https://letagents.invalid", GIT_AUTHOR_NAME: "octo-fake",
+  });
+  // Without the owner's setup the environment is the one every launch had before.
+  assert.deepEqual(claudeChildEnvironment({ env: { GIT_AUTHOR_NAME: "octo-fake" } }, ambient), claudeCliEnv(ambient, { GIT_AUTHOR_NAME: "octo-fake" }));
+  assert.equal(claudeChildEnvironment({}, ambient).LETAGENTS_SUPERVISOR_ENTRY_ID, "supervised_other");
+});
+
+test("the room server's config carries the coordinates only when the launch hands them over", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-claude-room-config-"));
+  try {
+    const runtime = () => ({ entryPath: "/fake/letagents-mcp.js" }) as never;
+    const read = async (roomServerEnvironment?: Record<string, string>) => {
+      const config = await createManagedClaudeMcpConfig("https://letagents.invalid", directory, undefined, runtime, roomServerEnvironment);
+      try {
+        return { text: await readFile(config.path, "utf8"), mode: (await stat(config.path)).mode & 0o777 };
+      } finally {
+        await config.dispose();
+      }
+    };
+    const isolated = await read();
+    assert.equal(isolated.text, JSON.stringify({ mcpServers: { letagents: {
+      command: process.execPath, args: ["/fake/letagents-mcp.js"], env: { LETAGENTS_API_URL: "https://letagents.invalid", ELECTRON_RUN_AS_NODE: "1" },
+    } } }), "without the owner's setup the file is byte for byte the one written before");
+    const ownSetup = await read({ LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_owner", LETAGENTS_API_URL: "https://elsewhere.invalid" });
+    assert.deepEqual(JSON.parse(ownSetup.text).mcpServers.letagents.env, {
+      LETAGENTS_SUPERVISOR_ENTRY_ID: "supervised_owner", LETAGENTS_API_URL: "https://letagents.invalid", ELECTRON_RUN_AS_NODE: "1",
+    }, "the endpoint is always the launch's own");
+    assert.equal(ownSetup.mode, 0o600, "only the owner can read it");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Claude is refused the owner's own setup outside a daemon-supervised room agent", async () => {
+  const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [ROOM_SERVER] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest({
+    configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), homeHarness: true,
+  })), /only as a daemon-supervised room agent/);
+  assert.equal(harness.launches.length, 0);
+  assert.equal(harness.mcpConfigRequests.length, 0);
+});
+
+test("the owner's MCP servers get Claude's own time to start, a smaller limit of the owner's is kept, and a larger one is capped", () => {
+  for (const [configured, expected] of [
+    [undefined, 30_000], ["", 30_000], ["5000", 5_000], [" 7000 ", 7_000], ["30000", 30_000], ["45000", 45_000],
+    ["45001", 45_000], ["600000", 45_000], ["999999999", 45_000],
+    // Anything that is not a plain positive number of milliseconds is not the owner's limit.
+    ["0", 30_000], ["-1", 30_000], ["1e3", 30_000], ["3000ms", 30_000], ["0x10", 30_000], ["3000.5", 30_000], ["1234567890", 30_000],
+  ] as const) assert.equal(ownerMcpStartupTimeoutMs(configured), expected, String(configured));
+});
+
+test("each of the owner's MCP servers that did not connect is named, and the room's own never is", () => {
+  assert.deepEqual(ownerMcpServerNotices({ mcp_servers: [
+    { name: "owner_ok", status: "connected", source: "user" },
+    { name: "owner_silent", status: "failed", source: "user" },
+    { name: "owner_slow", status: "pending", source: "user" },
+    { name: "owner_login", status: "needs-auth", source: "user" },
+    { name: "owner_other", status: "disabled", source: "user" },
+    { name: "letagents", status: "failed", source: "dynamic" },
+    { name: "  ", status: "failed" }, { status: "failed" }, null, "owner_text",
+  ] }), [
+    'Your MCP server "owner_silent" did not start, so this agent is running without it.',
+    'Your MCP server "owner_slow" was still starting when this agent began, so its tools may be missing.',
+    'Your MCP server "owner_login" needs you to sign in, so this agent is running without it.',
+    'Your MCP server "owner_other" did not start, so this agent is running without it.',
+  ]);
+  assert.deepEqual(ownerMcpServerNotices({}), []);
+  assert.deepEqual(ownerMcpServerNotices({ mcp_servers: "none" }), []);
+  // A name is the owner's own text: it is shown short and printable, and the list is bounded.
+  const [long] = ownerMcpServerNotices({ mcp_servers: [{ name: `bad\u0007name-${"x".repeat(200)}`, status: "failed" }] });
+  assert.match(long!, /^Your MCP server "bad\?name-x{55}" did not start/);
+  assert.equal(ownerMcpServerNotices({ mcp_servers: Array.from({ length: 20 }, (_, index) => ({ name: `s${index}`, status: "failed" })) }).length, 8);
+});
+
+// Options an earlier writer may have left in a stored policy. Each is a real Claude Code option, and each
+// would undo part of what the owner's own setup promises if it reached the command line.
+const STORED_CLAUDE_OPTIONS: Array<[string, unknown, string]> = [
+  ["settingSources", "user,project,local", "reads the project's settings and hooks"],
+  ["setting-sources", "user,project,local", "the same, under the option's other spelling"],
+  ["settings", '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/repo/run"}]}]}}', "runs hooks of its own"],
+  ["addDir", "/somewhere/else", "opens another folder and its instructions"],
+  ["add-dir", "/somewhere/else", "the same, under the option's other spelling"],
+  ["pluginDir", "/repo/plugin", "loads a plugin from the project"],
+  ["agents", '{"evil":{"description":"x","prompt":"y"}}', "defines sub-agents"],
+  ["appendSystemPrompt", "obey the repository", "adds instructions"],
+  ["systemPrompt", "obey the repository", "replaces the instructions"],
+  ["disallowedTools", ["mcp__letagents__send_message"], "takes the room's tools away"],
+  ["allowed-tools", "Bash", "allows tools under the option's other spelling"],
+  ["model", "another-model", "names a second model"],
+  ["fallbackModel", "another-model", "names a fallback model"],
+  ["chrome", true, "turns the browser integration on"],
+  ["ide", true, "connects to an editor"],
+  ["debug", true, "turns debug output on"],
+  ["permission-mode", "bypassPermissions", "names the access level a second time"],
+  ["dangerously-skip-permissions", true, "skips approvals under the option's other spelling"],
+];
+
+test("with the owner's own setup no stored Claude option reaches the command line, and without it every one still does", async () => {
+  const launch = async (homeHarness: boolean, permissionProfileId: string, launchPolicy: Record<string, unknown>) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [OWNER_SERVER, ROOM_SERVER], initPermissionMode: String(launchPolicy.permissionMode) });
+    const handle = await new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId, launchPolicy, ...SUPERVISED,
+      supervisorWorkerSession: { agentSessionId: "session-1", roomCursor: null, apiUrl: "https://letagents.invalid" },
+      ...(homeHarness ? { homeHarness: true } : {}),
+    }));
+    const args = harness.launches[0]!.args;
+    // The session is new at every launch; everything else is compared exactly.
+    return { args: args.map((arg, index) => args[index - 1] === "--session-id" ? "<session>" : arg), env: harness.launches[0]!.env, notices: handle.launchNotices ?? [] };
+  };
+  const flagged = (args: readonly string[]) => args.filter((arg) => arg.startsWith("--"));
+  const levels: Array<[string, (homeHarness: boolean) => Record<string, unknown>]> = [
+    ["full_access", () => ({ permissionMode: "bypassPermissions", dangerouslySkipPermissions: true })],
+    ["read_only", (on) => ({ permissionMode: "dontAsk", dangerouslySkipPermissions: false, tools: ["Read", "Glob", "Grep"], allowedTools: ["mcp__letagents__*"], settingSources: on ? "user" : "" })],
+    ["ask_before_write", (on) => ownSetupAskPolicy(on)],
+  ];
+  for (const [permissionProfileId, level] of levels) {
+    // The launch an agent with nothing else stored gets, with and without the owner's setup.
+    const on = await launch(true, permissionProfileId, level(true));
+    const off = await launch(false, permissionProfileId, level(false));
+    assert.deepEqual(on.notices, [], permissionProfileId);
+    // With the owner's setup every flag is there once, and these three are what the launch says they are.
+    assert.equal(new Set(flagged(on.args)).size, flagged(on.args).length, `${permissionProfileId}: no flag is given twice`);
+    assert.equal(argValue(on.args, "--setting-sources"), "user", permissionProfileId);
+    assert.equal(on.args.includes("--strict-mcp-config"), false, permissionProfileId);
+    assert.equal(argValue(on.args, "--mcp-config"), "/private/tmp/letagents-claude-mcp-test/mcp.json", permissionProfileId);
+    assert.deepEqual(JSON.parse(argValue(on.args, "--settings")!), { env: on.env }, `${permissionProfileId}: the launch's own start settings`);
+    assert.equal(argValue(on.args, "--add-dir") ?? null, permissionProfileId === "full_access" ? spawnRequest().cwd : null, permissionProfileId);
+
+    for (const [option, value, what] of STORED_CLAUDE_OPTIONS) {
+      // The asking levels refuse the other spelling of their own options at any launch, as they always did.
+      if (permissionProfileId === "ask_before_write" && ["settings", "setting-sources", "allowed-tools", "permission-mode", "dangerously-skip-permissions"].includes(option)) continue;
+      const name = `${permissionProfileId}: ${option} (${what})`;
+      // An option the level decides itself stays the level's.
+      const stored = (homeHarness: boolean) => ({ [option]: value, ...level(homeHarness) });
+      const withOption = await launch(true, permissionProfileId, stored(true));
+      assert.deepEqual(withOption.args, on.args, `${name}: the launch is the one with nothing else stored`);
+      assert.deepEqual(withOption.env, on.env, name);
+      assert.deepEqual(withOption.notices, Object.hasOwn(level(true), option) ? [] : [
+        `With your own setup on, this agent starts with its access level's own Claude Code options only. These saved options were not used: ${JSON.stringify(option)}.`,
+      ], `${name}: and the owner is told what was left out`);
+      // Without the owner's setup the option is passed on exactly as it always was.
+      const passedOn = await launch(false, permissionProfileId, stored(false));
+      assert.deepEqual(passedOn.args, [
+        ...off.args.slice(0, off.args.indexOf("--mcp-config") + 2),
+        ...claudeLaunchPolicyArgs(stored(false)),
+        ...off.args.slice(off.args.indexOf("--session-id")),
+      ], `${name}: unchanged without the owner's setup`);
+      assert.deepEqual(passedOn.notices, [], name);
+    }
+  }
+});
+
+test("a Claude agent is told which saved options were left out when they change, not at every start, and a failed start does not use the line up", async () => {
+  const level = { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true };
+  const told = async (agent: string, stored: Record<string, unknown>, over: { fails?: boolean; servers?: unknown[] } = {}) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: (over.servers ?? [OWNER_SERVER, ROOM_SERVER]) as never, initPermissionMode: "bypassPermissions",
+      ...(over.fails ? { bootstrapResultSubtype: "error_max_turns" } : {}) });
+    return new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId: "full_access", launchPolicy: { ...level, ...stored }, ...OWN_SETUP, supervisorEntryId: agent,
+      supervisorWorkerSession: { agentSessionId: "session-1", roomCursor: null, apiUrl: "https://letagents.invalid" },
+    })).then((handle) => handle.launchNotices ?? [], (error: Error) => error);
+  };
+  const line = (...options: string[]) => `With your own setup on, this agent starts with its access level's own Claude Code options only. These saved options were not used: ${options.map((option) => JSON.stringify(option)).join(", ")}.`;
+  const stored = { settingSources: "user,project,local" };
+  assert.deepEqual(await told("supervised_said_once", stored), [line("settingSources")], "its first start says it");
+  assert.deepEqual(await told("supervised_said_once", stored), [], "the same again says nothing");
+  assert.deepEqual(await told("supervised_said_once", { settingSources: "project" }), [], "another value under the same name is not a change");
+  assert.deepEqual(await told("supervised_said_once", { ...stored, pluginDir: "/repo" }), [line("settingSources", "pluginDir")], "a change is said");
+  // What one of the owner's servers did is still said at every start.
+  const silent = [OWNER_SERVER, { name: "owner_silent", status: "failed", source: "user" }, ROOM_SERVER];
+  const serverLine = 'Your MCP server "owner_silent" did not start, so this agent is running without it.';
+  assert.deepEqual(await told("supervised_said_once", { ...stored, pluginDir: "/repo" }, { servers: silent }), [serverLine]);
+  assert.deepEqual(await told("supervised_said_once", { ...stored, pluginDir: "/repo" }, { servers: silent }), [serverLine]);
+  // A start that failed after it was given the line never showed it, so the next one says it.
+  assert.ok(await told("supervised_said_once_failed", stored, { fails: true }) instanceof Error);
+  assert.deepEqual(await told("supervised_said_once_failed", stored), [line("settingSources")]);
+  // One that failed without being given it, the line having been said before, changes nothing.
+  assert.ok(await told("supervised_said_once_failed", stored, { fails: true, servers: silent }) instanceof Error);
+  assert.deepEqual(await told("supervised_said_once_failed", stored), []);
+  // What one agent was told says nothing about another.
+  assert.deepEqual(await told("supervised_said_once_other", stored), [line("settingSources")]);
+});
+
+test("a flag the launch with the owner's own setup decides is set once, wherever it stood before", () => {
+  const base = { approvalProfileLabel: null, homeHarness: true, ownerMcpStartupMs: 30_000, cwd: "/work/attempt", mcpConfigPath: "/room/mcp.json", session: { sessionId: "s-1" } };
+  const clean = claudeCliLaunchArgs({ ...base, policyArgs: ["--permission-mode", "bypassPermissions", "--dangerously-skip-permissions"] });
+  const settings = argValue(clean, "--settings")!;
+  // Arguments that already name the launch's own flags, first, last and twice: the answer is the same.
+  for (const policyArgs of [
+    ["--setting-sources", "user,project,local", "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions"],
+    ["--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--setting-sources", "user,project,local"],
+    ["--setting-sources", "project", "--permission-mode", "bypassPermissions", "--setting-sources", "local", "--dangerously-skip-permissions", "--setting-sources", "user,project,local"],
+    ["--settings", '{"hooks":{}}', "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--settings", '{"env":{"MCP_TIMEOUT":"1"}}'],
+    ["--add-dir", "/somewhere/else", "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--add-dir", "/another"],
+  ]) {
+    const args = claudeCliLaunchArgs({ ...base, policyArgs });
+    for (const flag of ["--setting-sources", "--settings", "--add-dir", "--mcp-config"]) {
+      assert.equal(args.filter((arg) => arg === flag).length <= 1, true, `${flag} in ${policyArgs.join(" ")}`);
+    }
+    assert.equal(argValue(args, "--setting-sources"), "user", policyArgs.join(" "));
+    assert.equal(args.join(" ").includes("project"), false, policyArgs.join(" "));
+    assert.equal(args.includes("/somewhere/else") || args.includes("/another"), false);
+    assert.equal(argValue(args, "--settings")?.includes("hooks"), false);
+    assert.equal(JSON.parse(argValue(args, "--settings")!).env.MCP_TIMEOUT, "30000");
+    // Arguments that named the settings to read are not Full access as stored, so no folder is added for them.
+    assert.equal(argValue(args, "--add-dir") ?? null, policyArgs.includes("--setting-sources") ? null : "/work/attempt");
+  }
+  assert.equal(argValue(clean, "--settings"), settings);
+  // Without the owner's setup the arguments are passed on untouched, twice-named flags included.
+  const off = claudeCliLaunchArgs({ ...base, homeHarness: false, policyArgs: ["--setting-sources", "user", "--setting-sources", "project", "--add-dir", "/x"] });
+  assert.deepEqual(off.slice(off.indexOf("--mcp-config") + 2, -2), ["--setting-sources", "user", "--setting-sources", "project", "--add-dir", "/x"]);
+});
+
+test("an owner MCP server that did not start is reported on the handle, only for a launch with the owner's setup", async () => {
+  const servers = [OWNER_SERVER, { name: "owner_silent", status: "failed", source: "user" }, { name: "owner_slow", status: "pending", source: "user" }, ROOM_SERVER];
+  const launch = async (over: Partial<ProviderSpawnRequest>) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: servers });
+    return new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId: "ask_before_write", ...over,
+    }));
+  };
+  const on = await launch({ launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP });
+  assert.deepEqual(on.launchNotices, [
+    'Your MCP server "owner_silent" did not start, so this agent is running without it.',
+    'Your MCP server "owner_slow" was still starting when this agent began, so its tools may be missing.',
+  ]);
+  // The agent started all the same.
+  assert.equal(on.observedState(), "idle");
+  // Its handle says the process has the owner's setup: that is what later ends it when the owner turns it off.
+  assert.equal(on.ownerSetup, true);
+  const off = await launch({ launchPolicy: ownSetupAskPolicy(false), ...SUPERVISED });
+  assert.deepEqual(off.launchNotices ?? [], []);
+  assert.equal(off.ownerSetup, false);
+});
+
+test("the start waits for the owner's MCP servers on top of its usual budget, and only with the owner's setup", async () => {
+  const start = (over: Partial<ProviderSpawnRequest>, ownerMcpTimeout?: string) => {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", noInit: true });
+    const adapter = new ClaudeCodeProviderAdapter({
+      dependencies: { ...harness.dependencies, ownerMcpTimeout: () => ownerMcpTimeout }, initTimeoutMs: 40,
+    });
+    let settled: "pending" | Error = "pending";
+    const spawned = adapter.spawn(spawnRequest({ configurationRevision: 4, permissionProfileId: "ask_before_write", ...over }));
+    spawned.catch((error: Error) => { settled = error; });
+    return { harness, spawned, state: () => settled };
+  };
+  // Without the owner's setup the budget is the one it always was.
+  const offStarted = Date.now();
+  const off = start({ launchPolicy: ownSetupAskPolicy(false), ...SUPERVISED }, "400");
+  await assert.rejects(withLoopAlive(off.spawned), (error: Error) => {
+    assert.ok(Date.now() - offStarted < 300, "it gives up after its usual 40 ms, not after the owner's limit as well");
+    assert.match(error.message, /did not report its stream-json init/);
+    assert.doesNotMatch(error.message, /your MCP servers/);
+    return true;
+  });
+  assert.equal(Object.hasOwn(off.harness.launches[0]!.env ?? {}, "MCP_TIMEOUT"), false);
+
+  // With it, Claude is told the limit and the launch waits that much longer for init.
+  const on = start({ launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP }, "400");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(on.state(), "pending", "the usual 40 ms have long passed and the launch is still waiting");
+  assert.equal(on.harness.launches[0]!.env?.MCP_TIMEOUT, "400");
+  await assert.rejects(withLoopAlive(on.spawned), (error: Error) => {
+    assert.match(error.message, /did not report its stream-json init/);
+    assert.match(error.message, /This agent starts with your own Claude Code setup, so one of your MCP servers or hooks may be holding the start up\./);
+    return true;
+  });
+  assert.equal(on.harness.children[0]!.alive, false, "a launch that still never reports is stopped, as before");
+});
+
+test("a start that ran out of time after Claude came up names the owner's servers that did not start", async () => {
+  const servers = [OWNER_SERVER, { name: "owner_silent", status: "failed", source: "user" }, ROOM_SERVER];
+  const start = (over: Partial<ProviderSpawnRequest>) => {
+    // Claude reports init, and then the first turn never finishes.
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: servers, omitBootstrapResult: true });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: { ...harness.dependencies, ownerMcpTimeout: () => "60" }, initTimeoutMs: 40 });
+    return adapter.spawn(spawnRequest({ configurationRevision: 4, permissionProfileId: "ask_before_write", ...over }));
+  };
+  await assert.rejects(withLoopAlive(start({ launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP })), (error: Error) => {
+    assert.match(error.message, /did not complete its daemon-safe bootstrap turn \(deadline\)/);
+    assert.match(error.message, /Your MCP server "owner_silent" did not start, so this agent is running without it\.$/);
+    return true;
+  });
+  await assert.rejects(withLoopAlive(start({ launchPolicy: ownSetupAskPolicy(false), ...SUPERVISED })), (error: Error) => {
+    assert.match(error.message, /did not complete its daemon-safe bootstrap turn \(deadline\)/);
+    assert.doesNotMatch(error.message, /Your MCP server/, "an isolated agent's failure says nothing about the owner's servers");
+    return true;
+  });
+});
+
+test("the Claude launch arguments differ only in what the owner's setup needs", () => {
+  // An access level that names its setting sources, as Read-only, Ask before writes and Auto do.
+  const input = { approvalProfileLabel: "Ask before writes", mcpConfigPath: "/tmp/mcp.json", policyArgs: ["--permission-mode", "default", "--setting-sources", "user"], model: "opus" };
+  const off = claudeCliLaunchArgs({ ...input, homeHarness: false, session: { sessionId: "s-1" } });
+  const on = claudeCliLaunchArgs({ ...input, homeHarness: true, cwd: "/work/attempt", session: { sessionId: "s-1" } });
+  assert.deepEqual(off, ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--permission-prompt-tool", "stdio", "--strict-mcp-config", "--mcp-config", "/tmp/mcp.json",
+    "--permission-mode", "default", "--setting-sources", "user", "--model", "opus", "--session-id", "s-1"]);
+  assert.deepEqual(on, ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--permission-prompt-tool", "stdio", "--mcp-config", "/tmp/mcp.json",
+    "--permission-mode", "default", "--setting-sources", "user", "--settings", OWNER_START_SETTINGS, "--model", "opus", "--session-id", "s-1"],
+  "the strict MCP flag is dropped and the start settings are added; no directory is added");
+  assert.deepEqual(claudeCliLaunchArgs({ ...input, approvalProfileLabel: null, model: null, homeHarness: true, ownerMcpStartupMs: 4_000, session: { resume: "s-2" } }),
+    ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+      "--mcp-config", "/tmp/mcp.json", "--permission-mode", "default", "--setting-sources", "user",
+      "--settings", JSON.stringify({ env: { ...OWNER_START_ENV, MCP_TIMEOUT: "4000" } }), "--resume", "s-2"]);
+  // A policy that already carries settings has them replaced where they stand, never given twice.
+  const replaced = claudeCliLaunchArgs({ ...input, policyArgs: ["--permission-mode", "default", "--setting-sources", "user", "--settings", "{}", "--tools", "Read"], homeHarness: true, session: { sessionId: "s-1" } });
+  assert.deepEqual(replaced.filter((arg) => arg === "--settings").length, 1);
+  assert.equal(replaced[replaced.indexOf("--settings") + 1], OWNER_START_SETTINGS);
+  assert.deepEqual(claudeCliLaunchArgs({ ...input, policyArgs: ["--permission-mode", "default", "--settings", "{}", "--tools", "Read"], homeHarness: false, ownerMcpStartupMs: 4_000, cwd: "/work/attempt", session: { sessionId: "s-1" } })
+    .filter((arg, index, all) => all[index - 1] === "--settings"), ["{}"], "without the owner's setup the policy's own settings are passed as they are");
+
+  // An access level that names no setting sources reads the project's too: Full access.
+  const full = { approvalProfileLabel: null, mcpConfigPath: "/tmp/mcp.json", policyArgs: ["--permission-mode", "bypassPermissions", "--dangerously-skip-permissions"], model: null };
+  assert.equal(claudeOwnerSetupReadsProjectInstructionsOnly(full.policyArgs), true);
+  assert.equal(claudeOwnerSetupReadsProjectInstructionsOnly(input.policyArgs), false);
+  assert.equal(claudeOwnerSetupReadsProjectInstructionsOnly(["--permission-mode", "dontAsk", "--setting-sources", ""]), false);
+  const fullOff = claudeCliLaunchArgs({ ...full, homeHarness: false, cwd: "/work/attempt", session: { sessionId: "s-1" } });
+  assert.deepEqual(fullOff, ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--strict-mcp-config", "--mcp-config", "/tmp/mcp.json",
+    "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions", "--session-id", "s-1"], "without the owner's setup nothing is added, whatever folder is named");
+  const instructions = JSON.stringify({ env: { ...OWNER_START_ENV, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" } });
+  assert.deepEqual(claudeCliLaunchArgs({ ...full, homeHarness: true, cwd: "/work/attempt", session: { sessionId: "s-1" } }),
+    ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json", "--mcp-config", "/tmp/mcp.json",
+      "--permission-mode", "bypassPermissions", "--dangerously-skip-permissions",
+      "--settings", instructions, "--setting-sources", "user", "--add-dir", "/work/attempt", "--session-id", "s-1"]);
+  // With no folder to add, the launch still reads the owner's settings alone.
+  for (const cwd of [undefined, "", "  "]) {
+    const args = claudeCliLaunchArgs({ ...full, homeHarness: true, ...(cwd === undefined ? {} : { cwd }), session: { sessionId: "s-1" } });
+    assert.equal(args.includes("--add-dir"), false, String(cwd));
+    assert.equal(args[args.indexOf("--setting-sources") + 1], "user", String(cwd));
+  }
+  assert.deepEqual(claudeOwnerSetupStartEnvironment(30_000), OWNER_START_ENV);
+  assert.deepEqual(claudeOwnerSetupStartEnvironment(30_000, true), { ...OWNER_START_ENV, CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" });
+});
+
+test("with the owner's own setup, Claude must report the room's server as the one this launch named", async () => {
+  for (const [servers, starts] of [
+    [[OWNER_SERVER, ROOM_SERVER], true],
+    [[{ name: "letagents", status: "connected", source: "user" }], false],
+    [[{ name: "letagents", status: "connected", source: "project" }], false],
+    [[{ name: "letagents", status: "connected" }], false],
+    [[ROOM_SERVER, { name: "letagents", status: "connected", source: "user" }], false],
+  ] as const) {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [...servers] });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const spawned = adapter.spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP,
+    }));
+    if (starts) {
+      await spawned;
+    } else {
+      await assert.rejects(withLoopAlive(spawned), /did not report the room's LetAgents server as the one this launch started/);
+      assert.equal(harness.mcpConfigDisposals, 1, "the refused launch leaves no room config behind");
+    }
+  }
+  // Without the owner's setup only the room's server can load, so an older CLI that names no source still starts.
+  const isolated = createHarness({ versionOutput: "2.1.278 (Claude Code)" });
+  await new ClaudeCodeProviderAdapter({ dependencies: isolated.dependencies }).spawn(spawnRequest({
+    configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(false),
+  }));
+});
+
+test("a rented Claude agent is refused the owner's own setup before anything starts", async () => {
+  const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [ROOM_SERVER] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest({
+    configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP,
+    supervisorEntryId: "supervised_rental_0123", supervisorSocketPath: "/tmp/fake-daemon.sock", supervisorExecutionGenerationId: "generation-1",
+  })), /a rented agent never uses its owner's own setup/);
+  assert.equal(harness.launches.length, 0);
+});
+
+test("a request nobody can answer is turned down at once instead of holding the turn", async () => {
+  const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [OWNER_SERVER, ROOM_SERVER] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({
+    configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP,
+  }));
+  const child = harness.children[0]!;
+  const answers = () => child.written.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.type === "control_response");
+  const observed: unknown[] = [];
+  const controller = new AbortController();
+  void adapter.observePermissions(handle, (event) => { observed.push(event); }, controller.signal);
+  const activity: string[] = [];
+  // The background service keeps an agent's activity from its stream, so that is where each one must be.
+  adapter.onStream(handle, (event) => { if (event.method === "control_request/declined") activity.push(event.summary ?? ""); });
+
+  // One of the owner's MCP servers asks the person to type something.
+  child.emit({ type: "control_request", request_id: "elicit-1", request: {
+    subtype: "elicitation", mcp_server_name: "owner_browser", message: "Which account?", mode: "form",
+    requested_schema: { type: "object", properties: { account: { type: "string" } }, required: ["account"] },
+  } });
+  // A skill's helper agent wants a tool approved.
+  child.emit({ type: "control_request", request_id: "sub-1", request: {
+    subtype: "can_use_tool", tool_name: "mcp__owner_browser__owner_write", input: {}, tool_use_id: "toolu_sub_1", agent_id: "a37a052b",
+  } });
+  assert.deepEqual(answers(), [
+    { type: "control_response", response: { subtype: "success", request_id: "elicit-1", response: { action: "decline" } } },
+    { type: "control_response", response: { subtype: "success", request_id: "sub-1", response: {
+      behavior: "deny", message: "LetAgents cannot show an approval for a sub-agent's action, so it was not allowed.",
+    } } },
+  ]);
+
+  // The owner can see in the agent's activity what was turned down, and whose request it was.
+  assert.deepEqual(activity, [
+    'Declined a request for typed input from your MCP server "owner_browser". LetAgents cannot show it.',
+    "Did not allow the tool \"mcp__owner_browser__owner_write\" for a skill's helper agent. LetAgents cannot show an approval for it.",
+  ]);
+  child.emit({ type: "control_request", request_id: "elicit-2", request: {
+    subtype: "elicitation", mcp_server_name: "owner_browser", message: "Sign in", mode: "url", url: "https://example.invalid/sign-in",
+  } });
+  assert.equal(activity.at(-1), 'Declined a request for a sign-in from your MCP server "owner_browser". LetAgents cannot show it.');
+  activity.length = 0;
+
+  // The agent's own tool call is never answered here: it waits for the owner's decision.
+  child.emit({ type: "control_request", request_id: "own-1", request: {
+    subtype: "can_use_tool", tool_name: "mcp__owner_browser__owner_write", input: {}, tool_use_id: "toolu_1",
+    mcp_server: { name: "owner_browser", source: "user" }, display_name: "Owner Write",
+  } });
+  // Neither is anything the room's own server might one day ask.
+  child.emit({ type: "control_request", request_id: "room-1", request: {
+    subtype: "elicitation", mcp_server_name: "letagents", message: "?", mode: "form", requested_schema: { type: "object", properties: {} },
+  } });
+  assert.equal(answers().length, 3);
+  assert.deepEqual(activity, [], "nothing is reported as declined that was not");
+  controller.abort();
+  assert.equal(JSON.stringify(observed).includes("elicit-1") || JSON.stringify(observed).includes("sub-1"), false,
+    "a declined request is never offered as an approval");
+});
+
+test("one of the owner's MCP tools asks for approval through the same flow as the agent's built-in tools", async () => {
+  for (const reply of ["once", "reject"] as const) {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [OWNER_SERVER, ROOM_SERVER] });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({
+      configurationRevision: 4, permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP,
+    }));
+    const child = harness.children[0]!;
+    const controller = new AbortController();
+    let requests: import("../../shared/provider-permissions.js").ClaudeNativePermissionRequest[] = [];
+    const observing = adapter.observePermissions(handle, event => { if (event.type === "snapshot") requests = [...event.requests]; }, controller.signal);
+    const running = adapter.runRoomTurn(handle, { inboxItemId: "inbox", actionId: "action", sourceMessage: { text: "Click the button" }, activation: {} }, {});
+    void running.catch(() => {});
+    await flush();
+    const turnId = JSON.parse(child.written.at(-1)!).uuid as string;
+    child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: handle.providerContinuationId });
+    child.emit({ type: "assistant", session_id: handle.providerContinuationId, parent_tool_use_id: null,
+      message: { content: [{ type: "tool_use", id: "toolu_owner", name: "mcp__owner_browser__owner_write", input: { selector: "#buy" } }] } });
+    // The request exactly as Claude Code 2.1.278 sends it for a user-scope MCP tool.
+    child.emit({ type: "control_request", request_id: "native-owner-tool", request: {
+      subtype: "can_use_tool", tool_name: "mcp__owner_browser__owner_write", mcp_server: { name: "owner_browser", source: "user" },
+      display_name: "Owner Write", input: { selector: "#buy" }, tool_use_id: "toolu_owner",
+      permission_suggestions: [{ type: "addRules", rules: [{ toolName: "mcp__owner_browser__owner_write" }], behavior: "allow", destination: "localSettings" }],
+    } });
+    await flush();
+    assert.equal(requests.length, 1, "the owner sees it as a pending approval");
+    assert.equal(requests[0]!.request.tool_name, "mcp__owner_browser__owner_write");
+    assert.equal(child.written.some((line) => line.includes("control_response")), false, "nothing is decided for the owner");
+    assert.deepEqual(await adapter.correlatePermissionTurn(handle, requests[0]!),
+      { outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: turnId });
+    assert.deepEqual(await adapter.replyPermission(handle, requests[0]!, reply, { beforeNativeDispatch: async () => {} }),
+      { outcome: "sent", scope: "request" });
+    assert.deepEqual(JSON.parse(child.written.at(-1)!), { type: "control_response", response: {
+      subtype: "success", request_id: "native-owner-tool",
+      response: reply === "once" ? { behavior: "allow", updatedInput: { selector: "#buy" } } : { behavior: "deny", message: "The host rejected this action." },
+    } });
+    child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId, result: "Done" });
+    await running.catch(() => {}); controller.abort(); await observing; await adapter.stop(handle);
+  }
 });

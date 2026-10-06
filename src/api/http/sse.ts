@@ -112,6 +112,7 @@ function stopSseStream(res: Response, heartbeat: NodeJS.Timeout): void {
 export interface SseConnection {
   readonly closed: boolean;
   write(chunk: string): Promise<boolean>;
+  tryWrite(chunk: string): boolean;
   addCleanup(cleanup: () => void | Promise<void>): void;
   close(): void;
 }
@@ -144,6 +145,11 @@ export function openSseConnection(
 
   return {
     get closed() { return closed; },
+    tryWrite(chunk: string) {
+      // Hints never queue, wait for drain, or close a connection.
+      if (closed || res.writableEnded || res.destroyed || res.writableNeedDrain || res.writableLength > 0) return false;
+      return res.write(chunk);
+    },
     async write(chunk: string) {
       if (closed) return false;
       const accepted = await writeChunk(chunk);

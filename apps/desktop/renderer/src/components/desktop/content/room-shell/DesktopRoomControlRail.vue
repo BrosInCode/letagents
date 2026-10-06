@@ -59,19 +59,36 @@
           </div>
         </div>
       </Transition>
+      <div v-if="historySearch.state.value.status !== 'idle'" class="desktop-room-search-results" data-testid="desktop-room-search-results">
+        <MessageSearchResults
+          :status="historySearch.state.value.status"
+          :hits="historySearch.hits.value"
+          :terms="historySearch.state.value.terms"
+          :has-more="historySearch.state.value.hasMore"
+          :loading-more="historySearch.state.value.loadingMore"
+          :error="historySearch.state.value.error"
+          :loaded-match-count="searchResultsCount"
+          :format-time="formatTimestamp"
+          @show="emit('showSearchResult', $event)"
+          @more="historySearch.loadMore()"
+        />
+      </div>
     </div>
   </Transition>
 </template>
 
 <script setup lang="ts">
-import { nextTick, ref, watch } from "vue";
+import { computed, nextTick, ref, toRef, watch } from "vue";
 import type {
   DesktopGitHubIntegrationStatus,
   DesktopRoomInfo,
   DesktopRoomStorageState,
 } from "../../../../../../electron/ipc-types";
+import MessageSearchResults from "../../../../../../../../shared/ui/MessageSearchResults.vue";
+import { formatTimestamp } from "../desktop-chat-message/message-rendering";
 import DesktopRoomActionPanel from "./DesktopRoomActionPanel.vue";
 import RoomSettingsDialog from "./RoomSettingsDialog.vue";
+import { useDesktopRoomHistorySearch } from "./useDesktopRoomHistorySearch";
 
 const props = defineProps<{
   actionPanelOpen: boolean;
@@ -110,12 +127,20 @@ const emit = defineEmits<{
   installGithub: [];
   exportChat: [];
   moveSearch: [delta: 1 | -1];
+  /** A match from the room's history was chosen: bring it into view. */
+  showSearchResult: [messageId: string];
   closeSearch: [];
   closeActionPanel: [];
 }>();
 
 const searchQuery = defineModel<string>("searchQuery", { required: true });
 const searchInputElement = ref<HTMLInputElement | null>(null);
+const historySearch = useDesktopRoomHistorySearch({
+  roomIdentifier: computed(() => props.room.identifier),
+  cloudRoom: computed(() => props.storage.effectiveMode !== "local"),
+  open: toRef(props, "searchOpen"),
+  query: searchQuery,
+});
 
 watch(
   () => props.searchOpen,

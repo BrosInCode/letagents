@@ -67,7 +67,11 @@ export function appendRoomMessage(message: RoomMessage): boolean {
 }
 export const messagesHasOlder = ref(false)
 export const isLoadingOlderMessages = ref(false)
+/** False until the joined room's initial message page has been loaded once. */
+export const messagesLoaded = ref(false)
 export const presence = ref<RoomAgentPresence[]>([])
+/** False until the joined room's presence has been loaded once. */
+export const presenceLoaded = ref(false)
 export const boardHandoffPresence = ref<RoomAgentPresence[]>([])
 export const participants = ref<RoomParticipant[]>([])
 export const participantHiddenCount = ref(0)
@@ -139,10 +143,12 @@ export function resetRoomState(options: {
   replaceRoomMessages([])
   messagesHasOlder.value = false
   isLoadingOlderMessages.value = false
+  messagesLoaded.value = false
   tasks.value = []
   roomArtifacts.value = []
   focusRooms.value = []
   presence.value = []
+  presenceLoaded.value = false
   boardHandoffPresence.value = []
   participants.value = []
   participantHiddenCount.value = 0

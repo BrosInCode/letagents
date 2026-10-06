@@ -13,32 +13,6 @@ function boundedRoomIds(roomIds: readonly string[]): string[] {
   return values;
 }
 
-export interface LivenessRoomContext {
-  suppressed_actor_labels: ReadonlySet<string>;
-}
-
-/** One set-based read replaces per-room suppression lookups for one due page. */
-export async function getLivenessRoomContexts(
-  roomIds: readonly string[],
-): Promise<Map<string, LivenessRoomContext>> {
-  const ids = boundedRoomIds(roomIds);
-  const result = new Map<string, LivenessRoomContext>(ids.map((roomId) => [roomId, {
-    suppressed_actor_labels: new Set<string>(),
-  }]));
-  if (ids.length === 0) return result;
-  const suppressions = await db.execute<{ room_id: string; actor_label: string }>(sql`
-    SELECT room_id, actor_label FROM room_live_agent_suppressions
-     WHERE room_id IN (
-       SELECT jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb)
-     )
-  `);
-  for (const row of suppressions.rows) {
-    const label = normalizeRoomActorLabel(row.actor_label);
-    if (label) (result.get(row.room_id)!.suppressed_actor_labels as Set<string>).add(label);
-  }
-  return result;
-}
-
 export interface DueRoomOperationalContext {
   reachable_manager_room_ids: ReadonlySet<string>;
   live_worker_labels_by_room: ReadonlyMap<string, readonly string[]>;

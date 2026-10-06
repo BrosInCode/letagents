@@ -1,4 +1,4 @@
-import { computed, ref, watch, type Ref } from "vue";
+import { computed, provide, ref, watch, type Ref } from "vue";
 import type {
   DesktopRoomInfo,
   DesktopRoomMessage,
@@ -17,9 +17,11 @@ import { desktopIpc } from "../../../../ipc/index.js";
 
 import { desktopMessageOutbox, enqueueDesktopMessage, reconcileDesktopMessageOutbox, retryDesktopOutgoingMessage } from "../../../../domain/message-outbox";
 
+import { unreadRevealKey } from "../../../../composables/roomUnread";
+
 const messageHistoryPageSize = 150;
 const maxAutoHistoryBackfillPages = 5;
-const maxExplicitMessageRevealPages = 5;
+const maxExplicitMessageRevealPages = 20;
 
 export function useDesktopRoomMessages(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
@@ -40,6 +42,7 @@ export function useDesktopRoomMessages(options: {
   const loadingOlderMessages = ref(false);
   const olderMessagesError = ref<string | null>(null);
   let roomHistoryGeneration = 0;
+  let olderMessagesRequest: Promise<void> | null = null;
   const autoHistoryBackfillCount = ref(0);
   const ownMessageIds = new Set<string>();
 
@@ -82,6 +85,7 @@ export function useDesktopRoomMessages(options: {
       roomGeneration += 1;
       sendingMessage.value = false;
       roomHistoryGeneration += 1;
+      olderMessagesRequest = null;
       olderMessagesError.value = null;
       olderMessages.value = [];
       hasOlderMessages.value = true;
@@ -151,7 +155,17 @@ export function useDesktopRoomMessages(options: {
     await desktopIpc.room.discardAttachment(options.room.value.identifier, uploadId);
   }
 
-  async function loadOlderMessages(): Promise<void> {
+  function loadOlderMessages(): Promise<void> {
+    if (olderMessagesRequest) return olderMessagesRequest;
+    const request = fetchOlderMessages();
+    olderMessagesRequest = request;
+    void request.finally(() => {
+      if (olderMessagesRequest === request) olderMessagesRequest = null;
+    });
+    return request;
+  }
+
+  async function fetchOlderMessages(): Promise<void> {
     if (loadingOlderMessages.value || !hasOlderMessages.value) return;
     const roomIdentifier = options.room.value.identifier;
     const firstMessageId = oldestRoomHistoryCursor(loadedServerMessages.value);
@@ -186,21 +200,48 @@ export function useDesktopRoomMessages(options: {
 
   /**
    * Reveal an explicit causal link without unboundedly walking room history.
-   * A false result is intentionally surfaced by the App shell rather than
+   * Failure outcomes are intentionally surfaced by the App shell rather than
    * silently leaving a link that appears to have worked.
    */
-  async function revealMessage(messageId: string): Promise<boolean> {
+  async function revealMessage(
+    messageId: string,
+  ): Promise<"revealed" | "not_found" | "too_far_back" | "unavailable"> {
     const generation = roomHistoryGeneration;
     const targetId = messageId.trim();
-    if (!targetId) return false;
-    for (let page = 0; page <= maxExplicitMessageRevealPages; page += 1) {
-      if (visibleMessages.value.some((message) => message.id === targetId)) return true;
-      if (!hasOlderMessages.value || loadingOlderMessages.value) return false;
-      await loadOlderMessages();
-      if (roomHistoryGeneration !== generation || olderMessagesError.value) return false;
+    if (!targetId) return "unavailable";
+
+    if (visibleMessages.value.some((message) => message.id === targetId)) return "revealed";
+
+    // Pre-flight check: tell "not found" / hidden from "too far back"
+    if (typeof desktopIpc.room?.getMessage === "function") {
+      try {
+        const targetMessage = await desktopIpc.room.getMessage(options.room.value.identifier, targetId);
+        if (!targetMessage || isHiddenChatMessage(targetMessage)) {
+          return "not_found";
+        }
+      } catch {
+        // Thrown error means lookup failed (network, timeout, 500); fall through to paging.
+      }
     }
-    return visibleMessages.value.some((message) => message.id === targetId);
+
+    let pagesRequested = 0;
+    while (roomHistoryGeneration === generation) {
+      if (visibleMessages.value.some((message) => message.id === targetId)) return "revealed";
+      if (!olderMessagesRequest && !hasOlderMessages.value) return "unavailable";
+      if (pagesRequested >= maxExplicitMessageRevealPages) return "too_far_back";
+      pagesRequested += 1;
+      await loadOlderMessages();
+      if (roomHistoryGeneration !== generation || olderMessagesError.value) {
+        return "unavailable";
+      }
+    }
+    return "unavailable";
   }
+
+  provide(unreadRevealKey, async (id) => {
+    const outcome = await revealMessage(id);
+    return outcome === "revealed" && timelineMessages.value.some(message => message.id === id);
+  });
 
   return {
     sendingMessage,
@@ -208,7 +249,7 @@ export function useDesktopRoomMessages(options: {
     hasOlderMessages,
     loadingOlderMessages,
     olderMessagesError,
-      ownMessageIds,
+    ownMessageIds,
     hasFilteredRoomActivity,
     visibleMessages,
     timelineMessages,

@@ -1111,6 +1111,27 @@ test("resource invalidations advance the broker cursor while only supported reso
     assert.equal(managedEmitted.length, managedCount);
 
     initial.pushRaw(
+      `id: broker_reactions\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
+        room_id: canonicalRoom,
+        resource: "message_reactions",
+      })}\n\n`,
+    );
+    await waitUntil(() => emitted.length > emittedCount + 1);
+    assert.deepEqual(emitted.at(-1), {
+      type: "resource_invalidation",
+      roomIdentifier: canonicalRoom,
+      resource: "message_reactions",
+    });
+    assert.equal(managedEmitted.length, managedCount, "a reaction never reaches a managed agent");
+
+    initial.pushRaw(
+      `id: broker_pins\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({ room_id: canonicalRoom, resource: "message_pins" })}\n\n`,
+    );
+    await waitUntil(() => emitted.length > emittedCount + 2);
+    assert.deepEqual(emitted.at(-1), { type: "resource_invalidation", roomIdentifier: canonicalRoom, resource: "message_pins" });
+    assert.equal(managedEmitted.length, managedCount, "a pin never reaches a managed agent");
+
+    initial.pushRaw(
       `id: broker_delegation\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
         room_id: canonicalRoom,
         resource: "execution_delegation",
@@ -1118,7 +1139,7 @@ test("resource invalidations advance the broker cursor while only supported reso
     );
     await waitUntil(() => delegationRooms.length === 1);
     assert.deepEqual(delegationRooms, [canonicalRoom]);
-    assert.equal(emitted.length, emittedCount + 1, "delegation pointers stay main-process-only");
+    assert.equal(emitted.length, emittedCount + 3, "delegation pointers stay main-process-only");
     assert.equal(managedEmitted.length, managedCount);
 
     const afterAgentWorkCount = emitted.length;
@@ -1452,4 +1473,36 @@ test("switching rooms fences a board read already in flight", async () => {
     deferredBoardReads.delete(oldRoom);
     await stopDesktopRoomStream();
   }
+});
+
+test('typing bypasses bootstrap buffers and cannot reach agents, cursors or gap repair', async () => {
+  const router = installFetchRouter();
+  try {
+    const initial = makeSse(), reconnected = makeSse();
+    router.streamQueue.push({ kind: 'ok', sse: initial }, { kind: 'ok', sse: reconnected });
+    const release = router.enqueueDeferredCatchUp();
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, 'msg_1');
+    await waitUntil(() => router.streamCalls.length === 1);
+    assert.match(router.streamCalls[0]?.url ?? '', /stream_capability=room_typing_v1/);
+    const baseline = managedEmitted.length;
+    const signal = { room_id: ROOM, account_id: 'ada', name: 'Ada', client_id: 'composer_native_1', sequence: 1, typing: true, ttl_ms: 5000, expires_at: Date.now() - 60000 };
+    for (const [index, skew] of [-60000, 60000].entries()) {
+      initial.pushRaw(`id: forbidden_typing_cursor\nevent: room_typing_v1\ndata: ${JSON.stringify({ ...signal, sequence: index + 1, expires_at: Date.now() + skew })}\n\n`);
+      await waitUntil(() => emitted.filter(e => e.type === 'typing').length === index + 1);
+    }
+    assert.equal(managedEmitted.length, baseline, 'managed dispatcher sees no typing, even before bootstrap finishes');
+    const count = emitted.filter(e => e.type === 'typing').length;
+    initial.pushRaw('event: room_typing_v1\ndata: not json\n\n');
+    initial.pushRaw(`event: room_typing_v1\ndata: ${JSON.stringify({ ...signal, room_id: 'room_other' })}\n\n`);
+    initial.pushRaw(`event: room_sync\ndata: ${JSON.stringify({ room_id: ROOM, checkpoint: 'msg_1', gap: false, event_cursor: 'broker_real' })}\n\n`);
+    release();
+    await starting;
+    assert.equal(emitted.filter(e => e.type === 'typing').length, count, 'no bootstrap replay');
+    assert.equal(emitted.some(e => e.type === 'open' && e.gap === true && e.verified), false);
+    initial.error();
+    await waitUntil(() => router.streamCalls.length >= 2, 4000);
+    assert.equal(router.streamCalls[1]?.headers.get('Last-Event-ID'), 'broker_real');
+    reconnected.close();
+  } finally { await stopDesktopRoomStream(); router.restore(); }
 });

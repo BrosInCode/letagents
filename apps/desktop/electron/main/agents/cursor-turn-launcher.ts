@@ -91,6 +91,8 @@ export function defaultLaunchTurn(input: {
   mcpRuntimeEnv?: Readonly<Record<string, string>>;
   providerAuthorization?: string;
   restrictRemoteAuthority?: boolean;
+  /** Attested Full access profile: retain turn supervision without an OS sandbox. */
+  fullAccess?: boolean;
   /** Exact continuation already held by the supervised adapter, never a prompt value. */
   nativeResumeSessionId?: string;
   /** Injectable only through direct unit tests; adapter production never sets it. */
@@ -232,7 +234,7 @@ const https = require("node:https");
 const net = require("node:net");
 const path = require("node:path");
 const { StringDecoder } = require("node:string_decoder");
-const [bin, statePath, workspaceGenerationManifestPath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, deniedExecSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, allowedInternalUnixSocketRootsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, mcpCapabilityTimeoutMsValue, restrictRemoteAuthorityValue, ...args] = process.argv.slice(1);
+const [bin, statePath, workspaceGenerationManifestPath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, deniedExecSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, allowedInternalUnixSocketRootsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, mcpCapabilityTimeoutMsValue, restrictRemoteAuthorityValue, fullAccessValue, ...args] = process.argv.slice(1);
 const deniedReadPaths = JSON.parse(deniedReadPathsJson || "[]");
 const deniedReadSubpaths = JSON.parse(deniedReadSubpathsJson || "[]");
 const deniedReadMetadataPaths = JSON.parse(deniedReadMetadataPathsJson || "[]");
@@ -247,6 +249,7 @@ const allowedReadSubpaths = JSON.parse(allowedReadSubpathsJson || "[]");
 const allowedNetworkUnixSockets = JSON.parse(allowedNetworkUnixSocketsJson || "[]");
 const allowedInternalUnixSocketRoots = JSON.parse(allowedInternalUnixSocketRootsJson || "[]");
 const restrictRemoteAuthority = restrictRemoteAuthorityValue === "1";
+const fullAccess = fullAccessValue === "1";
 const mcpCapabilityTimeoutMs = Number(mcpCapabilityTimeoutMsValue);
 if (!Number.isSafeInteger(mcpCapabilityTimeoutMs)
   || mcpCapabilityTimeoutMs < 1
@@ -283,6 +286,9 @@ let mcpConnectorServer = null;
 let mcpConnectorSocket = null;
 let mcpRuntime = null;
 let mcpRuntimeProcessIdentity = null;
+// Lost group continuity or a confirmed leader mismatch permanently revokes
+// signal authority across overlapping or repeated startup cleanup calls.
+let runtimeGroupSignalAuthorized = false;
 let mcpRuntimeEnv = null;
 let mcpConnectorAdmitted = false;
 let mcpCapabilityAttested = !restrictRemoteAuthority;
@@ -672,9 +678,9 @@ async function closeMcpConnector() {
   let runtimeClosed = true;
   let runtimeGroupClosed = true;
   const runtime = mcpRuntime;
-  let runtimeGroupSignalAuthorized = false;
   let groupMembers = null;
   let signalRuntimeGroup = null;
+  let termSignaled = false;
   if (runtime) {
     const runtimeGroupId = runtime.pid;
     runtimeClosed = runtime.exitCode !== null || runtime.signalCode !== null;
@@ -684,33 +690,38 @@ async function closeMcpConnector() {
       runtimeGroupClosed = runtimeClosed;
       signalRuntimeGroup = (signal) => {
         try { runtime.kill(signal); } catch {}
+        return true;
       };
-      if (!runtimeClosed) signalRuntimeGroup("SIGTERM");
+      if (!runtimeClosed) termSignaled = signalRuntimeGroup("SIGTERM");
     } else if (Number.isSafeInteger(runtimeGroupId) && runtimeGroupId > 1) {
       groupMembers = () => processGroupMembers(runtimeGroupId);
       signalRuntimeGroup = (signal) => {
-        const currentIdentity = exactProcessGroupLeaderIdentity(runtimeGroupId, process.pid);
         if (!runtimeGroupSignalAuthorized
-          || typeof mcpRuntimeProcessIdentity !== "string"
-          || currentIdentity !== mcpRuntimeProcessIdentity) {
+          || typeof mcpRuntimeProcessIdentity !== "string") {
           runtimeGroupSignalAuthorized = false;
-          return;
+          return false;
+        }
+        const currentIdentity = exactProcessGroupLeaderIdentity(runtimeGroupId, process.pid);
+        if (currentIdentity === undefined) return false;
+        if (currentIdentity !== mcpRuntimeProcessIdentity) {
+          runtimeGroupSignalAuthorized = false;
+          return false;
         }
         try { process.kill(-runtimeGroupId, signal); }
         catch (error) {
           // EPERM is not proof of absence. Keep polling the exact PGID below and
           // return false unless both the runtime and every group member vanish.
-          if (error && (error.code === "ESRCH" || error.code === "EPERM")) return;
+          if (error && (error.code === "ESRCH" || error.code === "EPERM")) return true;
           throw error;
         }
+        return true;
       };
-      runtimeGroupSignalAuthorized = typeof mcpRuntimeProcessIdentity === "string";
       // Re-prove the captured leader's birth and ancestry inside every signal
       // attempt, including escalation. POSIX offers no atomic identity+signal
       // primitive here, so this minimizes—but cannot erase—the final syscall
-      // race. An absent, changed, or ambiguous leader permanently revokes the
-      // numeric PGID's signal authority.
-      if (runtimeGroupSignalAuthorized) signalRuntimeGroup("SIGTERM");
+      // race. An absent or changed leader permanently revokes signal authority.
+      // An unavailable probe sends no signal and can retry within the deadline.
+      if (!runtimeClosed && runtimeGroupSignalAuthorized) termSignaled = signalRuntimeGroup("SIGTERM");
     }
   }
   if (mcpConnectorServer) { try { mcpConnectorServer.close(); } catch {} }
@@ -723,41 +734,38 @@ async function closeMcpConnector() {
   }
   if (runtime) {
     try { runtime.stdin.end(); } catch {}
-    let members = groupMembers ? groupMembers() : null;
-    if (process.platform !== "win32") {
-      runtimeGroupClosed = members !== null && members.length === 0;
-      // Once a successful probe observes the original group empty, or any
-      // probe is ambiguous, continuity is lost forever. A later process group
-      // with the same number must not inherit this runtime's signal authority.
-      if (members === null || runtimeGroupClosed) runtimeGroupSignalAuthorized = false;
-    }
+    // Escalate a still-live exact runtime before enumerating the whole process
+    // table. A slow membership probe must not strand a TERM-resistant runtime;
+    // the unchanged birth/ancestry check still fences every signal attempt.
     const graceDeadline = Date.now() + 500;
-    while ((!runtimeClosed || !runtimeGroupClosed) && Date.now() < graceDeadline) {
+    while (!runtimeClosed && Date.now() < graceDeadline) {
+      if (!termSignaled && signalRuntimeGroup
+        && (process.platform === "win32" || runtimeGroupSignalAuthorized)) {
+        termSignaled = signalRuntimeGroup("SIGTERM");
+      }
       await wait(25);
+    }
+    const killDeadline = Math.max(Date.now(), graceDeadline) + 500;
+    while (!runtimeClosed && Date.now() < killDeadline
+      && signalRuntimeGroup
+      && (process.platform === "win32" || runtimeGroupSignalAuthorized)) {
+      if (signalRuntimeGroup("SIGKILL")) break;
+      await wait(25);
+    }
+    // Exit alone does not prove descendant retirement. Require a successful
+    // empty-group observation, and never let an ambiguous/empty observation
+    // authorize a later cleanup call to signal a recycled numeric PGID.
+    do {
       if (process.platform === "win32") {
         runtimeGroupClosed = runtimeClosed;
       } else {
-        members = groupMembers ? groupMembers() : null;
+        const members = groupMembers ? groupMembers() : null;
         runtimeGroupClosed = members !== null && members.length === 0;
         if (members === null || runtimeGroupClosed) runtimeGroupSignalAuthorized = false;
       }
-    }
-    if ((!runtimeClosed || !runtimeGroupClosed)
-      && signalRuntimeGroup
-      && (process.platform === "win32" || runtimeGroupSignalAuthorized)) {
-      signalRuntimeGroup("SIGKILL");
-      const killDeadline = Date.now() + 500;
-      while ((!runtimeClosed || !runtimeGroupClosed) && Date.now() < killDeadline) {
-        await wait(25);
-        if (process.platform === "win32") {
-          runtimeGroupClosed = runtimeClosed;
-        } else {
-          members = groupMembers ? groupMembers() : null;
-          runtimeGroupClosed = members !== null && members.length === 0;
-          if (members === null || runtimeGroupClosed) runtimeGroupSignalAuthorized = false;
-        }
-      }
-    }
+      if (runtimeClosed && runtimeGroupClosed) break;
+      await wait(25);
+    } while (Date.now() < killDeadline);
   }
   const socketDeadline = Date.now() + 500;
   while (!socketClosed && Date.now() < socketDeadline) await wait(5);
@@ -1033,6 +1041,7 @@ function startMcpConnector() {
     });
     mcpRuntime = runtime;
     mcpRuntimeProcessIdentity = exactProcessGroupLeaderIdentity(runtime.pid, process.pid);
+    runtimeGroupSignalAuthorized = typeof mcpRuntimeProcessIdentity === "string";
     if (process.platform !== "win32" && typeof mcpRuntimeProcessIdentity !== "string") {
       const detail = "Cursor's hosted MCP runtime did not expose an exact process-group birth identity.";
       try { runtime.kill("SIGTERM"); } catch {}
@@ -1763,7 +1772,7 @@ async function start() {
   // Wrapper-only: packaged Electron needs this to execute the inline Node
   // wrapper, but an Electron-backed Cursor binary must never inherit it.
   delete nativeEnv.ELECTRON_RUN_AS_NODE;
-  const sandboxed = process.platform === "darwin"
+  const sandboxed = !fullAccess && process.platform === "darwin"
     && (restrictRemoteAuthority
       || deniedReadPaths.length > 0
       || deniedReadSubpaths.length > 0
@@ -2078,6 +2087,7 @@ if (process.send) process.send({ type: "prepared" });
     testStartupBarrier?.stage ?? "",
     String(mcpCapabilityTimeoutMs),
     restrictRemoteAuthority ? "1" : "0",
+    input.fullAccess === true ? "1" : "0",
     ...input.args,
   ], {
     cwd: input.cwd,

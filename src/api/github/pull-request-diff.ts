@@ -32,7 +32,10 @@ export class PullRequestDiffError extends Error {
   }
 }
 
-function mapStatusToError(status: number, context: string): PullRequestDiffError {
+function mapStatusToError(status: number, context: string, headers?: Headers): PullRequestDiffError {
+  if (status === 403 && (headers?.get("x-ratelimit-remaining") === "0" || headers?.has("retry-after"))) {
+    return new PullRequestDiffError("rate_limited", `${context}: 403`);
+  }
   if (status === 404) return new PullRequestDiffError("not_found", `${context}: 404`);
   if (status === 403 || status === 401) return new PullRequestDiffError("forbidden", `${context}: ${status}`);
   if (status === 429) return new PullRequestDiffError("rate_limited", `${context}: 429`);
@@ -73,14 +76,14 @@ async function readCappedText(response: Response, maxBytes: number): Promise<str
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function fetchHeadSha(
+async function fetchHead(
   fetchImpl: typeof fetch,
   owner: string,
   repo: string,
   number: number,
   token: string,
   signal: AbortSignal,
-): Promise<string> {
+): Promise<{ sha: string; totalFiles: number | null }> {
   const response = await githubRequest({
     url: `${GITHUB_API}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`,
     accept: "application/vnd.github+json",
@@ -88,16 +91,54 @@ async function fetchHeadSha(
     fetchImpl,
     signal,
   });
-  if (!response.ok) throw mapStatusToError(response.status, "pull request");
-  const json = (await response.json()) as { head?: { sha?: unknown } };
+  if (!response.ok) throw mapStatusToError(response.status, "pull request", response.headers);
+  const json = JSON.parse(await readCappedText(response, 1024 * 1024)) as { head?: { sha?: unknown }; changed_files?: unknown };
   const sha = typeof json.head?.sha === "string" ? json.head.sha : "";
   if (!sha) throw new PullRequestDiffError("upstream", "pull request response missing head sha");
-  return sha;
+  return { sha, totalFiles: Number.isSafeInteger(json.changed_files) && Number(json.changed_files) >= 0 ? Number(json.changed_files) : null };
+}
+
+export interface PullRequestFileList {
+  files: Array<{ path: string; previous_path: string | null; status: string; additions: number; deletions: number }>;
+  total_files: number;
 }
 
 export interface PullRequestUnifiedDiff {
   diff: string;
   headSha: string;
+  fileList?: PullRequestFileList | null;
+}
+
+// Optional enhancement only: one page, one request, its own shorter deadline.
+// A failed/oversized/stalled file list must never discard a successful diff.
+async function fetchFileList(
+  input: { owner: string; repo: string; number: number },
+  token: string,
+  fetchImpl: typeof fetch,
+  signal: AbortSignal,
+  totalFiles: number | null,
+): Promise<PullRequestFileList | null> {
+  try {
+    const response = await githubRequest({
+      url: `${GITHUB_API}/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/pulls/${input.number}/files?per_page=100&page=1`,
+      token, fetchImpl, signal,
+    });
+    if (!response.ok) return null;
+    const files: unknown = JSON.parse(await readCappedText(response, DEFAULT_MAX_DIFF_BYTES));
+    if (!Array.isArray(files) || files.length > 100 || totalFiles === null) return null;
+    const result: PullRequestFileList = { files: [], total_files: totalFiles };
+    for (const file of files) {
+      if (!file || typeof file.filename !== "string" || file.filename.length > 4096
+        || typeof file.status !== "string" || !Number.isSafeInteger(file.additions) || file.additions < 0
+        || !Number.isSafeInteger(file.deletions) || file.deletions < 0) return null;
+      result.files.push({
+        path: file.filename,
+        previous_path: typeof file.previous_filename === "string" ? file.previous_filename.slice(0, 4096) : null,
+        status: file.status, additions: file.additions, deletions: file.deletions,
+      });
+    }
+    return result;
+  } catch { return null; }
 }
 
 // Fetch a PR's unified diff via the App installation token. Bounded by a single
@@ -115,6 +156,7 @@ export async function fetchPullRequestUnifiedDiff(input: {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   maxBytes?: number;
+  includeFiles?: boolean;
 }): Promise<PullRequestUnifiedDiff> {
   const fetchImpl = input.fetchImpl ?? fetch;
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -130,7 +172,13 @@ export async function fetchPullRequestUnifiedDiff(input: {
       fetchImpl,
       signal: controller.signal,
     });
-    const shaBefore = await fetchHeadSha(fetchImpl, input.owner, input.repo, input.number, token, controller.signal);
+    const before = await fetchHead(fetchImpl, input.owner, input.repo, input.number, token, controller.signal);
+    const files = { value: null as PullRequestFileList | null };
+    if (input.includeFiles) {
+      void fetchFileList(input, token, fetchImpl, AbortSignal.any([
+          controller.signal, AbortSignal.timeout(Math.max(1, Math.min(5000, Math.floor(timeoutMs / 3)))),
+        ]), before.totalFiles).then(value => { files.value = value; });
+    }
 
     const diffResponse = await githubRequest({
       url: `${GITHUB_API}/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}/pulls/${input.number}`,
@@ -139,7 +187,7 @@ export async function fetchPullRequestUnifiedDiff(input: {
       fetchImpl,
       signal: controller.signal,
     });
-    if (!diffResponse.ok) throw mapStatusToError(diffResponse.status, "pull request diff");
+    if (!diffResponse.ok) throw mapStatusToError(diffResponse.status, "pull request diff", diffResponse.headers);
     const baseType = (diffResponse.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
     if (!ALLOWED_DIFF_CONTENT_TYPES.has(baseType)) {
       throw new PullRequestDiffError("invalid_content", `unexpected content-type: ${baseType || "none"}`);
@@ -148,11 +196,14 @@ export async function fetchPullRequestUnifiedDiff(input: {
 
     // Re-check after the body read: reject if the PR moved mid-flight so we never
     // return/cache a diff under a head SHA it does not correspond to.
-    const shaAfter = await fetchHeadSha(fetchImpl, input.owner, input.repo, input.number, token, controller.signal);
-    if (shaBefore !== shaAfter) {
+    // Metadata must be ready before the final head check; otherwise use the diff
+    // alone. Never spend the required verification's deadline waiting for it.
+    const fileList = files.value;
+    const after = await fetchHead(fetchImpl, input.owner, input.repo, input.number, token, controller.signal);
+    if (before.sha !== after.sha) {
       throw new PullRequestDiffError("moved", "pull request head changed during fetch");
     }
-    return { diff, headSha: shaAfter };
+    return { diff, headSha: after.sha, ...(input.includeFiles ? { fileList: fileList ?? null } : {}) };
   } catch (error) {
     if (controller.signal.aborted) {
       throw new PullRequestDiffError("timeout", "GitHub request timed out");
@@ -161,5 +212,6 @@ export async function fetchPullRequestUnifiedDiff(input: {
     throw new PullRequestDiffError("upstream", error instanceof Error ? error.message : "fetch failed");
   } finally {
     clearTimeout(timer);
+    controller.abort();
   }
 }

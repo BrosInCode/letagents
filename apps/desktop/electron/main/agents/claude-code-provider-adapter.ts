@@ -15,6 +15,7 @@ import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 import {
   synthesizeTerminalPayload,
   sameProviderConnectionIdentity,
+  PROCESS_ENDED_DURING_TURN,
   type ProviderActivityEvent,
   type ProviderAdapter,
   type ProviderAdapterCapabilities,
@@ -46,7 +47,8 @@ import {
   ProviderExecutionObserver,
   type NativeLifecycleCheckpoint,
 } from "./provider-execution-observer.js";
-import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
+import { attestProviderSpawnPolicy, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "./provider-spawn-configuration.js";
+import { withoutRoomAuthority } from "./room-authority-environment.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import {
   isRentalCredentialIsolationRequested,
@@ -71,6 +73,7 @@ import {
   CLAUDE_NO_ROOM_REPLY_SENTINEL,
   exactClaudeStreamTerminal,
   recoverExactClaudeTurnFromSession,
+  recoverExactClaudeTurnFailureFromSession,
   type ClaudeEvidenceRecord,
   type ClaudeExactTurnFailure,
   type ClaudeExactTurnResult,
@@ -92,6 +95,115 @@ const INIT_TIMEOUT_MS = 30_000;
 // tokens; failing does, since the deadline is not retried and the user must
 // restart the agent by hand.
 const RESUME_INIT_TIMEOUT_MS = 90_000;
+// With the owner's own setup on, Claude also starts the owner's MCP servers
+// and prints `init` only once each has connected or run out of time. Its own
+// limit for that is 30 s, the whole of the budget above, so one server that
+// never answers used to fail the launch. The limit is now set explicitly, to
+// Claude's own default so that no server is cut off sooner than when the
+// owner runs Claude themselves, and the launch's budget grows by the same
+// amount. A smaller limit the owner already set is kept. A larger one is
+// capped, so the wait always fits the budget.
+const OWNER_MCP_STARTUP_TIMEOUT_MS = 30_000;
+const OWNER_MCP_STARTUP_TIMEOUT_MAX_MS = 45_000;
+// Claude connects stdio servers three at a time, in order, and the room's own
+// server comes after the owner's. Three of the owner's that never answer
+// would hold the room's server back until they ran out of time, and the
+// launch would fail for want of the room. Connecting them all at once means
+// no server of the owner's can stand in front of the room's.
+const OWNER_MCP_CONNECTION_BATCH_SIZE = 256;
+
+/**
+ * What Claude is told when it also starts the owner's servers: how to start
+ * MCP servers, and, for a launch that reads the owner's settings alone, to
+ * still read the instructions in the agent's work folder (`projectInstructions`).
+ */
+export function claudeOwnerSetupStartEnvironment(startupMs: number, projectInstructions = false): Record<string, string> {
+  return {
+    MCP_TIMEOUT: String(startupMs),
+    MCP_SERVER_CONNECTION_BATCH_SIZE: String(OWNER_MCP_CONNECTION_BATCH_SIZE),
+    MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE: String(OWNER_MCP_CONNECTION_BATCH_SIZE),
+    ...(projectInstructions ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: "1" } : {}),
+  };
+}
+
+/**
+ * The same values as settings given on the command line. The owner's own
+ * `settings.json` may set them in its `env`, and that replaces the process
+ * environment; settings given on the command line replace the owner's in turn.
+ */
+function claudeOwnerSetupSettings(startupMs: number, projectInstructions: boolean): string {
+  return JSON.stringify({ env: claudeOwnerSetupStartEnvironment(startupMs, projectInstructions) });
+}
+
+/**
+ * A policy that names no setting sources reads every one: the owner's, the
+ * project's and the folder's local ones. That is Full access. With the
+ * owner's setup on, a project's settings, hooks, skills, commands and
+ * `.mcp.json` servers would then run beside the owner's own tools, and its
+ * settings `env` would reach the owner's servers. Such a launch reads the
+ * owner's settings alone, like every other access level does, and is given
+ * the work folder as an added directory so the project's `CLAUDE.md` still
+ * loads. The other access levels never read a project's instructions, with
+ * or without the owner's setup, so they are left as they are.
+ */
+export function claudeOwnerSetupReadsProjectInstructionsOnly(policyArgs: readonly string[]): boolean {
+  return !policyArgs.includes("--setting-sources");
+}
+
+/**
+ * The arguments with one flag set to one value: where the flag first stands
+ * when it is there already, at the end otherwise, and nowhere else. With the
+ * owner's setup the launch says what these flags are; nothing the arguments
+ * carried before decides them, by being there first or by being there last.
+ */
+function withFlagSetTo(args: readonly string[], flag: string, value: string | null): string[] {
+  const set: string[] = [];
+  let placed = false;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] !== flag) {
+      set.push(args[index]!);
+      continue;
+    }
+    index += 1;
+    if (!placed && value !== null) set.push(flag, value);
+    placed = true;
+  }
+  if (!placed && value !== null) set.push(flag, value);
+  return set;
+}
+
+/** How long the owner's own MCP servers get to start, given the limit the owner's environment already sets. */
+export function ownerMcpStartupTimeoutMs(configured: string | undefined): number {
+  const own = /^[1-9][0-9]{0,8}$/.test(configured?.trim() ?? "") ? Number(configured!.trim()) : null;
+  return own === null ? OWNER_MCP_STARTUP_TIMEOUT_MS : Math.min(own, OWNER_MCP_STARTUP_TIMEOUT_MAX_MS);
+}
+
+/** A name from the owner's own configuration, short and printable enough to show. */
+function shownName(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  return JSON.stringify(value.trim().replace(/[^\x20-\x7e]/g, "?").slice(0, 64));
+}
+
+/**
+ * One line for each of the owner's MCP servers that Claude did not connect
+ * when it started, so the owner can see which one is missing and why the
+ * start was slow. The room's own server is checked separately.
+ */
+export function ownerMcpServerNotices(init: Record<string, unknown>): string[] {
+  const notices: string[] = [];
+  for (const row of Array.isArray(init.mcp_servers) ? init.mcp_servers : []) {
+    if (!row || typeof row !== "object" || row.name === "letagents" || row.status === "connected") continue;
+    const name = shownName(row.name);
+    if (!name) continue;
+    notices.push(row.status === "pending"
+      ? `Your MCP server ${name} was still starting when this agent began, so its tools may be missing.`
+      : row.status === "needs-auth"
+        ? `Your MCP server ${name} needs you to sign in, so this agent is running without it.`
+        : `Your MCP server ${name} did not start, so this agent is running without it.`);
+    if (notices.length === 8) break;
+  }
+  return notices;
+}
 const VERSION_TIMEOUT_MS = 8_000;
 
 /** One parsed stream-json line from the CLI. */
@@ -118,15 +230,27 @@ export interface ClaudeCliChild {
 
 export interface ClaudeCodeProviderAdapterDependencies {
   readVersion(claudeBin: string): Promise<string>;
-  launchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild;
-  createLetAgentsMcpConfig(req: ProviderSpawnRequest): Promise<{ path: string; dispose(): Promise<void> }>;
+  /** `ownerSetup` marks a launch whose CLI environment the owner's own servers and hooks inherit. */
+  launchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; ownerSetup?: true }): ClaudeCliChild;
+  /** `roomServerEnvironment` is given to the room's server alone, in its own configuration. */
+  createLetAgentsMcpConfig(
+    req: ProviderSpawnRequest,
+    roomServerEnvironment?: Record<string, string>,
+  ): Promise<{ path: string; dispose(): Promise<void> }>;
   signalProcess(pid: number, signal: NodeJS.Signals): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
   observeProcessExit(pid: number, processIdentity: string): Promise<ProviderProcessExit>;
-  readSessionRows(sessionId: string): Promise<ClaudeEvidenceRecord[]>;
+  /**
+   * The rows of a session's transcript, read where the CLI that ran it wrote
+   * it (`transcriptsRoot`, its `projects` directory). Null when no transcript
+   * for the session is found there: that proves nothing about the turn.
+   */
+  readSessionRows(sessionId: string, transcriptsRoot?: string): Promise<ClaudeEvidenceRecord[] | null>;
   /** The managed commit identity for this work attempt, or none. */
   resolveCommitEnvironment(req: ProviderSpawnRequest): Promise<Record<string, string>>;
+  /** The owner's own `MCP_TIMEOUT`, when their environment sets one. Defaults to the desktop's environment. */
+  ownerMcpTimeout?(): string | undefined;
   now(): string;
 }
 
@@ -239,6 +363,80 @@ export function claudeLaunchPolicyArgs(value: unknown): string[] {
   return args;
 }
 
+/**
+ * The exact arguments a room agent's CLI starts with. The room's own server
+ * is always named explicitly. Without the owner's own setup it is the only
+ * MCP configuration Claude reads, so a repo-tracked .mcp.json cannot shadow
+ * it. With that setup on, Claude also reads the owner's own servers, and a
+ * server named on the command line still wins over one of the same name.
+ */
+export function claudeCliLaunchArgs(input: {
+  approvalProfileLabel: string | null;
+  homeHarness: boolean;
+  /** How long the owner's MCP servers get to start. Only read with the owner's setup. */
+  ownerMcpStartupMs?: number;
+  /** The agent's work folder. Only read with the owner's setup, for a policy that names no setting sources. */
+  cwd?: string;
+  mcpConfigPath: string;
+  policyArgs: readonly string[];
+  model?: string | null;
+  session: { resume: string } | { sessionId: string };
+}): string[] {
+  const instructionsOnly = input.homeHarness && claudeOwnerSetupReadsProjectInstructionsOnly(input.policyArgs);
+  // With the owner's setup these three are what the launch says they are, whatever the arguments said:
+  // the owner's settings alone, the launch's own start settings, and no folder but the agent's own.
+  const policyArgs = input.homeHarness
+    ? [
+      ...withFlagSetTo(withFlagSetTo(withFlagSetTo(input.policyArgs,
+        "--settings", claudeOwnerSetupSettings(input.ownerMcpStartupMs ?? ownerMcpStartupTimeoutMs(undefined), instructionsOnly)),
+      "--setting-sources", "user"), "--add-dir", null),
+      ...(instructionsOnly && input.cwd?.trim() ? ["--add-dir", input.cwd] : []),
+    ]
+    : input.policyArgs;
+  return [
+    "--print",
+    "--verbose",
+    "--input-format", "stream-json",
+    "--output-format", "stream-json",
+    // Auto keeps the bridge: anything Claude declines to decide reaches the host.
+    ...(input.approvalProfileLabel ? ["--permission-prompt-tool", "stdio"] : []),
+    ...(input.homeHarness ? [] : ["--strict-mcp-config"]),
+    "--mcp-config", input.mcpConfigPath,
+    ...policyArgs,
+    ...(input.model ? ["--model", input.model] : []),
+    ...("resume" in input.session ? ["--resume", input.session.resume] : ["--session-id", input.session.sessionId]),
+  ];
+}
+
+/**
+ * A request nobody can answer here. With the owner's own setup on, their MCP
+ * servers can ask a person for typed input, and their skills can run
+ * sub-agents whose tools need approval. LetAgents shows approvals only for
+ * the agent's own tool calls, so either would wait forever. Neither can
+ * happen without that setup: the room's server never asks, and an agent that
+ * asks for approval has no tool that starts a sub-agent.
+ */
+function unanswerableClaudeRequest(request: unknown): { response: Record<string, unknown>; summary: string } | null {
+  if (!request || typeof request !== "object" || Array.isArray(request)) return null;
+  const candidate = request as Record<string, unknown>;
+  if (candidate.subtype === "elicitation" && candidate.mcp_server_name !== "letagents") {
+    const server = shownName(candidate.mcp_server_name);
+    return {
+      // Declining is what the server sees when a person says no.
+      response: { action: "decline" },
+      summary: `Declined a request for ${candidate.mode === "url" ? "a sign-in" : "typed input"} from ${server ? `your MCP server ${server}` : "one of your MCP servers"}. LetAgents cannot show it.`,
+    };
+  }
+  if (candidate.subtype === "can_use_tool" && candidate.agent_id != null) {
+    const tool = shownName(candidate.tool_name);
+    return {
+      response: { behavior: "deny", message: "LetAgents cannot show an approval for a sub-agent's action, so it was not allowed." },
+      summary: `Did not allow ${tool ? `the tool ${tool}` : "a tool"} for a skill's helper agent. LetAgents cannot show an approval for it.`,
+    };
+  }
+  return null;
+}
+
 function claudeStreamKind(message: ClaudeStreamMessage): ProviderStreamEventKind {
   const type = typeof message.type === "string" ? message.type : "";
   if (type === "assistant") return "text_delta";
@@ -290,6 +488,18 @@ function hasReadyRoomWorkplace(message: ClaudeStreamMessage): boolean {
     && row.name === "letagents" && row.status === "connected");
   return connected && ["get_board", "read_messages", "send_message"].every(name =>
     (message.tools as unknown[]).includes(`mcp__letagents__${name}`));
+}
+
+/**
+ * With the owner's own setup on, Claude also reads their MCP servers, and one
+ * of them may be named `letagents` too. The room's server is the one this
+ * launch named on the command line, which Claude reports as `dynamic`.
+ */
+function roomServerIsThisLaunchs(message: ClaudeStreamMessage): boolean {
+  const rooms = Array.isArray(message.mcp_servers)
+    ? message.mcp_servers.filter(row => row && typeof row === "object" && row.name === "letagents")
+    : [];
+  return rooms.length === 1 && rooms[0].source === "dynamic";
 }
 
 function assistantTextOf(message: ClaudeStreamMessage): string | null {
@@ -571,7 +781,21 @@ function defaultReadVersion(claudeBin: string): Promise<string> {
   });
 }
 
-function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }): ClaudeCliChild {
+/**
+ * The environment the CLI itself runs in. Claude hands it to every MCP server,
+ * hook and command it starts. With the owner's own setup on those are the
+ * owner's programs, so nothing that lets a process act as the room agent may
+ * be in it; the room's server is given the coordinates in its own configuration.
+ */
+export function claudeChildEnvironment(
+  input: { env?: NodeJS.ProcessEnv; ownerSetup?: true },
+  base: NodeJS.ProcessEnv = desktopRuntimeEnvironment(),
+): NodeJS.ProcessEnv {
+  const env = claudeCliEnv(base, input.env);
+  return input.ownerSetup ? withoutRoomAuthority(env) : env;
+}
+
+function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; ownerSetup?: true }): ClaudeCliChild {
   const child = spawn(input.claudeBin, input.args, {
     cwd: input.cwd,
     stdio: ["pipe", "pipe", "pipe"],
@@ -581,7 +805,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     detached: process.platform !== "win32",
     // The strict launch config supplies the API endpoint; these coordinates
     // make every LetAgents MCP effect borrow the exact daemon generation.
-    env: claudeCliEnv(desktopRuntimeEnvironment(), input.env),
+    env: claudeChildEnvironment(input),
   });
 
   const lineListeners = new Set<(line: string) => void>();
@@ -699,13 +923,14 @@ export function createManagedClaudeMcpConfig(
   devEntryPath?: string,
   resolveRuntime: (devEntryPath?: string) => LetAgentsMcpRuntime = entry =>
     resolveLetAgentsMcpRuntime({ devEntryPath: entry, env: desktopRuntimeEnvironment() }),
+  roomServerEnvironment: Record<string, string> = {},
 ): Promise<{ path: string; dispose(): Promise<void> }> {
   const normalizedApiUrl = apiBaseUrl.trim();
   if (!normalizedApiUrl) {
     throw new Error("Claude's managed LetAgents endpoint is unavailable.");
   }
   return createEphemeralClaudeMcpConfig(
-    { LETAGENTS_API_URL: normalizedApiUrl },
+    { ...roomServerEnvironment, LETAGENTS_API_URL: normalizedApiUrl },
     resolveRuntime(devEntryPath),
     temporaryRoot,
   );
@@ -716,13 +941,23 @@ export function claudeSessionTranscriptCandidates(entries: string[], sessionId: 
   return entries.filter((entry) => entry.split(/[\\/]/).at(-1) === suffix);
 }
 
-async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidenceRecord[]> {
-  const projectsRoot = join(homedir(), ".claude", "projects");
+/**
+ * Where a Claude CLI started with this environment keeps its session
+ * transcripts: `CLAUDE_CONFIG_DIR` when it is set, otherwise `.claude` in its
+ * home directory, as Claude Code resolves it.
+ */
+export function claudeTranscriptsRoot(environment: NodeJS.ProcessEnv): string {
+  const configDir = environment.CLAUDE_CONFIG_DIR?.trim();
+  return configDir ? join(configDir, "projects") : join(environment.HOME?.trim() || homedir(), ".claude", "projects");
+}
+
+async function defaultReadSessionRows(sessionId: string, transcriptsRoot = claudeTranscriptsRoot(claudeCliEnv())): Promise<ClaudeEvidenceRecord[] | null> {
+  const projectsRoot = transcriptsRoot;
   let entries: string[];
   try {
     entries = await readdir(projectsRoot, { recursive: true });
   } catch {
-    return [];
+    return null;
   }
   const matches = claudeSessionTranscriptCandidates(entries, sessionId);
   if (matches.length > 1) {
@@ -730,7 +965,7 @@ async function defaultReadSessionRows(sessionId: string): Promise<ClaudeEvidence
       "Claude room-turn recovery found more than one transcript for the exact continuation.",
     );
   }
-  if (!matches[0]) return [];
+  if (!matches[0]) return null;
   const text = await readFile(join(projectsRoot, matches[0]), "utf8");
   return text.split(/\r?\n/).flatMap((line) => {
     const trimmed = line.trim();
@@ -750,8 +985,8 @@ const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
   readVersion: defaultReadVersion,
   launchChild: defaultLaunchChild,
   resolveCommitEnvironment: managedCommitEnvironmentFor,
-  createLetAgentsMcpConfig: req => createManagedClaudeMcpConfig(
-    req.supervisorWorkerSession?.apiUrl ?? desktopApiUrl, tmpdir(), req.devMcpServerEntryPath,
+  createLetAgentsMcpConfig: (req, roomServerEnvironment) => createManagedClaudeMcpConfig(
+    req.supervisorWorkerSession?.apiUrl ?? desktopApiUrl, tmpdir(), req.devMcpServerEntryPath, undefined, roomServerEnvironment,
   ),
   signalProcess: defaultSignalProcess,
   getProcessIdentity: defaultGetProcessIdentity,
@@ -761,6 +996,12 @@ const DEFAULT_DEPENDENCIES: ClaudeCodeProviderAdapterDependencies = {
 };
 
 class ClaudeProviderHandle implements ProviderHandle {
+  /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
+  launchNotices: readonly string[] = [];
+  /** The process was started with its owner's own Claude Code setup. */
+  ownerSetup = false;
+  /** Where this process writes its session transcripts, as its environment decides. */
+  transcriptsRoot: string | undefined;
   state: ProviderObservedState = "starting";
   stopRequested = false;
   protocolError = false;
@@ -1098,9 +1339,43 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (!terminal && handle.activeRoomTurnId === turnId) {
       terminal = await this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
     }
+    let cutOffByExit = false;
+    let providerErrorInSession = false;
     if (!terminal) {
-      const rows = await this.deps.readSessionRows(handle.providerContinuationId);
+      const rows = await this.deps.readSessionRows(handle.providerContinuationId, handle.transcriptsRoot);
+      // No transcript where the CLI writes it proves nothing about the turn:
+      // it is left for its owner, as before, rather than settled as cut off.
+      if (rows === null) {
+        throw new ClaudeRoomTurnRecoveryError("Claude room-turn recovery found no transcript for the conversation where the CLI keeps it.");
+      }
       terminal = recoverExactClaudeTurnFromSession(rows, turnId, handle.providerContinuationId);
+      // A turn that ended on a provider error has it in the session; that
+      // is how it ended, and its reason is the provider's.
+      if (!terminal) {
+        terminal = recoverExactClaudeTurnFailureFromSession(rows, turnId, handle.providerContinuationId);
+        providerErrorInSession = terminal !== null;
+      }
+      // The session holds no ending for this turn, and the process that ran
+      // it has ended: no ending will ever be written. The turn was cut off by
+      // that exit, and is reported as that instead of being waited for.
+      if (!terminal && request.originProcessEnded) {
+        cutOffByExit = true;
+        terminal = { turnId, nativeOutcome: "interrupted", error: PROCESS_ENDED_DURING_TURN };
+      }
+      // The process that ran this turn exited before it reported the turn's
+      // result, and this one is sent no result for a turn that ended before
+      // it started. The session's own record is then the only place the
+      // ending exists. The daemon says when its execution record still holds
+      // the turn open; the ending is recorded there too, or the turn would
+      // refuse every later turn of this agent.
+      if (terminal && request.recordEnding && nativeExecutionId(handle.providerContinuationId) && nativeExecutionId(turnId)) {
+        handle.execution.emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none",
+          providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
+          turnOutcome: "error" in terminal ? terminal.nativeOutcome ?? "failed"
+            : terminal.outcome === "unreadable" ? "unreadable" : "completed" },
+        handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined,
+        handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.pid ?? undefined : undefined);
+      }
     }
     if (!terminal) {
       throw new ClaudeRoomTurnRecoveryError(
@@ -1108,7 +1383,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       );
     }
 
-    const result = this.providerRoomTurnResult(handle, terminal);
+    // What was read is the session's own record of the turn, not a stream.
+    const result: ProviderRoomTurnResult = cutOffByExit
+      ? { turnId, providerContinuationId: handle.providerContinuationId, outcome: "interrupted", text: null, evidence: "transcript", error: PROCESS_ENDED_DURING_TURN }
+      : providerErrorInSession ? { ...this.providerRoomTurnResult(handle, terminal), evidence: "transcript" } as ProviderRoomTurnResult
+        : this.providerRoomTurnResult(handle, terminal);
     await options.checkpointTerminalResult?.(result);
     if (!("error" in terminal) || options.checkpointTerminalResult) handle.roomTurnResults.delete(turnId);
     return result;
@@ -1316,6 +1595,18 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.closePermission(handle, message.request_id);
       return;
     }
+    const unanswerable = unanswerableClaudeRequest(message.request);
+    if (unanswerable) {
+      try {
+        handle.child.writeLine(JSON.stringify({ type: "control_response", response: {
+          subtype: "success", request_id: message.request_id, response: unanswerable.response,
+        } }));
+      } catch { return; /* The CLI is gone; its exit is observed separately. */ }
+      // The owner sees in the agent's activity that something was turned down, and whose it was.
+      // The daemon builds an agent's activity from its stream, so that is where it is said.
+      this.publishStream(handle, "control_request/declined", {}, "provider_event", null, null, unanswerable.summary);
+      return;
+    }
     const request = message.request as ClaudeNativePermissionRequest["request"] | undefined;
     const turnId = handle.activeRoomTurnId;
     if (!request || request.agent_id != null || request.subtype !== "can_use_tool" || !turnId || handle.executionTurnId !== turnId
@@ -1382,33 +1673,13 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     const approvalProfileLabel = claudeApprovalProfileLabel(req.permissionProfileId);
     requireSupportedClaudeCodeVersion(versionOutput, approvalProfileLabel);
 
-    const policyArgs = claudeLaunchPolicyArgs(attestProviderSpawnPolicy("claude-code", req));
+    const homeHarness = spawnUsesHomeHarness("claude-code", req);
+    // With the owner's setup this is the access level's own options and nothing else the stored policy holds.
+    const attestedPolicy = attestProviderSpawnPolicy("claude-code", req);
+    const policyArgs = claudeLaunchPolicyArgs(attestedPolicy);
     // A workspace that would commit as the host's global Git identity commits
     // as the owner's GitHub noreply identity instead; rentals never get one.
     const commitEnvironment = await this.deps.resolveCommitEnvironment(req);
-    const managedMcpConfig = await this.deps.createLetAgentsMcpConfig(req);
-    // Use an explicit strict config so a repo-tracked .mcp.json cannot shadow
-    // the managed room workplace. The short-lived 0600 config lives outside
-    // the worktree, its path (never its credential) enters argv, and it is
-    // deleted as soon as Claude reports the initialized MCP workplace.
-    // The spike (msg_1382) proved both identity paths: a minted --session-id is
-    // honored verbatim on fresh spawns, and --resume continues the SAME session
-    // id. Either way the continuation is asserted against init below.
-    const expectedSessionId = resumeRef ? resumeRef.providerContinuationId : randomUUID();
-    const bootstrapTurnId = randomUUID();
-    const args = [
-      "--print",
-      "--verbose",
-      "--input-format", "stream-json",
-      "--output-format", "stream-json",
-      // Auto keeps the bridge: anything Claude declines to decide reaches the host.
-      ...(approvalProfileLabel ? ["--permission-prompt-tool", "stdio"] : []),
-      "--strict-mcp-config",
-      "--mcp-config", managedMcpConfig.path,
-      ...policyArgs,
-      ...(req.model ? ["--model", req.model] : []),
-      ...(resumeRef ? ["--resume", resumeRef.providerContinuationId] : ["--session-id", expectedSessionId]),
-    ];
     const supervisorEnv = req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId
       ? {
         LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId,
@@ -1428,10 +1699,43 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         ...(req.permissionProfileId ? { LETAGENTS_PERMISSION_PROFILE_ID: req.permissionProfileId } : {}),
       }
       : undefined;
-    const launchEnv = Object.keys(commitEnvironment).length ? { ...commitEnvironment, ...supervisorEnv } : supervisorEnv;
+    // Claude hands its own environment to every MCP server and hook it
+    // starts. With the owner's own setup on those include the owner's, so the
+    // coordinates go to the room's server alone, in its own configuration.
+    if (homeHarness && !supervisorEnv) {
+      throw new Error("Claude can use its owner's own setup only as a daemon-supervised room agent.");
+    }
+    const managedMcpConfig = homeHarness
+      ? await this.deps.createLetAgentsMcpConfig(req, supervisorEnv)
+      : await this.deps.createLetAgentsMcpConfig(req);
+    // Use an explicit strict config so a repo-tracked .mcp.json cannot shadow
+    // the managed room workplace. The short-lived 0600 config lives outside
+    // the worktree, its path (never its credential) enters argv, and it is
+    // deleted as soon as Claude reports the initialized MCP workplace.
+    // The spike (msg_1382) proved both identity paths: a minted --session-id is
+    // honored verbatim on fresh spawns, and --resume continues the SAME session
+    // id. Either way the continuation is asserted against init below.
+    const expectedSessionId = resumeRef ? resumeRef.providerContinuationId : randomUUID();
+    const bootstrapTurnId = randomUUID();
+    const ownerMcpStartupMs = homeHarness ? ownerMcpStartupTimeoutMs(this.deps.ownerMcpTimeout?.() ?? desktopRuntimeEnvironment().MCP_TIMEOUT) : 0;
+    const args = claudeCliLaunchArgs({
+      approvalProfileLabel,
+      homeHarness,
+      ...(homeHarness ? { ownerMcpStartupMs, cwd: req.cwd } : {}),
+      mcpConfigPath: managedMcpConfig.path,
+      policyArgs,
+      model: req.model,
+      session: resumeRef ? { resume: resumeRef.providerContinuationId } : { sessionId: expectedSessionId },
+    });
+    // With the owner's setup the CLI is told how to start their servers, and is not given the coordinates.
+    const launchEnv = homeHarness
+      ? { ...commitEnvironment, ...claudeOwnerSetupStartEnvironment(ownerMcpStartupMs, claudeOwnerSetupReadsProjectInstructionsOnly(policyArgs)) }
+      : Object.keys(commitEnvironment).length ? { ...commitEnvironment, ...supervisorEnv } : supervisorEnv;
     let child: ClaudeCliChild;
     try {
-      child = this.deps.launchChild({ claudeBin: this.claudeBin, args, cwd: req.cwd, env: launchEnv });
+      child = this.deps.launchChild({
+        claudeBin: this.claudeBin, args, cwd: req.cwd, env: launchEnv, ...(homeHarness ? { ownerSetup: true as const } : {}),
+      });
     } catch (error) {
       await managedMcpConfig.dispose();
       throw error;
@@ -1459,7 +1763,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
 
     let handle: ClaudeProviderHandle | null = null;
-    const startupBudgetMs = resumeRef ? this.resumeInitTimeoutMs : this.initTimeoutMs;
+    // The owner's servers get their own time to start on top of the launch's budget.
+    const startupBudgetMs = (resumeRef ? this.resumeInitTimeoutMs : this.initTimeoutMs) + ownerMcpStartupMs;
     const diagnostics = new ClaudeBootstrapDiagnostics(expectedSessionId, bootstrapTurnId, startupBudgetMs);
     const compaction = new ClaudeCompaction(expectedSessionId, startupBudgetMs,
       this.compactionTimeoutMs, this.deps.now, req.onProgress);
@@ -1510,7 +1815,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         initTimeout,
       ]);
       if (bootstrapFailure in observedInit) {
-        throw new ClaudeBootstrapError("init", observedInit[bootstrapFailure], diagnostics.summary(child, compaction.diagnosticFields()));
+        const failure = observedInit[bootstrapFailure];
+        // A start that ran out of time with the owner's setup on is most often waiting on something of the owner's.
+        const waitedOnOwnerSetup = homeHarness && failure.type !== "exit" && failure.type !== "error";
+        throw new ClaudeBootstrapError("init", failure, diagnostics.summary(child, compaction.diagnosticFields())
+          + (waitedOnOwnerSetup ? " This agent starts with your own Claude Code setup, so one of your MCP servers or hooks may be holding the start up." : ""));
       }
       if (approvalProfileLabel
         && (!Array.isArray(observedInit.capabilities) || !observedInit.capabilities.includes("msg_lifecycle_v1"))) {
@@ -1525,6 +1834,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       if (!hasReadyRoomWorkplace(observedInit)) {
         throw new Error(
           "LetAgents room tools did not connect to Claude; refusing to launch without the room workplace.",
+        );
+      }
+      if (homeHarness && !roomServerIsThisLaunchs(observedInit)) {
+        throw new Error(
+          "Claude did not report the room's LetAgents server as the one this launch started, so it will not run with your own setup. Update Claude Code, then try again.",
         );
       }
       const sessionId = sessionIdOf(observedInit);
@@ -1553,6 +1867,12 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         observeFencedExit(child, child.pid, processIdentity, child.exited, this.deps),
         this.deps.now,
       );
+      if (homeHarness) {
+        const unused = ownerSetupUnusedOptionsSaidOnce.whenChanged(req.supervisorEntryId, ownerSetupUnusedOptionsNotice("Claude Code", req.launchPolicy, attestedPolicy));
+        handle.launchNotices = [...ownerMcpServerNotices(observedInit), ...(unused ? [unused] : [])];
+      }
+      handle.ownerSetup = homeHarness;
+      handle.transcriptsRoot = claudeTranscriptsRoot(claudeChildEnvironment({ env: launchEnv, ...(homeHarness ? { ownerSetup: true as const } : {}) }));
       this.handles.set(req.workAttemptId, handle);
       this.handleCompactions.set(handle, compaction);
       const exitPromise = handle.exitEvidence.then((exit) => this.observeExit(handle!, exit));
@@ -1573,7 +1893,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         initTimeout,
       ]);
       if (bootstrapFailure in bootstrapTerminal) {
-        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure], diagnostics.summary(child, compaction.diagnosticFields()));
+        // Claude was up, so it has said which of the owner's servers did not start.
+        throw new ClaudeBootstrapError("bootstrap_turn", bootstrapTerminal[bootstrapFailure], diagnostics.summary(child, compaction.diagnosticFields())
+          + (handle.launchNotices.length ? ` ${handle.launchNotices.join(" ")}` : ""));
       }
       compaction.checkDeadline();
       if (compaction.failure) {
@@ -1597,6 +1919,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       unsubscribeCompactionDisconnect();
       if (handle) {
         handle.protocolError = true;
+        ownerSetupUnusedOptionsSaidOnce.forget(req.supervisorEntryId, handle.launchNotices);
       } else {
         unsubscribeLines();
       }
@@ -2069,6 +2392,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     kind: ProviderStreamEventKind,
     nativeEventId: string | null = null,
     nativeLifecyclePhase: "turn_active" | "turn_terminal" | null = null,
+    summary: string | null = null,
   ): void {
     const safe = safeStreamPayload(providerPayload);
     const event: ProviderStreamEvent = {
@@ -2081,6 +2405,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       method,
       ...(nativeEventId ? { nativeEventId } : {}),
       ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
+      ...(summary ? { summary } : {}),
       ...safe,
       durablePayloadRef: null,
     };

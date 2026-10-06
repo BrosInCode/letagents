@@ -59,6 +59,7 @@
                   <span class="state-pill" :data-state="group.key">
                     {{ group.key === "status_unavailable" ? "Status unavailable" : agent.overallLabel }}
                   </span>
+                  <span v-if="agent.entry.homeHarness" class="desktop-activity-mini-pill" :title="homeHarnessBadge(agent.provider, agent.entry.homeHarness).title" data-testid="desktop-activity-own-setup">{{ homeHarnessBadge(agent.provider, agent.entry.homeHarness).label }}</span>
                 </span>
               </button>
               <button
@@ -394,6 +395,7 @@ import {
   supervisedAgentInspectorRequest,
 } from "../../../domain/agent-inspector-identity";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
+import { homeHarnessBadge } from "../../../domain/agent-home-harness";
 import { isProjectedSupervisedActivityParticipant, supervisedActivityIdentity } from "../../../domain/room-agent-delivery";
 import {
   findLinkedPullRequest,

@@ -19,6 +19,7 @@ import {
   buildLetAgentsFocusRoomUrl,
   buildLetAgentsRoomCopyValue,
   buildLetAgentsRoomUrl,
+  resolveSameRoomMessageReference,
 } from "../src/domain/room-urls";
 import {
   isLocalGitRoom,
@@ -353,10 +354,10 @@ describe("desktop room shell helpers", () => {
         room: ref(roomInfo()), messages: ref([roomMessage({ id: "msg_20", text: "Latest" })]),
         githubEventsVisible: ref(false), playRoomSound: () => undefined, onMessageSent: () => undefined,
       });
-      assert.equal(await state.revealMessage("msg_1"), false);
+      assert.equal(await state.revealMessage("msg_1"), "unavailable");
       assert.equal(calls, 1);
       assert.equal(state.hasOlderMessages.value, true);
-      assert.equal(await state.revealMessage("msg_1"), false);
+      assert.equal(await state.revealMessage("msg_1"), "unavailable");
       assert.equal(calls, 2);
     });
   });
@@ -965,4 +966,127 @@ it("draft acceptance is revision guarded, room scoped, and invalidated by signou
   assert.equal(draft.text.value, "");
   assert.equal(draft.quote.value, null);
   clearDesktopMessageDrafts();
+});
+
+it("resolveSameRoomMessageReference pure decision matches same room and ignores other rooms", () => {
+  const currentRoom = "github.com/BrosInCode/letagents";
+  const same = "https://letagents.chat/in/github.com/BrosInCode/letagents?message=msg_42";
+  const other = "https://letagents.chat/in/focus_90?message=msg_42";
+  const nonMessage = "https://letagents.chat/in/github.com/BrosInCode/letagents";
+
+  assert.equal(resolveSameRoomMessageReference(same, currentRoom), "msg_42");
+  assert.equal(resolveSameRoomMessageReference(other, currentRoom), null);
+  assert.equal(resolveSameRoomMessageReference(nonMessage, currentRoom), null);
+  assert.equal(resolveSameRoomMessageReference("not-a-url", currentRoom), null);
+  assert.equal(resolveSameRoomMessageReference(null, currentRoom), null);
+  assert.equal(resolveSameRoomMessageReference(same, null), null);
+});
+
+it("revealMessage returns not_found when message does not exist", async () => {
+  await withWindowAsync({ letagentsDesktop: { room: {
+    async getMessage() { return null; },
+    async getMessagesBefore() { return { messages: [], hasOlder: false }; },
+  } } }, async () => {
+    const state = useDesktopRoomMessages({
+      room: ref(roomInfo()), messages: ref([roomMessage({ id: "msg_20", text: "Latest" })]),
+      githubEventsVisible: ref(false), playRoomSound: () => undefined, onMessageSent: () => undefined,
+    });
+    const outcome = await state.revealMessage("msg_999");
+    assert.equal(outcome, "not_found");
+  });
+});
+
+it("revealMessage continues with paging when getMessage throws offline error", async () => {
+  let getBeforeCalls = 0;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    async getMessage() { throw new Error("offline"); },
+    async getMessagesBefore() {
+      getBeforeCalls += 1;
+      return { messages: [roomMessage({ id: "msg_15", text: "Target message" })], hasOlder: false };
+    },
+  } } }, async () => {
+    const state = useDesktopRoomMessages({
+      room: ref(roomInfo()), messages: ref([roomMessage({ id: "msg_20", text: "Latest" })]),
+      githubEventsVisible: ref(false), playRoomSound: () => undefined, onMessageSent: () => undefined,
+    });
+    const outcome = await state.revealMessage("msg_15");
+    assert.equal(outcome, "revealed");
+    assert.equal(getBeforeCalls, 1);
+  });
+});
+
+
+it("revealMessage waits for the existing history page before deciding availability", async () => {
+  let completePage!: (page: { messages: DesktopRoomMessage[]; hasOlder: boolean }) => void;
+  let calls = 0;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    async getMessage() { return roomMessage({ id: "msg_15" }); },
+    getMessagesBefore() {
+      calls += 1;
+      return new Promise(resolve => { completePage = resolve; });
+    },
+  } } }, async () => {
+    const state = useDesktopRoomMessages({
+      room: ref(roomInfo()), messages: ref([roomMessage({ id: "msg_20" })]),
+      githubEventsVisible: ref(false), playRoomSound() {}, onMessageSent() {},
+    });
+    const page = state.loadOlderMessages();
+    let settled = false;
+    const reveal = state.revealMessage("msg_15").then(outcome => { settled = true; return outcome; });
+    await nextTick();
+    await Promise.resolve();
+    const settledDuringLoad = settled;
+    completePage({ messages: [roomMessage({ id: "msg_15" })], hasOlder: false });
+    await page;
+    assert.equal(await reveal, "revealed");
+    assert.equal(settledDuringLoad, false);
+    assert.equal(calls, 1);
+  });
+});
+
+it("revealMessage loads at most twenty older pages", async () => {
+  let calls = 0;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    async getMessage() { return roomMessage({ id: "msg_1" }); },
+    async getMessagesBefore() {
+      calls += 1;
+      return { messages: [roomMessage({ id: `msg_${100 - calls}` })], hasOlder: true };
+    },
+  } } }, async () => {
+    const state = useDesktopRoomMessages({
+      room: ref(roomInfo()), messages: ref([roomMessage({ id: "msg_100" })]),
+      githubEventsVisible: ref(false), playRoomSound() {}, onMessageSent() {},
+    });
+    assert.equal(await state.revealMessage("msg_1"), "too_far_back");
+    assert.equal(calls, 20);
+  });
+});
+
+it("a room change while reveal waits on history discards the old page", async () => {
+  let completePage!: (page: { messages: DesktopRoomMessage[]; hasOlder: boolean }) => void;
+  let calls = 0;
+  await withWindowAsync({ letagentsDesktop: { room: {
+    async getMessage() { return roomMessage({ id: "msg_15" }); },
+    getMessagesBefore() {
+      calls += 1;
+      return new Promise(resolve => { completePage = resolve; });
+    },
+  } } }, async () => {
+    const room = ref(roomInfo());
+    const messages = ref([roomMessage({ id: "msg_20" })]);
+    const state = useDesktopRoomMessages({
+      room, messages, githubEventsVisible: ref(false), playRoomSound() {}, onMessageSent() {},
+    });
+    const page = state.loadOlderMessages();
+    const reveal = state.revealMessage("msg_15");
+    await nextTick();
+    room.value = { ...roomInfo(), identifier: "another-room" };
+    messages.value = [roomMessage({ id: "msg_100" })];
+    await nextTick();
+    completePage({ messages: [roomMessage({ id: "msg_15" })], hasOlder: false });
+    await page;
+    assert.equal(await reveal, "unavailable");
+    assert.deepEqual(state.visibleMessages.value.map(message => message.id), ["msg_100"]);
+    assert.equal(calls, 1);
+  });
 });

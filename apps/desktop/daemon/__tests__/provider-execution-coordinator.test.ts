@@ -6,6 +6,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../shared/provider-acquisition-evidence.mjs";
 import { validatedNativeRuntimeDeath } from "../provider-action-port.js";
+import { advanceReconciliationState } from "../reconciler-state.js";
+import { RETIREMENT_SETTLEMENT_WAIT_MS } from "../provider-execution-coordinator.js";
+import { SupervisedAgentDelivery, SupervisedRoomAuthorizationError } from "../supervised-agent-delivery.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 
 import {
   ProviderExecutionCoordinator,
@@ -14,6 +18,7 @@ import {
 import type {
   ProviderActionHandle,
   ProviderActionPort,
+  ProviderActionRef,
   ProviderActionSpawn,
   ProviderActionTerminal,
 } from "../provider-action-port.js";
@@ -23,6 +28,7 @@ import type { BoundWorkerAuthorization, InstalledHostGrant } from "../worker-run
 import type { PollingActivationRecord } from "../custodial-polling-activation.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
+import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordinator.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -1111,6 +1117,420 @@ test("typed durable terminal authority fences a stale live handle without reopen
     "raw handle state cannot overwrite durable typed terminal authority");
 });
 
+function typedLaneHarness(input: {
+  handle: ProviderActionHandle;
+  provider?: DaemonManifestEntry["provider"];
+  port?: Partial<ProviderActionPort>;
+  /** A runtime born before typed lifecycle keeps the mode it was born with. */
+  authorityMode?: "typed" | "typed_shadow";
+}) {
+  const runtime = harness({
+    entry: {
+      ...baseEntry(),
+      provider: input.provider ?? "codex",
+      delivery_mode: "daemon_inbox" as const,
+      // No execution fact reported the failure: the entry still looks alive.
+      observed_state: "working" as const,
+      provider_ref: {
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        provider_continuation_id: "continuation-1",
+        provider_connection: input.handle.providerConnection,
+      },
+    },
+    frozenAuthorityMode: input.authorityMode ?? "typed",
+    provider: provider(input.port),
+    currentInstallation: () => {
+      const current = runtime.liveHandles.get("agent-1");
+      return current ? {
+        nonce: Symbol("installation"),
+        listenerLeaseNonce: Symbol("lease"),
+        entryId: "agent-1",
+        handle: current,
+        executionGenerationId: runtime.entry().provider_ref!.execution_generation_id,
+        workAttemptId: "attempt-1",
+        providerContinuationId: "continuation-1",
+        providerConnection: current.providerConnection!,
+        configurationRevision: 1,
+        authorityMode: input.authorityMode ?? "typed",
+      } : undefined;
+    },
+  });
+  runtime.liveHandles.set("agent-1", input.handle);
+  runtime.executionGenerations.push({
+    execution_generation_id: "generation-1",
+    work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z",
+    actor: "test",
+    generation: 1,
+    terminal: null,
+  });
+  return runtime;
+}
+
+test("a typed lane whose live handle reports failure is fenced even though no fact failed its entry", async () => {
+  for (const [provider, live] of [["codex", returnedHandle], ["claude-code", claudeHandle], ["open-model", openModelHandle]] as const) {
+    for (const observedState of ["failed", "stopped"] as const) {
+      let stopCalls = 0;
+      let deliveryStarts = 0;
+      const runtime = typedLaneHarness({
+        handle: { ...live, observedState },
+        provider,
+        port: { stop: async current => { stopCalls += 1; return terminal(current); } },
+      });
+      runtime.options.delivery.start = async () => { deliveryStarts += 1; };
+
+      await runtime.coordinator.converge("agent-1");
+
+      const label = `${provider} ${observedState}`;
+      assert.equal(stopCalls, 1, `${label}: the unusable runtime is stopped so the reconciler can replace it`);
+      assert.equal(deliveryStarts, 0, `${label}: delivery is not reopened on a runtime no turn can use`);
+      assert.equal(runtime.entry().observed_state, "working",
+        `${label}: the entry changes only when the exit is observed, as for any other terminal`);
+    }
+  }
+});
+
+function boundTypedLaneHarness(handle: ProviderActionHandle, authorityMode: "typed" | "typed_shadow" = "typed") {
+  let stopCalls = 0;
+  let mintCalls = 0;
+  let deliveryStarts = 0;
+  const runtime = typedLaneHarness({ handle, authorityMode, port: { stop: async current => { stopCalls += 1; return terminal(current); } } });
+  const grant: InstalledHostGrant = {
+    entryId: "agent-1", roomId: "room-1", agentKey: "owner/agent-1",
+    grantId: "grant-1", supervisorGrant: "supervisor-secret", grantGeneration: 1,
+    apiUrl: "https://letagents.test", daemonGeneration: 7, hostId: "host-1",
+    installationId: "installation-1", expiresAt: "2099-01-01T00:00:00.000Z",
+  };
+  // The agent's room binding is exact and its bearer is not due for rotation.
+  const binding: WorkerSessionBinding = {
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
+    execution_generation_id: "generation-1", agent_session_id: "session-1",
+    credential_ref: "bearer-id", api_url: grant.apiUrl, room_cursor: null,
+    last_sequence: 0, last_observed_at_ms: 0, updated_at: "2026-08-26T00:00:00.000Z",
+  };
+  runtime.options.bindings = {
+    get: async () => binding,
+    credentialFor: async () => "bearer-secret",
+    supervisedWorkerSession: async () => null,
+  };
+  runtime.options.host = {
+    ...runtime.options.host,
+    requiresGrant: () => true,
+    currentGrant: () => grant,
+    ensureGrantFresh: async () => grant,
+    bearerNeedsRotation: async () => false,
+    mintSession: async () => { mintCalls += 1; throw new Error("no session may be minted here"); },
+  };
+  runtime.options.delivery.start = async () => { deliveryStarts += 1; };
+  return { runtime, counts: () => ({ stopCalls, mintCalls, deliveryStarts }) };
+}
+
+test("convergence never mints a session for a bearer that is bound and not due for rotation", async () => {
+  // Whatever woke it: the room may have ended the session on purpose, and
+  // nothing here is allowed to mint the agent back in.
+  const refused = boundTypedLaneHarness({ ...returnedHandle, observedState: "idle" });
+  refused.runtime.options.delivery.roomRefusesAccess = () => true;
+  await refused.runtime.coordinator.converge("agent-1");
+  assert.deepEqual(refused.counts(), { stopCalls: 0, mintCalls: 0, deliveryStarts: 1 });
+
+  // Handed off by the heartbeat because the runtime ended: fenced, not minted.
+  const ended = boundTypedLaneHarness({ ...returnedHandle, observedState: "failed" });
+  await ended.runtime.coordinator.converge("agent-1");
+  assert.deepEqual(ended.counts(), { stopCalls: 1, mintCalls: 0, deliveryStarts: 0 });
+});
+
+test("while the room refuses the agent's bearer, a handle that ended without its entry ending is neither replaced nor minted for", async () => {
+  // What the daemon sees after a room admin disconnects the agent: its bearer
+  // is refused while its grant could still mint. The runtime then ends without
+  // a fact reaching its entry, which is the case this change newly recovers.
+  let roomRefuses = true;
+  const ended = boundTypedLaneHarness({ ...returnedHandle, observedState: "failed" });
+  ended.runtime.options.delivery.roomRefusesAccess = () => roomRefuses;
+  for (let pass = 0; pass < 3; pass += 1) await ended.runtime.coordinator.converge("agent-1");
+  assert.deepEqual(ended.counts(), { stopCalls: 0, mintCalls: 0, deliveryStarts: 0 },
+    "the ended runtime is left as it is: replacing it would mint the agent back into the room");
+  assert.equal(ended.runtime.liveHandles.size, 1);
+
+  // The room accepts the agent again (a bearer rotated on schedule, or the
+  // owner restarted it): the ended runtime is retired as usual.
+  roomRefuses = false;
+  await ended.runtime.coordinator.converge("agent-1");
+  assert.deepEqual(ended.counts(), { stopCalls: 1, mintCalls: 0, deliveryStarts: 0 });
+
+  // An entry that itself ended was retired before this change, refused or
+  // not. That is not this change's to alter.
+  const entryEnded = boundTypedLaneHarness({ ...returnedHandle, observedState: "failed" });
+  entryEnded.runtime.setEntry({ ...entryEnded.runtime.entry(), observed_state: "failed" });
+  entryEnded.runtime.options.delivery.roomRefusesAccess = () => true;
+  await entryEnded.runtime.coordinator.converge("agent-1");
+  assert.deepEqual(entryEnded.counts(), { stopCalls: 1, mintCalls: 0, deliveryStarts: 0 });
+
+  // So was the ended handle of a lane born before typed lifecycle.
+  const bornEarlier = boundTypedLaneHarness({ ...returnedHandle, observedState: "failed" }, "typed_shadow");
+  bornEarlier.runtime.options.delivery.roomRefusesAccess = () => true;
+  await bornEarlier.runtime.coordinator.converge("agent-1");
+  assert.deepEqual(bornEarlier.counts(), { stopCalls: 1, mintCalls: 0, deliveryStarts: 0 });
+});
+
+test("a runtime that ended while its room refused the agent is replaced in the one pass the end of the refusal asks for", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-refusal-ends-"));
+  const inbox = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const live = { ...returnedHandle, observedState: "idle" } as ProviderActionHandle & { observedState: ProviderActionHandle["observedState"] };
+  const lane = boundTypedLaneHarness(live);
+  let roomAccepts = false;
+  let polls = 0;
+  /** Each wake is one convergence pass, as the daemon wires it. */
+  const passes: Array<Promise<void>> = [];
+  const pause = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+  const delivery = new SupervisedAgentDelivery(inbox, provider(), {
+    poll: async ({ signal }) => {
+      polls += 1;
+      if (!roomAccepts) throw new SupervisedRoomAuthorizationError("Supervised room poll failed with HTTP 401.", 401);
+      await pause(5, signal);
+      return {};
+    },
+    publish: async () => { throw new Error("not used"); },
+  }, async () => true, 10, undefined, (_delayMs, signal) => pause(2, signal),
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  (agentId) => { passes.push(lane.runtime.coordinator.converge(agentId)); });
+  lane.runtime.options.delivery.roomRefusesAccess = (entryId) => delivery.roomRefusesAccess(entryId);
+  const until = async (check: () => boolean, label: string) => {
+    for (let waited = 0; !check(); waited += 5) {
+      assert.ok(waited < 3_000, label);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  };
+  try {
+    await inbox.bootstrapCursor({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "0" });
+    await delivery.start({
+      agentId: "agent-1", roomId: "room-1", provider: "codex", deliveryMode: "daemon_inbox", apiUrl: "https://letagents.test",
+      agentSessionId: "session-1", bearer: "bearer-secret", executionGenerationId: "generation-1", daemonGeneration: 7, handle: live,
+      workAttemptId: "attempt-1", providerContinuationId: "continuation-1", providerConnection: live.providerConnection ?? null,
+    });
+    await until(() => delivery.roomRefusesAccess("agent-1"), "the room refuses the agent");
+
+    // The runtime ends while the refusal stands. A heartbeat hand-off finds it held.
+    live.observedState = "failed";
+    await lane.runtime.coordinator.converge("agent-1");
+    assert.deepEqual(lane.counts(), { stopCalls: 0, mintCalls: 0, deliveryStarts: 0 });
+    assert.equal(passes.length, 0, "the refusal itself asked for nothing");
+
+    // The room accepts a poll again.
+    roomAccepts = true;
+    await until(() => passes.length > 0, "the end of the refusal wakes convergence");
+    await Promise.all(passes);
+    assert.deepEqual(lane.counts(), { stopCalls: 1, mintCalls: 0, deliveryStarts: 0 },
+      "that one pass retires the ended runtime; it does not wait for a later heartbeat");
+    const accepted = polls;
+    await until(() => polls >= accepted + 5, "the room keeps accepting polls");
+    assert.equal(passes.length, 1, "exactly one wake: the accepted polls that follow ask for nothing");
+  } finally {
+    await delivery.fenceAndDrain().catch(() => undefined);
+    await inbox.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** An inbox head: by default a message with a turn started and no result saved. */
+const inboxHead = (state: string, turn: { provider_turn_id: string | null; outcome: string | null } = { provider_turn_id: "turn-1", outcome: null }) =>
+  (async () => ({ state, source_message_id: "1", ...turn })) as unknown as ProviderExecutionCoordinatorOptions["inbox"]["head"];
+
+test("an ended runtime is retired only once its in-flight message is recorded, or its bounded wait has run out", async () => {
+  // A typed lane whose entry no fact told (`working`), one whose entry a fact
+  // did tell (`failed`), and a lane born before typed lifecycle, which takes
+  // its state from the handle. In each a stop now would land before the
+  // provider's result for the turn is saved.
+  for (const [authorityMode, entryState] of [["typed", "working"], ["typed", "failed"], ["typed_shadow", "working"]] as const) {
+    for (const ending of ["the turn is recorded", "the result never comes"] as const) {
+      const label = `${authorityMode} lane, ${entryState} entry, ${ending}`;
+      let nowMs = 10_000_000;
+      let stopCalls = 0;
+      let head = inboxHead("awaiting_result");
+      const delays: number[] = [];
+      const runtime = typedLaneHarness({
+        handle: { ...returnedHandle, observedState: "failed" },
+        port: { stop: async current => { stopCalls += 1; return terminal(current); } },
+        authorityMode,
+      });
+      runtime.setEntry({ ...runtime.entry(), observed_state: entryState });
+      const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+        nowMs: () => nowMs,
+        inbox: { ...runtime.options.inbox, head: (entryId) => head(entryId) },
+        setTimeout: ((_callback: () => void, delay: number) => { delays.push(delay); return { unref() {} }; }) as unknown as typeof setTimeout,
+        clearTimeout: (() => {}) as typeof clearTimeout,
+      });
+
+      await coordinator.converge("agent-1");
+      assert.equal(stopCalls, 0, `${label}: the runtime is left while its turn is not recorded`);
+      assert.deepEqual(delays, [RETIREMENT_SETTLEMENT_WAIT_MS], `${label}: convergence comes back when the wait runs out`);
+
+      // A pass inside the wait, as each heartbeat hand-off is, extends nothing.
+      nowMs += RETIREMENT_SETTLEMENT_WAIT_MS - 1;
+      await coordinator.converge("agent-1");
+      assert.equal(stopCalls, 0, `${label}: still inside the one wait`);
+
+      // Recorded: the failed message is settled and the next one is at the head.
+      if (ending === "the turn is recorded") head = inboxHead("pending", { provider_turn_id: null, outcome: null });
+      else nowMs += 1;
+      await coordinator.converge("agent-1");
+      assert.equal(stopCalls, 1, `${label}: the runtime is retired`);
+    }
+  }
+});
+
+test("only a message whose turn has no saved result holds an ended runtime", async () => {
+  const started = { provider_turn_id: "turn-1", outcome: null };
+  const untouched = { provider_turn_id: null, outcome: null };
+  for (const [label, head, held] of [
+    ["dispatching", inboxHead("dispatching", started), true],
+    ["dispatching, its turn id not saved yet", inboxHead("dispatching", untouched), true],
+    ["awaiting its result", inboxHead("awaiting_result", started), true],
+    ["recovering its result", inboxHead("result_recovery", started), true],
+    // A delivery lane torn down under its turn hands the started turn back.
+    ["pending with a started turn", inboxHead("pending", started), true],
+    ["pending, never started", inboxHead("pending", untouched), false],
+    ["pending with its result saved", inboxHead("pending", { provider_turn_id: "turn-1", outcome: "reply" }), false],
+    // Its result is saved; only the reply is still to be posted.
+    ["publishing", inboxHead("publishing", { provider_turn_id: "turn-1", outcome: "reply" }), false],
+    // Waiting for its owner, with nothing coming.
+    ["blocked with a started turn", inboxHead("blocked", started), false],
+    ["retryable", inboxHead("retryable", untouched), false],
+    ["an empty inbox", (async () => null) as ProviderExecutionCoordinatorOptions["inbox"]["head"], false],
+  ] as const) {
+    let stopCalls = 0;
+    const runtime = typedLaneHarness({
+      handle: { ...returnedHandle, observedState: "failed" },
+      port: { stop: async current => { stopCalls += 1; return terminal(current); } },
+    });
+    runtime.options.inbox.head = head;
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(stopCalls, held ? 0 : 1, label);
+  }
+});
+
+test("the wait for an ended runtime's turn belongs to that runtime, not to its agent", async () => {
+  let nowMs = 10_000_000;
+  let stopCalls = 0;
+  const runtime = typedLaneHarness({
+    handle: { ...returnedHandle, observedState: "failed" },
+    port: { stop: async current => { stopCalls += 1; return terminal(current); } },
+  });
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+    nowMs: () => nowMs,
+    inbox: { ...runtime.options.inbox, head: inboxHead("dispatching") },
+    setTimeout: (() => ({ unref() {} })) as unknown as typeof setTimeout,
+    clearTimeout: (() => {}) as typeof clearTimeout,
+  });
+  await coordinator.converge("agent-1");
+  nowMs += RETIREMENT_SETTLEMENT_WAIT_MS;
+  await coordinator.converge("agent-1");
+  assert.equal(stopCalls, 1, "the first runtime's wait ran out");
+
+  // Its replacement ends too, much later, again while holding a turn.
+  runtime.liveHandles.set("agent-1", { ...returnedHandle, observedState: "failed" });
+  nowMs += 10 * RETIREMENT_SETTLEMENT_WAIT_MS;
+  await coordinator.converge("agent-1");
+  assert.equal(stopCalls, 1, "it gets its own wait, not the one that already ran out");
+  nowMs += RETIREMENT_SETTLEMENT_WAIT_MS;
+  await coordinator.converge("agent-1");
+  assert.equal(stopCalls, 2, "and is retired when that one runs out");
+});
+
+test("a typed lane keeps a live handle that works, and Cursor's ended handle stays with its exit path", async () => {
+  for (const candidate of [
+    { name: "working Codex", provider: "codex" as const, handle: { ...returnedHandle, observedState: "working" as const } },
+    { name: "idle Codex", provider: "codex" as const, handle: { ...returnedHandle, observedState: "idle" as const } },
+    { name: "stopping Codex", provider: "codex" as const, handle: { ...returnedHandle, observedState: "stopping" as const } },
+    { name: "failed Cursor", provider: "cursor" as const, handle: {
+      ...returnedHandle, observedState: "failed" as const,
+      providerConnection: { kind: "cursor_cli" as const, pid: 4242, processIdentity: "birth-4242" },
+    } },
+  ]) {
+    let stopCalls = 0;
+    let deliveryStarts = 0;
+    const runtime = typedLaneHarness({
+      handle: candidate.handle,
+      provider: candidate.provider,
+      port: { stop: async current => { stopCalls += 1; return terminal(current); } },
+    });
+    runtime.options.delivery.start = async () => { deliveryStarts += 1; };
+
+    await runtime.coordinator.converge("agent-1");
+
+    assert.equal(stopCalls, 0, candidate.name);
+    assert.equal(deliveryStarts, 1, candidate.name);
+  }
+});
+
+// Coordinator rules only: this harness has no execution capture. With real
+// capture a replacement can stop earlier, visibly blocked on its readiness
+// evidence. A provider that merely refuses a turn never comes here at all;
+// its runtime does not end.
+test("a typed runtime that keeps ending is replaced once per ending, after its backoff, until the crash-loop limit", async () => {
+  let nowMs = 10_000_000;
+  let stopCalls = 0;
+  let launches = 0;
+  const birth = (n: number): ProviderActionHandle => ({
+    ...returnedHandle, pid: 5000 + n, observedState: "idle",
+    providerConnection: { kind: "codex_app_server", url: `http://127.0.0.1:${5000 + n}`, pid: 5000 + n, processIdentity: `birth-${5000 + n}` },
+  });
+  const launch = async () => { launches += 1; return birth(launches); };
+  const runtime = typedLaneHarness({
+    handle: birth(0),
+    port: {
+      capabilities: async () => ({ deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
+        transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+      attach: async () => null,
+      stop: async current => { stopCalls += 1; return terminal(current); },
+      resume: launch,
+      spawn: launch,
+    },
+  });
+  runtime.options.nowMs = () => nowMs;
+  runtime.setEntry({ ...runtime.entry(), observed_state: "idle" });
+
+  // Each round is one ended runtime: its handle reports failed with no fact
+  // reaching the entry, convergence fences it, and its exit is observed as a
+  // failed edge the same way the terminal coordinator records one.
+  for (let ending = 1; ending <= 5; ending += 1) {
+    const live = runtime.liveHandles.get("agent-1")!;
+    (live as { observedState: ProviderActionHandle["observedState"] }).observedState = "failed";
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(stopCalls, ending, "each failed runtime is stopped exactly once");
+    runtime.liveHandles.delete("agent-1");
+    for (const generation of runtime.executionGenerations) {
+      generation.terminal ??= runtime.options.terminalPayload(terminal(live), "test");
+    }
+    runtime.setEntry({ ...runtime.entry(), observed_state: "failed",
+      reconciliation: advanceReconciliationState(runtime.entry().reconciliation, "failed", nowMs) });
+
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(launches, ending - 1, "no replacement starts before the restart backoff elapses");
+
+    nowMs += 10_000;
+    await runtime.coordinator.converge("agent-1");
+    if (ending < 5) {
+      assert.equal(launches, ending, "one replacement per failed runtime");
+      assert.equal(runtime.liveHandles.get("agent-1")?.pid, 5000 + ending);
+      runtime.setEntry({ ...runtime.entry(), observed_state: "idle",
+        reconciliation: advanceReconciliationState(runtime.entry().reconciliation, "idle", nowMs) });
+    }
+  }
+
+  assert.equal(launches, 4, "the fifth failure inside the window starts nothing");
+  assert.equal(runtime.liveHandles.size, 0);
+  assert.equal(runtime.entry().observed_state, "failed");
+  assert.equal(runtime.entry().condition, "quarantined", "the owner sees a failed, quarantined agent");
+  nowMs += 60_000;
+  await runtime.coordinator.converge("agent-1");
+  assert.equal(launches, 4, "a quarantined agent is not restarted again");
+  assert.equal(stopCalls, 5);
+});
+
 test("handoff during native dispatch journals the exact returned provider without installing listeners", async () => {
   let runtime!: ReturnType<typeof harness>;
   const port = provider({
@@ -1419,6 +1839,32 @@ test("a live generation without an attachable handle re-checks with capped backo
   assert.equal(attaches, 7, "each timer really re-runs attach");
   assert.deepEqual(timers.map(timer => timer.delay), [60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000]);
   assert.equal(transitions, 1, "repeated checks of an unchanged state do not rewrite the manifest");
+});
+
+for (const desired of ["running", "paused"] as const) test(`while a ${desired} entry's exit is being settled, a pass neither attaches its exited runtime nor starts or stops anything`, async () => {
+  const runtime = ownedRecoveryHarness();
+  runtime.setEntry({ ...runtime.entry(), desired_state: desired, observed_state: "idle", condition: "none", last_error: null });
+  const calls: string[] = [];
+  runtime.options.provider.attach = async () => { calls.push("attach"); return returnedHandle; };
+  runtime.options.provider.resume = async () => { calls.push("resume"); return returnedHandle; };
+  runtime.options.provider.spawn = async () => { calls.push("spawn"); return returnedHandle; };
+  runtime.options.provider.stop = async (current) => { calls.push("stop"); return terminal(current); };
+  const transition = runtime.options.transition;
+  runtime.options.transition = async (...args) => { calls.push(`transition:${args[1]}`); return transition(...args); };
+  let settling = true;
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options, exitSettling: () => settling });
+
+  // The exit let go of the runtime; its generation has no terminal yet.
+  await coordinator.converge("agent-1");
+  assert.equal(await coordinator.attachLiveProvider(runtime.entry()), null, "nor does any other caller get the exited runtime");
+  assert.deepEqual(calls, [], "the settlement owns the entry until the exit is recorded");
+  assert.deepEqual(runtime.installed, []);
+  assert.equal(runtime.entry().observed_state, "idle");
+
+  // Once the exit is recorded the same pass acts as it always did.
+  settling = false;
+  await coordinator.converge("agent-1");
+  assert.equal(calls[0], "attach");
 });
 
 test("a sooner recovery replaces a pending later one and never the reverse", async () => {
@@ -1940,4 +2386,291 @@ test("a provider's launch notices are recorded in the agent's activity", async (
   assert.equal(notices.length, 1);
   assert.equal(notices[0]!.summary, "Plugin boundary not in effect: no git on the launch's PATH.");
   assert.equal(notices[0]!.method, "workspace_boundary");
+});
+
+test("an agent whose record stops under a running runtime, or was carried past a gap at its start, says so once in its activity", async () => {
+  const stopped = "LetAgents stopped recording this agent's activity: part of the record could not be kept. The agent keeps working, and its messages are not affected.";
+  const continued = "Part of this agent's activity record is missing; LetAgents continued with a new record.";
+  let installed: ProviderInstallationToken | undefined;
+  let archived: string[] = ["runtime-with-a-gap"];
+  const runtime = harness({
+    entry: { ...baseEntry(), provider: "open-model", delivery_mode: "daemon_inbox", source_repo_path: null },
+    workspaceIdentity: scratchWorkspaceIdentity,
+    provider: provider({ spawn: async () => openModelHandle }),
+    currentInstallation: () => installed,
+  });
+  const fences: unknown[] = [];
+  runtime.options.store.archiveExitedRuntimes = async (_agentId, commitFence) => { fences.push(commitFence); const now = archived; archived = []; return now; };
+  const notices = () => (runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice").map((event) => event.summary);
+  const settled = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+  runtime.coordinator.noteRecordStopped("agent-1");
+  await settled();
+  assert.deepEqual(notices(), [], "a record that stopped for a runtime that is gone is its replacement's to report");
+
+  // The daemon starts the agent: what its ended runtimes left unfinished is archived first, under the daemon's own fence.
+  await runtime.coordinator.converge("agent-1");
+  assert.deepEqual(fences, [runtime.options.authority.fenceCommit]);
+  assert.deepEqual(notices(), [continued]);
+
+  installed = { entryId: "agent-1" } as ProviderInstallationToken;
+  for (let report = 0; report < 3; report += 1) runtime.coordinator.noteRecordStopped("agent-1");
+  await settled();
+  assert.deepEqual(notices(), [continued, stopped], "however often the record reports it");
+  assert.equal(runtime.entry().observed_state === "failed" || runtime.entry().condition !== "none", false, "and nothing is asked of the owner");
+});
+
+test("a start goes ahead when the agent's ended runtimes cannot be archived, and says nothing when there was nothing to archive", async () => {
+  for (const archive of [async () => { throw new Error("the journal is busy"); }, async () => [] as string[]]) {
+    const runtime = harness({
+      entry: { ...baseEntry(), provider: "open-model", delivery_mode: "daemon_inbox", source_repo_path: null },
+      workspaceIdentity: scratchWorkspaceIdentity,
+      provider: provider({ spawn: async () => openModelHandle }),
+    });
+    runtime.options.store.archiveExitedRuntimes = archive;
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(runtime.installed.length, 1, "the agent is started");
+    assert.deepEqual((runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice"), []);
+  }
+});
+
+test("a launch carries the owner's own setup only for the owner's own agent, and never the stored key", async () => {
+  const stored = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, letagentsOwnerIsolation: false, letagentsOwnerIsolationChangedAt4: false };
+  const launch = async (entry: DaemonManifestEntry) => {
+    let request: ProviderActionSpawn | null = null;
+    // A process started with its owner's setup says so on its handle, as every provider's does.
+    const runtime = harness({ entry, provider: provider({ spawn: async (input) => {
+      request = input;
+      return input.homeHarness ? { ...returnedHandle, ownerSetup: true as const } : returnedHandle;
+    } }) });
+    await runtime.coordinator.converge(entry.id);
+    return request as ProviderActionSpawn | null;
+  };
+
+  // An agent the daemon delivers room messages to: the only kind that may have the owner's setup.
+  const delivered = (): DaemonManifestEntry => ({ ...baseEntry(), delivery_mode: "daemon_inbox" });
+  const off = await launch(delivered());
+  assert.ok(off);
+  assert.equal(Object.hasOwn(off, "homeHarness"), false, "an agent without it launches exactly as before");
+
+  const on = await launch({ ...delivered(), provider_launch_policy: stored });
+  assert.equal(on?.homeHarness, true);
+  assert.deepEqual(on?.launchPolicy, off.launchPolicy, "the provider's own policy never carries LetAgents' keys");
+
+  // An agent that collects its own room messages launches without it, whatever is stored: turning it off could not be enforced.
+  for (const deliveryMode of [undefined, "mcp_polling"] as const) {
+    const polling = await launch({ ...baseEntry(), ...(deliveryMode ? { delivery_mode: deliveryMode } : {}), provider_launch_policy: stored });
+    assert.ok(polling, "it still launches");
+    assert.equal(Object.hasOwn(polling, "homeHarness"), false, String(deliveryMode));
+    assert.deepEqual(polling.launchPolicy, (await launch(baseEntry()))!.launchPolicy);
+  }
+
+  // Only the exact stored form counts.
+  const unclear = await launch({ ...delivered(), provider_launch_policy: { ...stored, letagentsOwnerIsolation: true } });
+  assert.equal(Object.hasOwn(unclear!, "homeHarness"), false);
+  assert.deepEqual(unclear?.launchPolicy, off.launchPolicy);
+
+  // A rental is Cursor in a workspace-rooted profile. Whatever is stored, it launches without the owner's setup.
+  const rental = await launch({
+    ...baseEntry(), id: "supervised_rental_0123", provider: "cursor", permission_profile_id: "sandboxed_write",
+    provider_launch_policy: { force: true, sandbox: "enabled", letagentsOwnerIsolation: false },
+  });
+  assert.ok(rental, "the rental still launches");
+  assert.equal(Object.hasOwn(rental, "homeHarness"), false);
+  assert.deepEqual(rental.launchPolicy, { force: true, sandbox: "enabled" });
+});
+
+const OWNER_SETUP_NATIVE = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } };
+
+test("a launch is refused unless its handle says whether the process was started with the owner's setup", async () => {
+  const launched = async (policy: Record<string, unknown>, handle: ProviderActionHandle) => {
+    const runtime = harness({ entry: { ...baseEntry(), delivery_mode: "daemon_inbox", provider_launch_policy: policy },
+      provider: provider({ spawn: async () => handle }) });
+    return runtime.coordinator.converge("agent-1").then(() => runtime, (error: Error) => error);
+  };
+  const on = { ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: false, letagentsOwnerIsolationChangedAt1: false };
+  const refused = /Provider launch did not attest the complete configuration snapshot/;
+  // What ends the setup when its owner turns it off is the handle. A launch that hides it is not accepted.
+  assert.match(String(await launched(on, returnedHandle)), refused);
+  // Nor one that claims the setup for an agent that was started without it.
+  assert.match(String(await launched(OWNER_SETUP_NATIVE, { ...returnedHandle, ownerSetup: true })), refused);
+  for (const [policy, handle] of [[on, { ...returnedHandle, ownerSetup: true as const }], [OWNER_SETUP_NATIVE, returnedHandle]] as const) {
+    const runtime = await launched(policy, handle);
+    assert.ok(!(runtime instanceof Error), String(runtime));
+    assert.equal(runtime.installed.length, 1);
+  }
+});
+
+test("a reference to an agent's process says it was started with the owner's setup only when the daemon's own records do", async () => {
+  const attachedWith = async (entry: DaemonManifestEntry) => {
+    const current: DaemonManifestEntry = { ...entry, provider_ref: { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+      provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection } };
+    let seen: ProviderActionRef | null = null;
+    const runtime = harness({ entry: current, provider: provider({ attach: async (ref) => { seen = ref; return null; } }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
+    await runtime.coordinator.attachLiveProvider(current);
+    assert.ok(seen, "the provider was asked to attach");
+    // The same record goes on every reference the coordinator builds, a stop's included,
+    // and on the one a runtime recovery attaches with.
+    assert.equal(runtime.coordinator.providerRef(current).ownerSetup, (seen as ProviderActionRef).ownerSetup);
+    assert.equal(recoveryProviderRef(current).ownerSetup, (seen as ProviderActionRef).ownerSetup);
+    assert.deepEqual(Object.keys(recoveryProviderRef(current)).sort(),
+      ["provider", "providerConnection", "providerContinuationId", "workAttemptId", ...((seen as ProviderActionRef).ownerSetup ? ["ownerSetup"] : [])].sort());
+    return seen as ProviderActionRef;
+  };
+  // The process last started at revision 4.
+  const delivered = (policy: unknown, overrides: Partial<DaemonManifestEntry> = {}): DaemonManifestEntry =>
+    ({ ...baseEntry(), delivery_mode: "daemon_inbox", runtime_configuration_revision: 4, provider_launch_policy: policy, ...overrides });
+  const on = { letagentsOwnerIsolation: false };
+  const changed = (...revisions: number[]) => Object.fromEntries(revisions.map((revision) => [`letagentsOwnerIsolationChangedAt${revision}`, false]));
+
+  // An agent that never had the setup: its reference is the one every agent had before, with no such key.
+  const never = await attachedWith(delivered(OWNER_SETUP_NATIVE));
+  assert.equal(Object.hasOwn(never, "ownerSetup"), false);
+  assert.deepEqual(Object.keys(never).sort(), ["launchPolicy", "lifecycleAuthorityMode", "provider", "providerConnection", "providerContinuationId", "workAttemptId"]);
+
+  // Started with it and still on, or turned off since and not restarted yet: the process has it.
+  for (const [name, policy] of [
+    ["on since before it started", { ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }],
+    ["on, with no record of the change left", { ...OWNER_SETUP_NATIVE, ...on }],
+    ["turned off after it started", { ...OWNER_SETUP_NATIVE, ...changed(5) }],
+    ["off and on again after it started", { ...OWNER_SETUP_NATIVE, ...on, ...changed(5, 6) }],
+  ] as const) {
+    const ref = await attachedWith(delivered(policy));
+    assert.equal(ref.ownerSetup, true, name);
+    assert.deepEqual({ ...ref, ownerSetup: undefined }, { ...never, ownerSetup: undefined }, `${name}: nothing else about the reference differs`);
+  }
+
+  // Not started with it, whatever is saved now.
+  for (const [name, entry] of [
+    ["turned on after it started", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(5) })],
+    ["on and off again after it started", delivered({ ...OWNER_SETUP_NATIVE, ...changed(5, 6) })],
+    ["turned off before it started", delivered({ ...OWNER_SETUP_NATIVE, ...changed(3) })],
+    // A start whose revision was never recorded is older than every change.
+    ["a start with no recorded revision", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(2) }, { runtime_configuration_revision: undefined })],
+    // An agent that may not have the setup never has it, whatever is stored.
+    ["an agent that collects its own messages", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }, { delivery_mode: "mcp_polling" })],
+    ["an agent with no delivery recorded", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }, { delivery_mode: undefined })],
+    ["a rented agent", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }, { id: "supervised_rental_0123" })],
+    // A stored value that is not the exact one is not read as on, here or at a launch.
+    ["a true", delivered({ ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: true })],
+    ["a string", delivered({ ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: "false" })],
+    ["a null", delivered({ ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: null })],
+    ["a zero", delivered({ ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: 0 })],
+  ] as const) {
+    assert.equal(Object.hasOwn(await attachedWith(entry), "ownerSetup"), false, name);
+  }
+});
+
+test("a reference built from a stored policy that cannot be read says so, for a re-attach and for a recovery alike", () => {
+  const runtime = harness();
+  for (const unreadable of ["not a policy", ["not", "a", "policy"], 7]) {
+    const current: DaemonManifestEntry = { ...baseEntry(), delivery_mode: "daemon_inbox", runtime_configuration_revision: 4, provider_launch_policy: unreadable,
+      provider_ref: { work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+        provider_connection: returnedHandle.providerConnection } };
+    assert.equal(runtime.coordinator.providerRef(current).ownerSetup, "unknown", JSON.stringify(unreadable));
+    assert.equal(recoveryProviderRef(current).ownerSetup, "unknown", JSON.stringify(unreadable));
+  }
+});
+
+test("a pause stops the agent's process, and the agent is marked paused only once that process has ended or is proven gone", async () => {
+  const paused = (attach: ProviderActionPort["attach"]) => {
+    const current: DaemonManifestEntry = { ...baseEntry(), desired_state: "paused", observed_state: "idle", delivery_mode: "daemon_inbox",
+      provider_ref: { work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
+        provider_connection: returnedHandle.providerConnection } };
+    const stops: ProviderActionHandle[] = [];
+    const runtime = harness({ entry: current, provider: provider({ attach, stop: async (handle) => { stops.push(handle); return terminal(handle); } }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
+    return { runtime, stops };
+  };
+  // The daemon holds no process, as after a restart. The process is still there: it is re-attached and stopped.
+  // Its exit is what marks the agent paused, so until then it is only stopping.
+  const alive = paused(async () => returnedHandle);
+  await alive.runtime.coordinator.converge("agent-1");
+  assert.equal(alive.stops.length, 1);
+  assert.equal(alive.runtime.entry().observed_state, "stopping");
+  // The provider proves the process gone: its end is recorded, and then the agent is paused.
+  const gone = paused(async () => ({ state: "terminal", terminal: { endedAt: "2026-08-26T00:00:03.000Z", exitCode: null, signal: null,
+    terminalCause: "crashed", providerContinuationId: "continuation-1" } }));
+  await gone.runtime.coordinator.converge("agent-1");
+  assert.equal(gone.runtime.entry().observed_state, "paused");
+  assert.equal(gone.runtime.terminalWrites.length, 1);
+  // The provider cannot tell: the agent is not marked paused at all.
+  const unsure = paused(async () => { throw new Error("attach is ambiguous; the recorded process identity cannot be verified."); });
+  await assert.rejects(unsure.runtime.coordinator.converge("agent-1"), /ambiguous/);
+  assert.equal(unsure.runtime.entry().observed_state, "idle");
+  // The one route with no proof: nothing the provider could attach to. The agent is marked paused with no
+  // recorded end, which is why the roster asks for that record before it treats a paused agent's process as gone.
+  const unattachable = paused(async () => null);
+  await unattachable.runtime.coordinator.converge("agent-1");
+  assert.equal(unattachable.runtime.entry().observed_state, "paused");
+  assert.deepEqual([unattachable.stops.length, unattachable.runtime.terminalWrites.length], [0, 0]);
+});
+
+test("a stored choice that cannot be read starts the agent without the owner's setup, as its re-attach assumes", async () => {
+  // The re-attach of such an agent is the plain one (see the test above). That is only right because
+  // a launch from the same record gives the agent no setup either.
+  for (const unreadable of [true, "false", null, 0, {}, []]) {
+    let request: ProviderActionSpawn | null = null;
+    const runtime = harness({
+      entry: { ...baseEntry(), delivery_mode: "daemon_inbox", provider_launch_policy: { ...OWNER_SETUP_NATIVE, letagentsOwnerIsolation: unreadable } },
+      provider: provider({ spawn: async (input) => { request = input; return returnedHandle; } }),
+    });
+    await runtime.coordinator.converge("agent-1");
+    assert.ok(request, JSON.stringify(unreadable));
+    assert.equal(Object.hasOwn(request, "homeHarness"), false, JSON.stringify(unreadable));
+    assert.deepEqual((request as ProviderActionSpawn).launchPolicy, OWNER_SETUP_NATIVE, JSON.stringify(unreadable));
+  }
+});
+
+test("while an agent is still to be replaced the scheduler converges again after the wait it is given, and tells the owner what it is told to", async () => {
+  const runtime = harness({ entry: { ...baseEntry(), delivery_mode: "daemon_inbox" } });
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  const answers: Array<void | { retryAfterMs: number; notice?: string }> = [
+    { retryAfterMs: 1_000 },
+    { retryAfterMs: 2_000, notice: "Still waiting to restart this agent so it stops running with your own setup." },
+    undefined,
+  ];
+  let refreshes = 0;
+  const failures: unknown[] = [];
+  const coordinator = new ProviderExecutionCoordinator({ ...runtime.options,
+    refreshManagedRuntime: async () => { refreshes += 1; return answers.shift(); },
+    recordSchedulerFailure: async (_entryId, error) => { failures.push(error); },
+    setTimeout: ((callback: () => void, delay: number) => { timers.push({ callback, delay }); return { unref() {} }; }) as unknown as typeof setTimeout,
+    clearTimeout: (() => {}) as typeof clearTimeout,
+  });
+  const notices = () => (runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice").map((event) => event.summary);
+
+  coordinator.request("agent-1");
+  await coordinator.drainConvergence();
+  assert.deepEqual(timers.map((timer) => timer.delay), [1_000], "one wake-up, after the wait it was given");
+  assert.deepEqual(notices(), []);
+
+  // Nothing else happens until that wake-up: it is what converges again.
+  timers.shift()!.callback();
+  await coordinator.drainConvergence();
+  assert.equal(refreshes, 2);
+  assert.deepEqual(timers.map((timer) => timer.delay), [2_000]);
+  assert.deepEqual(notices(), ["Still waiting to restart this agent so it stops running with your own setup."]);
+
+  // Replaced: no further wake-up is set.
+  timers.shift()!.callback();
+  await coordinator.drainConvergence();
+  assert.equal(refreshes, 3);
+  assert.deepEqual(timers, []);
+  assert.deepEqual(failures, []);
+
+  // A replacement that fails outright is the agent's error, recorded as every scheduler failure is.
+  const failed = new Error("LetAgents could not restart this agent to stop it running with your own setup, so its messages are waiting.");
+  const failing = new ProviderExecutionCoordinator({ ...runtime.options,
+    refreshManagedRuntime: async () => { throw failed; },
+    recordSchedulerFailure: async (_entryId, error) => { failures.push(error); },
+    setTimeout: ((callback: () => void, delay: number) => { timers.push({ callback, delay }); return { unref() {} }; }) as unknown as typeof setTimeout,
+  });
+  failing.request("agent-1");
+  await failing.drainConvergence();
+  assert.deepEqual(failures, [failed]);
+  assert.deepEqual(timers, [], "and it is not tried again behind the owner's back");
 });

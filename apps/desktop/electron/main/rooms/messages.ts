@@ -484,10 +484,17 @@ export async function getDesktopRoomMessage(
     storage,
     trimmedRoomIdentifier,
   );
-  const response = await apiFetch<{ message?: RoomMessagePayload | null }>(
-    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}`,
-  );
-  return response.message ? mapRoomMessagePayload(response.message) : null;
+  try {
+    const response = await apiFetch<{ message?: RoomMessagePayload | null }>(
+      `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}`,
+    );
+    return response.message ? mapRoomMessagePayload(response.message) : null;
+  } catch (error) {
+    if (error instanceof DesktopApiError && error.status === 404) {
+      return null;
+    }
+    throw error;
+  }
 }
 
 export async function getDesktopRoomLatestMessages(

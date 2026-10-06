@@ -7,9 +7,12 @@ import {
   bindingMatchesRoomAgentGeneration,
   hasExactRoomAgentDeliveryOwner,
   projectRoomAgentManifestEntry,
+  RECORD_RESTART_PENDING_DETAIL,
   type RoomAgentStateProjectionInput,
 } from "../room-agent-state-projection.js";
 import type { SupervisedInboxReceiptWithTimeline } from "../supervised-agent-inbox-store.js";
+import { DaemonReadModel } from "../daemon-read-model.js";
+import type { ProviderActionHandle } from "../provider-action-port.js";
 import type { DaemonManifestEntry } from "../types.js";
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 
@@ -244,6 +247,41 @@ test("typed admission gates the room view without rewriting lifecycle or claimin
       entry: { ...recovering, desired_state }, lifecycleAdmission: "unavailable",
     }));
     assert.equal(inactive.condition, "none", "an inactive agent does not inherit a live admission blocker");
+  }
+});
+
+test("a record the daemon is about to get past by itself is progress; one it could not get past needs the owner, with the reason", () => {
+  const idle = { ...entry, observed_state: "idle" as const };
+  // No word on a restart: the long-standing blocker, as before.
+  const unexplained = projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission: "unavailable" }));
+  assert.equal(unexplained.condition, "coordination_blocked");
+  assert.match(unexplained.last_error ?? "", /readiness evidence is unavailable/);
+
+  const restarting = projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission: "unavailable", recordRecovery: null }));
+  assert.equal(restarting.condition, "none", "the daemon is going to restart the agent: nothing for the owner to do");
+  assert.equal(restarting.last_error ?? null, idle.last_error ?? null);
+  assert.equal(restarting.room_agent_state?.inbox.state, "queued", "its messages wait; they are not blocked");
+  assert.equal(restarting.room_agent_state?.connection.state, "reconnecting");
+  assert.equal(restarting.room_agent_state?.ingress.state, "starting");
+  assert.equal(restarting.room_agent_state?.inbox.detail, RECORD_RESTART_PENDING_DETAIL);
+  assert.equal(agentInspectorOverallState(mapEntry(restarting)), "reconnecting");
+  assert.equal(hasExactRoomAgentDeliveryOwner(facts({ entry: idle, lifecycleAdmission: "unavailable", recordRecovery: null })), false,
+    "delivery is still not admitted");
+
+  const reason = "Part of this agent's activity record is missing, and restarting the agent did not get past it. Messages wait until you use Restart and resume in Diagnostics.";
+  const waiting = projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission: "unavailable", recordRecovery: reason }));
+  assert.equal(waiting.condition, "coordination_blocked");
+  assert.equal(waiting.last_error, reason);
+  assert.equal(waiting.room_agent_state?.inbox.state, "blocked");
+  assert.equal(waiting.room_agent_state?.inbox.detail, reason);
+  assert.equal(agentInspectorOverallState(mapEntry(waiting)), "needs_attention");
+  const inspector = projectAgentInspector(mapEntry({ ...waiting, runtime_generation_id: "exact-runtime" }), { roomId: entry.room_id })!;
+  assert.equal(inspector.actions.find(action => action.kind === "recovery_options")?.available, true, "with the manual recovery actions");
+
+  // The word on a restart never overrides an admission that is not blocked.
+  for (const lifecycleAdmission of ["pending", "ready"] as const) {
+    assert.deepEqual(projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission, recordRecovery: reason })),
+      projectRoomAgentManifestEntry(facts({ entry: idle, lifecycleAdmission })));
   }
 });
 
@@ -553,4 +591,116 @@ test("committed and failed continuation repairs are ignored", () => {
     assert.equal(projected.room_agent_state?.turn.state, "failed", `${phase} repair does not override the turn`);
     assert.equal(projected.delivery_receipts?.[0]?.state, "blocked", `${phase} repair does not relabel the receipt`);
   }
+});
+
+/** The read model over fixed facts: one agent, its binding, its queue, and what the daemon holds and has recorded. */
+function readModel(input: {
+  nowMs: number; receipts?: SupervisedInboxReceiptWithTimeline[]; held?: ProviderActionHandle | null;
+  /** The recorded end of the agent's process, a failing read of it, or none recorded. */
+  ended?: boolean | "unreadable";
+  /** The agent's room credential is missing, so delivery could not run whatever its setup. */
+  noCredential?: boolean;
+}) {
+  let durabilityReads = 0;
+  const model = new DaemonReadModel({
+    currentDaemonGeneration: () => 1, nowMs: () => input.nowMs, startedAt: "2026-08-26T00:00:00.000Z",
+    capabilities: { hasDelivery: () => true, supportsRoomTurns: () => true, supportsContinuationRepair: () => false },
+    recoveryDiagnostics: () => { throw new Error("unused"); }, deliveryAdmission: () => null,
+    manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null },
+    bindings: { credentialFor: async () => input.noCredential ? null : "bearer", get: async () => binding, list: async () => [binding] },
+    inbox: { detail: async () => { throw new Error("unused"); }, latestContinuationRepair: async () => null,
+      ingressHealth: async () => ({ room_id: "room_1", state: "observing", detail: null, execution_generation_id: "generation_1" }),
+      receiptProjection: async () => (input.receipts ?? []) as never },
+    durability: { getAttempt: async () => {
+      durabilityReads += 1;
+      if (input.ended === "unreadable") throw new Error("the attempt could not be read");
+      return { execution_generations: [{ execution_generation_id: "generation_1", terminal: input.ended ? { ended_at: "2026-08-26T00:02:00.000Z" } : null }] } as never;
+    } },
+    workerAuthority: { currentHostGrant: () => ({}) as never, pollingContract: async () => null },
+    liveHandles: new Map(input.held ? [[entry.id, input.held]] : []), delivery: null,
+  });
+  return { model, durabilityReads: () => durabilityReads };
+}
+// The owner's own setup, as it is stored: on is an exact false, and each change is a key named for its revision.
+const ownerSetupOn = { letagentsOwnerIsolation: false };
+const ownerSetupChangedAt = (...revisions: number[]) => Object.fromEntries(revisions.map((revision) => [`letagentsOwnerIsolationChangedAt${revision}`, false]));
+/** The process the daemon holds, started at the given configuration revision. */
+const heldSince = (revision: number): ProviderActionHandle => ({ workAttemptId: "attempt_1", pid: 41, providerContinuationId: "continuation_1",
+  observedState: "idle", appliedConfigurationRevision: revision });
+const WAITING_SINCE = Date.parse("2026-08-26T00:01:00.000Z");
+
+test("an agent that cannot be restarted to end the owner's setup needs attention once a message has waited for it, and no longer once it is replaced", async () => {
+  // Turned off at revision 5. The idle process started at revision 4, with the setup, and two messages wait for its successor.
+  const ending: DaemonManifestEntry = { ...entry, observed_state: "idle", provider_launch_policy: ownerSetupChangedAt(5), runtime_configuration_revision: 4 };
+  const queue = [receipt(), receipt({ inbox_item_id: "inbox_2", source_message_id: "message_2", fifo_sequence: 2 })];
+  const at = async (seconds: number, agent: DaemonManifestEntry = ending, input: Partial<Parameters<typeof readModel>[0]> = {}) =>
+    readModel({ nowMs: WAITING_SINCE + seconds * 1_000, receipts: queue, held: heldSince(4), ...input }).model.entryWithDerivedLiveness(agent);
+
+  // While the daemon's own retries are still young nothing is said: a restart normally takes a moment.
+  const young = await at(29);
+  assert.equal(young.home_harness, "until_restart");
+  assert.equal(young.condition, "none");
+  assert.notEqual(agentInspectorOverallState(mapEntry(young)), "needs_attention");
+
+  // After that the agent is shown as any stuck agent is, with what is happening, what to do, and how much is waiting.
+  const stuck = await at(30);
+  assert.equal(stuck.condition, "coordination_blocked");
+  assert.equal(stuck.last_error, "This agent could not be restarted yet to turn your own setup off, so it is not taking messages. LetAgents keeps trying. "
+    + "Pause and resume this agent to finish now; 2 messages are waiting.");
+  assert.equal(agentInspectorOverallState(mapEntry(stuck)), "needs_attention", "which is what puts it in the Inbox as a stuck agent");
+  assert.equal(projectAgentInspector(mapEntry(stuck), { roomId: "room_1" })?.now?.summary, stuck.last_error);
+  // It is the same state however often and however much later it is read: nothing is raised a second time.
+  assert.deepEqual([(await at(31)).last_error, (await at(3_600)).last_error], [stuck.last_error, stuck.last_error]);
+  assert.match((await at(60, ending, { receipts: [queue[0]!] })).last_error!, /; 1 message is waiting\.$/);
+  // Nothing is stored for it: the entry the daemon keeps is untouched.
+  assert.equal(ending.condition, "none");
+
+  // Only that agent, and only while a message really waits on the restart.
+  for (const [name, agent, input] of [
+    ["its turn is still running", { ...ending, observed_state: "working" }, {}],
+    ["its owner paused it", { ...ending, desired_state: "paused" }, {}],
+    ["nothing is waiting", ending, { receipts: [] }],
+    // Delivery is held for another reason, which is the one that is shown.
+    ["its room access is missing", ending, { noCredential: true }],
+    ["the setup is still on", { ...ending, provider_launch_policy: { ...ownerSetupOn, ...ownerSetupChangedAt(4) } }, {}],
+    ["it never had the setup", { ...ending, provider_launch_policy: {} }, {}],
+    ["it was turned on and off again before any restart", { ...ending, provider_launch_policy: ownerSetupChangedAt(5, 6) }, {}],
+  ] as const) {
+    const view = await at(3_600, agent as DaemonManifestEntry, input);
+    assert.equal(view.condition, "none", name);
+    assert.equal(view.last_error ?? null, null, name);
+  }
+  // An agent that already needs attention for another reason keeps that reason.
+  const other = await at(3_600, { ...ending, condition: "auth_blocked", last_error: "Sign in again." });
+  assert.deepEqual([other.condition, other.last_error], ["auth_blocked", "Sign in again."]);
+
+  // The replacement succeeds: its successor started at revision 5, without the setup, and the state is gone with no one clearing it.
+  const replaced = await at(3_600, { ...ending, runtime_configuration_revision: 5 }, { held: heldSince(5) });
+  assert.equal(replaced.home_harness, undefined);
+  assert.equal(replaced.condition, "none");
+  assert.equal(replaced.last_error ?? null, null);
+  assert.notEqual(agentInspectorOverallState(mapEntry(replaced)), "needs_attention");
+});
+
+test("a paused agent is shown with the owner's setup until the end of its process is recorded", async () => {
+  // Turned off at revision 5 while the process from revision 4 ran. The agent is paused and the daemon holds no process.
+  const paused: DaemonManifestEntry = { ...entry, desired_state: "paused", observed_state: "paused",
+    provider_launch_policy: ownerSetupChangedAt(5), runtime_configuration_revision: 4 };
+  const shown = async (agent: DaemonManifestEntry, input: Partial<Parameters<typeof readModel>[0]>) => {
+    const subject = readModel({ nowMs: WAITING_SINCE, ...input });
+    return { state: (await subject.model.entryWithDerivedLiveness(agent)).home_harness, reads: subject.durabilityReads() };
+  };
+  // A pause ends the process and the daemon records that end: then nothing has the setup any more.
+  assert.deepEqual(await shown(paused, { ended: true }), { state: undefined, reads: 1 });
+  // Marked paused with no recorded end, or an end that cannot be read: the process may still be there, and it is shown so.
+  assert.deepEqual(await shown(paused, { ended: false }), { state: "until_restart", reads: 1 });
+  assert.deepEqual(await shown(paused, { ended: "unreadable" }), { state: "until_restart", reads: 1 });
+  // While the daemon still holds the process, as it does until the pause has stopped it, that process is what is shown.
+  assert.deepEqual(await shown(paused, { ended: true, held: heldSince(4) }), { state: "until_restart", reads: 0 });
+  // Saved on: the recorded end leaves the saved choice, and a process that may still run without it is "pending".
+  const on = { ...paused, provider_launch_policy: { ...ownerSetupOn, ...ownerSetupChangedAt(5) } };
+  assert.deepEqual(await shown(on, { ended: true }), { state: "on", reads: 1 });
+  assert.deepEqual(await shown(on, { ended: false }), { state: "after_restart", reads: 1 });
+  // An agent that never had the setup costs no read at all, paused or not.
+  assert.deepEqual(await shown({ ...paused, provider_launch_policy: {} }, { ended: false }), { state: undefined, reads: 0 });
 });

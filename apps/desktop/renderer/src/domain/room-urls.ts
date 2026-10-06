@@ -1,16 +1,20 @@
-export const LETAGENTS_ROOM_ORIGIN = "https://letagents.chat";
+export {
+  LETAGENTS_ROOM_ORIGIN,
+  MESSAGE_ID_PATTERN,
+  isValidMessageId,
+  encodeRoomPathIdentifier,
+  decodeRoomPath,
+  isLocalRoomIdentifier,
+  buildLetAgentsMessageUrl,
+  parseLetAgentsMessageUrl,
+  resolveSameRoomMessageReference,
+} from "../../../../../shared/room-message-urls.mjs";
 
-export function encodeRoomPathIdentifier(identifier: string): string {
-  return String(identifier)
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-}
-
-export function isLocalRoomIdentifier(identifier: string | null | undefined): boolean {
-  const value = identifier?.trim() || "";
-  return /^local[_-]/i.test(value) || /^git-room:local:/i.test(value);
-}
+import {
+  LETAGENTS_ROOM_ORIGIN,
+  encodeRoomPathIdentifier,
+  isLocalRoomIdentifier,
+} from "../../../../../shared/room-message-urls.mjs";
 
 export function buildLetAgentsRoomUrl(
   identifier: string | null | undefined,

@@ -5,6 +5,7 @@ import {
 import type { WorkDurabilityStore } from "./durability-store.js";
 import { executionRuntimeStorageIdentity } from "./execution-shadow-store.js";
 import type { ProviderActionHandle } from "./provider-action-port.js";
+import { homeHarnessRosterState } from "./provider-configuration.js";
 import type { ProviderRecoveryDiagnostics } from "./provider-stream-coordinator.js";
 import type { LifecycleCaptureAdmissionStatus } from "./lifecycle-projection-ledger.js";
 import {
@@ -26,6 +27,9 @@ import type {
   WorkerSessionBinding,
 } from "./worker-binding-store.js";
 
+/** As long as the retries take before the agent's activity says it is still waiting (1 + 2 + 4 + 8 + 16 s). */
+const OWNER_SETUP_END_ATTENTION_AFTER_MS = 30_000;
+
 export type DaemonReadModelPorts = {
   compactionProgress?(entry: DaemonManifestEntry): DaemonManifestEntryView["provider_progress"];
   currentDaemonGeneration(): number;
@@ -38,6 +42,12 @@ export type DaemonReadModelPorts = {
   };
   recoveryDiagnostics(): ProviderRecoveryDiagnostics;
   deliveryAdmission(entry: DaemonManifestEntry): LifecycleCaptureAdmissionStatus | null;
+  /**
+   * For an entry whose delivery is held because its execution record cannot
+   * be continued: null while the daemon is still going to restart the agent
+   * by itself, or why it now waits for its owner. Undefined otherwise.
+   */
+  recordRecovery?(entry: DaemonManifestEntry): string | null | undefined;
   manifest: {
     pendingRuntimeRecovery(agentId: string): Promise<import("./runtime-recovery-journal.js").RuntimeRecoveryRecord | null>;
     load(): Promise<{ entries: DaemonManifestEntry[] }>;
@@ -161,6 +171,7 @@ export class DaemonReadModel {
       credentialAvailable: Boolean(credential),
       liveHandle: liveHandle ?? null,
       lifecycleAdmission: this.ports.deliveryAdmission(entry),
+      recordRecovery: this.ports.recordRecovery?.(entry),
     };
     const activeTurn = hasExactRoomAgentDeliveryOwner(authorityFacts)
       && binding
@@ -196,7 +207,27 @@ export class DaemonReadModel {
     });
     const pollingContract = await this.ports.workerAuthority.pollingContract(entry);
     const recovery = await this.ports.manifest.pendingRuntimeRecovery(entry.id);
+    let homeHarness = homeHarnessRosterState(entry, liveHandle ? { startedAtRevision: liveHandle.appliedConfigurationRevision } : null);
+    // A paused agent keeps the reference to its process for its conversation.
+    // Its process is gone once the daemon has recorded its end, and not before.
+    if (homeHarness && !liveHandle && entry.observed_state === "paused" && await this.processEnded(entry)) {
+      homeHarness = homeHarnessRosterState({ ...entry, provider_ref: undefined }, null);
+    }
+    // The owner turned their setup off, the process that still has it is idle
+    // and could not be replaced, and a message has been waiting for that. The
+    // daemon keeps trying; meanwhile the agent is shown as needing attention,
+    // as any stuck agent is. Nothing is stored, so it ends with the wait.
+    // A queue that delivery could otherwise take from: the agent is meant to run and has its room access.
+    const held = homeHarness === "until_restart" && entry.observed_state === "idle"
+      && projected.condition === "none" && projected.room_agent_state?.inbox.state === "queued"
+      ? receipts.find((receipt) => receipt.state === "pending") : undefined;
+    const waiting = projected.room_agent_state?.inbox.pending_count ?? 0;
     return { ...projected,
+      ...(held && projectionNowMs - Date.parse(held.updated_at) >= OWNER_SETUP_END_ATTENTION_AFTER_MS ? {
+        condition: "coordination_blocked" as const,
+        last_error: `This agent could not be restarted yet to turn your own setup off, so it is not taking messages. LetAgents keeps trying. `
+          + `Pause and resume this agent to finish now; ${waiting} message${waiting === 1 ? " is" : "s are"} waiting.`,
+      } : {}),
       provider_progress: entry.desired_state === "running" && entry.condition === "none"
         && !["stopped", "failed", "stopping"].includes(entry.observed_state)
         ? this.ports.compactionProgress?.(entry) ?? null : null,
@@ -204,7 +235,20 @@ export class DaemonReadModel {
       runtime_recovery: recovery ? { operationId: recovery.operation_id, roomId: recovery.room_id,
         executionGenerationId: recovery.execution_generation_id, runtimeGenerationId: recovery.runtime_generation_id,
         mode: recovery.mode, phase: recovery.phase as "prepared" | "stopped" } : null,
-      ...(pollingContract ? { polling_contract: pollingContract } : {}) };
+      ...(pollingContract ? { polling_contract: pollingContract } : {}),
+      ...(homeHarness ? { home_harness: homeHarness } : {}) };
+  }
+
+  /** Whether the daemon has recorded the end of the process this entry refers to. Not known counts as not ended. */
+  private async processEnded(entry: DaemonManifestEntry): Promise<boolean> {
+    const ref = entry.provider_ref;
+    if (!ref) return true;
+    try {
+      return Boolean((await this.ports.durability.getAttempt(ref.work_attempt_id)).execution_generations
+        .find((generation) => generation.execution_generation_id === ref.execution_generation_id)?.terminal);
+    } catch {
+      return false;
+    }
   }
 
   async attempt(entryId: string) {

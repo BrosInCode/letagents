@@ -21,6 +21,7 @@ export function createRoomMessageActions() {
     replyTo?: string | null,
     attachments: OutgoingMessageAttachment[] = [],
     threadRootId?: string | null,
+    onSent?: (messageId: string) => void,
   ): Promise<boolean> {
     if (!room.value) return false
     lastSendError.value = ''
@@ -51,7 +52,10 @@ export function createRoomMessageActions() {
         method: 'POST',
         body: JSON.stringify(body),
       })
-      if (msg?.id && isVisibleRoomMessage(msg)) appendRoomMessage(msg)
+      if (msg?.id && isVisibleRoomMessage(msg)) {
+        onSent?.(msg.id)
+        appendRoomMessage(msg)
+      }
       return true
     } catch (error) {
       const message = error instanceof Error ? error.message.trim() : ''

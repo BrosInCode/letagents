@@ -99,7 +99,8 @@
           @archive-room="archiveSidebarRoom"
           @archive-focus-room="archiveSidebarFocusRoom"
           @conclude-focus-room="openSidebarFocusRoomConclusion"
-          @mark-room-read="markRoomEntryRead"
+          @mark-room-read="entry => markRoomEntryRead(entry, true)"
+          @mark-room-unread="entry => roomUnread.mark(entry.roomIdentifier, latestMessageIdForEntry(entry) || '')"
           @pin-room="togglePinSidebarRoom"
           @rename-room="renameSidebarRoom"
           @start-selection="startSidebarRoomSelection"
@@ -201,7 +202,7 @@
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
-          :attention-count="(needsYouData?.rooms.find(room => room.roomIdentifier === selectedRoomInfo.identifier)?.records.filter(record => !record.response).length ?? 0) + agentAttentionCountForRoom(selectedRoomInfo.identifier)"
+          :attention="roomAttention"
           @open-inbox="openNeedsYou(selectedRoomInfo.identifier)"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
@@ -379,8 +380,13 @@
 </template>
 
 <script setup lang="ts">
+import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { invalidateRoomWakeRules } from "./composables/useRoomWakeRules";
+import { invalidateRoomMessageLinkPreviews, setMessageLinkPreviewViewer } from "./composables/useRoomMessageLinkPreviews";
+import { invalidateRoomMessagePins, setMessagePinViewer } from "./composables/useRoomMessagePins";
+import { receiveRoomTyping, setTypingAccount } from "./composables/useRoomTyping";
+import { invalidateRoomMessageReactions, setMessageReactionViewer } from "./composables/useRoomMessageReactions";
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -439,6 +445,7 @@ import {
   useDesktopAccountRoomSettings,
   type SidebarRoomBatchMutationResult,
 } from "./composables/useDesktopAccountRoomSettings";
+import { provideAgentRoomAudience } from "./composables/useAgentRoomAudience";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { clearDesktopMessageOutbox } from "./domain/message-outbox";
@@ -496,14 +503,17 @@ import {
   streamedLatestMessage,
 } from "./domain/account-activity";
 import type { AttentionNavigationIntent } from "./components/desktop/content/room-shell/types";
+import { setReminderAccount, refreshMessageReminders } from "./composables/useMessageReminders";
 import InboxView from "./components/desktop/content/InboxView.vue";
 import type { InboxSection } from "./components/desktop/content/room-inbox/universal";
 import type { DesktopRentalRequest } from "../../electron/ipc-types.js";
 import { useNeedsYou, useNeedsYouRoomActivity } from "./composables/useNeedsYou";
+import { useNeedsYouSignal } from "./composables/useNeedsYouSignal";
 import { useAgentAttention } from "./composables/useAgentAttention";
 import { resetHostApprovals } from "./components/desktop/content/room-chat/host-approvals";
 import { useInboxRoomFilter } from "./composables/useInboxRoomFilter";
 import { desktopIpc } from "./ipc/index.js";
+import { roomNotificationPreferences } from "./composables/useRoomNotificationPreferences";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
@@ -519,6 +529,10 @@ const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
 watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
   setDesktopMessageDraftAccount, { immediate: true, flush: "sync" });
+watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null,
+  (account) => { setMessageReactionViewer(account); setMessagePinViewer(account); setMessageLinkPreviewViewer(account); roomUnread.account.value = account?.id ?? null; }, { immediate: true, flush: "sync" });
+watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id ?? null : null,
+  (account) => { setTypingAccount(account); setReminderAccount(account); }, { immediate: true, flush: "sync" });
 const sessionGeneration = ref(0);
 const authDialogOpen = ref(false);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
@@ -577,7 +591,7 @@ function openMessages(id?: string) { openConversationId.value = typeof id === 's
 const inboxSection = ref<InboxSection>('needs-you');
 const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
 useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
-const { items: agentAttentionItems, countForRoom: agentAttentionCountForRoom, refreshApprovals: refreshAgentApprovals } = useAgentAttention(needsYouData);
+const { items: agentAttentionItems, refreshApprovals: refreshAgentApprovals, approvalsReady } = useAgentAttention(needsYouData);
 const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length);
 const attentionIntent = ref<AttentionNavigationIntent | null>(null);
 let needsYouInterval: number | null = null;
@@ -603,7 +617,7 @@ const inboxStorageKey = computed(() => String(authStatus.value?.account?.id ?? '
 const { rooms: inboxRooms, open: openInboxRooms, choose: chooseInboxRooms, reload: reloadInboxRooms, prune: pruneInboxRooms } = useInboxRoomFilter(() => inboxStorageKey.value);
 watch(needsYouData, pruneInboxRooms);
 function openNeedsYou(room?: string) { openInboxRooms(room); inboxSection.value = 'needs-you'; activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
-async function refreshNeedsYou() { await Promise.all([loadNeedsYou(activeEntry.value.type === 'inbox'), refreshRentalRequestCount()]); await refreshAgentApprovals(); }
+async function refreshNeedsYou() { await Promise.all([loadNeedsYou(activeEntry.value.type === 'inbox'), refreshRentalRequestCount(), activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await refreshAgentApprovals(); }
 const rentMarketplaceRole = ref<"renter" | "provider">("renter");
 const openAddAgentAfterRepoPick = ref(false);
 const notificationRevealMessageId = ref<string | null>(null);
@@ -662,6 +676,19 @@ const {
   selectedRootRoomIdentifier,
   selectedSnapshot,
 });
+
+const roomAttention = useNeedsYouSignal(needsYouData, agentAttentionItems, {
+  ready: () => approvalsReady.value,
+  account: () => inboxStorageKey.value,
+  activeRoom: () => activeEntry.value.type === "room" && !selectedNeedsAccess.value ? selectedRoomInfo.value.identifier : null,
+  inboxRooms: () => activeEntry.value.type === "inbox" && inboxSection.value === "needs-you" ? inboxRooms.value : null,
+});
+
+watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null, (account) => {
+  roomNotificationPreferences.setViewer(account ? { id: account.id, login: account.login } : null);
+  void roomNotificationPreferences.refreshAll();
+  if (selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(selectedRoomIdentifier.value);
+}, { immediate: true, flush: "sync" });
 
 let unsubscribeRoomStream: (() => void) | null = null;
 let unsubscribeOpenSettings: (() => void) | null = null;
@@ -726,6 +753,7 @@ const selectedRoomWithProjectContext = computed(() => {
   );
   return roomWithInheritedProjectContext(room, parentRoom, isListedChild);
 });
+provideAgentRoomAudience(() => selectedRoomWithProjectContext.value, () => selectedSnapshot.value?.participants ?? [], () => [authStatus.value?.account?.login, authStatus.value?.account?.displayName]);
 
 const selectedGitRoomMatchesActiveRepo = computed(() => {
   const gitRoom = selectedRoomWithProjectContext.value.gitRoom;
@@ -1013,6 +1041,7 @@ function handleRepoStatusChanged(nextStatus: RepoStatus): void {
 
 function refreshForegroundData(): void {
   if (!authStatus.value?.authenticated || authSessionLocked.value) return;
+  if (activeEntry.value.type === "inbox") void refreshMessageReminders();
   // The main-process Git watcher retains invalidations while hidden and drains
   // them on BrowserWindow focus/show. Avoid racing it with a second full status
   // reconstruction from the renderer.
@@ -1092,6 +1121,8 @@ function handleVisibilityChange(): void {
 
 function handleWindowFocus(): void {
   refreshForegroundData();
+  void roomNotificationPreferences.refreshAll();
+  if (selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(selectedRoomIdentifier.value);
 }
 
 async function refreshSidebarLatestMessages(): Promise<void> {
@@ -1144,6 +1175,9 @@ function sidebarRoomIdentifiers(): string[] {
   return [...identifiers];
 }
 
+watch(() => activeEntry.value.type === "room" ? selectedRoomIdentifier.value : null,
+  roomUnread.enter, { immediate: true, flush: "sync" });
+
 function withRoomUnreadState(entry: RoomEntry): RoomEntry {
   const latestMessageId = latestMessageIdForEntry(entry);
   return {
@@ -1151,7 +1185,7 @@ function withRoomUnreadState(entry: RoomEntry): RoomEntry {
     activity: sidebarActivityFor(accountActivity.index.value, entry.roomIdentifier),
     latestMessageId,
     latestMessageAt: latestMessageAtForEntry(entry),
-    hasUnread: hasUnreadRoomActivity({
+    hasUnread: Boolean(roomUnread.get(entry.roomIdentifier)) || hasUnreadRoomActivity({
       activeRoomIdentifier: selectedRoomIdentifier.value,
       latestMessageId,
       readMarkers: readRoomMessageIds.value,
@@ -1320,7 +1354,11 @@ function markActiveRoomRead(): void {
   markRoomEntryRead(activeEntry.value);
 }
 
-function markRoomEntryRead(entry: RoomEntry): void {
+function markRoomEntryRead(entry: RoomEntry, explicit = false): void {
+  if (explicit) {
+    const bookmark = roomUnread.get(entry.roomIdentifier);
+    if (bookmark) roomUnread.clear(entry.roomIdentifier, bookmark.revision);
+  }
   const result = markRoomRead(readRoomMessageIds.value, entry.roomIdentifier, latestMessageIdForEntry(entry));
   if (!result.changed) return;
   readRoomMessageIds.value = result.readMarkers;
@@ -1415,11 +1453,18 @@ const {
 });
 
 function handleDesktopRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+  if (event.type === "typing") { receiveRoomTyping(event.roomIdentifier, event.signal); return; }
+  if (event.type === "open" || event.type === "error" || event.type === "session_disconnect") receiveRoomTyping(event.roomIdentifier);
+  if (["open", "github_event", "artifact_update"].includes(event.type)) invalidateRoomMessageLinkPreviews(event.roomIdentifier);
   if (event.type === "resource_invalidation") {
     if (event.resource === "wake_rules") invalidateRoomWakeRules(event.roomIdentifier);
+    else if (event.resource === "message_pins") invalidateRoomMessagePins(event.roomIdentifier);
+    else if (event.resource === "message_reactions") invalidateRoomMessageReactions(event.roomIdentifier);
     else invalidateSelectedRoomAgentWork(event.roomIdentifier);
     return;
   }
+  // A stream that just (re)connected may have missed a reaction or pin change.
+  if (event.type === "open") { invalidateRoomMessageReactions(event.roomIdentifier); invalidateRoomMessagePins(event.roomIdentifier); }
   handleRoomStreamEvent(event);
 }
 
@@ -1599,7 +1644,7 @@ async function handleSidebarBatchAction(action: SidebarRoomBatchActionId): Promi
   if (!resolution.targets.length) return;
 
   if (action === "mark-read") {
-    resolution.targets.forEach(markRoomEntryRead);
+    resolution.targets.forEach(entry => markRoomEntryRead(entry, true));
     pushActionToast(
       `${resolution.targets.length} ${resolution.targets.length === 1 ? "room" : "rooms"} marked as read.`,
       "success",
@@ -2359,8 +2404,14 @@ function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): void {
   void syncSelectedRoomStream(snapshot.roomIdentifier);
 }
 
-function handleRoomMessageRevealUnavailable(_messageId: string): void {
-  pushActionToast("That earlier message is not available in the loaded room history.", "info");
+function handleRoomMessageRevealUnavailable(_messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"): void {
+  if (reason === "not_found") {
+    pushActionToast("That message is not available.", "info");
+  } else if (reason === "too_far_back") {
+    pushActionToast("That message is too far back to open here yet.", "info");
+  } else {
+    pushActionToast("That earlier message is not available in the loaded room history.", "info");
+  }
 }
 
 function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): void {

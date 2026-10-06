@@ -10,12 +10,14 @@ import type {
 } from "../main/agents/codex-app-server.js";
 import {
   CodexProviderAdapter,
+  COMMAND_OUTPUT_WINDOW_MS,
   codexMcpWorkplaceConfigOverrides,
   type CodexPermissionObservation,
   type CodexAdapterRpc,
   type CodexProviderAdapterDependencies,
 } from "../main/agents/codex-provider-adapter.js";
 import { CodexRpcClient, type RpcNotification, type RpcServerRequest } from "../main/agents/codex-rpc-client.js";
+import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../../shared/codex-owner-isolation.mjs";
 import {
   CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE,
   writeCodexSupervisorBridgeContext,
@@ -63,6 +65,8 @@ class FakeRpc implements CodexAdapterRpc {
   connected = false;
   closed = false;
   turnStatus: string | { status?: string } = "completed";
+  /** What `thread/read` reports. A real app-server leaves `systemError` after a failed turn until the thread's next turn. */
+  threadStatus: "idle" | "active" | "systemError" = "idle";
   permissionChanges = [{ path: "/repo/file.ts", kind: { type: "add" as const }, diff: "+file" }];
   private threadStartCount = 0;
   private readonly missingThreadReads = new Map<string, number>();
@@ -86,6 +90,8 @@ class FakeRpc implements CodexAdapterRpc {
       threadReadTimesOut: boolean;
       threadReadUnmaterialized: boolean;
       reviewerFromOwnSettings: string | null;
+      /** The folder a new thread reports: where its app-server was launched, unless a test says otherwise. */
+      threadDirectory: string | null;
     },
   ) {
     this.reviewerFromOwnSettings = options.reviewerFromOwnSettings;
@@ -130,6 +136,7 @@ class FakeRpc implements CodexAdapterRpc {
             : `${this.threadId}-replacement-${this.threadStartCount - 1}`,
         },
         approvalsReviewer: this.appliedReviewer(params),
+        ...(this.options.threadDirectory === null ? {} : { cwd: this.options.threadDirectory }),
       } as T;
     }
     if (method === "thread/resume") {
@@ -180,7 +187,7 @@ class FakeRpc implements CodexAdapterRpc {
       return {
         thread: {
           id: requestedThreadId,
-          status: { type: "idle" },
+          status: { type: this.threadStatus },
           turns: [{
             id: `turn-${requestedThreadId}`,
             status: this.turnStatus,
@@ -205,6 +212,11 @@ class FakeRpc implements CodexAdapterRpc {
     this.permissionListeners.add(listener);
     return () => { this.permissionListeners.delete(listener); };
   }
+  readonly requestListeners = new Set<(request: RpcServerRequest) => void>();
+  onRequest(listener: (request: RpcServerRequest) => void): () => void {
+    this.requestListeners.add(listener);
+    return () => { this.requestListeners.delete(listener); };
+  }
   private permissionsChanged(): void {
     queueMicrotask(() => { for (const listener of this.permissionListeners) listener(); });
   }
@@ -213,6 +225,8 @@ class FakeRpc implements CodexAdapterRpc {
     const request = Object.freeze({ id, method, params: Object.freeze(structuredClone(params)), connectionId: this.currentConnectionId()! });
     this.pendingPermissions.set(id, request);
     this.permissionsChanged();
+    // Like the real client: told at arrival, before the pending set's observers.
+    for (const listener of this.requestListeners) listener(request);
     return request;
   }
   respond(request: RpcServerRequest, result: unknown): void {
@@ -271,8 +285,16 @@ function createHarness(options: {
   identityUnavailableAtLaunch?: boolean;
   processIdentity?: string;
   exitOnSignal?: boolean;
+  /** With `exitOnSignal`, the process exits this long after its signal instead of in the same tick. */
+  exitAfterMs?: number;
   /** Set when the app-server ignores the requested reviewer and reports this one. */
   reviewerFromOwnSettings?: string;
+  /** The folder new threads report instead of the launch folder; null reports none. */
+  threadDirectory?: string | null;
+  /** The running process's command line cannot be read, as when `ps` does not answer in time. */
+  processUnreadable?: boolean;
+  /** The running process's command line carries every isolation override, whatever it was started with. */
+  commandLineClaimsIsolation?: boolean;
 } = {}) {
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
@@ -280,8 +302,13 @@ function createHarness(options: {
   const launchOptions: Array<{
     serverUrl: string;
     codexBin: string;
-    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string> };
+    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean };
   }> = [];
+  /** Each time a running process with the owner's setup was checked against its project, and what the check answers. */
+  const liveChecks: Array<{ commandLine: string; cwd: string | null }> = [];
+  /** Each time a running process's command line was read. */
+  const commandLineReads: number[] = [];
+  const project: { changed: string | null } = { changed: null };
   const supervisorBridgeContexts: Array<{
     cwd: string;
     context: Parameters<CodexProviderAdapterDependencies["writeSupervisorBridgeContext"]>[1];
@@ -316,8 +343,10 @@ function createHarness(options: {
       return { pid: launch.pid, exited: launch.exited };
     },
     waitForServer: async () => true,
-    createRpcClient: (_serverUrl, notify) => {
+    createRpcClient: (serverUrl, notify) => {
       const client = new FakeRpc(`thread-${nextThread++}`, notify, {
+        threadDirectory: options.threadDirectory !== undefined ? options.threadDirectory
+          : launchOptions.find((entry) => entry.serverUrl === serverUrl)?.options.trustedProjectPath ?? null,
         resumeSupported: options.resumeSupported ?? true,
         placeholderResumeIsFatal: options.placeholderResumeIsFatal ?? false,
         workplacePresent: options.workplacePresent ?? true,
@@ -334,7 +363,8 @@ function createHarness(options: {
       signals.push({ pid, signal });
       if (options.exitOnSignal) {
         const launch = launches.find((entry) => entry.pid === pid && entry.alive);
-        launch?.resolveExit({ type: "exit", code: null, signal });
+        if (options.exitAfterMs === undefined) launch?.resolveExit({ type: "exit", code: null, signal });
+        else setTimeout(() => { if (launch?.alive) launch.resolveExit({ type: "exit", code: null, signal }); }, options.exitAfterMs);
       }
     },
     getProcessIdentity: (pid) => identityObservable
@@ -347,6 +377,18 @@ function createHarness(options: {
         return { type: "exit", code: null, signal: null };
       }
       return launch.exited;
+    },
+    // A running process is read as it was launched: with the isolation overrides unless it kept the owner's setup.
+    readCommandLine: async (pid) => {
+      commandLineReads.push(pid);
+      const launch = launchOptions[launches.findIndex((entry) => entry.pid === pid)];
+      if (!launch || options.processUnreadable) return null;
+      const isolated = launch.options.homeHarness !== true || options.commandLineClaimsIsolation === true;
+      return `codex app-server ${isolated ? CODEX_OWNER_FEATURE_OVERRIDES.map((override) => `-c ${override}`).join(" ") : ""} --listen ${launch.serverUrl}`;
+    },
+    assertLiveProjectUnchanged: async (_codexBin, live) => {
+      liveChecks.push(live);
+      if (project.changed) throw new Error(project.changed);
     },
     writeSupervisorBridgeContext: async (cwd, context) => {
       supervisorBridgeContexts.push({ cwd, context });
@@ -364,6 +406,10 @@ function createHarness(options: {
     supervisorBridgeContexts,
     sleeps,
     mcpRuntimeProbes,
+    liveChecks,
+    commandLineReads,
+    /** The project now adds something the running process was not started with turned off. */
+    changeProject: (refusal: string) => { project.changed = refusal; },
     setIdentityObservable: (observable: boolean) => { identityObservable = observable; },
   };
 }
@@ -1074,7 +1120,7 @@ test("Codex adapter launches app-server, maps attested thread policy, and boots 
   assert.equal(threadParams.approvalPolicy, policy.approvalPolicy);
   assert.equal(threadParams.sandbox, "danger-full-access");
   assert.equal(Object.hasOwn(threadParams, "sandboxPolicy"), false);
-  assert.equal(threadParams.cwd, "/tmp/letagents-work-attempt");
+  assert.equal(Object.hasOwn(threadParams, "cwd"), false, "a thread started in a named folder makes Codex trust the project");
   assert.equal(
     harness.clients[0]!.requests.some((entry) => entry.method === "thread/resume"),
     false,
@@ -1212,7 +1258,7 @@ test("Codex continuation repair keeps the access level the runtime was launched 
   // An agent created in Add Agent stores an empty policy until its settings are edited.
   const result = await adapter.repairContinuation!(handle, {
     workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
-    forceReplacement: true, cwd: "/repo", launchPolicy: {}, model: null, reasoningEffort: null,
+    forceReplacement: true, cwd: spawnRequest().cwd, launchPolicy: {}, model: null, reasoningEffort: null,
   }, { checkpointReplacement: async () => {} });
   assert.equal(result.outcome, "replaced");
   const replacement = client.requests.slice(before).find(request => request.method === "thread/start")!.params as Record<string, unknown>;
@@ -1237,10 +1283,91 @@ test("Codex continuation repair refuses a thread that would not review the way t
       let checkpointed = false;
       await assert.rejects(adapter.repairContinuation!(handle, {
         workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
-        forceReplacement, cwd: "/repo", launchPolicy: {}, model: null, reasoningEffort: null,
+        forceReplacement, cwd: spawnRequest().cwd, launchPolicy: {}, model: null, reasoningEffort: null,
       }, { checkpointReplacement: async () => { checkpointed = true; } }), reason);
       assert.equal(checkpointed, false, "a refused thread never becomes the agent's conversation");
     }
+  }
+});
+
+test("a new Codex thread names no folder, and one that starts outside the work attempt's folder is refused", async () => {
+  // Codex records a project as trusted, and loads its .codex config, when a
+  // thread starts in a named folder with a writable sandbox.
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  assert.equal(harness.launchOptions[0]?.options.trustedProjectPath, spawnRequest().cwd, "the app-server starts in the folder");
+  assert.equal(Object.hasOwn(requestByMethod(client, "thread/start").params as object, "cwd"), false);
+
+  const repair = (cwd: string, checkpointReplacement: () => Promise<void> = async () => {}) => adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+    forceReplacement: true, cwd, launchPolicy: spawnRequest().launchPolicy, model: null, reasoningEffort: null,
+  }, { checkpointReplacement });
+  let checkpointed = false;
+  const conversation = handle.providerContinuationId;
+  // The live app-server runs in the folder it was launched in, not this one.
+  await assert.rejects(repair("/tmp/letagents-another-attempt", async () => { checkpointed = true; }),
+    /^Error: Codex opened this conversation in \/tmp\/letagents-work-attempt, not in the agent's folder \/tmp\/letagents-another-attempt, so LetAgents will not use it\. Restart the agent\.$/);
+  assert.equal(checkpointed, false, "a thread in the wrong folder never becomes the agent's conversation");
+  // A refused repair uses nothing and stops nothing: the running app-server keeps its conversation.
+  assert.equal(handle.providerContinuationId, conversation);
+  assert.equal(handle.observedState(), "idle");
+  assert.deepEqual(harness.signals, []);
+  assert.equal((await repair(`${spawnRequest().cwd}/`)).outcome, "replaced");
+  // A request that names no folder has none to compare.
+  assert.equal((await repair("")).outcome, "replaced");
+  const starts = client.requests.filter((request) => request.method === "thread/start");
+  assert.equal(starts.length, 4);
+  for (const start of starts) assert.equal(Object.hasOwn(start.params as object, "cwd"), false);
+
+  for (const [threadDirectory, reason] of [
+    ["/tmp/letagents-elsewhere", /Codex opened this conversation in \/tmp\/letagents-elsewhere, not in the agent's folder \/tmp\/letagents-work-attempt, so LetAgents will not use it/],
+    [null, /Codex did not report the folder this conversation opened in, so LetAgents will not use it/],
+  ] as const) {
+    const elsewhere = createHarness({ threadDirectory });
+    const refused = new CodexProviderAdapter({ dependencies: elsewhere.dependencies });
+    await assert.rejects(refused.spawn(spawnRequest({ deliveryMode: "daemon_inbox" })), reason);
+    assert.deepEqual(elsewhere.signals, [{ pid: 4100, signal: "SIGTERM" }], "a refused launch stops its app-server");
+    assert.equal(elsewhere.clients[0]!.requests.some((request) => request.method === "turn/start"), false);
+  }
+});
+
+test("a Codex thread's folder is compared by where it really is", async (t) => {
+  const real = await realpath(await mkdtemp(join(tmpdir(), "letagents-codex-thread-folder-")));
+  const link = `${real}-link`;
+  await symlink(real, link);
+  t.after(async () => {
+    await rm(link, { force: true });
+    await rm(real, { recursive: true, force: true });
+  });
+  // The work attempt names the link; Codex reports the folder it resolves to.
+  const harness = createHarness({ threadDirectory: real });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", cwd: link }));
+  assert.equal(handle.observedState(), "idle");
+});
+
+test("a Codex thread's folder matches under its macOS data-volume path", {
+  skip: process.platform === "darwin" ? false : "macOS firmlinks only",
+}, async (t) => {
+  const real = await realpath(await mkdtemp(join(tmpdir(), "letagents-codex-thread-folder-")));
+  t.after(() => rm(real, { recursive: true, force: true }));
+  // The same folder, by a path that does not resolve to the one Codex reports.
+  const dataVolumePath = join("/System/Volumes/Data", real);
+  assert.equal(await realpath(dataVolumePath), dataVolumePath);
+  const harness = createHarness({ threadDirectory: real });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", cwd: dataVolumePath }));
+  assert.equal(handle.observedState(), "idle");
+
+  // Another folder is still refused, as is one that cannot be read.
+  const other = await realpath(await mkdtemp(join(tmpdir(), "letagents-codex-thread-folder-")));
+  t.after(() => rm(other, { recursive: true, force: true }));
+  for (const cwd of [join("/System/Volumes/Data", other), join(real, "missing")]) {
+    const refused = createHarness({ threadDirectory: real });
+    await assert.rejects(new CodexProviderAdapter({ dependencies: refused.dependencies })
+      .spawn(spawnRequest({ deliveryMode: "daemon_inbox", cwd })), /not in the agent's folder/);
   }
 });
 
@@ -1963,6 +2090,2324 @@ test("a runtime failure during the turn checkpoint cannot be cleared by turn set
     text: "Turn completed after runtime failure.", evidence: "transcript",
   });
   assert.equal(handle.observedState(), "failed");
+});
+
+test("a provider-refused turn on a daemon-inbox lane fails the turn, not the runtime, and the thread takes the next turn", async () => {
+  const refusal = "The provider refused this turn. Try rephrasing your request.";
+  const harness = createHarness();
+  const stream: ProviderStreamEvent[] = [];
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies, streamSink: (event) => stream.push(event) });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed" }));
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  const threadId = handle.providerContinuationId;
+  const turns = [
+    { id: "turn-refused", status: "failed", error: { message: refusal, codexErrorInfo: "cyberPolicy" }, items: [] },
+    { id: "turn-refused-again", status: "failed", error: { message: refusal, codexErrorInfo: "cyberPolicy" }, items: [] },
+    { id: "turn-answered", status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answered on the same thread." }] },
+  ];
+  let started = 0;
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: turns[started++]!.id } } as T;
+    if (method === "thread/read") return { thread: { id: threadId, turns: turns.slice(0, started) } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const checkpointed: Array<{ outcome: string; runtime: string }> = [];
+  const run = (turn: typeof turns[number]) => {
+    const pending = adapter.runRoomTurn!(handle, {
+      inboxItemId: `inbox-${turn.id}`, actionId: `action-${turn.id}`, sourceMessage: {}, activation: {},
+    }, {
+      beforeNativeDispatch: async () => {},
+      checkpointTurnStarted: async () => {},
+      checkpointTerminalResult: async (result) => {
+        checkpointed.push({ outcome: result.outcome, runtime: handle.observedState() });
+        return { acceptedResult: result, cleanupRecoveryEvidence: true };
+      },
+    });
+    return { pending, identity: { threadId, turnId: turn.id } };
+  };
+  const refuse = async (turn: typeof turns[number]) => {
+    const { pending, identity } = run(turn);
+    await flush();
+    client.emit({ method: "turn/started", params: { ...identity, turn: { id: turn.id, status: "inProgress" } } });
+    // The order the app-server sends when the provider refuses a turn.
+    client.emit({ method: "thread/status/changed", params: { threadId, status: { type: "systemError" } } });
+    assert.equal(handle.observedState(), "working", "the thread's systemError status does not end the runtime");
+    client.emit({ method: "error", params: { ...identity, willRetry: false, error: turn.error } });
+    client.emit({ method: "turn/completed", params: { ...identity, turn } });
+    assert.deepEqual(await pending, { turnId: turn.id, providerContinuationId: threadId,
+      outcome: "failed", text: null, evidence: "transcript", error: refusal, refusal: true });
+    assert.equal(handle.observedState(), "idle");
+  };
+
+  await refuse(turns[0]!);
+  await refuse(turns[1]!);
+  assert.notEqual((await adapter.probeControl(handle)).state, "lost", "a control probe does not report the runtime gone");
+
+  const answered = run(turns[2]!);
+  await flush();
+  client.emit({ method: "turn/started", params: { ...answered.identity, turn: { id: "turn-answered", status: "inProgress" } } });
+  client.emit({ method: "thread/status/changed", params: { threadId, status: { type: "idle" } } });
+  client.emit({ method: "turn/completed", params: { ...answered.identity, turn: turns[2] } });
+  assert.deepEqual(await answered.pending, {
+    turnId: "turn-answered", outcome: "reply", text: "Answered on the same thread.", evidence: "transcript",
+  });
+
+  assert.deepEqual(checkpointed, [
+    { outcome: "failed", runtime: "idle" }, { outcome: "failed", runtime: "idle" }, { outcome: "reply", runtime: "idle" },
+  ], "each ending is offered for checkpoint on a runtime the daemon may still use");
+  const lifecycle = observations.map((event) => event.fact)
+    .filter((fact) => fact.domain === "runtime" || fact.domain === "turn")
+    .map((fact) => [fact.domain, fact.state, "turnOutcome" in fact ? fact.turnOutcome : undefined]);
+  assert.equal(observations.some((event) => event.fact.domain === "control" && event.fact.state === "lost"), false);
+  assert.deepEqual(lifecycle, [
+    ["runtime", "ready", undefined],
+    ["runtime", "ready", undefined], ["turn", "active", undefined], ["turn", "terminal", "failed"],
+    ["runtime", "ready", undefined], ["turn", "active", undefined], ["turn", "terminal", "failed"],
+    ["runtime", "ready", undefined], ["turn", "active", undefined], ["turn", "terminal", "completed"],
+  ], "each refusal is one failed turn; nothing is reported lost and the runtime never exits");
+  assert.equal(harness.launches.length, 1, "one app-server served all three turns");
+  assert.deepEqual(harness.signals, []);
+  assert.deepEqual(stream.filter((event) => event.method === "error").map((event) => event.summary),
+    [`Codex error: ${refusal}`, `Codex error: ${refusal}`], "the owner's activity names the provider's reason");
+});
+
+test("only a policy refusal is marked as one; other failed turns are not", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed" }));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  const threadId = handle.providerContinuationId;
+  let current: Record<string, unknown> = {};
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: current.id } } as T;
+    if (method === "thread/read") return { thread: { id: threadId, turns: [current] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const cases: Array<[unknown, boolean]> = [
+    ["cyberPolicy", true], ["misalignmentPolicyViolation", true],
+    ["unauthorized", false], ["usageLimitExceeded", false], ["rateLimitExceeded", false], ["contextWindowExceeded", false],
+    [{ responseTooManyFailedAttempts: { httpStatusCode: 429 } }, false], ["other", false], [null, false],
+  ];
+  for (const [index, [codexErrorInfo, refusal]] of cases.entries()) {
+    current = { id: `turn-${index}`, status: "failed", error: { message: "The turn failed.", codexErrorInfo }, items: [] };
+    const pending = adapter.runRoomTurn!(handle, {
+      inboxItemId: `inbox-${index}`, actionId: `action-${index}`, sourceMessage: {}, activation: {},
+    }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+    await flush();
+    client.emit({ method: "turn/completed", params: { threadId, turnId: current.id, turn: current } });
+    const result = await pending;
+    assert.equal(result.outcome, "failed");
+    assert.equal("refusal" in result && result.refusal === true, refusal, JSON.stringify(codexErrorInfo));
+  }
+
+  // A turn someone stopped is not a refusal, whatever error it carries.
+  current = { id: "turn-stopped", status: "interrupted", error: { message: "The turn was stopped.", codexErrorInfo: "cyberPolicy" }, items: [] };
+  const stopped = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-stopped", actionId: "action-stopped", sourceMessage: {}, activation: {},
+  }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+  await flush();
+  client.emit({ method: "turn/completed", params: { threadId, turnId: current.id, turn: current } });
+  const interrupted = await stopped;
+  assert.equal(interrupted.outcome, "interrupted");
+  assert.equal("refusal" in interrupted, false, "an interrupted turn carries no refusal mark");
+});
+
+test("a lane that polls for itself still ends its runtime on a thread systemError", async () => {
+  for (const lifecycleAuthorityMode of ["typed_shadow", "legacy"] as const) {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode }));
+    const observations: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, (event) => observations.push(event));
+    harness.clients[0]!.emit({ method: "thread/status/changed", params: {
+      threadId: handle.providerContinuationId, status: { type: "systemError" },
+    } });
+    assert.equal(handle.observedState(), "failed", lifecycleAuthorityMode);
+    assert.deepEqual(observations.at(-1)?.fact, { domain: "runtime", kind: "state_changed", state: "exited",
+      controlEvidence: "native_session_terminated", sideEffects: "none" }, lifecycleAuthorityMode);
+  }
+});
+
+/**
+ * The real adapter over a fake app-server, the real router, and a real daemon
+ * with its real delivery, execution capture and shadow store. One supervised
+ * daemon-inbox Codex agent is launched, bound and listening when this returns.
+ */
+async function codexDaemonFixture(options: {
+  /** Answers the nth worker-session mint; the launch's own is the first. */
+  mint?: (mints: number) => { expiresInMs?: number; newSession?: boolean } | Error;
+  heartbeatMs?: number;
+  /** Work leases the room says this agent holds. */
+  ownedTasks?: Array<{ id: string; title: string; leaseId: string; epoch: number }>;
+  /** The owner turns on the agent's use of their own tool setup before it starts. */
+  ownerSetup?: boolean;
+  /** A stop request leaves the fake process running until the test ends it with `exitProcess`. */
+  holdExits?: boolean;
+  /** How long the daemon waits before it restarts an agent whose record blocks its delivery; ten seconds outside tests. */
+  recordGraceMs?: number;
+  /**
+   * A stopped process exits this long after its signal, as a real one does.
+   * Left out, it exits in the same tick it is signalled, which no real
+   * process does and which is the hardest ordering for the daemon.
+   */
+  exitAfterMs?: number;
+  /**
+   * The fake processes carry a start time in the form the operating system
+   * reports one, which is what "Restart and resume" checks a saved process by.
+   */
+  osProcessBirths?: boolean;
+} = {}) {
+  const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
+  const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
+  const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
+  const { SupervisedRoomAuthorizationError } = await import(new URL("../../daemon/supervised-agent-delivery.ts", import.meta.url).href);
+  const { createConnection } = await import("node:net");
+  const { DatabaseSync } = await import("node:sqlite");
+  const { generateKeyPairSync, sign } = await import("node:crypto");
+  /** The desktop app's key: only a request it signs can change an agent's use of its owner's setup. */
+  const host = generateKeyPairSync("ed25519");
+  const root = await mkdtemp(join(tmpdir(), "codex-daemon-"));
+  const id = "codex_agent";
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+  };
+  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
+    const socket = createConnection(paths.socketPath);
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk) => {
+      received += chunk;
+      if (!received.includes("\n")) return;
+      socket.end();
+      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
+    });
+    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
+  });
+  const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!await check()) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  const workAttemptId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const workspace = join(root, "worktrees", "repo", workAttemptId);
+  await mkdir(join(root, "repos", "repo.git"), { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo",
+    work_attempt_id: workAttemptId, task_id: id, remote_url: "https://example.invalid/repo", resolved_revision: "a".repeat(40),
+    bare_path: join(root, "repos", "repo.git") }));
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace, workAttemptId });
+  await durability.close();
+
+  // A stop request ends the fake process, so a runtime the daemon decides to
+  // replace is really replaced and a test can see it.
+  const harness = createHarness({ exitOnSignal: !options.holdExits, exitAfterMs: options.exitAfterMs,
+    ...(options.osProcessBirths ? { processIdentity: "Fri Oct  2 19:00:00 2026" } : {}) });
+  /** The sealed MCP runtime's tools. An app update that changes them changes every agent's launch contract. */
+  let sealedRuntime: unknown = custodialRuntimeContract;
+  /** Set once a daemon has been restarted: an app-server it re-attaches serves the agent's thread from its first request. */
+  let serveOnConnect: ((server: FakeRpc) => void) | null = null;
+  let onNextConnect: ((server: FakeRpc) => void) | null = null;
+  const makeAdapter = () => new CodexProviderAdapter({ dependencies: { ...harness.dependencies, now: () => new Date().toISOString(),
+    readMcpRuntimeContract: async () => sealedRuntime,
+    createRpcClient: (serverUrl, notify) => {
+      const server = harness.dependencies.createRpcClient(serverUrl, notify);
+      serveOnConnect?.(server as FakeRpc);
+      const connected = onNextConnect;
+      onNextConnect = null;
+      // Before the adapter has finished starting on or attaching to this app-server.
+      if (connected) queueMicrotask(() => connected(server as FakeRpc));
+      return server;
+    },
+    // Waits are real here, only short, so that what the app-server sends
+    // within milliseconds still arrives before a wait of seconds runs out.
+    sleep: async (ms) => { harness.sleeps.push(ms); await new Promise((resolve) => setTimeout(resolve, Math.min(ms, 40))); },
+    // An app-server takes time to start. A replacement that is up in the same
+    // millisecond its predecessor exits is not something a real one does, and
+    // the daemon's settling of that exit is not built for it.
+    waitForServer: async () => { await new Promise((resolve) => setTimeout(resolve, 200)); return true; } } });
+  let adapter = makeAdapter();
+  const roomMessages: Array<Record<string, unknown>> = [];
+  const published: string[] = [];
+  let mints = 0;
+  /** Moves the daemon's clock ahead of the wall clock; its timers stay real. */
+  let clockAheadMs = 0;
+  /** Renewals of the desktop's grant that were asked for, and what a test makes them wait on. */
+  const renewals = { started: 0, held: null as Promise<void> | null };
+  /** Bearers of a session the room has ended. The grant that minted them still mints. */
+  const endedBearers = new Set<string>();
+  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ codex: async () => adapter }), true,
+    options.heartbeatMs ?? 50, undefined, { nowMs: () => Date.now() + clockAheadMs }, {
+      poll: async ({ afterMessageId, bearer, signal }: { afterMessageId: string | null; bearer: string; signal: AbortSignal }) => {
+        // The server's answer for a bearer whose session has ended, for any reason.
+        if (endedBearers.has(bearer)) throw new SupervisedRoomAuthorizationError("Supervised room poll failed with HTTP 401.", 401);
+        const from = afterMessageId ? roomMessages.findIndex((message) => message.id === afterMessageId) + 1 : 0;
+        if (roomMessages.length > from) return { messages: roomMessages.slice(from) };
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 20);
+          signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+        return { messages: [] };
+      },
+      publish: async (input: { text: string; roomId: string }) => {
+        published.push(input.text);
+        return { messageId: `msg_${900 + published.length}`, roomId: input.roomId };
+      },
+      ...(options.ownedTasks ? { ownedTasks: async () => options.ownedTasks! } : {}),
+    }, {
+      listWorkLeases: async () => [], readWorkLease: async () => null,
+      attestWorkLease: async () => { throw new Error("unused"); },
+      rebindWorkLease: async () => { throw new Error("unused"); },
+      renewHostGrant: async (input: { grantId: string; grantGeneration: number }) => {
+        renewals.started += 1;
+        await renewals.held;
+        return { grantId: input.grantId, grantGeneration: input.grantGeneration, supervisorGrant: `${id}-parent-${renewals.started}`,
+          expiresAt: new Date(Date.now() + clockAheadMs + 24 * 60 * 60_000).toISOString() };
+      },
+      // What "Restart and resume" asks the server before it starts the agent again.
+      endWorkerSession: async () => {},
+      createWorkerSession: async () => {
+        mints += 1;
+        const answer = options.mint?.(mints) ?? {};
+        if (answer instanceof Error) throw answer;
+        return { sessionId: answer.newSession ? `${id}-session-${mints}` : `${id}-session`, bearer: `${id}-bearer-${mints}`, bearerId: `${id}-bearer-id-${mints}`,
+          expiresAt: new Date(Date.now() + (answer.expiresInMs ?? 24 * 60 * 60_000)).toISOString() };
+      },
+    });
+  let daemon = makeDaemon();
+  const read = <T>(sql: string): T[] => {
+    const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    try { return database.prepare(sql).all(id).map((row) => ({ ...row })) as T[]; } finally { database.close(); }
+  };
+  const cleanup = async () => {
+    // A stop fences the daemon's commits, and a stream callback that was
+    // still running is refused by that fence. The stop finishes all the same.
+    await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  };
+  try {
+    const startDaemon = async () => {
+      await daemon.start({ getHostApprovalPublicKey: async () => host.publicKey.export({ format: "der", type: "spki" }).toString("base64") });
+      (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+      if (options.recordGraceMs !== undefined) {
+        (daemon as unknown as { runtimeConfigurationApply: { recordBlockGraceMs: number } }).runtimeConfigurationApply.recordBlockGraceMs = options.recordGraceMs;
+      }
+      // "Restart and resume" asks the operating system whether the saved
+      // process still runs; here the fake processes answer for themselves.
+      (daemon as unknown as { runtimeRecovery: { options: { processIdentity?: unknown } } }).runtimeRecovery.options.processIdentity = {
+        probe: (pid: number) => {
+          if (!harness.launches.some((launch) => launch.pid === pid && launch.alive)) throw Object.assign(new Error("process gone"), { code: "ESRCH" });
+        },
+        readBirthIdentity: (pid: number) => harness.launches.find((launch) => launch.pid === pid)?.processIdentity ?? "",
+        sameBirthIdentity: (actual: string, expected: string) => actual === expected,
+      };
+    };
+    await startDaemon();
+    const inbox = () => (daemon as unknown as { supervisedInbox: {
+      bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<unknown>;
+      receipts(agentId: string): Promise<Array<{ source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null }>>;
+    } }).supervisedInbox;
+    assert.equal((await request("manifest.put", { entry: {
+      id, room_id: "room_1", display_name: "Agent", provider: "codex", model: null, charter: "test",
+      desired_state: options.ownerSetup ? "paused" : "running", observed_state: "absent", condition: "none",
+      permission_profile_id: options.ownerSetup ? "full_access" : null,
+      ...(options.ownerSetup ? { provider_launch_policy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } } : {}),
+      created_by: "test", created_at: "2026-01-01T00:00:00.000Z", delivery_mode: "daemon_inbox",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await inbox().bootstrapCursor({ agent_id: id, room_id: "room_1", last_observed_message_id: null });
+    let daemonGeneration = (await request("daemon.status")).result.generation;
+    /** What the desktop app sends when the owner flips "use my own setup" for this agent. */
+    const setOwnerSetup = async (enabled: boolean) => {
+      const challenge = (await request("supervisor.host_approval_challenge")).result;
+      const configuration = (await request("supervisor.get_agent_configuration", { entry_id: id, daemon_generation: daemonGeneration })).result;
+      const issuedAt = Date.now();
+      const payload = JSON.stringify({ domain: "letagents.host-approval", version: 1, ...challenge, operation: "set_home_harness",
+        input: { entryId: id, daemonGeneration, expectedRevision: configuration.config_revision, enabled }, issuedAt, expiresAt: issuedAt + 30_000 });
+      return request("supervisor.host_approval_request", { payload, signature: sign(null, Buffer.from(payload), host.privateKey).toString("base64") });
+    };
+    /** What the desktop app sends when the owner changes the agent's reasoning effort and uses "Restart to apply changes". */
+    const changeEffortAndRestart = async () => {
+      const configuration = (await request("supervisor.get_agent_configuration", { entry_id: id, daemon_generation: daemonGeneration })).result;
+      const saved = await request("supervisor.update_agent_configuration", { entry_id: id, daemon_generation: daemonGeneration,
+        expected_revision: configuration.config_revision, configuration: { model: configuration.model, reasoning_effort: "high",
+          charter: configuration.charter, permission_profile_id: configuration.permission_profile_id } });
+      assert.equal(saved.result?.outcome, "updated", saved.error ?? saved.result?.error);
+      // While the last turn is still being wrapped up the answer is "busy":
+      // the app says so and the owner presses the button again.
+      for (const deadline = Date.now() + 10_000; ;) {
+        const applied = await request("supervisor.apply_agent_configuration", { entry_id: id, daemon_generation: daemonGeneration,
+          expected_configuration_revision: configuration.config_revision + 1 });
+        if (applied.result?.outcome !== "busy_active_turn" || Date.now() >= deadline) return applied;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    };
+    if (options.ownerSetup) {
+      const on = await setOwnerSetup(true);
+      assert.equal(on.ok, true, on.error);
+    }
+    /** The desktop app hands every daemon it starts the grant its agents work under. */
+    const installGrant = async () => assert.equal((await request("supervisor.install_host_grant", {
+      entry_id: id, room_id: "room_1", agent_key: "owner/agent", grant_id: `grant-${id}`,
+      supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(Date.now() + clockAheadMs + 2 * 60 * 60_000).toISOString(),
+    })).ok, true);
+    await installGrant();
+    const view = async () => (await request("manifest.list")).result[0] as {
+      observed_state: string; condition: string; last_error: string | null;
+      room_agent_state: { connection: { state: string }; ingress: { state: string; detail: string | null }; inbox: { state: string } };
+    };
+    if (options.ownerSetup) {
+      const resumed = await request("manifest.set_desired_state", { id, desired_state: "running" });
+      assert.equal(resumed.ok, true, resumed.error);
+    }
+    await eventually(() => harness.clients.length === 1, "the provider is launched").catch(async (error) => {
+      const current = (await request("manifest.list")).result[0];
+      throw new Error(`${(error as Error).message}: agent is ${current?.observed_state}/${current?.condition} (${current?.last_error})`);
+    });
+    if (!options.mint) {
+      await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
+    }
+
+    const client = harness.clients[0]!;
+    const threadId = client.threadId;
+    const turns: Array<Record<string, unknown>> = [];
+    /** Every app-server of this agent serves the one thread and its turns. */
+    const serveThread = (server: typeof client) => {
+      const originalRequest = server.request.bind(server);
+      server.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        if (method === "turn/start") {
+          turns.push({ id: `turn-${turns.length + 1}`, status: "inProgress", items: [] });
+          return { turn: { id: turns.at(-1)!.id } } as T;
+        }
+        // As a real app-server reports it: a failed turn leaves the thread
+        // in `systemError` until its next turn starts.
+        if (method === "thread/read") {
+          const last = turns.at(-1)?.status;
+          const status = last === "inProgress" ? "active" : last === "failed" ? "systemError" : "idle";
+          // A turn its process ended under before it reached the thread's own record is not in what a later process reads.
+          return { thread: { id: threadId, status: { type: status }, turns: turns.filter((turn) => turn.notInThread !== true) } } as T;
+        }
+        if (method === "thread/loaded/list") return { data: [threadId], nextCursor: null } as T;
+        return originalRequest<T>(method, params);
+      };
+    };
+    serveThread(client);
+    const receipt = async (messageId: string) => (await inbox().receipts(id)).find((item) => item.source_message_id === messageId);
+    /**
+     * Send one room message to the agent and end its turn the way the
+     * app-server would. `beforeEnding` runs between a refusal's `systemError`
+     * and its `turn/completed`.
+     */
+    const deliver = async (ordinal: number, ending: { refusal: string; beforeEnding?: () => Promise<void> } | { answer: string }) => {
+      const messageId = `msg_${ordinal}`;
+      roomMessages.push({ id: messageId, sender: "someone", text: `request ${ordinal}`,
+        activation: { for_current_agent: { decision: "activate" } } });
+      await eventually(async () => turns.length === ordinal && Boolean((await receipt(messageId))?.provider_turn_id),
+        `${messageId} starts its own turn`);
+      const turn = turns[ordinal - 1]!;
+      const identity = { threadId, turnId: turn.id };
+      client.emit({ method: "turn/started", params: { ...identity, turn: { id: turn.id, status: "inProgress" } } });
+      if ("refusal" in ending) {
+        Object.assign(turn, { status: "failed", error: { message: ending.refusal, codexErrorInfo: "cyberPolicy" } });
+        // The order the app-server sends when the provider refuses a turn.
+        client.emit({ method: "thread/status/changed", params: { threadId, status: { type: "systemError" } } });
+        client.emit({ method: "error", params: { ...identity, willRetry: false, error: turn.error } });
+        await ending.beforeEnding?.();
+      } else {
+        Object.assign(turn, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: ending.answer }] });
+        client.emit({ method: "thread/status/changed", params: { threadId, status: { type: "idle" } } });
+      }
+      client.emit({ method: "turn/completed", params: { ...identity, turn } });
+      const settled = "refusal" in ending ? "acknowledged_failed" : "acknowledged";
+      await eventually(async () => (await receipt(messageId))?.state === settled, `${messageId} settles ${settled}`).catch(async (error) => {
+        const row = await receipt(messageId);
+        const current = await view();
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+      });
+      return (await receipt(messageId))!;
+    };
+    return { id, harness, client, threadId, request, eventually, view, read, deliver, published, roomMessages, turns, receipt, serveThread, setOwnerSetup, changeEffortAndRestart,
+      receipts: () => inbox().receipts(id), mints: () => mints, cleanup, passTime: (ms: number) => { clockAheadMs += ms; },
+      /** Execution capture has recorded the ending of this many message turns. An owner acts after that, not within the same millisecond. */
+      turnsRecorded: (count: number) => eventually(() => read<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM execution_message_attempts WHERE agent_id=? AND conclusion IS NOT NULL")[0]!.n === count,
+        `capture records ${count} turn ending(s)`),
+      /**
+       * What an app update does to a running agent: the daemon of the new app
+       * computes its launch contract from a sealed runtime that changed, so
+       * the runtime launched by the old app no longer matches it.
+       */
+      updateApp: () => {
+        sealedRuntime = { ...custodialRuntimeContract, profiles: { ...custodialRuntimeContract.profiles,
+          cursor_supervised_room_turn: { tools: [...custodialRuntimeContract.profiles.cursor_supervised_room_turn.tools, "post_status"] } } };
+        (daemon as unknown as { runtimeConfigurationApply: { desiredContracts: Map<string, string> } }).runtimeConfigurationApply.desiredContracts.clear();
+      },
+      /** What a room admin's disconnect does: the agent's session ends, its grant stays valid. */
+      endRoomSession: () => { for (let n = 1; n <= mints; n += 1) endedBearers.add(`${id}-bearer-${n}`); },
+      converge: () => (daemon as unknown as { requestConvergence(entryId: string): void }).requestConvergence(id),
+      /**
+       * The daemon's recording of a runtime's exit: the ports it records
+       * through, for a test to fail a step, how long the recording may take,
+       * and whether an exit of this agent is still being recorded.
+       */
+      exitSettlement: () => (daemon as unknown as { providerTerminals: {
+        ports: { settleRuntimeApprovals(...args: unknown[]): Promise<void>; serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
+          durability: { recordTerminal(...args: unknown[]): Promise<unknown> }; exitUnsettled(entryId: string, exitId: string): void };
+        bounds: { settleMs: number; lastAttemptMs: number; recordMs: number }; settling(entryId: string): boolean;
+      } }).providerTerminals,
+      daemonGeneration: () => daemonGeneration,
+      /**
+       * The ordering a loaded machine produces by itself: the daemon is
+       * stopped while it is writing the agent's activity, the stop's fence
+       * refuses the write, and the stop comes to wait for that callback while
+       * it is still ending. `release` lets the held write go on.
+       */
+      holdActivityWrites: () => {
+        const streams = (daemon as unknown as { providerStreams: { disposeAll(): Promise<void>; track(operation: Promise<void>): void;
+          options: { appendNativeActivity(...args: unknown[]): Promise<unknown> } } }).providerStreams;
+        const write = streams.options.appendNativeActivity;
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => { release = resolve; });
+        let waiting = 0;
+        streams.options.appendNativeActivity = async (...args: unknown[]) => { waiting += 1; await held; return write(...args); };
+        let stopWaits!: () => void;
+        const waited = new Promise<void>((resolve) => { stopWaits = resolve; });
+        const track = streams.track.bind(streams);
+        // A callback that fails is still ending when the stop comes to wait for it.
+        streams.track = (operation) => track(operation.catch(async (error) => { await waited; throw error; }));
+        const dispose = streams.disposeAll.bind(streams);
+        streams.disposeAll = () => { const disposing = dispose(); stopWaits(); return disposing; };
+        return { waiting: () => waiting, release };
+      },
+      /** The process of the nth runtime ends now, as it does some time after a stop request or when it crashes. */
+      exitProcess: (launch: number, signal: NodeJS.Signals | null = "SIGTERM") =>
+        harness.launches[launch]!.resolveExit({ type: "exit", code: signal ? null : 1, signal }),
+      /** Whether the daemon still holds a runtime for the agent. It lets go of one the moment its process exits. */
+      holdsRuntime: () => (daemon as unknown as { liveHandles: Map<string, unknown> }).liveHandles.has(id),
+      /**
+       * The desktop's grant is renewed in the middle of a convergence pass,
+       * and that is a request to the server. From here on such a request
+       * waits, as it does on a slow network, until the returned function
+       * answers it.
+       */
+      holdGrantRenewals: () => {
+        let answer!: () => void;
+        renewals.held = new Promise<void>((resolve) => { answer = resolve; });
+        return () => { renewals.held = null; answer(); };
+      },
+      grantRenewals: () => renewals.started,
+      /** Runs once, for the next app-server the adapter connects to, while the adapter is still starting on it or attaching to it. */
+      whenNextConnects: (act: (server: FakeRpc) => void) => { onNextConnect = act; },
+      /**
+       * What an app update, or a daemon crash, does to a running agent: its
+       * daemon ends, its app-server keeps running, and a new daemon with a
+       * new adapter finds the process and attaches to it.
+       */
+      restartDaemon: async () => {
+        await daemon.stop();
+        serveOnConnect = serveThread;
+        adapter = makeAdapter();
+        daemon = makeDaemon();
+        await startDaemon();
+        daemonGeneration = (await request("daemon.status")).result.generation;
+        await installGrant();
+      },
+      /** Change the daemon's saved state directly, to stand an agent in a state an earlier build left behind. */
+      write: (sql: string, ...values: Array<string | number | null>) => {
+        const database = new DatabaseSync(paths.manifestPath);
+        try { database.prepare(sql).run(...values); } finally { database.close(); }
+      },
+      workAttemptId,
+      /** The causes of the agent's recorded state changes, oldest first. */
+      transitionCauses: async () => (await readFile(paths.auditPath, "utf8")).split("\n").filter(Boolean)
+        .map((line) => JSON.parse(line) as { entry_id?: string; cause?: string }).filter((line) => line.entry_id === id).map((line) => line.cause ?? "") };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+for (const variant of ["", ", with an execution-capture gap from before", ", while it holds a task lease"] as const) test(`a real daemon keeps a Codex agent answering after its provider refuses two turns${variant}`, async () => {
+  const refusal = "The provider refused this turn. Try rephrasing your request.";
+  const priorGap = variant.includes("gap");
+  const heldTask = variant.includes("task lease");
+  const agent = await codexDaemonFixture(heldTask
+    ? { ownedTasks: [{ id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 }] } : {});
+  try {
+    const observer = () => agent.read<{ last: number; max: number }>(
+      "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0];
+    if (priorGap) {
+      // A terminal notification the adapter cannot attribute consumes a source
+      // position without a fact: the capture lane has a gap from here on.
+      agent.client.emit({ method: "turn/completed", params: {
+        threadId: agent.threadId, turnId: "unknown-turn", turn: { id: "another-turn", status: "completed" },
+      } });
+      await agent.eventually(() => { const row = observer(); return Boolean(row && row.max > row.last); }, "the capture gap is durable");
+    }
+
+    // With a task lease held, a note that the task was not continued follows the reason.
+    const reason = (row: { last_error: string | null }) => heldTask ? row.last_error?.slice(0, refusal.length) : row.last_error;
+    assert.equal(reason(await agent.deliver(1, { refusal })), refusal, "the first refusal settles with the provider's reason");
+    assert.equal(reason(await agent.deliver(2, { refusal })), refusal, "so does the second");
+    await agent.deliver(3, { answer: "Answer 3." });
+    if (heldTask) {
+      const rows = await agent.receipts();
+      assert.deepEqual(rows.map((row) => [row.source_message_id, row.state]),
+        [["msg_1", "acknowledged_failed"], ["msg_2", "acknowledged_failed"], ["msg_3", "acknowledged"]],
+        "no blocked task follow-up was queued in front of the next message");
+      assert.ok(rows[1]!.last_error?.startsWith(refusal), "the provider's reason stays on the refused message");
+    }
+    assert.deepEqual(agent.published, ["Answer 3."], "the next message is delivered and answered without a person");
+    assert.deepEqual(agent.read<{ activation_json: string }>("SELECT activation_json FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence")
+      .map((row) => Object.hasOwn(JSON.parse(row.activation_json), "task_continuity_refusal")), [false, false, false],
+      "no refusal mark is left on a settled message");
+
+    assert.equal(agent.harness.launches.length, 1, "the same app-server served every turn");
+    assert.deepEqual(agent.harness.signals, [], "the runtime was never stopped");
+    const current = await agent.view();
+    assert.equal(current.condition, "none", current.last_error ?? "");
+    assert.ok(["idle", "working"].includes(current.observed_state), current.observed_state);
+    assert.equal(current.room_agent_state.connection.state, "connected");
+    assert.equal(current.room_agent_state.inbox.state, "empty");
+    if (priorGap) {
+      const row = observer()!;
+      assert.ok(row.max > row.last, "the earlier gap is still there; delivery did not depend on closing it");
+    } else {
+      await agent.eventually(() => agent.read<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM execution_turns WHERE agent_id=? AND state='terminal'")[0]!.n === 3, "the capture records every turn");
+      assert.deepEqual(agent.read<{ provider_turn_id: string; state: string }>(
+        "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"), [
+        { provider_turn_id: "turn-1", state: "terminal" },
+        { provider_turn_id: "turn-2", state: "terminal" },
+        { provider_turn_id: "turn-3", state: "terminal" },
+      ], "the real shadow store accepted each turn; none was lost");
+      const row = observer()!;
+      assert.equal(row.max, row.last, "the capture lane has no gap");
+      await agent.eventually(() => agent.read<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM execution_message_attempts WHERE agent_id=? AND conclusion IS NOT NULL")[0]!.n === 3, "every attempt settles");
+      assert.deepEqual(agent.read<{ source_message_id: string; conclusion: string | null }>(
+        "SELECT source_message_id,conclusion FROM execution_message_attempts WHERE agent_id=? ORDER BY created_at_ms"), [
+        { source_message_id: "msg_1", conclusion: "failed" },
+        { source_message_id: "msg_2", conclusion: "failed" },
+        { source_message_id: "msg_3", conclusion: "replied" },
+      ]);
+    }
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("convergence and heartbeats between a thread's systemError and its turn's ending leave the turn alone", async () => {
+  const refusal = "The provider refused this turn. Try rephrasing your request.";
+  const agent = await codexDaemonFixture();
+  try {
+    // A capture gap, so nothing could replace a runtime that was stopped here.
+    agent.client.emit({ method: "turn/completed", params: {
+      threadId: agent.threadId, turnId: "unknown-turn", turn: { id: "another-turn", status: "completed" },
+    } });
+    const row = await agent.deliver(1, { refusal, beforeEnding: async () => {
+      // Eight heartbeats and two explicit passes while the turn has not ended.
+      agent.converge();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      agent.converge();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.deepEqual(agent.harness.signals, [], "the runtime is not stopped under its turn");
+    } });
+    assert.equal(row.last_error, refusal);
+    await agent.deliver(2, { answer: "Answer 2." });
+    assert.deepEqual(agent.published, ["Answer 2."]);
+    assert.equal(agent.harness.launches.length, 1);
+    assert.deepEqual(agent.harness.signals, []);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a runtime that ends under a turn is retired only after the turn's delayed result is saved", async () => {
+  const reason = "The provider failed this turn.";
+  const agent = await codexDaemonFixture();
+  try {
+    agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1",
+      activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id),
+      "msg_1 starts its turn");
+    const turn = agent.turns[0]!;
+    const identity = { threadId: agent.threadId, turnId: turn.id };
+    agent.client.emit({ method: "turn/started", params: { ...identity, turn: { id: turn.id, status: "inProgress" } } });
+
+    // The runtime itself ends, without its process exiting, under the turn.
+    agent.client.emit({ method: "process/systemError", params: { status: "systemError" } });
+    // Eight heartbeats and two explicit passes before the provider reports the turn.
+    agent.converge();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    agent.converge();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(agent.harness.signals, [], "the runtime is not stopped before its turn's result is saved");
+    assert.equal((await agent.receipt("msg_1"))?.last_error ?? null, null, "and the turn is still open");
+
+    // The delayed terminal event.
+    Object.assign(turn, { status: "failed", error: { message: reason } });
+    agent.client.emit({ method: "turn/completed", params: { ...identity, turn } });
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles");
+    assert.equal((await agent.receipt("msg_1"))?.last_error, reason, "with the provider's own reason");
+    await agent.eventually(() => agent.harness.signals.length === 1, "the ended runtime is stopped once its turn is recorded");
+
+    // Its replacement serves the same conversation and answers the next message.
+    await agent.eventually(() => agent.harness.clients.length === 2, "the runtime is replaced");
+    const successor = agent.harness.clients[1]!;
+    agent.serveThread(successor);
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2",
+      activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 2 && Boolean((await agent.receipt("msg_2"))?.provider_turn_id),
+      "msg_2 starts its own turn on the replacement");
+    const next = agent.turns[1]!;
+    successor.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: next.id, turn: { id: next.id, status: "inProgress" } } });
+    Object.assign(next, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 2." }] });
+    successor.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    successor.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: next.id, turn: next } });
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+    assert.deepEqual(agent.published, ["Answer 2."]);
+    assert.deepEqual((await agent.receipts()).map((row) => [row.source_message_id, row.state]),
+      [["msg_1", "acknowledged_failed"], ["msg_2", "acknowledged"]], "the failed turn was never run again");
+    assert.equal(agent.turns.length, 2);
+    assert.equal(agent.harness.launches.length, 2, "one replacement");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("an ended runtime whose turn can no longer be recorded is left until the provider finishes it, and retired when the bounded wait runs out", async () => {
+  const reason = "The provider failed this turn.";
+  // The launch's bearer falls due for rotation fifteen seconds after it is
+  // minted; a rotation then gets a new session, as the room gives when the
+  // earlier one has ended. The lane that started a turn under the earlier
+  // session has no authority left to record it.
+  const agent = await codexDaemonFixture({ mint: (mints) => mints === 1 ? { expiresInMs: 75_000 } : { newSession: true } });
+  try {
+    await agent.eventually(async () => (await agent.view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
+    // A capture gap: no fact tells the entry that its runtime ended, so the
+    // heartbeat keeps rotating its bearer.
+    agent.client.emit({ method: "turn/completed", params: {
+      threadId: agent.threadId, turnId: "unknown-turn", turn: { id: "another-turn", status: "completed" },
+    } });
+    await agent.eventually(() => {
+      const row = agent.read<{ last: number; max: number }>(
+        "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0];
+      return Boolean(row && row.max > row.last);
+    }, "the capture gap is durable");
+    agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1",
+      activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id),
+      "msg_1 starts its turn");
+    const turn = agent.turns[0]!;
+    const identity = { threadId: agent.threadId, turnId: turn.id };
+    agent.client.emit({ method: "turn/started", params: { ...identity, turn: { id: turn.id, status: "inProgress" } } });
+    agent.client.emit({ method: "process/systemError", params: { status: "systemError" } });
+
+    // Fifteen seconds pass: the bearer is due, and half the wait for the turn is left.
+    agent.passTime(15_000);
+    await agent.eventually(() => agent.mints() === 2, "the rotation mints a new session under the turn");
+    // Eight heartbeats with the lane torn down and the provider still working.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.deepEqual(agent.harness.signals, [], "the runtime is not stopped while its message is in flight");
+
+    // The provider finishes the turn and records its ending in the thread.
+    Object.assign(turn, { status: "failed", error: { message: reason } });
+    agent.client.emit({ method: "turn/completed", params: { ...identity, turn } });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.deepEqual(agent.harness.signals, [], "nor before the bounded wait for that message has run out");
+    assert.equal((await agent.receipt("msg_1"))?.state, "dispatching", "nothing here could record the turn");
+
+    // The wait runs out: the runtime is retired, once, with the turn's ending
+    // already in the provider's own record for the replacement to read.
+    agent.passTime(31_000);
+    agent.converge();
+    await agent.eventually(() => agent.harness.signals.length === 1, "the ended runtime is stopped when the wait runs out");
+    const row = await agent.receipt("msg_1");
+    assert.equal(row?.provider_turn_id, "turn-1", "the message keeps its exact turn");
+    assert.equal(agent.turns.length, 1, "and that turn is never run again");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a failed turn whose turn/completed never arrives is settled from the thread after a stated wait, and the next message runs", async () => {
+  const reason = "The provider refused this turn.";
+  const agent = await codexDaemonFixture();
+  try {
+    agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1",
+      activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id),
+      "msg_1 starts its turn");
+    const turn = agent.turns[0]!;
+    const identity = { threadId: agent.threadId, turnId: turn.id };
+    agent.client.emit({ method: "turn/started", params: { ...identity, turn: { id: turn.id, status: "inProgress" } } });
+    const sleepsBefore = agent.harness.sleeps.length;
+    // The app-server fails the turn and reports the thread; its turn/completed is lost.
+    Object.assign(turn, { status: "failed", error: { message: reason, codexErrorInfo: "unauthorized" } });
+    // Reported twice, as a reconnecting client can see it: still one read.
+    for (let report = 0; report < 2; report += 1) {
+      agent.client.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "systemError" } } });
+    }
+    agent.client.emit({ method: "error", params: { ...identity, willRetry: false, error: turn.error } });
+
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles without its turn/completed");
+    assert.equal((await agent.receipt("msg_1"))?.last_error, reason, "with the provider's reason, read from the thread");
+    assert.deepEqual(agent.harness.sleeps.slice(sleepsBefore), [2_000], "after one stated wait, not a poll");
+    await agent.eventually(async () => (await agent.view()).observed_state === "idle", "the agent is idle again", 5_000).catch(async (error) => {
+      const current = await agent.view();
+      throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+    });
+
+    // The lost notification turns up after all: it repeats what the thread
+    // already said, and execution capture takes it without a gap.
+    agent.client.emit({ method: "turn/completed", params: { ...identity, turn } });
+    await agent.turnsRecorded(1);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const observer = agent.read<{ last: number; max: number }>(
+      "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
+    assert.equal(observer.max, observer.last, "the capture lane has no gap");
+    assert.equal((await agent.receipt("msg_1"))?.state, "acknowledged_failed");
+
+    await agent.deliver(2, { answer: "Answer 2." });
+    assert.deepEqual(agent.published, ["Answer 2."]);
+    assert.equal(agent.harness.launches.length, 1, "on the same runtime");
+    assert.deepEqual(agent.harness.signals, []);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const lastTurn of ["answered", "refused"] as const) test(`an app update replaces the runtime of an agent whose last turn was ${lastTurn}, and its next message is delivered`, async () => {
+  const agent = await codexDaemonFixture();
+  try {
+    if (lastTurn === "refused") await agent.deliver(1, { refusal: "The provider refused this turn." });
+    else await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    agent.updateApp();
+
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2",
+      activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(() => agent.harness.clients.length === 2, "the runtime launched by the old app is replaced", 10_000).catch(async (error) => {
+      const current = await agent.view();
+      throw new Error(`${(error as Error).message}: msg_2 is ${(await agent.receipt("msg_2"))?.state}; agent is ${current.observed_state}/${current.condition} (${current.last_error}); inbox ${current.room_agent_state.inbox.state}`);
+    });
+    const successor = agent.harness.clients[1]!;
+    agent.serveThread(successor);
+    await agent.eventually(async () => agent.turns.length === 2 && Boolean((await agent.receipt("msg_2"))?.provider_turn_id),
+      "msg_2 starts its turn on the replacement");
+    const next = agent.turns[1]!;
+    successor.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: next.id, turn: { id: next.id, status: "inProgress" } } });
+    Object.assign(next, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 2." }] });
+    successor.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    successor.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: next.id, turn: next } });
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+    assert.equal(agent.published.at(-1), "Answer 2.");
+    assert.equal(agent.harness.launches.length, 2, "one replacement");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const exit of ["in the same tick it is signalled", "a moment after it is signalled"] as const) for (const lastTurn of ["refused", "answered"] as const) {
+  test(`an agent that still runs with its owner's setup after ${lastTurn === "refused" ? "a refused" : "an answered"} turn is replaced without it when the owner turns the setup off, and takes its next message (the stopped process exits ${exit})`, async () => {
+    const agent = await codexDaemonFixture({ ownerSetup: true, ...(exit === "a moment after it is signalled" ? { exitAfterMs: 10 } : {}) });
+    try {
+      assert.equal(agent.harness.launchOptions[0]?.options.homeHarness, true, "the runtime was started with the owner's setup");
+      if (lastTurn === "refused") await agent.deliver(1, { refusal: "The provider refused this turn." });
+      else await agent.deliver(1, { answer: "Answer 1." });
+      await agent.turnsRecorded(1);
+      // The owner acts a moment after the turn, not within the same millisecond.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+
+      // After a refusal the thread is in systemError. The switch replaces the
+      // runtime as it does after an answered turn: as soon as the agent is idle.
+      const off = await agent.setOwnerSetup(false);
+      assert.equal(off.ok, true, off.error);
+      await agent.eventually(() => agent.harness.signals.length === 1, "the runtime that has the setup is stopped");
+      await agent.eventually(() => agent.harness.launches.length === 2, "a replacement is started").catch(async (error) => {
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+      });
+      assert.notEqual(agent.harness.launchOptions[1]?.options.homeHarness, true, "and it runs without the owner's setup");
+      assert.equal(agent.turns.length, 1, "no turn ran on the runtime that still had the setup");
+
+      await agent.eventually(() => agent.harness.clients.length === 2, "the replacement is up");
+      await answerOnReplacement(agent, 2);
+      assert.equal(agent.published.at(-1), "Answer 2.", "the next message is delivered and answered by the replacement");
+      assert.equal(agent.harness.launches.length, 2, "one replacement");
+      // Delivery alone does not show that the stopped process's exit was
+      // settled before the agent was converged: what is recorded does.
+      assert.deepEqual((await agent.transitionCauses()).filter((cause) => /provider terminal|attachable/.test(cause)),
+        ["provider terminal completed intentional configuration replacement"],
+        "the stopped process's exit is recorded once, as the replacement it was");
+      assert.deepEqual(executionRecord(agent).boundaries(), [], "and nothing had to be archived for the agent to carry on");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+test("an agent paused and resumed after a refused turn is replaced, and its next message is delivered", async () => {
+  const agent = await codexDaemonFixture();
+  const snap = async () => { const current = await agent.view(); return `agent is ${current.observed_state}/${current.condition} (${current.last_error}); launches ${agent.harness.launches.length}; signals ${JSON.stringify(agent.harness.signals)}`; };
+  try {
+    await agent.deliver(1, { refusal: "The provider refused this turn." });
+    await agent.turnsRecorded(1);
+    assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "paused" })).ok, true);
+    await agent.eventually(async () => (await agent.view()).observed_state === "paused", "the agent pauses").catch(async (error) => { throw new Error(`${(error as Error).message}: ${await snap()}`); });
+    assert.equal(agent.harness.signals.length, 1, "pausing stops the runtime whose thread is in systemError");
+    assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "running" })).ok, true);
+    await agent.eventually(() => agent.harness.clients.length === 2, "resuming starts a runtime").catch(async (error) => { throw new Error(`${(error as Error).message}: ${await snap()}`); });
+    const successor = agent.harness.clients[1]!;
+    agent.serveThread(successor);
+
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2",
+      activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 2 && Boolean((await agent.receipt("msg_2"))?.provider_turn_id),
+      "msg_2 starts its turn on the resumed runtime").catch(async (error) => { throw new Error(`${(error as Error).message}: msg_2 is ${(await agent.receipt("msg_2"))?.state}; ${await snap()}`); });
+    const next = agent.turns[1]!;
+    successor.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: next.id, turn: { id: next.id, status: "inProgress" } } });
+    Object.assign(next, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 2." }] });
+    successor.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    successor.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: next.id, turn: next } });
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+    assert.equal(agent.published.at(-1), "Answer 2.");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const runtime of ["healthy", "ended"] as const) for (const room of ["ends the agent's session", "still accepts the agent"] as const) {
+  if (runtime === "healthy" && room === "still accepts the agent") continue;
+  test(`${runtime === "ended" ? "an ended" : "a healthy"} runtime whose room ${room}: ${room === "still accepts the agent" ? "the runtime is replaced" : "no new session and no new runtime"}`, async () => {
+    const { ROOM_REFUSED_ACCESS_DETAIL } = await import(new URL("../../daemon/supervised-agent-delivery.ts", import.meta.url).href);
+    const agent = await codexDaemonFixture();
+    try {
+      // A capture gap: no fact will tell the entry that its runtime ended,
+      // which is the ending this change newly recovers by replacing the runtime.
+      agent.client.emit({ method: "turn/completed", params: {
+        threadId: agent.threadId, turnId: "unknown-turn", turn: { id: "another-turn", status: "completed" },
+      } });
+      await agent.eventually(() => {
+        const row = agent.read<{ last: number; max: number }>(
+          "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0];
+        return Boolean(row && row.max > row.last);
+      }, "the capture gap is durable");
+      const mintsBefore = agent.mints();
+      assert.equal(mintsBefore, 1, "the launch's own session");
+
+      if (room === "ends the agent's session") {
+        // What a room admin's disconnect looks like from here: the bearer is
+        // refused, and the grant that minted it would mint again if asked.
+        agent.endRoomSession();
+        await agent.eventually(async () => (await agent.view()).room_agent_state.ingress.state === "blocked", "the owner sees the refusal");
+      }
+      if (runtime === "ended") agent.client.emit({ method: "process/systemError", params: { status: "systemError" } });
+
+      if (room === "still accepts the agent") {
+        await agent.eventually(() => agent.harness.signals.length === 1, "the ended runtime is stopped for its replacement");
+        return;
+      }
+      // Thirty heartbeats, with the refused poll retried throughout.
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      assert.equal(agent.mints(), mintsBefore, "no session is minted");
+      assert.equal(agent.harness.launches.length, 1, "no runtime is launched");
+      assert.deepEqual(agent.harness.signals, [], "and none is stopped");
+      const current = await agent.view();
+      assert.deepEqual([current.room_agent_state.ingress.state, current.room_agent_state.ingress.detail],
+        ["blocked", ROOM_REFUSED_ACCESS_DETAIL], "the owner is told the room refused the agent, not that it is reconnecting");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+test("an ended runtime whose room access was refused is not minted for again on every heartbeat", async () => {
+  const { SupervisorGrantRequestError } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
+  // The launch's bearer is due for rotation at once, and the room refuses
+  // every later mint: the agent ends up with no room binding.
+  const agent = await codexDaemonFixture({
+    mint: (mints) => mints === 1 ? { expiresInMs: 30_000 } : new SupervisorGrantRequestError(403, "Worker session mint"),
+  });
+  try {
+    await agent.eventually(async () => /Use Reconnect/.test((await agent.view()).last_error ?? ""),
+      "room access is given up after its bounded attempts", 30_000);
+    // The runtime itself now ends without its process exiting.
+    agent.client.emit({ method: "process/systemError", params: { status: "systemError" } });
+    // The failure itself is reconciled once; let that settle before counting.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const settledMints = agent.mints();
+    // Thirty heartbeats. Each used to send convergence to mint once more.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(agent.mints(), settledMints, "no heartbeat mints for an agent that has no room binding");
+    const current = await agent.view();
+    assert.equal(current.condition, "coordination_blocked");
+    assert.match(current.last_error ?? "", /Use Reconnect/, "the owner still sees how to restore it");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const launchPolicy of ["without", "with"] as const) test(`the router does not hand back a runtime whose process has exited, ${launchPolicy} a launch policy on the attach`, async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const request = spawnRequest({ deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed" });
+  const handle = await router.spawn({ ...request, provider: "codex" });
+  // What the daemon attaches with. An attach carries the launch policy only
+  // while the saved configuration is the one the runtime was started with.
+  const ref = {
+    workAttemptId: request.workAttemptId, provider: "codex", providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection, lifecycleAuthorityMode: "typed" as const,
+    ...(launchPolicy === "with" ? { launchPolicy: request.launchPolicy } : {}),
+  };
+  const live = await router.attach(ref);
+  assert.ok(live && !("state" in live), "a running process is attached from memory");
+  assert.equal(live.pid, handle.pid);
+
+  harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGTERM" });
+  await flush();
+  const attached = await router.attach(ref);
+  assert.ok(attached && "state" in attached && attached.state === "terminal",
+    "the adapter answers that the process is gone; the remembered handle is not attached again");
+  assert.deepEqual(attached.terminal.nativeRuntimeDeath,
+    { kind: "codex_app_server", pid: handle.pid, processIdentity: handle.providerConnection!.processIdentity });
+  assert.equal(harness.launches.length, 1, "and nothing is started");
+});
+
+/**
+ * Puts one convergence pass between a runtime's exit and the settlement of
+ * that exit. A pass renews the desktop's grant when it is due, which is a
+ * request to the server, and the process exits while the pass waits for the
+ * answer. Under load the same ordering happens without any wait; this
+ * produces it every time.
+ */
+async function convergeAcrossExit(agent: Awaited<ReturnType<typeof codexDaemonFixture>>, exit: () => void) {
+  const answerRenewal = agent.holdGrantRenewals();
+  const renewalsBefore = agent.grantRenewals();
+  // The grant has under an hour left: the next pass renews it.
+  agent.passTime(61 * 60_000);
+  agent.converge();
+  await agent.eventually(() => agent.grantRenewals() > renewalsBefore, "a convergence pass waits on the grant's renewal");
+  exit();
+  await agent.eventually(() => !agent.holdsRuntime(), "the daemon lets go of the exited runtime");
+  answerRenewal();
+}
+
+/** Run the agent's nth message on its newest runtime and answer it. */
+async function answerOnReplacement(agent: Awaited<ReturnType<typeof codexDaemonFixture>>, ordinal: number) {
+  const successor = agent.harness.clients.at(-1)!;
+  agent.serveThread(successor);
+  // Unless it was sent earlier and has been waiting for this runtime.
+  if (!agent.roomMessages.some((message) => message.id === `msg_${ordinal}`)) {
+    agent.roomMessages.push({ id: `msg_${ordinal}`, sender: "someone", text: `request ${ordinal}`,
+      activation: { for_current_agent: { decision: "activate" } } });
+  }
+  await agent.eventually(async () => agent.turns.length === ordinal && Boolean((await agent.receipt(`msg_${ordinal}`))?.provider_turn_id),
+    `msg_${ordinal} starts its turn on the replacement`, 8_000).catch(async (error) => {
+    const current = await agent.view();
+    throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+  });
+  const turn = agent.turns[ordinal - 1]!;
+  successor.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: turn.id, turn: { id: turn.id, status: "inProgress" } } });
+  Object.assign(turn, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: `Answer ${ordinal}.` }] });
+  successor.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+  successor.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: turn.id, turn } });
+  await agent.eventually(async () => (await agent.receipt(`msg_${ordinal}`))?.state === "acknowledged", `msg_${ordinal} is answered`);
+}
+
+test("a convergence pass that runs while a configuration change's exit is being settled does not take the exited runtime back", async () => {
+  const agent = await codexDaemonFixture({ holdExits: true });
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+
+    // The owner changes a setting and restarts the agent to apply it: its idle runtime is stopped.
+    const applied = agent.changeEffortAndRestart();
+    await agent.eventually(() => agent.harness.signals.length === 1, "the runtime with the old setting is asked to stop");
+    await convergeAcrossExit(agent, () => agent.exitProcess(0));
+    const answer = await applied;
+    assert.equal(answer.result?.outcome, "restarting", answer.error);
+    const entry = (await agent.request("manifest.list")).result[0] as { reconciliation?: { exit_timestamps_ms?: number[] } };
+    assert.deepEqual(entry.reconciliation?.exit_timestamps_ms ?? [], [], "a restart the owner asked for is not counted as a crash");
+    assert.deepEqual((await agent.transitionCauses()).filter((cause) => /provider terminal|attachable/.test(cause)),
+      ["provider terminal completed intentional configuration replacement"],
+      "the exit is recorded once, as the replacement it was, and the agent is never reported as blocked");
+
+    await agent.eventually(() => agent.harness.clients.length === 2, "the runtime is replaced").catch(async (error) => {
+      const current = await agent.view();
+      throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+    });
+    await answerOnReplacement(agent, 2);
+    assert.equal(agent.published.at(-1), "Answer 2.");
+    assert.equal(agent.harness.launches.length, 2, "one replacement");
+    const observer = agent.read<{ last: number; max: number }>(
+      "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
+    assert.equal(observer.max, observer.last, "the replacement's activity is recorded without a gap");
+    assert.deepEqual(agent.read<{ provider_turn_id: string; state: string }>(
+      "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"), [
+      { provider_turn_id: "turn-1", state: "terminal" },
+      { provider_turn_id: "turn-2", state: "terminal" },
+    ], "both turns are in the record");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a convergence pass that runs while a crash is being settled starts no replacement until the crash is recorded", async () => {
+  const agent = await codexDaemonFixture({ holdExits: true });
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+
+    await convergeAcrossExit(agent, () => agent.exitProcess(0, "SIGKILL"));
+    await agent.eventually(() => agent.harness.clients.length === 2, "the crashed runtime is replaced").catch(async (error) => {
+      const current = await agent.view();
+      throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+    });
+    const entry = (await agent.request("manifest.list")).result[0] as {
+      reconciliation?: { exit_timestamps_ms?: number[]; last_terminal?: { terminal_cause?: string } };
+    };
+    assert.deepEqual((await agent.transitionCauses()).filter((cause) => /provider terminal|attachable/.test(cause)),
+      ["provider terminal: crashed"],
+      "the crash is recorded once, and the agent is never reported as blocked on a runtime that cannot be attached");
+    assert.equal(entry.reconciliation?.exit_timestamps_ms?.length, 1, "the crash counts toward the agent's crash-loop limit");
+    assert.equal(entry.reconciliation?.last_terminal?.terminal_cause, "crashed", "and the owner can see how the runtime ended");
+    await answerOnReplacement(agent, 2);
+    assert.equal(agent.published.at(-1), "Answer 2.");
+    assert.equal(agent.harness.launches.length, 2, "one replacement");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+/**
+ * What stops the daemon recording an exit, for as long as a test lasts.
+ * Each returns what ends the fault, for the test to call when it is done:
+ * a daemon cannot be stopped under a step that never returns.
+ */
+type ExitSettlement = ReturnType<Awaited<ReturnType<typeof codexDaemonFixture>>["exitSettlement"]>;
+const EXIT_RECORDING_FAULTS = {
+  "closing its approvals fails every time": (terminals: ExitSettlement) => {
+    const original = terminals.ports.settleRuntimeApprovals;
+    terminals.ports.settleRuntimeApprovals = async () => { throw new Error("approval storage fault"); };
+    return () => { terminals.ports.settleRuntimeApprovals = original; };
+  },
+  "closing its approvals never returns": (terminals: ExitSettlement) => {
+    const original = terminals.ports.settleRuntimeApprovals;
+    let end!: () => void;
+    const ended = new Promise<void>((resolve) => { end = resolve; });
+    terminals.ports.settleRuntimeApprovals = async (...args) => { await ended; return original(...args); };
+    return () => { terminals.ports.settleRuntimeApprovals = original; end(); };
+  },
+  "its entry's queue never answers": (terminals: ExitSettlement) => {
+    const original = terminals.ports.serializeEntry;
+    let end!: () => void;
+    const ended = new Promise<void>((resolve) => { end = resolve; });
+    terminals.ports.serializeEntry = async (entryId, operation) => { await ended; return original(entryId, operation); };
+    return () => { terminals.ports.serializeEntry = original; end(); };
+  },
+  "saving its terminal fails every time": (terminals: ExitSettlement) => {
+    const original = terminals.ports.durability;
+    terminals.ports.durability = Object.create(original, {
+      recordTerminal: { value: async () => { throw new Error("terminal storage fault"); } } });
+    return () => { terminals.ports.durability = original; };
+  },
+  "saving its terminal never returns": (terminals: ExitSettlement) => {
+    const original = terminals.ports.durability;
+    let end!: () => void;
+    const ended = new Promise<void>((resolve) => { end = resolve; });
+    terminals.ports.durability = Object.create(original, {
+      recordTerminal: { value: async (...args: unknown[]) => { await ended; return original.recordTerminal(...args); } } });
+    return () => { terminals.ports.durability = original; end(); };
+  },
+} as const;
+
+for (const [fault, inject] of Object.entries(EXIT_RECORDING_FAULTS)) {
+  test(`an agent whose crash cannot be recorded because ${fault} is started again after a bounded wait, answers its next message, and tells its owner`, async () => {
+    const { EXIT_UNSETTLED_NOTICE } = await import(new URL("../../daemon/provider-terminal-coordinator.ts", import.meta.url).href);
+    const agent = await codexDaemonFixture({ holdExits: true });
+    let endFault = () => {};
+    try {
+      await agent.deliver(1, { answer: "Answer 1." });
+      await agent.turnsRecorded(1);
+      const terminals = agent.exitSettlement();
+      // Fifteen seconds, eight and four outside tests.
+      terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+      endFault = inject(terminals);
+
+      const crashedAt = Date.now();
+      agent.exitProcess(0, "SIGKILL");
+      await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the daemon lets go of the exited runtime and starts recording its exit");
+      agent.converge();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(agent.harness.launches.length, 1, "while the exit may still be recorded, no replacement is started");
+      assert.equal(terminals.settling(agent.id), true);
+
+      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again once the wait has ended", 5_000).catch(async (error) => {
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); settling=${terminals.settling(agent.id)}`);
+      });
+      assert.ok(Date.now() - crashedAt >= 600, "not before the ordinary attempts had their time");
+      assert.equal(terminals.settling(agent.id), false, "the daemon no longer waits for that exit");
+      await answerOnReplacement(agent, 2);
+      assert.equal(agent.published.at(-1), "Answer 2.");
+      assert.equal(agent.harness.launches.length, 2, "one replacement");
+
+      const entry = (await agent.request("manifest.list")).result[0] as { activity?: Array<{ kind: string; summary: string }> };
+      assert.equal(entry.activity?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length, 1,
+        "the owner reads once, in the agent's activity, that the exit could not be recorded in full");
+      const generations = agent.read<{ ended: number }>(
+        "SELECT terminal_json IS NOT NULL AS ended FROM work_attempt_executions WHERE work_attempt_id=(SELECT work_attempt_id FROM agent_configurations c JOIN runtime_deployments d ON d.agent_id=c.agent_id WHERE c.agent_id=?) ORDER BY rowid");
+      assert.deepEqual(generations.map((row) => row.ended), [1, 0], "the crashed process's terminal is saved: the first generation has ended, the second runs");
+      const recorded = (await agent.transitionCauses()).filter((cause) => /provider terminal/.test(cause));
+      // The last attempt goes on without the approvals step, so the crash is
+      // recorded as one. When the queue or the terminal's storage is what
+      // fails, the daemon stops waiting and finds the process gone instead.
+      assert.deepEqual(recorded, fault.startsWith("closing its approvals") ? ["provider terminal: crashed"] : [], "the crash is recorded at most once");
+      const observer = agent.read<{ last: number; max: number }>(
+        "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
+      assert.equal(observer.max, observer.last, "and the replacement's activity is recorded without a gap");
+
+      // The replacement crashes as well, and its exit cannot be recorded either: that is a second exit, and the owner is told of it too.
+      agent.exitProcess(1, "SIGKILL");
+      await agent.eventually(() => agent.harness.clients.length === 3, "the agent is started again after the second crash", 5_000);
+      await agent.eventually(async () => ((await agent.request("manifest.list")).result[0] as typeof entry).activity
+        ?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length === 2, "the owner reads of each exit once");
+      await answerOnReplacement(agent, 3);
+      assert.equal(agent.published.at(-1), "Answer 3.");
+      // Told again of the first exit, and then of a third, the owner reads of the third only.
+      const [firstExit] = agent.read<{ id: string }>("SELECT execution_generation_id AS id FROM execution_generations WHERE agent_id=? ORDER BY rowid");
+      terminals.ports.exitUnsettled(agent.id, firstExit!.id);
+      terminals.ports.exitUnsettled(agent.id, "a-third-exit");
+      await agent.eventually(async () => ((await agent.request("manifest.list")).result[0] as typeof entry).activity
+        ?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length === 3, "the owner reads of the third exit");
+      assert.equal(((await agent.request("manifest.list")).result[0] as typeof entry).activity
+        ?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length, 3, "and of no exit twice");
+    } finally {
+      endFault();
+      await agent.cleanup();
+    }
+  });
+}
+
+for (const fault of ["closing its approvals never returns", "its entry's queue never answers"] as const) {
+  test(`an agent restarted to apply a setting, whose stopped process cannot be recorded because ${fault}, runs again with the setting after a bounded wait`, async () => {
+    const agent = await codexDaemonFixture();
+    let endFault = () => {};
+    try {
+      await agent.deliver(1, { answer: "Answer 1." });
+      await agent.turnsRecorded(1);
+      const terminals = agent.exitSettlement();
+      terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+      endFault = EXIT_RECORDING_FAULTS[fault](terminals);
+
+      const applied = await agent.changeEffortAndRestart();
+      // The last attempt records the exit without the approvals step, and the
+      // restart completes as asked. When the queue is what fails, the app is
+      // told the exit could not be recorded, and the agent is started all the same.
+      if (fault === "closing its approvals never returns") assert.equal(applied.result?.outcome, "restarting", JSON.stringify(applied));
+      else assert.match(applied.error ?? "", /could not finish recording that in time/, JSON.stringify(applied));
+      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again", 5_000).catch(async (error) => {
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); settling=${terminals.settling(agent.id)}; answer=${JSON.stringify(applied)}`);
+      });
+      assert.equal(terminals.settling(agent.id), false);
+      await answerOnReplacement(agent, 2);
+      assert.equal(agent.published.at(-1), "Answer 2.");
+      assert.equal(agent.harness.launches.length, 2, "one replacement");
+      const configuration = (await agent.request("supervisor.get_agent_configuration", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() })).result;
+      assert.equal(configuration.runtime_configuration_revision, configuration.config_revision, "the running process has the saved setting");
+    } finally {
+      endFault();
+      await agent.cleanup();
+    }
+  });
+}
+
+for (const fault of ["its entry's queue never answers", "closing its approvals never returns", "saving its terminal never returns"] as const) {
+test(`Restart and resume starts an agent again at once while the daemon is still recording the exit of its crashed process, because ${fault}`, async () => {
+  const agent = await codexDaemonFixture({ holdExits: true, osProcessBirths: true });
+  let endFault = () => {};
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    const terminals = agent.exitSettlement();
+    // The exit's recording does not finish. The bound that would end the wait
+    // is seconds away; the owner's last resort must not wait for it, even for
+    // a step that holds the entry's queue.
+    endFault = EXIT_RECORDING_FAULTS[fault](terminals);
+    const before = (await agent.request("manifest.list")).result[0] as { room_id: string; provider_ref: { execution_generation_id: string } };
+    const runtimeId = agent.read<{ runtime_generation_id: string }>(
+      "SELECT runtime_generation_id FROM execution_runtime_generations WHERE agent_id=? ORDER BY created_at_ms DESC")[0]!.runtime_generation_id;
+
+    agent.exitProcess(0, "SIGKILL");
+    await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the exit waits to be recorded");
+    agent.converge();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(agent.harness.launches.length, 1, "nothing replaces the process by itself yet");
+
+    // The owner uses Diagnostics, "Restart and resume".
+    const askedAt = Date.now();
+    const recovered = await agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration(),
+      mode: "resume", operation_id: "owner-restart-1", room_id: before.room_id,
+      execution_generation_id: before.provider_ref.execution_generation_id, runtime_generation_id: runtimeId });
+    assert.equal(recovered.result?.outcome, "recovering", recovered.error ?? recovered.result?.error);
+    assert.ok(Date.now() - askedAt < 3_000, `it took effect at once, not after the recording's bound (${Date.now() - askedAt} ms)`);
+    assert.equal(terminals.settling(agent.id), false, "the exit the daemon was still recording gives way to the owner's recovery");
+    await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again", 3_000).catch(async (error) => {
+      const current = await agent.view();
+      throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+    });
+    await answerOnReplacement(agent, 2);
+    assert.equal(agent.published.at(-1), "Answer 2.");
+    assert.equal(agent.harness.launches.length, 2, "one replacement");
+    assert.equal(agent.read<{ n: number }>("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=? AND phase='complete'")[0]!.n, 1);
+  } finally {
+    endFault();
+    await agent.cleanup();
+  }
+});
+}
+
+for (const fault of Object.keys(EXIT_RECORDING_FAULTS) as Array<keyof typeof EXIT_RECORDING_FAULTS>) {
+test(`an app update that waits on an exit that cannot be recorded, because ${fault}, goes ahead once the bounded wait has ended`, async () => {
+  const agent = await codexDaemonFixture({ holdExits: true });
+  let endFault = () => {};
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    const terminals = agent.exitSettlement();
+    terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+    endFault = EXIT_RECORDING_FAULTS[fault](terminals);
+    const exitedAt = Date.now();
+    agent.exitProcess(0, "SIGKILL");
+    await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the exit waits to be recorded");
+
+    // The update waits for the exit to be recorded, which outside tests
+    // takes 27 seconds at most: inside the 30 seconds after which the app
+    // would say "Update deferred" and leave the owner to try again. A step
+    // that fails is waited through as one that never returns is.
+    const handoff = await agent.request("daemon.prepare_handoff");
+    assert.equal(handoff.ok, true, handoff.error);
+    // The wait is counted from the exit, not from the request.
+    assert.ok(Date.now() - exitedAt >= 600, "it waited for the exit, for as long as the exit was waited for");
+    assert.equal(terminals.settling(agent.id), false);
+  } finally {
+    endFault();
+    await agent.cleanup();
+  }
+});
+}
+
+for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
+  test(`removing an agent whose exit ${exit} is not refused for a process that still looks alive${exit === "cannot be recorded" ? " once the bounded wait has ended" : ""}`, async () => {
+    const agent = await codexDaemonFixture({ holdExits: true });
+    let endFault = () => {};
+    try {
+      await agent.deliver(1, { answer: "Answer 1." });
+      await agent.turnsRecorded(1);
+      const terminals = agent.exitSettlement();
+      terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+      if (exit === "cannot be recorded") endFault = EXIT_RECORDING_FAULTS["its entry's queue never answers"](terminals);
+      agent.exitProcess(0, "SIGKILL");
+      await agent.eventually(() => !agent.holdsRuntime(), "the daemon lets go of the exited runtime");
+
+      // What the app does when the owner removes an agent: it retires it, ending its room session, and then purges it.
+      const removal = { entry_id: agent.id, daemon_generation: agent.daemonGeneration() };
+      const asked = await agent.request("supervisor.retire_agent", { ...removal, revoked_agent_session_id: null, grant_revoked_without_worker_session: false });
+      assert.equal(asked.result?.outcome, "revocation_required", asked.error ?? asked.result?.error);
+      const retired = await agent.request("supervisor.retire_agent", { ...removal, revoked_agent_session_id: asked.result.agent_session_id, grant_revoked_without_worker_session: false });
+      assert.equal(retired.result?.outcome, "retired", retired.error ?? retired.result?.error);
+      const purge = () => agent.request("supervisor.purge_agent", { ...removal, revoked_agent_session_id: asked.result.agent_session_id });
+      const unended = () => agent.read<{ n: number }>("SELECT COUNT(*) AS n FROM work_attempt_executions WHERE terminal_json IS NULL AND ?<>''")[0]!.n;
+      if (exit === "cannot be recorded") {
+        // Removal is refused while the exit may still be recorded: the
+        // agent's execution has no terminal, and depending on how far the
+        // daemon has got, its state is not yet a stopped one either.
+        const early = (await purge()).result as { outcome: string; error?: string };
+        assert.equal(early.outcome, "invalid", early.error);
+        assert.match(early.error ?? "", /live provider execution|fully stopped durable lifecycle/);
+        assert.equal(unended(), 1, "the ended process has no saved terminal yet");
+        await agent.eventually(() => !terminals.settling(agent.id), "the daemon stops waiting for the exit", 5_000);
+      }
+      await agent.eventually(() => unended() === 0, "the ended process has a saved terminal");
+      // In this fixture a purge after retirement stops at its next step for
+      // every agent, with or without a fault in the exit's recording: the
+      // fake server keeps no record of the ended session. Removal has got
+      // past the process's exit once it answers that, as it does for both.
+      let answer: { outcome: string; error?: string } = { outcome: "" };
+      await agent.eventually(async () => {
+        answer = (await purge()).result as typeof answer;
+        return !/live provider execution|fully stopped durable lifecycle/.test(answer.error ?? "");
+      }, "removal is no longer refused for a process that looks alive").catch((error) => {
+        throw new Error(`${(error as Error).message}: ${JSON.stringify(answer)}`);
+      });
+      assert.deepEqual(answer, { outcome: "invalid",
+        error: "Purge credential recovery needs an exact retained worker session or durable proof that no worker session was minted." });
+      assert.equal(agent.harness.launches.length, 1, "an agent being removed is not started again");
+    } finally {
+      endFault();
+      await agent.cleanup();
+    }
+  });
+}
+
+for (const shown of ["still shows the turn as running", "does not hold the turn"] as const) for (const started of [true, false]) {
+  test(`a turn whose runtime exited under it${started ? "" : " before the record saw it start"}, in a thread that ${shown}, is settled as cut off by the exit${started ? " and closed in the record" : ", with no ending recorded for it"}, and the next message is answered`, async () => {
+    const { PROCESS_ENDED_DURING_TURN } = await import("../main/agents/provider-adapter.js");
+    const agent = await codexDaemonFixture({ holdExits: true });
+    const turnStates = () => agent.read<{ provider_turn_id: string; state: string }>(
+      "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id");
+    try {
+      agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
+      await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
+      const turn = agent.turns[0]!;
+      if (started) {
+        agent.client.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: turn.id, turn: { id: turn.id, status: "inProgress" } } });
+        await agent.eventually(() => turnStates()[0]?.state === "active", "the turn's start is recorded");
+      }
+
+      // The process dies under the turn, and the thread never learns how the turn ended.
+      if (shown === "does not hold the turn") turn.notInThread = true;
+      agent.exitProcess(0, null);
+      await agent.eventually(() => agent.harness.clients.length === 2, "the runtime is replaced");
+      agent.serveThread(agent.harness.clients[1]!);
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles as failed").catch(async (error) => {
+        const row = await agent.receipt("msg_1");
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+      });
+      assert.equal((await agent.receipt("msg_1"))!.last_error, PROCESS_ENDED_DURING_TURN, "with the reason, for the room and the owner");
+      if (started) await agent.eventually(() => turnStates()[0]?.state === "terminal", "and the record closes the turn");
+      else assert.deepEqual(turnStates(), [], "a turn the record never saw start is given no ending in it");
+
+      // The turn is over for the thread as well: the next message gets a turn of its own.
+      Object.assign(turn, { status: "interrupted" });
+      await answerOnReplacement(agent, 2);
+      assert.deepEqual(agent.published, ["Answer 2."], "the turn that was cut off is never run again");
+      await agent.eventually(() => turnStates().at(-1)?.state === "terminal" && turnStates().length === (started ? 2 : 1), "the next turn is recorded to its end");
+      assert.deepEqual(turnStates().map((row) => row.provider_turn_id), started ? ["turn-1", "turn-2"] : ["turn-2"]);
+      const observer = agent.read<{ last: number; max: number }>(
+        "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
+      assert.equal(observer.max, observer.last, "with no gap in the record");
+      assert.equal(agent.harness.launches.length, 2, "one replacement");
+      assert.equal((await agent.view()).room_agent_state.inbox.state, "empty", "nothing waits for a person");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+test("a turn that is still running on its live process when the daemon is restarted is waited for and answered, not taken for cut off", async () => {
+  const agent = await codexDaemonFixture({ recordGraceMs: 400 });
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 2 && Boolean((await agent.receipt("msg_2"))?.provider_turn_id), "msg_2 starts its turn");
+    const turn = agent.turns[1]!;
+    agent.client.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: turn.id, turn: { id: turn.id, status: "inProgress" } } });
+
+    // The daemon ends and a new one attaches the same process, which is still running the turn.
+    await agent.restartDaemon();
+    await agent.eventually(() => agent.holdsRuntime(), "the new daemon attaches the agent's process");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal((await agent.receipt("msg_2"))!.state === "acknowledged_failed", false, "the turn's process has not ended; the turn is not given up");
+    assert.equal(agent.harness.launches.length, 1, "nothing was started in its place");
+
+    // A restart under a running turn can leave the record of that turn
+    // incomplete, and delivery is then not admitted to read the turn's
+    // ending. The daemon does not touch the process while the turn runs.
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.deepEqual(agent.harness.signals, [], "a running turn is never interrupted for its record");
+
+    const attached = agent.harness.clients.at(-1)!;
+    Object.assign(turn, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 2." }] });
+    attached.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    attached.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: turn.id, turn } });
+    // Either delivery reads the ending from the process it attached, or,
+    // where the record no longer admits it, the daemon restarts the idle
+    // agent once and its replacement reads the ending from the thread.
+    agent.whenNextConnects((server) => agent.serveThread(server));
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered").catch(async (error) => {
+      const row = await agent.receipt("msg_2");
+      const current = await agent.view();
+      throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); agent is ${current.observed_state}/${current.condition} (${current.last_error}); ${JSON.stringify(current.room_agent_state)}; clients ${agent.harness.clients.length}; record ${JSON.stringify(executionRecord(agent).observer())} ${JSON.stringify(executionRecord(agent).turns())}`);
+    });
+    assert.deepEqual(agent.published, ["Answer 1.", "Answer 2."], "the answer is posted once, and the turn was never run again");
+    assert.equal(agent.turns.length, 2);
+    await answerOnReplacement(agent, 3);
+    assert.equal(agent.published.at(-1), "Answer 3.", "and the next message is answered");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const ending of ["interrupted", "completed"] as const) test(`a turn whose runtime exited under it is closed in the record when its replacement reads that it was ${ending}, so later turns and later replacements are recorded too`, async () => {
+  const agent = await codexDaemonFixture({ holdExits: true });
+  const turnStates = () => agent.read<{ provider_turn_id: string; state: string }>(
+    "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id");
+  const observer = () => agent.read<{ last: number; max: number }>(
+    "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
+  const replaced = (count: number) => agent.eventually(() => agent.harness.clients.length === count, `runtime ${count} is started`).catch(async (error) => {
+    const current = await agent.view();
+    throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+  });
+  try {
+    agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
+    const turn = agent.turns[0]!;
+    agent.client.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: turn.id, turn: { id: turn.id, status: "inProgress" } } });
+    await agent.eventually(() => turnStates()[0]?.state === "active", "the turn's start is recorded");
+
+    // The process dies under the turn. The thread then says how the turn
+    // ended: interrupted, as Codex reports a turn its process died under, or
+    // completed, when the answer was written just before. No notification
+    // ever says so.
+    Object.assign(turn, ending === "completed"
+      ? { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 1." }] }
+      : { status: "interrupted", items: [] });
+    const settled = ending === "completed" ? "acknowledged" : "acknowledged_failed";
+    agent.exitProcess(0, null);
+    await agent.eventually(() => turnStates()[0]?.state === "lost", "the record says the turn was lost with its runtime");
+    await replaced(2);
+    agent.serveThread(agent.harness.clients[1]!);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === settled, "the replacement reads how the turn ended");
+    await agent.eventually(() => turnStates()[0]?.state === "terminal", "and the record closes the turn", 5_000).catch((error) => {
+      throw new Error(`${(error as Error).message}: the record has ${JSON.stringify(turnStates())}`);
+    });
+
+    // The next turn is recorded: nothing is left open in front of it.
+    await answerOnReplacement(agent, 2);
+    await agent.eventually(() => turnStates()[1]?.state === "terminal", "the next turn is recorded to its end", 5_000).catch((error) => {
+      throw new Error(`${(error as Error).message}: the record has ${JSON.stringify(turnStates())}, observer ${JSON.stringify(observer())}`);
+    });
+    assert.deepEqual([observer().last], [observer().max], "with no gap in the record");
+
+    // So a second exit is replaced like the first, and its replacement takes the next message.
+    agent.exitProcess(1, null);
+    await replaced(3);
+    await answerOnReplacement(agent, 3);
+    assert.deepEqual(agent.published, [...(ending === "completed" ? ["Answer 1."] : []), "Answer 2.", "Answer 3."],
+      "each answer is posted once");
+    assert.deepEqual((await agent.receipts()).map((row) => [row.source_message_id, row.state]),
+      [["msg_1", settled], ["msg_2", "acknowledged"], ["msg_3", "acknowledged"]], "the first turn was never run again");
+    assert.equal(agent.turns.length, 3);
+    await agent.eventually(() => agent.read<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM execution_message_attempts WHERE agent_id=? AND conclusion IS NOT NULL")[0]!.n === 3, "every attempt settles");
+    assert.deepEqual(agent.read<{ source_message_id: string; conclusion: string | null }>(
+      "SELECT source_message_id,conclusion FROM execution_message_attempts WHERE agent_id=? ORDER BY created_at_ms"), [
+      { source_message_id: "msg_1", conclusion: ending === "completed" ? "replied" : "interrupted" },
+      { source_message_id: "msg_2", conclusion: "replied" },
+      { source_message_id: "msg_3", conclusion: "replied" },
+    ]);
+    // Nothing is missing from this record, so nothing was archived and the owner is told nothing.
+    assert.deepEqual(executionRecord(agent).boundaries(), []);
+    assert.deepEqual(await executionRecord(agent).notices(), []);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a turn the record never saw start is still recovered by the replacement, and its ending opens no gap in the record", async () => {
+  const agent = await codexDaemonFixture({ holdExits: true });
+  const observer = () => agent.read<{ last: number; max: number }>(
+    "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
+  try {
+    agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
+    // The process dies before it reports that the turn started: the record holds no such turn.
+    Object.assign(agent.turns[0]!, { status: "interrupted", items: [] });
+    agent.exitProcess(0, null);
+    await agent.eventually(() => agent.harness.clients.length === 2, "the crashed runtime is replaced");
+    agent.serveThread(agent.harness.clients[1]!);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "the replacement reads how the turn ended");
+
+    await answerOnReplacement(agent, 2);
+    await agent.eventually(() => agent.read<{ state: string }>(
+      "SELECT state FROM execution_turns WHERE agent_id=? AND provider_turn_id='turn-2'")[0]?.state === "terminal", "the next turn is recorded to its end", 5_000)
+      .catch((error) => { throw new Error(`${(error as Error).message}: observer ${JSON.stringify(observer())}`); });
+    assert.equal(observer().max, observer().last, "the record has no gap");
+    assert.deepEqual(agent.read<{ provider_turn_id: string }>("SELECT provider_turn_id FROM execution_turns WHERE agent_id=?"),
+      [{ provider_turn_id: "turn-2" }], "and no turn it never saw start");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a command's output is recorded as one fact per window, always ahead of whatever is recorded next", async (t) => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed" }));
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  assert.equal(COMMAND_OUTPUT_WINDOW_MS, 5_000);
+  const observations: NativeExecutionObservation[] = [];
+  const subscription = adapter.onExecution(handle, (event) => observations.push(event));
+  const client = harness.clients[0]!;
+  const threadId = handle.providerContinuationId;
+  const emit = (method: string, params: Record<string, unknown>) => client.emit({ method, params: { threadId, turnId: "turn-1", ...params } });
+  const print = (itemId: string, chunks: number) => {
+    for (let chunk = 0; chunk < chunks; chunk += 1) emit("item/commandExecution/outputDelta", { itemId, delta: "1234567890" });
+  };
+  const recorded = () => observations.splice(0).map(({ fact }) => fact.domain === "execution"
+    ? `${fact.executionId}:${fact.kind}${fact.kind === "output" ? `:${fact.outputBytes}` : ""}` : `${fact.domain}:${"state" in fact ? fact.state : ""}`);
+
+  emit("turn/started", { turn: { id: "turn-1", status: "inProgress" } });
+  emit("item/started", { item: { id: "command-1", type: "commandExecution", status: "inProgress", processId: "pty-1" } });
+  recorded();
+
+  // Output is added up, and nothing is recorded while the window is open, even once the burst has been read.
+  print("command-1", 300);
+  assert.deepEqual(recorded(), []);
+  await flush();
+  t.mock.timers.tick(COMMAND_OUTPUT_WINDOW_MS - 1);
+  assert.deepEqual(recorded(), [], "the window is still open");
+  t.mock.timers.tick(1);
+  assert.deepEqual(recorded(), ["command-1:output:3000"], "when the window closes");
+  t.mock.timers.tick(COMMAND_OUTPUT_WINDOW_MS);
+  assert.deepEqual(recorded(), [], "a window with nothing printed records nothing");
+
+  // Another command's output, and the command's own ending, come after what was printed before them.
+  emit("item/started", { item: { id: "command-2", type: "commandExecution", status: "inProgress", processId: "pty-2" } });
+  print("command-1", 2);
+  print("command-2", 3);
+  emit("item/completed", { item: { id: "command-2", type: "commandExecution", status: "completed", exitCode: 0 } });
+  assert.deepEqual(recorded(), ["command-2:started", "command-1:output:20", "command-2:output:30", "command-2:completed"]);
+
+  // Commands that print in turn are each added up on their own: a burst is one fact per command, not one per switch.
+  emit("item/started", { item: { id: "command-3", type: "commandExecution", status: "inProgress", processId: "pty-3" } });
+  emit("item/started", { item: { id: "command-4", type: "commandExecution", status: "inProgress", processId: "pty-4" } });
+  recorded();
+  for (let round = 0; round < 300; round += 1) { print("command-3", 1); print("command-1", 1); print("command-4", 1); }
+  assert.deepEqual(recorded(), []);
+  t.mock.timers.tick(COMMAND_OUTPUT_WINDOW_MS);
+  assert.deepEqual(recorded(), ["command-3:output:3000", "command-1:output:3000", "command-4:output:3000"],
+    "in the order they first printed");
+
+  // A turn ending that cannot be read uses up a position in the record; output printed before it is recorded first.
+  print("command-1", 4);
+  const before = subscription.position().latestSequence;
+  client.emit({ method: "turn/completed", params: { threadId, turnId: "unknown-turn", turn: { id: "another-turn", status: "completed" } } });
+  assert.deepEqual(recorded(), ["command-1:output:40", "control:degraded"]);
+  assert.equal(subscription.position().latestSequence, before + 3, "the output, the unreadable ending, and its report");
+
+  // The runtime ending closes the command and the turn; output printed before it is not recorded after them.
+  print("command-1", 5);
+  client.emit({ method: "process/systemError", params: { status: "systemError" } });
+  assert.deepEqual(recorded(), ["command-1:output:50", "command-1:completed", "command-3:completed", "command-4:completed", "turn:lost", "control:lost", "runtime:exited"]);
+  print("command-1", 6);
+  t.mock.timers.tick(COMMAND_OUTPUT_WINDOW_MS);
+  assert.deepEqual(recorded(), [], "nothing is recorded for a runtime that has ended");
+});
+
+const OUTPUT_CLOSED_BY = {
+  "the commands' ends": (emit: (method: string, params: Record<string, unknown>) => void, ids: string[]) => {
+    for (const id of ids) emit("item/completed", { item: { id, type: "commandExecution", status: "completed", exitCode: 0 } });
+  },
+  "the turn's end": (emit: (method: string, params: Record<string, unknown>) => void) => {
+    emit("turn/completed", { turn: { id: "turn-1", status: "completed" } });
+  },
+  "the process exiting": (emit: (method: string, params: Record<string, unknown>) => void) => {
+    emit("process/systemError", { status: "systemError" });
+  },
+} as const;
+
+for (const [closedBy, close] of Object.entries(OUTPUT_CLOSED_BY)) for (const commands of [1, 3] as const) {
+  test(`${commands === 1 ? "a command" : `${commands} commands`} streaming one chunk per millisecond for 6,000 chunks ${commands === 1 ? "is" : "are"} recorded once per window and at ${closedBy}, every byte counted and in order`, async (t) => {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed" }));
+    const observations: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, (event) => observations.push(event));
+    const client = harness.clients[0]!;
+    const threadId = handle.providerContinuationId;
+    const emit = (method: string, params: Record<string, unknown>) => client.emit({ method, params: { threadId, turnId: "turn-1", ...params } });
+    const ids = Array.from({ length: commands }, (_unused, index) => `command-${index + 1}`);
+    emit("turn/started", { turn: { id: "turn-1", status: "inProgress" } });
+    for (const id of ids) emit("item/started", { item: { id, type: "commandExecution", status: "inProgress", processId: `pty-${id}` } });
+    observations.splice(0);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+
+    // One chunk each millisecond, from the next command in turn, as side-by-side installs or test runs print.
+    const delta = "line é🙂\n";
+    const size = Buffer.byteLength(delta);
+    const printed = new Map(ids.map((id) => [id, 0]));
+    const seen: Array<[number, string]> = [];
+    const collect = (ms: number) => {
+      for (const { fact } of observations.splice(0)) {
+        seen.push([ms, fact.domain === "execution" ? `${fact.executionId}:${fact.kind}${fact.kind === "output" ? `:${fact.outputBytes / size}` : ""}` : fact.domain]);
+      }
+    };
+    for (let ms = 0; ms < 6_000; ms += 1) {
+      const id = ids[ms % commands]!;
+      emit("item/commandExecution/outputDelta", { itemId: id, delta });
+      printed.set(id, printed.get(id)! + size);
+      collect(ms);
+      t.mock.timers.tick(1);
+    }
+    collect(6_000);
+    close(emit, ids);
+    collect(6_000);
+    t.mock.timers.tick(COMMAND_OUTPUT_WINDOW_MS);
+    collect(11_000);
+
+    // Output facts carry chunk counts here: each is a whole number of chunks.
+    const outputs = seen.filter(([, label]) => label.includes(":output:"));
+    assert.deepEqual(outputs, commands === 1 ? [
+      [5_000, "command-1:output:5000"],
+      [6_000, "command-1:output:1000"],
+    ] : [
+      // The first window holds chunks 0 to 4,999, in the order the commands first printed in it.
+      [5_000, "command-1:output:1667"], [5_000, "command-2:output:1667"], [5_000, "command-3:output:1666"],
+      // The second opens on chunk 5,000, printed by command-3, and is closed early.
+      [6_000, "command-3:output:334"], [6_000, "command-1:output:333"], [6_000, "command-2:output:333"],
+    ]);
+    const closing = seen.slice(outputs.length);
+    assert.ok(closing.length > 0 && closing.every(([ms, label]) => ms === 6_000 && !label.includes(":output:")),
+      `what closed the window is recorded after the output and at once: ${JSON.stringify(closing)}`);
+    assert.deepEqual(seen.slice(0, outputs.length), outputs, "no output is recorded after what closed it");
+    const counted = new Map(ids.map((id) => [id, 0]));
+    for (const [, label] of seen) {
+      const [id, kind, chunks] = label.split(":");
+      if (kind === "output") counted.set(id!, counted.get(id!)! + Number(chunks) * size);
+    }
+    assert.deepEqual(counted, printed, "every byte each command printed is counted");
+  });
+}
+
+test("a command that prints thousands of chunks at once leaves no gap in the agent's record", async () => {
+  const agent = await codexDaemonFixture();
+  try {
+    agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
+    const turn = agent.turns[0]!;
+    const identity = { threadId: agent.threadId, turnId: turn.id };
+    agent.client.emit({ method: "turn/started", params: { ...identity, turn: { id: turn.id, status: "inProgress" } } });
+    // Two commands, each printing more chunks in one read than the record's intake holds.
+    let printed = 0;
+    for (const command of ["command-1", "command-2"]) {
+      agent.client.emit({ method: "item/started", params: { ...identity,
+        item: { id: command, type: "commandExecution", status: "inProgress", processId: `pty-${command}` } } });
+      for (let line = 0; line < 2_000; line += 1) {
+        const delta = `${command} line ${line}\n`;
+        printed += Buffer.byteLength(delta);
+        agent.client.emit({ method: "item/commandExecution/outputDelta", params: { ...identity, itemId: command, delta } });
+      }
+      agent.client.emit({ method: "item/completed", params: { ...identity,
+        item: { id: command, type: "commandExecution", status: "completed", exitCode: 0 } } });
+    }
+    Object.assign(turn, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 1." }] });
+    agent.client.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    agent.client.emit({ method: "turn/completed", params: { ...identity, turn } });
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    await agent.turnsRecorded(1);
+
+    const observer = agent.read<{ last: number; max: number }>(
+      "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
+    assert.equal(observer.max, observer.last, "the record has no gap");
+    assert.deepEqual(agent.read<{ provider_turn_id: string; state: string }>(
+      "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=?"), [{ provider_turn_id: "turn-1", state: "terminal" }]);
+    const output = agent.read<{ facts: number; bytes: number }>(
+      "SELECT COUNT(*) AS facts, SUM(output_bytes) AS bytes FROM execution_facts WHERE agent_id=? AND kind='output'")[0]!;
+    assert.equal(output.bytes, printed, "every byte the commands printed is counted");
+    assert.equal(output.facts, 2, "as one fact per command, in order with the command's own start and end");
+    assert.deepEqual(agent.read<{ kind: string }>(
+      "SELECT kind FROM execution_facts WHERE agent_id=? AND domain='execution' ORDER BY source_sequence").map((fact) => fact.kind),
+      ["started", "output", "completed", "started", "output", "completed"]);
+
+    // The next message is recorded as well.
+    await agent.deliver(2, { answer: "Answer 2." });
+    await agent.turnsRecorded(2);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const commands of [2, 5] as const) {
+  test(`${commands} commands that print 5,000 chunks in turn leave no gap in the agent's record`, async () => {
+    const agent = await codexDaemonFixture();
+    try {
+      agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
+      await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
+      const turn = agent.turns[0]!;
+      const identity = { threadId: agent.threadId, turnId: turn.id };
+      agent.client.emit({ method: "turn/started", params: { ...identity, turn: { id: turn.id, status: "inProgress" } } });
+      const ids = Array.from({ length: commands }, (_unused, index) => `command-${index + 1}`);
+      for (const id of ids) {
+        agent.client.emit({ method: "item/started", params: { ...identity, item: { id, type: "commandExecution", status: "inProgress", processId: `pty-${id}` } } });
+      }
+      // The commands run side by side and their output arrives chunk by chunk, each chunk from the next command.
+      const printed = new Map(ids.map((id) => [id, 0]));
+      for (let chunk = 0; chunk < 5_000; chunk += 1) {
+        const id = ids[chunk % commands]!;
+        const delta = `${id} line ${chunk}: é🙂\n`;
+        printed.set(id, printed.get(id)! + Buffer.byteLength(delta));
+        agent.client.emit({ method: "item/commandExecution/outputDelta", params: { ...identity, itemId: id, delta } });
+      }
+      for (const id of ids) {
+        agent.client.emit({ method: "item/completed", params: { ...identity, item: { id, type: "commandExecution", status: "completed", exitCode: 0 } } });
+      }
+      Object.assign(turn, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 1." }] });
+      agent.client.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+      agent.client.emit({ method: "turn/completed", params: { ...identity, turn } });
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+      await agent.turnsRecorded(1);
+
+      const observer = agent.read<{ last: number; max: number }>(
+        "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
+      assert.equal(observer.max, observer.last, "the record has no gap");
+      assert.deepEqual(agent.read<{ execution_id: string; bytes: number }>(
+        "SELECT execution_id, SUM(output_bytes) AS bytes FROM execution_facts WHERE agent_id=? AND kind='output' GROUP BY execution_id ORDER BY MIN(source_sequence)")
+        .map((row) => [row.execution_id.replace(/^.*(command-\d+)$/, "$1"), row.bytes]), [...printed],
+        "every byte each command printed is counted for it, in the order the commands first printed");
+      const kinds = agent.read<{ kind: string }>(
+        "SELECT kind FROM execution_facts WHERE agent_id=? AND domain='execution' ORDER BY source_sequence").map((fact) => fact.kind);
+      assert.deepEqual(kinds, [...ids.map(() => "started"), ...ids.map(() => "output"), ...ids.map(() => "completed")],
+        "as one fact per command, after the commands' starts and before their ends");
+
+      await agent.deliver(2, { answer: "Answer 2." });
+      await agent.turnsRecorded(2);
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+for (const commands of [1, 3] as const) {
+  test(`${commands === 1 ? "a command" : `${commands} commands`} streaming 12,000 chunks, each in its own read, leave${commands === 1 ? "s" : ""} no gap in the agent's record`, async () => {
+    const agent = await codexDaemonFixture();
+    try {
+      agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
+      await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
+      const turn = agent.turns[0]!;
+      const identity = { threadId: agent.threadId, turnId: turn.id };
+      agent.client.emit({ method: "turn/started", params: { ...identity, turn: { id: turn.id, status: "inProgress" } } });
+      const ids = Array.from({ length: commands }, (_unused, index) => `command-${index + 1}`);
+      for (const id of ids) {
+        agent.client.emit({ method: "item/started", params: { ...identity, item: { id, type: "commandExecution", status: "inProgress", processId: `pty-${id}` } } });
+      }
+      // More chunks than the record's intake holds, each arriving on its own, as a slow install or test run streams them:
+      // adding up only what one read held recorded each of these as its own fact.
+      const printed = new Map(ids.map((id) => [id, 0]));
+      const started = Date.now();
+      for (let chunk = 0; chunk < 12_000; chunk += 1) {
+        const id = ids[chunk % commands]!;
+        const delta = `${id} line ${chunk}: é🙂\n`;
+        printed.set(id, printed.get(id)! + Buffer.byteLength(delta));
+        agent.client.emit({ method: "item/commandExecution/outputDelta", params: { ...identity, itemId: id, delta } });
+        await flush();
+      }
+      const windows = Math.ceil((Date.now() - started) / COMMAND_OUTPUT_WINDOW_MS);
+      for (const id of ids) {
+        agent.client.emit({ method: "item/completed", params: { ...identity, item: { id, type: "commandExecution", status: "completed", exitCode: 0 } } });
+      }
+      Object.assign(turn, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 1." }] });
+      agent.client.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+      agent.client.emit({ method: "turn/completed", params: { ...identity, turn } });
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+      await agent.turnsRecorded(1);
+
+      const observer = agent.read<{ last: number; max: number }>(
+        "SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")[0]!;
+      assert.equal(observer.max, observer.last, "the record has no gap");
+      const output = agent.read<{ execution_id: string; facts: number; bytes: number }>(
+        "SELECT execution_id, COUNT(*) AS facts, SUM(output_bytes) AS bytes FROM execution_facts WHERE agent_id=? AND kind='output' GROUP BY execution_id ORDER BY MIN(source_sequence)");
+      assert.deepEqual(output.map((row) => [row.execution_id.replace(/^.*(command-\d+)$/, "$1"), row.bytes]), [...printed],
+        "every byte each command printed is counted for it, in the order the commands first printed");
+      for (const row of output) {
+        assert.ok(row.facts <= windows + 1, `one fact per window the command printed in and one at its end, not one per chunk: ${row.facts} in ${windows} windows`);
+      }
+      const kinds = agent.read<{ kind: string }>(
+        "SELECT kind FROM execution_facts WHERE agent_id=? AND domain='execution' ORDER BY source_sequence").map((fact) => fact.kind);
+      assert.deepEqual(kinds.slice(0, commands), ids.map(() => "started"));
+      assert.deepEqual(kinds.slice(-commands), ids.map(() => "completed"), "no output is recorded after a command's end");
+      assert.ok(kinds.slice(commands, -commands).every((kind) => kind === "output"));
+
+      await agent.deliver(2, { answer: "Answer 2." });
+      await agent.turnsRecorded(2);
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+const ACTIVITY_RECORD_STOPPED = "LetAgents stopped recording this agent's activity: part of the record could not be kept. The agent keeps working, and its messages are not affected.";
+const ACTIVITY_RECORD_CONTINUED = "Part of this agent's activity record is missing; LetAgents continued with a new record.";
+
+/** What the agent's execution record holds about its observer, its turns and its recovery boundaries. */
+function executionRecord(agent: Awaited<ReturnType<typeof codexDaemonFixture>>) {
+  return {
+    observer: () => agent.read<{ last: number; max: number; runtime: string; source: string | null }>(`SELECT last_source_sequence AS last,
+      max_observed_sequence AS max, observer_runtime_generation_id AS runtime, source_id AS source FROM execution_observers WHERE agent_id=?`)[0],
+    boundaries: () => agent.read<{ operation_id: string; runtime_generation_id: string; phase: string; mode: string; observer_json: string | null; provider_ref_json: string }>(
+      "SELECT operation_id,runtime_generation_id,phase,mode,observer_json,provider_ref_json FROM agent_runtime_recoveries WHERE agent_id=? ORDER BY created_at,operation_id"),
+    turns: () => agent.read<{ provider_turn_id: string; state: string }>(
+      "SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,provider_turn_id"),
+    notices: async () => ((await agent.request("manifest.list")).result[0].activity as Array<{ kind: string; summary: string }>)
+      .filter((event) => event.kind === "launch_notice").map((event) => event.summary),
+  };
+}
+
+/** A turn ending the adapter cannot attribute uses up a position in the record without a fact: a gap from here on. */
+async function openRecordGap(agent: Awaited<ReturnType<typeof codexDaemonFixture>>) {
+  agent.client.emit({ method: "turn/completed", params: {
+    threadId: agent.threadId, turnId: "unknown-turn", turn: { id: "another-turn", status: "completed" },
+  } });
+  const record = executionRecord(agent);
+  await agent.eventually(() => { const row = record.observer(); return Boolean(row && row.max > row.last); }, "the gap is in the record");
+  return record.observer()!;
+}
+
+for (const replacement of ["a crash", "a configuration change", "the owner's setup being switched off", "an app update after a refused turn"] as const) {
+  test(`an agent whose activity record has a gap keeps taking messages when its runtime is replaced by ${replacement}`, async () => {
+    const agent = await codexDaemonFixture(replacement === "the owner's setup being switched off" ? { ownerSetup: true } : {});
+    const record = executionRecord(agent);
+    try {
+      const gap = await openRecordGap(agent);
+      if (replacement === "an app update after a refused turn") await agent.deliver(1, { refusal: "The provider refused this turn." });
+      else await agent.deliver(1, { answer: "Answer 1." });
+      await agent.eventually(async () => (await record.notices()).length === 1, "the owner is told the record stopped");
+      assert.deepEqual(await record.notices(), [ACTIVITY_RECORD_STOPPED], "once, and the agent keeps working");
+      assert.equal((await agent.view()).condition, "none", "which asks nothing of the owner");
+
+      if (replacement === "a crash") agent.exitProcess(0, null);
+      else if (replacement === "a configuration change") assert.equal((await agent.changeEffortAndRestart()).result?.outcome, "restarting");
+      else if (replacement === "the owner's setup being switched off") assert.equal((await agent.setOwnerSetup(false)).ok, true);
+      else agent.updateApp();
+      // An update replaces a runtime when its next message is about to start.
+      if (replacement === "an app update after a refused turn") agent.converge();
+      await agent.eventually(() => agent.harness.clients.length === 2, "the runtime is replaced", 10_000).catch(async (error) => {
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+      });
+
+      await answerOnReplacement(agent, 2);
+      assert.equal(agent.published.at(-1), "Answer 2.", "the next message is delivered and answered without a person");
+      assert.equal(agent.harness.launches.length, 2, "by one replacement");
+      const current = await agent.view();
+      assert.equal(current.condition, "none", current.last_error ?? "");
+
+      // The same boundary "Restart and resume" records, for the runtime that had the gap.
+      const boundaries = record.boundaries();
+      assert.equal(boundaries.length, 1);
+      assert.deepEqual([boundaries[0]!.runtime_generation_id, boundaries[0]!.phase, boundaries[0]!.mode], [gap.runtime, "complete", "resume"]);
+      const archived = JSON.parse(boundaries[0]!.observer_json!) as { last_source_sequence: number; max_observed_sequence: number; source_id: string };
+      assert.ok(archived.max_observed_sequence > archived.last_source_sequence, "the gap stays on record: no fact was invented to close it");
+      assert.equal(archived.source_id, gap.source);
+      const ref = JSON.parse(boundaries[0]!.provider_ref_json) as { provider_connection: unknown; native_runtime_death?: { pid: number } };
+      assert.equal(ref.provider_connection, null);
+      assert.equal(ref.native_runtime_death?.pid, 4100, "with the evidence that the process is gone");
+      assert.deepEqual(await record.notices(), [ACTIVITY_RECORD_STOPPED, ACTIVITY_RECORD_CONTINUED], "and once that a new record was started");
+
+      // The replacement has a record of its own, without a gap.
+      await agent.eventually(() => record.turns().some((turn) => turn.provider_turn_id === "turn-2" && turn.state === "terminal"), "the next turn is recorded");
+      const observer = record.observer()!;
+      assert.notEqual(observer.runtime, gap.runtime);
+      assert.equal(observer.max, observer.last);
+      assert.deepEqual((await agent.receipts()).map((row) => [row.source_message_id, row.state]),
+        [["msg_1", replacement === "an app update after a refused turn" ? "acknowledged_failed" : "acknowledged"], ["msg_2", "acknowledged"]],
+        "no message was cancelled");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+/**
+ * States that agents were found in on a real installation, after builds that
+ * still had the causes fixed above. Each is rebuilt here from rows of the same
+ * shape: which runtime the row is on, what the record says of that runtime and
+ * how its generation ended. No message content is involved.
+ */
+const RECORDS_LEFT_BEHIND = {
+  // The record stops one position short of what its runtime sent.
+  "a gap": { on: "last", gap: 1, turn: null, unstarted: 0, runtime: null, ending: null },
+  // A long burst of output overflowed the record under a turn: the turn is
+  // still open, later turns never started, and the runtime still reads as running.
+  "a gap under a turn left active": { on: "last", gap: 1_347, turn: "active", unstarted: 3, runtime: ["ready", "responsive"], ending: null },
+  // The runtime ended under a turn, and the turn was never closed.
+  "a turn lost with its runtime": { on: "last", gap: 0, turn: "lost", unstarted: 0, runtime: null, ending: null },
+  // The same on an earlier runtime, whose ending carries no evidence of the process.
+  "a turn lost on an earlier runtime": { on: "earlier", gap: 0, turn: "lost", unstarted: 0, runtime: ["exited", "lost"], ending: "stopped" },
+  // A turn whose ending was never recorded, on an earlier runtime that crashed and still reads as running.
+  "a turn left active on an earlier runtime": { on: "earlier", gap: 0, turn: "active", unstarted: 0, runtime: ["ready", "responsive"], ending: "crashed" },
+} as const;
+
+for (const [left, shape] of Object.entries(RECORDS_LEFT_BEHIND)) {
+  test(`an agent whose record was left with ${left} is started again, records its next turns and keeps answering`, async () => {
+    const agent = await codexDaemonFixture();
+    const record = executionRecord(agent);
+    const replaced = (count: number) => agent.eventually(() => agent.harness.clients.length === count, `runtime ${count} is started`).catch(async (error) => {
+      const current = await agent.view();
+      throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+    });
+    try {
+      await agent.deliver(1, { answer: "Answer 1." });
+      await agent.turnsRecorded(1);
+      // The runtime the state is left on: the agent's last one, or one a crash has since replaced.
+      const damaged = record.observer()!.runtime;
+      const damagedGeneration = agent.read<{ id: string }>("SELECT execution_generation_id AS id FROM execution_generations WHERE agent_id=?")[0]!.id;
+      if (shape.on === "earlier") {
+        agent.exitProcess(0, null);
+        await replaced(2);
+        await agent.eventually(() => record.observer()!.runtime !== damaged, "the replacement is being recorded");
+      }
+      // The agent is not running, as most of the agents found in these states were not.
+      assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "paused" })).ok, true);
+      await agent.eventually(async () => (await agent.view()).observed_state === "paused", "the agent pauses");
+      const runtimes = agent.harness.clients.length;
+      const before = Date.parse("2026-01-01T00:00:00.000Z");
+
+      // Build the state.
+      if (shape.runtime) {
+        agent.write("UPDATE execution_runtime_generations SET runtime_state=?,control_state=?,ended_at_ms=? WHERE runtime_generation_id=?",
+          shape.runtime[0], shape.runtime[1], shape.runtime[0] === "exited" ? Date.now() : null, damaged);
+      }
+      if (shape.ending) {
+        agent.write(`UPDATE work_attempt_executions SET terminal_json=json_set(json_remove(terminal_json,'$.native_runtime_death'),'$.terminal_cause',?)
+          WHERE execution_generation_id=?`, shape.ending, damagedGeneration);
+      }
+      const leftOpen: Array<[string, string]> = [...(shape.turn ? [["turn-left-open", shape.turn] as [string, string]] : []),
+        ...Array.from({ length: shape.unstarted }, (_unused, index) => [`turn-unstarted-${index}`, "none"] as [string, string])];
+      for (const [index, [turn, state]] of leftOpen.entries()) {
+        // Each belongs to a message that was settled long ago: nothing will read its turn back.
+        const attempt = `attempt-${turn}`;
+        agent.write("INSERT INTO execution_message_attempts VALUES(?,?,?,?,?,?,?,?)", attempt, agent.id, "room_1", `message-${turn}`,
+          "failed", "failed", before + index, before + 60_000);
+        agent.write("INSERT INTO execution_attempt_generations VALUES(?,?,?,?,?,?)", attempt, agent.id, "room_1", damagedGeneration, agent.workAttemptId, before + index);
+        agent.write(`INSERT INTO execution_turns(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+          provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms) VALUES(?,?,?,?,?,?,?,?,?,'none',?,?)`,
+          turn, attempt, agent.id, "room_1", damagedGeneration, damaged, agent.threadId, turn, state, before + index, state === "lost" ? before + 60_000 : null);
+      }
+      if (shape.gap) agent.write("UPDATE execution_observers SET max_observed_sequence=last_source_sequence+? WHERE agent_id=?", shape.gap, agent.id);
+
+      // The agent is started again, as an update or its owner does.
+      assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "running" })).ok, true);
+      await replaced(runtimes + 1);
+      await answerOnReplacement(agent, 2);
+      assert.equal(agent.published.at(-1), "Answer 2.", "the next message is delivered and answered without a person");
+
+      // Its turn is in the record, on a new observer with no gap, behind one boundary for the runtime that was left damaged.
+      const recorded = (turn: string) => agent.eventually(() => record.turns().some((row) => row.provider_turn_id === turn && row.state === "terminal"),
+        `${turn} is recorded to its end`, 5_000).catch((error) => {
+        throw new Error(`${(error as Error).message}: observer ${JSON.stringify(record.observer())}, turns ${JSON.stringify(record.turns())}`);
+      });
+      await recorded("turn-2");
+      assert.equal(record.observer()!.max, record.observer()!.last, "the new record has no gap");
+      assert.deepEqual(record.boundaries().map((row) => [row.runtime_generation_id, row.phase]), [[damaged, "complete"]]);
+      assert.deepEqual(record.turns().filter((row) => row.provider_turn_id.startsWith("turn-left") || row.provider_turn_id.startsWith("turn-unstarted"))
+        .map((row) => row.state), leftOpen.map(() => "lost"), "what was left open is recorded as lost, never as finished");
+      assert.deepEqual(await record.notices(), [ACTIVITY_RECORD_CONTINUED], "the owner is told once");
+
+      // And it stays that way through the next replacement.
+      agent.exitProcess(runtimes, null);
+      await replaced(runtimes + 2);
+      await answerOnReplacement(agent, 3);
+      await recorded("turn-3");
+      assert.deepEqual(agent.published, ["Answer 1.", "Answer 2.", "Answer 3."]);
+      assert.equal(record.observer()!.max, record.observer()!.last);
+      assert.equal(record.boundaries().length, 1, "a healthy replacement needs no boundary");
+      assert.deepEqual(await record.notices(), [ACTIVITY_RECORD_CONTINUED]);
+      assert.deepEqual((await agent.receipts()).map((row) => [row.source_message_id, row.state]),
+        [["msg_1", "acknowledged"], ["msg_2", "acknowledged"], ["msg_3", "acknowledged"]], "no message was cancelled");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+for (const state of ["lost", "active"] as const) {
+  test(`a running agent with a turn left ${state} on an earlier runtime has it archived where it runs, and records its next turn`, async () => {
+    const agent = await codexDaemonFixture();
+    const record = executionRecord(agent);
+    try {
+      await agent.deliver(1, { answer: "Answer 1." });
+      await agent.turnsRecorded(1);
+      const earlier = record.observer()!.runtime;
+      const generation = agent.read<{ id: string }>("SELECT execution_generation_id AS id FROM execution_generations WHERE agent_id=?")[0]!.id;
+      agent.exitProcess(0, null);
+      await agent.eventually(() => agent.harness.clients.length === 2, "the crashed runtime is replaced");
+      await agent.eventually(() => record.observer()!.runtime !== earlier, "the replacement is being recorded");
+      assert.deepEqual(record.boundaries(), [], "a clean crash needs no boundary");
+
+      // The state an earlier build left: a turn of the ended runtime that was never closed, for a message settled long ago.
+      const before = Date.parse("2026-01-01T00:00:00.000Z");
+      agent.write("INSERT INTO execution_message_attempts VALUES(?,?,?,?,?,?,?,?)", "attempt-left-open", agent.id, "room_1", "message-left-open", "failed", "failed", before, before + 60_000);
+      agent.write("INSERT INTO execution_attempt_generations VALUES(?,?,?,?,?,?)", "attempt-left-open", agent.id, "room_1", generation, agent.workAttemptId, before);
+      agent.write(`INSERT INTO execution_turns(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+        provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms) VALUES(?,?,?,?,?,?,?,?,?,'none',?,?)`,
+        "turn-left-open", "attempt-left-open", agent.id, "room_1", generation, earlier, agent.threadId, "turn-left-open", state, before, state === "lost" ? before + 60_000 : null);
+
+      // The next convergence pass archives it; the agent is neither stopped nor restarted.
+      agent.converge();
+      await agent.eventually(() => record.boundaries().length === 1, "the earlier runtime is archived");
+      assert.deepEqual(record.boundaries().map((row) => [row.runtime_generation_id, row.observer_json]), [[earlier, null]]);
+      await answerOnReplacement(agent, 2);
+      await agent.eventually(() => record.turns().some((turn) => turn.provider_turn_id === "turn-2" && turn.state === "terminal"), "the next turn is recorded", 5_000)
+        .catch((error) => { throw new Error(`${(error as Error).message}: observer ${JSON.stringify(record.observer())}, turns ${JSON.stringify(record.turns())}`); });
+      assert.equal(record.observer()!.max, record.observer()!.last, "with no gap");
+      assert.equal(record.turns().find((turn) => turn.provider_turn_id === "turn-left-open")?.state, "lost");
+      assert.deepEqual(await record.notices(), [ACTIVITY_RECORD_CONTINUED]);
+      assert.equal(agent.harness.launches.length, 2, "only the crash replaced a runtime");
+      assert.deepEqual(agent.harness.signals, []);
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+const RECORD_RESTART_PENDING = "Part of this agent's activity record is missing. LetAgents restarts the agent when it is idle and continues with a new record; messages wait until then.";
+
+test("a daemon that is stopped while it is still writing an agent's activity finishes stopping, and its successor takes the agent over", async () => {
+  const agent = await codexDaemonFixture();
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+
+    // The app-server reports something, and the daemon is stopped before it has written it down.
+    const writes = agent.holdActivityWrites();
+    agent.client.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    await agent.eventually(() => writes.waiting() > 0, "the daemon starts writing the agent's activity");
+    const restarting = agent.restartDaemon();
+    // The stop has raised its fence, and the write is refused by it.
+    writes.release();
+    await restarting;
+
+    await agent.eventually(() => agent.holdsRuntime(), "the new daemon attaches the agent's process");
+    assert.equal(agent.harness.launches.length, 1, "the same process: nothing was started in its place");
+    await answerOnReplacement(agent, 2);
+    assert.equal(agent.published.at(-1), "Answer 2.");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const gap of ["left by the daemon before it", "made by the re-attach itself"] as const) {
+  test(`an idle agent that a new daemon re-attaches over a gap ${gap} is restarted once, and answers the message that was waiting`, async () => {
+    const agent = await codexDaemonFixture({ recordGraceMs: 400 });
+    const record = executionRecord(agent);
+    try {
+      await agent.deliver(1, { answer: "Answer 1." });
+      await agent.turnsRecorded(1);
+      if (gap === "left by the daemon before it") await openRecordGap(agent);
+      // Otherwise the gap opens during the re-attach: a turn notification that
+      // arrives beside the attach's own reading of the thread cannot be
+      // ordered against it, and uses up a position in the record. Here the
+      // app-server repeats the ending of the last turn.
+      else agent.whenNextConnects((server) => server.emit({ method: "turn/completed", params: {
+        threadId: agent.threadId, turnId: "turn-1", turn: agent.turns[0] } }));
+      const stuck = record.observer()!.runtime;
+
+      // What an app update does: a new daemon finds the app-server running and attaches to it.
+      await agent.restartDaemon();
+      await agent.eventually(() => agent.harness.clients.length === 2, "the new daemon attaches to the running app-server");
+      agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+      await agent.eventually(async () => (await agent.view()).room_agent_state.ingress.detail === RECORD_RESTART_PENDING,
+        "the owner is told the agent will be restarted").catch(async (error) => {
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); ingress ${JSON.stringify(current.room_agent_state.ingress)}`);
+      });
+      const waiting = await agent.view();
+      assert.equal(waiting.condition, "none", "which is not yet a matter for the owner");
+      assert.notEqual(waiting.room_agent_state.inbox.state, "blocked");
+
+      // The daemon restarts the idle agent by itself, once.
+      await agent.eventually(() => agent.harness.launches.length === 2, "the agent is restarted").catch(async (error) => {
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+      });
+      await agent.eventually(() => agent.harness.clients.length === 3, "the replacement is up");
+      await answerOnReplacement(agent, 2);
+      assert.equal(agent.published.at(-1), "Answer 2.", "the message that was waiting is answered without a person");
+      assert.deepEqual(agent.harness.signals.map((signal) => signal.signal), ["SIGTERM"], "one runtime was stopped, once");
+      assert.equal(agent.harness.launches.length, 2);
+
+      // Behind the same boundary a replacement by any other cause gets.
+      assert.deepEqual(record.boundaries().map((row) => [row.runtime_generation_id, row.phase]), [[stuck, "complete"]]);
+      assert.deepEqual(await record.notices(), [ACTIVITY_RECORD_STOPPED, ACTIVITY_RECORD_CONTINUED],
+        "the owner is told once that the record stopped, however many daemons saw it, and once that a new one was started");
+      await agent.eventually(() => record.turns().some((turn) => turn.provider_turn_id === "turn-2" && turn.state === "terminal"), "the next turn is recorded");
+      assert.equal(record.observer()!.max, record.observer()!.last);
+      const current = await agent.view();
+      assert.equal(current.condition, "none", current.last_error ?? "");
+      assert.deepEqual((await agent.receipts()).map((row) => [row.source_message_id, row.state]),
+        [["msg_1", "acknowledged"], ["msg_2", "acknowledged"]], "no message was cancelled");
+
+      // And it is left alone from then on.
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      assert.equal(agent.harness.launches.length, 2);
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+for (const gap of ["left by the daemon before it", "made by the re-attach itself"] as const) {
+  test(`an agent a new daemon re-attaches mid-turn over a gap ${gap}, with its saved state still working, is restarted once the turn ends and answers`, async () => {
+    const agent = await codexDaemonFixture({ recordGraceMs: 400 });
+    try {
+      await agent.deliver(1, { answer: "Answer 1." });
+      await agent.turnsRecorded(1);
+      agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+      await agent.eventually(async () => agent.turns.length === 2 && Boolean((await agent.receipt("msg_2"))?.provider_turn_id), "msg_2 starts its turn");
+      const turn = agent.turns[1]!;
+      agent.client.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: turn.id, turn: { id: turn.id, status: "inProgress" } } });
+      await agent.eventually(async () => (await agent.view()).observed_state === "working", "the agent is saved as working");
+      if (gap === "left by the daemon before it") await openRecordGap(agent);
+      // A notification the attach reads beside its own snapshot uses up a position without a fact.
+      else agent.whenNextConnects((server) => server.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: "turn-1", turn: agent.turns[0] } }));
+      await agent.restartDaemon();
+      await agent.eventually(() => agent.holdsRuntime(), "the new daemon attaches the agent's process");
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      assert.equal((await agent.view()).observed_state, "working", "the blocked record leaves the saved state at working");
+      assert.deepEqual(agent.harness.signals, [], "and the running turn is not interrupted");
+
+      // The turn ends on the process the new daemon attached.
+      const attached = agent.harness.clients.at(-1)!;
+      Object.assign(turn, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 2." }] });
+      attached.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+      attached.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: turn.id, turn } });
+      agent.whenNextConnects((server) => agent.serveThread(server));
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered", 12_000).catch(async (error) => {
+        const row = await agent.receipt("msg_2");
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: row is ${row?.state}; agent is ${current.observed_state}/${current.condition}; ${current.room_agent_state.ingress.detail}`);
+      });
+      await answerOnReplacement(agent, 3);
+      assert.deepEqual(agent.published, ["Answer 1.", "Answer 2.", "Answer 3."], "each answer once; the turn was not run again");
+      assert.equal(agent.harness.launches.length, 2, "one restart");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+test("an agent whose replacement is blocked by its record as well is not restarted again: it waits for its owner, with the reason", async () => {
+  const agent = await codexDaemonFixture({ recordGraceMs: 400 });
+  const record = executionRecord(agent);
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    await openRecordGap(agent);
+    await agent.restartDaemon();
+    await agent.eventually(() => agent.harness.clients.length === 2, "the new daemon attaches to the running app-server");
+    // The replacement's record gets a gap before it is admitted: its app-server
+    // reports the ending of a turn nobody can place while it is still starting.
+    agent.whenNextConnects((server) => server.emit({ method: "turn/completed", params: {
+      threadId: agent.threadId, turnId: "unknown-turn", turn: { id: "another-turn", status: "completed" } } }));
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+
+    await agent.eventually(() => agent.harness.launches.length === 2, "the agent is restarted once");
+    const reason = "Part of this agent's activity record is missing, and restarting the agent did not get past it. "
+      + "Messages wait until you use Restart and resume in Diagnostics.";
+    await agent.eventually(async () => (await agent.view()).last_error === reason, "the owner is told why the agent needs attention").catch(async (error) => {
+      const current = await agent.view();
+      throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); ingress ${JSON.stringify(current.room_agent_state.ingress)}`);
+    });
+    const blocked = await agent.view();
+    assert.equal(blocked.condition, "coordination_blocked");
+    assert.equal(blocked.room_agent_state.inbox.state, "blocked");
+
+    // Ten more waits of the same length: nothing else is stopped or started.
+    await new Promise((resolve) => setTimeout(resolve, 4_000));
+    assert.equal(agent.harness.launches.length, 2, "no second restart");
+    assert.deepEqual(agent.harness.signals.map((signal) => signal.signal), ["SIGTERM"]);
+    assert.equal((await agent.view()).last_error, reason);
+    assert.equal((await agent.receipt("msg_2"))?.state ?? "pending", "pending", "the waiting message is kept, not cancelled");
+    assert.equal(record.boundaries().length, 1, "one boundary, for the runtime that was restarted");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("an agent whose record is full keeps answering, and its next runtime starts a new record", async () => {
+  const agent = await codexDaemonFixture({ recordGraceMs: 400 });
+  const record = executionRecord(agent);
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    // The record holds 10,000 facts for one agent. Fill it up to there, as weeks of work do.
+    const filled = record.observer()!;
+    const generation = agent.read<{ id: string }>("SELECT execution_generation_id AS id FROM execution_generations WHERE agent_id=?")[0]!.id;
+    agent.write(`WITH RECURSIVE positions(value) AS (SELECT 1000001 UNION ALL SELECT value+1 FROM positions WHERE value<1010000)
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+        source_sequence,domain,kind,state,side_effects,observed_at_ms)
+      SELECT 'filler-'||value,?,?,?,1,value,'control','state_changed','responsive','none',value FROM positions`, agent.id, generation, filled.runtime);
+    // Each with its settled effect, as every recorded fact has.
+    agent.write(`INSERT INTO execution_lifecycle_effects(fact_id,fact_sequence,agent_id,observer_execution_generation_id,observer_runtime_generation_id,
+        observer_epoch,subject_authority_mode,observer_authority_mode,effect_kind,state,created_at_ms,disposed_at_ms)
+      SELECT fact_id,sequence,agent_id,execution_generation_id,runtime_generation_id,1,'typed','typed','none','applied',observed_at_ms,observed_at_ms
+      FROM execution_facts WHERE agent_id=? AND fact_id LIKE 'filler-%'`, agent.id);
+
+    // The next turn cannot be recorded. It is still delivered and answered, and the owner is told the record stopped.
+    await agent.deliver(2, { answer: "Answer 2." });
+    await agent.eventually(async () => (await record.notices()).includes(ACTIVITY_RECORD_STOPPED), "the owner is told the record stopped");
+    assert.equal((await agent.view()).condition, "none", "which asks nothing of the owner");
+    assert.ok(record.observer()!.max > record.observer()!.last, "the record stops at the fact it had no room for");
+
+    // Its next runtime is recorded again, from the start of a new window; nothing was deleted to make room.
+    agent.exitProcess(0, null);
+    await agent.eventually(() => agent.harness.clients.length === 2, "the crashed runtime is replaced");
+    await answerOnReplacement(agent, 3);
+    assert.deepEqual(agent.published, ["Answer 1.", "Answer 2.", "Answer 3."]);
+    await agent.eventually(() => record.turns().some((turn) => turn.provider_turn_id === "turn-3" && turn.state === "terminal"), "the next turn is recorded", 5_000)
+      .catch(async (error) => {
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); observer ${JSON.stringify(record.observer())}`);
+      });
+    assert.equal(record.observer()!.max, record.observer()!.last);
+    assert.deepEqual(record.boundaries().map((row) => row.runtime_generation_id), [filled.runtime]);
+    assert.deepEqual(await record.notices(), [ACTIVITY_RECORD_STOPPED, ACTIVITY_RECORD_CONTINUED]);
+    assert.ok(agent.read<{ n: number }>("SELECT COUNT(*) AS n FROM execution_facts WHERE agent_id=?")[0]!.n > 10_000, "the full record is still there");
+    assert.equal(agent.harness.launches.length, 2, "one replacement, and no restart for the record's sake");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("an error activity line is generic without a reason, bounded, and free of credentials", async () => {
+  const harness = createHarness();
+  const stream: ProviderStreamEvent[] = [];
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies, streamSink: (event) => stream.push(event) });
+  const handle = await adapter.spawn(spawnRequest());
+  for (const error of [undefined, {}, { message: "   " }, { message: 7 }]) {
+    harness.clients[0]!.emit({ method: "error", params: { threadId: handle.providerContinuationId, error } });
+  }
+  harness.clients[0]!.emit({ method: "error", params: {
+    threadId: handle.providerContinuationId, error: { message: `first line\n  second line ${"x".repeat(600)}` },
+  } });
+  // Only the `error` notification is the provider's reason for a failed turn.
+  // Another notification that happens to carry an error keeps its own summary.
+  harness.clients[0]!.emit({ method: "thread/tokenUsage/updated", params: {
+    threadId: handle.providerContinuationId, error: { message: "not a failed turn" },
+  } });
+  assert.doesNotMatch(stream.find((event) => event.method === "thread/tokenUsage/updated")?.summary ?? "", /^Codex error:/);
+  const lines = stream.filter((event) => event.method === "error").map((event) => event.summary);
+  assert.deepEqual(lines.slice(0, 4), Array(4).fill("Codex runtime event: error"));
+  assert.match(lines[4] ?? "", /^Codex error: first line second line x+$/);
+  assert.equal(lines[4]?.length, 500, "the line is bounded");
+
+  // A provider can echo the credential it rejected. Built at run time so no
+  // credential-shaped literal sits in this file.
+  const echoed = "ab12".repeat(8);
+  harness.clients[0]!.emit({ method: "error", params: {
+    threadId: handle.providerContinuationId, error: { message: `The key was rejected: Bearer ${echoed}` },
+  } });
+  const redacted = stream.filter((event) => event.method === "error").at(-1)?.summary ?? "";
+  assert.equal(redacted, "Codex error: The key was rejected: Bearer [REDACTED]");
+  assert.equal(redacted.includes(echoed), false, "a credential in the provider's reason never reaches the activity line");
 });
 
 test("a hard runtime failure prevents bounded room-turn dispatch across the durable callback", async () => {
@@ -4584,9 +7029,9 @@ test("explicit Codex system errors emit one typed hard-runtime terminal before p
   client.emit({ method: "turn/started", params: { ...params, turn: { id: params.turnId, status: "inProgress" } } });
   client.emit({ method: "item/started", params: { ...params,
     item: { id: "system-error-command", type: "commandExecution", status: "inProgress", processId: "pty-system-error" } } });
-  client.emit({ method: "thread/status/changed", params: {
-    threadId: handle.providerContinuationId, status: { type: "systemError" },
-  } });
+  // On a typed lane a thread's `systemError` status is a failed turn; only a
+  // process-level system error ends the runtime.
+  client.emit({ method: "process/systemError", params: { status: "systemError" } });
 
   const hardTerminals = observations.filter((event) => event.fact.domain === "runtime" || event.fact.domain === "control");
   assert.deepEqual(hardTerminals.map((event) => event.fact), [
@@ -4614,6 +7059,9 @@ test("explicit Codex system errors emit one typed hard-runtime terminal before p
     },
   } });
   client.emit({ method: "process/systemError", params: { status: "systemError" } });
+  client.emit({ method: "thread/status/changed", params: {
+    threadId: handle.providerContinuationId, status: { type: "systemError" },
+  } });
   client.disconnect();
   harness.launches[0]!.resolveExit({ type: "exit", code: 1, signal: null });
   await flush();
@@ -4841,4 +7289,373 @@ test("managed launch receipt freezes the exact generated tool policy and is neve
   });
   assertProviderHandle(restored);
   assert.equal((restored as ProviderHandle & { managedLaunchContract?: string }).managedLaunchContract, undefined);
+});
+
+/** The access level every launch below runs under: the default policy of these tests is Full access. */
+const FULL_ACCESS = { permissionProfileId: "full_access", configurationRevision: 1 };
+
+test("the owner's own Codex setup reaches the app-server launch only for an exact request, and never for a rental", async () => {
+  const supervised = { deliveryMode: "daemon_inbox" as const, supervisorEntryId: "supervised_owner",
+    supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS };
+  const launchOptions = async (overrides: Partial<ProviderSpawnRequest>) => {
+    const harness = createHarness();
+    await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({ ...supervised, ...overrides }));
+    return harness.launchOptions[0]!.options as Record<string, unknown>;
+  };
+  const off = await launchOptions({});
+  assert.equal(Object.hasOwn(off, "homeHarness"), false, "an ordinary launch is handed exactly what it was before");
+  for (const unclear of ["true", 1, false, null]) {
+    assert.deepEqual(await launchOptions({ homeHarness: unclear as never }), off, String(unclear));
+  }
+  assert.deepEqual(await launchOptions({ homeHarness: true }), { ...off, homeHarness: true },
+    "the room's own server, its environment and the working folder are the same either way");
+
+  const rental = createHarness();
+  await assert.rejects(new CodexProviderAdapter({ dependencies: rental.dependencies }).spawn(spawnRequest({
+    ...supervised, supervisorEntryId: "supervised_rental_0123", homeHarness: true,
+  })), /a rented agent never uses its owner's own setup/);
+  assert.equal(rental.launches.length, 0, "nothing starts");
+
+  // An agent that collects its own room messages could not be held back once the setup is turned off, so it never has it.
+  for (const deliveryMode of [undefined, "mcp_polling"] as const) {
+    const polling = createHarness();
+    await assert.rejects(new CodexProviderAdapter({ dependencies: polling.dependencies }).spawn(spawnRequest({
+      ...supervised, ...(deliveryMode ? { deliveryMode } : { deliveryMode: undefined }), homeHarness: true,
+    })), /an agent that collects its own room messages never uses its owner's own setup/, String(deliveryMode));
+    assert.equal(polling.launches.length, 0, "nothing starts");
+  }
+  // Its environment is cleared of the room agent's coordinates, so the room's server must be the one given its own copy.
+  const unsupervised = createHarness();
+  await assert.rejects(new CodexProviderAdapter({ dependencies: unsupervised.dependencies }).spawn(spawnRequest({ deliveryMode: "daemon_inbox", ...FULL_ACCESS, homeHarness: true })),
+    /only as a daemon-supervised room agent/);
+  assert.equal(unsupervised.launches.length, 0, "nothing starts");
+  // Nor without a named access level: the launch is built from that level and from nothing else the policy holds.
+  const unnamed = createHarness();
+  await assert.rejects(new CodexProviderAdapter({ dependencies: unnamed.dependencies }).spawn(spawnRequest({
+    ...supervised, permissionProfileId: undefined, homeHarness: true,
+  })), /an agent with its owner's own setup starts only under a named access level/);
+  assert.equal(unnamed.launches.length, 0, "nothing starts");
+});
+
+test("another MCP server's request for typed input or a sign-in is declined at once; approvals and the room's own server are left alone", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", supervisorEntryId: "supervised_owner",
+    supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS, homeHarness: true }));
+  const client = harness.clients[0]!; client.turnStatus = "inProgress";
+  const method = "mcpServer/elicitation/request";
+  const activity: string[] = [];
+  // The background service keeps an agent's activity from its stream, so that is where each one must be.
+  adapter.onStream(handle, (event) => { if (event.method === "mcpServer/elicitation/declined") activity.push(event.summary ?? ""); });
+  const form = client.askPermission(mcpToolPermissionParams({ serverName: "owner_browser", _meta: null, message: "Which account?",
+    requestedSchema: { type: "object", properties: { account: { type: "string" } }, required: ["account"] } }), 51, method);
+  const signIn = client.askPermission({ threadId: "thread-1", turnId: "turn-thread-1", serverName: "owner_browser", mode: "url",
+    url: "https://example.invalid/sign-in", elicitationId: "sign-in-1", message: "Sign in", _meta: null }, 52, method);
+  // A tool approval from the owner's server waits for the owner, like the room's own.
+  const ownerToolApproval = client.askPermission(mcpToolPermissionParams({ serverName: "owner_browser",
+    message: 'Allow the owner_browser MCP server to run tool "owner_write"?' }), 53, method);
+  const roomToolApproval = client.askPermission(mcpToolPermissionParams(), 54, method);
+  // The room's server never asks for input; an unrecognised request of its own is not answered for it.
+  const roomForm = client.askPermission(mcpToolPermissionParams({ _meta: {} }), 55, method);
+  const command = client.askPermission(approvalParams(), 56);
+  // A tool approval too large to show could never be answered either. From the owner's server it is turned down;
+  // from the room's own it is left exactly as it always was.
+  const oversized = { codex_approval_kind: "mcp_tool_call", persist: ["session"], tool_description: "Write", tool_params: { text: "x".repeat(30_000) } };
+  const ownerOversized = client.askPermission(mcpToolPermissionParams({ serverName: "owner_browser", _meta: oversized }), 57, method);
+  const roomOversized = client.askPermission(mcpToolPermissionParams({ _meta: oversized }), 58, method);
+  assert.deepEqual(client.permissionResponses, [
+    { request: form, result: { action: "decline", content: null, _meta: null } },
+    { request: signIn, result: { action: "decline", content: null, _meta: null } },
+    { request: ownerOversized, result: { action: "decline", content: null, _meta: null } },
+  ]);
+  assert.deepEqual(client.listPendingRequests(), [ownerToolApproval, roomToolApproval, roomForm, command, roomOversized]);
+  // Each one is in the agent's activity, with whose request it was, and nothing else is reported as declined.
+  assert.deepEqual(activity, [
+    'Declined a request for typed input from your MCP server "owner_browser". LetAgents cannot show it.',
+    'Declined a request for a sign-in from your MCP server "owner_browser". LetAgents cannot show it.',
+    'Did not allow a tool of your MCP server "owner_browser". Its approval request was too large or malformed to show.',
+  ]);
+});
+
+test("an agent that was re-attached still declines and reports an owner server's request nobody can answer", async () => {
+  const harness = createHarness();
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({
+    deliveryMode: "daemon_inbox", supervisorEntryId: "supervised_owner", supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS, homeHarness: true,
+  }));
+  // A fresh adapter, as after the background service restarts: it is not told about the switch again.
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await adapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+  assertProviderHandle(attached);
+  const client = harness.clients[1]!; client.turnStatus = "inProgress";
+  const activity: string[] = [];
+  adapter.onStream(attached, (event) => { if (event.method === "mcpServer/elicitation/declined") activity.push(event.summary ?? ""); });
+  const form = client.askPermission(mcpToolPermissionParams({ serverName: "owner_browser", _meta: null, message: "Which account?",
+    requestedSchema: { type: "object", properties: { account: { type: "string" } }, required: ["account"] } }), 71, "mcpServer/elicitation/request");
+  assert.deepEqual(client.permissionResponses, [{ request: form, result: { action: "decline", content: null, _meta: null } }]);
+  assert.deepEqual(activity, ['Declined a request for typed input from your MCP server "owner_browser". LetAgents cannot show it.']);
+});
+
+const OWN_SETUP_LAUNCH = { deliveryMode: "daemon_inbox" as const, supervisorEntryId: "supervised_owner",
+  supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS, homeHarness: true };
+const REFUSAL = "This project's Codex config changes your MCP server \"owner_browser\", so LetAgents will not start Codex here with your own setup.";
+
+/** A re-attach as the background service makes it after a restart: a fresh adapter, and a ref that carries the daemon's own record. */
+async function launchedThenRestarted(spawn: Partial<ProviderSpawnRequest>, recordedOwnerSetup: boolean, harnessOptions: Parameters<typeof createHarness>[0] = {}) {
+  const harness = createHarness({ exitOnSignal: true, processIdentity: "Mon Aug 31 08:00:00 2026", ...harnessOptions });
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest(spawn));
+  const ref = { workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection,
+    ...(recordedOwnerSetup ? { ownerSetup: true as const } : {}) };
+  harness.commandLineReads.length = 0;
+  return { harness, ref, adapter: new CodexProviderAdapter({ dependencies: harness.dependencies }) };
+}
+const attachRequests = (harness: ReturnType<typeof createHarness>) => harness.clients[1]!.requests.map((request) => request.method);
+/** What makes a running Codex read the project's config again. */
+const RELOADS = ["mcpServerStatus/list", "thread/start", "config/mcpServer/reload"];
+
+test("an agent that never had its owner's setup is re-attached exactly as before, whatever its process looks like, and nothing is read off the process", async () => {
+  // What a re-attach asked a running app-server before the owner's setup existed.
+  const BEFORE = ["mcpServerStatus/list", "thread/read", "thread/resume", "thread/read"];
+  for (const [shape, spawn, harnessOptions] of [
+    // Started by an older build: no override that turns the owner's extensions off is on its command line.
+    ["no isolation overrides on its command line", OWN_SETUP_LAUNCH, {}],
+    ["every isolation override on its command line", { deliveryMode: "daemon_inbox" as const }, {}],
+    // Nothing about the process is asked, so a process that cannot be read is no obstacle either.
+    ["a process that cannot be read", { deliveryMode: "daemon_inbox" as const }, { processUnreadable: true }],
+  ] as const) {
+    const { harness, ref, adapter } = await launchedThenRestarted(spawn, false, harnessOptions);
+    harness.changeProject(REFUSAL);
+    const attached = await adapter.attach(ref);
+    assertProviderHandle(attached);
+    assert.equal(attached.ownerSetup, false, shape);
+    assert.deepEqual(attachRequests(harness), BEFORE, shape);
+    assert.deepEqual(harness.commandLineReads, [], `${shape}: the process's command line is never read`);
+    assert.deepEqual(harness.liveChecks, [], `${shape}: the project is never inspected`);
+    assert.deepEqual(harness.signals, [], `${shape}: nothing is stopped`);
+    // Nor later: its conversation is repaired with no check at all.
+    await adapter.repairContinuation(attached, {
+      workAttemptId: attached.workAttemptId, expectedProviderContinuationId: attached.providerContinuationId!,
+      cwd: spawnRequest().cwd, launchPolicy: spawnRequest().launchPolicy, forceReplacement: true,
+    }, { checkpointReplacement: async () => {} });
+    assert.deepEqual(harness.commandLineReads, [], shape);
+    assert.deepEqual(harness.liveChecks, [], shape);
+    assert.deepEqual(harness.signals, [], shape);
+  }
+});
+
+test("re-attaching an agent the daemon started with its owner's setup never asks Codex to read the project again, and stops nothing", async () => {
+  for (const [name, harnessOptions, projectChanged] of [
+    ["the project is as it was", {}, false],
+    ["the project changed since the agent started", {}, true],
+    ["its command line cannot be read", { processUnreadable: true }, true],
+    ["its command line claims it was started isolated", { commandLineClaimsIsolation: true }, true],
+  ] as const) {
+    const { harness, ref, adapter } = await launchedThenRestarted(OWN_SETUP_LAUNCH, true, harnessOptions);
+    if (projectChanged) harness.changeProject(REFUSAL);
+    const attached = await adapter.attach(ref);
+    assertProviderHandle(attached);
+    assert.equal(attached.ownerSetup, true, name);
+    // The same re-attach as any agent's, without the one request that lists the MCP servers.
+    assert.deepEqual(attachRequests(harness), ["thread/read", "thread/resume", "thread/read"], name);
+    assert.deepEqual(attachRequests(harness).filter((method) => RELOADS.includes(method)), [], name);
+    assert.deepEqual(harness.signals, [], `${name}: the agent keeps running, mid-turn or not`);
+    assert.deepEqual(harness.commandLineReads, [], `${name}: no process is started to look at it`);
+    assert.deepEqual(harness.liveChecks, [], name);
+    assert.equal(harness.launches[0]!.alive, true, name);
+  }
+});
+
+test("a process whose record cannot say how it was started is not asked to read its project again, and is otherwise an agent without the setup", async () => {
+  for (const spawn of [OWN_SETUP_LAUNCH, { deliveryMode: "daemon_inbox" as const }]) {
+    const { harness, ref, adapter } = await launchedThenRestarted(spawn, false, { processUnreadable: true });
+    harness.changeProject(REFUSAL);
+    const attached = await adapter.attach({ ...ref, ownerSetup: "unknown" });
+    assertProviderHandle(attached);
+    assert.deepEqual(attachRequests(harness), ["thread/read", "thread/resume", "thread/read"], "the list of MCP servers is left out");
+    // Nothing else changes for it: it is not held to be an agent with the setup, and nothing is read or stopped.
+    assert.equal(attached.ownerSetup, false);
+    await adapter.repairContinuation(attached, {
+      workAttemptId: attached.workAttemptId, expectedProviderContinuationId: attached.providerContinuationId!,
+      cwd: spawnRequest().cwd, launchPolicy: spawnRequest().launchPolicy, forceReplacement: true,
+    }, { checkpointReplacement: async () => {} });
+    assert.deepEqual([harness.commandLineReads, harness.liveChecks, harness.signals], [[], [], []]);
+  }
+});
+
+test("repairing a conversation never lets a Codex that has its owner's setup reload a project that changed since it started", async () => {
+  const repair = async (spawn: Partial<ProviderSpawnRequest>, change: boolean, harnessOptions: Parameters<typeof createHarness>[0] = {}, reattachedAs?: boolean) => {
+    const harness = createHarness({ exitOnSignal: true, processIdentity: "Mon Aug 31 08:00:00 2026", ...harnessOptions });
+    let adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const request = spawnRequest(spawn);
+    let handle = await adapter.spawn(request);
+    // A launch says on its handle whether the process has the owner's setup.
+    assert.equal(handle.ownerSetup, spawn.homeHarness === true);
+    if (reattachedAs !== undefined) {
+      // After a restart of the background service the adapter knows only what the daemon's ref tells it.
+      adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+      const attached = await adapter.attach({ workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!,
+        providerConnection: handle.providerConnection, ...(reattachedAs ? { ownerSetup: true as const } : {}) });
+      assertProviderHandle(attached);
+      handle = attached;
+    }
+    const client = harness.clients.at(-1)!;
+    const before = client.requests.length;
+    // What the daemon puts in the agent's activity, and how many stops had been sent when it was said.
+    const told: Array<{ summary: string; stopsBefore: number }> = [];
+    adapter.onStream(handle, (event) => {
+      if (event.method === "ownerSetup/stopped") told.push({ summary: event.summary ?? "", stopsBefore: harness.signals.length });
+    });
+    if (change) harness.changeProject(REFUSAL);
+    const outcome = await adapter.repairContinuation(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+      cwd: request.cwd, launchPolicy: request.launchPolicy, forceReplacement: true,
+    }, { checkpointReplacement: async () => {} }).then(() => null, (error: Error) => error);
+    return { harness, handle, outcome, told, after: client.requests.slice(before).map((entry) => entry.method) };
+  };
+  const threadCalls = (methods: string[]) => methods.filter((method) => method === "thread/start" || method === "thread/resume");
+  const refused = (result: Awaited<ReturnType<typeof repair>>, reason: RegExp, name: string) => {
+    assert.match(result.outcome?.message ?? "", reason, name);
+    assert.deepEqual(threadCalls(result.after), [], `${name}: no thread was started or loaded`);
+    assert.deepEqual(result.harness.signals.map((signal) => signal.pid), [4100], `${name}: the process is stopped`);
+    assert.equal(result.handle.observedState() === "idle" || result.handle.observedState() === "working", false, name);
+    // The owner is told why in the agent's activity, once, before the process goes.
+    assert.equal(result.told.length, 1, name);
+    assert.match(result.told[0]!.summary, /^Stopped this agent\. /, name);
+    assert.match(result.told[0]!.summary, reason, name);
+    assert.equal(result.told[0]!.stopsBefore, 0, name);
+  };
+
+  const changed = await repair(OWN_SETUP_LAUNCH, true);
+  refused(changed, /changes your MCP server "owner_browser"/, "the refusal names what the project changed");
+
+  // A command line that cannot be read, as when `ps` does not answer in time: the project is not loaded on a guess.
+  const unreadable = await repair(OWN_SETUP_LAUNCH, false, { processUnreadable: true });
+  refused(unreadable, /could not read how this agent's Codex was started, so it stopped the agent before Codex could load the project's configuration with your own setup/, "unreadable");
+  assert.deepEqual(unreadable.harness.liveChecks, [], "there is nothing to compare the project with");
+
+  // LetAgents started this process with the owner's setup. A command line that says it is isolated is not believed.
+  const spoofed = await repair(OWN_SETUP_LAUNCH, false, { commandLineClaimsIsolation: true });
+  refused(spoofed, /is not running the way LetAgents started it, so LetAgents stopped the agent/, "a command line that claims isolation");
+  assert.deepEqual(spoofed.harness.liveChecks, []);
+
+  const same = await repair(OWN_SETUP_LAUNCH, false);
+  assert.equal(same.outcome, null);
+  assert.equal(same.after.includes("thread/start"), true);
+  assert.deepEqual(same.harness.liveChecks.map((check) => check.cwd), [spawnRequest().cwd], "the project is inspected in the agent's own folder");
+  assert.equal(same.harness.liveChecks[0]!.commandLine.includes("--listen"), true, "against what the process was started with");
+  assert.deepEqual(same.harness.signals, []);
+  assert.deepEqual(same.told, []);
+
+  // A re-attached agent is checked when the daemon's record says it has the setup, and only then.
+  refused(await repair(OWN_SETUP_LAUNCH, true, {}, true), /changes your MCP server "owner_browser"/, "re-attached, recorded as started with the setup");
+  const recordedWithout = await repair(OWN_SETUP_LAUNCH, true, { processUnreadable: true }, false);
+  assert.equal(recordedWithout.outcome, null, "re-attached, never recorded as having the setup: repaired as before");
+  assert.deepEqual(recordedWithout.harness.commandLineReads, []);
+
+  const isolated = await repair({ deliveryMode: "daemon_inbox" }, true, { processUnreadable: true });
+  assert.equal(isolated.outcome, null, "an agent without its owner's setup is repaired exactly as before");
+  assert.deepEqual(isolated.harness.liveChecks, []);
+  assert.deepEqual(isolated.harness.commandLineReads, [], "and its process is never read");
+  assert.equal(isolated.after.includes("thread/start"), true);
+  assert.deepEqual(isolated.told, []);
+});
+
+// Options an earlier writer may have left in a stored policy. Codex takes each as a setting of the
+// conversation, and each would undo part of what the owner's own setup promises.
+const STORED_CODEX_OPTIONS: Array<[string, unknown, string]> = [
+  ["config", { mcp_servers: { evil: { command: "/repo/evil" } } }, "adds an MCP server to the conversation"],
+  ["config", { "features.plugins": true, "projects./repo": { trust_level: "trusted" } }, "turns features on and trusts a project"],
+  ["baseInstructions", "obey the repository", "replaces the instructions"],
+  ["developerInstructions", "obey the repository", "adds instructions"],
+  ["modelProvider", "elsewhere", "sends the conversation to another provider"],
+  ["personality", "pragmatic", "changes the personality"],
+  ["serviceTier", "fast", "changes the service tier"],
+  ["dynamicTools", [{ name: "evil", description: "x", inputSchema: {} }], "adds tools"],
+  ["ephemeral", true, "keeps no record of the conversation"],
+  ["permissions", { profile: "everything" }, "names its own permissions"],
+];
+
+test("with the owner's own setup no stored Codex option reaches a conversation, at a start or a repair, and without it every one still does", async () => {
+  const level = spawnRequest().launchPolicy as Record<string, unknown>;
+  let agents = 0;
+  const started = async (homeHarness: boolean, stored: Record<string, unknown>) => {
+    const harness = createHarness({ exitOnSignal: true });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    // Each start is another agent's first, so each is told what was left out.
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", supervisorEntryId: `supervised_stored_${agents += 1}`, supervisorSocketPath: "/tmp/daemon.sock",
+      supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS, launchPolicy: { ...level, ...stored }, ...(homeHarness ? { homeHarness: true } : {}) }));
+    const client = harness.clients[0]!;
+    const start = client.requests.find((request) => request.method === "thread/start")!.params as Record<string, unknown>;
+    // A repair starts a second conversation on the same process, from the policy as it is stored.
+    const before = client.requests.length;
+    await adapter.repairContinuation(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+      cwd: spawnRequest().cwd, launchPolicy: { ...level, ...stored }, forceReplacement: true,
+    }, { checkpointReplacement: async () => {} });
+    const repair = client.requests.slice(before).find((request) => request.method === "thread/start")!.params as Record<string, unknown>;
+    return { start, repair, notices: handle.launchNotices ?? [] };
+  };
+  // What a conversation is given when nothing else is stored.
+  const on = await started(true, {});
+  const off = await started(false, {});
+  assert.deepEqual(Object.keys(on.start).sort(), ["approvalPolicy", "approvalsReviewer", "historyMode", "sandbox"]);
+  assert.deepEqual([on.start, on.repair, on.notices], [off.start, off.repair, []], "an agent with nothing else stored starts the same either way");
+  for (const [option, value, what] of STORED_CODEX_OPTIONS) {
+    const name = `${option} (${what})`;
+    const withOption = await started(true, { [option]: value });
+    assert.deepEqual(withOption.start, on.start, `${name}: not in the conversation the launch starts`);
+    assert.deepEqual(withOption.repair, on.repair, `${name}: nor in one a repair starts`);
+    assert.deepEqual(withOption.notices, [
+      `With your own setup on, this agent starts with its access level's own Codex options only. These saved options were not used: ${JSON.stringify(option)}.`,
+    ], name);
+    // Without the owner's setup the option is passed on exactly as it always was.
+    const passedOn = await started(false, { [option]: value });
+    assert.deepEqual(passedOn.start, { ...off.start, [option]: value }, `${name}: unchanged without the owner's setup`);
+    assert.deepEqual(passedOn.repair, { ...off.repair, [option]: value }, name);
+    assert.deepEqual(passedOn.notices, [], name);
+  }
+});
+
+test("a Codex agent is told which saved options were left out when they change, not at every start", async () => {
+  const level = spawnRequest().launchPolicy as Record<string, unknown>;
+  const told = async (agent: string, stored: Record<string, unknown>, own: Record<string, unknown> = OWN_SETUP_LAUNCH) => {
+    const harness = createHarness({ exitOnSignal: true });
+    const handle = await new CodexProviderAdapter({ dependencies: harness.dependencies })
+      .spawn(spawnRequest({ ...own, supervisorEntryId: agent, launchPolicy: { ...level, ...stored } }));
+    return handle.launchNotices ?? [];
+  };
+  const line = (...options: string[]) => [`With your own setup on, this agent starts with its access level's own Codex options only. These saved options were not used: ${options.map((option) => JSON.stringify(option)).join(", ")}.`];
+  const secret = { mcp_servers: { evil: { command: "/repo/value-that-is-never-shown" } } };
+  assert.deepEqual(await told("supervised_said_once", { config: secret }), line("config"), "its first start says it");
+  assert.deepEqual(await told("supervised_said_once", { config: secret }), [], "the same again says nothing");
+  assert.deepEqual(await told("supervised_said_once", { config: { other: true } }), [], "another value under the same name is not a change: names are all that is said");
+  assert.deepEqual(await told("supervised_said_once", { config: secret, personality: "x" }), line("config", "personality"), "a change is said");
+  assert.deepEqual(await told("supervised_said_once", {}), []);
+  assert.deepEqual(await told("supervised_said_once", { config: secret, personality: "x" }), line("config", "personality"), "and so is the same set coming back");
+  // A start without the owner's setup says nothing and is not counted as one that did.
+  const { homeHarness: _on, ...without } = OWN_SETUP_LAUNCH;
+  assert.deepEqual(await told("supervised_said_once", { config: secret, personality: "x" }, without), []);
+  assert.deepEqual(await told("supervised_said_once", { config: secret, personality: "x" }), []);
+  // What one agent was told says nothing about another.
+  assert.deepEqual(await told("supervised_said_once_other", { config: secret, personality: "x" }), line("config", "personality"));
+});
+
+test("without the owner's setup nothing the room's server asks is declined, whatever its size or shape", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!; client.turnStatus = "inProgress";
+  const method = "mcpServer/elicitation/request";
+  const activity: string[] = [];
+  // The background service keeps an agent's activity from its stream, so that is where each one must be.
+  adapter.onStream(handle, (event) => { if (event.method === "mcpServer/elicitation/declined") activity.push(event.summary ?? ""); });
+  const pending = [
+    client.askPermission(mcpToolPermissionParams(), 61, method),
+    client.askPermission(mcpToolPermissionParams({ _meta: { codex_approval_kind: "mcp_tool_call", tool_params: { text: "x".repeat(30_000) } } }), 62, method),
+    client.askPermission(mcpToolPermissionParams({ _meta: null, requestedSchema: { type: "object", properties: { a: { type: "string" } } } }), 63, method),
+    client.askPermission(mcpToolPermissionParams({ mode: "url", url: "https://example.invalid", _meta: null }), 64, method),
+    client.askPermission(approvalParams(), 65),
+  ];
+  assert.deepEqual(client.permissionResponses, []);
+  assert.deepEqual(client.listPendingRequests(), pending);
+  assert.deepEqual(activity, []);
 });

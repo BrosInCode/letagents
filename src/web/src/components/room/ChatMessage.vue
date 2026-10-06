@@ -1,5 +1,6 @@
 <template>
   <div
+    ref="messageElement"
     class="message"
     :class="{
       'system-message': isSystem,
@@ -17,6 +18,7 @@
     <div v-if="isWakeNotice" class="message-body wake-notice-body">
       <p class="wake-notice-line">
         <span class="wake-notice-text">{{ visibleText }}</span>
+        <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
         <time :datetime="message.timestamp" :title="fullTimestamp">{{ formattedTime }}</time>
       </p>
       <ThreadMarker
@@ -37,8 +39,16 @@
         :provenance-badge="provenanceBadge"
         :inline-prompt-injection="inlinePromptInjection"
         :formatted-time="formattedTime"
+        :pinned="pinned"
+        :can-pin="pinnable"
+        :pin-pending="Boolean(pinContext?.state.value.pending)"
+        @pin="pinContext?.toggle(message.id)"
+        @copy="copyMessageFromMenu"
+        :can-react="reactable"
+        :picker-open="reactionPickerAnchor !== null"
         @reply="emit('reply', message)"
         @info="emit('info', message)"
+        @react="openReactionPicker"
       />
       <div
         class="message-bubble"
@@ -63,6 +73,7 @@
         />
         <GitHubEventCard
           v-if="githubEvent"
+          room
           :event="githubEvent"
           :taskLinkEnabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
           @openTask="emit('openTask', $event)"
@@ -76,9 +87,15 @@
         <LongMessageContent
           v-else-if="message.text"
           :text="visibleText"
-          :html="renderedContent"
+          :html="renderedMessage.html"
           :messageId="message.id"
           @taskReferenceClick="emit('openTask', $event)"
+        />
+        <GitHubEventCard
+          v-for="preview in linkPreviews"
+          :key="preview.url"
+          :event="linkPreviewPresentation(preview)"
+          compact
         />
         <MessageAttachments
           v-if="attachments.length"
@@ -92,6 +109,16 @@
           @toggle="handleToggleStalePromptMute"
         />
       </div>
+      <MessageReactionBar
+        v-if="reactions.length"
+        :reactions="reactions"
+        :viewer-login="reactionContext?.viewerLogin.value ?? null"
+        :viewer-reacted="viewerReacted"
+        :can-react="reactable"
+        :picker-open="reactionPickerAnchor !== null"
+        @toggle="toggleReaction"
+        @add="openReactionPicker"
+      />
       <ThreadMarker
         v-if="hasThread"
         :latest-id="threadLatestId"
@@ -124,16 +151,28 @@
         @keydown="handleMenuKeydown"
       >
         <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
+        <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromMenu">Copy link to message</button>
         <button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
+        <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromMenu">{{ pinned ? 'Unpin message' : 'Pin message' }}</button>
+        <button v-if="reactable" type="button" role="menuitem" @click="reactFromMenu">Add reaction…</button>
+        <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromMenu">Mark unread from here</button>
         <div class="web-message-context-menu-separator" role="separator" />
         <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
       </div>
+      <MessageReactionPicker
+        v-if="reactionPickerAnchor"
+        :anchor="reactionPickerAnchor"
+        :viewer-reacted="viewerReacted"
+        :instant="reactionPickerInstant"
+        @select="toggleReaction"
+        @close="closeReactionPicker"
+      />
     </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { inject, computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
@@ -144,7 +183,15 @@ import ReasoningAnchor from './chat-message/ReasoningAnchor.vue'
 import ReplyPreview from './chat-message/ReplyPreview.vue'
 import StalePromptActions from './chat-message/StalePromptActions.vue'
 import ThreadMarker from './chat-message/ThreadMarker.vue'
+import MessageReactionBar from '../../../../../shared/ui/MessageReactionBar.vue'
+import MessageReactionPicker, { type MessageReactionPickerAnchor } from '../../../../../shared/ui/MessageReactionPicker.vue'
 import WakeGlyph from '../../../../../shared/ui/WakeGlyph.vue'
+import { isPinMessageId } from '../../../../../shared/message-pins.mjs'
+import { unreadMenuKey } from '../../../../../shared/room-unread-client'
+import { injectRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
+import { excludeGitHubEventLink, linkPreviewPresentation } from '../../../../../shared/message-link-previews.mjs'
+import { injectRoomMessagePins } from '@/composables/roomMessagePins'
+import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
 import { WAKE_NOTICE_SOURCE } from '../../../../../shared/wake-rules.mjs'
 import {
   formatMessageTime,
@@ -168,6 +215,11 @@ import {
   hasInlinePromptInjection,
   getReplyPreviewText,
 } from '@/composables/useRoom'
+import {
+  buildLetAgentsMessageUrl,
+  isLocalRoomIdentifier,
+  isValidMessageId,
+} from '@/domain/roomRoutes'
 
 const props = defineProps<{
   message: RoomMessage
@@ -199,6 +251,14 @@ const contextMenuPosition = ref({ x: 0, y: 0 })
 const contextMenuRef = ref<HTMLElement | null>(null)
 let contextMenuRestoreFocus: HTMLElement | null = null
 
+const canCopyMessageLink = computed(() => {
+  return (
+    Boolean(props.roomIdentifier) &&
+    !isLocalRoomIdentifier(props.roomIdentifier) &&
+    isValidMessageId(props.message.id)
+  )
+})
+
 // Native context menus stay useful on these targets (open link in new tab,
 // copy selection, media controls), so the message menu defers to them.
 const NATIVE_MENU_TARGETS = 'a[href], button, input, textarea, select, [contenteditable="true"], img, video, audio'
@@ -210,9 +270,14 @@ function openContextMenu(event: MouseEvent) {
   if (selection && !selection.isCollapsed && target && selection.containsNode(target, true)) return
   event.preventDefault()
   contextMenuRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  const menuExtraHeight =
+    (canCopyMessageLink.value ? 32 : 0) +
+    (reactable.value ? 32 : 0) +
+    (pinnable.value ? 32 : 0) +
+    (canMarkUnread.value ? 32 : 0)
   contextMenuPosition.value = {
-    x: Math.min(event.clientX, window.innerWidth - 190),
-    y: Math.min(event.clientY, window.innerHeight - 170),
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 190)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - (170 + menuExtraHeight))),
   }
   contextMenuOpen.value = true
   void nextTick(() => {
@@ -236,6 +301,18 @@ async function copyMessageFromMenu() {
   }
 }
 
+async function copyMessageLinkFromMenu() {
+  closeContextMenu(true)
+  if (!props.roomIdentifier) return
+  try {
+    const origin = typeof window !== 'undefined' ? window.location.origin : ''
+    const url = buildLetAgentsMessageUrl(props.roomIdentifier, props.message.id, origin)
+    await navigator.clipboard.writeText(url)
+  } catch {
+    // Clipboard may be unavailable; text remains selectable.
+  }
+}
+
 function replyFromMenu() {
   closeContextMenu()
   emit('reply', props.message)
@@ -246,8 +323,82 @@ function messageInfoFromMenu() {
   emit('info', props.message)
 }
 
+// Reactions exist only inside a room that provides them (not in previews or
+// tests), and only on a message the server sent with its reactions.
+const unreadContext = inject(unreadMenuKey, null)
+const canMarkUnread = computed(() => Boolean(unreadContext?.client.account.value && unreadContext.room.value)
+  && (!props.message.thread_root_id || props.message.thread_root_id === props.message.id)
+  && !props.message.id.startsWith('pending:'))
+function markUnreadFromMenu() {
+  closeContextMenu(true)
+  if (canMarkUnread.value) unreadContext?.client.mark(unreadContext.room.value, props.message.id)
+}
+const pinContext = injectRoomMessagePins()
+const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id))
+const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false)
+function pinFromMenu(): void { closeContextMenu(true); pinContext?.toggle(props.message.id) }
+const reactionContext = injectRoomMessageReactions()
+const reactions = computed(() => reactionContext?.reactionsFor(props.message.id) ?? [])
+const reactable = computed(() => Boolean(reactionContext?.canReact.value)
+  && props.message.reactions !== undefined
+  && !isWakeNotice.value
+  && /^msg_\d+$/.test(props.message.id))
+const viewerReacted = (emoji: string): boolean => reactionContext?.viewerReacted(props.message.id, emoji) ?? false
+
+let stopTrackingReactions: (() => void) | null = null
+watch(() => [props.message.id, props.message.reactions !== undefined] as const, () => {
+  stopTrackingReactions?.()
+  stopTrackingReactions = reactionContext?.track(props.message) ?? null
+}, { immediate: true })
+
+const messageElement = ref<HTMLElement | null>(null)
+const reactionPickerAnchor = ref<MessageReactionPickerAnchor | null>(null)
+const reactionPickerInstant = ref(false)
+let reactionPickerInvoker: HTMLElement | null = null
+let reactionPickerClosedByPress: { invoker: HTMLElement; at: number } | null = null
+
+function toggleReaction(emoji: string) {
+  reactionContext?.toggle(props.message.id, emoji)
+}
+
+function showReactionPicker(anchor: MessageReactionPickerAnchor, invoker: HTMLElement | null, instant: boolean) {
+  if (!reactable.value) return
+  reactionPickerInvoker = invoker
+  reactionPickerInstant.value = instant
+  reactionPickerAnchor.value = anchor
+}
+
+function openReactionPicker(event: MouseEvent) {
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  if (!trigger) return
+  // The press that starts this click already closed the picker this control
+  // had open: the control is a toggle, so do not open it again.
+  const closed = reactionPickerClosedByPress
+  reactionPickerClosedByPress = null
+  if (closed?.invoker === trigger && performance.now() - closed.at < 500) return
+  // A click with no pointer detail came from the keyboard.
+  showReactionPicker({ element: trigger }, trigger, event.detail === 0)
+}
+
+function closeReactionPicker(restoreFocus: boolean, pressed?: EventTarget | null) {
+  const invoker = reactionPickerInvoker
+  reactionPickerAnchor.value = null
+  reactionPickerInvoker = null
+  reactionPickerClosedByPress = invoker && pressed instanceof Node && invoker.contains(pressed)
+    ? { invoker, at: performance.now() }
+    : null
+  if (restoreFocus && invoker?.isConnected) invoker.focus({ preventScroll: true })
+}
+
+function reactFromMenu() {
+  const { x, y } = contextMenuPosition.value
+  const invoker = contextMenuRestoreFocus
+  closeContextMenu()
+  if (messageElement.value) showReactionPicker({ element: messageElement.value, point: { x, y } }, invoker, true)
+}
+
 function handleMenuKeydown(event: KeyboardEvent) {
-  const items = Array.from(contextMenuRef.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+  const items = Array.from(contextMenuRef.value?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])
   if (items.length === 0) return
   const activeIndex = items.indexOf(document.activeElement as HTMLElement)
   if (event.key === 'ArrowDown') {
@@ -282,6 +433,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopTrackingReactions?.()
+  stopTrackingPreviews?.()
   document.removeEventListener('pointerdown', handleMenuDismiss, true)
   document.removeEventListener('keydown', handleMenuDismiss, true)
   window.removeEventListener('blur', handleMenuDismiss)
@@ -392,12 +545,20 @@ const fullTimestamp = computed(() => {
     ? ''
     : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 })
-const renderedContent = computed(() => renderMessageContent(
-  isAmbientSystem.value
-    ? stripStatusPrefix(visibleText.value)
-    : visibleText.value,
-  props.taskReferenceIds,
-))
+const renderedMessage = computed(() => {
+  const urls: string[] = []
+  const html = renderMessageContent(isAmbientSystem.value ? stripStatusPrefix(visibleText.value) : visibleText.value,
+    props.taskReferenceIds, (url) => urls.push(url))
+  return { html, urls }
+})
+const previewUrls = computed(() => excludeGitHubEventLink(renderedMessage.value.urls, githubEvent.value?.url))
+const previewContext = injectRoomMessageLinkPreviews()
+const linkPreviews = computed(() => previewContext?.previewsFor(props.message.id) ?? [])
+let stopTrackingPreviews: (() => void) | null = null
+watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.value], () => {
+  stopTrackingPreviews?.()
+  stopTrackingPreviews = previewContext?.track({ id: props.message.id, urls: previewUrls.value }) ?? null
+}, { immediate: true })
 </script>
 
 <style scoped>
@@ -405,7 +566,9 @@ const renderedContent = computed(() => renderMessageContent(
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 13px 0;
+  width: min(100%, 720px);
+  margin: 0 auto;
+  padding: 12px 0;
 }
 
 .message-avatar {
@@ -424,24 +587,25 @@ const renderedContent = computed(() => renderMessageContent(
 }
 
 .message-body {
-  flex: 0 1 72ch;
-  width: min(100%, 72ch);
+  flex: 1;
   min-width: 0;
 }
 
 .message-bubble {
-  --message-surface: color-mix(in srgb, var(--surface, #18181b) 96%, var(--sender-color, #71717a) 4%);
   width: fit-content;
-  max-width: 100%;
+  max-width: min(64ch, 100%);
   min-width: 0;
-  padding: 11px 15px 12px;
-  border: none;
-  border-radius: 16px 16px 16px 6px;
-  background: var(--message-surface);
-  color: color-mix(in srgb, var(--text, #fafafa) 94%, transparent);
+  box-sizing: border-box;
+  padding: 9px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--bg-subtle);
+  color: var(--text);
   box-shadow:
-    inset 0 1px color-mix(in srgb, white 5%, transparent),
-    0 1px 2px color-mix(in srgb, black 22%, transparent);
+    inset 0 1px 0 light-dark(rgba(255,255,255,.8),rgba(255,255,255,.045)),
+    0 2px 3px light-dark(rgba(9,9,11,.08),rgba(0,0,0,.6)),
+    0 8px 18px -4px light-dark(rgba(9,9,11,.15),rgba(0,0,0,.55)),
+    0 20px 34px -12px light-dark(rgba(9,9,11,.2),rgba(0,0,0,.7));
 }
 
 .message-bubble.github-message-bubble {
@@ -472,8 +636,8 @@ const renderedContent = computed(() => renderMessageContent(
 }
 
 .message-bubble :deep(.md-content) {
-  font-size: 0.96rem;
-  line-height: 1.62;
+  font-size: 14px;
+  line-height: 1.65;
   overflow-wrap: anywhere;
   word-break: normal;
 }
@@ -690,6 +854,8 @@ const renderedContent = computed(() => renderMessageContent(
   z-index: 9998;
   display: grid;
   min-width: 172px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   padding: 5px;
   border: 1px solid var(--border, #27272a);
   border-radius: 10px;

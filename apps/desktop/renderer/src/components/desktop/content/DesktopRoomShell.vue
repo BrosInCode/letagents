@@ -10,7 +10,7 @@
       :storage="storage"
       :tabs="tabs"
       :active-tab="activeTab"
-      :attention-count="attentionCount"
+      :attention="attention"
       @open-inbox="emit('open-inbox')"
       :search-open="searchOpen"
       :action-panel-open="actionPanelOpen"
@@ -43,7 +43,7 @@
       :github-events-visible="githubEventsVisible"
       :storage-busy="storageBusy"
       :search-summary="searchSummary"
-      :search-results-count="searchResults.length"
+      :search-results-count="searchResults.length" @show-search-result="revealRoomMessage"
       @copy-room-link="copyRoomLink"
       @open-rules="openRules"
       @toggle-sound="toggleSound"
@@ -371,6 +371,7 @@ import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { attentionResponseAgentNames } from "../../../domain/attention-response";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import { useAgentPauseRequests } from "../../../domain/agent-pause-requests";
+import { appendAgentInspectorLiveBatch } from "../../../domain/agent-inspector-live";
 import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import { roomMentionCandidates } from "../../../domain/participants";
@@ -379,7 +380,7 @@ import {
   participantAgentInspectorRequest,
   resolvingAgentInspectorRequest,
   resolveAgentInspectorSelection,
-  supervisedAgentInspectorRequest,
+  supervisedAgentInspectorRequest, inspectorInitialTab,
   type AgentInspectorSupervisorEntryUpdate,
   type SupervisorEntriesResource,
 } from "../../../domain/agent-inspector-identity";
@@ -481,7 +482,6 @@ import { useDesktopRoomGitHubEvents } from "./room-shell/useDesktopRoomGitHubEve
 import { useDesktopRoomMessages } from "./room-shell/useDesktopRoomMessages";
 import {
   useDesktopRoomPreferences,
-  watchRoomNotifications,
 } from "./room-shell/useDesktopRoomPreferences";
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -518,7 +518,7 @@ const props = defineProps<{
   notificationRevealMessageId?: string | null;
   notificationRevealNonce?: number;
   attentionIntent?: AttentionNavigationIntent | null;
-  attentionCount?: number;
+  attention?: { count: number; pulse: boolean };
   initialChatScrollTop?: number | null;
   onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
@@ -541,7 +541,7 @@ const emit = defineEmits<{
   "add-agent-open-request-consumed": [];
   /** Placeholder until the daemon exposes a receipt retry control endpoint. */
   "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
-  "message-reveal-unavailable": [messageId: string];
+  "message-reveal-unavailable": [messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"];
   "open-inbox": [];
 }>();
 
@@ -555,12 +555,10 @@ const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
 const selectedAgentDetailRequestVersion = ref(0);
-const agentInspectorInitialTab = ref<"overview" | "work" | "workspace" | "diagnostics">("overview");
+const agentInspectorInitialTab = ref<"overview" | "live" | "work" | "workspace" | "diagnostics">("overview");
 const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
-// Cap the retained live-feed tail so a long turn can't grow the renderer
-// buffer without bound; matches the daemon's ephemeral ring buffer intent.
-const AGENT_LIVE_FEED_LIMIT = 400;
+let agentInspectorLiveIdentity: string | null = null;
 // Ephemeral live feed for the inspected agent's "Live" tab. Not persisted;
 // accumulates raw stream events for the focused entry only, reset on focus
 // change and inspector close.
@@ -790,7 +788,8 @@ const {
   toggleNotifications,
   playRoomSound,
   showRoomNotification,
-} = useDesktopRoomPreferences();
+  watchRoomNotifications,
+} = useDesktopRoomPreferences(() => props.room.identifier);
 
 const {
   sendingMessage,
@@ -1138,18 +1137,7 @@ onMounted(() => {
     // Only accumulate for the agent whose inspector is focused; a batch for a
     // stale focus (raced focus change) is ignored.
     if (batch.entryId !== selectedAgentDetailProjection.value?.entryId) return;
-    const priorEvents = batch.reset ? [] : agentInspectorLiveFeed.value.events;
-    const localOverflow = Math.max(0, priorEvents.length + batch.events.length - AGENT_LIVE_FEED_LIMIT);
-    const events = batch.events.length
-      ? [...priorEvents, ...batch.events].slice(-AGENT_LIVE_FEED_LIMIT)
-      : priorEvents;
-    agentInspectorLiveFeed.value = {
-      events,
-      ended: batch.ended,
-      droppedEvents: (batch.reset ? 0 : agentInspectorLiveFeed.value.droppedEvents)
-        + Math.max(0, batch.droppedEvents)
-        + localOverflow,
-    };
+    agentInspectorLiveFeed.value = appendAgentInspectorLiveBatch(agentInspectorLiveFeed.value, batch);
   }) || null;
 });
 
@@ -1521,9 +1509,9 @@ async function revealRoomMessage(messageId: string): Promise<void> {
     selectAgentInspectorWorkSource(messageId);
     return;
   }
-  const revealed = await revealMessage(messageId);
-  if (!revealed) {
-    emit("message-reveal-unavailable", messageId);
+  const outcome = await revealMessage(messageId);
+  if (outcome !== "revealed") {
+    emit("message-reveal-unavailable", messageId, outcome);
     return;
   }
   // Repeated links to the same message need a new reactive edge.
@@ -1941,7 +1929,7 @@ async function openAgentDetailFromParticipant(target: AgentModalTarget): Promise
 }
 
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
-  agentInspectorInitialTab.value = request.target.workSourceMessageId ? "work" : request.target.workspaceSourceMessageId ? "workspace" : "overview";
+  agentInspectorInitialTab.value = inspectorInitialTab(request.target);
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = request;
   agentInspectorActionState.value = null;
@@ -1992,6 +1980,9 @@ function closeAgentDetail(): void {
 function openAgentInspectorLive(): void {
   const projection = selectedAgentDetailProjection.value;
   if (!projection) return;
+  const identity = JSON.stringify([projection.entryId, projection.entry.agentSessionId, projection.entry.executionGenerationId]);
+  if (agentInspectorLiveIdentity === identity) return;
+  agentInspectorLiveIdentity = identity;
   agentInspectorLiveFeed.value = { events: [], ended: false, droppedEvents: 0 };
   void loadAgentInspectorProviders();
   openAgentInspectorWork();
@@ -1999,9 +1990,17 @@ function openAgentInspectorLive(): void {
 }
 
 function stopAgentInspectorLive(): void {
+  agentInspectorLiveIdentity = null;
   agentInspectorLiveFeed.value = { events: [], ended: false, droppedEvents: 0 };
   void desktopIpc.supervisor?.watchAgentStream?.(null);
 }
+
+watch(
+  () => [selectedAgentDetailProjection.value?.entry.agentSessionId, selectedAgentDetailProjection.value?.entry.executionGenerationId],
+  () => {
+    if (agentInspectorLiveIdentity !== null) openAgentInspectorLive();
+  },
+);
 
 function resetAgentInspectorSettings(): void {
   agentInspectorSettingsRequestToken += 1;

@@ -1188,9 +1188,9 @@ export function supervisedCursorPermissionProfilePresentation(
   if (profile.id === "full_access") {
     return {
       ...profile,
-      label: "Workspace writes (compatibility)",
-      description: "Turns off Cursor’s own command restrictions so more project tools can run.",
-      detail: "Cursor still works in a separate copy of your project and cannot write directly to files on this Mac. LetAgents checks for conflicts before copying changes back. Files ignored by Git are not copied back, and Git history is kept.",
+      label: "Full access",
+      description: "Can change files on this Mac and run commands without approval prompts.",
+      detail: "Changes apply directly to the agent's working directory. Commands can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.",
     };
   }
   if (profile.id === "read_only") {
@@ -1282,22 +1282,44 @@ const SUPERVISED_PERMISSION_PROFILE_LIMITS: Partial<Record<
     ask_before_write: "Can't run commands or change files until you approve each one.",
     auto_review: "Can't open files outside the project. Commands that delete, publish, install or reach the network ask you first.",
   },
-  // Cursor runs inside a macOS sandbox that denies network on every level;
-  // compatibility lifts Cursor's own command restrictions, not that sandbox.
+  // Only Cursor's restricted profiles use the outer macOS sandbox.
   cursor: {
     read_only: `Can't edit files. ${CURSOR_NO_NETWORK}`,
     sandboxed_write: `Can't write to files on this Mac directly. ${CURSOR_NO_NETWORK}`,
-    full_access: `Can't write to files on this Mac directly. ${CURSOR_NO_NETWORK}`,
+    full_access: NOTHING_BLOCKED,
+  },
+};
+
+/**
+ * The same lines for an agent that uses its owner's own setup. The owner's
+ * allow rules, hooks, MCP tools and plugins are then outside what an access
+ * level withholds, so each line says what still asks and what does not.
+ */
+const OWNER_SETUP_PERMISSION_PROFILE_LIMITS: Partial<Record<
+  DesktopAgentProviderId,
+  Partial<Record<DesktopManagedAgentPermissionProfileId, string>>
+>> = {
+  codex: {
+    ask_before_write: "Without your approval, Codex's own commands change no files and have no network access. Your own MCP tools, hooks and plugins are not held to this.",
+    auto_review: "Codex's own commands have no network access and change nothing outside its working folder, unless Codex approves more. Your own MCP tools, hooks and plugins are not held to this.",
+  },
+  "claude-code": {
+    read_only: "Its own tools can't change files, run commands or browse the web. Your MCP tools and hooks can, where your own Claude Code settings allow them.",
+    ask_before_write: "Asks before it changes files or runs write commands, except where your own Claude Code rules already allow it. Your hooks run without asking.",
+    auto_review: "Blocks only what Claude judges risky, after your own Claude Code rules have allowed what they allow. It doesn't ask you first.",
   },
 };
 
 export function supervisedPermissionProfileLimits(
   providerId: DesktopAgentProviderId | string | null | undefined,
   profile: Pick<DesktopManagedAgentPermissionProfile, "id" | "status">,
+  /** The agent is set to use its owner's own setup. */
+  ownSetup = false,
 ): string | null {
   if (profile.status !== "available") return null;
-  const provider = providerId === "claude" ? "claude-code" : providerId;
-  return SUPERVISED_PERMISSION_PROFILE_LIMITS[provider as DesktopAgentProviderId]?.[profile.id] ?? null;
+  const provider = (providerId === "claude" ? "claude-code" : providerId) as DesktopAgentProviderId;
+  return (ownSetup ? OWNER_SETUP_PERMISSION_PROFILE_LIMITS[provider]?.[profile.id] : undefined)
+    ?? SUPERVISED_PERMISSION_PROFILE_LIMITS[provider]?.[profile.id] ?? null;
 }
 
 /** Shown before launch. Auto still has a reviewer, so the Full access notice would mislead. */

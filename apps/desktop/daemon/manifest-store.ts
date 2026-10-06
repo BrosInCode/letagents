@@ -1,4 +1,5 @@
 import { PreparedReadStatements } from "./prepared-reads.js";
+import { namesHomeHarness, withoutHomeHarness } from "./provider-configuration.js";
 import { ManagedRuntimeRefreshDeferred } from "./provider-action-port.js";
 import type { ProcessIdentity } from "./process-identity.js";
 import { listHostToolRules, findHostToolRule, readHostToolContext, bindHostToolRule, assertDecisionToolRule, revokeHostToolRule,
@@ -46,7 +47,7 @@ import {
   type SelectDelegatedApproval,
 } from "./execution-delegated-approval.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
-import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery, recordInterruptedCursorRecovery,
+import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, archiveExitedRuntimes, exitedRuntimesToArchive, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery, recordInterruptedCursorRecovery,
   type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "./runtime-recovery-journal.js";
 import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
@@ -103,7 +104,7 @@ import type {
 
 type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
-type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"] };
+type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"]; delivery_mode: string };
 type PreMembershipRoomMoveCancellation = { agentId: string; detail: string };
 export type PendingTypedLifecycleEffect = {
   factId: string; agentId: string; factSequence: number;
@@ -177,6 +178,12 @@ function parseJson<T>(value: unknown): T {
 
 function normalizeManifestEntry(entry: DaemonManifestEntry): DaemonManifestEntry {
   return JSON.parse(JSON.stringify(entry)) as DaemonManifestEntry;
+}
+
+function importedWithoutHomeHarness(entry: DaemonManifestEntry): DaemonManifestEntry {
+  return namesHomeHarness(entry.provider_launch_policy)
+    ? { ...entry, provider_launch_policy: withoutHomeHarness(entry.provider_launch_policy) }
+    : entry;
 }
 
 function canonicalManifestEntry(entry: DaemonManifestEntry): DaemonManifestEntry {
@@ -861,9 +868,9 @@ export class ManifestStore {
 
   async getAgentConfiguration(agentId: string): Promise<StoredAgentConfiguration | undefined> {
     const database = await this.getDatabase();
-    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
+    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract,delivery_mode FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
     if (!row) return undefined;
-    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"] };
+    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"], delivery_mode: String(row.delivery_mode) };
   }
 
   /** Explicit operator request only; startup and credential recovery never create this journal. */
@@ -1600,6 +1607,14 @@ export class ManifestStore {
       }, entry, retired, identity);
       return checkpointRuntimeStopped(database, operationId, entry);
     }, commitFence);
+  }
+
+  /** Archive what the agent's exited runtimes left unfinished in its execution record; see the journal. */
+  async archiveExitedRuntimes(agentId: string, commitFence: (commit: () => Promise<void>) => Promise<void>, identity?: ProcessIdentity): Promise<string[]> {
+    // Asked on every convergence pass, and nearly always with nothing to do: look before taking the write lock.
+    const database = await this.getDatabase();
+    if (!exitedRuntimesToArchive(database, this.readEntryFromDatabase(database, agentId), identity).length) return [];
+    return this.writeOperationalJournal(current => archiveExitedRuntimes(current, this.readEntryFromDatabase(current, agentId), identity), commitFence);
   }
 
   async completeRuntimeRecovery(operationId: string, commitFence: (commit: () => Promise<void>) => Promise<void>) {
@@ -2895,7 +2910,9 @@ export class ManifestStore {
       const current = Number((this.reads.get(database, "generation").get() as Row).generation);
       const count = Number((database.prepare("SELECT COUNT(*) AS count FROM agent_identities").get() as Row).count);
       if (current !== 0 || count !== 0) throw new Error("Refusing to import a legacy manifest into non-empty daemon state.");
-      this.replaceEntries(database, stored.manifest.entries.map((entry) =>
+      // An imported file is not the desktop app's signed choice, so no
+      // imported agent starts with its owner's own setup turned on.
+      this.replaceEntries(database, stored.manifest.entries.map(importedWithoutHomeHarness).map((entry) =>
         entry.provider === "codex" && entry.provider_ref
           ? { ...entry, desired_state: "stopped" as const }
           : entry), false);

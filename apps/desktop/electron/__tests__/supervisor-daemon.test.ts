@@ -3113,7 +3113,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.206");
+    assert.equal(status.implementationVersion, "2.0.208");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -3554,6 +3554,116 @@ test("saved permission list and revoke use the real enrolled signer", async () =
     await assert.rejects(client.revokeHostToolRule({ agentId: "agent", ruleId: "rule", revision: 1 }, () => { throw new Error("Sender changed"); }), /Sender changed/);
     assert.equal(operations.length, 2);
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("turning an agent's use of the owner's own setup on or off is sent only as a request the app signed", async () => {
+  const env = await fixture();
+  const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey);
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  const configuration = (enabled: boolean, revision: number, availability = "available", pending: unknown = undefined) => ({
+    entry_id: "agent", daemon_generation: 7, provider: "codex", model: null, reasoning_effort: null, charter: "help",
+    permission_profile_id: "full_access", supervised_permission_profiles: [], provider_launch_policy: {},
+    config_revision: revision, runtime_configuration_revision: 1, home_harness: enabled, home_harness_availability: availability,
+    ...(pending === undefined ? {} : { home_harness_pending: pending }),
+  });
+  const operations: unknown[] = [];
+  let reply: unknown = null;
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope);
+    assert.ok(authenticated, "the daemon's own verifier accepts the app's signature for this operation");
+    operations.push(authenticated);
+    return reply;
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, loadApprovalSigner: async () => signer });
+  try {
+    reply = { outcome: "updated", configuration: configuration(true, 2) };
+    const on = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 1, enabled: true });
+    assert.equal(on.outcome, "updated");
+    assert.deepEqual(on.outcome === "updated" && on.configuration.homeHarness, { enabled: true, pending: false, availability: "available" });
+    assert.equal(Object.hasOwn(on, "restart"), false, "nothing was restarted, and nothing says it was");
+    assert.deepEqual(operations, [
+      { operation: "set_home_harness", input: { entryId: "agent", daemonGeneration: 7, expectedRevision: 1, enabled: true } },
+    ]);
+    assert.equal(wire.requests.some((request) => request.method === "supervisor.update_agent_configuration"), false,
+      "it never travels as the unsigned settings update");
+
+    reply = { outcome: "conflict", configuration: configuration(false, 3) };
+    const conflict = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 2, enabled: false });
+    assert.equal(conflict.outcome, "conflict");
+    reply = { outcome: "invalid", error: "A rented agent works for someone else and cannot use your own setup." };
+    assert.deepEqual(await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 2, enabled: true }),
+      { outcome: "invalid", error: "A rented agent works for someone else and cannot use your own setup." });
+    reply = { outcome: "updated", configuration: configuration(true, 3, "rental") };
+    const rental = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 2, enabled: true });
+    assert.deepEqual(rental.outcome === "updated" && rental.configuration.homeHarness, { enabled: false, pending: false, availability: "rental" },
+      "a rental reads as off whatever the service says");
+    // An agent that collects its own messages is named as such, and reads as off and not waiting.
+    reply = { outcome: "updated", configuration: configuration(true, 3, "polling", true) };
+    const polling = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 2, enabled: true });
+    assert.deepEqual(polling.outcome === "updated" && polling.configuration.homeHarness, { enabled: false, pending: false, availability: "polling" });
+    reply = { outcome: "updated", configuration: configuration(true, 3, "elsewhere", true) };
+    const unknown = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 2, enabled: true });
+    assert.equal(unknown.outcome === "updated" && Object.hasOwn(unknown.configuration, "homeHarness"), false, "an availability this app does not know offers nothing");
+    reply = { outcome: "updated", configuration: configuration(true, 3, "rental", true) };
+    const rentalWaiting = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 2, enabled: true });
+    assert.deepEqual(rentalWaiting.outcome === "updated" && rentalWaiting.configuration.homeHarness, { enabled: false, pending: false, availability: "rental" },
+      "and never as waiting for a restart to get it");
+
+    // A process that is still running with the other choice is reported, exactly when the service says so.
+    reply = { outcome: "updated", configuration: configuration(true, 4, "available", true) };
+    const waiting = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 3, enabled: true });
+    assert.deepEqual(waiting.outcome === "updated" && waiting.configuration.homeHarness, { enabled: true, pending: true, availability: "available" });
+    for (const unclear of ["true", 1, null]) {
+      reply = { outcome: "updated", configuration: configuration(true, 4, "available", unclear) };
+      const read = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 3, enabled: true });
+      assert.equal(read.outcome === "updated" && read.configuration.homeHarness?.pending, false, String(unclear));
+    }
+    // Turning it off restarts an idle agent. What the service did about the running process is passed on as it was.
+    for (const [apply, restart] of [
+      ["restarting", "restarting"], ["busy_active_turn", "busy"], ["conflict", "not_restarted"],
+      ["unsupported", "not_restarted"], ["unavailable", "not_restarted"], ["already_applied", "not_restarted"],
+    ] as const) {
+      reply = { outcome: "updated", configuration: configuration(false, 5, "available", apply !== "restarting"), apply };
+      const off = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 4, enabled: false });
+      assert.equal(off.outcome === "updated" && off.restart, restart, apply);
+    }
+
+    // Nothing is signed for a request that is not exactly a choice for one agent, or from another sender.
+    const sent = operations.length;
+    for (const malformed of [
+      { entryId: "agent", daemonGeneration: 7, expectedRevision: 1 },
+      { entryId: "agent", daemonGeneration: 7, expectedRevision: 1, enabled: "true" },
+      { entryId: "agent", daemonGeneration: 7, expectedRevision: 0, enabled: true },
+      { entryId: "", daemonGeneration: 7, expectedRevision: 1, enabled: true },
+      { entryId: "agent", daemonGeneration: 7, expectedRevision: 1, enabled: true, providerLaunchPolicy: {} },
+    ]) await assert.rejects(client.setAgentHomeHarness(malformed as never));
+    await assert.rejects(client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 1, enabled: true },
+      () => { throw new Error("Sender changed"); }), /Sender changed/);
+    assert.equal(operations.length, sent);
+
+    // Host approval signing that was never enrolled cannot turn it on.
+    wire.hostApprovals.challenge = () => null;
+    const unenrolled = await client.setAgentHomeHarness({ entryId: "agent", daemonGeneration: 7, expectedRevision: 1, enabled: true });
+    assert.equal(unenrolled.outcome, "invalid");
+    assert.equal(operations.length, sent);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("an agent's use of the owner's own setup is read as off unless the background service says exactly otherwise", async () => {
+  const wire = (overrides: Record<string, unknown>) => mapEntry({
+    id: "agent", room_id: "room", display_name: "Agent", provider: "codex", model: null, charter: "help",
+    desired_state: "paused", observed_state: "absent", condition: "none", permission_profile_id: "full_access",
+    created_by: "desktop", created_at: "2026-10-01T00:00:00.000Z", ...overrides,
+  } as never);
+  for (const state of ["on", "after_restart", "until_restart"] as const) assert.equal(wire({ home_harness: state }).homeHarness, state);
+  for (const value of [undefined, false, true, "true", "off", 1, null]) {
+    assert.equal(Object.hasOwn(wire({ home_harness: value }), "homeHarness"), false, String(value));
+  }
+  // The stored policy alone is never read as the setting on this side.
+  assert.equal(Object.hasOwn(wire({ provider_launch_policy: { letagentsOwnerIsolation: false } }), "homeHarness"), false);
 });
 
 

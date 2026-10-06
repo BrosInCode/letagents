@@ -14,6 +14,7 @@ import {
   type OpenModelProviderAdapterDependencies,
 } from "../main/agents/open-model-provider-adapter.js";
 import {
+  PROCESS_ENDED_DURING_TURN,
   ProviderTurnControlError,
   type ProviderHandle,
   type ProviderRoomTurnResult,
@@ -360,6 +361,19 @@ function openCodeStyleAscendingId(timestampMs: number, counter: number): string 
     encoded >>= BigInt(8);
   }
   return `msg_${timeBytes.toString("hex")}00000000000000`;
+}
+
+/** A completed model step that ended on one tool call, in the given state. */
+function toolStep(turnId: string, id: string, created: number, text: string, status: "running" | "completed"): TranscriptMessage {
+  return {
+    info: { id, role: "assistant", parentID: turnId, time: { created, completed: created + 1 } },
+    parts: [
+      { id: `${id}-text`, type: "text", text },
+      { id: `${id}-tool`, type: "tool", tool: "bash", callID: `${id}-call`,
+        state: { status, input: { command: "ls" }, time: { start: created }, ...(status === "completed" ? { output: "files" } : {}) } },
+      { id: `${id}-finish`, type: "step-finish", reason: "tool-calls" },
+    ],
+  };
 }
 
 function assistantMessage(
@@ -3893,6 +3907,164 @@ test("Open Model session errors do not invent an exact typed or legacy terminal"
   assert.equal(stream.some((event) => event.lifecycleProjectionOnly && event.nativeLifecyclePhase === "turn_terminal"), false);
 });
 
+test("an Open Model turn whose last step ended on tool calls is recorded as ended once its session reports idle", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  const turnFacts = (turnId: string) => observations.flatMap(({ fact }) => fact.domain === "turn" && fact.providerTurnId === turnId
+    ? [[fact.state, "turnOutcome" in fact ? fact.turnOutcome : undefined]] : []);
+
+  // The model answers and calls a tool in its last step; the session then goes idle.
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-final", 10, "Answered, and posted it with a tool.", "tool-calls")]]);
+  harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+  const first = await adapter.runRoomTurn(handle, { inboxItemId: "tool-ending", sourceMessage: {}, activation: {}, actionId: "tool-ending" });
+  assert.equal(first.outcome, "reply", "the turn settles with its answer, as before");
+  assert.deepEqual(turnFacts(first.turnId).at(-1), ["terminal", "completed"],
+    "and its ending is recorded: left open, it would refuse the agent's next turn in the record");
+
+  // The same last step with nothing readable: the turn is over all the same.
+  harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-tool-only", 20, null, "tool-calls")]]);
+  harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+  const second = await adapter.runRoomTurn(handle, { inboxItemId: "tool-only-ending", sourceMessage: {}, activation: {}, actionId: "tool-only-ending" });
+  assert.equal(second.outcome, "unreadable");
+  assert.deepEqual(turnFacts(second.turnId).at(-1), ["terminal", "unreadable"]);
+
+  // A last step whose tool call never returned: what the model said before the call is not its answer.
+  harness.setTranscriptFactories([(turnId) => [toolStep(turnId, "assistant-tool-running", 30, "I will inspect the files.", "running")]]);
+  harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+  const third = await adapter.runRoomTurn(handle, { inboxItemId: "tool-running", sourceMessage: {}, activation: {}, actionId: "tool-running" });
+  assert.equal(third.outcome, "interrupted", "the turn has no answer");
+  assert.equal(third.text, null, "and the text before the call is not published as one");
+  assert.deepEqual(turnFacts(third.turnId).at(-1), ["terminal", "interrupted"], "its ending says it was cut off, not completed");
+  assert.equal(observations.filter(({ fact }) => fact.domain === "turn" && fact.state === "terminal").length, 3, "one ending per turn");
+});
+
+test("a re-read Open Model turn the record still holds open is recorded as ended when its last step ended on tool calls", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  const endings = () => observations.flatMap(({ fact }) => fact.domain === "turn" && fact.state === "terminal"
+    ? [[fact.providerTurnId, "turnOutcome" in fact ? fact.turnOutcome : undefined]] : []);
+
+  // The owner's shape: the turn's only step called a tool and nothing followed; the session is not busy.
+  harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-tool-only", 10, null, "tool-calls")]]);
+  const first = await adapter.runRoomTurn(handle, { inboxItemId: "left-open", sourceMessage: {}, activation: {}, actionId: "left-open" });
+  assert.equal(first.outcome, "unreadable");
+  assert.deepEqual(endings(), [], "a missing status entry alone still invents no ending");
+
+  const plain = await adapter.recoverRoomTurn(handle, { inboxItemId: "left-open", providerTurnId: first.turnId });
+  assert.equal(plain.outcome, "unreadable");
+  assert.deepEqual(endings(), [], "and neither does a re-read the daemon did not ask to close");
+
+  const closing = await adapter.recoverRoomTurn(handle, { inboxItemId: "left-open", providerTurnId: first.turnId, recordEnding: true });
+  assert.equal(closing.outcome, "unreadable", "the answer read back is the same");
+  assert.deepEqual(endings(), [[first.turnId, "unreadable"]], "but the record's open turn is closed, so the next turn is accepted");
+
+  await adapter.recoverRoomTurn(handle, { inboxItemId: "left-open", providerTurnId: first.turnId, recordEnding: true });
+  assert.equal(endings().length, 1, "once");
+});
+
+for (const ending of ["idle", "reread", "open"] as const) {
+  const title = ending === "idle" ? "is closed in the record when OpenCode reports the session idle, and the next turn is recorded"
+    : ending === "reread" ? "is closed in the record when the daemon re-reads it as a turn its record holds open, and the next turn is recorded"
+      : "stays open in the record on a re-read the daemon did not ask to close, and refuses the next turn";
+  test(`an Open Model turn whose last step ended on tool calls ${title}`, async () => {
+    // The real adapter over the fake OpenCode server, feeding the real execution capture and shadow store.
+    const { DatabaseSync } = await import("node:sqlite");
+    const { DaemonStateSchema } = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
+    const { ExecutionCaptureCoordinator } = await import(new URL("../../daemon/execution-capture-coordinator.ts", import.meta.url).href);
+    const { ExecutionShadowStore, executionRuntimeStorageIdentity } = await import(new URL("../../daemon/execution-shadow-store.ts", import.meta.url).href);
+    const { adapter, handle, harness } = await spawnAdapter({ lifecycleAuthorityMode: "typed" });
+    const at = "2026-08-31T00:00:00.000Z";
+    const attempt = handle.workAttemptId;
+    const generation = "generation-open-model-1";
+    const connection = handle.providerConnection!;
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys=ON");
+    new DaemonStateSchema().createSchema(db);
+    db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${at}',0);
+      INSERT INTO agent_configurations(agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,config_revision,runtime_configuration_revision)
+        VALUES('agent','open-model','charter','daemon_inbox',0,0,1,1);
+      INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+        VALUES('${attempt}','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${at}');
+      INSERT INTO work_attempt_executions VALUES('${generation}','${attempt}','${at}','test',1,NULL);`);
+    db.prepare(`INSERT INTO runtime_deployments(agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
+      provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,provider_connection_pid,
+      provider_process_identity_present,provider_process_identity,provider_execution_generation_id,workplace_liveness_present,native_liveness_present,activity_present)
+      VALUES('agent','idle',0,1,?,1,?,?,'opencode_server',?,1,?,?,0,0,0)`)
+      .run(attempt, attempt, handle.providerContinuationId, connection.pid, connection.processIdentity!, generation);
+    new ExecutionShadowStore(db).registerRuntime({ agentId: "agent", executionGenerationId: generation,
+      runtimeGenerationId: executionRuntimeStorageIdentity("agent", generation, "opencode_server", connection.pid!, connection.processIdentity!),
+      provider: "open-model", authorityMode: "typed", configRevision: 1, createdAtMs: Date.parse(at) });
+    const current = { workAttemptId: attempt, pid: handle.pid, providerContinuationId: handle.providerContinuationId,
+      providerConnection: connection, observedState: "idle" as const, appliedConfigurationRevision: 1 };
+    const diagnostics: string[] = [];
+    const capture = new ExecutionCaptureCoordinator(db, {
+      provider: { onExecution: (_handle: object, listener: (event: NativeExecutionObservation) => void) => adapter.onExecution(handle, listener) },
+      currentHandle: () => current, daemonGeneration: () => 1, diagnostic: (_id: string, code: string) => diagnostics.push(code),
+    });
+    capture.install(Object.freeze({ nonce: Symbol("installation"), listenerLeaseNonce: Symbol("lease"), entryId: "agent", handle: current,
+      executionGenerationId: generation, workAttemptId: attempt, providerContinuationId: handle.providerContinuationId!,
+      providerConnection: { ...connection }, configurationRevision: 1, authorityMode: "typed" }));
+    /** The daemon saves which message a native turn belongs to when the adapter reports the turn started. */
+    const bindTurn = async (turnId: string) => {
+      const order = Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1;
+      db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
+        VALUES(?,'agent','room',?,'{}','{}',?,'awaiting_result',1,?,?,?,?,?)`).run(turnId, `message-${order}`, order, `action-${order}`, `reply-${order}`, turnId, at, at);
+      db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room',?,?,?,?)").run(turnId, attempt, generation, handle.providerContinuationId, turnId);
+      capture.refresh("agent");
+    };
+    const settle = async () => { for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve)); };
+    const turns = () => db.prepare("SELECT provider_turn_id,state FROM execution_turns ORDER BY rowid").all().map((turn) => ({ ...turn }));
+    const run = (inboxItemId: string) => adapter.runRoomTurn(handle, { inboxItemId, sourceMessage: {}, activation: {}, actionId: inboxItemId },
+      { beforeNativeDispatch: async () => {}, checkpointTurnStarted: bindTurn });
+    try {
+      // The owner's shape: the turn's only step called a tool, and nothing followed it.
+      harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-tool-only", 10, null, "tool-calls")]]);
+      if (ending === "idle") {
+        harness.holdTurnOpenWithTranscript();
+        harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+      }
+      const one = await run("inbox-1");
+      assert.equal(one.outcome, "unreadable");
+      await settle();
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: ending === "idle" ? "terminal" : "active" }]);
+      if (ending !== "idle") {
+        // The daemon re-reads an unreadable turn once before it blocks the message.
+        const reread = await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-1", providerTurnId: one.turnId,
+          ...(ending === "reread" ? { recordEnding: true } : {}) });
+        assert.equal(reread.outcome, "unreadable");
+        await settle();
+      }
+      db.prepare("UPDATE supervised_agent_inbox SET state='blocked' WHERE inbox_item_id=?").run(one.turnId);
+      const closed = ending !== "open";
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: closed ? "terminal" : "active" }]);
+
+      // The next turn.
+      harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-next", 20, "Answered.")]]);
+      harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+      const two = await run("inbox-2");
+      assert.equal(two.outcome, "reply");
+      await settle();
+      const position = { ...db.prepare("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers").get()! };
+      const stops = diagnostics.filter((code) => ["source_gap", "invalid_observation", "retention_limit"].includes(code));
+      if (closed) {
+        assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "terminal" }, { provider_turn_id: two.turnId, state: "terminal" }],
+          "the next turn is recorded");
+        assert.equal(position.max, position.last, "with no gap");
+        assert.deepEqual(stops, [], "and the record never stops");
+      } else {
+        assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "active" }], "the open turn refuses the next one");
+        assert.ok(Number(position.max) > Number(position.last), "and the record has a gap from here on");
+        assert.ok(stops.includes("invalid_observation"));
+      }
+    } finally {
+      capture.close();
+    }
+  });
+}
+
 test("Open Model does not invent a typed terminal from the legacy tool-child session fallback", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const observations: NativeExecutionObservation[] = [];
@@ -4127,3 +4299,355 @@ test("Open Model typed facts reject contradictory session evidence even when a l
   await adapter.runRoomTurn(handle, { inboxItemId: "foreign-rows", sourceMessage: {}, activation: {}, actionId: "foreign-rows" });
   assert.equal(observations.some(({ fact }) => fact.domain === "execution" || (fact.domain === "turn" && fact.state === "terminal")), false);
 });
+
+/**
+ * A real daemon supervising one Open Model agent: the real adapter, action
+ * router, delivery, execution capture and stores, over a fake OpenCode. Only
+ * the room, the server and the OpenCode processes are doubles. Every fake
+ * process serves the sessions the agent's runtime directory keeps, as a real
+ * one does, and starts a session of its own.
+ */
+async function openModelDaemonFixture() {
+  const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
+  const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
+  const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
+  const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+  const { createConnection } = await import("node:net");
+  const { DatabaseSync } = await import("node:sqlite");
+  const root = await mkdtemp(join(tmpdir(), "open-model-daemon-"));
+  const id = "open_model_agent";
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+  };
+  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
+    const socket = createConnection(paths.socketPath);
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk) => {
+      received += chunk;
+      if (!received.includes("\n")) return;
+      socket.end();
+      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
+    });
+    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
+  });
+  const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!await check()) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  const workAttemptId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const workspace = join(root, "worktrees", "repo", workAttemptId);
+  await mkdir(join(root, "repos", "repo.git"), { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo",
+    work_attempt_id: workAttemptId, task_id: id, remote_url: "https://example.invalid/repo", resolved_revision: "a".repeat(40),
+    bare_path: join(root, "repos", "repo.git") }));
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace, workAttemptId });
+  await durability.close();
+
+  type FakeProcess = { pid: number; port: number; alive: boolean; exited: Promise<ProviderProcessExit>; end(exit: ProviderProcessExit): void };
+  /** One turn of a session: the prompt's own message id, what the session keeps of the answer, and the process that is running it. */
+  type FakeTurn = { id: string; sessionId: string; assistants: TranscriptMessage[]; runningOn: number | null };
+  const processes: FakeProcess[] = [];
+  /** Kept in the agent's runtime directory: every process reads all of them. */
+  const sessions = new Map<string, FakeTurn[]>();
+  const turns: FakeTurn[] = [];
+  const streams = new Set<{ port: number; send(event: Record<string, unknown>): void; close(): void }>();
+  let nextPort = 43_821;
+  const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+  const dependencies: OpenModelProviderAdapterDependencies = {
+    launch() {
+      let resolveExit!: (exit: ProviderProcessExit) => void;
+      const process: FakeProcess = { pid: 6_101 + processes.length, port: nextPort - 1, alive: true,
+        exited: new Promise((resolve) => { resolveExit = resolve; }),
+        end: (exit) => {
+          if (!process.alive) return;
+          process.alive = false;
+          for (const stream of [...streams]) if (stream.port === process.port) stream.close();
+          resolveExit(exit);
+        } };
+      processes.push(process);
+      const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+      Object.assign(child, { pid: process.pid, unref() {} });
+      return { child, exited: process.exited };
+    },
+    getProcessIdentity: (pid) => processes.find((process) => process.pid === pid)?.alive ? `opencode-birth-${pid}` : null,
+    observeProcessExit: (pid) => processes.find((process) => process.pid === pid)?.exited ?? Promise.resolve({ type: "exit", code: 1, signal: null }),
+    signalProcess: (pid, signal) => processes.find((process) => process.pid === pid)?.end({ type: "exit", code: null, signal }),
+    allocatePort: async () => nextPort++,
+    discoverRuntimeConnection: async () => null,
+    async fetch(input, init) {
+      const url = new URL(input);
+      const process = processes.find((candidate) => candidate.port === Number(url.port));
+      if (!process?.alive) throw refused();
+      if (url.pathname === "/global/health") return json({ healthy: true, version: "1.18.20" });
+      if (url.pathname === "/permission") return json([]);
+      if (url.pathname === "/config") return json({ model: "letagents-open-model/qwen/qwen3-coder" });
+      if (url.pathname === "/event") {
+        const encoder = new TextEncoder();
+        let connection: { port: number; send(event: Record<string, unknown>): void; close(): void };
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            connection = { port: process.port,
+              send(event) { controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); },
+              close() { if (streams.delete(connection)) controller.close(); } };
+            streams.add(connection);
+            connection.send({ type: "server.connected", properties: {} });
+            init?.signal?.addEventListener("abort", () => connection.close(), { once: true });
+          },
+          cancel() { streams.delete(connection); },
+        }), { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
+      if (url.pathname === "/session" && init?.method === "POST") {
+        const sessionId = `session-open-model-${sessions.size + 1}`;
+        sessions.set(sessionId, []);
+        return json({ id: sessionId });
+      }
+      if (url.pathname === "/session") return json([...sessions.keys()].map((sessionId) => ({ id: sessionId })));
+      if (url.pathname === "/session/status") {
+        // A process knows only the turns it runs itself.
+        return json(Object.fromEntries(turns.filter((turn) => turn.runningOn === process.port).map((turn) => [turn.sessionId, { type: "busy" }])));
+      }
+      const [, sessionId, action] = url.pathname.match(/^\/session\/([^/]+)\/([^/]+)$/) ?? [];
+      const session = sessionId ? sessions.get(decodeURIComponent(sessionId)) : undefined;
+      if (session && action === "prompt_async" && init?.method === "POST") {
+        const turn: FakeTurn = { id: String((JSON.parse(String(init.body)) as { messageID: string }).messageID),
+          sessionId: decodeURIComponent(sessionId!), assistants: [], runningOn: process.port };
+        session.push(turn);
+        turns.push(turn);
+        return new Response(null, { status: 204 });
+      }
+      if (session && action === "message") return json(session.flatMap((turn) => [userMessage(turn.id), ...turn.assistants]));
+      if (session && action === "abort" && init?.method === "POST") {
+        for (const turn of session) turn.runningOn = null;
+        return json(true);
+      }
+      assert.fail(`Unexpected OpenCode request: ${init?.method ?? "GET"} ${url.pathname}`);
+    },
+    now: () => new Date().toISOString(),
+    probeGit: async () => null,
+  };
+  const adapter = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot: join(root, "runtime"),
+    dependencies, startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 30_000 });
+  const roomMessages: Array<Record<string, unknown>> = [];
+  const published: string[] = [];
+  let mints = 0;
+  const daemon = new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ "open-model": async () => adapter }), true,
+    50, undefined, {}, {
+      poll: async ({ afterMessageId, signal }: { afterMessageId: string | null; signal: AbortSignal }) => {
+        const from = afterMessageId ? roomMessages.findIndex((message) => message.id === afterMessageId) + 1 : 0;
+        if (roomMessages.length > from) return { messages: roomMessages.slice(from) };
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 20);
+          signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+        return { messages: [] };
+      },
+      publish: async (input: { text: string; roomId: string }) => {
+        published.push(input.text);
+        return { messageId: `msg_${900 + published.length}`, roomId: input.roomId };
+      },
+    }, {
+      listWorkLeases: async () => [], readWorkLease: async () => null,
+      attestWorkLease: async () => { throw new Error("unused"); },
+      rebindWorkLease: async () => { throw new Error("unused"); },
+      createWorkerSession: async () => {
+        mints += 1;
+        return { sessionId: `${id}-session`, bearer: `${id}-bearer-${mints}`, bearerId: `${id}-bearer-id-${mints}`,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
+      },
+    });
+  const read = <T>(sql: string): T[] => {
+    const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    try { return database.prepare(sql).all(id).map((row) => ({ ...row })) as T[]; } finally { database.close(); }
+  };
+  const cleanup = async () => {
+    for (const process of processes) process.end({ type: "exit", code: null, signal: "SIGTERM" });
+    await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  };
+  try {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    type Receipt = { source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null };
+    const inbox = (daemon as unknown as { supervisedInbox: {
+      bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<unknown>;
+      receipts(agentId: string): Promise<Receipt[]>;
+    } }).supervisedInbox;
+    assert.equal((await request("manifest.put", { entry: {
+      id, room_id: "room_1", display_name: "Agent", provider: "open-model", model: "qwen/qwen3-coder", charter: "test",
+      desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: "full_access",
+      created_by: "test", created_at: "2026-01-01T00:00:00.000Z", delivery_mode: "daemon_inbox",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await inbox.bootstrapCursor({ agent_id: id, room_id: "room_1", last_observed_message_id: null });
+    const daemonGeneration = (await request("daemon.status")).result.generation;
+    // A key of the test's own making, for a provider that is never called.
+    assert.equal((await request("supervisor.install_open_model_credential", { entry_id: id, api_key: "test-key-for-the-fake-provider",
+      base_url: "https://openrouter.ai/api/v1", model: "qwen/qwen3-coder", daemon_generation: daemonGeneration })).ok, true);
+    assert.equal((await request("supervisor.install_host_grant", {
+      entry_id: id, room_id: "room_1", agent_key: "owner/agent", grant_id: `grant-${id}`,
+      supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
+      host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+    })).ok, true);
+    const view = async () => (await request("manifest.list")).result[0] as {
+      observed_state: string; condition: string; last_error: string | null; activity?: Array<{ summary: string }>;
+      room_agent_state: { ingress: { state: string }; inbox: { state: string; detail: string | null } };
+    };
+    await eventually(() => processes.length === 1, "OpenCode is launched");
+    await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
+    const receipt = async (messageId: string) => (await inbox.receipts(id)).find((item) => item.source_message_id === messageId);
+    return { id, request, eventually, view, read, published, roomMessages, turns, sessions, processes, receipt, cleanup,
+      receipts: () => inbox.receipts(id),
+      /** Send the agent its nth room message and wait until its process has been given the prompt. */
+      begin: async (ordinal: number) => {
+        // Unless it was sent earlier and has been waiting behind the message before it.
+        if (!roomMessages.some((message) => message.id === `msg_${ordinal}`)) {
+          roomMessages.push({ id: `msg_${ordinal}`, sender: "someone", text: `request ${ordinal}`, activation: { for_current_agent: { decision: "activate" } } });
+        }
+        await eventually(async () => turns.length === ordinal && Boolean((await receipt(`msg_${ordinal}`))?.provider_turn_id), `msg_${ordinal} starts its turn`).catch(async (error) => {
+          const current = await view();
+          const row = await receipt(`msg_${ordinal}`);
+          throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); agent is ${current.observed_state}/${current.condition} (${current.last_error}); inbox ${current.room_agent_state.inbox.state} (${current.room_agent_state.inbox.detail})`);
+        });
+        return turns[ordinal - 1]!;
+      },
+      /** The turn ends in its session with these assistant messages, and the process that ran it reports the session idle. */
+      end: (turn: FakeTurn, assistants: TranscriptMessage[]) => {
+        turn.assistants = assistants;
+        const port = turn.runningOn;
+        turn.runningOn = null;
+        for (const stream of streams) if (stream.port === port) stream.send({ type: "session.idle", properties: { sessionID: turn.sessionId } });
+      },
+      /**
+       * From here on a convergence pass that has not begun waits until the
+       * returned function lets it go, as passes wait for each other and for
+       * the network. What delivery does by itself between two messages is
+       * then all that happens between them.
+       */
+      holdConvergence: () => {
+        const execution = (daemon as unknown as { providerExecution: { converge(...args: unknown[]): Promise<void> } }).providerExecution;
+        const converge = execution.converge.bind(execution);
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => { release = resolve; });
+        execution.converge = async (...args: unknown[]) => { await held; return converge(...args); };
+        return () => { execution.converge = converge; release(); };
+      },
+      /** The agent's newest process ends now, as it does when it crashes: what its session holds of a running turn stays as it is. */
+      exitProcess: () => {
+        const process = processes.at(-1)!;
+        for (const turn of turns) if (turn.runningOn === process.port) turn.runningOn = null;
+        process.end({ type: "exit", code: 1, signal: null });
+      },
+      /** The turns in the agent's execution record, its recovery boundaries, and whether the record has a gap. */
+      recorded: () => ({
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        boundaries: read<{ n: number }>("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=? AND phase='complete'")[0]!.n,
+        gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
+          .filter((observer) => observer.max !== observer.last).length,
+      }) };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+/** What an OpenCode session holds of a turn whose process ended under it, and how the message then settles. */
+const OPEN_MODEL_SESSION_AFTER_EXIT = {
+  "its answer": { settles: "acknowledged", reason: null,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [assistantMessage(turnId, `assistant-${ordinal}`, 10, `Recovered ${ordinal}.`)] },
+  "the provider's error": { settles: "acknowledged_failed", reason: /provider failure/i,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [{ info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId,
+      time: { created: 10, completed: 11 }, error: { name: "APIError", data: { message: "Exact provider failure." } } }, parts: [] }] },
+  "a step that never finished": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [{ info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId,
+      time: { created: 10 } }, parts: [{ id: `text-${ordinal}`, type: "text", text: "Half of" }] }] },
+  "nothing but the prompt": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN, assistants: (): TranscriptMessage[] => [] },
+  "a step whose tool call never returned": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [toolStep(turnId, `assistant-${ordinal}`, 10, "I will inspect the files.", "running")] },
+  "a tool call that returned, with no step after it": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [toolStep(turnId, `assistant-${ordinal}`, 10, "I will inspect the files.", "completed")] },
+  // The last step ended at the output limit before it wrote anything.
+  "a last step cut off at the output limit with no text": { settles: "acknowledged_failed", reason: NO_REPLY_FAILURE.outputLimit,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [{ info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId,
+      time: { created: 10, completed: 11 } }, parts: [{ id: `finish-${ordinal}`, type: "step-finish", reason: "length" }] }] },
+  // A tool call the owner's policy refused ends the turn there, whatever the model said before it.
+  "a refused tool call after some narration": { settles: "acknowledged_failed", reason: NO_REPLY_FAILURE.deniedTool,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [{ info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId,
+      time: { created: 10, completed: 11 } }, parts: [{ id: `text-${ordinal}`, type: "text", text: "I will list the files." },
+      { id: `tool-${ordinal}`, type: "tool", tool: "bash", callID: `call-${ordinal}`,
+        state: { status: "error", input: { command: "ls" }, error: "The user rejected permission to use this specific tool call", time: { start: 10, end: 11 } } },
+      { id: `finish-${ordinal}`, type: "step-finish", reason: "tool-calls" }] }] },
+  // OpenCode goes on after a step it could not read a finish reason for.
+  "a finished step with text, and a later step begun": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [
+      { info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId, time: { created: 10, completed: 11 } },
+        parts: [{ id: `text-${ordinal}`, type: "text", text: "Half an answer." }, { id: `finish-${ordinal}`, type: "step-finish", reason: "unknown" }] },
+      { info: { id: `assistant-${ordinal}-next`, role: "assistant", parentID: turnId, time: { created: 12 } }, parts: [] }] },
+} as const;
+
+for (const [left, session] of Object.entries(OPEN_MODEL_SESSION_AFTER_EXIT)) {
+  test(`an Open Model agent whose process ends during two turns in a row, leaving ${left} in the session, settles both without a person and answers its next message`, async () => {
+    const { ACTIVITY_RECORD_CONTINUED_NOTICE } = await import(new URL("../../daemon/runtime-recovery-journal.ts", import.meta.url).href);
+    const agent = await openModelDaemonFixture();
+    let letConverge = () => {};
+    try {
+      for (const ordinal of [1, 2]) {
+        const turn = await agent.begin(ordinal);
+        await agent.eventually(() => agent.recorded().turns.at(-1)?.state === "active" && agent.recorded().turns.length === ordinal,
+          `turn ${ordinal} is recorded as started`);
+        letConverge();
+        turn.assistants = session.assistants(turn.id, ordinal);
+        // The next message is already waiting behind this one: it is dispatched the moment this one settles.
+        agent.roomMessages.push({ id: `msg_${ordinal + 1}`, sender: "someone", text: `request ${ordinal + 1}`, activation: { for_current_agent: { decision: "activate" } } });
+        await agent.eventually(async () => Boolean(await agent.receipt(`msg_${ordinal + 1}`)), `msg_${ordinal + 1} waits in the agent's inbox`);
+        agent.exitProcess();
+        await agent.eventually(() => agent.processes.length === ordinal + 1, `process ${ordinal + 1} replaces it`);
+        // No later pass of the daemon comes between this message settling and the next one starting.
+        letConverge = agent.holdConvergence();
+        await agent.eventually(async () => (await agent.receipt(`msg_${ordinal}`))?.state === session.settles, `msg_${ordinal} settles ${session.settles}`).catch(async (error) => {
+          const row = await agent.receipt(`msg_${ordinal}`);
+          const current = await agent.view();
+          throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+        });
+        const reason = (await agent.receipt(`msg_${ordinal}`))!.last_error;
+        if (typeof session.reason === "string") assert.equal(reason, session.reason, "the room and the owner read why the message has no answer");
+        else if (session.reason) assert.match(reason ?? "", session.reason, "the provider's own reason stays on the message");
+      }
+      // The third process takes the next message, in a session of its own.
+      const third = await agent.begin(3);
+      await agent.eventually(() => agent.recorded().turns.length === 3, "turn 3 is recorded as started");
+      letConverge();
+      agent.end(third, [assistantMessage(third.id, "assistant-3", 10, "Answer 3.")]);
+      await agent.eventually(async () => (await agent.receipt("msg_3"))?.state === "acknowledged", "msg_3 is answered");
+
+      assert.deepEqual(agent.published, left === "its answer" ? ["Recovered 1.", "Recovered 2.", "Answer 3."] : ["Answer 3."],
+        "an answer the session kept is delivered; a turn that was cut off is never run again");
+      assert.deepEqual(agent.turns.map((turn) => turn.sessionId), ["session-open-model-1", "session-open-model-2", "session-open-model-3"],
+        "every process ran its turn in its own session, and each earlier turn was read where it ran");
+      assert.equal(agent.turns.length, 3, "no prompt was sent twice");
+      await agent.eventually(() => agent.recorded().turns.at(-1)?.state === "terminal", "the third turn is recorded to its end");
+      const record = agent.recorded();
+      // An ended process's turn cannot be given an ending by a process that
+      // did not run it: it stays lost, behind the boundary that lets the
+      // record go on, and its message carries what was read.
+      assert.deepEqual(record.turns.map((turn) => turn.state), ["lost", "lost", "terminal"]);
+      assert.equal(record.boundaries, 2, "one boundary for each ended process");
+      assert.equal(record.gaps, 0, "the record has no gap");
+      const current = await agent.view();
+      assert.equal(current.condition, "none", current.last_error ?? "");
+      assert.equal(current.room_agent_state.inbox.state, "empty", "nothing waits behind a message that needs a person");
+      assert.ok(current.activity?.some((event) => event.summary === ACTIVITY_RECORD_CONTINUED_NOTICE), "the owner reads that part of the record is missing");
+    } finally {
+      letConverge();
+      await agent.cleanup();
+    }
+  });
+}

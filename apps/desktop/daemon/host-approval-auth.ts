@@ -36,7 +36,7 @@ export class HostApprovalVerifier {
         || payload.domain !== "letagents.host-approval" || payload.version !== 1
         || payload.daemonGeneration !== this.boot.daemonGeneration || payload.bootNonce !== this.boot.bootNonce
         || payload.keyFingerprint !== this.boot.keyFingerprint || !Object.hasOwn(payload, "input")
-        || (!["list", "decide", "list_tool_rules", "revoke_tool_rule"].includes(String(payload.operation)))
+        || (!["list", "decide", "list_tool_rules", "revoke_tool_rule", "set_home_harness"].includes(String(payload.operation)))
         || !Number.isSafeInteger(payload.issuedAt) || (payload.issuedAt as number) < 0 || !Number.isSafeInteger(payload.expiresAt)
         || (payload.issuedAt as number) > nowMs || (payload.expiresAt as number) <= nowMs
         || (payload.expiresAt as number) - (payload.issuedAt as number) > 30_000

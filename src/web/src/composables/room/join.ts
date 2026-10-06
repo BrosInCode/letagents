@@ -95,6 +95,7 @@ export async function joinRoomSession(
   const canonicalIdentifier = project.room_id || roomIdentifier
 
   return {
+    requestedIdentifier: roomIdentifier,
     projectId: canonicalIdentifier,
     identifier: canonicalIdentifier,
     code: project.code || '',
