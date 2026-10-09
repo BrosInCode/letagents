@@ -129,6 +129,21 @@ export function hostApprovalDecisionsArmed(shownAtMs: number, nowMs: number): bo
   return nowMs - shownAtMs >= HOST_APPROVAL_ARM_MS;
 }
 
+/**
+ * The decision buttons a card offers now. The composer restarts the card's hold
+ * when this set changes, so a button that appears on the same request is never
+ * armed at once. Stop turn appears when a turn starts to wait on the request.
+ */
+export function hostApprovalActionKey(approval: Pick<DesktopHostApproval, "presentation" | "status" | "retryDecision">,
+  blocksTurn: boolean): string {
+  return [
+    approval.status === "pending" ? "deny allow_once" : "",
+    approval.status === "pending" && approval.presentation.alwaysAllow ? "allow_always" : "",
+    approval.status === "decision_recorded" && approval.retryDecision ? `retry_${approval.retryDecision}` : "",
+    blocksTurn ? "stop_turn" : "",
+  ].filter(Boolean).join(" ");
+}
+
 /** Unavailable and unconfirmed requests cannot be answered here. */
 export function hostApprovalCannotBeAnswered(status: HostApprovalStatus): boolean {
   return status === "unavailable" || status === "uncertain";

@@ -90,6 +90,7 @@
         <RoomComposer
           v-else
           ref="roomComposer"
+          :active="active"
           :attaching="attaching"
           :attachment-drafts="attachmentDrafts"
           :attachment-error="attachmentError"

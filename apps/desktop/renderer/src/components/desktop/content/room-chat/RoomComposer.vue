@@ -1,8 +1,8 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
-    <button v-if="unanswerableApprovalCount" type="button" class="desktop-host-approval-history"
+    <button v-if="historyApprovalCount" type="button" class="desktop-host-approval-history"
       :aria-expanded="showApprovalHistory" @click="showApprovalHistory = !showApprovalHistory">
-      {{ hostApprovalHistoryLabel(unanswerableApprovalCount, showApprovalHistory) }}
+      {{ hostApprovalHistoryLabel(historyApprovalCount, showApprovalHistory) }}
     </button>
     <RoomPresenceChips :chips="presenceChips ?? []" />
     <RoomComposerEventChips
@@ -276,7 +276,7 @@ import { roomSearchCommandKey } from "../room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 import { useRoomTyping } from "../../../../composables/useRoomTyping";
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, Plus, X } from "@lucide/vue";
 import type {
   DesktopManagedAgentPermissionDecisionBehavior,
@@ -285,7 +285,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
-import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_ARM_MS, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalDecisionsArmed, hostApprovalFields, hostApprovalHeading, hostApprovalHistoryCount, hostApprovalHistoryLabel, hostApprovalSummary, hostApprovalTrayOrder } from "./host-approval-presentation";
+import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_ARM_MS, hostApprovalActionKey, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalDecisionsArmed, hostApprovalFields, hostApprovalHeading, hostApprovalHistoryCount, hostApprovalHistoryLabel, hostApprovalSummary, hostApprovalTrayOrder } from "./host-approval-presentation";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "./host-approval-dismissals";
 import { decideHostApproval, hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./host-approvals";
 import { roomMentionCandidates } from "../../../../domain/participants";
@@ -331,6 +331,8 @@ const props = defineProps<{
   sendError: string | null;
   sending: boolean;
   correctableAgents?: readonly AgentCorrectionTarget[];
+  // False while the chat tab is hidden; the composer holds its cards again when it turns true.
+  active?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -381,14 +383,19 @@ const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approv
     || approval.status === "unavailable" || approval.status === "uncertain")
   && !dismissedHostApprovalIds.value.has(approval.id)
   && !(approval.dismissKey && rememberedHostApprovalDismissals.value.has(approval.dismissKey))));
-const unanswerableApprovalCount = computed(() => hostApprovalHistoryCount(unresolvedHostApprovals.value));
 function approvalBlocksTurn(approval: DesktopHostApproval): boolean {
   return hostApprovalBlocksTurn(approval, approvalRoom.value.firstSeenAt[hostApprovalIdentity(approval)], approvalNowMs.value);
 }
 // A request its agent is still waiting on stays in view, even when it cannot be decided here.
+// Pending requests are always in view; the history toggle adds the rest.
+function shownWithoutHistory(approval: DesktopHostApproval): boolean {
+  return approval.status === "pending" || approval.status === "decision_recorded" || approvalBlocksTurn(approval);
+}
 const visibleHostApprovals = computed(() => unresolvedHostApprovals.value.filter(approval =>
-  showApprovalHistory.value || approval.status === "pending" || approval.status === "decision_recorded"
-  || approvalBlocksTurn(approval)));
+  showApprovalHistory.value || shownWithoutHistory(approval)));
+// The history line counts only what its toggle adds to the stack, so it never names a request already in view.
+const historyApprovalCount = computed(() => hostApprovalHistoryCount(
+  unresolvedHostApprovals.value.filter(approval => !shownWithoutHistory(approval))));
 
 // An undecidable record stays dismissed across restarts until its status
 // changes. A live request is dismissed only for this session.
@@ -469,9 +476,33 @@ function holdCardDecisions(): void {
 
 // Every request that becomes the visible card holds first: when it mounts, and
 // when Previous, Next, a decision or a withdrawal shows a different request.
-watch(() => currentHostApproval.value ? hostApprovalIdentity(currentHostApproval.value) : null, (key) => {
+// The same card holds again when a decision button appears on it, such as Stop turn.
+const currentCardHoldKey = computed(() => currentHostApproval.value
+  ? `${hostApprovalIdentity(currentHostApproval.value)}\n${hostApprovalActionKey(currentHostApproval.value, approvalBlocksTurn(currentHostApproval.value))}`
+  : null);
+watch(currentCardHoldKey, (key) => {
   if (key) holdCardDecisions();
 }, { immediate: true });
+
+// The owner sees the composer again when the window comes back to the front,
+// when the room is shown again through KeepAlive, or when the chat tab is shown.
+// A card that was on screen then holds again, so it is armed only from that moment.
+function holdCardIfShown(): void {
+  if (currentHostApproval.value) holdCardDecisions();
+}
+function onWindowVisibilityChange(): void {
+  if (document.visibilityState === "visible") holdCardIfShown();
+}
+watch(() => props.active, (active) => {
+  if (active) holdCardIfShown();
+});
+onActivated(() => {
+  holdCardIfShown();
+  document.addEventListener("visibilitychange", onWindowVisibilityChange);
+});
+onDeactivated(() => {
+  document.removeEventListener("visibilitychange", onWindowVisibilityChange);
+});
 
 /** The room checks the request again before it stops anything. */
 function stopAgentTurnFor(approval: DesktopHostApproval): void {
@@ -589,12 +620,14 @@ watch(
 onMounted(() => {
   void refreshRoomHostApprovals();
   approvalTimer = setInterval(() => { approvalNowMs.value = Date.now(); void refreshRoomHostApprovals(); }, 3_000);
+  document.addEventListener("visibilitychange", onWindowVisibilityChange);
   void nextTick(syncTextareaHeight);
 });
 
 onBeforeUnmount(() => {
   if (approvalTimer) clearInterval(approvalTimer);
   if (decisionTimer) clearTimeout(decisionTimer);
+  document.removeEventListener("visibilitychange", onWindowVisibilityChange);
 });
 
 async function submitMessage(): Promise<void> {
