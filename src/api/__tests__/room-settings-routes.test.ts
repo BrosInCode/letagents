@@ -28,6 +28,7 @@ function harness(options: { role?: Role; denied?: boolean; inherited?: string[];
   type Stored = { guidelines: string | null; updated_by: string | null; updated_at: string | null };
   const none: Stored = { guidelines: null, updated_by: null, updated_at: null };
   const guidelinesByRoom = new Map<string, Stored>();
+  const replyOrderByRoom = new Map<string, 'sequential' | 'parallel'>();
   const published: string[] = [];
   let writes = 0;
   const app = Object.fromEntries(['get', 'put'].map(method => [method, (path: RegExp, handler: Function) => routes.push({ method, path, handler })])) as unknown as Express;
@@ -54,6 +55,8 @@ function harness(options: { role?: Role; denied?: boolean; inherited?: string[];
         for (const id of ids) { const stored = guidelinesByRoom.get(id); if (stored?.guidelines) return { ...stored, source_room_id: id }; }
         return { ...none, source_room_id: null };
       },
+      getRoomAgentReplyOrder: async id => replyOrderByRoom.get(id) ?? null,
+      setRoomAgentReplyOrder: async (id, order) => { writes++; if (order) replyOrderByRoom.set(id, order); else replyOrderByRoom.delete(id); },
       setRoomAgentGuidelines: async (id, text, by) => {
         writes++;
         const stored = { guidelines: text || null, updated_by: by, updated_at: '2026-09-29T10:00:00.000Z' };
@@ -291,4 +294,41 @@ test('a failed announcement does not fail the save', async () => {
   const saved = await h.request('put', `/rooms/${room}/agent-guidelines`, { guidelines: 'Keep pull requests small.' });
   assert.equal(saved.code, 200);
   assert.equal(saved.body.guidelines, 'Keep pull requests small.');
+});
+
+test('reply order: a room that has not chosen answers in parallel', async () => {
+  const res = await harness().request('get', `/rooms/${room}/agent-reply-order`);
+  assert.equal(res.code, 200);
+  assert.deepEqual(res.body, { room_id: room, order: 'parallel', chosen: false, can_manage: true });
+});
+
+test('reply order: an admin turns sequential on, can choose parallel, and resets to the default with null', async () => {
+  const h = harness();
+  const saved = await h.request('put', `/rooms/${room}/agent-reply-order`, { order: 'sequential' });
+  assert.equal(saved.code, 200);
+  assert.deepEqual(saved.body, { room_id: room, order: 'sequential', chosen: true, can_manage: true });
+  assert.equal((await h.request('get', `/rooms/${room}/agent-reply-order`)).body.order, 'sequential');
+  const parallel = await h.request('put', `/rooms/${room}/agent-reply-order`, { order: 'parallel' });
+  assert.deepEqual(parallel.body, { room_id: room, order: 'parallel', chosen: true, can_manage: true });
+  const reset = await h.request('put', `/rooms/${room}/agent-reply-order`, { order: null });
+  assert.equal(reset.code, 200);
+  assert.deepEqual(reset.body, { room_id: room, order: 'parallel', chosen: false, can_manage: true });
+});
+
+test('reply order: invalid values, non-admins, agents and denied rooms cannot write', async () => {
+  const h = harness();
+  for (const body of [{}, { order: 'random' }, { order: 1 }, { order: ['parallel'] }]) {
+    assert.equal((await h.request('put', `/rooms/${room}/agent-reply-order`, body)).code, 400);
+  }
+  assert.equal(h.writes(), 0);
+  const participant = harness({ role: 'participant' });
+  assert.equal((await participant.request('put', `/rooms/${room}/agent-reply-order`, { order: 'parallel' })).code, 403);
+  assert.equal((await participant.request('get', `/rooms/${room}/agent-reply-order`)).body.can_manage, false);
+  assert.equal((await h.request('put', `/rooms/${room}/agent-reply-order`, { order: 'parallel' }, 'agent_session')).code, 403);
+  assert.equal((await h.request('put', `/rooms/${room}/agent-reply-order`, { order: 'parallel' }, 'owner_token')).code, 403,
+    'an agent holding its admin owner\'s token cannot change it either');
+  const denied = harness({ denied: true });
+  assert.equal((await denied.request('get', `/rooms/${room}/agent-reply-order`)).code, 403);
+  assert.equal(participant.writes() + h.writes() + denied.writes(), 0);
+  assert.equal(requiredAgentSessionRouteCapability('PUT', `/rooms/${room}/agent-reply-order`), null);
 });

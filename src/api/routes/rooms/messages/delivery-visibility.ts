@@ -23,9 +23,16 @@ export function isRoomEventVisibleToSubscriber(input: {
   const { event } = input;
   if (input.messageOnly && event.kind !== "message_created" && event.kind !== "message_routed") return false;
   if (event.kind === "message_routed") {
+    if (isPromptOnlyAgentMessage(event.message.text, event.message.agent_prompt_kind)) return false;
+    // A reply-turn wake concerns only the released agents' workers. Nobody
+    // else's view of the message changed, so nobody else gets it again.
+    if (event.wakeAgentKeys) {
+      const agentKey = input.recipientAgentIdentity?.agent_key?.trim();
+      return Boolean(agentKey && event.wakeAgentKeys.has(agentKey));
+    }
     // Completion also releases workers waiting behind this message, even if
     // Jev chose nobody. Authority is hydrated separately for each subscriber.
-    return !isPromptOnlyAgentMessage(event.message.text, event.message.agent_prompt_kind);
+    return true;
   }
   if (event.kind === "message_created") {
     if (!isPromptOnlyAgentMessage(event.message.text, event.message.agent_prompt_kind)) return true;

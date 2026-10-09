@@ -33,7 +33,7 @@ import { RequestValidationError } from "../../validation-error.js";
 import { chooseAnsweringSession, chooseSessionForReply } from "../../rooms/answering-session.js";
 import { getSessionConnections } from "./session-connections.js";
 import { db } from "../client.js";
-import { rooms, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
+import { rooms, room_settings, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
@@ -67,6 +67,16 @@ import {
   type ThreadRoutingProjection,
 } from "./thread-routing-membership.js";
 import { enqueueDesktopPushNotifications } from "../../notifications/enqueue.js";
+import {
+  finishReplyTurnsTx,
+  MAX_SEQUENTIAL_REPLY_AGENTS,
+  planReplyTurns,
+  queueReplyTurnWakes,
+  releaseAgentReplyTurnHoldsTx,
+  SEQUENTIAL_REPLY_REASONS,
+  type ReleasedReplyTurn,
+  type ReplyTurnFields,
+} from "./reply-turns.js";
 
 const MESSAGE_RECEIPT_INSERT_BATCH_SIZE = 500;
 const MAX_ACTIVE_ROUTING_SESSIONS = 50_000;
@@ -81,7 +91,7 @@ export function chunkMessageReceiptRows<T>(rows: readonly T[]): T[][] {
 
 async function insertMessageReceiptRows(
   tx: MessageCreateTransaction,
-  rows: readonly {
+  rows: readonly ({
     id: string;
     message_room_id: string;
     message_number: number;
@@ -93,7 +103,7 @@ async function insertMessageReceiptRows(
     receipt_state: string;
     created_at: string;
     updated_at: string;
-  }[],
+  } & Partial<ReplyTurnFields>)[],
 ): Promise<void> {
   for (const batch of chunkMessageReceiptRows(rows)) {
     // One JSON bind per bounded batch avoids Drizzle/Postgres parameter growth
@@ -102,16 +112,21 @@ async function insertMessageReceiptRows(
       INSERT INTO ${message_agent_receipts} (
         id, message_room_id, message_number, room_id, agent_session_id,
         agent_key, actor_label, activation_reason, receipt_state,
+        turn_position, turn_count, hold_release_after, hold_released_at,
         created_at, updated_at
       )
       SELECT input.id, input.message_room_id, input.message_number,
              input.room_id, input.agent_session_id, input.agent_key,
              input.actor_label, input.activation_reason, input.receipt_state,
+             input.turn_position, input.turn_count,
+             input.hold_release_after::timestamptz, input.hold_released_at::timestamptz,
              input.created_at::timestamptz, input.updated_at::timestamptz
         FROM jsonb_to_recordset(${JSON.stringify(batch)}::jsonb) AS input(
           id text, message_room_id text, message_number integer, room_id text,
           agent_session_id text, agent_key text, actor_label text,
           activation_reason text, receipt_state text,
+          turn_position integer, turn_count integer,
+          hold_release_after text, hold_released_at text,
           created_at text, updated_at text
         )
       ON CONFLICT DO NOTHING
@@ -220,6 +235,7 @@ export async function addMessageWithCreateStatus(
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   const repliedReceiptTargets = new Set<number>();
+  const releasedReplyTurns: ReleasedReplyTurn[] = [];
   // Conversation routing (Jev) never runs inside the send: the plan is
   // captured in the transaction and executed after commit, so the human's
   // send returns as fast as the deterministic ladder alone.
@@ -874,7 +890,23 @@ export async function addMessageWithCreateStatus(
         }
       }
 
-      const receiptRowsToInsert = [...receiptsByAgentKey.values()];
+      const routedReceipts = [...receiptsByAgentKey.values()];
+      // Several agents woken by one broadcast or small-room message answer
+      // one after another only in a room whose admin turned sequential replies
+      // on (NULL is parallel). The setting is read only when the receipts
+      // could be sequenced at all.
+      const sequenceCandidate = routedReceipts.length >= 2
+        && routedReceipts.length <= MAX_SEQUENTIAL_REPLY_AGENTS
+        && routedReceipts.every((receipt) => SEQUENTIAL_REPLY_REASONS.has(receipt.activation_reason));
+      const [replyOrder] = sequenceCandidate
+        ? await tx.select({ order: room_settings.agent_reply_order })
+          .from(room_settings).where(eq(room_settings.room_id, roomId))
+        : [];
+      const receiptRowsToInsert = planReplyTurns(routedReceipts, {
+        messageNumber: createdMessage.number,
+        timestamp: createdMessage.timestamp,
+        sequential: sequenceCandidate && replyOrder?.order === "sequential",
+      });
       if (receiptRowsToInsert.length > MAX_ACCOUNT_ROUTING_TARGETS) {
         throw new RequestValidationError("Message fanout exceeds the bounded desktop routing contract.");
       }
@@ -907,10 +939,25 @@ export async function addMessageWithCreateStatus(
           .find((session) => session.session_id === receipt.agent_session_id)!.owner_account_id,
       }));
       await insertMessageReceiptRows(tx, receiptRowsToInsert);
+      // A direct activation (mention, reply target, thread, task owner) must
+      // not stay behind an earlier held turn: the frontier would hide it too.
+      // Sequenced receipts never release, not even position 1: a quick
+      // follow-up broadcast must not let an agent answer the previous message
+      // out of turn. It waits behind that hold like everything else.
+      releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
+        tx,
+        roomId,
+        receiptRowsToInsert.filter((receipt) => receipt.turn_position === null).map((receipt) => receipt.agent_key),
+      ));
     }
 
     if (addressedTo) {
       const addressed = await routeAddressedMessage(tx, roomId, createdMessage, addressedTo);
+      releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
+        tx,
+        roomId,
+        addressed.map((target) => target.agent_key),
+      ));
       receiptCount = addressed.length;
       recipientAgentKeys = addressed.map((target) => target.agent_key);
       recipientAgentTargets = addressed;
@@ -943,7 +990,11 @@ export async function addMessageWithCreateStatus(
       if (supervisedTarget) replyTargetNumbers.add(supervisedTarget);
       for (const targetNumber of replyTargetNumbers) {
         const unresolved = await tx
-          .select({ id: message_agent_receipts.id, receipt_state: message_agent_receipts.receipt_state })
+          .select({
+            id: message_agent_receipts.id,
+            receipt_state: message_agent_receipts.receipt_state,
+            turn_position: message_agent_receipts.turn_position,
+          })
           .from(message_agent_receipts)
           .where(and(
             eq(message_agent_receipts.message_room_id, roomId),
@@ -982,6 +1033,14 @@ export async function addMessageWithCreateStatus(
             timestamp: createdMessage.timestamp,
           });
           repliedReceiptTargets.add(targetNumber);
+          // This agent's turn is done: the next ready position may now see
+          // the message, with this reply already in its context.
+          if (receipt.turn_position !== null) {
+            releasedReplyTurns.push(...await finishReplyTurnsTx(tx, roomId, [{
+              message_number: targetNumber,
+              agent_key: publisherAgentKey,
+            }]));
+          }
         }
       }
     }
@@ -994,6 +1053,8 @@ export async function addMessageWithCreateStatus(
       mentionNotices,
     }, options, tx);
   });
+  // Only after commit, and only the released agents' workers.
+  queueReplyTurnWakes(releasedReplyTurns);
   if (repliedReceiptTargets.size > 0) {
     // Dynamic import avoids a module cycle; room-level so the shared stream
     // never enumerates ids that may be concealed from some participants.

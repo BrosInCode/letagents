@@ -2,7 +2,9 @@ import { eq, inArray, sql } from "drizzle-orm";
 import {
   GITHUB_ROOM_CHAT_EVENT_KINDS,
   normalizeGitHubRoomChatEventKinds,
+  normalizeRoomAgentReplyOrder,
   type GitHubRoomChatEventKind,
+  type RoomAgentReplyOrder,
 } from "../../../shared/room-settings.mjs";
 import { db } from "./client.js";
 import { room_settings } from "./schema.js";
@@ -138,4 +140,24 @@ export async function setRoomAgentGuidelines(
       updated_at: room_settings.agent_guidelines_updated_at,
     });
   return row;
+}
+
+/** The order this room chose, or null when it has not chosen (parallel applies). */
+export async function getRoomAgentReplyOrder(roomId: string): Promise<RoomAgentReplyOrder | null> {
+  const [row] = await db
+    .select({ order: room_settings.agent_reply_order })
+    .from(room_settings)
+    .where(eq(room_settings.room_id, roomId));
+  return normalizeRoomAgentReplyOrder(row?.order);
+}
+
+/** null returns the room to the default (parallel) without choosing it. */
+export async function setRoomAgentReplyOrder(roomId: string, order: RoomAgentReplyOrder | null): Promise<void> {
+  await db
+    .insert(room_settings)
+    .values({ room_id: roomId, agent_reply_order: order })
+    .onConflictDoUpdate({
+      target: room_settings.room_id,
+      set: { agent_reply_order: order, updated_at: sql`now()` },
+    });
 }

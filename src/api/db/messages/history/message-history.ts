@@ -1,4 +1,4 @@
-import { settledRoutingCondition } from "../routing-frontier.js";
+import { replyTurnHoldCondition, settledRoutingCondition } from "../routing-frontier.js";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../../client.js";
@@ -45,6 +45,8 @@ type MessageHistoryOptions = {
   account_id?: string | null;
   account_agent_routing?: boolean;
   wait_for_routing?: boolean;
+  /** A worker's durable agent key: hide its held reply turns and everything after. */
+  hold_agent_key?: string | null;
 };
 
 export async function getMessages(
@@ -53,7 +55,11 @@ export async function getMessages(
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
   const afterNumber = options?.after ? parseScopedId(options.after, "msg") : null;
-  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
+  const visibilityCondition = and(
+    visibleMessageCondition(options?.include_prompt_only),
+    settledRoutingCondition(options?.wait_for_routing),
+    replyTurnHoldCondition(roomId, options?.hold_agent_key),
+  );
 
   const rows = await db
     .select(messageRowSelection)
@@ -84,7 +90,11 @@ export async function getLatestMessages(
   options?: Omit<MessageHistoryOptions, "after">,
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
-  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
+  const visibilityCondition = and(
+    visibleMessageCondition(options?.include_prompt_only),
+    settledRoutingCondition(options?.wait_for_routing),
+    replyTurnHoldCondition(roomId, options?.hold_agent_key),
+  );
 
   const rows = await db
     .select(messageRowSelection)
@@ -117,7 +127,11 @@ export async function getMessagesBefore(
   }
 
   const limit = clampLimit(options?.limit);
-  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
+  const visibilityCondition = and(
+    visibleMessageCondition(options?.include_prompt_only),
+    settledRoutingCondition(options?.wait_for_routing),
+    replyTurnHoldCondition(roomId, options?.hold_agent_key),
+  );
 
   const rows = await db
     .select(messageRowSelection)

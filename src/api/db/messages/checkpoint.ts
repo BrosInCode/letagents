@@ -1,4 +1,4 @@
-import { settledRoutingCondition } from "./routing-frontier.js";
+import { replyTurnHoldCondition, settledRoutingCondition } from "./routing-frontier.js";
 import { sql } from "drizzle-orm";
 
 import { db } from "../client.js";
@@ -9,12 +9,18 @@ import { visibleMessageCondition } from "./visibility.js";
 /** One body-free, index-bounded query for the SSE snapshot/subscribe barrier. */
 export async function getMessageStreamCheckpoint(
   roomId: string,
-  options: { requestedCursor?: string | null; includePromptOnly?: boolean; waitForRouting?: boolean },
+  options: {
+    requestedCursor?: string | null;
+    includePromptOnly?: boolean;
+    waitForRouting?: boolean;
+    holdAgentKey?: string | null;
+  },
 ): Promise<{ checkpoint: string | null; cursorExists: boolean }> {
   const requestedNumber = options.requestedCursor
     ? parseScopedId(options.requestedCursor, "msg")
     : null;
   const visible = visibleMessageCondition(options.includePromptOnly);
+  const holds = replyTurnHoldCondition(roomId, options.holdAgentKey);
   const result = await db.execute<{
     checkpoint_number: number | null;
     cursor_exists: boolean;
@@ -23,7 +29,7 @@ export async function getMessageStreamCheckpoint(
       (
         SELECT ${messages.number}
         FROM ${messages}
-        WHERE ${messages.room_id} = ${roomId} AND ${visible} AND ${settledRoutingCondition(options.waitForRouting)}
+        WHERE ${messages.room_id} = ${roomId} AND ${visible} AND ${settledRoutingCondition(options.waitForRouting)} AND ${holds}
         ORDER BY ${messages.number} DESC
         LIMIT 1
       ) AS checkpoint_number,
@@ -33,7 +39,7 @@ export async function getMessageStreamCheckpoint(
             FROM ${messages}
             WHERE ${messages.room_id} = ${roomId}
               AND ${messages.number} = ${requestedNumber}
-              AND ${visible} AND ${settledRoutingCondition(options.waitForRouting)}
+              AND ${visible} AND ${settledRoutingCondition(options.waitForRouting)} AND ${holds}
           )`
         : sql`TRUE`} AS cursor_exists
   `);

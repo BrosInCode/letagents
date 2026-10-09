@@ -80,6 +80,7 @@ export function attachAgentMessageActivationsFromReceipts(messages, identity, re
                         decision: "activate",
                         reason: reason || "explicit_mention",
                         addressed: true,
+                        ...replyTurnActivationFields(receipt),
                     },
                 },
             };
@@ -102,6 +103,42 @@ export function attachAgentMessageActivationsFromReceipts(messages, identity, re
         }
         return attachAgentMessageActivation(message, identity, context);
     });
+}
+/**
+ * The turn note for an agent that answers a shared message after others.
+ * Desktop adapters print `for_current_agent` into the prompt verbatim, so this
+ * text reaches the model without a client change.
+ */
+export function replyTurnGuidance(position, count, priorSpeakers = [], releaseReason = null) {
+    const opening = `Turn order: you answer this message in position ${position} of ${count}.`;
+    const speakers = priorSpeakers.filter((speaker) => typeof speaker === "string" && speaker.trim());
+    if (speakers.length === 0) {
+        // Say "did not answer in time" only when that is what happened. A
+        // turn opened by a direct activation, or after agents that ended with
+        // nothing to say, may still have earlier agents at work.
+        return releaseReason === "deadline"
+            ? `${opening} The agent before you did not answer in time. Answer now.`
+            : `${opening} The agents before you have not answered yet. Cover only what they are unlikely to say.`;
+    }
+    const names = speakers.length === 1
+        ? speakers[0]
+        : `${speakers.slice(0, -1).join(", ")} and ${speakers.at(-1)}`;
+    const replies = speakers.length === 1 ? "their reply is" : "their replies are";
+    return `${opening} ${names} answered before you; ${replies} in the recent room context.`
+        + " Do not repeat their points. Add only new points, agree in one short line, or disagree and give the reason.";
+}
+/** Position 1 and parallel receipts add nothing; later positions add turn and guidance. */
+function replyTurnActivationFields(receipt) {
+    const position = Number(receipt.turn_position);
+    const count = Number(receipt.turn_count);
+    if (!Number.isSafeInteger(position) || !Number.isSafeInteger(count) || position < 2 || count < position) {
+        return {};
+    }
+    const priorSpeakers = Array.isArray(receipt.prior_speakers) ? receipt.prior_speakers : [];
+    return {
+        turn: { position, count, prior_speakers: [...priorSpeakers] },
+        guidance: replyTurnGuidance(position, count, priorSpeakers, receipt.hold_release_reason ?? null),
+    };
 }
 export function attachAgentMessageActivations(messages, identity, context = {}) {
     if (!identity || identity.session_kind !== "worker") {
