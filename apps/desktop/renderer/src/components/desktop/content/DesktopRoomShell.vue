@@ -140,6 +140,7 @@
       @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
       @resolve-permission="resolveComposerPermission"
       @stop-agent-turn="stopAgentTurnForApproval"
+      @post-agent-answer-now="postAgentAnswerNow"
       @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
       @open-task="openBoardTask"
@@ -1812,6 +1813,13 @@ async function stopAgentTurnForApproval(entryId: string, approvalId: string): Pr
   }
   openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: ownerAttributionLabel(entry.createdBy) }));
   void runAgentInspectorAction({ entryId, roomId, kind: "stop_turn" });
+}
+
+function postAgentAnswerNow(entryId: string, sourceMessageId: string | null): void { // The stop of a turn that only waits for background work posts the answer it has.
+  const entry = supervisorEntries.value.find((candidate) => candidate.id === entryId && candidate.roomId === props.room.identifier);
+  if (!entry || !sourceMessageId || entry.roomAgentState?.turn.sourceMessageId !== sourceMessageId) return; // Only the turn that the button was shown for: a later turn would be stopped at its work.
+  openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: ownerAttributionLabel(entry.createdBy) }));
+  void runAgentInspectorAction({ entryId, roomId: entry.roomId, kind: "stop_turn" });
 }
 
 function openComposerPermissionDetail(approval: ManagedAgentPermissionApproval): void {

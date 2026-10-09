@@ -115,6 +115,31 @@
   animation-delay: 240ms;
 }
 
+/* What the owner can do about the wait in the row above. It stands under that row's text. */
+.room-local-agent-work-action {
+  justify-self: start;
+  margin: 0 0 2px 20px;
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent-hover);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 640;
+  cursor: pointer;
+  appearance: none;
+}
+
+.room-local-agent-work-action:focus-visible {
+  outline: 2px solid var(--blue, #3b82f6);
+  outline-offset: 1px;
+}
+
+.room-local-agent-work-action:active {
+  background: var(--accent-active);
+}
+
 .room-local-agent-work-overflow {
   margin: 2px 0 0;
   padding-left: 4px;
