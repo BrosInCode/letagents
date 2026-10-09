@@ -13741,7 +13741,7 @@ test("read model projects child compaction before admission without changing dur
     capabilities: { hasDelivery: () => false, supportsRoomTurns: () => true, supportsContinuationRepair: () => false },
     recoveryDiagnostics: () => { throw new Error("not part of progress projection"); }, deliveryAdmission: () => null,
     compactionProgress: candidate => { assert.equal(candidate.work_attempt_id, "compaction-attempt"); return progress; },
-    manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null },
+    manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null, getAgentConfiguration: async () => undefined },
     bindings: { credentialFor: async () => null, get: async () => null, list: async () => [] },
     inbox: { detail: async () => { throw new Error("unused"); }, ingressHealth: async () => null,
       latestContinuationRepair: async () => null, receiptProjection: async () => [] },
