@@ -211,6 +211,8 @@ test("replacement checkpoints inbox and attempt state before manifest commit, th
     launchPolicy: { sandbox: true },
     model: "gpt-test",
     reasoningEffort: "high",
+    // The agent is named as its launch names it, so a line this repair says is not said again by the next launch.
+    supervisorEntryId: "agent-1",
   });
   assert.deepEqual(harness.durableCheckpoints, [{
     workAttemptId: "attempt-1",
@@ -285,6 +287,85 @@ test("a repair's owner-visible lines are recorded once the repair is done, for a
   assert.equal(await unrecorded.subject.restore(unrecorded.input), "replaced");
   assert.deepEqual(unrecorded.failures, []);
   assert.deepEqual(unrecorded.commits, [{ repairId: "repair-1", continuation: "thread-new", continuityReset: true }]);
+});
+
+test("recording that throws at once does not fail a repair that is already committed", async () => {
+  // The daemon's recorder returns a promise, and a promise that rejects was always ignored. A recorder
+  // that throws before it returns one must not reach the failure path either: the repair is committed.
+  const line = "This agent's reasoning effort \"high\" was given to Codex, but Codex reports \"low\" for the conversation.";
+  let replaced!: Harness;
+  replaced = fixture({
+    recordNoticesThrows: true,
+    repair: async (_handle, _request, options) => {
+      await options.checkpointReplacement("thread-new");
+      return { handle: providerHandle("thread-new"), outcome: "replaced", previousProviderContinuationId: "thread-old",
+        replacementProviderContinuationId: "thread-new", notices: [line] };
+    },
+  });
+  assert.equal(await replaced.subject.restore(replaced.input), "replaced");
+  assert.deepEqual(replaced.failures, []);
+  assert.deepEqual(replaced.commits, [{ repairId: "repair-1", continuation: "thread-new", continuityReset: true }]);
+  assert.deepEqual(replaced.events.slice(replaced.events.indexOf("inbox.commit")), ["inbox.commit", "notices.record", "notify"],
+    "the recorder was called, and nothing but the notification follows it");
+
+  const restored = fixture({
+    recordNoticesThrows: true,
+    repair: async (handle, request) => ({ handle, outcome: "rematerialized", previousProviderContinuationId: request.expectedProviderContinuationId,
+      replacementProviderContinuationId: request.expectedProviderContinuationId, notices: [line] }),
+  });
+  assert.equal(await restored.subject.restore(restored.input), "restored");
+  assert.deepEqual(restored.failures, []);
+  assert.deepEqual(restored.commits, [{ repairId: "repair-1", continuation: "thread-old", continuityReset: false }]);
+});
+
+test("the provider is told that its repair's lines are recorded, and only when they are", async () => {
+  // A provider says a line once. It counts the line as said when the daemon has recorded it: a line
+  // that the daemon dropped is said again by the next repair or start.
+  const line = "This agent's reasoning effort \"high\" was given to Codex, but Codex reports \"low\" for the conversation.";
+  const run = async (options: FixtureOptions & { notices?: readonly string[]; toldThrows?: boolean; otherProcess?: boolean; restore?: boolean }) => {
+    let harness!: Harness;
+    let told = 0;
+    harness = fixture({
+      ...options,
+      repair: async (handle, request, repairOptions) => {
+        if (!options.restore) await repairOptions.checkpointReplacement("thread-new");
+        const replacement = providerHandle("thread-new");
+        return {
+          handle: options.restore ? handle : options.otherProcess ? { ...replacement, pid: 999 } : replacement,
+          outcome: options.restore ? "rematerialized" : "replaced",
+          previousProviderContinuationId: request.expectedProviderContinuationId,
+          replacementProviderContinuationId: options.restore ? request.expectedProviderContinuationId : "thread-new",
+          ...(options.notices ? { notices: options.notices } : {}),
+          noticesRecorded: () => {
+            harness.events.push("provider.told");
+            told += 1;
+            if (options.toldThrows) throw new Error("the provider could not take it");
+          },
+        };
+      },
+    });
+    const outcome = await harness.subject.restore(harness.input);
+    return { outcome, told, failures: harness.failures.length, after: harness.events.slice(harness.events.lastIndexOf("inbox.commit")) };
+  };
+
+  assert.deepEqual(await run({ notices: [line] }),
+    { outcome: "replaced", told: 1, failures: 0, after: ["inbox.commit", "notices.record", "provider.told", "notify"] });
+  assert.deepEqual(await run({ notices: [line], restore: true }),
+    { outcome: "restored", told: 1, failures: 0, after: ["inbox.commit", "notices.record", "provider.told", "notify"] });
+  // A repair with no line has nothing to record. It is committed, and the provider is told that too.
+  assert.deepEqual(await run({}), { outcome: "replaced", told: 1, failures: 0, after: ["inbox.commit", "provider.told", "notify"] });
+
+  // A line that could not be recorded was not said. The repair stays committed.
+  assert.deepEqual(await run({ notices: [line], recordNoticesRejects: true }),
+    { outcome: "replaced", told: 0, failures: 0, after: ["inbox.commit", "notices.record", "notify"] });
+  assert.deepEqual(await run({ notices: [line], recordNoticesThrows: true }),
+    { outcome: "replaced", told: 0, failures: 0, after: ["inbox.commit", "notices.record", "notify"] });
+  // A repair that the daemon fails after the provider returned has recorded nothing.
+  const failed = await run({ notices: [line], otherProcess: true });
+  assert.deepEqual([failed.outcome, failed.told, failed.failures], ["failed", 0, 1]);
+  // A provider that throws when it is told does not undo the repair either.
+  assert.deepEqual(await run({ notices: [line], toldThrows: true }),
+    { outcome: "replaced", told: 1, failures: 0, after: ["inbox.commit", "notices.record", "provider.told", "notify"] });
 });
 
 test("an already checkpointed replacement does not duplicate the work-attempt checkpoint", async () => {
@@ -368,6 +449,8 @@ type FixtureOptions = {
   failRejects?: boolean;
   beginRejects?: boolean;
   recordNoticesRejects?: boolean;
+  /** The recorder throws before it returns a promise. */
+  recordNoticesThrows?: boolean;
 };
 
 type Harness = ReturnType<typeof fixture>;
@@ -496,10 +579,13 @@ function fixture(options: FixtureOptions = {}) {
         if (harness) harness.handle = handle;
       },
     },
-    recordNotices: async (entryId, notices) => {
+    // Not an `async` function: one that throws here throws to its caller, with no promise to reject.
+    recordNotices: (entryId, notices) => {
       events.push("notices.record");
-      if (options.recordNoticesRejects) throw new Error("activity unavailable");
+      if (options.recordNoticesThrows) throw new Error("activity unavailable");
+      if (options.recordNoticesRejects) return Promise.reject(new Error("activity unavailable"));
       recordedNotices.push({ entryId, notices });
+      return Promise.resolve();
     },
     notifyStateChanged: () => {
       events.push("notify");

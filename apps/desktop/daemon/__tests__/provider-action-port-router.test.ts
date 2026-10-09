@@ -75,24 +75,32 @@ test("restoration preserves permission ownership while replacement retires it", 
   await router.observePermissions(handle, event => events.push(event), new AbortController().signal);
   const snapshot = { type: "snapshot" as const, connectionId: "socket-1", requests: [native] };
   listeners[0]!(snapshot);
+  const toldRecorded: string[] = [];
   adapter.repairContinuation = async nativeHandle => {
     listeners[0]!(snapshot); // Pending requests can arrive while restoration awaits the provider.
     return { handle: nativeHandle, outcome: "rematerialized", previousProviderContinuationId: request.expectedProviderContinuationId,
-      replacementProviderContinuationId: request.expectedProviderContinuationId, notices: ["said while restoring"] };
+      replacementProviderContinuationId: request.expectedProviderContinuationId, notices: ["said while restoring"],
+      noticesRecorded: () => { toldRecorded.push("restoring"); } };
   };
   const restored = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
   listeners[0]!(snapshot);
   assert.equal(restored.handle, handle);
   // The provider's owner-visible lines of a repair reach the daemon in its result.
   assert.deepEqual(restored.notices, ["said while restoring"]);
+  // So does the way to tell the provider that they are recorded. The router does not call it.
+  assert.deepEqual(toldRecorded, []);
+  restored.noticesRecorded!();
   assert.deepEqual(events.map(event => event.type), ["snapshot", "snapshot", "snapshot"]);
   adapter.repairContinuation = async nativeHandle => {
     nativeHandle.providerContinuationId = "replacement";
     return { handle: nativeHandle, outcome: "replaced", previousProviderContinuationId: request.expectedProviderContinuationId,
-      replacementProviderContinuationId: "replacement", notices: ["said while replacing"] };
+      replacementProviderContinuationId: "replacement", notices: ["said while replacing"],
+      noticesRecorded: () => { toldRecorded.push("replacing"); } };
   };
   const replaced = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
   assert.deepEqual(replaced.notices, ["said while replacing"]);
+  replaced.noticesRecorded!();
+  assert.deepEqual(toldRecorded, ["restoring", "replacing"]);
   listeners[0]!(snapshot);
   assert.equal(events.at(-1)!.type, "unavailable");
   assert.deepEqual(await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native }), { outcome: "correlation_unproven" });
