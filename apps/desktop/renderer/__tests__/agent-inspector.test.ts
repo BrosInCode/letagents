@@ -223,15 +223,29 @@ test("an agent its room refuses needs attention and says so, ahead of its queued
   assert.deepEqual([now?.label, now?.summary], ["Reconnecting", "Room delivery is queued."]);
 });
 
-test("a Claude usage-limit bootstrap failure explains the automatic retry instead of a raw diagnostic", () => {
-  const limited = entry({
+test("a Claude usage-limit bootstrap failure reads as one plain reason, not the raw start-up diagnostic", () => {
+  const raw = "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (failed_response). "
+    + "Startup observations: assistant_error=rate_limit; usage_limit_resets_at=2026-10-07T15:00:00.000Z; result=success; init_ms=512; bootstrap_ms=1492; budget_ms=30000.";
+  const limited = (overrides: Partial<DesktopSupervisorManifestEntry> = {}) => entry({
+    provider: "claude",
     observedState: "recovering",
     condition: "coordination_blocked",
-    lastError: "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (failed_response). "
-      + "Startup observations: assistant_error=rate_limit; result=success; init_ms=512; bootstrap_ms=1492; budget_ms=30000.",
+    lastError: raw,
+    ...overrides,
   });
-  const projection = projectAgentInspector(limited, { roomId: "focus_1", deliveryRetryAvailable: false });
-  assert.match(projection?.now?.summary ?? "", /usage limit was reached.*retries automatically/);
+  const summary = (agent: DesktopSupervisorManifestEntry) => projectAgentInspector(agent, { roomId: "focus_1", deliveryRetryAvailable: false })?.now;
+
+  const now = summary(limited());
+  assert.equal(agentInspectorOverallState(limited()), "needs_attention");
+  assert.equal(now?.kind, "attention");
+  assert.match(now?.summary ?? "", /^Claude's usage limit is reached\. LetAgents checks again by itself and starts the agent after the limit resets\./);
+  assert.doesNotMatch(now?.summary ?? "", /failed_response|assistant_error|Startup observations|convergence scheduler/,
+    "the observation string stays in Diagnostics");
+  // The owner can also ask for a check now through the control the header offers.
+  assert.match(summary(limited({ executionGenerationId: null, providerContinuationId: null }))?.summary ?? "", /To try again now, recover the agent\.$/);
+  assert.match(summary(limited({ runtimeGenerationId: "runtime_1" }))?.summary ?? "", /To try again now, open Recovery options\.$/);
+  assert.equal(projectAgentInspectorDiagnostics(projectAgentInspector(limited(), { roomId: "focus_1", deliveryRetryAvailable: false })!)
+    .recovery.lastError, raw, "the raw observation is kept in technical details");
 });
 
 test("a Claude startup deadline reads as one sentence naming the recovery control on offer", () => {

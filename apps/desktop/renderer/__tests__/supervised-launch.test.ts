@@ -465,3 +465,20 @@ test("native compaction is visible during startup without completing any readine
     assert.notEqual(supervisedLaunchProgress({ ...starting, ...override }).headline, "Compacting conversation");
   }
 });
+
+test("a Claude launch refused by the usage limit says so instead of a generic start failure", () => {
+  const limited = entry({
+    provider: "claude",
+    observedState: "failed",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/claude-agent",
+    lastError: "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (failed_response). "
+      + "Startup observations: assistant_error=rate_limit; result=success; init_ms=512.",
+  });
+  const progress = supervisedLaunchProgress(limited);
+  assert.equal(progress.failed, true);
+  assert.equal(progress.failureDetail, "Claude's usage limit is reached. LetAgents checks again by itself and starts the agent after the limit resets.");
+  assert.equal(supervisedLaunchProgress({ ...limited, lastError: "convergence scheduler failure: spawn failed" }).failureDetail,
+    "LetAgents couldn't start Claude Code in the private project area. Try this launch again or cancel it and start a new agent.",
+    "another start failure keeps its own wording");
+});
