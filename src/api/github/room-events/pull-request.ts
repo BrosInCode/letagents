@@ -1,3 +1,5 @@
+import type { GitHubRoomEvent } from "../../db.js";
+import type { RepoPullRequestEvent } from "../../repo-workflow.js";
 import type { GitHubWebhookPayload } from "../app.js";
 import { toGitHubRepoPullRequestRef } from "../pull-request-ref.js";
 import {
@@ -106,6 +108,46 @@ export function materializePullRequestEvent(
       ...base,
       kind: "pull_request",
       pullRequest,
+    },
+  };
+}
+
+function metadataString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+/**
+ * The room event a stored pull_request row was materialized from. Reads only
+ * what the webhook stored, so a replay of the row sees what the live event saw.
+ */
+export function rehydratePullRequestRoomEvent(row: GitHubRoomEvent): RepoPullRequestEvent | null {
+  const number = Number(row.github_object_id);
+  const url = row.github_object_url;
+  const repositoryFullName = url
+    ? /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/\d+$/.exec(url)?.[1]
+    : undefined;
+  if (row.event_type !== "pull_request" || !Number.isInteger(number) || !url || !repositoryFullName) {
+    return null;
+  }
+
+  const metadata = row.metadata ?? {};
+  return {
+    provider: "github",
+    action: row.action,
+    repositoryFullName,
+    senderLogin: row.actor_login,
+    kind: "pull_request",
+    pullRequest: {
+      number,
+      title: row.title ?? "",
+      url,
+      body: metadataString(metadata.body),
+      headRef: row.head_ref,
+      headSha: row.head_sha,
+      merged: metadata.merged === true,
+      ...(metadata.draft === true ? { draft: true } : {}),
+      authorLogin: metadataString(metadata.author_login),
+      mergedByLogin: metadataString(metadata.merged_by_login),
     },
   };
 }

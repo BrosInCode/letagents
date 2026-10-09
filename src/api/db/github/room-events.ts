@@ -1,8 +1,8 @@
 import crypto from "crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like, or, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
-import { github_room_events } from "../schema.js";
+import { github_room_events, rooms } from "../schema.js";
 import type { GitHubRoomEventMetadata, GitHubRoomEventType } from "../schema.js";
 import type { GitHubRoomEvent } from "../types.js";
 
@@ -106,6 +106,72 @@ export async function updateGitHubRoomEventLinkedTaskId(
       linked_task_id: linkedTaskId,
     })
     .where(eq(github_room_events.idempotency_key, idempotencyKey));
+}
+
+/**
+ * The newest stored pull_request event of one pull request, read from the rooms
+ * the webhook route leaves an event no task claimed in: the repo room and its
+ * Git branch and tag rooms. A task's own room is read too. The task focus rooms
+ * of other tasks are not, as the events there belong to those tasks.
+ */
+export async function getLatestPullRequestRoomEvent(input: {
+  repo_room_id: string;
+  task_room_id: string;
+  github_object_url: string;
+}): Promise<GitHubRoomEvent | null> {
+  const [event] = await db
+    .select()
+    .from(github_room_events)
+    .where(and(
+      eq(github_room_events.event_type, "pull_request"),
+      eq(github_room_events.github_object_url, input.github_object_url),
+      inArray(
+        github_room_events.room_id,
+        db
+          .select({ id: rooms.id })
+          .from(rooms)
+          .where(or(
+            eq(rooms.id, input.repo_room_id),
+            eq(rooms.id, input.task_room_id),
+            and(
+              eq(rooms.parent_room_id, input.repo_room_id),
+              or(like(rooms.focus_key, "git:branch:%"), like(rooms.focus_key, "git:tag:%"))
+            )
+          ))
+      ),
+    ))
+    .orderBy(
+      desc(github_room_events.event_order_at),
+      desc(github_room_events.created_at),
+      desc(github_room_events.id)
+    )
+    .limit(1);
+
+  return (event as GitHubRoomEvent | undefined) ?? null;
+}
+
+/** Links a stored event to a task only while it has no task: one writer wins. */
+export async function claimGitHubRoomEventForTask(
+  eventId: string,
+  taskId: string
+): Promise<boolean> {
+  const claimed = await db
+    .update(github_room_events)
+    .set({ linked_task_id: taskId })
+    .where(and(eq(github_room_events.id, eventId), isNull(github_room_events.linked_task_id)))
+    .returning({ id: github_room_events.id });
+
+  return claimed.length > 0;
+}
+
+export async function releaseGitHubRoomEventFromTask(
+  eventId: string,
+  taskId: string
+): Promise<void> {
+  await db
+    .update(github_room_events)
+    .set({ linked_task_id: null })
+    .where(and(eq(github_room_events.id, eventId), eq(github_room_events.linked_task_id, taskId)));
 }
 
 export async function hasGitHubRoomActivationEventAfter(input: {

@@ -43,7 +43,7 @@ export interface GitHubRoomEventProjectionDeps {
   applyGitHubRefRoomLifecycle: typeof applyGitHubRefRoomLifecycle;
 }
 
-function githubProjectionMessageIdBase(event: Pick<GitHubRoomEvent, "semantic_id" | "idempotency_key">): string {
+export function githubProjectionMessageIdBase(event: Pick<GitHubRoomEvent, "semantic_id" | "idempotency_key">): string {
   const digest = crypto
     .createHash("sha256")
     .update(event.semantic_id ?? event.idempotency_key)
