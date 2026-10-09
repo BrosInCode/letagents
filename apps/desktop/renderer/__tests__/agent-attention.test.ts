@@ -224,7 +224,7 @@ test("a Claude usage limit reaches Needs you as its plain reason", () => {
   const [item] = buildAgentAttentionItems({ agents: [limited], agentFirstSeenAt: { supervised_copper: at(AGENT_ATTENTION_GRACE_MS) }, nowMs: NOW });
   assert.equal(item.kind, "agent_attention");
   const [inboxItem] = filterUniversalInbox(buildUniversalInbox(needsYou(), [], [item]), "needs-you", [], {});
-  assert.match(inboxItem.body, /^Claude's usage limit is reached\. The agent starts again when the limit resets\./);
+  assert.match(inboxItem.body, /^Claude's usage limit is reached\. LetAgents checks again by itself and starts the agent after the limit resets\./);
   assert.doesNotMatch(inboxItem.body, /failed_response|assistant_error|Startup observations/);
 });
 

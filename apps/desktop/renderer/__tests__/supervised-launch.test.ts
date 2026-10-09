@@ -477,7 +477,7 @@ test("a Claude launch refused by the usage limit says so instead of a generic st
   });
   const progress = supervisedLaunchProgress(limited);
   assert.equal(progress.failed, true);
-  assert.equal(progress.failureDetail, "Claude's usage limit is reached. The agent starts again when the limit resets.");
+  assert.equal(progress.failureDetail, "Claude's usage limit is reached. LetAgents checks again by itself and starts the agent after the limit resets.");
   assert.equal(supervisedLaunchProgress({ ...limited, lastError: "convergence scheduler failure: spawn failed" }).failureDetail,
     "LetAgents couldn't start Claude Code in the private project area. Try this launch again or cancel it and start a new agent.",
     "another start failure keeps its own wording");

@@ -662,10 +662,11 @@ class ClaudeBootstrapDiagnostics {
       // The CLI reports each usage window it reads. Only a rejected one names
       // the reset that matters, as epoch seconds (SDKRateLimitEvent). A value
       // outside the seconds range is not that field, so it is not trusted.
+      // With several rejected windows the agent is limited until the latest.
       const info = message.rate_limit_info as { status?: unknown; resetsAt?: unknown } | null | undefined;
       if (info?.status === "rejected" && typeof info.resetsAt === "number" && Number.isSafeInteger(info.resetsAt)
         && info.resetsAt > 0 && info.resetsAt <= CLAUDE_MAX_RESET_EPOCH_SECONDS) {
-        this.limitResetsAtMs = info.resetsAt * 1000;
+        this.limitResetsAtMs = Math.max(this.limitResetsAtMs ?? 0, info.resetsAt * 1000);
       }
     } else if (message.type === "auth_status") {
       this.authMessages = Math.min(Number.MAX_SAFE_INTEGER, this.authMessages + 1);
