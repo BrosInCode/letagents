@@ -18,7 +18,14 @@ export type TaskFailurePolicy = {
   note?: string;
 };
 
-export function taskFailurePolicy(error: string | null, attempt: number, refusal = false): TaskFailurePolicy {
+export function taskFailurePolicy(error: string | null, attempt: number, refusal = false, unrecognizedResult = false): TaskFailurePolicy {
+  // The turn ended on a result of a shape its adapter does not know. The text
+  // may be the model's own words, so nothing below may read it: words such as
+  // "500" or "rate limit" in an answer are not a provider failure. No follow-up
+  // is started on them, and nothing is blocked; the text stays on the message.
+  if (unrecognizedResult) {
+    return { automatic: false, settle: true, detail: `${error?.trim() || "The provider ended this turn with a result that was not recognized."} The unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
+  }
   // The provider declined the turn's content. Retry delivery cannot change
   // that and a follow-up would send the same context again, so stop without a
   // follow-up and without blocking: the provider's reason stays on the

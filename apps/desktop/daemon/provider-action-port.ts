@@ -164,6 +164,11 @@ export type ProviderRoomTurnResult =
   | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string;
     /** The provider declined this turn's content on policy grounds; `error` carries its reason. */
     refusal?: true;
+    /**
+     * The turn ended on a result of a shape the adapter does not know. `error` may hold the model's own
+     * words, which are for the owner to read: nothing may read them as a provider error and act on them.
+     */
+    unrecognizedResult?: true;
     /** The turn finished, but the wrapper could not prove its remote authority ended. Its journaled reply is never published. */
     authorityUnproven?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
@@ -188,6 +193,12 @@ export type ProviderRoomTurnRecoveryRequest = {
   originProcessEnded?: boolean;
   /** The turn's own conversation, when it is not the one this runtime continues. */
   providerContinuationId?: string;
+  /**
+   * The daemon has this turn saved as completed with an answer that could not
+   * be read, and this read is the second look at it. An adapter that finds no
+   * answer again may end the turn instead of reporting it unreadable again.
+   */
+  savedAsUnreadable?: boolean;
 };
 export type ProviderExactTurnControlResult = { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null };
 export type ProviderContinuationRepairRequest = {
