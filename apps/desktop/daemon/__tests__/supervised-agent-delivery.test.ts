@@ -7,7 +7,7 @@ import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { ProviderActionFailure, type ProviderActionHandle, type ProviderActionPort } from "../provider-action-port.js";
+import { ProviderActionFailure, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnResult } from "../provider-action-port.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
@@ -18,6 +18,7 @@ import {
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
 import { taskFailurePolicy } from "../task-continuity.js";
+import { cursorAuthorityUnprovenDetail } from "../../electron/main/agents/cursor-turn-settlement.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 
@@ -1011,6 +1012,137 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const scenario of [
+  {
+    name: "restarts the agent", priorLaneEndings: 0, fileChangesLost: true,
+    expected: "Cursor finished this turn, but LetAgents could not confirm that the turn's helper processes had stopped. "
+      + "The turn's reply was not posted and its file changes were not kept. LetAgents restarts the agent.",
+  },
+  {
+    name: "leaves a quarantined agent to its owner", priorLaneEndings: 4, fileChangesLost: false,
+    expected: "Cursor finished this turn, but LetAgents could not confirm that the turn's helper processes had stopped. "
+      + "The turn's reply was not posted. Automatic recovery was stopped after repeated provider exits. The agent needs you to recover it.",
+  },
+] as const) {
+test(`a Cursor turn that finished without proof its authority ended is settled as lost, its reply is withheld, the next message still runs, and the reason ${scenario.name}`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "la-cursor-unproven-"));
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon.sqlite"), auditPath: join(root, "audit.log"),
+    attemptsPath: join(root, "attempts.sqlite"), attemptsRoot: join(root, "attempts"),
+    workspaceRoot: root, workerBindingsPath: join(root, "bindings.sqlite"),
+  };
+  const agentId = "cursor-unproven";
+  const workAttemptId = "00000000-0000-4000-8000-000000000101";
+  const executionGenerationId = "00000000-0000-4000-8000-000000000102";
+  const continuation = "cursor-session:unproven";
+  const idle = { kind: "cursor_cli" as const, pid: null as number | null, processIdentity: null as string | null };
+  let connection = idle;
+  const liveHandle = {
+    workAttemptId,
+    get pid() { return connection.pid; },
+    get providerContinuationId() { return continuation; },
+    get providerConnection() { return connection; },
+    appliedConfigurationRevision: 1,
+    observedState: () => connection.pid === null ? "idle" as const : "working" as const,
+  };
+  const published: string[] = [];
+  // What the adapter reports; the daemon appends what happens to the agent next.
+  const detail = cursorAuthorityUnprovenDetail(scenario.fileChangesLost);
+  let turns = 0;
+  let daemon!: SupervisorDaemon;
+  const port = provider(async (_handle, request, options) => {
+    turns += 1;
+    const turn = turns;
+    const providerTurnId = `cursor:unproven:${turn}`;
+    await options?.beforeNativeDispatch?.();
+    connection = { kind: "cursor_cli", pid: 95_000 + turn, processIdentity: `wrapper:unproven:${turn}` };
+    await options?.checkpointPreparedTurn?.({ providerTurnId, providerContinuationId: continuation, providerConnection: connection });
+    options?.markDurableTurnStarted?.();
+    await options?.checkpointProviderState?.({ providerContinuationId: continuation, providerConnection: connection });
+    connection = idle;
+    await options?.checkpointProviderState?.({ providerContinuationId: continuation, providerConnection: connection });
+    // The model journaled a reply for both messages through complete_room_turn.
+    await seedCursorRoomTurnCompletion(internals().supervisedInbox, {
+      agentId, roomId: "room", executionGenerationId, workAttemptId,
+      providerContinuationId: continuation, providerTurnId, outcome: "reply", text: `reply ${turn}`,
+    });
+    const raw: ProviderRoomTurnResult = turn === 1
+      // The wrapper saw a successful result but could not prove it revoked the turn's remote authority.
+      ? { turnId: providerTurnId, providerContinuationId: continuation, outcome: "interrupted", text: null,
+        evidence: "stream", error: detail, authorityUnproven: true }
+      : { turnId: providerTurnId, outcome: "reply", text: `ignored aggregate ${turn}` };
+    return (await options?.checkpointTerminalResult?.(raw))?.acceptedResult ?? raw;
+  });
+  daemon = new SupervisorDaemon(paths, "darwin", port, false, 60_000, undefined, {}, {
+    poll: async () => ({}),
+    publish: async (input) => {
+      published.push(input.text);
+      return { messageId: `published:${published.length}`, roomId: input.roomId };
+    },
+  });
+  const internals = () => daemon as unknown as {
+    liveHandles: Map<string, typeof liveHandle>;
+    workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
+    supervisedInbox: SupervisedAgentInboxStore;
+    startSupervisedDelivery(entryId: string): Promise<void>;
+    store: ManifestStore;
+    manifestGeneration: number;
+    providerStreams: {
+      install(entryId: string, handle: ProviderActionHandle, executionGenerationId: string, mayStartDelivery: () => boolean): Promise<void>;
+    };
+  };
+  try {
+    await daemon.start();
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      id: agentId, room_id: "room", display_name: "Cursor Unproven", provider: "cursor", model: null,
+      charter: "test", desired_state: "running", observed_state: "idle", condition: "none",
+      permission_profile_id: "read_only", delivery_mode: "daemon_inbox", created_by: "test",
+      created_at: new Date().toISOString(), workspace_path: root, work_attempt_id: workAttemptId,
+      provider_ref: {
+        work_attempt_id: workAttemptId, provider_continuation_id: continuation,
+        provider_connection: connection, execution_generation_id: executionGenerationId,
+      },
+      reconciliation: {
+        // Lane endings already inside the crash-loop window; the lane about to end is the next one.
+        exit_timestamps_ms: Array.from({ length: scenario.priorLaneEndings }, (_, index) => Date.now() - 1_000 * (index + 1)),
+        consecutive_action_failures: 0, last_observed_state: "idle", next_restart_at_ms: null,
+        completed_action_ids: [], last_action_sequence: 0, pending_action: null,
+      },
+    } });
+    assert.equal(put.ok, true, put.error);
+    await installExactTestProviderBirth(internals(), agentId, liveHandle, executionGenerationId);
+    await internals().workerBindings.bind({
+      entry_id: agentId, room_id: "room", work_attempt_id: workAttemptId,
+      execution_generation_id: executionGenerationId, agent_session_id: "session:unproven",
+      agent_session_token: "bearer:unproven", credential_ref: "credential:unproven", api_url: "https://letagents.test",
+    });
+    await internals().supervisedInbox.bootstrapCursor({ agent_id: agentId, room_id: "room", last_observed_message_id: null });
+    await internals().supervisedInbox.ingestPoll({
+      agent_id: agentId, room_id: "room", last_observed_message_id: "2",
+      messages: ["1", "2"].map((id) => ({ source_message_id: id, source_message: { id, text: `relay ${id}` },
+        activation: { for_current_agent: { decision: "activate" } } })),
+    });
+    await internals().startSupervisedDelivery(agentId);
+
+    await waitForAsync(async () => {
+      const receipts = await internals().supervisedInbox.receipts(agentId);
+      return receipts.length === 2 && receipts.every((receipt) => ["acknowledged", "acknowledged_failed"].includes(receipt.state));
+    }, 5_000);
+    const receipts = await internals().supervisedInbox.receipts(agentId);
+    assert.deepEqual(receipts.map((receipt) => receipt.state), ["acknowledged_failed", "acknowledged"],
+      "the unproven turn is settled, not blocked, and the next message runs");
+    assert.equal(receipts[0]!.last_error, scenario.expected, "the lost turn carries its plain reason and what happens next");
+    assert.equal(await internals().supervisedInbox.nativeFailure(receipts[0]!.inbox_item_id), "interrupted");
+    assert.deepEqual(published, ["reply 2"], "the journaled reply of the unproven turn is never published");
+    assert.equal(turns, 2, "no turn was run twice");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+}
 
 test("handoff after Cursor native release waits for first-turn and resumed init authority without killing the turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "la-cursor-init-handoff-"));
