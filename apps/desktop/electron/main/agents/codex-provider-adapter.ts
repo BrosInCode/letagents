@@ -17,6 +17,7 @@ import {
   type CodexAppServerExit,
   type CodexAppServerLaunch,
 } from "./codex-app-server.js";
+import { sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal } from "./codex-agent-home.js";
 import {
   assertLiveCodexProjectUnchanged,
   codexProcessKeepsOwnerSetup,
@@ -108,6 +109,14 @@ type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown
 const CODEX_MODEL_LIST_TIMEOUT_MS = 5_000;
 /** The line about an agent's reasoning effort is said when it changes, not at every start. A repair whose line was recorded keeps it here too. */
 const codexEffortNoticeSaidOnce = launchNoticeSaidOnce();
+/** The line about files Codex wrote in the agents' home: said when what it names changes. */
+const codexAgentHomeNoticeSaidOnce = launchNoticeSaidOnce();
+
+/** Whether a policy has a sandbox: every one but an exact Full access. The owner's saved command rules would open it. */
+function codexPolicyIsSandboxed(policy: Readonly<Record<string, unknown>>): boolean {
+  const sandbox = recordValue(policy.sandboxPolicy);
+  return !(sandbox?.type === "dangerFullAccess" && Object.keys(sandbox).length === 1);
+}
 /** A value as a notice shows it: printable, short, and in quotes. */
 function shownInNotice(text: string): string {
   return JSON.stringify(text.replace(/[^\x20-\x7e]/g, "?").slice(0, 48));
@@ -267,6 +276,8 @@ export interface CodexAdapterRpc {
   close(): void;
   onDisconnect(listener: () => void): () => void;
   currentConnectionId(): string | null;
+  /** The Codex home the app-server said it runs with. Null when it did not say. */
+  reportedCodexHome?(): string | null;
   listPendingRequests(): readonly RpcServerRequest[];
   /** Told of each server request as it arrives, before any observer of the pending set. */
   onRequest?(listener: (request: RpcServerRequest) => void): () => void;
@@ -296,7 +307,7 @@ export interface CodexProviderAdapterDependencies {
   launchServer(
     serverUrl: string,
     codexBin: string,
-    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean },
+    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean; sandboxed?: boolean },
   ): CodexAppServerLaunch | Promise<CodexAppServerLaunch>;
   waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
   createRpcClient(
@@ -317,6 +328,12 @@ export interface CodexProviderAdapterDependencies {
    * project configuration it was not started with turned off.
    */
   assertLiveProjectUnchanged(codexBin: string, live: CodexLiveProcess): Promise<void>;
+  /**
+   * Why a running app-server at a sandboxed access level may not start or
+   * load a conversation: a command rule it would read with its home, in its
+   * project or from the machine. Null when it may.
+   */
+  sandboxedLoadRefusal(codexBin: string, live: { cwd: string; codexHome: string | null }): Promise<string | null>;
   writeSupervisorBridgeContext(
     cwd: string,
     context: {
@@ -496,6 +513,13 @@ const boundedMcpEnvironment = {
   LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
 };
 
+/**
+ * Version 2: a sandboxed agent runs with a Codex home that has no saved
+ * command rules. A process started under version 1 is replaced when it is
+ * idle, so this number never goes back.
+ */
+export const CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION = 2;
+
 function boundedLaunchContract(apiUrl: string, tools: string[]): string {
   // Reuse the generated override: approval modes, filters, credentials and
   // command semantics must change the identity too. Birth/workspace coordinates
@@ -504,7 +528,7 @@ function boundedLaunchContract(apiUrl: string, tools: string[]): string {
     ...boundedMcpEnvironment, LETAGENTS_API_URL: apiUrl,
   }, [...tools].sort());
   return createHash("sha256").update(JSON.stringify({
-    version: 1, provider: "codex", runtimeTree: LETAGENTS_MCP_RUNTIME_TREE_SHA256, override,
+    version: CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION, provider: "codex", runtimeTree: LETAGENTS_MCP_RUNTIME_TREE_SHA256, override,
   })).digest("hex");
 }
 
@@ -908,6 +932,7 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   // The owner's own config is found as the launch found it: through the launch's environment.
   assertLiveProjectUnchanged: (codexBin, live) =>
     assertLiveCodexProjectUnchanged(codexBin, live, codexAppServerEnvironment({ homeHarness: true }).env),
+  sandboxedLoadRefusal: (codexBin, live) => sandboxedCodexLoadRefusal(codexBin, { ...live, env: codexAppServerEnvironment().env }),
   writeSupervisorBridgeContext: writeCodexSupervisorBridgeContext,
   now: () => new Date().toISOString(),
   sleep: delay,
@@ -923,6 +948,14 @@ class CodexProviderHandle implements ProviderHandle {
   ownerRequestDeclined: ((summary: string) => void) | null = null;
   /** The process was started with its owner's own Codex setup, so it must never reload a project's config unchecked. */
   ownerSetup = false;
+  /**
+   * The Codex home the app-server said it runs with: null when it did not
+   * say. Undefined only for a client that cannot be asked, which is never the
+   * real one.
+   */
+  codexHome: string | null | undefined = undefined;
+  /** The folder this agent works in: from its launch, from a repair, or as the conversation of a process found running says. Null when none said. */
+  cwd: string | null = null;
   /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
   launchNotices: readonly string[] = [];
   /** What this runtime's launch, or its last repair that the daemon recorded, found about its reasoning effort. A repair does not say it again. */
@@ -992,7 +1025,26 @@ class CodexProviderHandle implements ProviderHandle {
 
   requireTurnPolicy(): Readonly<Record<string, unknown>> {
     if (!this.turnPolicy) throw new Error("Codex cannot start a turn without its exact applied permission policy; restart the agent to apply its configuration.");
+    if (this.sandboxed()) {
+      // A process that was started before agents had a home of their own, or that
+      // a daemon found running, is never kept as it is: it takes no turn at a
+      // sandboxed level while its home holds a saved rule, and its owner is told.
+      // Nor does it take one in a project that has rule folders of its own, trusted
+      // or not. Codex 0.153.4 reads rules when it starts or loads a conversation and
+      // not at each turn, so a folder that appears between two turns does not reach a
+      // running conversation; it is looked for here all the same, because only names
+      // are read and the next load would take it.
+      const refusal = (this.codexHome !== undefined ? sandboxedCodexHomeRefusal(this.codexHome) : null)
+        // A stand-in client, which cannot be asked its home, is not asked for a folder it never said either.
+        ?? (this.cwd !== null || this.codexHome !== undefined ? sandboxedCodexProjectRefusal(this.cwd) : null);
+      if (refusal) throw new Error(refusal);
+    }
     return this.turnPolicy;
+  }
+
+  /** Whether this runtime's access level has a sandbox. False while its policy is not known: it takes no turn then. */
+  sandboxed(): boolean {
+    return this.turnPolicy !== null && codexPolicyIsSandboxed(this.turnPolicy);
   }
 
   /** The policy this runtime was launched under, when it is known. */
@@ -1813,6 +1865,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (handle.turnWaiters.size) throw new Error("Codex continuation repair is unsafe while a provider turn is active.");
     // Loading or starting a thread makes Codex read the project's config again.
     if (handle.ownerSetup) await this.stopBeforeProjectReload(handle, request.cwd);
+    // It reads its command rules again too: what the project or the machine gained since the launch would apply.
+    handle.cwd = request.cwd;
+    await this.stopBeforeRuleLoad(handle, request.launchPolicy, request.cwd);
 
     const assertAttached = () => {
       if (options.detachSignal?.aborted) {
@@ -2268,6 +2323,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
       // The owner's own Codex setup stays on for this agent's app-server.
       ...(homeHarness ? { homeHarness: true } : {}),
+      ...(codexPolicyIsSandboxed(turnPolicy) ? { sandboxed: true } : {}),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {
@@ -2306,6 +2362,22 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
     try {
       await client.connect();
+      const reportedHome = client.reportedCodexHome?.();
+      // At a sandboxed level a Codex that does not say which home it runs with is not used. Codex
+      // 0.153.4 always says. A client that cannot be asked at all is a stand-in, never the real one.
+      if (codexPolicyIsSandboxed(turnPolicy) && (reportedHome === null || (launch.codexHome && reportedHome === undefined))) {
+        throw new Error(
+          "Codex did not say which home folder it runs with, so LetAgents cannot tell that your saved command rules stay away from this agent, and stopped it. "
+          + "Update Codex, then start the agent again.",
+        );
+      }
+      // A Codex that says it runs with another home than the one it was given has the owner's rules.
+      if (launch.codexHome && !sameDirectory(reportedHome!, launch.codexHome)) {
+        throw new Error(
+          "Codex did not start with the home folder LetAgents gave it for this access level, so LetAgents stopped it. "
+          + "Check that nothing sets CODEX_HOME for the codex command (a wrapper script or a shell alias), update Codex, then start the agent again.",
+        );
+      }
       await requireLetAgentsWorkplace(client);
       if (resumeRef && !this.resumeSupported) {
         throw new Error(
@@ -2361,14 +2433,19 @@ export class CodexProviderAdapter implements ProviderAdapter {
       );
       handle.managedLaunchContract = managedLaunchContract;
       handle.ownerSetup = homeHarness;
+      handle.codexHome = reportedHome;
+      handle.cwd = req.cwd;
       // A start with the owner's setup asks Codex nothing more that can fail it, so a line given here reaches the owner.
       const unused = homeHarness
         ? ownerSetupUnusedOptionsSaidOnce.whenChanged(req.supervisorEntryId, ownerSetupUnusedOptionsNotice("Codex", req.launchPolicy, attestedPolicy))
         : null;
       // The effort is either not sent, or sent and reported back. A line about it is said when it changes.
       handle.effortNotice = effort.notice ?? codexEffortMismatchNotice(effort.sent, threadResult);
-      handle.launchNotices = [unused, codexEffortNoticeSaidOnce.whenChanged(req.supervisorEntryId, handle.effortNotice)]
-        .filter((notice): notice is string => notice !== null);
+      handle.launchNotices = [
+        unused,
+        codexEffortNoticeSaidOnce.whenChanged(req.supervisorEntryId, handle.effortNotice),
+        codexAgentHomeNoticeSaidOnce.whenChanged(req.supervisorEntryId, launch.notices?.join(" ") || null),
+      ].filter((notice): notice is string => notice !== null);
       this.reportDeclinedOwnerRequests(handle);
       handle.setLiveState("idle");
       this.emitNativeExecution(handle, {
@@ -2433,8 +2510,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     } catch (error) {
       if (handle) {
         handle.protocolError = true;
-        // The line about the effort did not reach the owner, so the next start says it.
+        // The lines about the effort and the agents' home did not reach the owner, so the next start says them.
         codexEffortNoticeSaidOnce.forget(req.supervisorEntryId, handle.launchNotices);
+        codexAgentHomeNoticeSaidOnce.forget(req.supervisorEntryId, handle.launchNotices);
       }
       client.close();
       if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM");
@@ -2578,6 +2656,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
         turnPolicy,
       );
       handle.ownerSetup = ownerSetup;
+      // A process found running is held to the same rule as a new one: see requireTurnPolicy.
+      handle.codexHome = client.reportedCodexHome?.();
+      const conversationFolder = recordValue(read.thread)?.cwd;
+      handle.cwd = typeof conversationFolder === "string" && conversationFolder.trim() ? conversationFolder : null;
       this.reportDeclinedOwnerRequests(handle);
       handle.setLiveState(continuationMissing ? "idle" : "working");
       handle.subscriptionAfterMaterialization = exactEmptyFallback;
@@ -3291,6 +3373,26 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (!reason) return;
     // The daemon keeps an agent's activity from its stream, so this is said there before the process goes.
     this.publishStream(handle, "ownerSetup/stopped", {}, "provider_event", `Stopped this agent. ${reason}`);
+    await this.stop(handle).catch(() => undefined);
+    throw new Error(reason);
+  }
+
+  /**
+   * For a process at a sandboxed access level: stop it and refuse when a
+   * conversation it started or loaded now would read a command rule, or when
+   * that cannot be checked. As above, the agent is idle and its owner is told.
+   */
+  private async stopBeforeRuleLoad(handle: CodexProviderHandle, storedPolicy: unknown, cwd: string): Promise<void> {
+    const policy = handle.appliedTurnPolicy() ?? recordValue(storedPolicy);
+    if (!policy || !codexPolicyIsSandboxed(policy)) return;
+    // The project's own rule folders are looked in by name, for every client. The rest is asked of
+    // Codex with the home the process runs with, which a stand-in client cannot say.
+    const reason = sandboxedCodexProjectRefusal(cwd) ?? (handle.codexHome === undefined ? null
+      : await this.deps.sandboxedLoadRefusal(this.codexBin, { cwd, codexHome: handle.codexHome })
+        .catch((error: unknown) => `LetAgents could not check which command rules Codex would read (${errorMessage(error).split("\n")[0]}), `
+          + "so it stopped the agent before Codex could load them. It starts again by itself."));
+    if (!reason) return;
+    this.publishStream(handle, "sandboxRules/stopped", {}, "provider_event", `Stopped this agent. ${reason}`);
     await this.stop(handle).catch(() => undefined);
     throw new Error(reason);
   }

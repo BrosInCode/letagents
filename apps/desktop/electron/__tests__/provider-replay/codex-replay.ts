@@ -128,6 +128,9 @@ export class CodexReplay {
       readMcpRuntimeContract: notReplayed("readMcpRuntimeContract"),
       readCommandLine: notReplayed("readCommandLine"),
       assertLiveProjectUnchanged: notReplayed("assertLiveProjectUnchanged"),
+      // Which command rules a Codex would read is asked of a second Codex process and of the disk.
+      // A recording holds neither, so the stand-in refuses nothing.
+      sandboxedLoadRefusal: async () => null,
       writeSupervisorBridgeContext: notReplayed("writeSupervisorBridgeContext"),
       resolveServerUrl: async () => REPLAY_SERVER_URL,
       launchServer: () => ({ pid: REPLAY_PID, exited: this.exited }),
