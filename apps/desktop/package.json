@@ -57,7 +57,7 @@
     "cuelume": "0.1.0",
     "electron-updater": "6.8.9",
     "undici": "7.29.1",
-    "vue": "3.5.33",
+    "vue": "3.5.43",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -91,6 +91,10 @@
     "ip-address": "10.7.2",
     "builder-util-runtime": "9.7.0",
     "joi": "18.2.9",
-    "js-yaml": "4.3.2"
+    "js-yaml": "4.3.2",
+    "concurrently": {
+      "shell-quote": "1.11.0"
+    },
+    "@modelcontextprotocol/sdk": "1.31.0"
   }
 }
