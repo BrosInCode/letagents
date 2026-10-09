@@ -1525,7 +1525,6 @@ test("approval journal rechecks operational checkpoint and configuration at sele
       ["runtime_deployments", "provider_process_identity", "other", "birth"],
       ["runtime_deployments", "provider_connection_url", "http://127.0.0.1:9999", "http://127.0.0.1:4311"],
       ["agent_configurations", "runtime_configuration_revision", 2, 1],
-      ["agent_configurations", "config_revision", 2, 1],
       ["agent_configurations", "delivery_mode", "mcp_polling", "daemon_inbox"],
       ["agent_launch_intents", "desired_state", "paused", "running"],
       ["work_attempt_executions", "terminal_json", "{}", null],
@@ -1544,6 +1543,16 @@ test("approval journal rechecks operational checkpoint and configuration at sele
         await store.validateExecutionApprovalAuthority(expected, authority);
       }
     }
+    // A saved edit ahead of the applied revision waits for the next start. The live runtime keeps its
+    // authority for the owner's own answer, but not for a decision that depends on the configuration in force.
+    const owners = { ...authority, ownerAnswer: true as const };
+    const assertNativeWriteAfterSave = await store.validateExecutionApprovalAuthority(expected, owners);
+    database.exec("UPDATE agent_configurations SET config_revision=2");
+    assertNativeWriteAfterSave();
+    await store.validateExecutionApprovalAuthority(expected, owners);
+    await assert.rejects(store.validateExecutionApprovalAuthority(expected, authority), { code: "missing_turn" });
+    database.exec("UPDATE agent_configurations SET config_revision=1");
+    await store.validateExecutionApprovalAuthority(expected, authority);
     await assert.rejects(store.beginExecutionApprovalDispatch(dispatch, async commit => {
       database.exec("UPDATE supervised_agent_inbox SET outcome='{}'"); await commit();
     }), { code: "missing_turn" }, "post-inspection checkpoint change is rechecked inside the committed intent");
