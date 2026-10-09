@@ -683,6 +683,66 @@ test("Claude successful tool result confirms its exact allowed request after dis
   } finally { await f.close(); }
 });
 
+test("Claude's report that a tool was denied before it started settles its exact denied request", async () => {
+  const f = await fixture("claude-code");
+  const fact: NativeExecutionFact = { domain: "execution", kind: "completed", operation: "file_change",
+    providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+    outcome: "denied_before_start", sideEffects: "none" };
+  try {
+    const [candidate] = await f.broker.list("room");
+    const selected = decision(candidate!, { decision: "deny" });
+    f.execution(fact); // An old report must not settle the later response.
+    await f.broker.decide(selected);
+    const unsettled = async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
+    };
+    await unsettled();
+    for (const changed of [{ executionId: "other" }, { providerTurnId: "other" },
+      { providerContinuationId: "other" }, { operation: "command" as const },
+      // Success, or a generic failure, says nothing about a deny.
+      { outcome: "succeeded" as const, sideEffects: "possible" as const },
+      { outcome: "failed" as const, sideEffects: "possible" as const }]) {
+      f.execution({ ...fact, ...changed });
+      await unsettled();
+    }
+    for (const changed of [{ sourceId: "other" }, { nativeProcessIdentity: "other-birth" },
+      { nativeProcessPid: 1234 }, { sequence: 0 }]) {
+      f.execution(fact, changed);
+      await unsettled();
+    }
+    f.emit([]); // Disappearance alone is not acknowledgment.
+    await unsettled();
+    f.execution(fact);
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    const record = (await f.store.getExecutionApproval(selected.expected))!;
+    assert.equal(record.request.state, "resolved");
+    assert.equal(record.decision!.dispatchState, "acknowledged");
+    assert.deepEqual(await f.broker.list("room"), []);
+    assert.equal(await f.broker.decide(selected), "resolved");
+    assert.deepEqual(f.sends, ["reject"], "confirmation never resends the response");
+  } finally { await f.close(); }
+});
+
+test("Claude's denied-before-start report does not settle an allowed request", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room");
+    const selected = decision(candidate!);
+    await f.broker.decide(selected);
+    f.execution({ domain: "execution", kind: "completed", operation: "file_change",
+      providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+      outcome: "denied_before_start", sideEffects: "none" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
+    f.emit([]);
+    assert.equal(await f.broker.decide(selected), "uncertain");
+  } finally { await f.close(); }
+});
+
 test("Claude completion arriving inside native dispatch is reconciled after the journal is armed", async () => {
   const f = await fixture("claude-code");
   try {
