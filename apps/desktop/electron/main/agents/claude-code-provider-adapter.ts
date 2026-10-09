@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { claudeToolOperation } from "../../../../../shared/claude-tool-operation.mjs";
 import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../../shared/provider-acquisition-evidence.mjs";
+import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -1039,6 +1040,8 @@ class ClaudeProviderHandle implements ProviderHandle {
     reject: (error: Error) => void;
   }>>();
   readonly roomTurnResults = new Map<string, ClaudeRoomTurnTerminal>();
+  /** Turns whose own result proved that they completed, and carried no answer. */
+  readonly roomTurnsWithoutAnswer = new Set<string>();
   activeRoomTurnId: string | null = null;
   roomTurnOperationId: string | null = null;
   pendingInterruptTurnId: string | null = null;
@@ -1366,23 +1369,45 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     let cutOffByExit = false;
     let providerErrorInSession = false;
     if (!terminal) {
-      const rows = await this.deps.readSessionRows(handle.providerContinuationId, handle.transcriptsRoot);
+      // The turn's own result already proved that it completed, and carried
+      // no answer. This read looks for the answer in the session instead.
+      // The process that saw the result holds that proof in memory. The
+      // daemon holds it saved, for a read after that process or the daemon
+      // itself has ended.
+      const completedWithoutAnswer = request.savedAsUnreadable === true || handle.roomTurnsWithoutAnswer.has(turnId);
+      // With that proof a session that cannot be read changes nothing: it
+      // would be read the same way again, and there is no answer to wait for.
+      const rows = await this.deps.readSessionRows(handle.providerContinuationId, handle.transcriptsRoot).catch((error: unknown) => {
+        if (!completedWithoutAnswer) throw error;
+        return null;
+      });
       // No transcript where the CLI writes it proves nothing about the turn:
       // it is left for its owner, as before, rather than settled as cut off.
-      if (rows === null) {
+      if (rows === null && !completedWithoutAnswer) {
         throw new ClaudeRoomTurnRecoveryError("Claude room-turn recovery found no transcript for the conversation where the CLI keeps it.");
       }
-      terminal = recoverExactClaudeTurnFromSession(rows, turnId, handle.providerContinuationId);
+      terminal = rows && recoverExactClaudeTurnFromSession(rows, turnId, handle.providerContinuationId);
       // A turn that ended on a provider error has it in the session; that
       // is how it ended, and its reason is the provider's.
-      if (!terminal) {
+      if (!terminal && rows) {
         terminal = recoverExactClaudeTurnFailureFromSession(rows, turnId, handle.providerContinuationId);
         providerErrorInSession = terminal !== null;
       }
+      // Neither the result nor the session holds an answer, and the turn is
+      // known to have completed: there is no answer to wait for. Reporting it
+      // unreadable once more would block the agent on a read that cannot
+      // change. It is the settled failure every provider reports for a model
+      // that wrote no reply, which task continuity knows how to follow up.
+      if (completedWithoutAnswer && (!terminal || (!("error" in terminal) && terminal.outcome === "unreadable"))) {
+        terminal = { turnId, nativeOutcome: "failed", error: NO_REPLY_FAILURE.emptyAnswer };
+      }
       // The session holds no ending for this turn, and the process that ran
       // it has ended: no ending will ever be written. The turn was cut off by
-      // that exit, and is reported as that instead of being waited for.
-      if (!terminal && request.originProcessEnded) {
+      // that exit, and is reported as that instead of being waited for. A last
+      // message with no answer in it is no ending either: the CLI goes on
+      // after such a message, and only the turn's own result, which was not
+      // seen here, could prove that the turn ended there.
+      if ((!terminal || (!("error" in terminal) && terminal.outcome === "unreadable")) && request.originProcessEnded) {
         cutOffByExit = true;
         terminal = { turnId, nativeOutcome: "interrupted", error: PROCESS_ENDED_DURING_TURN };
       }
@@ -1395,7 +1420,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       if (terminal && request.recordEnding && nativeExecutionId(handle.providerContinuationId) && nativeExecutionId(turnId)) {
         handle.execution.emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none",
           providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
-          turnOutcome: "error" in terminal ? terminal.nativeOutcome ?? "failed"
+          turnOutcome: "error" in terminal ? terminal.nativeOutcome
             : terminal.outcome === "unreadable" ? "unreadable" : "completed" },
         handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined,
         handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.pid ?? undefined : undefined);
@@ -1414,6 +1439,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         : this.providerRoomTurnResult(handle, terminal);
     await options.checkpointTerminalResult?.(result);
     if (!("error" in terminal) || options.checkpointTerminalResult) handle.roomTurnResults.delete(turnId);
+    if (result.outcome !== "unreadable") handle.roomTurnsWithoutAnswer.delete(turnId);
     return result;
   }
 
@@ -1935,6 +1961,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           diagnostics.summary(child, compaction.diagnosticFields()), diagnostics.apiError, diagnostics.usageLimitResetsAtMs);
       }
       handle.roomTurnResults.delete(bootstrapTurnId);
+      handle.roomTurnsWithoutAnswer.delete(bootstrapTurnId);
       handle.state = "idle";
       handle.execution.emit(
         { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
@@ -2107,6 +2134,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         if (terminal) {
           exactTurnFailed = "error" in terminal && handle.activeRoomTurnId === exactTurnId;
           handle.roomTurnResults.set(exactTurnId, terminal);
+          if (!("error" in terminal) && terminal.outcome === "unreadable") handle.roomTurnsWithoutAnswer.add(exactTurnId);
           if (handle.activeRoomTurnId === exactTurnId) handle.activeRoomTurnId = null;
           if (handle.pendingInterruptTurnId === exactTurnId) handle.pendingInterruptTurnId = null;
           if (contextualInterruptTurnId === exactTurnId) {
@@ -2394,10 +2422,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
 
   private providerRoomTurnResult(handle: ClaudeProviderHandle, terminal: ClaudeRoomTurnTerminal): ProviderRoomTurnResult {
     if ("error" in terminal) {
-      if (!terminal.nativeOutcome) throw new Error(`Claude bounded room turn ${terminal.turnId} failed: ${terminal.error}`);
       return { turnId: terminal.turnId, providerContinuationId: handle.providerContinuationId,
         outcome: terminal.nativeOutcome, text: null, evidence: "stream",
-        error: String(safeStreamPayload(terminal.error).payload).slice(0, 2000) };
+        error: String(safeStreamPayload(terminal.error).payload).slice(0, 2000),
+        ...(terminal.unrecognizedResult ? { unrecognizedResult: true as const } : {}) };
     }
     if (terminal.outcome === "reply") {
       return {
