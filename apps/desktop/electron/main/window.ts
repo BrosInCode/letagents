@@ -12,6 +12,11 @@ import { devServerUrl, electronMainDir, rendererDistPath } from "./paths.js";
 const { app, BrowserWindow } = electron as typeof import("electron");
 
 let mainWindow: ElectronBrowserWindow | null = null;
+let quitting = false;
+
+export function allowMainWindowQuit(): void {
+  quitting = true;
+}
 
 export function getMainWindow(): ElectronBrowserWindow | null {
   return mainWindow;
@@ -60,6 +65,12 @@ export function createWindow(): void {
       sandbox: false,
       preload: join(electronMainDir, "preload.js"),
     },
+  });
+  mainWindow.on("close", (event) => {
+    // Keep unread tracking alive while macOS leaves the app running in the Dock.
+    if (process.platform !== "darwin" || quitting) return;
+    event.preventDefault();
+    mainWindow?.hide();
   });
   installSmokeCheck(mainWindow);
   installExternalLinkRouting(
