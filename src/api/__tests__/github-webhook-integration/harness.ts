@@ -347,6 +347,8 @@ export async function postGitHubWebhook(input: {
   deliveryId: string;
   eventName: string;
   payload: Record<string, unknown>;
+  /** The HTTP status the route answers with. */
+  expectedStatus?: number;
 }): Promise<{ ok: boolean; status?: string; duplicate?: boolean }> {
   const rawBody = JSON.stringify(input.payload);
   const response = await fetch(`http://127.0.0.1:${input.port}/webhooks/github`, {
@@ -361,7 +363,7 @@ export async function postGitHubWebhook(input: {
   });
 
   const body = await response.json();
-  assert.equal(response.status, 202);
+  assert.equal(response.status, input.expectedStatus ?? 202);
   return body;
 }
 

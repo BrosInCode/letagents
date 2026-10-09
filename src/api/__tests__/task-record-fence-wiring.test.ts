@@ -145,3 +145,31 @@ test("PATCH asks for the replay only after a write that links a pull request or 
   await patchWith({ status: "in_review" }, replay);
   assert.equal(asked, 3);
 });
+
+// Only a GitHub event may move a task to merged before review. The status
+// table lets updateTask allow it for a write that says it projects an event,
+// so the manual route must never say so, whoever writes.
+test("PATCH never marks its write as a GitHub event, for a worker, an admin or a board intent", async () => {
+  const seen: unknown[] = [];
+  const handler = buildRoute({
+    updateTask: async (_room: string, _task: string, _updates: unknown, options?: object) => {
+      seen.push(options);
+      return committedTask;
+    },
+  });
+  const worker = { authKind: "agent_session", agentSession: workerPrincipal() };
+  const requests: Array<[Record<string, unknown>, object]> = [
+    [{ status: "in_review" }, worker],
+    [{ status: "merged" }, {}],
+    [{ status: "merged", board_intent_id: "intent_1", board_approval_token: "token" }, {}],
+    [{ status: "in_progress", pr_url: committedTask.pr_url }, worker],
+  ];
+  for (const [body, principal] of requests) {
+    await handler({ params: { 0: "room_1", 1: "task_1" }, body, ...principal }, responseRecorder());
+  }
+
+  assert.ok(seen.length >= 3, "the writes reached updateTask");
+  for (const options of seen) {
+    assert.equal((options as { githubEvent?: unknown } | undefined)?.githubEvent, undefined);
+  }
+});

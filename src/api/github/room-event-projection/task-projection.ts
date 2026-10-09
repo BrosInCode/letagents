@@ -253,7 +253,7 @@ export async function applyRepoRoomEventToTask(
     return { task: linkedTask, authoritative: true };
   }
 
-  const nextTask = await updateTask(project.id, linkedTask.id, updates);
+  const nextTask = await updateTask(project.id, linkedTask.id, updates, { githubEvent: true });
   if (nextTask) {
     if (updates.status) {
       await emitTaskLifecycleStatusMessage(project.id, nextTask, {
