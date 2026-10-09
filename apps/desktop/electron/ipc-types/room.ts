@@ -589,6 +589,7 @@ export interface DesktopRoomThreadReadResult {
 
 export interface DesktopRoomLatestMessage {
   roomIdentifier: string;
+  storageMode?: "cloud" | "local";
   latestMessageId: string | null;
   latestMessageAt: string | null;
 }

@@ -149,7 +149,7 @@
               <strong>{{ sidebarRoomTitle(result.entry) }}</strong>
               <small>{{ result.context }}</small>
             </span>
-            <span v-if="result.entry.hasUnread" class="room-unread-dot" aria-label="Unread messages"></span>
+            <RoomUnreadBadge :count="result.entry.unreadCount || 0" :marked-unread="result.entry.hasUnread" />
           </button>
         </div>
         <p v-else-if="searchQuery.trim()" class="sidebar-search-empty">
@@ -294,12 +294,7 @@
                     <span class="pinned-title">{{ project.roomName }}</span>
                     <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
                     <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
-                    <span
-                      v-if="project.parent.hasUnread"
-                      class="room-unread-dot"
-                      aria-label="Unread messages"
-                      title="Unread messages"
-                    ></span>
+                    <RoomUnreadBadge :count="project.parent.unreadCount || 0" :marked-unread="project.parent.hasUnread" />
                   </span>
                 </span>
               </button>
@@ -444,12 +439,7 @@
                       <span class="project-name">{{ project.roomName }}</span>
                       <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
                       <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
-                      <span
-                        v-if="project.parent.hasUnread"
-                        class="room-unread-dot"
-                        aria-label="Unread messages"
-                        title="Unread messages"
-                      ></span>
+                      <RoomUnreadBadge :count="project.parent.unreadCount || 0" :marked-unread="project.parent.hasUnread" />
                     </span>
                   </span>
                 </span>
@@ -639,6 +629,7 @@
 </template>
 
 <script setup lang="ts">
+import RoomUnreadBadge from "./RoomUnreadBadge.vue";
 import {
   Archive,
   ArrowLeftRight,

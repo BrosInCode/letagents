@@ -23,6 +23,7 @@ const { app, Notification, pushNotifications } = electron as typeof import("elec
 const DESKTOP_BUNDLE_ID = "chat.letagents.desktop";
 const APNS_ENVIRONMENT = "production";
 let stateStore: DesktopNotificationStateStore | null = null;
+let badgeCount = 0;
 let initializationPromise: Promise<void> | null = null;
 const activationState = new DesktopNotificationActivationState();
 const restoredNotifications = new Map<string, Electron.Notification>();
@@ -108,6 +109,7 @@ async function registerNativeDevice(): Promise<void> {
 function handleApnsNotification(_event: Electron.Event, userInfo: Record<string, unknown>): void {
   const target = parseDesktopNotificationTarget(userInfo.letagents);
   if (!target) return;
+  emitToMainWindow("desktop:notifications:received", target);
   void rememberTarget(target).then(attachNotificationHistory).catch((error) => {
     console.warn(`[desktop-notifications] Could not persist APNs target: ${error instanceof Error ? error.message : String(error)}`);
   });
@@ -144,10 +146,12 @@ export async function initializeDesktopNotifications(): Promise<void> {
 export async function refreshDesktopNotificationRegistration(): Promise<void> {
   await initializeDesktopNotifications();
   await registerNativeDevice();
+  setDesktopNotificationBadgeCount(badgeCount);
   emitToMainWindow("desktop:notifications:status-changed", await getDesktopNotificationStatus());
 }
 
 export async function unregisterDesktopNotificationAccount(): Promise<void> {
+  setDesktopNotificationBadgeCount(0);
   await initializeDesktopNotifications();
   const current = await readState();
   if (current.deviceToken) await deleteDevice().catch(() => undefined);
@@ -175,6 +179,7 @@ export async function setDesktopNotificationsEnabled(enabled: boolean): Promise<
   await persistState();
   if (enabled) {
     await registerNativeDevice();
+    setDesktopNotificationBadgeCount(badgeCount);
   } else {
     await deleteDevice().catch(() => undefined);
     if (process.platform === "darwin") pushNotifications.unregisterForAPNSNotifications();
@@ -186,4 +191,12 @@ export async function setDesktopNotificationsEnabled(enabled: boolean): Promise<
 
 export function takePendingDesktopNotificationActivation(): DesktopNotificationTarget | null {
   return activationState.takePending();
+}
+
+export function setDesktopNotificationBadgeCount(count: unknown): void {
+  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0 || count > 2_147_483_647) {
+    throw new Error("Badge count must be a non-negative integer.");
+  }
+  badgeCount = count;
+  if (process.platform === "darwin" || process.platform === "linux") app.setBadgeCount(count);
 }

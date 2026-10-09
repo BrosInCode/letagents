@@ -96,6 +96,7 @@ import {
   getDesktopRoomMessage,
   getDesktopRoomMessageInfo,
   getDesktopRoomMessagesBefore,
+  getDesktopRoomMessagesAfter,
   getDesktopRoomStorage,
   getDesktopRoomThread,
   getDesktopRoomThreads,
@@ -189,6 +190,11 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       afterCursor?: string | null,
     ): Promise<DesktopRoomAgentWorkPollResult> =>
       pollDesktopRoomAgentWork(roomIdentifier, afterCursor),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-messages-after",
+    async (_event, roomIdentifier: string, afterMessageId: string | null) =>
+      getDesktopRoomMessagesAfter(roomIdentifier, afterMessageId),
   );
   targetIpcMain.handle(
     "desktop:room:get-latest-messages",
