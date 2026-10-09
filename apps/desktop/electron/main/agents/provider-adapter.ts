@@ -416,6 +416,9 @@ export interface ProviderRoomTurnRequest {
   observedContext?: unknown[];
 }
 
+/** What a provider said about a used-up usage limit. */
+export type ProviderUsageLimitEvidence = { resetsAtMs?: number };
+
 export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
@@ -423,6 +426,12 @@ export type ProviderRoomTurnResult =
   | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string;
     /** The provider declined this turn's content on policy grounds; `error` carries its reason. */
     refusal?: true;
+    /**
+     * The provider refused the turn because the account's usage limit or
+     * credit is used up. Delivery pauses until `resetsAtMs` when the provider
+     * said when the limit resets, and the room is told once.
+     */
+    usageLimit?: ProviderUsageLimitEvidence;
     /** The turn finished, but the wrapper could not prove its remote authority ended. Its journaled reply is never published. */
     authorityUnproven?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };

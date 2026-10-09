@@ -1563,6 +1563,7 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
     text: null,
     evidence: "transcript",
     error: "Open Model request was rejected because the model provider account could not cover this turn's output budget (HTTP 402). Add provider credit or choose another model, then retry the unfinished work in LetAgents.",
+    usageLimit: {},
   });
   const terminal = observations.find(({ fact }) =>
     fact.domain === "turn" && fact.kind === "state_changed" && fact.state === "terminal");
@@ -1610,6 +1611,32 @@ test("Open Model preserves safe 403 explanations in terminal checkpoints without
       return true;
     });
     assert.equal(harness.promptBodies.length, 1, "a forbidden turn is not replayed");
+  }
+});
+
+test("Open Model marks a used-up quota or credit as a usage limit, never a short rate limit", async () => {
+  const cases: Array<{ error: Record<string, unknown>; usageLimit: boolean }> = [
+    { error: { name: "APIError", data: { statusCode: 429, message: "You exceeded your current quota, please check your plan and billing details." } }, usageLimit: true },
+    { error: { name: "APIError", data: { statusCode: 429, message: "insufficient_quota" } }, usageLimit: true },
+    { error: { name: "APIError", data: { statusCode: 400, message: "Your credit balance is too low to access the API." } }, usageLimit: true },
+    { error: { name: "APIError", data: { statusCode: 429, message: "Rate limit exceeded: too many requests, slow down." } }, usageLimit: false },
+    { error: { name: "APIError", data: { statusCode: 429 } }, usageLimit: false },
+    { error: { name: "APIError", data: { statusCode: 500, message: "Internal server error" } }, usageLimit: false },
+  ];
+  for (const { error, usageLimit } of cases) {
+    const { adapter, handle, harness } = await spawnAdapter();
+    let checkpointed: ProviderRoomTurnResult | null = null;
+    harness.setTranscriptFactories([(turnId) => [{
+      info: { id: "assistant-limited", role: "assistant", parentID: turnId, time: { created: 10, completed: 11 }, error },
+      parts: [],
+    }]]);
+    await assert.rejects(adapter.runRoomTurn(handle, {
+      inboxItemId: "inbox-limited", sourceMessage: { text: "hi" },
+      activation: { decision: "activate" }, actionId: "limited",
+    }, { checkpointTerminalResult: async (result) => { checkpointed = result; } }));
+    const result = checkpointed as (ProviderRoomTurnResult & { usageLimit?: unknown }) | null;
+    assert.equal(result?.outcome, "failed");
+    assert.deepEqual(result?.usageLimit, usageLimit ? {} : undefined, JSON.stringify(error));
   }
 });
 

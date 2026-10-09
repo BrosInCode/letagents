@@ -1,3 +1,4 @@
+import { PROVIDER_USAGE_LIMIT_SOURCE } from "../../../../../../../../shared/provider-usage-limit.mjs";
 import type {
   DesktopParticipantSummary,
   DesktopReasoningSession,
@@ -24,7 +25,7 @@ export function participantMatchesHuman(
 }
 
 export function isHumanMessage(message: DesktopRoomMessage): boolean {
-  if (message.source === "managed_agent_failure") return false;
+  if (message.source === "managed_agent_failure" || message.source === PROVIDER_USAGE_LIMIT_SOURCE) return false;
   return message.source === "browser" || !message.agentIdentity;
 }
 

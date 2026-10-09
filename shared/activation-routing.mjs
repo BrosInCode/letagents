@@ -1,5 +1,6 @@
 import { normalizeRoutingHandle, normalizeRoutingSender, routingIdentityAliases, routingSenderAliasRows, routingSenderAliases, } from "./routing-aliases.mjs";
 import { parsePositivePgIntegerScopedId } from "./message-contracts.mjs";
+import { PROVIDER_USAGE_LIMIT_SOURCE } from "./provider-usage-limit.mjs";
 /** Send-time human fallback only; never use this to re-route historical reads. */
 export function humanConversationFallback(input) {
     if (input.source !== "browser" || !input.publisherAccountId || input.publisherAgentKey || input.explicitlyAddressed)
@@ -19,6 +20,15 @@ export function humanConversationFallback(input) {
  */
 export function isUntrustedExternalActivationSource(source) {
     return normalizeSender(source) === "github";
+}
+/**
+ * Notices LetAgents posts about an agent's own failure: a managed agent that
+ * could not reply, or an agent that reached its provider's usage limit. They
+ * inform people and never activate an agent.
+ */
+export function isSilentSystemEventSource(source) {
+    const value = normalizeSender(source);
+    return value === "managed_agent_failure" || value === PROVIDER_USAGE_LIMIT_SOURCE;
 }
 const NON_AGENT_AT_HANDLES = new Set([
     "charset",
@@ -88,7 +98,7 @@ export function attachAgentMessageActivationsFromReceipts(messages, identity, re
         // snapshot with no receipt must not erase their diagnostic reason.
         if (msgNum !== null
             && snapshotNumbers.has(msgNum)
-            && normalizeSender(message.source) !== "managed_agent_failure") {
+            && !isSilentSystemEventSource(message.source)) {
             return {
                 ...message,
                 activation: {
@@ -110,7 +120,7 @@ export function attachAgentMessageActivations(messages, identity, context = {}) 
     return messages.map((message) => attachAgentMessageActivation(message, identity, context));
 }
 export function decideAgentMessageActivation(message, identity, context = {}) {
-    if (normalizeSender(message.source) === "managed_agent_failure"
+    if (isSilentSystemEventSource(message.source)
         || isUntrustedExternalActivationSource(message.source)) {
         return decision("silent", "system_event");
     }

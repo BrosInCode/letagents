@@ -1,0 +1,92 @@
+import type { Express } from "express";
+
+import {
+  normalizeUsageLimitResetMs,
+  PROVIDER_USAGE_LIMIT_SOURCE,
+  providerUsageLimitNoticeText,
+} from "../../../shared/provider-usage-limit.mjs";
+import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
+import { getAgentIdentityByCanonicalKey } from "../db.js";
+import { respondWithInternalError, type AuthenticatedRequest } from "../http/helpers.js";
+import { normalizeRoomId } from "../rooms/routing.js";
+import type { emitProjectMessage } from "../server/events.js";
+import {
+  requireCurrentSupervisorGrant,
+  respondToStaleSupervisorGrantFence,
+  type RoomResolverDeps,
+} from "./supervisor-host-grants.js";
+
+export type ProviderUsageLimitNoticeRouteDeps = RoomResolverDeps & {
+  emitProjectMessage: typeof emitProjectMessage;
+  requireCurrentSupervisorGrant?: typeof requireCurrentSupervisorGrant;
+  getAgentIdentityByCanonicalKey?: typeof getAgentIdentityByCanonicalKey;
+};
+
+const PROVIDERS = new Set(["claude-code", "claude", "codex", "cursor", "open-model", "open_model", "antigravity"]);
+const OCCURRENCE_PATTERN = /^[A-Za-z0-9:_.-]{1,128}$/;
+
+/**
+ * A desktop tells its agent's room that the agent reached its model
+ * provider's usage limit. Only a current supervisor grant for that room and
+ * agent may ask. The room writes the text itself and posts it once per
+ * occurrence as LetAgents; the notice never activates an agent.
+ */
+export function registerProviderUsageLimitNoticeRoutes(app: Express, deps: ProviderUsageLimitNoticeRouteDeps): void {
+  if (!isSupervisorHostGrantFeatureEnabled()) return;
+
+  app.post(
+    "/supervisor-host-grants/:grantId/usage-limit-notices",
+    async (req: AuthenticatedRequest, res) => {
+      if (req.authKind !== "supervisor_grant" || req.supervisorGrant?.grant_id !== req.params.grantId) {
+        res.status(403).json({ error: "A current supervisor grant is required." });
+        return;
+      }
+      const body = req.body && typeof req.body === "object" && !Array.isArray(req.body)
+        ? req.body as Record<string, unknown> : {};
+      const requestedRoom = typeof body.room_id === "string" ? body.room_id.trim() : "";
+      const agentKey = typeof body.agent_key === "string" ? body.agent_key.trim() : "";
+      const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
+      const phase = body.phase === "start" || body.phase === "turn" ? body.phase : null;
+      const occurrence = typeof body.occurrence === "string" ? body.occurrence.trim() : "";
+      const resetsAtMs = body.resets_at === null || body.resets_at === undefined ? null : normalizeUsageLimitResetMs(body.resets_at);
+      if (!requestedRoom || requestedRoom.length > 512 || !agentKey || !PROVIDERS.has(provider) || !phase
+        || !OCCURRENCE_PATTERN.test(occurrence)
+        || (body.resets_at !== null && body.resets_at !== undefined && (typeof body.resets_at !== "string" || resetsAtMs === null))) {
+        res.status(400).json({ error: "Invalid usage-limit notice." });
+        return;
+      }
+      try {
+        const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(requestedRoom));
+        if (roomId !== requestedRoom) {
+          res.status(400).json({ error: "A usage-limit notice must use the canonical room id.", code: "noncanonical_room_id" });
+          return;
+        }
+        const grant = await (deps.requireCurrentSupervisorGrant ?? requireCurrentSupervisorGrant)(req, res, deps, { kind: "rooms", room_ids: [roomId] });
+        if (!grant) return;
+        if (!grant.allowed_room_ids.includes(roomId) || !grant.allowed_agent_keys.includes(agentKey)) {
+          res.status(403).json({ error: "Grant does not authorize that room and agent identity." });
+          return;
+        }
+        const agent = await (deps.getAgentIdentityByCanonicalKey ?? getAgentIdentityByCanonicalKey)(agentKey);
+        if (!agent || agent.owner_account_id !== grant.owner_account_id) {
+          res.status(403).json({ error: "Grant agent identity is no longer valid." });
+          return;
+        }
+        const project = await deps.resolveRoomOrReply(roomId, res);
+        if (!project) return;
+        const displayName = typeof body.display_name === "string" && body.display_name.trim()
+          ? body.display_name.trim().slice(0, 64) : agent.display_name;
+        const text = providerUsageLimitNoticeText({ agentName: displayName, provider, resetsAt: resetsAtMs, phase });
+        const message = await deps.emitProjectMessage(project.id, "letagents", text, {
+          source: PROVIDER_USAGE_LIMIT_SOURCE,
+          client_message_id: `${PROVIDER_USAGE_LIMIT_SOURCE}:${agent.canonical_key}:${phase}:${occurrence}`,
+        });
+        res.setHeader("Cache-Control", "no-store");
+        res.status(201).json({ status: "created", message_id: message.id, room_id: project.id });
+      } catch (error) {
+        if (respondToStaleSupervisorGrantFence(res, error)) return;
+        respondWithInternalError(res, "provider-usage-limit-notice", error, "The usage-limit notice could not be posted.");
+      }
+    },
+  );
+}

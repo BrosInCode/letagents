@@ -8,7 +8,9 @@ function harness(clock = { now: 0 }) {
     work_attempt_id: "attempt-1", provider_ref: { execution_generation_id: "generation-1" } };
   const scheduled: number[] = [];
   const messages: string[] = [];
+  const reports: Array<{ entryId: string; resetsAtMs: number | null; occurrence: string }> = [];
   const coordinator = new ProviderSchedulerFailureCoordinator({
+    reportUsageLimit: (input) => { reports.push(input); },
     nativeHeartbeatIntervalMs: 15_000, currentDaemonGeneration: () => 1, nowMs: () => clock.now,
     serializeEntry: async (_id, operation) => operation(),
     serializeManifest: async (operation) => operation(),
@@ -20,7 +22,7 @@ function harness(clock = { now: 0 }) {
     audit: { append: async () => {} },
     scheduleRecovery: (_id, delayMs) => { scheduled.push(delayMs); },
   });
-  return { coordinator, scheduled, messages };
+  return { coordinator, scheduled, messages, reports };
 }
 
 const quotaError = (resetsAtMs?: number) => Object.assign(
@@ -102,4 +104,20 @@ test("an unclassified bootstrap failure still schedules no automatic retry", asy
   const { coordinator, scheduled } = harness();
   await coordinator.record("agent-1", new Error("Claude CLI did not complete its daemon-safe bootstrap turn (deadline)."), "test");
   assert.deepEqual(scheduled, []);
+});
+
+test("a launch refused at the usage limit tells the room, once for each reset the provider names", async () => {
+  const clock = { now: Date.parse("2026-10-09T12:00:00.000Z") };
+  const { coordinator, reports } = harness(clock);
+  const reset = clock.now + 2 * HOUR;
+  await coordinator.record("agent-1", quotaError(reset), "test");
+  await coordinator.record("agent-1", quotaError(reset), "test");
+  await coordinator.record("agent-1", quotaError(), "test");
+  assert.deepEqual(reports, [
+    { entryId: "agent-1", resetsAtMs: reset, occurrence: `start:${reset}` },
+    { entryId: "agent-1", resetsAtMs: reset, occurrence: `start:${reset}` },
+    { entryId: "agent-1", resetsAtMs: null, occurrence: `start:unknown:${Math.floor(clock.now / (24 * HOUR))}` },
+  ], "the occurrence repeats for the same reset, so the room posts it once");
+  await coordinator.record("agent-1", new Error("some other launch failure"), "test");
+  assert.equal(reports.length, 3, "only a usage limit is reported");
 });

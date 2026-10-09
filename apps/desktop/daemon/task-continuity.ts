@@ -18,7 +18,7 @@ export type TaskFailurePolicy = {
   note?: string;
 };
 
-export function taskFailurePolicy(error: string | null, attempt: number, refusal = false): TaskFailurePolicy {
+export function taskFailurePolicy(error: string | null, attempt: number, refusal = false, usageLimit = false): TaskFailurePolicy {
   // The provider declined the turn's content. Retry delivery cannot change
   // that and a follow-up would send the same context again, so stop without a
   // follow-up and without blocking: the provider's reason stays on the
@@ -27,6 +27,12 @@ export function taskFailurePolicy(error: string | null, attempt: number, refusal
   // how the held task resumes.
   if (refusal) {
     return { automatic: false, settle: true, detail: `${error?.trim() || "The model provider refused this turn."} The unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
+  }
+  // The provider's usage limit or credit is used up. Delivery for this agent
+  // already waits until the limit resets, so the follow-up is queued now and
+  // runs after that wait instead of blocking for the owner.
+  if (usageLimit && attempt <= 3) {
+    return { automatic: true, detail: "The model provider's usage limit was reached. The unfinished task continues after the limit resets." };
   }
   const retry = "Resolve this issue, then use Retry delivery to continue the existing task.";
   if (/\b402\b|insufficient.{0,30}(?:credit|balance|quota)|(?:account|credit).{0,60}(?:output budget|exhausted)|(?:usage|spend|credit) limit|quota[ _-](?:exhausted|reached|exceeded)/i.test(error ?? "")) {

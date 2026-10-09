@@ -1,3 +1,4 @@
+import { isSilentSystemEventSource } from "../../../../../shared/activation-routing.mjs";
 import type {
   DesktopManagedAgentSession,
   DesktopRoomMessage,
@@ -206,7 +207,7 @@ function resolveProviderNeutralLegacyMessageRecipients<T extends CodexAddressabl
   workers: readonly T[],
   message: DesktopRoomMessage,
 ): T[] {
-  if (normalizeKey(message.source) === "managed_agent_failure") return [];
+  if (isSilentSystemEventSource(message.source)) return [];
   const mentions = extractMentionHandles(message.text);
   if (mentions.some(isBroadcastHandle) || hasBroadcastAddress(message.text)) {
     return [...workers];
@@ -373,7 +374,7 @@ export function desktopManagedAgentMessageActivationDecision(
   worker: Pick<DesktopManagedAgentSession, "agentSessionId" | "agentKey" | "actorLabel" | "displayName">,
   message: DesktopRoomMessage,
 ): DesktopManagedAgentMessageActivationDecision {
-  if (normalizeKey(message.source) === "managed_agent_failure") {
+  if (isSilentSystemEventSource(message.source)) {
     return "silent";
   }
   const routing = message.accountAgentRouting;
@@ -551,7 +552,7 @@ function resolveCodexMessageRecipients<T extends CodexAddressableWorker>(
   workers: readonly T[],
   message: DesktopRoomMessage,
 ): T[] {
-  if (normalizeKey(message.source) === "managed_agent_failure") {
+  if (isSilentSystemEventSource(message.source)) {
     return [];
   }
 

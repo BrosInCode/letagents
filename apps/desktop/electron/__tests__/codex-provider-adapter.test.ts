@@ -27,6 +27,7 @@ import type {
   ProviderConnectionRef,
   ProviderContinuationRef,
   ProviderHandle,
+  ProviderRoomTurnResult,
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
@@ -2266,6 +2267,62 @@ test("only a policy refusal is marked as one; other failed turns are not", async
   const interrupted = await stopped;
   assert.equal(interrupted.outcome, "interrupted");
   assert.equal("refusal" in interrupted, false, "an interrupted turn carries no refusal mark");
+});
+
+test("a turn Codex refused at the account's usage limit carries usage-limit evidence and its reset time", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed" }));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  const threadId = handle.providerContinuationId;
+  let current: Record<string, unknown> = {};
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: current.id } } as T;
+    if (method === "thread/read") return { thread: { id: threadId, turns: [current] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const run = async (index: number, error: Record<string, unknown>, status = "failed") => {
+    current = { id: `turn-limit-${index}`, status, error, items: [] };
+    const pending = adapter.runRoomTurn!(handle, {
+      inboxItemId: `inbox-limit-${index}`, actionId: `action-limit-${index}`, sourceMessage: {}, activation: {},
+    }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+    await flush();
+    client.emit({ method: "turn/completed", params: { threadId, turnId: current.id, turn: current } });
+    return (await pending) as ProviderRoomTurnResult & { usageLimit?: unknown };
+  };
+
+  // No snapshot yet: the limit is marked, without a reset time.
+  const first = await run(0, { message: "You've hit your usage limit.", codexErrorInfo: "usageLimitExceeded" });
+  assert.equal(first.outcome, "failed");
+  assert.deepEqual(first.usageLimit, {});
+
+  // The latest full window says when the limit resets (epoch seconds).
+  client.emit({ method: "account/rateLimits/updated", params: { rateLimits: {
+    primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: 1_790_000_000 },
+    secondary: { usedPercent: 40, windowDurationMins: 10_080, resetsAt: 1_790_500_000 },
+  } } });
+  await flush();
+  const second = await run(1, { message: "The turn failed.", codexErrorInfo: "usageLimitExceeded" });
+  assert.deepEqual(second.usageLimit, { resetsAtMs: 1_790_000_000_000 }, "the window that is not full does not set the reset");
+
+  // An error that only says so in its message is marked too.
+  const third = await run(2, { message: "You've hit your usage limit. Upgrade to Pro or try again later.", codexErrorInfo: "other" });
+  assert.deepEqual(third.usageLimit, { resetsAtMs: 1_790_000_000_000 });
+
+  // A short rate limit and other failures are not usage limits; neither is a stopped turn.
+  for (const [index, error] of [
+    { message: "Rate limit reached, retrying failed.", codexErrorInfo: { responseTooManyFailedAttempts: { httpStatusCode: 429 } } },
+    { message: "The turn failed.", codexErrorInfo: "contextWindowExceeded" },
+    { message: "The turn failed.", codexErrorInfo: "unauthorized" },
+  ].entries()) {
+    const result = await run(10 + index, error);
+    assert.equal(result.outcome, "failed");
+    assert.equal("usageLimit" in result, false, JSON.stringify(error));
+  }
+  const stopped = await run(20, { message: "stopped", codexErrorInfo: "usageLimitExceeded" }, "interrupted");
+  assert.equal(stopped.outcome, "interrupted");
+  assert.equal("usageLimit" in stopped, false);
 });
 
 test("a lane that polls for itself still ends its runtime on a thread systemError", async () => {

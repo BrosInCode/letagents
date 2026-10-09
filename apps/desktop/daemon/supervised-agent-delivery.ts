@@ -2,6 +2,7 @@ import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef,
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import { taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
+import { providerUsageLimitSubject } from "../../../shared/provider-usage-limit.mjs";
 
 function providerFailureDisplayText(message: string): string {
   const normalized = message
@@ -170,6 +171,36 @@ const SUCCESSFUL_POLL_PACE_MS = 25;
 const POLL_ERROR_BACKOFF_BASE_MS = 250;
 const POLL_ERROR_BACKOFF_CAP_MS = 30_000;
 
+/** Delivery resumes this long after the reset the provider gave, so the provider has surely reset. */
+export const USAGE_LIMIT_RESET_MARGIN_MS = 30_000;
+/** With no reset time, delivery tries the next message after this long. */
+export const USAGE_LIMIT_UNKNOWN_RESET_WAIT_MS = 60 * 60_000;
+/** One wait never runs longer than this; the pause is checked again after it. */
+const USAGE_LIMIT_MAX_WAIT_MS = 6 * 60 * 60_000;
+
+/** Reported once per failed turn, so the room can be told about a usage limit. */
+export type SupervisedUsageLimitReport = {
+  agent: SupervisedIngressAgent;
+  sourceInboxItemId: string;
+  resetsAtMs: number | null;
+};
+
+function usageLimitResumeTime(resumeAtMs: number, nowMs: number): string {
+  const resume = new Date(resumeAtMs);
+  const sameDay = resume.toDateString() === new Date(nowMs).toDateString();
+  return resume.toLocaleString(undefined, sameDay
+    ? { hour: "numeric", minute: "2-digit" }
+    : { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/** Why a message waits, said on the paused delivery. */
+export function usageLimitPauseDetail(provider: string, resumeAtMs: number, knownReset: boolean, nowMs = Date.now()): string {
+  const time = usageLimitResumeTime(resumeAtMs, nowMs);
+  return knownReset
+    ? `${providerUsageLimitSubject(provider)} was reached. This message waits until the limit resets and is delivered at ${time}. To continue sooner, change the account and use Retry delivery.`
+    : `${providerUsageLimitSubject(provider)} was reached. This message waits and is tried again at ${time}. To continue sooner, change the account and use Retry delivery.`;
+}
+
 /**
  * The daemon-owned delivery loop. It intentionally knows no owner credential
  * and no mention grammar: a worker-authenticated poll is the sole activation
@@ -218,6 +249,12 @@ export class SupervisedAgentDelivery {
   private fenced = false;
   private dispatchPaused = false;
   private readonly pausedDispatchAgents = new Map<string, SupervisedIngressAgent>();
+  /** The usage-limit failure the owner chose to retry past, per agent. */
+  private readonly usageLimitOverrides = new Map<string, string>();
+  /** Ends a usage-limit wait early when the owner retries. */
+  private readonly usageLimitWaits = new Map<string, AbortController>();
+  /** The last usage-limit failure reported for each agent, so each is reported once. */
+  private readonly reportedUsageLimits = new Map<string, string>();
 
   constructor(
     private readonly inbox: SupervisedAgentInboxStore,
@@ -241,6 +278,8 @@ export class SupervisedAgentDelivery {
     private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent, demand: object) => Promise<boolean>,
     /** Archive, in the agent's execution record, what its ended runtimes left open and no message still needs. */
     private readonly archiveEndedRuntimes?: (agentId: string) => Promise<void>,
+    /** Told once for each turn the provider refused because the usage limit was reached. Never awaited. */
+    private readonly reportUsageLimit?: (report: SupervisedUsageLimitReport) => void,
   ) {}
 
   /**
@@ -1161,7 +1200,13 @@ export class SupervisedAgentDelivery {
     const item = receipts.find((receipt) => receipt.source_message_id === sourceMessageId && receipt.state === "blocked");
     if (!item) throw new Error("The blocked room delivery is no longer available for this exact agent.");
     if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
+    // Retrying while a usage limit holds delivery means the owner wants to try
+    // now, for example after changing the account. Only a new usage-limit
+    // failure pauses delivery again.
+    const limit = await this.inbox.latestUsageLimit(agent.agentId);
+    if (limit) this.usageLimitOverrides.set(agent.agentId, limit.sourceInboxItemId);
     await this.inbox.retryBlocked(item.inbox_item_id);
+    this.usageLimitWaits.get(agent.agentId)?.abort();
     // The row is now truthfully pending; if authority changed during the
     // durable transition, reject the stale control request rather than claim
     // it began provider work. The successor will recover this pending head.
@@ -1310,7 +1355,8 @@ export class SupervisedAgentDelivery {
             if (binding?.work_attempt_id !== agent.workAttemptId || binding.provider_continuation_id !== agent.providerContinuationId) return;
             const prior = await this.inbox.taskContinuation(failed.inbox_item_id);
             const attempt = (prior?.attempt ?? 0) + 1;
-            const policy = taskFailurePolicy(failed.last_error, attempt, await this.inbox.providerRefusedTurn(failed.inbox_item_id));
+            const policy = taskFailurePolicy(failed.last_error, attempt, await this.inbox.providerRefusedTurn(failed.inbox_item_id),
+              await this.inbox.providerUsageLimitTurn(failed.inbox_item_id));
             let tasks: ContinuityTask[] = [];
             let lookupError: string | null = null;
             try { tasks = await this.ownedTasks(agent, { taskIds: prior?.tasks?.map((task) => task.id), heldBefore: prior?.heldBefore ?? String(failed.activation.task_continuity_failed_at), signal: controller.signal }); }
@@ -1367,6 +1413,24 @@ export class SupervisedAgentDelivery {
             }
           }
         }
+        if (head?.state === "blocked" && head.next_attempt_at_ms !== null) {
+          // A usage-limit pause: the only blocked delivery with a resume time.
+          // It ends by itself then; Retry delivery ends it sooner.
+          const resumeAtMs = head.next_attempt_at_ms;
+          const waitMs = resumeAtMs - this.inbox.nowMs();
+          if (waitMs > 0 && !await this.waitForUsageLimitReset(agent, waitMs, controller)) return;
+          if (!await this.hasExecutionAuthority(agent, controller)) return;
+          if (!sameInboxHead(head, await this.inbox.head(agent.agentId)) || this.inbox.nowMs() < resumeAtMs) continue;
+          await this.inbox.resumeUsageLimitPause(head.inbox_item_id, resumeAtMs);
+          continue;
+        }
+        if (head?.state === "pending" && !head.provider_turn_id && !head.outcome) {
+          const pause = await this.usageLimitPause(agent);
+          if (pause) {
+            if (!await this.hasExecutionAuthority(agent, controller)) return;
+            if (await this.inbox.pauseForUsageLimit(head.inbox_item_id, pause.detail, pause.resumeAtMs)) continue;
+          }
+        }
         if (head?.state === "pending" && !head.provider_turn_id && !head.outcome && this.canAdmitNewTurn) {
           const demand = this.admissionDemands.get(agent.handle) ?? {};
           this.admissionDemands.set(agent.handle, demand);
@@ -1389,6 +1453,38 @@ export class SupervisedAgentDelivery {
         await this.deliver(agent, item, controller);
       }
     } finally { /* tracked by pump(), including handoff draining. */ }
+  }
+
+  /** When delivery for this agent must wait for its usage limit, and why. */
+  private async usageLimitPause(agent: SupervisedIngressAgent): Promise<{ resumeAtMs: number; detail: string } | null> {
+    const limit = await this.inbox.latestUsageLimit(agent.agentId);
+    if (!limit || this.usageLimitOverrides.get(agent.agentId) === limit.sourceInboxItemId) return null;
+    const resumeAtMs = limit.resetsAtMs !== null
+      ? limit.resetsAtMs + USAGE_LIMIT_RESET_MARGIN_MS
+      : limit.observedAtMs + USAGE_LIMIT_UNKNOWN_RESET_WAIT_MS;
+    const nowMs = this.inbox.nowMs();
+    if (resumeAtMs <= nowMs) return null;
+    return { resumeAtMs, detail: usageLimitPauseDetail(agent.provider, resumeAtMs, limit.resetsAtMs !== null, nowMs) };
+  }
+
+  /** Wait for a usage limit to reset. False when this pump must stop instead. */
+  private async waitForUsageLimitReset(agent: SupervisedIngressAgent, waitMs: number, controller: AbortController): Promise<boolean> {
+    const wake = new AbortController();
+    this.usageLimitWaits.get(agent.agentId)?.abort();
+    this.usageLimitWaits.set(agent.agentId, wake);
+    try {
+      await this.waitForPollDelay(Math.min(waitMs, USAGE_LIMIT_MAX_WAIT_MS), AbortSignal.any([controller.signal, wake.signal]));
+    } finally {
+      if (this.usageLimitWaits.get(agent.agentId) === wake) this.usageLimitWaits.delete(agent.agentId);
+    }
+    return !controller.signal.aborted;
+  }
+
+  /** Tell the room once about a turn the provider refused at its usage limit. */
+  private reportUsageLimitOnce(agent: SupervisedIngressAgent, sourceInboxItemId: string, resetsAtMs: number | null): void {
+    if (this.reportedUsageLimits.get(agent.agentId) === sourceInboxItemId) return;
+    this.reportedUsageLimits.set(agent.agentId, sourceInboxItemId);
+    try { this.reportUsageLimit?.({ agent, sourceInboxItemId, resetsAtMs }); } catch { /* A room notice is optional. */ }
   }
 
   private async deliver(agent: SupervisedIngressAgent, item: SupervisedInboxItem, controller: AbortController): Promise<void> {
@@ -1688,6 +1784,11 @@ export class SupervisedAgentDelivery {
           acceptedResult = { turnId: publicationResult.turnId, providerContinuationId,
             outcome: saved.kind, text: null, evidence: saved.evidence,
             ...(checkpointed.last_error?.trim() ? { error: checkpointed.last_error } : {}) };
+        }
+        if (acceptedResult.outcome === "failed" && publicationResult.outcome === "failed" && publicationResult.usageLimit) {
+          const resetsAtMs = publicationResult.usageLimit.resetsAtMs;
+          this.reportUsageLimitOnce(agent, item.inbox_item_id,
+            typeof resetsAtMs === "number" && Number.isSafeInteger(resetsAtMs) && resetsAtMs > 0 ? resetsAtMs : null);
         }
         const disposition = {
           acceptedResult,

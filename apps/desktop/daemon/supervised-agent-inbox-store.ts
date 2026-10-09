@@ -573,6 +573,58 @@ export class SupervisedAgentInboxStore {
     });
   }
 
+  /** The provider refused this exact turn because the account's usage limit or credit was used up. */
+  async providerUsageLimitTurn(inboxItemId: string): Promise<boolean> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT terminal_evidence_json FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+        .get(inboxItemId) as Row | undefined;
+      return row ? terminalUsageLimit(row) !== null : false;
+    });
+  }
+
+  /**
+   * The usage limit the agent's most recent turn ended on, if it did. Only the
+   * latest terminal result counts: any later turn, failed or not, proves the
+   * provider accepted work again or failed for another reason.
+   */
+  async latestUsageLimit(agentId: string): Promise<{ sourceInboxItemId: string; observedAtMs: number; resetsAtMs: number | null } | null> {
+    return this.read(async (database) => {
+      const row = database.prepare(`SELECT inbox_item_id,outcome,terminal_evidence_json,observed_at FROM supervised_agent_terminal_results
+        WHERE agent_id=? ORDER BY observed_at DESC, rowid DESC LIMIT 1`).get(agentId) as Row | undefined;
+      if (!row || String(row.outcome) !== "failed") return null;
+      const limit = terminalUsageLimit(row);
+      const observedAtMs = Date.parse(String(row.observed_at));
+      if (!limit || !Number.isFinite(observedAtMs)) return null;
+      return { sourceInboxItemId: String(row.inbox_item_id), observedAtMs, resetsAtMs: limit.resetsAtMs };
+    });
+  }
+
+  /** The store's clock, so delivery decisions and stored times agree. */
+  nowMs(): number {
+    return Date.parse(this.now());
+  }
+
+  /**
+   * Hold the pending FIFO head until the usage limit resets. The row is
+   * blocked like any other stalled delivery, so it shows why and offers Retry
+   * delivery, and `next_attempt_at_ms` records when delivery resumes by
+   * itself. No other blocked row carries a resume time.
+   */
+  async pauseForUsageLimit(inboxItemId: string, detail: string, resumeAtMs: number): Promise<SupervisedInboxItem | null> {
+    if (!Number.isSafeInteger(resumeAtMs) || resumeAtMs <= 0 || !detail.trim()) throw new Error("A usage-limit pause needs a reason and a resume time.");
+    const item = await this.get(inboxItemId);
+    if (!item || item.state !== "pending" || item.provider_turn_id || item.outcome) return null;
+    return this.transition(inboxItemId, "blocked", { last_error: detail.trim().slice(0, 2_000), next_attempt_at_ms: resumeAtMs });
+  }
+
+  /** Resume a usage-limit pause, only if it is still the same pause. */
+  async resumeUsageLimitPause(inboxItemId: string, resumeAtMs: number): Promise<boolean> {
+    const item = await this.get(inboxItemId);
+    if (!item || item.state !== "blocked" || item.next_attempt_at_ms !== resumeAtMs) return false;
+    await this.retryBlocked(inboxItemId);
+    return true;
+  }
+
   /** The considered marker and child commit together; a restart can fill the gap after terminal settlement. */
   async enqueueTaskContinuation(input: { parentId: string; agentId: string; roomId: string; workAttemptId: string;
     providerContinuationId: string; agentSessionId: string; tasks: ContinuityTask[] | null;
@@ -2652,6 +2704,15 @@ function isNewerCursor(candidate: string, current: string | null): boolean {
   const numeric = (value: string) => value.startsWith("msg_") ? value.slice(4) : value;
   const candidateNumber = BigInt(numeric(candidate)); const currentNumber = BigInt(numeric(current));
   return candidateNumber > currentNumber;
+}
+
+/** The usage limit recorded with a failed turn's terminal evidence, if any. */
+function terminalUsageLimit(row: Row): { resetsAtMs: number | null } | null {
+  let evidence: { outcome?: unknown; usageLimit?: unknown } | null;
+  try { evidence = JSON.parse(String(row.terminal_evidence_json)) as typeof evidence; } catch { return null; }
+  if (!evidence || evidence.outcome !== "failed" || !evidence.usageLimit || typeof evidence.usageLimit !== "object") return null;
+  const resetsAtMs = (evidence.usageLimit as { resetsAtMs?: unknown }).resetsAtMs;
+  return { resetsAtMs: typeof resetsAtMs === "number" && Number.isSafeInteger(resetsAtMs) && resetsAtMs > 0 ? resetsAtMs : null };
 }
 
 function rowToItem(row: Row): SupervisedInboxItem {

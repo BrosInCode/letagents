@@ -1,4 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
+import { PROVIDER_USAGE_LIMIT_SOURCE } from "../../../../shared/provider-usage-limit.mjs";
 
 import {
   createGlobalAgentAddressResolver,
@@ -581,7 +582,7 @@ export async function resolveGlobalLegacyTargets(
     let targetKeys = new Set<string>();
     let exactTaskSession: ActiveRoutingSession | undefined;
 
-    if (row.source === "managed_agent_failure") {
+    if (row.source === "managed_agent_failure" || row.source === PROVIDER_USAGE_LIMIT_SOURCE) {
       reason = "system_event";
     } else if (addressed.broadcast) {
       reason = "broadcast";

@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { claudeToolOperation } from "../../../../../shared/claude-tool-operation.mjs";
 import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "../../../../../shared/provider-acquisition-evidence.mjs";
+import { looksLikeProviderUsageLimit } from "../../../../../shared/provider-usage-limit.mjs";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -71,6 +72,9 @@ import {
 } from "./provider-evidence.js";
 import {
   CLAUDE_NO_ROOM_REPLY_SENTINEL,
+  CLAUDE_USAGE_LIMIT_API_ERRORS,
+  claudeUsageLimitEvidence,
+  claudeUsageLimitTextResetMs,
   exactClaudeStreamTerminal,
   recoverExactClaudeTurnFromSession,
   recoverExactClaudeTurnFailureFromSession,
@@ -1040,6 +1044,12 @@ class ClaudeProviderHandle implements ProviderHandle {
   }>>();
   readonly roomTurnResults = new Map<string, ClaudeRoomTurnTerminal>();
   activeRoomTurnId: string | null = null;
+  /**
+   * What the stream said about a usage limit during the active room turn:
+   * whether Claude refused a request at the account's limit, and the latest
+   * reset time of a rejected usage window (epoch ms). Reset per room turn.
+   */
+  roomTurnUsageLimit: { turnId: string; limited: boolean; resetsAtMs: number | null } | null = null;
   roomTurnOperationId: string | null = null;
   pendingInterruptTurnId: string | null = null;
   contextualInterruptTerminalTurnId: string | null = null;
@@ -1311,6 +1321,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       await options.checkpointTurnStarted?.(turnId);
       terminalPromise = this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
       handle.activeRoomTurnId = turnId;
+      handle.roomTurnUsageLimit = { turnId, limited: false, resetsAtMs: null };
       if (handle.lifecycleAuthorityMode !== "typed") handle.state = "working";
       handle.executionTurnId = turnId;
       handle.executionTurnStarted = false;
@@ -2064,6 +2075,46 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     };
   }
 
+  /**
+   * Note what the stream says about a usage limit during the active room
+   * turn. An assistant message with the `rate_limit` or `billing_error`
+   * category is a request Claude refused at the account's limit (Claude
+   * retries a short overload itself and reports it as `overloaded`). A
+   * rejected `rate_limit_event` names when that window resets, as epoch
+   * seconds; with several rejected windows the agent waits for the latest.
+   */
+  private observeRoomTurnUsageLimit(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
+    const tracking = handle.roomTurnUsageLimit;
+    if (!tracking || handle.activeRoomTurnId !== tracking.turnId) return;
+    if (sessionIdOf(message) !== handle.providerContinuationId) return;
+    if (message.type === "assistant" && typeof message.error === "string") {
+      if (CLAUDE_USAGE_LIMIT_API_ERRORS.has(message.error)) tracking.limited = true;
+    } else if (message.type === "rate_limit_event") {
+      const info = message.rate_limit_info as { status?: unknown; resetsAt?: unknown } | null | undefined;
+      if (info?.status !== "rejected") return;
+      tracking.limited = true;
+      if (typeof info.resetsAt === "number" && Number.isSafeInteger(info.resetsAt)
+        && info.resetsAt > 0 && info.resetsAt <= CLAUDE_MAX_RESET_EPOCH_SECONDS) {
+        tracking.resetsAtMs = Math.max(tracking.resetsAtMs ?? 0, info.resetsAt * 1000);
+      }
+    }
+  }
+
+  /**
+   * Mark the active room turn's failed terminal with usage-limit evidence
+   * when the stream or the failure's own text says the limit was reached.
+   */
+  private withRoomTurnUsageLimit(
+    handle: ClaudeProviderHandle,
+    terminal: ClaudeRoomTurnTerminal | null,
+  ): ClaudeRoomTurnTerminal | null {
+    if (!terminal || !("error" in terminal) || terminal.nativeOutcome !== "failed") return terminal;
+    const tracking = handle.roomTurnUsageLimit?.turnId === terminal.turnId ? handle.roomTurnUsageLimit : null;
+    if (tracking) handle.roomTurnUsageLimit = null;
+    if (!tracking?.limited && !looksLikeProviderUsageLimit(terminal.error)) return terminal;
+    return { ...terminal, usageLimit: claudeUsageLimitEvidence(tracking?.resetsAtMs ?? claudeUsageLimitTextResetMs(terminal.error)) };
+  }
+
   private consumeLine(handle: ClaudeProviderHandle, line: string): void {
     const message = parseStreamLine(line);
     if (!message) {
@@ -2071,6 +2122,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       return;
     }
     this.handleCompactions.get(handle)?.observe(message);
+    this.observeRoomTurnUsageLimit(handle, message);
     // Native approval payloads stay host-ephemeral; do not publish them to room activity.
     if (message.type === "control_request" || message.type === "control_cancel_request") {
       this.consumePermission(handle, message);
@@ -2103,7 +2155,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       if (exactTurnId) {
         const terminal = contextualInterruptTurnId
           ? { turnId: contextualInterruptTurnId, nativeOutcome: "interrupted" as const, error: "Claude command ended interrupted." }
-          : exactClaudeStreamTerminal(message, exactTurnId, handle.providerContinuationId);
+          : this.withRoomTurnUsageLimit(handle, exactClaudeStreamTerminal(message, exactTurnId, handle.providerContinuationId));
         if (terminal) {
           exactTurnFailed = "error" in terminal && handle.activeRoomTurnId === exactTurnId;
           handle.roomTurnResults.set(exactTurnId, terminal);
@@ -2397,7 +2449,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       if (!terminal.nativeOutcome) throw new Error(`Claude bounded room turn ${terminal.turnId} failed: ${terminal.error}`);
       return { turnId: terminal.turnId, providerContinuationId: handle.providerContinuationId,
         outcome: terminal.nativeOutcome, text: null, evidence: "stream",
-        error: String(safeStreamPayload(terminal.error).payload).slice(0, 2000) };
+        error: String(safeStreamPayload(terminal.error).payload).slice(0, 2000),
+        ...(terminal.nativeOutcome === "failed" && terminal.usageLimit ? { usageLimit: { ...terminal.usageLimit } } : {}) };
     }
     if (terminal.outcome === "reply") {
       return {
