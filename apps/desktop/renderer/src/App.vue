@@ -163,6 +163,7 @@
 
       <KeepAlive :max="1">
         <DesktopRoomShell
+          :viewer-login="authStatus?.authenticated ? authStatus.account?.login : null"
           v-if="activeEntry.type === 'room' && !selectedNeedsAccess"
           :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"

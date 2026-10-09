@@ -61,6 +61,7 @@ const props = withDefaults(defineProps<{
   busy: boolean;
   busyKind?: AgentInspectorActionIntent["kind"] | null;
   compact: boolean;
+  menuOnly?: boolean;
 }>(), {
   busyKind: null,
 });
@@ -108,8 +109,8 @@ const orderedCompactActions = computed(() => availableActions.value
   .map((action, index) => ({ action, index }))
   .sort((left, right) => compactPriority[left.action.kind] - compactPriority[right.action.kind] || left.index - right.index)
   .map(({ action }) => action));
-const primaryActions = computed(() => props.compact ? orderedCompactActions.value.slice(0, 2) : availableActions.value);
-const secondaryActions = computed(() => props.compact ? orderedCompactActions.value.slice(2) : []);
+const primaryActions = computed(() => props.menuOnly ? [] : props.compact ? orderedCompactActions.value.slice(0, 2) : availableActions.value);
+const secondaryActions = computed(() => props.menuOnly ? availableActions.value : props.compact ? orderedCompactActions.value.slice(2) : []);
 const hasOverflow = computed(() => Boolean(secondaryActions.value.length));
 
 // Reset only when the inspected agent or presentation changes. The actions

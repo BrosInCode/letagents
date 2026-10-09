@@ -36,7 +36,7 @@ test("the Inspector has one exclusive surface for durable, external, loading, er
   assert.match(participantProjection, /selection\.kind === "resolving"/);
   assert.match(participantProjection, /unavailableReason === "load_error"/);
   assert.match(participantProjection, /selection\.kind === "external"/);
-  assert.match(participantSurface, /Room participant/);
+  assert.match(participantSurface, /shared\.ownerLabel/);
   assert.doesNotMatch(participantSurface, /useManagedAgentSessionsContext/);
   assert.match(participantSurface, /desktopIpc\.workers\.stopManagedAgent/);
   assert.doesNotMatch(participantSurface, /aria-live/);

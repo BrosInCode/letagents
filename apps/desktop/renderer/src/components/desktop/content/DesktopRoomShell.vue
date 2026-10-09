@@ -256,6 +256,9 @@
       :daemon-status="supervisorStatus"
       :refresh-diagnostics="refreshAgentInspectorDiagnostics"
       :selection="selectedAgentDetailTarget"
+      :presence="presence"
+      :presence-fresh="sourceStates?.presence.status !== 'error'"
+      :viewer-login="viewerLogin"
       :action-state="selectedAgentInspectorActionState"
       :work-resource="agentInspectorWorkResource"
       :selected-work-source-message-id="agentInspectorWorkSourceMessageId"
@@ -388,6 +391,7 @@ import {
   isCurrentAgentInspectorParticipantSessionUpdate,
   type AgentInspectorParticipantSessionUpdate,
 } from "../../../domain/agent-inspector-participant";
+import { agentInspectorActionErrorMessage } from "../../../domain/agent-inspector-presentation";
 import {
   agentInspectorActionStateForEntry,
   clearAgentInspectorActionStateIfMatching,
@@ -490,6 +494,7 @@ import { hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./
 import { provideRoomWakeRules, useRoomWakeRules } from "../../../composables/useRoomWakeRules";
 
 const props = defineProps<{
+  viewerLogin?: string | null;
   sidebarMode: SidebarMode;
   roomLoading: boolean;
   room: DesktopRoomInfo;
@@ -1962,6 +1967,11 @@ async function loadAgentInspectorProviders(): Promise<void> {
   return agentInspectorProvidersRequest;
 }
 
+// Identity can resolve after the panel opens from a historical message.
+watch([() => selectedAgentDetailProjection.value?.entryId, selectedAgentDetailRequestVersion], ([entryId]) => {
+  if (entryId && agentInspectorConfigurationResource.value.status === "idle") void loadAgentInspectorSettings();
+});
+
 function closeAgentDetail(): void {
   agentInspectorMessageIdentityRequestToken += 1;
   selectedAgentDetailRequestVersion.value += 1;
@@ -2908,23 +2918,6 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         : agentInspectorActionErrorMessage(intent.kind, error),
     };
   }
-}
-
-function agentInspectorActionErrorMessage(
-  kind: AgentInspectorActionIntent["kind"],
-  error: unknown,
-): string {
-  const detail = error instanceof Error ? error.message : "";
-  if (kind === "reconnect" && /previous provider runtime is unavailable|no longer has a live runtime/i.test(detail)) {
-    return "This provider process has stopped. Recover the agent to continue with the same identity and workspace.";
-  }
-  if (kind === "recover" && /cannot prove that the previous provider process stopped/i.test(detail)) {
-    return "LetAgents could not safely prove the old provider stopped. No replacement was started.";
-  }
-  if (kind === "recover" && /desktop credentials are required/i.test(detail)) {
-    return "LetAgents could not restore this agent’s room credentials. Try recovery again.";
-  }
-  return detail || "The agent action could not be completed.";
 }
 
 function actionProgressMessage(kind: Exclude<AgentInspectorActionIntent["kind"], "recovery_options">): string {
