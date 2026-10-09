@@ -21,17 +21,14 @@
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
       </button>
     </header>
-    <div class="agent-inspector-status-copy">
-      <strong>{{ heading }}</strong>
-      <p>{{ detail }}</p>
-    </div>
-    <div v-if="canRetry" class="agent-inspector-actions agent-inspector-status-actions">
-      <button type="button" @click="emit('retry')">Try again</button>
-    </div>
+    <AgentInspectorSignal :label="heading" :detail="detail" :tone="canRetry ? 'red' : heading.startsWith('Loading') ? 'amber' : 'neutral'" :moving="heading.startsWith('Loading')">
+      <template v-if="canRetry" #actions><button type="button" @click="emit('retry')">Try again</button></template>
+    </AgentInspectorSignal>
   </aside>
 </template>
 
 <script setup lang="ts">
+import AgentInspectorSignal from "./AgentInspectorSignal.vue";
 import { ref } from "vue";
 
 const props = defineProps<{

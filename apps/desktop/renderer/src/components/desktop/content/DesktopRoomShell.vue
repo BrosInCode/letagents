@@ -256,6 +256,9 @@
       :daemon-status="supervisorStatus"
       :refresh-diagnostics="refreshAgentInspectorDiagnostics"
       :selection="selectedAgentDetailTarget"
+      :presence="presence"
+      :presence-fresh="sourceStates?.presence.status !== 'error'"
+      :viewer-login="viewerLogin"
       :action-state="selectedAgentInspectorActionState"
       :work-resource="agentInspectorWorkResource"
       :selected-work-source-message-id="agentInspectorWorkSourceMessageId"
@@ -490,6 +493,7 @@ import { hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./
 import { provideRoomWakeRules, useRoomWakeRules } from "../../../composables/useRoomWakeRules";
 
 const props = defineProps<{
+  viewerLogin?: string | null;
   sidebarMode: SidebarMode;
   roomLoading: boolean;
   room: DesktopRoomInfo;
@@ -1961,6 +1965,11 @@ async function loadAgentInspectorProviders(): Promise<void> {
     .finally(() => { agentInspectorProvidersRequest = null; });
   return agentInspectorProvidersRequest;
 }
+
+// Identity can resolve after the panel opens from a historical message.
+watch([() => selectedAgentDetailProjection.value?.entryId, selectedAgentDetailRequestVersion], ([entryId]) => {
+  if (entryId && agentInspectorConfigurationResource.value.status === "idle") void loadAgentInspectorSettings();
+});
 
 function closeAgentDetail(): void {
   agentInspectorMessageIdentityRequestToken += 1;

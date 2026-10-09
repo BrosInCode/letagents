@@ -239,6 +239,7 @@ let AgentInspectorStatusSurface: object;
 let AgentInspectorSurface: object;
 let AgentInspectorOverview: object;
 let AgentInspectorNow: object;
+let AgentInspectorSignal: object;
 let ProviderBadge: object;
 let AgentInspectorHomeHarness: object;
 let DesktopSwitch: object;
@@ -261,6 +262,7 @@ before(async () => {
   AgentInspectorStatusSurface = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorStatusSurface.vue")).default;
   AgentInspectorOverview = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorOverview.vue")).default;
   AgentInspectorNow = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorNow.vue")).default;
+  AgentInspectorSignal = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorSignal.vue")).default;
   ProviderBadge = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/desktop-chat-message/ProviderBadge.vue")).default;
   AgentInspectorHomeHarness = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorHomeHarness.vue")).default;
   DesktopSwitch = (await vite.ssrLoadModule("/renderer/src/components/desktop/controls/DesktopSwitch.vue")).default;
@@ -274,6 +276,7 @@ before(async () => {
     attachClientRender(AgentInspectorStatusSurface, "components/desktop/content/agent-inspector/AgentInspectorStatusSurface.vue"),
     attachClientRender(AgentInspectorOverview, "components/desktop/content/agent-inspector/AgentInspectorOverview.vue"),
     attachClientRender(AgentInspectorNow, "components/desktop/content/agent-inspector/AgentInspectorNow.vue"),
+    attachClientRender(AgentInspectorSignal, "components/desktop/content/agent-inspector/AgentInspectorSignal.vue"),
     attachClientRender(ProviderBadge, "components/desktop/content/desktop-chat-message/ProviderBadge.vue"),
     attachClientRender(AgentInspectorHomeHarness, "components/desktop/content/agent-inspector/AgentInspectorHomeHarness.vue"),
     attachClientRender(DesktopSwitch, "components/desktop/controls/DesktopSwitch.vue"),
@@ -436,7 +439,7 @@ test("mounted Settings keeps its two-step retirement confirmation", async () => 
   settings.app.unmount();
 });
 
-test("the lifecycle overflow leaves retirement at the base of Overview", async () => {
+test("the lifecycle overflow leaves retirement in Settings", async () => {
   const emitted: string[] = [];
   const lifecycle = mount(AgentInspectorLifecycleActions, {
     entryId: "agent_a",
@@ -574,7 +577,7 @@ test("mounted inspector preserves selected tabs on refresh and keeps retirement 
   };
   const mounted = mount(Harness, {});
 
-  assert.ok(descendants(mounted.root).some((node) => String(node.props.class).includes("agent-inspector-overview-retire")));
+  assert.equal(descendants(mounted.root).some((node) => String(node.props.class).includes("agent-inspector-overview-retire")), false);
   assert.match(textContent(mounted.root), /My project/);
   assert.match(textContent(mounted.root), /Status uncertain/);
   assert.match(textContent(mounted.root), /may still be working/);
@@ -637,28 +640,11 @@ test("mounted inspector preserves selected tabs on refresh and keeps retirement 
   projectionResource.value = { ...projectionResource.value, entryId: "agent_a" };
   initialTab.value = "overview";
   await nextTick();
-  const retire = buttonByText(mounted.root, "Retire agent");
-  retire.focus();
-  (retire.props.onClick as () => void)();
-  await nextTick();
-  assert.deepEqual(actions, []);
-  assert.ok(nodeByProp(mounted.root, "role", "alert"));
-  const keep = buttonByText(mounted.root, "Keep agent");
-  assert.equal(testDocument.activeElement, keep, "confirmation moves focus to the safe action");
-  (keep.props.onClick as () => void)();
-  await nextTick();
-  const restoredRetire = buttonByText(mounted.root, "Retire agent");
-  assert.equal(testDocument.activeElement, restoredRetire, "cancelling returns focus to the retire action");
-  (restoredRetire.props.onClick as () => void)();
-  await nextTick();
-  (buttonByText(mounted.root, "Confirm retire agent").props.onClick as () => void)();
-  assert.deepEqual(actions, [{ entryId: "agent_a", roomId: "room_a", kind: "retire_agent" }]);
+  assert.equal(descendants(mounted.root).some(node => node.type === 'button' && textContent(node) === 'Retire agent'), false, 'Overview stays focused on status and work');
   mounted.app.unmount();
 
   assert.doesNotMatch(surfaceSource, /agent-inspector-danger-footer/, "the inspector has no persistent destructive footer");
-  assert.match(surfaceSource, /class="agent-inspector-overview-retire"/, "Overview owns the visible retire action");
-  assert.match(surfaceSource, /Confirm retire agent/, "Overview retirement remains a two-step confirmation");
-  assert.match(surfaceSource, /AGENT_INSPECTOR_RETIRE_CONFIRMATION/, "Overview uses the shared retirement warning");
+  assert.doesNotMatch(surfaceSource, /agent-inspector-overview-retire/, "retirement lives in Settings");
   assert.match(surfaceSource, /<AgentInspectorSettings/, "retirement remains available through Settings");
   assert.match(surfaceSource, /@retire="emit\('retire'\)"/, "Settings still forwards the retire action");
   assert.match(settingsSource, /class="agent-inspector-danger"/, "retire is placed in the contextual danger zone");
@@ -742,6 +728,33 @@ test("mounted Settings offers an explicit, non-overlapping restart only for a sa
   const retired = mount(AgentInspectorSettings, settingsProps({ resource: laggingResource, retired: true }));
   assert.equal(descendants(retired.root).some((node) => node.type === "button" && textContent(node) === "Restart to apply changes"), false);
   retired.app.unmount();
+});
+
+test("Overview waits for a historical identity before loading intensity and reloads on reopen", async () => {
+  const shell = await readFile(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
+  const opening = shell.slice(shell.indexOf("function openAgentDetailRequest("), shell.indexOf("async function loadAgentInspectorProviders("));
+  assert.doesNotMatch(opening, /loadAgentInspectorSettings\(/, "an unresolved opening must not mark settings unavailable");
+  const watcher = shell.slice(shell.indexOf("// Identity can resolve after"), shell.indexOf("function closeAgentDetail("));
+  const projection = Vue.ref<{ entryId: string } | null>(null);
+  const version = Vue.ref(0);
+  const resource = Vue.ref({ status: "idle" });
+  let loads = 0;
+  let stop: (() => void) | undefined;
+  new Function("watch", "selectedAgentDetailProjection", "selectedAgentDetailRequestVersion", "agentInspectorConfigurationResource", "loadAgentInspectorSettings", watcher)(
+    (...args: Parameters<typeof Vue.watch>) => { stop = Vue.watch(...args); }, projection, version, resource,
+    () => { loads += 1; resource.value.status = "ready"; },
+  );
+  version.value += 1;
+  await nextTick();
+  assert.equal(loads, 0);
+  projection.value = { entryId: "agent_a" };
+  await nextTick();
+  assert.equal(loads, 1);
+  resource.value.status = "idle";
+  version.value += 1;
+  await nextTick();
+  assert.equal(loads, 2, "reopening the same agent loads its current configuration once");
+  stop?.();
 });
 
 test("Settings apply uses exact authority fences and explicit reload recovers an accepted restart", async () => {

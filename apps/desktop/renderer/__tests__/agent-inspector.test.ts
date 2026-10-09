@@ -1663,3 +1663,16 @@ test("inspector shows current compaction during startup and work, hiding it afte
   assert.notEqual(projectAgentInspector({ ...compacting, condition: "coordination_blocked" }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
   assert.notEqual(projectAgentInspector({ ...compacting, providerProgress: null }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
 });
+
+test('Overview signal distinguishes responding, compaction and stale observations', async () => {
+  const { agentInspectorSignal } = await import('../src/domain/agent-inspector-presentation');
+  const projection = projectAgentInspector(entry(), { roomId: 'focus_1' })!;
+  assert.ok(projection);
+  assert.equal(agentInspectorSignal({ ...projection, overallState: 'responding' }).label, 'Responding');
+  assert.equal(agentInspectorSignal({ ...projection, overallState: 'online' }).tone, 'green');
+  const compacting = { ...projection, entry: { ...projection.entry, provider: 'claude-code', desiredState: 'running' as const, observedState: 'working' as const, condition: 'none' as const, providerProgress: { state: 'compacting' as const, startedAt: new Date().toISOString() } } };
+  assert.equal(agentInspectorSignal(compacting).state, 'compacting');
+  assert.equal(agentInspectorSignal(compacting).tone, 'violet');
+  assert.equal(agentInspectorSignal({ ...compacting, resourceFreshness: 'stale' }).state, 'stale');
+  assert.equal(agentInspectorSignal({ ...compacting, resourceFreshness: 'stale' }).moving, false);
+});
