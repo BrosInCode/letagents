@@ -17,6 +17,8 @@ export type RecordedApprovalDecision = {
   actorId: string;
   decision: "allow_once" | "deny";
   projectionSha256: string;
+  /** The owner chose this on the card. Automatic, rule and delegated decisions leave it unset. */
+  byOwner?: true;
 };
 
 export type RecordedApprovalSelection = {
