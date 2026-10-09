@@ -117,6 +117,39 @@ export const HOST_APPROVAL_ALWAYS_ALLOW_HINT = "Saved for this agent. Revoke in 
  */
 export const HOST_APPROVAL_SETTLE_MS = 400;
 
+/**
+ * The composer's hold. A request that becomes the visible card keeps its
+ * decisions off this long, so a click aimed at another control never answers
+ * a request nobody has read.
+ */
+export const HOST_APPROVAL_ARM_MS = 600;
+
+/** Decisions on the visible card arm once it has been on screen for HOST_APPROVAL_ARM_MS. */
+export function hostApprovalDecisionsArmed(shownAtMs: number, nowMs: number): boolean {
+  return nowMs - shownAtMs >= HOST_APPROVAL_ARM_MS;
+}
+
+/** Unavailable and unconfirmed requests cannot be answered here. */
+export function hostApprovalCannotBeAnswered(status: HostApprovalStatus): boolean {
+  return status === "unavailable" || status === "uncertain";
+}
+
+/** Requests that can still be answered come first. Each group keeps the order it has. */
+export function hostApprovalTrayOrder<T extends Pick<DesktopHostApproval, "status">>(approvals: readonly T[]): T[] {
+  return [...approvals.filter(approval => !hostApprovalCannotBeAnswered(approval.status)),
+    ...approvals.filter(approval => hostApprovalCannotBeAnswered(approval.status))];
+}
+
+/** The history line counts exactly the requests that cannot be answered here. */
+export function hostApprovalHistoryCount(approvals: readonly Pick<DesktopHostApproval, "status">[]): number {
+  return approvals.filter(approval => hostApprovalCannotBeAnswered(approval.status)).length;
+}
+
+/** The history toggle names what it counts, in the words the cards show. */
+export function hostApprovalHistoryLabel(count: number, showing: boolean): string {
+  return `${showing ? "Hide" : "Show"} ${count} unavailable or unconfirmed ${count === 1 ? "approval" : "approvals"}`;
+}
+
 /** One line: what the request would do, for a list row or the composer tray. */
 export function hostApprovalSummary(presentation: HostApprovalPresentation): string {
   return hostApprovalFields(presentation).map(field => `${field.label}: ${field.value}`).join(" · ").replace(/\s+/g, " ").trim();
