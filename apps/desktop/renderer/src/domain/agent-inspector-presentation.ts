@@ -1,6 +1,6 @@
 import type { DesktopAgentPresence } from '../../../electron/ipc-types';
 import type { AgentInspectorSelection } from '../components/desktop/content/desktop-chat-message/types';
-import type { AgentInspectorProjection } from './agent-inspector';
+import type { AgentInspectorActionIntent, AgentInspectorProjection } from './agent-inspector';
 import { agentCompactionProgress } from './managed-agents';
 
 export interface InspectorSignal {
@@ -13,6 +13,23 @@ export interface InspectorSignal {
 
 export function agentInspectorProviderLabel(provider: string): string {
   return ({ 'claude-code': 'Claude Code', codex: 'Codex', cursor: 'Cursor', 'open-model': 'Open Model' } as Record<string, string>)[provider] || provider;
+}
+
+export function agentInspectorActionErrorMessage(
+  kind: AgentInspectorActionIntent["kind"],
+  error: unknown,
+): string {
+  const detail = error instanceof Error ? error.message : "";
+  if (kind === "reconnect" && /previous provider runtime is unavailable|no longer has a live runtime/i.test(detail)) {
+    return "This provider process has stopped. Recover the agent to continue with the same identity and workspace.";
+  }
+  if (kind === "recover" && /cannot prove that the previous provider process stopped/i.test(detail)) {
+    return "LetAgents could not safely prove the old provider stopped. No replacement was started.";
+  }
+  if (kind === "recover" && /desktop credentials are required/i.test(detail)) {
+    return "LetAgents could not restore this agent’s room credentials. Try recovery again.";
+  }
+  return detail || "The agent action could not be completed.";
 }
 
 export function agentInspectorSignal(projection: AgentInspectorProjection): InspectorSignal {

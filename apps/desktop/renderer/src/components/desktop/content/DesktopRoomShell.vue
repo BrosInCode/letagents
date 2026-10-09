@@ -391,6 +391,7 @@ import {
   isCurrentAgentInspectorParticipantSessionUpdate,
   type AgentInspectorParticipantSessionUpdate,
 } from "../../../domain/agent-inspector-participant";
+import { agentInspectorActionErrorMessage } from "../../../domain/agent-inspector-presentation";
 import {
   agentInspectorActionStateForEntry,
   clearAgentInspectorActionStateIfMatching,
@@ -2917,23 +2918,6 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         : agentInspectorActionErrorMessage(intent.kind, error),
     };
   }
-}
-
-function agentInspectorActionErrorMessage(
-  kind: AgentInspectorActionIntent["kind"],
-  error: unknown,
-): string {
-  const detail = error instanceof Error ? error.message : "";
-  if (kind === "reconnect" && /previous provider runtime is unavailable|no longer has a live runtime/i.test(detail)) {
-    return "This provider process has stopped. Recover the agent to continue with the same identity and workspace.";
-  }
-  if (kind === "recover" && /cannot prove that the previous provider process stopped/i.test(detail)) {
-    return "LetAgents could not safely prove the old provider stopped. No replacement was started.";
-  }
-  if (kind === "recover" && /desktop credentials are required/i.test(detail)) {
-    return "LetAgents could not restore this agent’s room credentials. Try recovery again.";
-  }
-  return detail || "The agent action could not be completed.";
 }
 
 function actionProgressMessage(kind: Exclude<AgentInspectorActionIntent["kind"], "recovery_options">): string {
