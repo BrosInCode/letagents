@@ -316,6 +316,13 @@ let finalizing = false;
 let authorityRetiring = false;
 let authorityRetirementPromise = null;
 let runtimeDataRetirementResult = null;
+// Which clean-up checks could not be proven; written beside remote_authority_revoked.
+// A later pass that proves a check again clears it, so this is the last answer.
+const revocationFailures = new Set();
+function noteRevocation(check, failed) {
+  if (failed) revocationFailures.add(check);
+  else revocationFailures.delete(check);
+}
 let persistedBytes = 0;
 let exitEvidence = null;
 let exitCode = 1;
@@ -519,16 +526,27 @@ function flushParser() {
   if (!droppingOversizedLine && pendingLine) inspectLine(pendingLine);
   pendingLine = "";
 }
+function runGroupProbe() {
+  // A timed-out probe says nothing about the process table: under load a quick
+  // ps can miss its bound. Retry it, at most twice more, with a longer bound.
+  // Any other answer, including "members are still alive", is final.
+  let inspected;
+  for (const timeout of [250, 1000, 1000]) {
+    inspected = spawnSync("/bin/ps", ["-axo", "pid=,pgid="], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], detached: true,
+      timeout, maxBuffer: 1024 * 1024,
+    });
+    if (!inspected.error || inspected.error.code !== "ETIMEDOUT") break;
+  }
+  return inspected;
+}
 function processGroupMembers(groupId, excludedPid = null) {
   if (process.platform === "win32") return [];
   try {
     // The detached ps probe cannot become a false member of either supervised
     // process group. A live group leader also prevents its PGID from being
     // recycled while retirement is inspecting it.
-    const inspected = spawnSync("/bin/ps", ["-axo", "pid=,pgid="], {
-      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], detached: true,
-      timeout: 250, maxBuffer: 1024 * 1024,
-    });
+    const inspected = runGroupProbe();
     if (inspected.error || inspected.status !== 0 || typeof inspected.stdout !== "string") return null;
     return inspected.stdout.split(/\r?\n/).flatMap((line) => {
       const match = line.trim().match(/^(\d+)\s+(\d+)$/);
@@ -770,6 +788,9 @@ async function closeMcpConnector() {
   const socketDeadline = Date.now() + 500;
   while (!socketClosed && Date.now() < socketDeadline) await wait(5);
   const revoked = socketClosed && runtimeClosed && runtimeGroupClosed;
+  noteRevocation("mcp_socket", !socketClosed);
+  noteRevocation("mcp_runtime", !runtimeClosed);
+  noteRevocation("mcp_runtime_group", !runtimeGroupClosed);
   if (socketClosed) mcpConnectorSocket = null;
   // Preserve ambiguous runtime evidence across repeated close attempts. Some
   // not-started paths deliberately call close twice around an in-flight start;
@@ -1168,6 +1189,7 @@ async function closeAuthorityProxy() {
     && authorityProxySockets.size === 0
     && agentProxySessions.size === 0
     && agentProxySockets.size === 0;
+  noteRevocation("proxy_sockets", !revoked);
   authorityProxy = null;
   agentProxy = null;
   return revoked;
@@ -1208,9 +1230,10 @@ function beginTurnAuthorityRetirement() {
   return authorityRetirementPromise;
 }
 function retireTurnRuntimeData() {
-  try { runtimeDataRetirementResult = purgeTurnRuntimeDataRoot(); }
+  try { runtimeDataRetirementResult = purgeTurnRuntimeDataRoot(); noteRevocation("runtime_data", false); }
   catch {
     runtimeDataRetirementResult = false;
+    noteRevocation("runtime_data", true);
     if (!exitEvidence) {
       exitEvidence = { type: "error", error: "Cursor's private turn data root could not be retired safely." };
     }
@@ -1721,6 +1744,7 @@ async function finalize() {
       native_process_group_reaped: nativeGroupReaped,
       reap_scope: "native_process_group",
       remote_authority_revoked: remoteAuthorityRevoked,
+      remote_authority_failed_checks: [...revocationFailures],
       turn_contract_version: 1,
       session_contract_valid: sessionContractValid,
       stream_contract_complete: streamContractComplete,
@@ -2021,6 +2045,7 @@ async function finishNotStarted(error, calledFromStart = false) {
       native_process_group_reaped: true,
       reap_scope: "native_process_group",
       remote_authority_revoked: proxyAuthorityRevoked && mcpAuthorityRevoked && runtimeDataRetired,
+      remote_authority_failed_checks: [...revocationFailures],
       session_contract_valid: true,
       stream_contract_complete: true,
       workspace_generation_manifest_path: workspaceGenerationManifestPath || null,
