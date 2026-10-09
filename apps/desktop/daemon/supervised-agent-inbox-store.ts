@@ -11,7 +11,7 @@ import { prepareRoomContext } from "./prepared-room-context.js";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
 import { assertNoPollingActivation } from "./custodial-polling-activation.js";
-import { parseTaskContinuation, type ContinuityTask, type TaskContinuation } from "./task-continuity.js";
+import { parseClaudeApiFailure, parseTaskContinuation, type ClaudeApiFailure, type ContinuityTask, type TaskContinuation } from "./task-continuity.js";
 import {
   MAX_QUEUED_NOTICES_PER_TURN, peopleFirstOrder, queuedDeliveryKind, queuedNoticeIds, queuedNoticeReason, queuedNoticesFor, roomArrival,
   type QueuedDeliveryKind,
@@ -585,6 +585,17 @@ export class SupervisedAgentInboxStore {
       if (!row) return false;
       try { return (JSON.parse(String(row.terminal_evidence_json)) as { unrecognizedResult?: unknown } | null)?.unrecognizedResult === true; }
       catch { return false; }
+    });
+  }
+
+  /** Claude Code's structured account of the failed request of this message's turn, from the saved result of the turn. */
+  async claudeApiFailure(inboxItemId: string): Promise<ClaudeApiFailure | null> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT terminal_evidence_json FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+        .get(inboxItemId) as Row | undefined;
+      if (!row) return null;
+      try { return parseClaudeApiFailure((JSON.parse(String(row.terminal_evidence_json)) as { claudeApiFailure?: unknown } | null)?.claudeApiFailure); }
+      catch { return null; }
     });
   }
 

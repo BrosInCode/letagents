@@ -18,7 +18,92 @@ export type TaskFailurePolicy = {
   note?: string;
 };
 
-export function taskFailurePolicy(error: string | null, attempt: number, refusal = false, unrecognizedResult = false): TaskFailurePolicy {
+/** Claude Code's own structured account of a request to the model that failed. */
+export type ClaudeApiFailure = { status: number | null; terminalReason: string | null; category: string | null;
+  /** Claude reported, in the same turn, a usage window of the account that rejected the request. */
+  usageLimit?: true;
+  /** The error's text begins with Claude Code's own words for a request that does not fit the model's context. */
+  promptTooLong?: true };
+
+/** Parsing is not trust: only an HTTP status and short names are kept, and anything else reads as not said. */
+export function parseClaudeApiFailure(value: unknown): ClaudeApiFailure | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const name = (field: unknown) => typeof field === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(field) ? field : null;
+  return { status: typeof row.status === "number" && Number.isInteger(row.status) && row.status >= 100 && row.status <= 599 ? row.status : null,
+    terminalReason: name(row.terminalReason), category: name(row.category), ...(row.usageLimit === true ? { usageLimit: true as const } : {}),
+    ...(row.promptTooLong === true ? { promptTooLong: true as const } : {}) };
+}
+
+export type ClaudeApiFailureClass = "short_fault" | "authentication" | "billing" | "model" | "conversation" | "request" | "output_limit";
+
+/**
+ * What kind of failure Claude's structured fields describe. Null when they do
+ * not say, as for the category `unknown` with no HTTP status: the failure text
+ * is then read as it is for every other provider.
+ */
+export function claudeApiFailureClass(failure: ClaudeApiFailure | null): ClaudeApiFailureClass | null {
+  if (!failure) return null;
+  const { status, terminalReason, category } = failure;
+  // The account's usage limit and a brief rate limit have the same name and
+  // the same status. A usage limit does not pass in seconds, so a follow-up
+  // turn cannot help: it is a limit of the account, like its credit. A usage
+  // window that rejected the turn says which of the two this is.
+  if (failure.usageLimit && (category === "rate_limit" || status === 429)) return "billing";
+  // A refused credential is a key or an access that the owner can put right,
+  // whatever name Claude Code gave the error: "API key authentication is
+  // disabled" is a 403 that it names `invalid_request`. So this status is
+  // read before any name.
+  if (status === 401 || status === 403) return "authentication";
+  // Otherwise Claude Code's name for the error says the most. One HTTP status
+  // can mean several things: a low credit balance and a malformed request are
+  // both 400. A connection that was refused or lost has no status, and is a
+  // server error.
+  if (category === "rate_limit" || category === "server_error") return "short_fault";
+  if (category === "authentication_failed") return "authentication";
+  if (category === "billing_error") return "billing";
+  if (category === "model_not_found") return "model";
+  if (category === "max_output_tokens") return "output_limit";
+  // The request does not fit the model's context. That is not a fault of one
+  // request: every later turn in the conversation fails the same way. The
+  // result says so in its terminal reason: `prompt_too_long` when the
+  // provider refused the request, `blocking_limit` when Claude Code did not
+  // send it. The session keeps no terminal reason; there, and for a CLI that
+  // sends none, the start of the error's text says it, as it does for the CLI.
+  if (terminalReason === "prompt_too_long" || terminalReason === "blocking_limit" || failure.promptTooLong) return "conversation";
+  if (category === "invalid_request" || terminalReason === "image_error") return "request";
+  // No name that says it: the provider's status still says what kind of answer it gave.
+  if (status === 429 || (status !== null && status >= 500)) return "short_fault";
+  // A 400 means a request that cannot succeed only when Claude Code named the
+  // error at all. With no name the text is read below: a low credit balance
+  // is a 400 too.
+  if (status === 413 || (status === 400 && category !== null)) return "request";
+  return null;
+}
+
+/** Words for an account that is out of credit or quota, as the failure text of every provider is read. */
+const OUT_OF_CREDIT_OR_QUOTA = /\b402\b|insufficient.{0,30}(?:credit|balance|quota)|(?:account|credit).{0,60}(?:output budget|exhausted)|(?:usage|spend|credit) limit|quota[ _-](?:exhausted|reached|exceeded)/i;
+/**
+ * The words Claude Code has for its own limits of usage and credit, which
+ * name no "usage limit": "Credit balance is too low", and the starts of its
+ * usage messages ("You've hit your session limit", "weekly limit", "Opus
+ * limit", "team's shared budget", "You're out of extra usage"...). A brief
+ * rate limit that is worded "your ... rate limit" is not one of them. These
+ * are read for a Claude failure alone: another provider can word a brief
+ * limit of its own as "you've hit your ... limit".
+ */
+const CLAUDE_OUT_OF_USAGE = /credit balance (?:is )?too low|you['’]ve (?:hit|reached) your (?:(?!rate[ -]?limit)[^.\n]){0,60}?(?:limit|budget)|you['’]re out of (?:usage credits|extra usage)|your org is out of usage|your seat type doesn['’]t include (?:extra )?usage|your usage allocation has been disabled|requires usage credits|this service is disabled for your org/i;
+/** Claude Code words a brief rate limit of a subscription login as "(not your usage limit)". Those words name no usage limit. */
+const CLAUDE_NOT_A_USAGE_LIMIT = /\(not your usage limit\)/gi;
+
+/**
+ * `claudeCode` says that the failure is one of Claude Code. It is true when
+ * Claude's account of the failure is given; a caller that knows the provider
+ * says so for a failure that has no account. For every other provider the
+ * text is read exactly as it was before Claude's fields and words were read.
+ */
+export function taskFailurePolicy(error: string | null, attempt: number, refusal = false, unrecognizedResult = false,
+  claudeApiFailure: ClaudeApiFailure | null = null, claudeCode = claudeApiFailure !== null): TaskFailurePolicy {
   // The turn ended on a result of a shape its adapter does not know. The text
   // may be the model's own words, so nothing below may read it: words such as
   // "500" or "rate limit" in an answer are not a provider failure. No follow-up
@@ -36,15 +121,44 @@ export function taskFailurePolicy(error: string | null, attempt: number, refusal
     return { automatic: false, settle: true, detail: `${error?.trim() || "The model provider refused this turn."} The unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
   }
   const retry = "Resolve this issue, then use Retry delivery to continue the existing task.";
-  if (/\b402\b|insufficient.{0,30}(?:credit|balance|quota)|(?:account|credit).{0,60}(?:output budget|exhausted)|(?:usage|spend|credit) limit|quota[ _-](?:exhausted|reached|exceeded)/i.test(error ?? "")) {
+  // Claude's structured fields say what kind of failure this is. When they do,
+  // the kind decides and the text is not read: "Credit balance is too low"
+  // matches no pattern below, and "Connection refused" reads like no temporary fault.
+  const kind = claudeApiFailureClass(claudeApiFailure);
+  // A failure that Claude names a rate limit, or that has the status of one,
+  // can be the account's usage limit with no usage window reported: a turn
+  // that is read back from its session has no window. The text that says so
+  // is still read first, so that such a limit is never retried as a short fault.
+  const readsLimitText = !kind || (kind === "short_fault" && (claudeApiFailure?.category === "rate_limit" || claudeApiFailure?.status === 429));
+  // Claude Code's own words are read for a Claude failure alone.
+  const limitText = claudeCode ? (error ?? "").replace(CLAUDE_NOT_A_USAGE_LIMIT, "") : error ?? "";
+  if (kind === "billing" || (readsLimitText && (OUT_OF_CREDIT_OR_QUOTA.test(limitText) || (claudeCode && CLAUDE_OUT_OF_USAGE.test(limitText))))) {
     return { automatic: false, detail: `The model provider has insufficient credit or quota. ${retry}` };
   }
-  if (/\b40[13]\b|unauthorized|invalid api key|authentication|sign[ -]?in required|access.{0,15}denied/i.test(error ?? "")) {
+  if (kind === "authentication" || (!kind && /\b40[13]\b|unauthorized|invalid api key|authentication|sign[ -]?in required|access.{0,15}denied/i.test(error ?? ""))) {
     return { automatic: false, detail: `The model provider needs authentication or account access. ${retry}` };
+  }
+  if (kind === "model") {
+    return { automatic: false, detail: `The model provider cannot find the selected model, or this account cannot use it. ${retry}` };
+  }
+  // The request does not fit the model's context, and no follow-up turn in
+  // this conversation can. Claude's own text says what takes the room: the
+  // conversation, or the system prompt, tools and attachments. The owner can
+  // start a new conversation with Start fresh, at the cost of this one's
+  // context. The follow-up belongs to the old conversation, so Retry delivery
+  // then ends it without a turn, and later messages go ahead.
+  if (kind === "conversation") {
+    return { automatic: false, detail: `${error?.trim() || "Claude reported that the prompt is too long."} The request does not fit the model's context, so each turn in this conversation fails the same way. Start fresh opens a new conversation and discards the context of this one. After it, use Retry delivery, then send a message to continue the task. If the size comes from attachments or tools, a new conversation may not help.` };
+  }
+  // The provider cannot accept the request as it was sent: it is malformed or
+  // too large. That belongs to this one message. A follow-up for it fails the
+  // same way and Retry delivery cannot change it, so nothing is queued.
+  if (kind === "request") {
+    return { automatic: false, settle: true, detail: `${error?.trim() || "The model provider rejected this request."} Sending it again unchanged cannot help, so the unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
   }
   // The turn finished without an answer. That usually repeats, so allow one
   // follow-up turn (never a replay), then stop without blocking later messages.
-  const noReply = noReplyFailureKind(error);
+  const noReply = kind === "output_limit" ? "outputLimit" : kind ? null : noReplyFailureKind(error);
   if (noReply === "contentFilter") {
     return { automatic: false, settle: true, detail: `${NO_REPLY_FAILURE.contentFilter} The unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
   }
@@ -60,7 +174,7 @@ export function taskFailurePolicy(error: string | null, attempt: number, refusal
           : "Your previous turn ended without a reply. End this turn with a short reply." };
   }
   if (attempt > 3) return { automatic: false, detail: `Automatic task recovery stopped after three continuations. Check the provider, then use Retry delivery. Existing work is preserved.` };
-  if (/\b(?:429|500|502|503|504|529)\b|rate.?limit|temporar(?:y|ily)|overloaded|service unavailable|connection reset|ECONNRESET|ETIMEDOUT|socket closed|network error/i.test(error ?? "")) {
+  if (kind === "short_fault" || (!kind && /\b(?:429|500|502|503|504|529)\b|rate.?limit|temporar(?:y|ily)|overloaded|service unavailable|connection reset|ECONNRESET|ETIMEDOUT|socket closed|network error/i.test(error ?? ""))) {
     return { automatic: true, detail: "The provider failed temporarily. Continuing the unfinished task after a short delay." };
   }
   return { automatic: false, detail: `The provider failed and safe automatic recovery could not be established. ${retry}` };

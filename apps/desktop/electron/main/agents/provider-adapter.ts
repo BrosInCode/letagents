@@ -428,6 +428,11 @@ export type ProviderRoomTurnResult =
      * words, which are for the owner to read: nothing may read them as a provider error and act on them.
      */
     unrecognizedResult?: true;
+    /**
+     * Claude Code's own structured account of a failed request to the model: the provider's HTTP status, the
+     * result's terminal reason and Claude Code's name for the error. Task continuity decides on these and not on `error`.
+     */
+    claudeApiFailure?: { status: number | null; terminalReason: string | null; category: string | null; usageLimit?: true; promptTooLong?: true };
     /** The turn finished, but the wrapper could not prove its remote authority ended. Its journaled reply is never published. */
     authorityUnproven?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
