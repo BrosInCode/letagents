@@ -240,6 +240,53 @@ test("replacement checkpoints inbox and attempt state before manifest commit, th
   ]);
 });
 
+test("a repair's owner-visible lines are recorded once the repair is done, for a replaced and for a restored conversation", async () => {
+  // A line that the provider streams during a repair waits for the lane this repair holds. When the
+  // repair replaces the conversation, the handle is promoted first and the daemon then drops the line.
+  // So the provider returns its lines, and they are recorded here.
+  const line = "This agent's reasoning effort \"high\" was given to Codex, but Codex reports \"low\" for the conversation.";
+  let replaced!: Harness;
+  replaced = fixture({
+    repair: async (_handle, _request, options) => {
+      replaced.events.push("provider.repair");
+      await options.checkpointReplacement("thread-new");
+      return { handle: providerHandle("thread-new"), outcome: "replaced", previousProviderContinuationId: "thread-old",
+        replacementProviderContinuationId: "thread-new", notices: [line] };
+    },
+  });
+  assert.equal(await replaced.subject.restore(replaced.input), "replaced");
+  assert.deepEqual(replaced.recordedNotices, [{ entryId: "agent-1", notices: [line] }]);
+  assert.deepEqual(replaced.events.slice(replaced.events.indexOf("runtime.promote")),
+    ["runtime.promote", "inbox.commit", "notices.record", "notify"], "after the handle is promoted and the repair is committed");
+
+  const restored = fixture({
+    repair: async (handle, request) => ({ handle, outcome: "rematerialized", previousProviderContinuationId: request.expectedProviderContinuationId,
+      replacementProviderContinuationId: request.expectedProviderContinuationId, notices: [line] }),
+  });
+  assert.equal(await restored.subject.restore(restored.input), "restored");
+  assert.deepEqual(restored.recordedNotices, [{ entryId: "agent-1", notices: [line] }]);
+
+  // A repair with nothing to say records nothing.
+  const silent = fixture();
+  assert.equal(await silent.subject.restore(silent.input), "restored");
+  assert.deepEqual(silent.recordedNotices, []);
+  assert.equal(silent.events.includes("notices.record"), false);
+
+  // A line that cannot be recorded does not undo a repair that is already committed.
+  let unrecorded!: Harness;
+  unrecorded = fixture({
+    recordNoticesRejects: true,
+    repair: async (_handle, _request, options) => {
+      await options.checkpointReplacement("thread-new");
+      return { handle: providerHandle("thread-new"), outcome: "replaced", previousProviderContinuationId: "thread-old",
+        replacementProviderContinuationId: "thread-new", notices: [line] };
+    },
+  });
+  assert.equal(await unrecorded.subject.restore(unrecorded.input), "replaced");
+  assert.deepEqual(unrecorded.failures, []);
+  assert.deepEqual(unrecorded.commits, [{ repairId: "repair-1", continuation: "thread-new", continuityReset: true }]);
+});
+
 test("an already checkpointed replacement does not duplicate the work-attempt checkpoint", async () => {
   let harness!: Harness;
   harness = fixture({
@@ -320,6 +367,7 @@ type FixtureOptions = {
   checkpoints?: WorkAttemptCheckpoint[];
   failRejects?: boolean;
   beginRejects?: boolean;
+  recordNoticesRejects?: boolean;
 };
 
 type Harness = ReturnType<typeof fixture>;
@@ -334,6 +382,7 @@ function fixture(options: FixtureOptions = {}) {
   const promotions: Array<{ entryId: string; continuation: string | null; executionGenerationId: string }> = [];
   const failures: string[] = [];
   const beginInputs: unknown[] = [];
+  const recordedNotices: Array<{ entryId: string; notices: readonly string[] }> = [];
   let notifications = 0;
   let serializeCalls = 0;
   let credential = "worker-bearer";
@@ -353,6 +402,7 @@ function fixture(options: FixtureOptions = {}) {
     promotions: typeof promotions;
     failures: string[];
     beginInputs: unknown[];
+    recordedNotices: typeof recordedNotices;
     notifications: number;
     serializeCalls: number;
     credential: string | null;
@@ -446,6 +496,11 @@ function fixture(options: FixtureOptions = {}) {
         if (harness) harness.handle = handle;
       },
     },
+    recordNotices: async (entryId, notices) => {
+      events.push("notices.record");
+      if (options.recordNoticesRejects) throw new Error("activity unavailable");
+      recordedNotices.push({ entryId, notices });
+    },
     notifyStateChanged: () => {
       events.push("notify");
       notifications += 1;
@@ -463,6 +518,7 @@ function fixture(options: FixtureOptions = {}) {
     promotions,
     failures,
     beginInputs,
+    recordedNotices,
     notifications,
     serializeCalls,
     credential,

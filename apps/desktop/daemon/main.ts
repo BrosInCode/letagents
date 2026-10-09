@@ -563,6 +563,7 @@ export class SupervisorDaemon {
           : {}),
         promote: (entryId, handle, executionGenerationId) => this.installProviderHandle(entryId, handle, executionGenerationId),
       },
+      recordNotices: async (entryId, notices) => { await this.providerExecution?.noteRepairNotices(entryId, notices); },
       notifyStateChanged: () => this.notifyStateChanged(),
     });
     this.roomMoves = new RoomMoveCoordinator({

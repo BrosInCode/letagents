@@ -206,6 +206,8 @@ export type ProviderContinuationRepairResult = {
   outcome: "rematerialized" | "replaced";
   previousProviderContinuationId: string;
   replacementProviderContinuationId: string;
+  /** Owner-visible lines of this repair, recorded in the agent's activity once the repair is done. */
+  notices?: readonly string[];
 };
 export type ProviderFailureCode = "provider_continuation_missing";
 

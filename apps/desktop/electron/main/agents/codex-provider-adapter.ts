@@ -37,7 +37,7 @@ import {
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { LETAGENTS_MCP_RUNTIME_TREE_SHA256, resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
-import { attestProviderSpawnPolicy, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "./provider-spawn-configuration.js";
+import { attestProviderSpawnPolicy, launchNoticeSaidOnce, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
 import {
   ProviderExecutionObserver,
@@ -102,7 +102,16 @@ import {
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
-type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown; cwd?: unknown };
+type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown; cwd?: unknown; reasoningEffort?: unknown };
+
+/** How long a start waits for Codex to list its models before it leaves the reasoning effort out. */
+const CODEX_MODEL_LIST_TIMEOUT_MS = 5_000;
+/** The line about an agent's reasoning effort is said when it changes, not at every start. */
+const codexEffortNoticeSaidOnce = launchNoticeSaidOnce();
+/** A value as a notice shows it: printable, short, and in quotes. */
+function shownInNotice(text: string): string {
+  return JSON.stringify(text.replace(/[^\x20-\x7e]/g, "?").slice(0, 48));
+}
 
 /**
  * The reviewer Codex reports must be the one this launch named. The owner's
@@ -118,6 +127,78 @@ function assertCodexReviewerApplied(policy: Record<string, unknown>, result: Cod
   if (result.approvalsReviewer !== undefined && result.approvalsReviewer !== null && result.approvalsReviewer !== "user") {
     throw new Error("Codex would review approvals itself instead of asking you. Choose Auto to allow that, or remove the reviewer from your Codex settings.");
   }
+}
+
+/**
+ * A thread's reasoning effort, as the parameter Codex takes it in.
+ *
+ * Codex takes the effort as the config override `model_reasoning_effort`, on
+ * thread/start and on thread/resume. It has no `reasoningEffort` parameter:
+ * it ignores one, and the thread runs with the effort of its owner's settings.
+ *
+ * Codex accepts any effort for a thread and reports it back. It is the model
+ * that refuses an effort it does not advertise, and then every turn of the
+ * thread fails. So the effort is sent only when Codex lists it for the
+ * thread's model. An agent with no model of its own runs its owner's Codex
+ * model, or the model its thread already has, and neither is known here: its
+ * effort must be one that every listed model takes. An effort that is not
+ * sent leaves the thread with the effort Codex gives it, and the owner is told.
+ *
+ * Only the first page of the list is read, with a time limit. A list that
+ * has more pages is not complete, and a model that is not on the first page
+ * is not found: both leave the effort out, as an answer that does not come does.
+ */
+async function codexThreadEffort(
+  client: CodexAdapterRpc,
+  policy: Record<string, unknown>,
+  model: string | null | undefined,
+  effort: string | null | undefined,
+): Promise<{ params: { config?: Record<string, unknown> }; sent: string | null; notice: string | null }> {
+  if (!effort) return { params: {}, sent: null, notice: null };
+  const named = model?.trim() || null;
+  let listed: Array<Record<string, unknown>> = [];
+  let answered = false;
+  let complete = false;
+  try {
+    const page = recordValue(await client.request<unknown>("model/list", { includeHidden: true }, { timeoutMs: CODEX_MODEL_LIST_TIMEOUT_MS }));
+    listed = (Array.isArray(page?.data) ? page.data : []).map(recordValue).filter((entry): entry is Record<string, unknown> => entry !== null);
+    answered = true;
+    complete = (page?.nextCursor ?? null) === null;
+  } catch {
+    // No answer: the effort cannot be checked, and it is not sent.
+  }
+  // A thread is started with a model's `model`. An entry's `id` names the entry, not the model.
+  const models = named ? listed.filter((entry) => entry.model === named) : complete ? listed : [];
+  const takes = (entry: Record<string, unknown>) => Array.isArray(entry.supportedReasoningEfforts)
+    && entry.supportedReasoningEfforts.some((option) => recordValue(option)?.reasoningEffort === effort);
+  if (models.length && models.every(takes)) {
+    return { params: { config: { ...recordValue(policy.config), model_reasoning_effort: effort } }, sent: effort, notice: null };
+  }
+  const unchecked = !answered ? "Codex did not say which efforts its models take"
+    : !complete ? "Codex did not list all its models"
+    : named ? `Codex does not list the model ${shownInNotice(named)}` : "Codex listed no models";
+  const reason = !models.length ? `${unchecked}, so the effort could not be checked`
+    : named ? `the model ${shownInNotice(named)} does not take it`
+    : "not every Codex model takes it and this agent has no model of its own";
+  return {
+    params: {},
+    sent: null,
+    notice: `This agent's reasoning effort ${shownInNotice(effort)} was not given to Codex, because ${reason}. The agent runs with the effort Codex gives it.`
+      + (models.length ? ` Choose ${named ? "another effort" : "a model or another effort"} in the agent's settings.` : ""),
+  };
+}
+
+/**
+ * The effort Codex reports for a thread, against the effort it was sent.
+ * Codex once ignored the effort and said nothing, and it keeps the effort of
+ * a thread that is already loaded. Neither stops the agent: the owner is told
+ * both values. A reply that reports no effort says nothing either way.
+ */
+function codexEffortMismatchNotice(sent: string | null, result: CodexThreadResult): string | null {
+  const reported = result.reasoningEffort;
+  if (sent === null || typeof reported !== "string" || !reported || reported === sent) return null;
+  return `This agent's reasoning effort ${shownInNotice(sent)} was given to Codex, but Codex reports ${shownInNotice(reported)} for the conversation. `
+    + "The agent runs with the effort Codex reports.";
 }
 
 /**
@@ -833,6 +914,8 @@ class CodexProviderHandle implements ProviderHandle {
   ownerSetup = false;
   /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
   launchNotices: readonly string[] = [];
+  /** What this runtime last had to say about its reasoning effort, so a repair does not say it again. */
+  effortNotice: string | null = null;
   custodyLaunchAgentSessionId?: string;
   managedLaunchContract?: string;
   readonly execution: ProviderExecutionObserver;
@@ -1742,6 +1825,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ...(handle.ownerSetup ? Object.fromEntries(CODEX_ACCESS_LEVEL_OPTIONS.filter((key) => Object.hasOwn(stored, key)).map((key) => [key, stored[key]])) : stored),
       ...(handle.appliedTurnPolicy() ?? {}),
     });
+    const effort = await codexThreadEffort(handle.client, policy, request.model, request.reasoningEffort);
+    // The daemon reads launch notices when a launch returns, and it drops a line that a repair
+    // streams when the repair replaces the conversation. So a repair returns its lines, and the
+    // daemon records them when the repair is done. A line the launch already said is not said again.
+    const notices: string[] = [];
+    const sayEffort = (line: string | null) => {
+      if (line === null || line === handle.effortNotice) return;
+      handle.effortNotice = line;
+      notices.push(line);
+    };
+    const said = () => (notices.length ? { notices: [...notices] } : {});
+    sayEffort(effort.notice);
     const probeDelays = [0, 1_000, 2_000, 4_000];
     const probe = async (threadId: string): Promise<boolean> => {
       for (const waitMs of probeDelays) {
@@ -1757,10 +1852,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
             cwd: request.cwd,
             ...policy,
             ...(request.model ? { model: request.model } : {}),
-            ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
+            ...effort.params,
           });
           assertAttached();
           assertCodexReviewerApplied(policy, resumed);
+          sayEffort(codexEffortMismatchNotice(effort.sent, resumed));
           if (resumed.thread?.id === threadId) return true;
           throw new Error("Codex continuation repair resolved a different thread.");
         } catch (error) {
@@ -1790,6 +1886,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         outcome: "replaced",
         previousProviderContinuationId: expected,
         replacementProviderContinuationId: checkpointedReplacement,
+        ...said(),
       };
     }
 
@@ -1799,6 +1896,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         outcome: "rematerialized",
         previousProviderContinuationId: expected,
         replacementProviderContinuationId: expected,
+        ...said(),
       };
     }
 
@@ -1807,10 +1905,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ...policy,
       historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
-      ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
+      ...effort.params,
     });
     assertCodexReviewerApplied(policy, started);
     assertCodexThreadDirectory(request.cwd, started);
+    sayEffort(codexEffortMismatchNotice(effort.sent, started));
     const replacement = started.thread?.id?.trim();
     if (!replacement || replacement === expected) {
       throw new Error("Codex continuation repair did not return a distinct replacement thread.");
@@ -1825,6 +1924,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       outcome: "replaced",
       previousProviderContinuationId: expected,
       replacementProviderContinuationId: replacement,
+      ...said(),
     };
   }
 
@@ -2188,6 +2288,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           "Codex app-server does not support thread/resume; bounded recovery must start a fresh generation.",
         );
       }
+      const effort = await codexThreadEffort(client, policy, req.model, req.reasoningEffort);
       let threadResult: CodexThreadResult;
       if (resumeRef) {
         try {
@@ -2196,7 +2297,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
             cwd: req.cwd,
             ...policy,
             ...(req.model ? { model: req.model } : {}),
-            ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
+            ...effort.params,
           });
         } catch (error) {
           if (!isMethodNotFound(error)) throw error;
@@ -2210,7 +2311,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           ...policy,
           historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
-          ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
+          ...effort.params,
         });
         assertCodexThreadDirectory(req.cwd, threadResult);
       }
@@ -2240,7 +2341,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
       const unused = homeHarness
         ? ownerSetupUnusedOptionsSaidOnce.whenChanged(req.supervisorEntryId, ownerSetupUnusedOptionsNotice("Codex", req.launchPolicy, attestedPolicy))
         : null;
-      if (unused) handle.launchNotices = [unused];
+      // The effort is either not sent, or sent and reported back. A line about it is said when it changes.
+      handle.effortNotice = effort.notice ?? codexEffortMismatchNotice(effort.sent, threadResult);
+      handle.launchNotices = [unused, codexEffortNoticeSaidOnce.whenChanged(req.supervisorEntryId, handle.effortNotice)]
+        .filter((notice): notice is string => notice !== null);
       this.reportDeclinedOwnerRequests(handle);
       handle.setLiveState("idle");
       this.emitNativeExecution(handle, {
@@ -2303,7 +2407,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
       void this.emitTranscriptTail(handle);
       return handle;
     } catch (error) {
-      if (handle) handle.protocolError = true;
+      if (handle) {
+        handle.protocolError = true;
+        // The line about the effort did not reach the owner, so the next start says it.
+        codexEffortNoticeSaidOnce.forget(req.supervisorEntryId, handle.launchNotices);
+      }
       client.close();
       if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM");
       throw error;

@@ -78,18 +78,21 @@ test("restoration preserves permission ownership while replacement retires it", 
   adapter.repairContinuation = async nativeHandle => {
     listeners[0]!(snapshot); // Pending requests can arrive while restoration awaits the provider.
     return { handle: nativeHandle, outcome: "rematerialized", previousProviderContinuationId: request.expectedProviderContinuationId,
-      replacementProviderContinuationId: request.expectedProviderContinuationId };
+      replacementProviderContinuationId: request.expectedProviderContinuationId, notices: ["said while restoring"] };
   };
   const restored = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
   listeners[0]!(snapshot);
   assert.equal(restored.handle, handle);
+  // The provider's owner-visible lines of a repair reach the daemon in its result.
+  assert.deepEqual(restored.notices, ["said while restoring"]);
   assert.deepEqual(events.map(event => event.type), ["snapshot", "snapshot", "snapshot"]);
   adapter.repairContinuation = async nativeHandle => {
     nativeHandle.providerContinuationId = "replacement";
     return { handle: nativeHandle, outcome: "replaced", previousProviderContinuationId: request.expectedProviderContinuationId,
-      replacementProviderContinuationId: "replacement" };
+      replacementProviderContinuationId: "replacement", notices: ["said while replacing"] };
   };
   const replaced = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
+  assert.deepEqual(replaced.notices, ["said while replacing"]);
   listeners[0]!(snapshot);
   assert.equal(events.at(-1)!.type, "unavailable");
   assert.deepEqual(await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native }), { outcome: "correlation_unproven" });
