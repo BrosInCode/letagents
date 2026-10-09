@@ -6,6 +6,7 @@ import {
   entryLaunchPolicy,
   homeHarnessAvailability,
   homeHarnessDiffersFromSaved,
+  latestPermissionChange,
   namesHomeHarness,
   storedHomeHarness,
   storedLaunchPolicy,
@@ -598,6 +599,18 @@ export class ManifestAdministrationCoordinator {
         permissionProfileId: profile === null ? null : (profile as string).trim(),
         configurationRevision: input.expectedRevision + 1,
       }, trustedPolicy);
+      // The access level the running process may have: what was saved before, as the next start would read it.
+      let before: string | null = null;
+      try {
+        before = this.options.policies.deriveProviderConfiguration({
+          provider: currentConfiguration.provider,
+          model: null,
+          reasoningEffort: null,
+          permissionProfileId: currentConfiguration.permission_profile_id,
+          configurationRevision: input.expectedRevision,
+        }, trustedPolicy).permissionProfileId;
+      } catch { /* A saved level that cannot be read counts as changed. */ }
+      const permissionChanged = before !== normalized.permissionProfileId;
       return this.options.authority.serialize(async () => {
         await this.options.authority.assertCurrent();
         const result = await this.options.store.updateAgentConfiguration(
@@ -609,8 +622,12 @@ export class ManifestAdministrationCoordinator {
             reasoningEffort: normalized.reasoningEffort,
             charter: charter.trim(),
             permissionProfileId: normalized.permissionProfileId,
-            // An edit to the model or access level keeps the owner's choice.
-            providerLaunchPolicy: storedLaunchPolicy(normalized, { policy: trustedPolicy }),
+            // An edit to the model or access level keeps the owner's choice. The record of an earlier access
+            // level change is read from the stored policy: an agent that cannot use the owner's setup has it removed above.
+            providerLaunchPolicy: storedLaunchPolicy(normalized, {
+              policy: trustedPolicy,
+              permissionChangedAt: permissionChanged ? input.expectedRevision + 1 : latestPermissionChange(currentConfiguration.provider_launch_policy),
+            }),
           },
           this.options.authority.fenceCommit,
         );
@@ -618,6 +635,8 @@ export class ManifestAdministrationCoordinator {
         if (result.outcome === "invalid") {
           return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
         }
+        // A running agent takes the new access level as soon as it is idle: convergence is what tries.
+        if (permissionChanged && result.outcome === "updated") this.options.convergence.request(input.entryId);
         return {
           outcome: result.outcome,
           configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration),

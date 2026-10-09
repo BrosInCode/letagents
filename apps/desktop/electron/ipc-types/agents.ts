@@ -720,6 +720,12 @@ export interface DesktopSupervisorManifestEntry {
    * once it restarts, or still does until it restarts. Absent means off.
    */
   homeHarness?: "on" | "after_restart" | "until_restart";
+  /**
+   * Read-only: the owner saved another access level (permission mode) after
+   * this agent's process started, and the process has not been replaced yet.
+   * The daemon replaces it as soon as the agent is idle. Absent means none.
+   */
+  permissionPending?: true;
   createdBy: string;
   createdAt: string;
   /** User-selected source checkout. Distinct from the daemon's private work-attempt workspace. */

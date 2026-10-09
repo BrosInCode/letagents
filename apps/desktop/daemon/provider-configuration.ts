@@ -60,6 +60,16 @@ const HOME_HARNESS_CHANGE_KEY = /^letagentsOwnerIsolationChangedAt([1-9][0-9]{0,
 export function homeHarnessChangeKey(revision: number): string {
   return `letagentsOwnerIsolationChangedAt${revision}`;
 }
+/**
+ * The revision at which the owner last changed the agent's access level (its
+ * permission mode), in the key's name. A process that started before it still
+ * runs with the older level. Only the latest change is kept: it is the only
+ * one that decides, and two changes that cancel out cost one harmless restart.
+ */
+const PERMISSION_CHANGE_KEY = /^letagentsPermissionChangedAt([1-9][0-9]{0,14})$/;
+export function permissionChangeKey(revision: number): string {
+  return `letagentsPermissionChangedAt${revision}`;
+}
 const homeHarnessProviders = new Set(["codex", "claude-code", "claude"]);
 const MAX_HOME_HARNESS_CHANGES = 32;
 
@@ -131,6 +141,27 @@ function storedHomeHarnessChanges(policy: unknown): number[] {
 export function homeHarnessDiffersFromSaved(policy: unknown, runtimeRevision: number | undefined): boolean {
   const started = Number.isSafeInteger(runtimeRevision) ? runtimeRevision as number : 0;
   return storedHomeHarnessChanges(policy).filter((revision) => revision > started).length % 2 === 1;
+}
+
+/** The revision of the latest change to the access level, from the policy as it is stored. Undefined when there was none. */
+export function latestPermissionChange(policy: unknown): number | undefined {
+  if (!isPlainPolicy(policy)) return undefined;
+  let latest: number | undefined;
+  for (const key of Object.getOwnPropertyNames(policy)) {
+    const revision = PERMISSION_CHANGE_KEY.exec(key)?.[1];
+    if (revision !== undefined && policy[key] === false && (latest === undefined || Number(revision) > latest)) latest = Number(revision);
+  }
+  return latest;
+}
+
+/**
+ * Whether the owner changed the access level after a process that started at
+ * `runtimeRevision` began, so that it still runs with the older one. A process
+ * whose revision is not known is counted as older than every change.
+ */
+export function permissionChangedSince(policy: unknown, runtimeRevision: number | undefined): boolean {
+  const changed = latestPermissionChange(policy);
+  return changed !== undefined && changed > (Number.isSafeInteger(runtimeRevision) ? runtimeRevision as number : 0);
 }
 
 /**
@@ -240,10 +271,12 @@ export function withoutHomeHarness<T>(policy: T): T {
  * The policy to store: the native options, the key only while it is on, and
  * the changes a running process may still predate. `changedAt` records a new
  * change; the ones the running process already started after are dropped then.
+ * `permissionChangedAt` records a new change to the access level. A change
+ * that the policy already records is kept as it is.
  */
 export function storedLaunchPolicy(
   snapshot: Pick<ProviderConfigurationSnapshot, "launchPolicy" | "homeHarness">,
-  previous?: { policy: unknown; runtimeRevision?: number; changedAt?: number },
+  previous?: { policy: unknown; runtimeRevision?: number; changedAt?: number; permissionChangedAt?: number },
 ): Record<string, unknown> {
   const native = withoutHomeHarness(snapshot.launchPolicy);
   const earlier = storedHomeHarnessChanges(previous?.policy);
@@ -252,10 +285,13 @@ export function storedLaunchPolicy(
     : [...earlier.filter((revision) => revision > (previous.runtimeRevision ?? 0)), previous.changedAt];
   // Two changes cancel for any process older than both, so the oldest go in pairs.
   while (changes.length > MAX_HOME_HARNESS_CHANGES) changes.splice(0, 2);
+  // An access level changed earlier and not yet started is kept, unless this save changes it again.
+  const permissionChangedAt = previous?.permissionChangedAt ?? latestPermissionChange(previous?.policy);
   return {
     ...native,
     ...(snapshot.homeHarness === true ? HOME_HARNESS_ON : {}),
     ...Object.fromEntries(changes.map((revision) => [homeHarnessChangeKey(revision), false])),
+    ...(permissionChangedAt === undefined ? {} : { [permissionChangeKey(permissionChangedAt)]: false }),
   };
 }
 
@@ -267,8 +303,9 @@ export function storedLaunchPolicy(
  * policy with no such record is returned as it is.
  */
 export function launchPolicyForToolRules<T>(policy: T): T {
-  if (!isPlainPolicy(policy) || !Object.getOwnPropertyNames(policy).some((key) => HOME_HARNESS_CHANGE_KEY.test(key))) return policy;
-  return Object.fromEntries(Object.entries(policy).filter(([key]) => !HOME_HARNESS_CHANGE_KEY.test(key))) as T;
+  const isChange = (key: string) => HOME_HARNESS_CHANGE_KEY.test(key) || PERMISSION_CHANGE_KEY.test(key);
+  if (!isPlainPolicy(policy) || !Object.getOwnPropertyNames(policy).some(isChange)) return policy;
+  return Object.fromEntries(Object.entries(policy).filter(([key]) => !isChange(key))) as T;
 }
 
 /** The stored policy a launch or a save may use for this agent: only an agent that may have the owner's setup carries it. */
