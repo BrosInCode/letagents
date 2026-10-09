@@ -13,6 +13,7 @@ import {
   workIndicatorSupersededByAgentMessage,
   type ManagedAgentWorkIndicator,
 } from "../src/domain/managed-agents";
+import { waitingAgentIndicators } from "../src/domain/scheduled-retry";
 import type { DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
 
 function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): DesktopSupervisorManifestEntry {
@@ -117,6 +118,124 @@ test("an Open Model provider retry is shown in the adapter's own words only", ()
       "Waiting for the model provider",
     );
   }
+});
+
+test("a Claude turn that waits for background work says so in the adapter's own words only", () => {
+  const notice = { kind: "provider_event", method: "letagents/backgroundWork", summary: "" };
+  assert.equal(isHumanVisibleSupervisorActivity(notice), true);
+  // The sentences of the adapter: what the turn waits for, by kind, in the model's own short descriptions.
+  for (const summary of [
+    "Waiting up to 2 min for a background command: \"Start the server\".",
+    "Waiting up to 2 min for background commands: \"Server\", \"Watcher\".",
+    "Waiting up to 2 min for background work: \"Monitor\".",
+    "Waiting for a sub-agent to finish (under 1 min): \"Review the diff\".",
+    "Waiting for sub-agents to finish (12 min): \"Review\", \"Plan\", \"Build\" and 2 more.",
+    "Waiting for a sub-agent to finish (3 min): \"A\". Also up to 2 min for a background command: \"B\".",
+    "Waiting for Claude's answer about background work that ended under 1 min ago.",
+    "Waiting for Claude's answer about background work that ended 3 min ago.",
+  ]) {
+    assert.ok(summary.length <= 100, summary);
+    assert.equal(humanFacingSupervisorActivitySummary({ ...notice, summary }), summary);
+  }
+  // A long description is cut at the end of the line, after the time.
+  assert.equal(
+    humanFacingSupervisorActivitySummary({ ...notice, summary: `Waiting for a sub-agent to finish (29 min): "${"x".repeat(80)}".` }),
+    `Waiting for a sub-agent to finish (29 min): "${"x".repeat(54)}…`,
+  );
+  // Any other text under this method gets fixed copy.
+  for (const summary of [
+    "claude-code · letagents/backgroundWork",
+    "Waiting for a sub-agent to finish: \"Review\".",
+    "Waiting for a sub-agent to finish (3 min): \"Review\nthe diff\".",
+    "Waiting up to 2 min for a background command: Start the server.",
+    "Waiting for Claude's answer about background work that ended 3 min ago. Visit https://provider.example",
+    "Waiting for Claude's answer about background work that has ended (3 min).",
+    "",
+  ]) {
+    assert.equal(humanFacingSupervisorActivitySummary({ ...notice, summary }), "Waiting for background work to finish");
+  }
+  // The answer to a task's notice, and the note that one was not posted, stay in diagnostics.
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "provider_event", method: "letagents/backgroundWorkAnswer" }), false);
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "provider_event", method: "letagents/backgroundWorkFinished" }), false);
+});
+
+test("the work indicator of a turn that waits for background work offers its owner the answer now, and only then", () => {
+  const waiting = {
+    ...entry().activity[0]!,
+    provider: "claude-code",
+    kind: "provider_event",
+    method: "letagents/backgroundWork",
+    summary: "Waiting up to 2 min for a background command: \"Start the server\".",
+    observedAt: "2026-07-17T00:00:02.000Z",
+    sequence: 6,
+  };
+  // The wait stands in the place of "Thinking", and the owner can end it.
+  const held = supervisedAgentWorkIndicators([entry({ activity: [...entry().activity, waiting] })], [], "room_1");
+  assert.equal(held.length, 1);
+  assert.equal(held[0]!.summary, "Waiting up to 2 min for a background command: \"Start the server\".");
+  assert.equal(held[0]!.waitsForBackgroundWork, true);
+  assert.equal(held[0]!.id, "supervised_1", "the indicator names the agent whose wait it is");
+  // An agent that works has no answer to post yet.
+  assert.equal(supervisedAgentWorkIndicators([entry()], [], "room_1")[0]!.waitsForBackgroundWork, undefined);
+  // The agent goes on: it answers a notice. The offer goes with the wait.
+  const answering = supervisedAgentWorkIndicators([entry({ activity: [...entry().activity, waiting, {
+    ...waiting, kind: "text_delta", method: "assistant", summary: "", observedAt: "2026-07-17T00:00:03.000Z", sequence: 7,
+  }] })], [], "room_1");
+  assert.deepEqual([answering[0]!.summary, answering[0]!.waitsForBackgroundWork], ["Writing a response", undefined]);
+  // The wait must be this turn's own. When the start of the turn is not known, the newest activity can be an
+  // earlier turn's wait, and the button would stop a turn that works.
+  const startUnknown = entry({ activity: [...entry().activity, waiting] });
+  startUnknown.deliveryReceipts![0]!.timeline = [];
+  const unknown = supervisedAgentWorkIndicators([startUnknown], [], "room_1");
+  assert.deepEqual([unknown.length, unknown[0]!.waitsForBackgroundWork], [1, undefined]);
+  const earlierWait = entry({ activity: [{ ...waiting, observedAt: "2026-07-17T00:00:00.100Z", sequence: 4 }, ...entry().activity] });
+  assert.equal(supervisedAgentWorkIndicators([earlierWait], [], "room_1")[0]!.waitsForBackgroundWork, undefined, "a wait from before this turn started is not this turn's");
+  // What is shown may be old: the offer is made on fresh state only, and for a turn that is responding.
+  assert.equal(supervisedAgentWorkIndicators([entry({ activity: [...entry().activity, waiting] })], [], "room_1", "stale")[0]!.waitsForBackgroundWork, undefined);
+  const publishing = entry({ activity: [...entry().activity, waiting] });
+  publishing.roomAgentState!.turn.state = "publishing";
+  assert.equal(supervisedAgentWorkIndicators([publishing], [], "room_1")[0]!.waitsForBackgroundWork, undefined);
+  // The echo of the text is held back for a moment at a time. The offer comes through with the indicator.
+  const coalesced = coalesceWorkIndicatorEchoes({ supervised_1: { summary: "Thinking", shownAtMs: 0, pending: null } }, held, 10);
+  assert.deepEqual([coalesced.indicators[0]!.summary, coalesced.indicators[0]!.waitsForBackgroundWork], ["Thinking", true]);
+});
+
+test("a turn that is held open for background work keeps the look of work, and an agent that waits to try again rests: two rows that never share a key", () => {
+  const wait = {
+    ...entry().activity[0]!,
+    provider: "claude-code",
+    kind: "provider_event",
+    method: "letagents/backgroundWork",
+    summary: "Waiting for a sub-agent to finish (3 min): \"Review the diff\".",
+    observedAt: "2026-07-17T00:00:02.000Z",
+    sequence: 6,
+  };
+  const held = entry({ activity: [...entry().activity, wait] });
+  // Something runs while a turn is held open: the command, the sub-agent, or Claude's answer. Its row is a row of work.
+  const [working] = supervisedAgentWorkIndicators([held], [], "room_1");
+  assert.deepEqual([working!.id, working!.waiting, working!.waitsForBackgroundWork], ["supervised_1", undefined, true]);
+  assert.deepEqual(waitingAgentIndicators([held], "room_1"), [], "it does not wait for a time: it has no row at rest");
+
+  // The background service runs one item of an agent's queue at a time, and an automatic attempt waits at the head
+  // of the queue while nothing runs. So one agent does not have a held turn and an attempt that waits. This is
+  // that state all the same: the live strip, built as the room shell builds it, has one row of each, with its own key.
+  const both = entry({ activity: [...entry().activity, wait] });
+  both.deliveryReceipts!.push({ ...both.deliveryReceipts![0]!, inboxItemId: "inbox_2", sourceMessageId: "task-continuation:inbox_0", fifoSequence: 2,
+    state: "pending", providerTurnId: null, timeline: [],
+    followUp: { forMessageId: null, state: "scheduled", scheduled: { atMs: Date.parse("2026-07-17T00:05:00.000Z"), attempt: 2, attempts: 3, kind: "provider_fault" } } });
+  const strip: ManagedAgentWorkIndicator[] = [
+    ...waitingAgentIndicators([both], "room_1", () => "00:05"),
+    ...supervisedAgentWorkIndicators([both], [], "room_1"),
+  ];
+  assert.deepEqual(strip.map((row) => [row.id, row.summary, row.waiting ?? false, row.waitsForBackgroundWork ?? false]), [
+    ["supervised_1:waiting", "Waiting to try again, due at 00:05 (attempt 2 of 3)", true, false],
+    ["supervised_1", "Waiting for a sub-agent to finish (3 min): \"Review the diff\".", false, true],
+  ]);
+  assert.equal(new Set(strip.map((row) => row.id)).size, strip.length, "no two rows of the strip have the same key");
+  // Each row keeps its own look and its own offer through the strip's collapse and its echo.
+  const shown = coalesceWorkIndicatorEchoes({}, collapseWorkIndicators(strip).visible, 10).indicators;
+  assert.deepEqual(shown.map((row) => [row.id, row.waiting ?? false, row.waitsForBackgroundWork ?? false]).sort(),
+    [["supervised_1", false, true], ["supervised_1:waiting", true, false]]);
 });
 
 test("the work indicator shows a provider retry, then gives way to the answer", () => {
