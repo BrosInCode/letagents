@@ -10,6 +10,13 @@ function getWebSocketCtor(): typeof WebSocket {
 
 const DEFAULT_RPC_REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * The socket constructor the client connects through. Production uses the
+ * runtime's own WebSocket. A replay test passes one that plays a recording of
+ * a real app-server, and the recorder passes one that taps every frame.
+ */
+export type CodexRpcWebSocketCtor = typeof WebSocket;
+
 export type RpcRequestId = string | number;
 export interface RpcServerRequest {
   readonly id: RpcRequestId;
@@ -107,10 +114,15 @@ export class CodexRpcClient {
     private readonly serverUrl: string,
     private readonly onNotification?: (notification: RpcNotification) => void,
     private readonly requestTimeoutMs = DEFAULT_RPC_REQUEST_TIMEOUT_MS,
+    private readonly webSocketCtor?: CodexRpcWebSocketCtor,
   ) {}
 
+  private socketCtor(): CodexRpcWebSocketCtor {
+    return this.webSocketCtor ?? getWebSocketCtor();
+  }
+
   async connect(): Promise<void> {
-    const WS = getWebSocketCtor();
+    const WS = this.socketCtor();
     const previous = this.ws;
     this.ws = null;
     this.invalidateRequests();
@@ -236,7 +248,7 @@ export class CodexRpcClient {
 
   currentConnectionId(): string | null {
     const ws = this.ws;
-    return ws && ws.readyState === getWebSocketCtor().OPEN ? this.connectionId : null;
+    return ws && ws.readyState === this.socketCtor().OPEN ? this.connectionId : null;
   }
 
   onPendingRequestsChanged(listener: () => void): () => void {
@@ -382,7 +394,7 @@ export class CodexRpcClient {
 
   private send(payload: Record<string, unknown>): void {
     const ws = this.ws;
-    if (!ws || ws.readyState !== getWebSocketCtor().OPEN) {
+    if (!ws || ws.readyState !== this.socketCtor().OPEN) {
       throw new Error("Codex app-server WebSocket is not open.");
     }
     ws.send(JSON.stringify(payload));
