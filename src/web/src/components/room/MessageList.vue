@@ -221,7 +221,7 @@ const openedThreads = ref(new Set<string>())
 const loadedThreadMessages = ref(new Map<string, RoomMessage[]>())
 function rememberThreadMessages(id: string, messages: RoomMessage[]) {
   loadedThreadMessages.value.set(id, messages)
-  emit('threadMessages', [...loadedThreadMessages.value.values()].flat())
+  emit('threadMessages', [...loadedThreadRoots.value.values(), ...[...loadedThreadMessages.value.values()].flat()])
 }
 const loadedThreadSummaries = ref(new Map<string, MessageThreadSummary>())
 const threadRevealId = ref<string | null>(null)

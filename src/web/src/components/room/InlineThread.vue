@@ -131,7 +131,7 @@ watch(replies, async (next, previous) => {
   }
   emit('rowsChanged')
 })
-watch(() => [props.revealMessageId, props.active, Boolean(props.revealMessageId && replies.value.some(message => message.id === props.revealMessageId))] as const, async ([id, active, found]) => {
+watch([() => props.revealMessageId, () => props.active, () => Boolean(props.revealMessageId && replies.value.some(message => message.id === props.revealMessageId))], async ([id, active, found]) => {
   if (id && active && found) { await nextTick(); reveal(id) }
 })
 watch(() => props.active, async () => { await nextTick(); emit('rowsChanged') })
