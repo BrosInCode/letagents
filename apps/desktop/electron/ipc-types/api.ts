@@ -448,6 +448,7 @@ export interface DesktopApi {
     listHostApprovals?: (roomIdentifier: string) => Promise<import("../../shared/host-approvals.js").DesktopHostApprovalSnapshot>;
     decideHostApproval?: (input: { id: string; decision: import("../../shared/host-approvals.js").HostApprovalSelection }) => Promise<import("../../shared/host-approvals.js").HostApprovalStatus>;
     getStatus: () => Promise<DesktopSupervisorDaemonStatus>;
+    getServiceSnapshot?: () => Promise<import("./agents.js").DesktopSupervisorServiceSnapshot>;
     listAgents: (roomIdentifier?: string | null) => Promise<DesktopSupervisorManifestEntry[]>;
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
     resumeOwnershipTransfer: (id: string) => Promise<DesktopSupervisorManifestEntry>;
