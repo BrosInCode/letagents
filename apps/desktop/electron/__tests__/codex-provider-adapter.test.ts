@@ -2345,7 +2345,14 @@ async function codexDaemonFixture(options: {
   const renewals = { started: 0, held: null as Promise<void> | null };
   /** Bearers of a session the room has ended. The grant that minted them still mints. */
   const endedBearers = new Set<string>();
-  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ codex: async () => adapter }), true,
+  /** Every reference the daemon has asked the provider to attach, in order. */
+  const attachedRefs: Array<{ workAttemptId: string; ownerSetup?: true | "unknown" }> = [];
+  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", (() => {
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    const attach = router.attach.bind(router);
+    router.attach = async (ref: { workAttemptId: string; ownerSetup?: true | "unknown" }) => { attachedRefs.push({ ...ref }); return attach(ref); };
+    return router;
+  })(), true,
     options.heartbeatMs ?? 50, undefined, { nowMs: () => Date.now() + clockAheadMs }, {
       poll: async ({ afterMessageId, bearer, signal }: { afterMessageId: string | null; bearer: string; signal: AbortSignal }) => {
         // The server's answer for a bearer whose session has ended, for any reason.
@@ -2607,6 +2614,9 @@ async function codexDaemonFixture(options: {
         harness.launches[launch]!.resolveExit({ type: "exit", code: signal ? null : 1, signal }),
       /** Whether the daemon still holds a runtime for the agent. It lets go of one the moment its process exits. */
       holdsRuntime: () => (daemon as unknown as { liveHandles: Map<string, unknown> }).liveHandles.has(id),
+      attachedRefs: () => attachedRefs,
+      /** Whether the daemon records the runtime it holds as started with the owner's own setup. */
+      holdsOwnerSetup: () => (daemon as unknown as { liveHandles: Map<string, { ownerSetup?: true }> }).liveHandles.get(id)?.ownerSetup === true,
       /**
        * The desktop's grant is renewed in the middle of a convergence pass,
        * and that is a request to the server. From here on such a request
@@ -2969,6 +2979,156 @@ for (const exit of ["in the same tick it is signalled", "a moment after it is si
     }
   });
 }
+
+/** What the desktop app sends for "Restart to apply changes": the saved settings start a new runtime. Asked again while a turn is wrapping up. */
+async function applySavedSettings(agent: Awaited<ReturnType<typeof codexDaemonFixture>>) {
+  const configuration = (await agent.request("supervisor.get_agent_configuration", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() })).result;
+  for (const deadline = Date.now() + 10_000; ;) {
+    const applied = await agent.request("supervisor.apply_agent_configuration", { entry_id: agent.id, daemon_generation: agent.daemonGeneration(),
+      expected_configuration_revision: configuration.config_revision });
+    if (applied.result?.outcome !== "busy_active_turn" || Date.now() >= deadline) return applied;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+/** The owner changes the switch and restarts the agent to apply it, and the runtime that starts is the nth one. */
+async function switchOwnerSetupAndApply(agent: Awaited<ReturnType<typeof codexDaemonFixture>>, enabled: boolean, runtime: number) {
+  const saved = await agent.setOwnerSetup(enabled);
+  assert.equal(saved.ok, true, saved.error);
+  assert.equal(saved.result?.outcome, "updated", saved.error ?? saved.result?.error);
+  // Turning it off replaces a runtime that has it by itself. Turning it on waits for the owner's restart.
+  if (enabled) {
+    const applied = await applySavedSettings(agent);
+    assert.equal(applied.result?.outcome, "restarting", applied.error ?? JSON.stringify(applied.result));
+  }
+  await agent.eventually(() => agent.harness.launches.length === runtime && agent.harness.clients.length === runtime, `runtime ${runtime} is started`).catch(async (error) => {
+    const current = await agent.view();
+    throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+  });
+  agent.serveThread(agent.harness.clients[runtime - 1]!);
+}
+
+/** Whether the daemon, once it holds the agent's runtime, asked that runtime to list its MCP servers when it attached it. */
+const attachedAsIsolated = (agent: Awaited<ReturnType<typeof codexDaemonFixture>>) =>
+  agent.harness.clients.at(-1)!.requests.some((request) => request.method === "mcpServerStatus/list");
+
+test("a daemon restart does not make a runtime that has the owner's setup look isolated: it is attached as it is, and turning the setup off during a turn still replaces it afterwards", async () => {
+  const agent = await codexDaemonFixture();
+  try {
+    assert.notEqual(agent.harness.launchOptions[0]?.options.homeHarness, true, "the agent was created isolated");
+    await switchOwnerSetupAndApply(agent, true, 2);
+    assert.equal(agent.harness.launchOptions[1]?.options.homeHarness, true, "the restart that applied the switch started the runtime with the owner's setup");
+    await agent.eventually(() => agent.holdsOwnerSetup(), "the daemon records the new runtime as having the owner's setup");
+
+    // The daemon ends and a new one finds the runtime still running.
+    await agent.restartDaemon();
+    await agent.eventually(() => agent.holdsRuntime(), "the new daemon attaches the agent's runtime");
+    assert.equal(agent.harness.launches.length, 2, "nothing was started in its place");
+    assert.equal(agent.holdsOwnerSetup(), true, "the new daemon records that this runtime has the owner's setup");
+    assert.equal(attachedAsIsolated(agent), false, "and so does not ask it to list its MCP servers, which makes Codex read the project's config again");
+
+    // A turn is running when the owner turns the setup off: the runtime cannot be replaced yet.
+    const attached = agent.harness.clients.at(-1)!;
+    agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
+    const turn = agent.turns[0]!;
+    attached.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: turn.id, turn: { id: turn.id, status: "inProgress" } } });
+    const off = await agent.setOwnerSetup(false);
+    assert.equal(off.result?.outcome, "updated", off.error ?? off.result?.error);
+    assert.equal(off.result?.apply, "busy_active_turn", "the turn is not interrupted");
+    assert.equal(agent.harness.launches.length, 2);
+
+    // When the turn ends, the daemon replaces the runtime before it takes another turn.
+    Object.assign(turn, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 1." }] });
+    attached.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    attached.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: turn.id, turn } });
+    await agent.eventually(() => agent.harness.launches.length === 3, "a replacement without the owner's setup is started").catch(async (error) => {
+      const current = await agent.view();
+      throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); signals ${JSON.stringify(agent.harness.signals)}`);
+    });
+    assert.notEqual(agent.harness.launchOptions[2]?.options.homeHarness, true);
+    assert.equal(agent.harness.signals.filter((signal) => signal.pid === agent.harness.launches[1]!.pid).length, 1, "the runtime that had the setup was stopped");
+    await agent.eventually(() => agent.harness.clients.length === 4, "the replacement is up");
+    await answerOnReplacement(agent, 2);
+    assert.equal(agent.turns.length, 2, "the next message ran on the replacement, and no turn ran on the runtime that still had the setup");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a daemon restart while a turn runs on a runtime whose owner has since turned the setup off: the new daemon still ends that runtime when the turn is over", async () => {
+  const agent = await codexDaemonFixture();
+  try {
+    await switchOwnerSetupAndApply(agent, true, 2);
+    await agent.eventually(() => agent.holdsOwnerSetup(), "the daemon records the new runtime as having the owner's setup");
+    agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
+    const turn = agent.turns[0]!;
+    agent.harness.clients.at(-1)!.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: turn.id, turn: { id: turn.id, status: "inProgress" } } });
+    const off = await agent.setOwnerSetup(false);
+    assert.equal(off.result?.apply, "busy_active_turn", "the turn is not interrupted, so the runtime keeps the setup for now");
+
+    await agent.restartDaemon();
+    await agent.eventually(() => agent.holdsRuntime(), "the new daemon attaches the agent's runtime");
+    assert.equal(agent.holdsOwnerSetup(), true, "the new daemon records that this runtime still has the owner's setup");
+    assert.equal(agent.harness.launches.length, 2);
+
+    const attached = agent.harness.clients.at(-1)!;
+    Object.assign(turn, { status: "completed", items: [{ type: "agentMessage", phase: "final", text: "Answer 1." }] });
+    attached.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    attached.emit({ method: "turn/completed", params: { threadId: agent.threadId, turnId: turn.id, turn } });
+    await agent.eventually(() => agent.harness.launches.length === 3, "a replacement without the owner's setup is started");
+    assert.notEqual(agent.harness.launchOptions[2]?.options.homeHarness, true);
+    await agent.eventually(() => agent.harness.clients.length === 4, "the replacement is up");
+    await answerOnReplacement(agent, 2);
+    assert.equal(agent.turns.length, 2, "no turn ran on the runtime that still had the setup after it was turned off");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a daemon restart does not make an isolated runtime look like one with the owner's setup, after the setup was turned on and off again", async () => {
+  const agent = await codexDaemonFixture();
+  try {
+    await switchOwnerSetupAndApply(agent, true, 2);
+    await switchOwnerSetupAndApply(agent, false, 3);
+    assert.notEqual(agent.harness.launchOptions[2]?.options.homeHarness, true, "the runtime in place is isolated");
+    await agent.eventually(() => agent.holdsRuntime(), "the daemon holds the replacement");
+    assert.equal(agent.holdsOwnerSetup(), false);
+
+    await agent.restartDaemon();
+    await agent.eventually(() => agent.holdsRuntime(), "the new daemon attaches the agent's runtime");
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(agent.holdsOwnerSetup(), false, "the new daemon records it as isolated");
+    assert.equal(attachedAsIsolated(agent), true, "and checks it as any isolated runtime is checked");
+    assert.equal(agent.harness.launches.length, 3, "and does not replace a runtime that has nothing to end");
+    assert.equal(agent.harness.signals.filter((signal) => signal.pid === agent.harness.launches[2]!.pid).length, 0);
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a daemon restart keeps a runtime isolated while the owner's setup is saved on but has not been applied, and the restart that applies it starts the owner's setup", async () => {
+  const agent = await codexDaemonFixture();
+  try {
+    const on = await agent.setOwnerSetup(true);
+    assert.equal(on.result?.outcome, "updated", on.error ?? on.result?.error);
+    await agent.restartDaemon();
+    await agent.eventually(() => agent.holdsRuntime(), "the new daemon attaches the agent's runtime");
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(agent.holdsOwnerSetup(), false, "the runtime started without the setup, whatever is saved");
+    assert.equal(attachedAsIsolated(agent), true);
+    assert.equal(agent.harness.launches.length, 1, "the saved switch waits for the owner's restart");
+
+    const applied = await applySavedSettings(agent);
+    assert.equal(applied.result?.outcome, "restarting", applied.error ?? JSON.stringify(applied.result));
+    await agent.eventually(() => agent.harness.launches.length === 2, "the restart starts a new runtime");
+    assert.equal(agent.harness.launchOptions[1]?.options.homeHarness, true);
+    await agent.eventually(() => agent.holdsOwnerSetup(), "the daemon records the new runtime as having the owner's setup");
+  } finally {
+    await agent.cleanup();
+  }
+});
 
 test("an agent paused and resumed after a refused turn is replaced, and its next message is delivered", async () => {
   const agent = await codexDaemonFixture();
@@ -3392,6 +3552,34 @@ test(`Restart and resume starts an agent again at once while the daemon is still
   }
 });
 }
+
+test("a recovery that asks the provider whether the saved process is gone names the process as one that has the owner's setup when it was started with it", async () => {
+  const agent = await codexDaemonFixture({ holdExits: true, osProcessBirths: true, ownerSetup: true });
+  let endFault = () => {};
+  try {
+    assert.equal(agent.harness.launchOptions[0]?.options.homeHarness, true, "the runtime was started with the owner's setup");
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    const terminals = agent.exitSettlement();
+    terminals.bounds = { settleMs: 600, lastAttemptMs: 400, recordMs: 200 };
+    endFault = EXIT_RECORDING_FAULTS["saving its terminal never returns"](terminals);
+    agent.exitProcess(0, "SIGKILL");
+    await agent.eventually(() => !agent.holdsRuntime() && terminals.settling(agent.id), "the exit waits to be recorded");
+
+    // The daemon holds no runtime and has not recorded the end of the saved one, so it asks the provider whether that process is gone.
+    const attachedBefore = agent.attachedRefs().length;
+    const recovered = await agent.request("supervisor.recover_agent_runtime", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() });
+    assert.equal(recovered.ok, true, recovered.error);
+    const asked = agent.attachedRefs().slice(attachedBefore);
+    assert.ok(asked.length > 0, "the provider was asked to attach the saved process");
+    assert.ok(asked.every((ref) => ref.ownerSetup === true), "and was told it was started with the owner's setup");
+    await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again", 3_000);
+    assert.equal(agent.harness.launchOptions[1]?.options.homeHarness, true, "the setup is still on, so the replacement has it");
+  } finally {
+    endFault();
+    await agent.cleanup();
+  }
+});
 
 for (const fault of Object.keys(EXIT_RECORDING_FAULTS) as Array<keyof typeof EXIT_RECORDING_FAULTS>) {
 test(`an app update that waits on an exit that cannot be recorded, because ${fault}, goes ahead once the bounded wait has ended`, async () => {
