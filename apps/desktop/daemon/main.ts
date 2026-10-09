@@ -59,6 +59,7 @@ import { RoomMoveCoordinator } from "./room-move-coordinator.js";
 import { RuntimeConfigurationApplyCoordinator } from "./runtime-configuration-apply-coordinator.js";
 import { RuntimeRecoveryCoordinator } from "./runtime-recovery-coordinator.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
+import { runEveryStopStep } from "./stop-steps.js";
 import { type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import {
   deriveProviderConfigurationSnapshot,
@@ -388,7 +389,7 @@ export class SupervisorDaemon {
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeManifest: (operation) => this.serializeManifestMutation(operation),
       transition: (entryId, state, condition, detail, actor) => this.transition(entryId, state, condition, detail, actor),
-      appendNativeActivity: (entryId, event, activityOnly) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly),
+      appendNativeActivity: (entryId, event, activityOnly, position) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly, position),
       publishNativeActivity: (entryId, method, status, observedAt) => this.publishNativeActivity(entryId, method, status, observedAt),
       handleTerminal: (installation, _bindingIdentity, terminal) =>
         this.providerTerminals.handleTerminal(installation, terminal),
@@ -1062,35 +1063,33 @@ export class SupervisorDaemon {
 
   async stop(): Promise<void> {
     // Stop is final for this daemon instance. Fence late delivery/cutover
-    // continuations before awaiting any drain so they cannot retain a socket
-    // or SQLite handle after the caller has observed shutdown.
+    // continuations before awaiting any drain. Every step then runs whatever an
+    // earlier one reports, and the first failure is rethrown at the end: an
+    // open socket would keep the process alive.
     this.handoffScheduled = true;
-    this.convergencePacer.close();
-    this.providerTerminals.close();
-    this.hostApprovals.close();
-    const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
-    this.roomWorkPublisher?.close();
-    this.executionCapture?.close();
-    this.supervisedDelivery?.fence();
-    await this.typedLifecycleEffects?.close();
-    this.wakeRoomMoveReconciliationWaiters();
-    this.notifyStateChanged();
-    this.workerRuntimeCustody.destroyAllCredentials();
-    await executionDelegationDrain;
-    await this.deliveryCutovers.fenceAndDrain();
-    await this.supervisedDelivery?.fenceAndDrain();
-    await this.fenceAndDrainRoomMoveReconciliations();
-    await this.boundedEffects.drainJournalReservations();
-    this.providerExecution?.clearRecoveryTimers();
-    await this.providerReconciliation?.disposeAll();
-    await this.providerExecution?.drainConvergence();
-    await this.providerStreams.disposeAll();
-    await this.socket.stop();
-    await this.serializeManifestCommit(() => this.singleton.release());
-    await this.store.close();
-    await this.durability.close();
-    await this.workerBindings.close();
-    await this.supervisedInbox.close();
+    let executionDelegationDrain: Promise<void> | undefined;
+    await runEveryStopStep([
+      () => this.convergencePacer.close(), () => this.providerTerminals.close(), () => this.hostApprovals.close(),
+      () => { executionDelegationDrain = this.executionDelegations.fenceAndDrain(); },
+      () => this.roomWorkPublisher?.close(), () => this.executionCapture?.close(), () => this.supervisedDelivery?.fence(),
+      () => this.typedLifecycleEffects?.close(),
+      () => this.wakeRoomMoveReconciliationWaiters(), () => this.notifyStateChanged(), () => this.workerRuntimeCustody.destroyAllCredentials(),
+      () => executionDelegationDrain,
+      () => this.deliveryCutovers.fenceAndDrain(),
+      () => this.supervisedDelivery?.fenceAndDrain(),
+      () => this.fenceAndDrainRoomMoveReconciliations(),
+      () => this.boundedEffects.drainJournalReservations(),
+      () => this.providerExecution?.clearRecoveryTimers(),
+      () => this.providerReconciliation?.disposeAll(),
+      () => this.providerExecution?.drainConvergence(),
+      () => this.providerStreams.disposeAll(),
+      () => this.socket.stop(),
+      () => this.serializeManifestCommit(() => this.singleton.release()),
+      () => this.store.close(),
+      () => this.durability.close(),
+      () => this.workerBindings.close(),
+      () => this.supervisedInbox.close(),
+    ]);
   }
 
   /**

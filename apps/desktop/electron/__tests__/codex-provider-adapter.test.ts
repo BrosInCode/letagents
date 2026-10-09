@@ -2536,6 +2536,14 @@ async function codexDaemonFixture(options: {
       });
       return (await receipt(messageId))!;
     };
+    const startSuccessor = async () => {
+      serveOnConnect = serveThread;
+      adapter = makeAdapter();
+      daemon = makeDaemon();
+      await startDaemon();
+      daemonGeneration = (await request("daemon.status")).result.generation;
+      await installGrant();
+    };
     return { id, harness, client, threadId, request, eventually, view, read, deliver, published, roomMessages, turns, receipt, serveThread, setOwnerSetup, changeEffortAndRestart,
       receipts: () => inbox().receipts(id), mints: () => mints, cleanup, passTime: (ms: number) => { clockAheadMs += ms; },
       /** Execution capture has recorded the ending of this many message turns. An owner acts after that, not within the same millisecond. */
@@ -2572,14 +2580,19 @@ async function codexDaemonFixture(options: {
        * refuses the write, and the stop comes to wait for that callback while
        * it is still ending. `release` lets the held write go on.
        */
-      holdActivityWrites: () => {
+      holdActivityWrites: (failure?: Error) => {
         const streams = (daemon as unknown as { providerStreams: { disposeAll(): Promise<void>; track(operation: Promise<void>): void;
           options: { appendNativeActivity(...args: unknown[]): Promise<unknown> } } }).providerStreams;
         const write = streams.options.appendNativeActivity;
         let release!: () => void;
         const held = new Promise<void>((resolve) => { release = resolve; });
-        let waiting = 0;
-        streams.options.appendNativeActivity = async (...args: unknown[]) => { waiting += 1; await held; return write(...args); };
+        let waiting = 0, heldSequence = 0;
+        // With a failure, the held write fails with it once released, as a write that loses a race does.
+        streams.options.appendNativeActivity = async (...args: unknown[]) => {
+          waiting += 1; heldSequence = (args[1] as { sequence: number }).sequence; await held;
+          if (failure) throw failure;
+          return write(...args);
+        };
         let stopWaits!: () => void;
         const waited = new Promise<void>((resolve) => { stopWaits = resolve; });
         const track = streams.track.bind(streams);
@@ -2587,7 +2600,7 @@ async function codexDaemonFixture(options: {
         streams.track = (operation) => track(operation.catch(async (error) => { await waited; throw error; }));
         const dispose = streams.disposeAll.bind(streams);
         streams.disposeAll = () => { const disposing = dispose(); stopWaits(); return disposing; };
-        return { waiting: () => waiting, release };
+        return { waiting: () => waiting, heldSequence: () => heldSequence, release };
       },
       /** The process of the nth runtime ends now, as it does some time after a stop request or when it crashes. */
       exitProcess: (launch: number, signal: NodeJS.Signals | null = "SIGTERM") =>
@@ -2615,13 +2628,12 @@ async function codexDaemonFixture(options: {
        */
       restartDaemon: async () => {
         await daemon.stop();
-        serveOnConnect = serveThread;
-        adapter = makeAdapter();
-        daemon = makeDaemon();
-        await startDaemon();
-        daemonGeneration = (await request("daemon.status")).result.generation;
-        await installGrant();
+        await startSuccessor();
       },
+      /** The socket the daemon listens on: open, it keeps the process alive. */
+      socketPath: paths.socketPath,
+      /** A new daemon on the same paths, once the last one has stopped, however its stop ended. */
+      startSuccessor,
       /** Change the daemon's saved state directly, to stand an agent in a state an earlier build left behind. */
       write: (sql: string, ...values: Array<string | number | null>) => {
         const database = new DatabaseSync(paths.manifestPath);
@@ -4187,6 +4199,73 @@ test("a daemon that is stopped while it is still writing an agent's activity fin
 
     await agent.eventually(() => agent.holdsRuntime(), "the new daemon attaches the agent's process");
     assert.equal(agent.harness.launches.length, 1, "the same process: nothing was started in its place");
+    await answerOnReplacement(agent, 2);
+    assert.equal(agent.published.at(-1), "Answer 2.");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("an agent's activity that a notice overtakes on its way to being written is kept, after the notice", async () => {
+  const { EXIT_UNSETTLED_NOTICE } = await import(new URL("../../daemon/provider-terminal-coordinator.ts", import.meta.url).href);
+  const agent = await codexDaemonFixture();
+  type Activity = Array<{ sequence: number; summary: string; method?: string }>;
+  const activity = async () => ((await agent.request("manifest.list")).result[0] as { activity?: Activity }).activity ?? [];
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+    // The app-server reports something; the daemon has taken the next position for it, and its write is held there.
+    const writes = agent.holdActivityWrites();
+    agent.client.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    await agent.eventually(() => writes.waiting() > 0, "the daemon starts writing the agent's activity");
+    // Notices are written meanwhile, as the notice of an exit that could not be recorded is, until one takes that position.
+    for (let exit = 1; (await activity()).at(-1)!.sequence < writes.heldSequence(); exit += 1) {
+      const before = (await activity()).at(-1)!.sequence;
+      agent.exitSettlement().ports.exitUnsettled(agent.id, `exit-${exit}`);
+      await agent.eventually(async () => (await activity()).at(-1)!.sequence > before, `notice ${exit} is written`);
+    }
+    const notice = (await activity()).at(-1)!;
+    assert.deepEqual([notice.summary, notice.sequence], [EXIT_UNSETTLED_NOTICE, writes.heldSequence()], "a notice holds the position the held write took");
+    writes.release();
+    const after = async () => (await activity()).filter((event) => event.sequence > notice.sequence);
+    await agent.eventually(async () => (await after()).some((event) => event.method === "thread/status/changed"), "the held activity is written");
+    // Every write that was held goes after the notice, in turn, and none is refused for the position the notice took.
+    assert.deepEqual((await after()).map((event) => event.sequence), Array.from({ length: (await after()).length }, (_unused, index) => notice.sequence + 1 + index));
+  } finally {
+    // A refused write would fail the stop here.
+    await agent.cleanup();
+  }
+});
+
+test("a daemon whose activity write fails while it stops still closes its socket and stores, reports the failure, and lets its successor take the agent over", async () => {
+  const { createConnection, Server } = await import("node:net");
+  const agent = await codexDaemonFixture();
+  try {
+    await agent.deliver(1, { answer: "Answer 1." });
+    await agent.turnsRecorded(1);
+
+    // A write of the agent's activity is still running when the daemon is stopped, and then fails, not on the stop's fence.
+    const failure = new Error("Native activity sequence 10 is not newer than 10.");
+    const writes = agent.holdActivityWrites(failure);
+    agent.client.emit({ method: "thread/status/changed", params: { threadId: agent.threadId, status: { type: "idle" } } });
+    await agent.eventually(() => writes.waiting() > 0, "the daemon starts writing the agent's activity");
+    const stopping = agent.restartDaemon().then(() => null, (error: unknown) => error);
+    writes.release();
+    assert.equal(await stopping, failure, "the stop reports the failure");
+
+    // The stop closed its socket all the same: nothing is left listening that would keep the process alive.
+    const listening = (process as unknown as { _getActiveHandles(): unknown[] })._getActiveHandles()
+      .filter((handle) => handle instanceof Server && handle.address() === agent.socketPath);
+    assert.deepEqual(listening, [], "the daemon's socket server is closed");
+    assert.equal(await new Promise<boolean>((resolve) => {
+      const socket = createConnection(agent.socketPath);
+      socket.once("connect", () => { socket.destroy(); resolve(true); });
+      socket.once("error", () => resolve(false));
+    }), false, "and nothing answers on its socket");
+
+    // Its lock and stores were released: a successor starts on the same paths and takes the agent over.
+    await agent.startSuccessor();
+    await agent.eventually(() => agent.holdsRuntime(), "the new daemon attaches the agent's process");
     await answerOnReplacement(agent, 2);
     assert.equal(agent.published.at(-1), "Answer 2.");
   } finally {
