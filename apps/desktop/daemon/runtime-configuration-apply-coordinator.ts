@@ -1,5 +1,5 @@
 import { ManagedRuntimeRefreshDeferred } from "./provider-action-port.js";
-import { agentUsesHomeHarness } from "./provider-configuration.js";
+import { agentUsesHomeHarness, permissionChangedSince } from "./provider-configuration.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
 import type { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
@@ -58,6 +58,20 @@ const OWNER_SETUP_END_RETRY_BASE_MS = 1_000;
 const OWNER_SETUP_END_RETRY_MAX_MS = 30_000;
 /** After this many tries that found the agent neither busy nor replaceable, its owner is told it is still waiting. */
 const OWNER_SETUP_END_NOTICE_AFTER = 5;
+/** Why an idle process is replaced before it takes another turn: its owner turned their setup off, or saved another access level. */
+type OutdatedRuntime = "owner_setup" | "access_level";
+const OUTDATED_RUNTIME_NOTICE: Record<OutdatedRuntime, string> = {
+  owner_setup: "Still waiting to restart this agent so it stops running with your own setup. Its messages wait until then. "
+    + "Pause the agent and resume it to do it now.",
+  access_level: "Still waiting to restart this agent so it runs with the access level you saved. Its messages wait until then. "
+    + "Pause the agent and resume it to do it now.",
+};
+const OUTDATED_RUNTIME_FAILURE: Record<OutdatedRuntime, string> = {
+  owner_setup: "LetAgents could not restart this agent to stop it running with your own setup, so its messages are waiting. "
+    + "Pause the agent and resume it to finish switching your setup off",
+  access_level: "LetAgents could not restart this agent to apply the access level you saved, so its messages are waiting. "
+    + "Pause the agent and resume it to finish applying it",
+};
 
 export type RuntimeConfigurationApplyCoordinatorOptions = {
   store: Pick<ManifestStore,
@@ -123,7 +137,7 @@ export class RuntimeConfigurationApplyCoordinator {
    * and so is an agent whose restart failed: either one is shown to the
    * owner as needing attention, with the reason.
    */
-  private async continuePastBlockedRecord(entryId: string): Promise<ManagedRefreshRetry | null> {
+  private async continuePastBlockedRecord(entryId: string): Promise<"replaced" | ManagedRefreshRetry | null> {
     const installation = this.options.streams.currentInstallation(entryId);
     const entry = installation && this.options.streams.recordBlock ? await this.options.store.getEntry(entryId) : undefined;
     if (!installation || !entry) return null;
@@ -158,7 +172,7 @@ export class RuntimeConfigurationApplyCoordinator {
     }
     if (outcome === "restarting") {
       this.recordRestarts.add(entryId);
-      return null;
+      return "replaced";
     }
     // Paused, stopped or not a daemon-delivered agent: nothing is waiting on this runtime.
     if (outcome === "unsupported") return null;
@@ -198,22 +212,45 @@ export class RuntimeConfigurationApplyCoordinator {
   }
 
   /**
-   * Replace an idle process that still has the owner's setup after the owner
-   * turned it off. It is the same path as "Restart to apply changes", so it
-   * never interrupts a turn. When the process could not be replaced this
-   * time, the answer says when to try again: later after each try, so an
-   * agent whose turn was refused is never left waiting on some other event.
-   * A replacement that fails outright is thrown, and shown as the agent's error.
+   * For a process that started before the owner saved another access level:
+   * the agent's saved configuration, or null while the process runs with the
+   * level that is saved. The change is recorded in the stored policy against
+   * the revision the process started at, so a restart of the daemon loses
+   * nothing. A turn that is running is never interrupted: the process takes
+   * no new turn, and is replaced as soon as it is idle.
    */
-  private async endOwnerSetup(entryId: string): Promise<"replaced" | ManagedRefreshRetry | null> {
+  private async accessLevelToApply(entryId: string, installation: ProviderInstallationToken) {
+    const configuration = await this.options.store.getAgentConfiguration(entryId);
+    // An agent that collects its own messages cannot be held back from its next turn, so it keeps its level until it starts again.
+    return configuration?.delivery_mode === "daemon_inbox" && permissionChangedSince(configuration.provider_launch_policy,
+      installation.handle.appliedConfigurationRevision ?? configuration.runtime_configuration_revision) ? configuration : null;
+  }
+
+  /**
+   * Replace an idle process that runs differently from what its owner saved:
+   * it still has the owner's setup after they turned it off, or it started
+   * before they saved another access level. It is the same path as "Restart
+   * to apply changes", so it never interrupts a turn. When the process could
+   * not be replaced this time, the answer says when to try again: later after
+   * each try, so an agent whose turn was refused is never left waiting on some
+   * other event. A replacement that fails outright is thrown, and shown as the
+   * agent's error.
+   */
+  private async endOutdatedRuntime(entryId: string): Promise<"replaced" | ManagedRefreshRetry | null> {
     const installation = this.options.streams.currentInstallation(entryId);
-    if (installation?.handle.ownerSetup !== true) return null;
-    let configuration: Awaited<ReturnType<RuntimeConfigurationApplyCoordinator["ownerSetupToEnd"]>>;
+    if (!installation) return null;
+    let configuration: Awaited<ReturnType<RuntimeConfigurationApplyCoordinator["ownerSetupToEnd"]>> = null;
+    let why: OutdatedRuntime = "owner_setup";
     try {
-      configuration = await this.ownerSetupToEnd(entryId);
+      if (installation.handle.ownerSetup === true) configuration = await this.ownerSetupToEnd(entryId);
     } catch {
       // Whether the setup was turned off could not be read. Its turns wait meanwhile, so it is asked again.
-      return this.ownerSetupEndRetry(installation, false);
+      return this.outdatedRuntimeRetry(installation, false, why);
+    }
+    if (!configuration) {
+      why = "access_level";
+      // A saved level that cannot be read leaves the agent as it was: nothing new is held back on a guess.
+      configuration = await this.accessLevelToApply(entryId, installation).catch(() => null);
     }
     if (!configuration) {
       this.ownerSetupEndTries.delete(installation);
@@ -226,38 +263,39 @@ export class RuntimeConfigurationApplyCoordinator {
     } catch (error) {
       // The agent cannot be restarted: that is an error its owner sees, not a quiet wait. What went
       // wrong stays its cause, which is shown after it and is what the scheduler decides from.
-      throw new Error("LetAgents could not restart this agent to stop it running with your own setup, so its messages are waiting. "
-        + "Pause the agent and resume it to finish switching your setup off", { cause: error });
+      throw new Error(OUTDATED_RUNTIME_FAILURE[why], { cause: error });
     }
     if (outcome === "restarting") return "replaced";
+    // An agent that is paused, or collects its own messages, takes the level when it starts again: there is nothing to retry.
+    if (why === "access_level" && outcome === "unsupported") return null;
     // A turn that is still running, or an agent that is paused, is waited for without comment.
-    return this.ownerSetupEndRetry(installation, outcome === "busy_active_turn" || outcome === "unsupported");
+    return this.outdatedRuntimeRetry(installation, outcome === "busy_active_turn" || outcome === "unsupported", why);
   }
 
-  private ownerSetupEndRetry(installation: ProviderInstallationToken, expected: boolean): ManagedRefreshRetry {
+  private outdatedRuntimeRetry(installation: ProviderInstallationToken, expected: boolean, why: OutdatedRuntime): ManagedRefreshRetry {
     const tries = this.ownerSetupEndTries.get(installation) ?? { all: 0, unexplained: 0 };
     tries.all += 1;
     if (!expected) tries.unexplained += 1;
     this.ownerSetupEndTries.set(installation, tries);
     return {
       retryAfterMs: Math.min(OWNER_SETUP_END_RETRY_MAX_MS, OWNER_SETUP_END_RETRY_BASE_MS * 2 ** Math.min(tries.all - 1, 10)),
-      ...(!expected && tries.unexplained === OWNER_SETUP_END_NOTICE_AFTER ? {
-        notice: "Still waiting to restart this agent so it stops running with your own setup. Its messages wait until then. "
-          + "Pause the agent and resume it to do it now.",
-      } : {}),
+      ...(!expected && tries.unexplained === OWNER_SETUP_END_NOTICE_AFTER ? { notice: OUTDATED_RUNTIME_NOTICE[why] } : {}),
     };
   }
 
   /** Observe only: replacement drains the caller, so convergence must run separately. */
   async canAdmitManagedDelivery(agent: SupervisedIngressAgent, demand: object): Promise<boolean> {
     const current = this.options.streams.currentInstallation(agent.agentId);
-    // An agent whose process was not started with its owner's setup is admitted as it always was: nothing is read for it.
-    if (current?.handle.ownerSetup === true) {
+    if (current) {
       // Whether the setup was turned off could not be read: the turn waits rather than run with it.
-      const mustEnd = await this.ownerSetupToEnd(agent.agentId).then((configuration) => configuration !== null, () => true);
+      let mustEnd = current.handle.ownerSetup === true
+        && await this.ownerSetupToEnd(agent.agentId).then((configuration) => configuration !== null, () => true);
+      // A saved level that cannot be read leaves the agent as it was: the turn is not held back on a guess.
+      mustEnd ||= await this.accessLevelToApply(agent.agentId, current).then((configuration) => configuration !== null, () => false);
       if (mustEnd) {
         // No new turn starts on a process that still has the setup its owner
-        // turned off. Convergence replaces it, and the turn waits for the new one.
+        // turned off, or the access level they changed. Convergence replaces
+        // it, and the turn waits for the new one.
         if (this.admissionRefreshRequested.get(demand) !== current) {
           this.admissionRefreshRequested.set(demand, current);
           this.options.requestConvergence(agent.agentId);
@@ -306,10 +344,13 @@ export class RuntimeConfigurationApplyCoordinator {
 
   async refreshManaged(entryId: string): Promise<void | ManagedRefreshRetry> {
     // Runs after every convergence, so also when a turn has just ended.
-    const ownerSetup = await this.endOwnerSetup(entryId);
-    if (ownerSetup) return ownerSetup === "replaced" ? undefined : ownerSetup;
+    const outdated = await this.endOutdatedRuntime(entryId);
+    if (outdated === "replaced") return;
+    // An agent that waits for its turn to end is still restarted for a blocked record, which has its own wait: the sooner of the two is kept.
     const blockedRecord = await this.continuePastBlockedRecord(entryId);
-    if (blockedRecord) return blockedRecord;
+    if (blockedRecord === "replaced") return;
+    if (blockedRecord) return outdated && outdated.retryAfterMs < blockedRecord.retryAfterMs ? outdated : blockedRecord;
+    if (outdated) return outdated;
     const managed = this.options.managed;
     const provider = this.options.provider;
     if (!managed || !provider?.stopIdle || !provider.describeManagedLaunchContract) return;

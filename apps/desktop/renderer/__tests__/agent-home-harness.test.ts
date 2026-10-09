@@ -131,6 +131,14 @@ test("agents that use the owner's setup are marked in the inspector header and t
   assert.match(roster, /<span v-if="agent\.entry\.homeHarness" class="desktop-activity-mini-pill"[^>]*>\{\{ homeHarnessBadge\(agent\.provider, agent\.entry\.homeHarness\)\.label \}\}<\/span>/);
 });
 
+test("an agent whose saved access level has not reached it is marked in the inspector header and the room's agent list", () => {
+  const surface = read("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue");
+  assert.match(surface, /<span v-if="projection\.entry\.permissionPending" class="agent-inspector-own-setup"[^>]*data-testid="agent-inspector-settings-pending">\{\{ permissionPendingBadge\(\)\.label \}\}<\/span>/);
+  assert.match(surface, /:delivery-mode="projection\.entry\.deliveryMode" :permission-pending="projection\.entry\.permissionPending === true"/);
+  const roster = read("../src/components/desktop/content/RoomActivityTabView.vue");
+  assert.match(roster, /<span v-if="agent\.entry\.permissionPending" class="desktop-activity-mini-pill"[^>]*data-testid="desktop-activity-settings-pending">\{\{ permissionPendingBadge\(\)\.label \}\}<\/span>/);
+});
+
 test("the mark says what the running agent has, and never that a change has reached an agent it has not", () => {
   // Saved on, but the running process started without it.
   assert.deepEqual(homeHarnessBadge("claude-code", "after_restart"), {

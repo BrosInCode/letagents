@@ -5,6 +5,7 @@ import {
   HOME_HARNESS_ON,
   deriveProviderConfigurationSnapshot,
   homeHarnessChangeKey,
+  permissionChangeKey,
   storedLaunchPolicy,
 } from "../provider-configuration.js";
 import {
@@ -112,5 +113,27 @@ test("an older build hands Codex only false-valued fields it does not know, and 
       }, `${profile}/${history}`);
       assert.deepEqual(Object.fromEntries(Object.entries(policy).filter(([key]) => Object.hasOwn(never, key))), never, `${profile}/${history}`);
     }
+  }
+});
+
+test("an older build starts an agent the same way when this build recorded a change to its access level", () => {
+  for (const profile of PROFILES["claude-code"]) {
+    const never = deriveProviderConfigurationSnapshot({ provider: "claude-code", model: null, reasoningEffort: null, permissionProfileId: profile, configurationRevision: 1 }, {}).launchPolicy;
+    const stored = storedLaunchPolicy(deriveProviderConfigurationSnapshot(
+      { provider: "claude-code", model: null, reasoningEffort: null, permissionProfileId: profile, configurationRevision: 3 }, never),
+    { policy: never, permissionChangedAt: 3 });
+    assert.equal(stored[permissionChangeKey(3)], false, `${profile}: this build did store a record, and its value is exactly false`);
+    const args = claudeArgsAsDesktop106(launchPolicyAsDesktop106("claude-code", profile, stored));
+    assert.deepEqual(args, claudeArgsAsDesktop106(launchPolicyAsDesktop106("claude-code", profile, never)), profile);
+    assert.equal(args.some((arg) => /^--letagents/i.test(arg)), false, profile);
+  }
+  for (const profile of PROFILES.codex) {
+    const never = deriveProviderConfigurationSnapshot({ provider: "codex", model: null, reasoningEffort: null, permissionProfileId: profile, configurationRevision: 1 }, {}).launchPolicy;
+    const stored = storedLaunchPolicy(deriveProviderConfigurationSnapshot(
+      { provider: "codex", model: null, reasoningEffort: null, permissionProfileId: profile, configurationRevision: 3 }, never),
+    { policy: never, permissionChangedAt: 3 });
+    const policy = launchPolicyAsDesktop106("codex", profile, stored);
+    assert.deepEqual(Object.fromEntries(Object.entries(policy).filter(([key]) => !Object.hasOwn(never, key))), { [permissionChangeKey(3)]: false }, profile);
+    assert.deepEqual(Object.fromEntries(Object.entries(policy).filter(([key]) => Object.hasOwn(never, key))), never, profile);
   }
 });

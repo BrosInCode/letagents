@@ -4356,6 +4356,8 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
   /** One turn of a session: the prompt's own message id, what the session keeps of the answer, and the process that is running it. */
   type FakeTurn = { id: string; sessionId: string; assistants: TranscriptMessage[]; runningOn: number | null };
   const processes: FakeProcess[] = [];
+  /** How each process was launched, in the order they were: the access level it runs with is in its config. */
+  const launches: LaunchRecord[] = [];
   /** Kept in the agent's runtime directory: every process reads all of them. */
   const sessions = new Map<string, FakeTurn[]>();
   const turns: FakeTurn[] = [];
@@ -4366,7 +4368,8 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
   let nextPort = 43_821;
   const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
   const dependencies: OpenModelProviderAdapterDependencies = {
-    launch() {
+    launch(input) {
+      launches.push(input);
       let resolveExit!: (exit: ProviderProcessExit) => void;
       const process: FakeProcess = { pid: 6_101 + processes.length, port: nextPort - 1, alive: true,
         exited: new Promise((resolve) => { resolveExit = resolve; }),
@@ -4456,12 +4459,13 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
     now: () => new Date().toISOString(),
     probeGit: async () => null,
   };
-  const adapter = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot: join(root, "runtime"),
+  const makeAdapter = () => new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot: join(root, "runtime"),
     dependencies, startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 30_000 });
   const roomMessages: Array<Record<string, unknown>> = [];
   const published: string[] = [];
   let mints = 0;
-  const daemon = new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ "open-model": async () => adapter }), true,
+  // A daemon that starts again on the same files gets a new adapter: only the fake processes outlive it.
+  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ "open-model": async () => makeAdapter() }), true,
     50, undefined, {}, {
       poll: async ({ afterMessageId, signal }: { afterMessageId: string | null; signal: AbortSignal }) => {
         const from = afterMessageId ? roomMessages.findIndex((message) => message.id === afterMessageId) + 1 : 0;
@@ -4486,6 +4490,7 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
           expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
       },
     });
+  let daemon = makeDaemon();
   const read = <T>(sql: string): T[] => {
     const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
     try { return database.prepare(sql).all(id).map((row) => ({ ...row })) as T[]; } finally { database.close(); }
@@ -4499,10 +4504,12 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
     await daemon.start();
     (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
     type Receipt = { source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null };
-    const inbox = (daemon as unknown as { supervisedInbox: {
+    const inboxOf = () => (daemon as unknown as { supervisedInbox: {
       bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<unknown>;
       receipts(agentId: string): Promise<Receipt[]>;
     } }).supervisedInbox;
+    const inbox = { bootstrapCursor: (input: Parameters<ReturnType<typeof inboxOf>["bootstrapCursor"]>[0]) => inboxOf().bootstrapCursor(input),
+      receipts: (agentId: string) => inboxOf().receipts(agentId) };
     assert.equal((await request("manifest.put", { entry: {
       id, room_id: "room_1", display_name: "Agent", provider: "open-model", model: "qwen/qwen3-coder", charter: "test",
       desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: options.permissionProfileId ?? "full_access",
@@ -4510,29 +4517,45 @@ async function openModelDaemonFixture(options: { permissionProfileId?: string } 
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } })).ok, true);
     await inbox.bootstrapCursor({ agent_id: id, room_id: "room_1", last_observed_message_id: null });
-    const daemonGeneration = (await request("daemon.status")).result.generation;
-    // A key of the test's own making, for a provider that is never called.
-    assert.equal((await request("supervisor.install_open_model_credential", { entry_id: id, api_key: "test-key-for-the-fake-provider",
-      base_url: "https://openrouter.ai/api/v1", model: "qwen/qwen3-coder", daemon_generation: daemonGeneration })).ok, true);
-    assert.equal((await request("supervisor.install_host_grant", {
-      entry_id: id, room_id: "room_1", agent_key: "owner/agent", grant_id: `grant-${id}`,
-      supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
-      host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
-    })).ok, true);
+    /** What the desktop app hands every daemon it starts: the agent's credential and the grant it works under. */
+    const handOverSecrets = async () => {
+      const daemonGeneration = (await request("daemon.status")).result.generation;
+      // A key of the test's own making, for a provider that is never called.
+      assert.equal((await request("supervisor.install_open_model_credential", { entry_id: id, api_key: "test-key-for-the-fake-provider",
+        base_url: "https://openrouter.ai/api/v1", model: "qwen/qwen3-coder", daemon_generation: daemonGeneration })).ok, true);
+      assert.equal((await request("supervisor.install_host_grant", {
+        entry_id: id, room_id: "room_1", agent_key: "owner/agent", grant_id: `grant-${id}`,
+        supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
+        host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+      })).ok, true);
+    };
+    await handOverSecrets();
     const view = async () => (await request("manifest.list")).result[0] as {
-      observed_state: string; condition: string; last_error: string | null; activity?: Array<{ summary: string }>;
+      observed_state: string; condition: string; last_error: string | null; activity?: Array<{ summary: string }>; permission_pending?: true;
       room_agent_state: { ingress: { state: string }; inbox: { state: string; detail: string | null } };
     };
     await eventually(() => processes.length === 1, "OpenCode is launched");
     await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
     const receipt = async (messageId: string) => (await inbox.receipts(id)).find((item) => item.source_message_id === messageId);
-    const hostApprovals = (daemon as unknown as { hostApprovals: {
+    type HostApprovals = {
       list(roomId: string): Promise<Array<{ status: string; detail: string | null; reference: Record<string, unknown> | null; presentation: unknown }>>;
       decide(input: unknown): Promise<string>;
-    } }).hostApprovals;
+    };
     let asks = 0;
     return { id, request, eventually, view, read, published, roomMessages, turns, sessions, processes, receipt, cleanup,
-      hostApprovals, permissionReplies,
+      daemon: () => daemon,
+      get hostApprovals() { return (daemon as unknown as { hostApprovals: HostApprovals }).hostApprovals; },
+      permissionReplies,
+      /** The background service stops and starts again on the same files. Agent processes keep running, as they do when it is updated. */
+      restartDaemon: async () => {
+        await daemon.stop();
+        daemon = makeDaemon();
+        await daemon.start();
+        (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+        await handOverSecrets();
+      },
+      /** The access level the nth process was launched with, as OpenCode reads it. */
+      launchedPermission: (index: number) => (JSON.parse(launches[index]?.env.OPENCODE_CONFIG_CONTENT ?? "{}") as { permission?: unknown }).permission,
       /** The newest process asks its owner to allow a shell command the turn's model wants to run. */
       ask: (turn: FakeTurn, command = "git status") => {
         asks += 1;
@@ -4728,17 +4751,15 @@ async function ownerAllowsTheCommand(agent: OpenModelDaemonAgent, turn: Awaited<
 test("an Open Model agent whose process crashed after its owner changed its permission mode still gets answerable approval cards", async () => {
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
-    const first = await agent.begin(1);
-    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
-    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    // The owner saves the new mode while a turn runs, so the process has not been replaced when it crashes.
+    await agent.begin(1);
     await ownerSavesPermissionMode(agent, "ask_before_write");
-    await agent.begin(2);
     // The next message waits behind the one the process is running when it crashes.
-    agent.roomMessages.push({ id: "msg_3", sender: "someone", text: "request 3", activation: { for_current_agent: { decision: "activate" } } });
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
     agent.exitProcess();
     await agent.eventually(() => agent.processes.length === 2, "a replacement process starts");
-    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged_failed", "the cut-off message settles");
-    await ownerAllowsTheCommand(agent, await agent.begin(3));
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "the cut-off message settles");
+    await ownerAllowsTheCommand(agent, await agent.begin(2));
   } finally { await agent.cleanup(); }
 });
 
@@ -4746,13 +4767,133 @@ test("an Open Model agent that was paused and resumed after its owner changed it
   const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
   try {
     const first = await agent.begin(1);
-    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
-    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    // The new mode waits for the turn to end; the owner pauses the agent before it does.
     await ownerSavesPermissionMode(agent, "auto_review");
     assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "paused" })).ok, true);
     await agent.eventually(async () => (await agent.view()).observed_state === "paused", "the agent is paused");
     assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "running" })).ok, true);
     await agent.eventually(() => agent.processes.length === 2, "a new process starts on resume");
+    assert.equal(first.runningOn === agent.processes[1]!.port, false, "the first turn did not move to it");
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "the turn the pause cut off settles, and is not run again");
     await ownerAllowsTheCommand(agent, await agent.begin(2));
+  } finally { await agent.cleanup(); }
+});
+
+test("an Open Model agent asks its owner about a command while the mode the owner saved waits for the turn to end, and the owner's answer is accepted", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    assert.equal((await agent.view()).permission_pending, true, "the saved mode is not the one the process runs");
+    // A saved mode that has not been applied does not make the owner's own answer wrong.
+    await ownerAllowsTheCommand(agent, first);
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(() => agent.processes.length === 2, "the process is replaced when the turn ends");
+  } finally { await agent.cleanup(); }
+});
+
+const FULL_ACCESS = { "*": "allow" };
+const ASK_BEFORE_WRITE = { "*": "allow", edit: "ask", bash: "ask" };
+
+test("an idle Open Model agent is restarted at once with the permission mode its owner saved, and takes its next message under it", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  const releaseConvergence = agent.holdConvergence();
+  try {
+    const first = await agent.begin(1);
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    assert.equal((await agent.view()).permission_pending, undefined, "nothing is pending before the owner saves");
+
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    // Between the save and the restart the owner is shown that the new level is not applied yet.
+    assert.equal((await agent.view()).permission_pending, true, "the saved mode is pending until the process is replaced");
+    assert.equal(agent.processes.length, 1);
+
+    releaseConvergence();
+    await agent.eventually(() => agent.processes.length === 2, "the idle process is replaced without a pause and resume");
+    await agent.eventually(async () => (await agent.view()).permission_pending === undefined, "nothing is pending once the new process has the mode");
+    assert.equal(agent.processes[0]!.alive, false, "the old process is gone");
+    assert.deepEqual(agent.launchedPermission(0), FULL_ACCESS);
+    assert.deepEqual(agent.launchedPermission(1), ASK_BEFORE_WRITE, "the replacement is launched with the saved mode");
+
+    // The next message runs on the new process.
+    const second = await agent.begin(2);
+    assert.equal(second.runningOn, agent.processes[1]!.port, "the next turn runs under the saved mode");
+    assert.equal(agent.processes.length, 2, "and nothing is restarted again");
+  } finally { releaseConvergence(); await agent.cleanup(); }
+});
+
+test("an Open Model agent in the middle of a turn finishes it under the old mode, and the queued message waits for the replacement", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    // The next message is already waiting behind the turn that is running.
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => Boolean(await agent.receipt("msg_2")), "msg_2 waits in the agent's inbox");
+
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    assert.equal((await agent.view()).permission_pending, true);
+    // A turn is never interrupted for it, however long the daemon tries.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(agent.processes.length, 1, "the process is not replaced while its turn runs");
+    assert.equal(agent.processes[0]!.alive, true);
+    assert.equal(first.runningOn, agent.processes[0]!.port, "the turn is still running on it");
+    assert.equal((await agent.view()).permission_pending, true, "and the owner is still told the new level waits");
+
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "the turn finishes under the old mode");
+    await agent.eventually(() => agent.processes.length === 2, "the process is replaced when its turn ends");
+    const second = await agent.begin(2);
+    assert.equal(second.runningOn, agent.processes[1]!.port, "the queued message is delivered to the replacement, never to the old process");
+    assert.equal(agent.processes[0]!.alive, false);
+    assert.deepEqual(agent.launchedPermission(1), ASK_BEFORE_WRITE);
+    await agent.eventually(async () => (await agent.view()).permission_pending === undefined, "nothing is pending once the replacement runs");
+  } finally { await agent.cleanup(); }
+});
+
+test("an Open Model agent whose background service restarted between its owner's save and the restart is still replaced with the saved mode", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    // The service goes down before it gets to replace the process.
+    (agent.daemon() as unknown as { runtimeConfigurationApply: { refreshManaged(): Promise<void> } }).runtimeConfigurationApply.refreshManaged = async () => undefined;
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    assert.equal((await agent.view()).permission_pending, true);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(agent.processes.length, 1, "nothing replaced the process yet");
+
+    await agent.restartDaemon();
+    await agent.eventually(() => agent.processes.length === 2, "the service that starts next replaces the process");
+    await agent.eventually(async () => (await agent.view()).permission_pending === undefined, "and nothing is pending after that");
+    assert.deepEqual(agent.launchedPermission(1), ASK_BEFORE_WRITE);
+    const second = await agent.begin(2);
+    assert.equal(second.runningOn, agent.processes[1]!.port, "the next turn runs under the saved mode");
+  } finally { await agent.cleanup(); }
+});
+
+test("an Open Model agent whose background service restarted in the middle of its turn is replaced with the saved mode when that turn ends", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => Boolean(await agent.receipt("msg_2")), "msg_2 waits in the agent's inbox");
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+
+    await agent.restartDaemon();
+    // The process and its turn outlive the service. The saved mode is still waiting for them.
+    await agent.eventually(async () => (await agent.view()).permission_pending === true, "the service that starts next still knows the saved mode is waiting");
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(agent.processes.length, 1, "the turn that is running is not interrupted");
+    assert.equal(agent.processes[0]!.alive, true);
+
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "the turn finishes under the old mode");
+    await agent.eventually(() => agent.processes.length === 2, "the process is replaced when the turn ends");
+    const second = await agent.begin(2);
+    assert.equal(second.runningOn, agent.processes[1]!.port, "the queued message runs under the saved mode");
+    assert.deepEqual(agent.launchedPermission(1), ASK_BEFORE_WRITE);
+    await agent.eventually(async () => (await agent.view()).permission_pending === undefined, "nothing is pending after that");
   } finally { await agent.cleanup(); }
 });
