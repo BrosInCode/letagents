@@ -187,6 +187,7 @@ type WireEntry = {
   delivery_mode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
   polling_contract?: "custodial_polling_v1" | null;
   home_harness?: string;
+  permission_pending?: boolean;
   provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
@@ -2475,6 +2476,7 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
     ...(entry.polling_contract === "custodial_polling_v1" ? { pollingContract: entry.polling_contract } : {}),
     ...(entry.home_harness === "on" || entry.home_harness === "after_restart" || entry.home_harness === "until_restart"
       ? { homeHarness: entry.home_harness } : {}),
+    ...(entry.permission_pending === true ? { permissionPending: true as const } : {}),
     createdBy: entry.created_by,
     createdAt: entry.created_at,
     sourceRepoPath: entry.source_repo_path ?? null,

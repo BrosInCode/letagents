@@ -16,6 +16,7 @@
           <div class="agent-inspector-name-line">
             <h2 id="agent-inspector-title">{{ projection.displayName }}</h2>
             <span v-if="projection.entry.homeHarness" class="agent-inspector-own-setup" :title="homeHarnessBadge(projection.provider, projection.entry.homeHarness).title" data-testid="agent-inspector-own-setup">{{ homeHarnessBadge(projection.provider, projection.entry.homeHarness).label }}</span>
+            <span v-if="projection.entry.permissionPending" class="agent-inspector-own-setup" :title="permissionPendingBadge(projection.entry.deliveryMode).title" data-testid="agent-inspector-settings-pending">{{ permissionPendingBadge().label }}</span>
           </div>
           <p>
             {{ providerModelLabel }}
@@ -104,6 +105,7 @@
       <AgentInspectorSettings
         v-else-if="selectedTab === 'settings'" id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
         :entry-id="projection.entryId" :display-name="projection.displayName" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
+        :delivery-mode="projection.entry.deliveryMode" :permission-pending="projection.entry.permissionPending === true"
         :resource="settingsResource" :move="roomMoveResource" :move-available="roomMoveAvailable" :providers="providers" :destinations="destinations"
         :busy="actionState?.status === 'running'" :apply-pending="actionState?.kind === 'apply_settings' && actionState.status === 'success' && configurationHasRuntimeLag(settingsResource.configuration)" :conflict="settingsConflict"
         @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @apply="emit('settings-apply')" @reload="emit('settings-reload')"
@@ -133,7 +135,7 @@ import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspec
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
-import { configurationHasRuntimeLag } from "../../../../domain/agent-inspector-settings";
+import { configurationHasRuntimeLag, permissionPendingBadge } from "../../../../domain/agent-inspector-settings";
 import { homeHarnessBadge } from "../../../../domain/agent-home-harness";
 import { initialTabEffects } from "../../../../domain/agent-inspector-identity";
 import { agentInspectorSignal, agentInspectorProviderLabel } from "../../../../domain/agent-inspector-presentation";

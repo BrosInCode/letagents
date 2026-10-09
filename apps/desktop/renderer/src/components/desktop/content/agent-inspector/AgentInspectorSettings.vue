@@ -24,7 +24,7 @@
         <label class="agent-inspector-field"><span>Initial message</span><textarea :value="resource.draft.charter" rows="4" readonly aria-readonly="true"></textarea><small>The first message sent when this agent was created.</small></label>
         <fieldset v-if="resource.configuration.supervisedPermissionProfiles.length" class="agent-inspector-permissions" :disabled="busy || !settingsEditable" :aria-describedby="'agent-inspector-permission-detail'">
           <legend>Permissions</legend>
-          <p id="agent-inspector-permission-detail" class="agent-inspector-settings-note">Choose what the agent can access the next time it starts.</p>
+          <p id="agent-inspector-permission-detail" class="agent-inspector-settings-note" :data-tone="permissionPending ? 'warning' : undefined" data-testid="agent-inspector-permission-timing">{{ permissionTimingNote(deliveryMode, permissionPending) }}</p>
           <label v-for="profile in resource.configuration.supervisedPermissionProfiles" :key="profile.id" class="agent-inspector-permission-choice" :data-selected="resource.draft.permissionProfileId === profile.id" :data-state="profile.status">
             <input
               type="radio"
@@ -115,6 +115,7 @@ import {
   configurationDraft,
   configurationHasRuntimeLag,
   inspectorEffortOptions,
+  permissionTimingNote,
   roomMovePresentation,
   type AgentInspectorConfigurationDraft,
   type AgentInspectorConfigurationResource,
@@ -125,7 +126,7 @@ import { supervisedPermissionProfileLimits } from "../../../../domain/managed-ag
 import { desktopIpc } from "../../../../ipc";
 import type { HostToolRule } from "../../../../../../shared/host-tool-rules";
 import AgentInspectorHomeHarness from "./AgentInspectorHomeHarness.vue";
-const props = defineProps<{ entryId: string; displayName: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; applyPending: boolean; conflict: boolean }>();
+const props = defineProps<{ entryId: string; displayName: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; applyPending: boolean; conflict: boolean; deliveryMode?: string; permissionPending?: boolean }>();
 const emit = defineEmits<{ patch: [patch: Partial<AgentInspectorConfigurationDraft>]; save: [overwrite: boolean]; apply: []; reload: []; "prepare-move": [destination: string]; "commit-move": []; retire: []; purge: [] }>();
 const destination = ref(""); const purgeConfirmation = ref(""); const confirmRetire = ref(false);
 const provider = computed(() => props.providers.find((item) => item.id === props.resource.configuration?.provider) ?? null);

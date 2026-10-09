@@ -3697,6 +3697,19 @@ test("an agent's use of the owner's own setup is read as off unless the backgrou
   assert.equal(Object.hasOwn(wire({ provider_launch_policy: { letagentsOwnerIsolation: false } }), "homeHarness"), false);
 });
 
+test("an agent whose saved access level has not reached its process is marked pending only when the background service says exactly that", async () => {
+  const wire = (overrides: Record<string, unknown>) => mapEntry({
+    id: "agent", room_id: "room", display_name: "Agent", provider: "open-model", model: null, charter: "help",
+    desired_state: "running", observed_state: "idle", condition: "none", permission_profile_id: "ask_before_write",
+    created_by: "desktop", created_at: "2026-10-01T00:00:00.000Z", ...overrides,
+  } as never);
+  assert.equal(wire({ permission_pending: true }).permissionPending, true);
+  for (const value of [undefined, false, "true", 1, null]) {
+    assert.equal(Object.hasOwn(wire({ permission_pending: value }), "permissionPending"), false, String(value));
+  }
+  // The stored policy alone is never read as the state on this side.
+  assert.equal(Object.hasOwn(wire({ provider_launch_policy: { letagentsPermissionChangedAt4: false } }), "permissionPending"), false);
+});
 
 for (const takeover of [false, true]) test(`provider-aware ${takeover ? "startup takeover" : "application update"} keeps approvals available and honors deferred handoff`, { timeout: 10_000 }, async (t) => {
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;

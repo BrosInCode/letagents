@@ -12,8 +12,12 @@ import {
   homeHarnessDiffersFromSaved,
   homeHarnessRosterState,
   homeHarnessState,
+  launchPolicyForToolRules,
+  latestPermissionChange,
   namesHomeHarness,
   ownerSetupRef,
+  permissionChangeKey,
+  permissionChangedSince,
   startedWithHomeHarness,
   providerSupportsConcurrentSupervisedAgents,
   resolveProviderConfigurationSnapshot,
@@ -663,6 +667,48 @@ test("a save keeps the history of changes a running process may predate, and rec
   for (const [key, value] of Object.entries(policy)) if (key.startsWith("letagents")) assert.equal(value, false, key);
   assert.equal(storedHomeHarness(policy), true, "41 changes from off leave it on");
   assert.equal(homeHarnessDiffersFromSaved(policy, 1), true, "and the process from before them all still runs without it");
+});
+
+test("a change to the access level is recorded against its revision, and tells a process that started before it from one that did not", () => {
+  const native = { permission: { "*": "allow", edit: "ask", bash: "ask" } };
+  const snapshot = { launchPolicy: native };
+  // Changed at revision 4 while the process from revision 2 runs: the key's value is exactly false, which an older build drops.
+  const changed = storedLaunchPolicy(snapshot, { policy: native, permissionChangedAt: 4 });
+  assert.deepEqual(changed, { ...native, letagentsPermissionChangedAt4: false });
+  assert.equal(permissionChangeKey(4), "letagentsPermissionChangedAt4");
+  assert.equal(latestPermissionChange(changed), 4);
+  assert.equal(permissionChangedSince(changed, 2), true, "the process that started before the change runs the old level");
+  assert.equal(permissionChangedSince(changed, 3), true);
+  assert.equal(permissionChangedSince(changed, 4), false, "a process that started at the change has it");
+  assert.equal(permissionChangedSince(changed, 9), false, "and so does a later one");
+  for (const unknown of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
+    assert.equal(permissionChangedSince(changed, unknown), true, `a process whose revision is not known counts as older than every change: ${String(unknown)}`);
+  }
+  // Nothing recorded, nothing changed.
+  for (const none of [native, {}, undefined, null, "not a policy", [], { letagentsPermissionChangedAt4: true }, { letagentsPermissionChangedAt4: "false" },
+    { letagentspermissionchangedat4: false }, { letagentsPermissionChangedAt0: false }, { letagentsPermissionChangedAt4x: false }]) {
+    assert.equal(latestPermissionChange(none), undefined, JSON.stringify(none));
+    assert.equal(permissionChangedSince(none, 1), false, JSON.stringify(none));
+  }
+  // An ordinary save keeps the record, a later change replaces it, and only the latest is ever kept.
+  assert.deepEqual(storedLaunchPolicy(snapshot, { policy: changed }), changed);
+  assert.deepEqual(storedLaunchPolicy(snapshot, { policy: changed, permissionChangedAt: 7 }), { ...native, letagentsPermissionChangedAt7: false });
+  assert.deepEqual(storedLaunchPolicy(snapshot, { policy: { ...changed, letagentsPermissionChangedAt3: false } }), changed, "an older record is dropped");
+  // The owner's own setup is saved beside it without disturbing it, in either order.
+  const both = storedLaunchPolicy({ launchPolicy: native, homeHarness: true }, { policy: changed, runtimeRevision: 2, changedAt: 5 });
+  assert.deepEqual(both, { ...native, letagentsOwnerIsolation: false, letagentsOwnerIsolationChangedAt5: false, letagentsPermissionChangedAt4: false });
+  assert.equal(homeHarnessDiffersFromSaved(both, 2), true);
+  assert.equal(permissionChangedSince(both, 2), true);
+  // Neither key reaches a provider, and neither counts when a saved "Always allowed" tool is matched to its access level.
+  assert.deepEqual(withoutHomeHarness(both), native);
+  assert.equal(namesHomeHarness(changed), true, "a creation request cannot supply one");
+  assert.deepEqual(launchPolicyForToolRules(both), { ...native, letagentsOwnerIsolation: false });
+  assert.deepEqual(launchPolicyForToolRules(changed), native);
+  assert.equal(launchPolicyForToolRules(native), native);
+  // The record does not change what the next start derives.
+  const derived = (policy: unknown) => deriveProviderConfigurationSnapshot(
+    { provider: "open-model", model: null, reasoningEffort: null, permissionProfileId: "ask_before_write", configurationRevision: 5 }, policy);
+  assert.deepEqual(derived(changed), derived(native));
 });
 
 test("the owner's own setup is offered only for an owner's Codex and Claude Code agents, never a rental", () => {

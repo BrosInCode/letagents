@@ -361,6 +361,12 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
    * once it restarts, or still does until it restarts. Absent means off.
    */
   home_harness?: import("./provider-configuration.js").HomeHarnessState;
+  /**
+   * Read-only: the owner saved another access level (permission mode) after
+   * this agent's process started, and the process has not been replaced yet.
+   * Absent means the process runs with the saved level.
+   */
+  permission_pending?: true;
   worker_binding?: DaemonWorkerBindingProjection | null;
   /** Ephemeral causal delivery projection; never persisted in the manifest. */
   room_agent_state?: {
