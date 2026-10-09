@@ -30,6 +30,8 @@ export interface CodexScenarioEnvironment {
   settled(): Promise<void>;
   /** Told of each stream event at the moment the adapter publishes it. */
   onStream?(event: ProviderStreamEvent): void;
+  /** Told once the agent is spawned. `observedState` reads the state the adapter shows its caller at that moment. */
+  onSpawned?(observedState: () => ProviderObservedState): void;
 }
 
 /** Everything the adapter showed its caller during one scenario. */
@@ -128,6 +130,7 @@ export async function runCodexScenario(
   });
 
   const handle = await adapter.spawn(spawnRequest(environment));
+  environment.onSpawned?.(() => handle.observedState());
   const subscription = adapter.onExecution(handle, (event) => { execution.push(event); });
   try {
     const stateAfterSpawn = handle.observedState();

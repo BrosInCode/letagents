@@ -3,7 +3,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 
-import type { ProviderStreamEvent } from "../main/agents/provider-adapter.js";
+import type { ProviderObservedState, ProviderStreamEvent } from "../main/agents/provider-adapter.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import { CODEX_REPLAY_PROMPT, CodexReplay, normalizeCodexOutbound } from "./provider-replay/codex-replay.js";
 import {
@@ -71,20 +71,28 @@ async function replayScenario(
   transcript = loadFixture(name),
   /**
    * Called as each recorded frame reaches the adapter. `published` reads the
-   * stream events the adapter has published by the time it is called.
+   * stream events the adapter has published by the time it is called, and
+   * `observedState` the state it shows its caller then: null before the spawn.
    */
-  afterInbound?: (entry: Located<EmitInboundEntry>, published: () => ProviderStreamEvent[], replay: CodexReplay) => void,
+  afterInbound?: (
+    entry: Located<EmitInboundEntry>,
+    published: () => ProviderStreamEvent[],
+    replay: CodexReplay,
+    observedState: () => ProviderObservedState | null,
+  ) => void,
 ) {
   const replay = new CodexReplay(transcript, { workspace: WORKSPACE });
   sessions.push(replay.session);
   const published: ProviderStreamEvent[] = [];
-  replay.session.onInboundDelivered((entry) => afterInbound?.(entry, () => [...published], replay));
+  let spawnedState: (() => ProviderObservedState) | null = null;
+  replay.session.onInboundDelivered((entry) => afterInbound?.(entry, () => [...published], replay, () => spawnedState?.() ?? null));
   const outcome = await replay.session.run(() => runCodexScenario(CODEX_SCENARIOS[name], {
     dependencies: replay.dependencies,
     codexBin: "codex-replay",
     workspace: WORKSPACE,
     settled: () => replay.session.untilExitIsNext(),
     onStream: (event) => { published.push(event); },
+    onSpawned: (observedState) => { spawnedState = observedState; },
   }));
   return { transcript, replay, outcome };
 }
@@ -175,6 +183,26 @@ test("Codex replay, simple: one room message completes with the reply Codex gave
     { exitCode: real.exit.code, signal: real.exit.signal, terminalCause: "stopped", providerContinuationId: real.threadId },
   );
   assert.equal(outcome.stateAfterStop, "stopped");
+});
+
+test("Codex replay, simple: the agent shows working until turn/completed, not until the thread goes idle", async () => {
+  const transcript = loadFixture("simple");
+  const real = recorded(transcript);
+  // What real Codex did: it reported the thread idle, and the turn's own end after that.
+  const threadIdle = real.notifications.filter((entry) => entry.frame.method === "thread/status/changed"
+    && (entry.frame.params as Row).status?.type === "idle" && entry.line < real.turnCompleted.line).at(-1);
+  assert.ok(threadIdle, "the recording holds thread/status/changed idle before turn/completed");
+
+  // The daemon starts and ends every turn of an agent it delivers to (`lifecycleAuthorityMode: "typed"`),
+  // so only the turn's own end may show the agent idle. In the other mode the thread's status does.
+  // The look is taken after the adapter reacted to that frame, and before the next one is played.
+  const afterThreadIdle: Array<{ state: ProviderObservedState | null; lifecycle: Array<[string, string]> }> = [];
+  await replayScenario("simple", transcript, (entry, published, _replay, observedState) => {
+    if (entry.line !== threadIdle.line) return;
+    setImmediate(() => afterThreadIdle.push({ state: observedState(), lifecycle: lifecycle(published()) }));
+  });
+  assert.deepEqual(afterThreadIdle, [{ state: "working", lifecycle: [["turn/started", "turn_active"]] }],
+    "the thread is idle, turn/completed has not arrived, and the agent still shows working");
 });
 
 test("Codex replay, turn_interrupt: the interrupt's acknowledgement does not end the turn; turn/completed does", async () => {
