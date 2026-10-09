@@ -1,5 +1,6 @@
 import { pool } from "../../db/client.js";
 import {
+  describeError,
   repairUnappliedMergeEvents,
   summarizeMergeRepair,
 } from "./unapplied-merge-repair.js";
@@ -26,9 +27,14 @@ if (args.includes("--help") || args.includes("-h")) {
       log: (line) => console.log(line),
     });
     for (const line of summarizeMergeRepair(report)) console.log(line);
-    if (report.lines.some((line) => line.decision.kind === "failed")) process.exitCode = 1;
+    // A card that failed, or that moved without its shared artifact, needs a look.
+    if (report.lines.some((line) => line.decision.kind === "failed"
+      || (line.decision.kind === "moved" && line.decision.artifactSyncError !== undefined))) {
+      process.exitCode = 1;
+    }
   } catch (error) {
-    console.error("Failed to repair unapplied merge events.", error);
+    // The cause only: a failed query's own text carries task titles.
+    console.error(`Failed to repair unapplied merge events: ${describeError(error)}`);
     process.exitCode = 1;
   } finally {
     await pool.end();

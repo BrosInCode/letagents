@@ -190,6 +190,24 @@ async function repairAuditCount(roomId: string, taskId: string): Promise<number>
   return rows[0].n;
 }
 
+/** The state of the room's shared artifact for a pull request, null when it has no state, undefined without a row. */
+async function sharedArtifactState(roomId: string, pullRequestUrl: string): Promise<string | null | undefined> {
+  const { rows } = await pool!.query(
+    "SELECT state FROM room_shared_artifacts WHERE room_id = $1 AND kind = 'pull_request' AND url = $2",
+    [roomId, pullRequestUrl]
+  );
+  return rows[0]?.state;
+}
+
+async function artifactLinkedToTask(roomId: string, pullRequestUrl: string, taskId: string): Promise<boolean> {
+  const { rowCount } = await pool!.query(
+    `SELECT 1 FROM room_shared_artifact_tasks
+      WHERE room_id = $1 AND task_id = $2 AND artifact_identity_key = $3`,
+    [roomId, taskId, `github:pull_request:url:${pullRequestUrl}`]
+  );
+  return rowCount === 1;
+}
+
 async function statusOf(context: WebhookIntegrationContext, roomId: string, taskId: string) {
   return (await context.getTaskById(roomId, taskId))?.status;
 }
@@ -319,6 +337,9 @@ webhookIntegrationTest(
     assert.deepEqual(await snapshotDatabase(), before, "a dry run changes nothing");
     const stillActive = await pool!.query("SELECT status FROM task_leases WHERE id = $1", [expiredLease.id]);
     assert.equal(stillActive.rows[0].status, "active");
+    for (const card of stuck) {
+      assert.notEqual(await sharedArtifactState(room.id, prUrl(card.number)), "merged", "the refused delivery never synced it");
+    }
 
     // Apply: the cards move, each with one status message, no agent prompt and an audit row.
     const appliedRun = await runRepairCommand(["--apply"]);
@@ -337,6 +358,9 @@ webhookIntegrationTest(
         [room.id, `[status] ${card.task.id} was merged:`]
       );
       assert.equal(messages.rows[0].agent_prompt_kind, null, "no agent turn starts");
+      // The room's shared artifact for the pull request shows the merge, linked to the card.
+      assert.equal(await sharedArtifactState(room.id, prUrl(card.number)), "merged");
+      assert.ok(await artifactLinkedToTask(room.id, prUrl(card.number), card.task.id));
       assert.match(messages.rows[0].client_message_id, /^github-event:[0-9a-f]{64}:task-status$/);
     }
     // The cards that applied normally were not touched.
@@ -515,6 +539,14 @@ webhookIntegrationTest(
     await context.updateTask(room.id, movedFrom.task.id, { pr_url: prUrl(2398) });
     await context.updateTask(room.id, movedTo.id, { status: "in_progress", pr_url: prUrl(2305) });
 
+    // The pull request was reverted and redone: the worker opened a new one on the
+    // same branch and set it on the card, and its lease follows the new pull
+    // request but keeps the branch. The resolver still reaches the card from the
+    // merged pull request through that branch.
+    const redone = await createStuckTask(context, room.id, 2307);
+    await context.updateTask(room.id, redone.task.id, { pr_url: prUrl(2308) });
+    await db.updateTaskLeaseWorkflowRefs(room.id, redone.lease.id, { pr_url: prUrl(2308) });
+
     // A person cancelled the card after the merge was stored.
     const cancelled = await createStuckTask(context, room.id, 2306);
     await context.updateTask(room.id, cancelled.task.id, { status: "cancelled" });
@@ -540,6 +572,10 @@ webhookIntegrationTest(
       kind: "skipped",
       reason: "the task was created after the pull request merged",
     });
+    assert.deepEqual(reportLine(report, room.id, redone.task.id)?.decision, {
+      kind: "skipped",
+      reason: `the card now points at another pull request (${prUrl(2308)})`,
+    });
     // Cards the event does not belong to, or that a person ended, are no candidates and have no line.
     for (const task of [movedFrom.task, movedTo, cancelled.task]) {
       assert.equal(reportLine(report, room.id, task.id), undefined, task.title);
@@ -547,7 +583,7 @@ webhookIntegrationTest(
     assert.equal(await statusOf(context, room.id, movedFrom.task.id), "in_progress");
     assert.equal(await statusOf(context, room.id, movedTo.id), "in_progress");
     assert.equal(await statusOf(context, room.id, cancelled.task.id), "cancelled");
-    for (const { task } of [reopenedPr, noLease, locked, early]) {
+    for (const { task } of [reopenedPr, noLease, locked, early, redone]) {
       assert.equal(await statusOf(context, room.id, task.id), "in_progress", task.title);
       assert.equal(await mergedMessageCount(room.id, task.id), 0, task.title);
       assert.equal(await repairAuditCount(room.id, task.id), 0, task.title);
@@ -602,5 +638,54 @@ webhookIntegrationTest(
     const unknown = await runRepairCommand(["--aply"]);
     assert.equal(unknown.code, 2);
     assert.match(unknown.stderr, /Unknown argument: --aply/);
+
+    // When the command itself fails, it prints the cause and not the failed query:
+    // a query's text and parameters carry task titles.
+    await pool!.query("ALTER TABLE github_room_events RENAME TO github_room_events_away");
+    try {
+      const crashed = await runRepairCommand(["--apply"]);
+      assert.equal(crashed.code, 1);
+      assert.match(crashed.stderr, /Failed to repair unapplied merge events: relation "github_room_events" does not exist/);
+      assert.doesNotMatch(crashed.stderr, /Failed query|select |params/);
+    } finally {
+      await pool!.query("ALTER TABLE github_room_events_away RENAME TO github_room_events");
+    }
+  }
+);
+
+webhookIntegrationTest(
+  "the repair brings the shared artifact to merged, and a failure there is reported without undoing the card",
+  async (context) => {
+    const { getTaskById } = context;
+    const room = await createRepoRoom(context);
+    const unsynced = await createStuckTask(context, room.id, 2501);
+    const synced = await createStuckTask(context, room.id, 2502);
+    // The write of the shared artifact for the merge event is refused; the one
+    // the task write makes (source task_workflow_artifact) is not.
+    await pool!.query(`
+      CREATE FUNCTION refuse_artifact_sync() RETURNS trigger AS $$
+      BEGIN RAISE EXCEPTION 'artifact refused'; END $$ LANGUAGE plpgsql`);
+    await pool!.query(`
+      CREATE TRIGGER refuse_artifact_sync BEFORE INSERT OR UPDATE ON room_shared_artifacts
+        FOR EACH ROW WHEN (NEW.source = 'github_event' AND NEW.url = '${prUrl(2501)}')
+        EXECUTE FUNCTION refuse_artifact_sync()`);
+
+    const run = await runRepairCommand(["--apply"]);
+    assert.equal(run.code, 1, run.stderr);
+    assert.match(
+      lineFields(lineOf(run.stdout, room.id, unsynced.task.id)).decision,
+      /^moved to merged, but the shared artifact was not synced: artifact refused$/
+    );
+    assert.equal(lineFields(lineOf(run.stdout, room.id, synced.task.id)).decision, "moved to merged");
+    assert.match(run.stdout, /Moved to merged: 2\./);
+    assert.match(run.stdout, /Failed: 0\./);
+    assert.match(run.stdout, /Moved, but the shared artifact was not synced: 1\./);
+
+    // The card moved, with its message and audit row; the other card's artifact is merged.
+    assert.equal((await getTaskById(room.id, unsynced.task.id))?.status, "merged");
+    assert.equal(await mergedMessageCount(room.id, unsynced.task.id), 1);
+    assert.equal(await repairAuditCount(room.id, unsynced.task.id), 1);
+    assert.notEqual(await sharedArtifactState(room.id, prUrl(2501)), "merged");
+    assert.equal(await sharedArtifactState(room.id, prUrl(2502)), "merged");
   }
 );
