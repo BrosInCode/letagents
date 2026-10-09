@@ -32,6 +32,12 @@ export interface CodexScenarioEnvironment {
   onStream?(event: ProviderStreamEvent): void;
   /** Told once the agent is spawned. `observedState` reads the state the adapter shows its caller at that moment. */
   onSpawned?(observedState: () => ProviderObservedState): void;
+  /**
+   * The conversation that a resume scenario continues. An earlier process
+   * started it. The recorder runs that process itself and does not record its
+   * traffic; a replay reads the id from the recording.
+   */
+  resumeThreadId?: string;
 }
 
 /** Everything the adapter showed its caller during one scenario. */
@@ -43,6 +49,8 @@ export interface CodexScenarioOutcome {
   roomTurn: ProviderRoomTurnResult;
   /** What `controlExactTurn` returned, in a scenario that interrupts. */
   interrupt: { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null } | null;
+  /** What `repairContinuation` returned for the conversation while the process had it loaded, in a scenario that resumes. */
+  loadedResume: { outcome: "rematerialized" | "replaced"; notices: readonly string[] } | null;
   stateAfterTurn: ProviderObservedState;
   terminal: ProviderTerminalPayload;
   stateAfterStop: ProviderObservedState;
@@ -58,7 +66,24 @@ export interface CodexScenario {
   message: string;
   /** Stop the turn when the first piece of the answer arrives. */
   interruptAtFirstAnswerDelta: boolean;
+  /**
+   * The agent's process is a second one. It resumes a conversation that an
+   * earlier process started with CODEX_SCENARIO_REASONING_EFFORT, and it names
+   * `reasoningEffort` for it. Then, with the conversation loaded, the adapter
+   * is asked to restore it under `loadedReasoningEffort`: it sends the resume
+   * that a continuation repair sends first.
+   *
+   * `reasoningEffort` must be an effort that Codex can report for one reason
+   * only, that the resume named it. So it is not the effort of the earlier
+   * process, not the default effort of the conversation's model, and not the
+   * effort of the recording owner's own settings. The replay test checks the
+   * first two on the recording. `loadedReasoningEffort` is another effort
+   * again, so the reply shows whether the loaded conversation took it.
+   */
+  resume?: { reasoningEffort: ScenarioEffort; loadedReasoningEffort: ScenarioEffort };
 }
+
+type ScenarioEffort = NonNullable<ProviderSpawnRequest["reasoningEffort"]>;
 
 export const CODEX_SCENARIOS = {
   simple: {
@@ -73,6 +98,14 @@ export const CODEX_SCENARIOS = {
     message: "Count from 1 to 300. Write one number on each line and nothing else.",
     interruptAtFirstAnswerDelta: true,
   },
+  resume: {
+    name: "resume",
+    description: "A second process resumes a conversation with another reasoning effort, resumes it once more while it is loaded, and completes one turn.",
+    // Another word than the earlier process's turn answered, so the answer of this turn is not the earlier one.
+    message: "Reply with the single word: resumed",
+    interruptAtFirstAnswerDelta: false,
+    resume: { reasoningEffort: "high", loadedReasoningEffort: "medium" },
+  },
 } as const satisfies Record<string, CodexScenario>;
 
 export type CodexScenarioName = keyof typeof CODEX_SCENARIOS;
@@ -85,6 +118,9 @@ const WORK_ATTEMPT_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
  * took it.
  */
 export const CODEX_SCENARIO_REASONING_EFFORT = "low";
+
+/** The scenario whose process starts the conversation that a resume scenario continues. */
+export const CODEX_RESUMED_SCENARIO = "simple";
 
 function spawnRequest(environment: CodexScenarioEnvironment): ProviderSpawnRequest {
   return {
@@ -138,13 +174,42 @@ export async function runCodexScenario(
     activitySink: (event) => { activity.push(event); },
   });
 
-  const handle = await adapter.spawn(spawnRequest(environment));
+  const request = spawnRequest(environment);
+  if (scenario.resume && !environment.resumeThreadId) {
+    throw new Error(`Scenario ${scenario.name} continues a conversation, and none was given.`);
+  }
+  const handle = scenario.resume
+    ? await adapter.resume(
+      { workAttemptId: WORK_ATTEMPT_ID, providerContinuationId: environment.resumeThreadId! },
+      { ...request, reasoningEffort: scenario.resume.reasoningEffort },
+    )
+    : await adapter.spawn(request);
   environment.onSpawned?.(() => handle.observedState());
   const subscription = adapter.onExecution(handle, (event) => { execution.push(event); });
   try {
     const stateAfterSpawn = handle.observedState();
     const launchNotices = [...(handle.launchNotices ?? [])];
     const threadId = handle.providerContinuationId ?? "";
+
+    let loadedResume: CodexScenarioOutcome["loadedResume"] = null;
+    if (scenario.resume) {
+      // The resume that a continuation repair sends first. Here the process has the conversation
+      // loaded. A repair in production follows a conversation that Codex did not find.
+      const restored = await adapter.repairContinuation(handle, {
+        workAttemptId: WORK_ATTEMPT_ID,
+        expectedProviderContinuationId: threadId,
+        cwd: environment.workspace,
+        launchPolicy: request.launchPolicy,
+        reasoningEffort: scenario.resume.loadedReasoningEffort,
+      }, {
+        checkpointReplacement: async () => {
+          throw new Error("The loaded conversation was not found, so there is no resume of it to record.");
+        },
+      });
+      loadedResume = { outcome: restored.outcome, notices: [...(restored.notices ?? [])] };
+      // The daemon records the lines, then tells the adapter that they are recorded.
+      restored.noticesRecorded?.();
+    }
 
     let turnId: string | null = null;
     let interrupting: Promise<CodexScenarioOutcome["interrupt"]> | null = null;
@@ -175,7 +240,7 @@ export async function runCodexScenario(
 
     const terminal = await adapter.stop(handle);
     return {
-      threadId, stateAfterSpawn, launchNotices, roomTurn, interrupt, stateAfterTurn,
+      threadId, stateAfterSpawn, launchNotices, loadedResume, roomTurn, interrupt, stateAfterTurn,
       terminal, stateAfterStop: handle.observedState(), stream, activity, execution,
     };
   } catch (error) {

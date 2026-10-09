@@ -35,6 +35,12 @@ still passes. Assert such a dependency on what the adapter shows its caller.
 You need the Codex CLI, signed in. The recorder runs one real model turn.
 It does not start the desktop app or the daemon. CI never runs it.
 
+A scenario that resumes a conversation (`resume`) runs two turns. The recorder
+first runs the scenario that starts the conversation, in a process of its own,
+and does not record its traffic. The transcript holds the second process only.
+Codex's history of the conversation is in the resume reply, so the earlier
+turn is in the transcript too: read it as well.
+
 ```sh
 cd apps/desktop
 LETAGENTS_RECORD_LIVE_CODEX=1 node --import tsx \
