@@ -937,6 +937,37 @@ test("an owner's recorded choice that was not sent stays retryable while a saved
   } finally { await f.close(); }
 });
 
+// A real save moves the saved tool scope inside the card, so the card's digest is no longer the one the
+// owner decided on. The recorded choice is then retried against its own stored digest.
+for (const choice of ["allow_once", "deny"] as const) {
+  test(`the owner's recorded ${choice} that was not sent is sent after a real permission-mode save`, async () => {
+    const f = await savedRuleFixture("claude-code");
+    try {
+      const [candidate] = await f.broker.list("room");
+      f.state.failBefore = true;
+      await assert.rejects(f.broker.decide(decision(candidate!, { decision: choice })), /recorded but could not be sent/);
+      f.state.failBefore = false;
+      const decidedOn = hash(candidate!.presentation);
+      await saveNewPermissionMode(f);
+      const [card] = await f.broker.list("room");
+      assert.equal(card?.status, "decision_recorded", card?.detail ?? "");
+      assert.notEqual(hash(card!.presentation), decidedOn, "a real save changes the card's digest");
+      assert.equal(card!.recordedDecision?.projectionSha256, decidedOn, "the journal still holds the digest the owner decided on");
+      const retry = (changes: Partial<HostApprovalDecision> = {}) =>
+        f.broker.decide(decision(card!, { decision: choice, projectionSha256: decidedOn, ...changes }));
+      // Only the stored digest matches a retry. The card's own digest and any other do not.
+      await assert.rejects(retry({ projectionSha256: hash(card!.presentation) }), /already recorded/);
+      await assert.rejects(retry({ projectionSha256: "a".repeat(64) }), /already recorded/);
+      await assert.rejects(retry({ decision: choice === "deny" ? "allow_once" : "deny" }), /already recorded/);
+      await assert.rejects(retry({ decisionId: "another" }), /already recorded/);
+      await assert.rejects(retry({ expected: { ...card!.reference!, requestSha256: "f".repeat(64) } }), /changed/);
+      assert.deepEqual(f.sends, []);
+      assert.equal(await retry(), "decision_sent");
+      assert.deepEqual(f.sends, [choice === "deny" ? "reject" : "once"]);
+    } finally { await f.close(); }
+  });
+}
+
 test("Claude generic failure cannot confirm a decision, and a retired runtime cannot confirm success", async () => {
   for (const scenario of ["allow", "deny", "retired"] as const) {
     const f = await fixture("claude-code");
