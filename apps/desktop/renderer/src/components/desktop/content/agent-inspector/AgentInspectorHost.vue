@@ -4,7 +4,7 @@
     ref="wideHostElement"
     class="agent-inspector-host-wide"
   >
-    <Transition name="agent-inspector-panel" appear>
+    <Transition :css="false" appear @enter="enterPanel" @enter-cancelled="cancelOpening" @leave="leavePanel">
       <component
         ref="surfaceComponent"
         :is="surfaceComponentType"
@@ -31,7 +31,7 @@
         @click="emit('close')"
       ></button>
     </Transition>
-    <Transition name="agent-inspector-panel">
+    <Transition :css="false" @enter="enterPanel" @enter-cancelled="cancelOpening" @leave="leavePanel">
       <component
         ref="surfaceComponent"
         :is="surfaceComponentType"
@@ -56,7 +56,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
 import {
-  agentInspectorLiveAnnouncement,
   type AgentInspectorActionIntent,
   type AgentInspectorActionState,
   type AgentInspectorCorrectionRequest,
@@ -78,6 +77,7 @@ import {
   projectAgentInspectorStatus,
   type AgentInspectorParticipantSessionUpdate,
 } from "../../../../domain/agent-inspector-participant";
+import { agentInspectorSignal, sharedAgentInspectorPresentation } from "../../../../domain/agent-inspector-presentation";
 import { agentInspectorRequestResetKey } from "../../../../domain/agent-inspector-identity";
 import { latestReasoningSessionForExactIdentity } from "../../../../domain/reasoning";
 import AgentInspectorSurface from "./AgentInspectorSurface.vue";
@@ -85,10 +85,14 @@ import AgentInspectorStatusSurface from "./AgentInspectorStatusSurface.vue";
 import AgentInspectorParticipantSurface from "./AgentInspectorParticipantSurface.vue";
 import type { AgentInspectorSelection } from "../desktop-chat-message/types";
 import "./agent-inspector.css";
+import { animateInspectorOpening } from "./inspector-opening";
 
 const compactBreakpoint = 920;
 const props = defineProps<{
   open: boolean;
+  presence?: readonly import("../../../../../../electron/ipc-types").DesktopAgentPresence[];
+  presenceFresh?: boolean;
+  viewerLogin?: string | null;
   projection: AgentInspectorProjection | null;
   daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
   refreshDiagnostics?: () => Promise<boolean>;
@@ -171,17 +175,20 @@ const surfaceComponentType = computed<Component>(() => props.projection
     : AgentInspectorStatusSurface);
 watch(compact, (value) => emit("presentation-change", value), { immediate: true });
 const statusPresentation = computed(() => projectAgentInspectorStatus(props.selection));
+const sharedPresentation = computed(() => sharedAgentInspectorPresentation(
+  props.selection, props.presence ?? [], props.roomIdentifier, props.viewerLogin, props.presenceFresh,
+));
 const liveAnnouncement = computed(() => {
   if (props.actionState?.message) return props.actionState.message;
   if (participantAnnouncement.value) return participantAnnouncement.value;
-  if (props.projection) return agentInspectorLiveAnnouncement(props.projection);
+  if (props.projection) return `${props.projection.displayName}: ${agentInspectorSignal(props.projection).label}.`;
   if (participantProjection.value?.kind === "local_managed") {
     return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
   }
   if (participantProjection.value?.kind === "unavailable") {
     return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
   }
-  if (participantProjection.value?.kind === "external") return `${participantProjection.value.title}: externally managed agent.`;
+  if (participantProjection.value?.kind === "external") return `${participantProjection.value.title}: ${sharedPresentation.value.signal.label}.`;
   return `${statusPresentation.value.title}: ${statusPresentation.value.heading}.`;
 });
 watch(
@@ -219,6 +226,8 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
     return {
       ...workspace,
       projection: participantProjection.value,
+      shared: sharedPresentation.value,
+      roomDisplayName: props.roomDisplayName,
       compact: compactPresentation,
       busy: false,
       roomIdentifier: props.roomIdentifier,
@@ -229,6 +238,14 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
   }
   return { ...statusPresentation.value, compact: compactPresentation };
 }
+let finishOpening: (() => void) | null = null;
+function cancelOpening(): void { finishOpening?.(); finishOpening = null; }
+function enterPanel(element: Element, done: () => void): void {
+  cancelOpening();
+  finishOpening = animateInspectorOpening(element as HTMLElement, restoreFocusElement?.closest<HTMLElement>('button, [role="button"]') ?? null, done);
+}
+function leavePanel(_element: Element, done: () => void): void { cancelOpening(); done(); }
+watch(() => props.requestVersion, cancelOpening);
 let resizeObserver: ResizeObserver | null = null;
 let restoreFocusElement: HTMLElement | null = null;
 let restoreFocusOnClose = true;
@@ -342,6 +359,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  cancelOpening();
   resizeObserver?.disconnect();
   resizeObserver = null;
   window.removeEventListener("resize", syncCompact);
