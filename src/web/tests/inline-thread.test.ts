@@ -69,13 +69,15 @@ test('a delayed thread send stays routed to its original room and does not inser
 const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null })
 function mountSetup(Component: any, props: any) {
   let vm: any
+  const state = reactive(props)
+  const events: Array<[string, unknown]> = []
   const app = renderer.createApp({ setup() {
-    vm = Component.setup(reactive(props), { expose() {}, emit() {} })
+    vm = Component.setup(state, { expose() {}, emit: (name: string, value: unknown) => events.push([name, value]) })
     return () => h('div')
   } })
   app.provide(ssrContextKey, { modules: new Set() })
   app.mount({})
-  return { vm, close: () => app.unmount() }
+  return { vm, props: state, events, close: () => app.unmount() }
 }
 
 test('opening a recent orphan reply fetches and expands its actual thread root', async () => {
@@ -95,6 +97,8 @@ test('opening a recent orphan reply fetches and expands its actual thread root',
     assert.equal(surface.vm.activeThreadId.value, parent.id)
     assert.deepEqual(surface.vm.timelineMessages.value.map((row: any) => row.id), [parent.id])
     assert.equal(surface.vm.threadRevealId.value, reply.id)
+    const images = surface.events.find(([name]) => name === 'threadMessages')?.[1] as any[]
+    assert.deepEqual(images.map(row => row.id), [parent.id, reply.id], 'the image viewer receives the fetched owner as well as its replies')
   } finally { surface.close(); globalThis.fetch = originalFetch }
 })
 
@@ -115,4 +119,32 @@ test('send completion preserves a newer quote and Escape consumed by suggestions
     assert.equal(touched, false)
     await nextTick()
   } finally { surface.close(); globalThis.fetch = originalFetch }
+})
+
+test('incoming messages do not repeat a finished reply reveal', async () => {
+  const Component = (await vite.ssrLoadModule('/src/components/room/InlineThread.vue')).default
+  const originalFetch = globalThis.fetch
+  const originalCSS = globalThis.CSS
+  ;(globalThis as any).CSS = { escape: (id: string) => id }
+  globalThis.fetch = (async () => new Response(JSON.stringify({ replies: [], has_older: false }), { status: 200 })) as typeof fetch
+  const reply = message('msg_2', 'Reply', 'msg_1')
+  const surface = mountSetup(Component, { parent: message('msg_1', 'Owner'), messages: [reply], roomIdentifier: 'test', active: true, revealMessageId: null })
+  let reveals = 0
+  const body = {
+    scrollTop: 120, scrollHeight: 1000, clientHeight: 200,
+    getBoundingClientRect: () => ({ top: 100 }),
+    querySelectorAll: () => [],
+    querySelector: () => ({ getBoundingClientRect: () => ({ top: 200 }), classList: { add() {}, remove() {} } }),
+    scrollTo: () => { reveals++ },
+  }
+  try {
+    await new Promise(resolve => setImmediate(resolve)); await nextTick()
+    surface.vm.body.value = body
+    surface.props.revealMessageId = reply.id
+    await nextTick(); await nextTick()
+    assert.equal(reveals, 1)
+    surface.props.messages = [reply, message('msg_3', 'New reply', 'msg_1'), message('msg_4', 'Unrelated room message')]
+    await nextTick(); await nextTick()
+    assert.equal(reveals, 1, 'new arrivals preserve the user reading position after navigation')
+  } finally { surface.close(); globalThis.fetch = originalFetch; (globalThis as any).CSS = originalCSS }
 })
