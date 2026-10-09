@@ -232,8 +232,37 @@
           </span>
           <strong>{{ receipt.agentName }}</strong>
           <small v-if="receiptStateLabel(receipt)">{{ receiptStateLabel(receipt) }}</small>
+          <template v-if="receipt.scheduledRetry">
+            <small aria-hidden="true">{{ scheduledRetryText(receipt) }}</small>
+            <button
+              type="button"
+              :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId)"
+              :aria-label="`Try again now for ${receipt.agentName}`"
+              title="Asks the agent to start this attempt now instead of waiting."
+              @click="tryRetryNow(receipt)"
+            >{{ retryingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId) ? "Asking…" : "Try now" }}</button>
+            <button
+              type="button"
+              :disabled="!roomDeliverySkipAvailable || skippingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId)"
+              :aria-label="`Stop the automatic attempts for ${receipt.agentName}`"
+              title="No more automatic attempts. Later messages go ahead. The task stays assigned to the agent: send it a message to continue."
+              @click="stopRetrying(receipt)"
+            >{{ skippingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId) ? "Stopping…" : "Stop trying" }}</button>
+            <small>{{ scheduledRetryOutcome(receipt.scheduledRetry) }}</small>
+          </template>
+          <template v-else-if="receipt.followUpNote">
+            <small>{{ followUpNoteLabel(receipt.followUpNote) }}</small>
+            <button
+              v-if="receipt.followUpNote.canRetry"
+              type="button"
+              :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId, receipt.followUpNote.sourceMessageId)"
+              :aria-label="deliveryRecoveryAvailable ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
+              title="Retry delivery"
+              @click="retryFollowUp(receipt)"
+            >{{ retryingReceipt(receipt.agentId, receipt.followUpNote.sourceMessageId) ? "Retrying…" : deliveryRecoveryAvailable ? "Retry" : "Retry unavailable" }}</button>
+          </template>
           <button
-            v-if="receipt.state === 'queued_behind_blocked' && receipt.blockedByMessageId"
+            v-if="(receipt.state === 'queued_behind_blocked' || receipt.state === 'queued_behind_retry') && receipt.blockedByMessageId"
             type="button"
             class="room-message-delivery-link"
             @click="$emit('scroll-to-message', receipt.blockedByMessageId)"
@@ -368,6 +397,12 @@ import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../.
 import { desktopIpc } from "../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import { useSecondClock } from "../../../composables/useSecondClock";
+import { scheduledRetryClockLabel, scheduledRetryLabel, scheduledRetryOutcome, type AgentScheduledRetry } from "../../../domain/scheduled-retry";
+import type { RoomMessageFollowUpNote } from "../../../domain/room-message-receipts";
+
+/** What this message needs of an automatic attempt: its time, its attempt, what it follows, and the id its two controls name. */
+type AgentScheduledRetryView = Pick<AgentScheduledRetry, "atMs" | "attempt" | "attempts" | "kind" | "sourceMessageId">;
 import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
 import {
@@ -424,7 +459,11 @@ const props = withDefaults(defineProps<{
   context?: "timeline" | "thread-root" | "thread-reply";
   threadMessageId?: string;
   testId?: string;
-  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null; retry?: DesktopRoomAgentDeliveryAttention["retry"] | null }>;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null; retry?: DesktopRoomAgentDeliveryAttention["retry"] | null;
+    /** The agent's automatic attempt for the work this message began, while it waits for its time. */
+    scheduledRetry?: AgentScheduledRetryView | null;
+    /** The follow-up of the work this message began, when it waits for its owner or ended with nothing started. */
+    followUpNote?: RoomMessageFollowUpNote | null }>;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;
@@ -441,16 +480,17 @@ const props = withDefaults(defineProps<{
   roomDeliverySkipAvailable: false,
 });
 
-function retryingReceipt(agentId: string): boolean {
-  return props.deliveryRetryKeys?.has(`${agentId}:${props.message.id}`) === true;
+/** A request for this agent that is on its way. A follow-up has an id of its own, which is not this message's. */
+function retryingReceipt(agentId: string, sourceMessageId = props.message.id): boolean {
+  return props.deliveryRetryKeys?.has(`${agentId}:${sourceMessageId}`) === true;
 }
 
 function restoringReceipt(agentId: string): boolean {
   return props.continuationRepairKeys?.has(`${agentId}:${props.message.id}`) === true;
 }
 
-function skippingReceipt(agentId: string): boolean {
-  return props.roomDeliverySkipKeys?.has(`${agentId}:${props.message.id}`) === true;
+function skippingReceipt(agentId: string, sourceMessageId = props.message.id): boolean {
+  return props.roomDeliverySkipKeys?.has(`${agentId}:${sourceMessageId}`) === true;
 }
 
 const emit = defineEmits<{
@@ -469,6 +509,34 @@ const emit = defineEmits<{
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
 }>();
 
+/** Try now: ask the agent to start its automatic attempt at once. The request names the attempt, which is not this message. */
+function tryRetryNow(receipt: { agentId: string; scheduledRetry?: AgentScheduledRetryView | null }): void {
+  const retryId = receipt.scheduledRetry?.sourceMessageId;
+  if (retryId && props.deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId, retryId)) emit("retry-delivery", receipt.agentId, retryId);
+}
+
+/** Stop trying: end the agent's automatic attempt before it starts. */
+function stopRetrying(receipt: { agentId: string; scheduledRetry?: AgentScheduledRetryView | null }): void {
+  const retryId = receipt.scheduledRetry?.sourceMessageId;
+  if (retryId && props.roomDeliverySkipAvailable && !skippingReceipt(receipt.agentId, retryId)) emit("skip-delivery", receipt.agentId, retryId);
+}
+
+/** Retry for a follow-up that waits for its owner: the request names the follow-up, which is not this message. */
+function retryFollowUp(receipt: { agentId: string; followUpNote?: RoomMessageFollowUpNote | null }): void {
+  const note = receipt.followUpNote;
+  if (note?.canRetry && props.deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId, note.sourceMessageId)) emit("retry-delivery", receipt.agentId, note.sourceMessageId);
+}
+
+/** The countdown as this message shows it: the saved time minus the clock, so it is right however long the app slept. */
+function scheduledRetryText(receipt: { scheduledRetry?: AgentScheduledRetryView | null }): string {
+  return receipt.scheduledRetry ? scheduledRetryLabel(receipt.scheduledRetry, retryClock.value) : "";
+}
+
+/** Why the follow-up of this message's work waits for its owner, or why it ended with nothing started. */
+function followUpNoteLabel(note: Pick<RoomMessageFollowUpNote, "state" | "text">): string {
+  return receiptErrorLabel(note.text) || (note.state === "ended" ? "The agent did not try again." : "The agent stopped and now waits for you.");
+}
+
 const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((receipt) => [
   "retryable",
   "result_recovery",
@@ -479,10 +547,13 @@ const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((re
   "cancelled_by_user",
   "restoring_conversation",
   "queued_behind_blocked",
+  "queued_behind_retry",
 ].includes(receipt.state)));
+// Counts down to the saved time of an automatic attempt, once a second while one shows on this message.
+const retryClock = useSecondClock(() => Boolean(props.deliveryReceipts?.some((receipt) => receipt.scheduledRetry)));
 
 function receiptIsAnimated(state: string): boolean {
-  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery", "restoring_conversation"].includes(state);
+  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery", "restoring_conversation", "queued_behind_retry"].includes(state);
 }
 
 function receiptNeedsAttention(state: string): boolean {
@@ -503,6 +574,7 @@ function receiptStateLabel(receipt: { state: string; terminalReason: string | nu
   if (state === "restoring_conversation") return "Restoring conversation";
   if (state === "blocked") return receiptErrorLabel(receipt.error) || "Needs attention";
   if (state === "queued_behind_blocked") return "Queued behind an issue";
+  if (state === "queued_behind_retry") return "Queued until the agent has tried again";
   if (state === "acknowledged_no_reply") return "Read · no reply";
   if (state === "acknowledged_failed") return receiptErrorLabel(receipt.error) || "Work did not finish";
   if (state === "cancelled_by_room_move") return "Moved rooms";
@@ -510,8 +582,17 @@ function receiptStateLabel(receipt: { state: string; terminalReason: string | nu
   return "";
 }
 
-function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null }): string {
+function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null;
+  scheduledRetry?: AgentScheduledRetryView | null; followUpNote?: RoomMessageFollowUpNote | null }): string {
   if (receipt.terminalReason === "upgrade_authority_unavailable") return `A safety upgrade retired this legacy turn for ${receipt.agentName}; its exact authority could not be reconstructed`;
+  if (receipt.scheduledRetry || receipt.followUpNote) {
+    // Read aloud with a clock time: the list is a live region, and a count that changes each second would be read each second.
+    const failed = (receiptErrorLabel(receipt.error) || "Work did not finish").replace(/[.\s]+$/, "");
+    return `${receipt.agentName}: ${failed}. ${receipt.scheduledRetry
+      ? `${scheduledRetryClockLabel(receipt.scheduledRetry, retryClock.value)}. ${scheduledRetryOutcome(receipt.scheduledRetry)}`
+      : followUpNoteLabel(receipt.followUpNote!)}`;
+  }
+  if (receipt.state === "queued_behind_retry") return `Waiting — ${receipt.agentName} will try earlier work again first`;
   if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
   if (receipt.state === "publishing") return `${receipt.agentName} is sending a reply`;
   if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;

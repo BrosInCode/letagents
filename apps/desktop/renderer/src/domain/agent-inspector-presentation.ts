@@ -2,6 +2,7 @@ import type { DesktopAgentPresence } from '../../../electron/ipc-types';
 import type { AgentInspectorSelection } from '../components/desktop/content/desktop-chat-message/types';
 import type { AgentInspectorActionIntent, AgentInspectorProjection } from './agent-inspector';
 import { agentCompactionProgress } from './managed-agents';
+import { agentScheduledRetry, scheduledRetryDetail } from './scheduled-retry';
 
 export interface InspectorSignal {
   state: string;
@@ -32,7 +33,8 @@ export function agentInspectorActionErrorMessage(
   return detail || "The agent action could not be completed.";
 }
 
-export function agentInspectorSignal(projection: AgentInspectorProjection): InspectorSignal {
+/** `nowMs` moves on each second while the agent waits to try again, so what is said of that wait is right at its time. */
+export function agentInspectorSignal(projection: AgentInspectorProjection, nowMs = Date.now()): InspectorSignal {
   if (projection.resourceFreshness === 'stale') return {
     state: 'stale', label: 'Updates delayed', detail: 'Showing the last known state. Controls return when the connection does.', tone: 'amber', moving: false,
   };
@@ -42,6 +44,11 @@ export function agentInspectorSignal(projection: AgentInspectorProjection): Insp
   const state = projection.overallState;
   if (projection.deliveryProgress?.phase === 'publishing') return {
     state: 'publishing', label: 'Publishing reply', detail: 'Sending the response to the room.', tone: 'blue', moving: true,
+  };
+  // The agent is online, and waits to try unfinished work again by itself. It does not need its owner yet.
+  const retry = state === 'online' ? agentScheduledRetry(projection.entry.deliveryReceipts) : null;
+  if (retry) return {
+    state: 'retry_scheduled', label: 'Waiting to try again', detail: scheduledRetryDetail(retry, nowMs), tone: 'amber', moving: false,
   };
   const tone = state === 'online' ? 'green' : state === 'responding' ? 'blue'
     : ['starting', 'recovering', 'reconnecting', 'restoring_conversation'].includes(state) ? 'amber'

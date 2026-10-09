@@ -1721,6 +1721,35 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
   assert.equal(settledReceipt?.canonicalMessageId, null);
 });
 
+test("a follow-up crosses to the desktop only when every part of it is what the daemon writes", () => {
+  const followUp = (value: unknown) => {
+    const wire = wireEntryWithCausalProjection();
+    Object.assign(wire.delivery_receipts![0]!, { state: "pending", source_message_id: "task-continuation:inbox_0", follow_up: value });
+    const receipts = mapEntry(wire).deliveryReceipts!;
+    assert.equal(receipts.length, 1, "the receipt itself is kept whatever the follow-up holds");
+    return receipts[0]!.followUp;
+  };
+  const at = { at_ms: 1_790_000_030_000, attempt: 2, attempts: 3, kind: "provider_fault" };
+  const scheduled = (parts: object, for_message_id: unknown = "msg_1") => ({ for_message_id, state: "scheduled", scheduled: { ...at, ...parts } });
+  assert.deepEqual(followUp(scheduled({})),
+    { forMessageId: "msg_1", state: "scheduled", scheduled: { atMs: 1_790_000_030_000, attempt: 2, attempts: 3, kind: "provider_fault" } });
+  assert.deepEqual(followUp(scheduled({ attempt: 1, attempts: 1, kind: "no_reply" }, null)),
+    { forMessageId: null, state: "scheduled", scheduled: { atMs: 1_790_000_030_000, attempt: 1, attempts: 1, kind: "no_reply" } });
+  // One that waits for its owner, and one that ended with nothing started, hold no time.
+  assert.deepEqual(followUp({ for_message_id: "msg_1", state: "waiting_for_owner", scheduled: null }), { forMessageId: "msg_1", state: "waiting_for_owner", scheduled: null });
+  assert.deepEqual(followUp({ for_message_id: null, state: "ended", scheduled: null }), { forMessageId: null, state: "ended", scheduled: null });
+  // A daemon that sends none, or anything that is not what it writes, shows no follow-up.
+  for (const malformed of [undefined, null, "soon", [], {}, scheduled({ at_ms: "1790000030000" }), scheduled({ at_ms: 0 }), scheduled({ at_ms: 1.5 }),
+    scheduled({ attempt: 0 }), scheduled({ attempt: 4 }), scheduled({ attempts: "3" }), scheduled({ kind: "other" }), scheduled({ kind: undefined }),
+    scheduled({}, ""), scheduled({}, 7), { state: "scheduled", scheduled: at },
+    { for_message_id: "msg_1", state: "scheduled", scheduled: null }, { for_message_id: "msg_1", state: "scheduled" },
+    { for_message_id: "msg_1", state: "later", scheduled: null }, { for_message_id: "msg_1", scheduled: null },
+    { for_message_id: "msg_1", state: "ended", scheduled: at }, { for_message_id: "msg_1", state: "waiting_for_owner" }]) {
+    assert.equal(followUp(malformed), undefined, JSON.stringify(malformed));
+  }
+  assert.equal(Object.hasOwn(mapEntry(wireEntryWithCausalProjection()).deliveryReceipts![0]!, "followUp"), false, "a receipt that is no follow-up has no such field");
+});
+
 test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
   const legacy = wireEntryWithCausalProjection();
   legacy.delivery_receipts![0]!.timeline = Array.from({ length: 64 }, (_, index) => ({
@@ -3185,7 +3214,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.215");
+    assert.equal(status.implementationVersion, "2.0.216");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
