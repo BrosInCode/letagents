@@ -34,7 +34,72 @@ export type ClaudeExactTurnFailure = {
    * them as a provider error and act on what they happen to say.
    */
   unrecognizedResult?: true;
+  /** Claude Code's own structured account of the failed request, when the failure is a known API error. */
+  apiFailure?: ClaudeApiFailure;
+  /** The provider declined the turn's content: the answer stopped with `stop_reason: "refusal"`. */
+  refusal?: true;
 };
+
+/**
+ * What Claude Code says, in its own fields, about a request to the model that
+ * failed. These are for code to decide on. The error text is for the owner to
+ * read, and what it happens to say decides nothing for a failure that has them.
+ * One mark is the exception, because Claude Code has no field for it: its own
+ * first words for a request that does not fit the model's context.
+ */
+export type ClaudeApiFailure = {
+  /** The HTTP status of the provider's answer. Null when there was none, as for a connection that was refused or lost. */
+  status: number | null;
+  /** The result's `terminal_reason`, such as `api_error` or `prompt_too_long`. The session file does not keep it. */
+  terminalReason: string | null;
+  /** Claude Code's name for the error, on the assistant row that carries its text: `rate_limit`, `server_error`, `billing_error`... */
+  category: string | null;
+  /** Claude reported, in the same turn, a usage window of the account that rejected the request. */
+  usageLimit?: true;
+  /** The error's text begins with Claude Code's own words for a request that does not fit the model's context. */
+  promptTooLong?: true;
+};
+
+/**
+ * How Claude Code begins the text of an error for a request that does not fit
+ * the model's context. The CLI itself knows such a row by this start, and by
+ * nothing else: its name for the error, `invalid_request`, is also its name
+ * for a malformed tool history, a PDF it cannot read, a plan that lacks a
+ * model, and more.
+ */
+const CLAUDE_PROMPT_TOO_LONG = "Prompt is too long";
+
+/** A field is kept only when it is what Claude Code writes there: a short name, or an HTTP status. */
+function factName(value: unknown): string | null {
+  return typeof value === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value) ? value : null;
+}
+function apiFailureFacts(status: unknown, terminalReason: unknown, category: unknown, texts: readonly string[], usageLimit = false): { apiFailure?: ClaudeApiFailure } {
+  const promptTooLong = texts.some((text) => text.startsWith(CLAUDE_PROMPT_TOO_LONG));
+  const facts = { status: typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599 ? status : null,
+    terminalReason: factName(terminalReason), category: factName(category), ...(usageLimit ? { usageLimit: true as const } : {}),
+    ...(promptTooLong ? { promptTooLong: true as const } : {}) };
+  return facts.status === null && facts.terminalReason === null && facts.category === null && !usageLimit && !promptTooLong ? {} : { apiFailure: facts };
+}
+
+/**
+ * Whether a stream line reports a usage window of the account that rejected a
+ * request (SDKRateLimitEvent). Claude writes one line for each window it
+ * reads; a window that is only allowed, or allowed with a warning, rejects nothing.
+ */
+export function claudeUsageLimitRejected(row: ClaudeEvidenceRecord, sessionId: string): boolean {
+  return row.type === "rate_limit_event" && sessionIdOf(row) === sessionId && record(row.rate_limit_info)?.status === "rejected";
+}
+
+/**
+ * Claude Code's name for an API error, from the assistant row that carries the
+ * error's text in the stream. A sub-agent's row carries the same fields and the
+ * same session; `parent_tool_use_id` names the tool call that started it. Its
+ * error is not the turn's.
+ */
+export function claudeApiErrorCategory(row: ClaudeEvidenceRecord, sessionId: string): string | null {
+  return row.type === "assistant" && row.is_api_error_message === true && row.parent_tool_use_id == null
+    && sessionIdOf(row) === sessionId ? factName(row.error) : null;
+}
 
 function record(value: unknown): ClaudeEvidenceRecord | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -94,6 +159,10 @@ export function exactClaudeStreamTerminal(
   event: ClaudeEvidenceRecord,
   turnId: string,
   sessionId: string,
+  /** Claude Code's name for the API error of this turn, when the stream carried one before the result. */
+  apiErrorCategory: string | null = null,
+  /** The stream of this turn reported a usage window that rejected the request. */
+  usageLimitRejected = false,
 ): ClaudeExactTurnResult | ClaudeExactTurnFailure | null {
   if (
     event.type !== "result"
@@ -137,6 +206,8 @@ export function exactClaudeStreamTerminal(
       // The shapes Claude Code is known to send for a failed command are an
       // API error, and an error subtype with `is_error: true` and no text.
       ...(apiError || (namedEnding && event.is_error === true && !freeText) ? {} : { unrecognizedResult: true as const }),
+      ...(apiError ? apiFailureFacts(event.api_error_status, event.terminal_reason, apiErrorCategory, [resultText], usageLimitRejected) : {}),
+      ...(apiError && event.stop_reason === "refusal" ? { refusal: true as const } : {}),
     };
   }
   return exactTextResult(
@@ -191,7 +262,9 @@ export function recoverExactClaudeTurnFailureFromSession(
   if (!failure) return null;
   const text = assistantText(failure).join("").trim();
   const status = typeof failure.apiErrorStatus === "number" ? ` (HTTP ${failure.apiErrorStatus})` : "";
-  return { turnId, nativeOutcome: "failed", error: text || `The model provider refused the request${status}.` };
+  return { turnId, nativeOutcome: "failed", error: text || `The model provider refused the request${status}.`,
+    ...apiFailureFacts(failure.apiErrorStatus, null, failure.error, assistantText(failure)),
+    ...(record(failure.message)?.stop_reason === "refusal" ? { refusal: true as const } : {}) };
 }
 
 /** Whether a row is an assistant message that ended its reply. */

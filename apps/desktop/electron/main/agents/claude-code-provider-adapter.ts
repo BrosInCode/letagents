@@ -72,6 +72,8 @@ import {
 } from "./provider-evidence.js";
 import {
   CLAUDE_NO_ROOM_REPLY_SENTINEL,
+  claudeApiErrorCategory,
+  claudeUsageLimitRejected,
   exactClaudeStreamTerminal,
   recoverExactClaudeTurnFromSession,
   recoverExactClaudeTurnFailureFromSession,
@@ -1042,6 +1044,10 @@ class ClaudeProviderHandle implements ProviderHandle {
   readonly roomTurnResults = new Map<string, ClaudeRoomTurnTerminal>();
   /** Turns whose own result proved that they completed, and carried no answer. */
   readonly roomTurnsWithoutAnswer = new Set<string>();
+  /** Claude Code's name for the API error that the running turn's stream last carried. */
+  roomTurnApiError: { turnId: string; category: string } | null = null;
+  /** The turn whose stream reported a usage window of the account that rejected a request. */
+  roomTurnUsageLimit: string | null = null;
   activeRoomTurnId: string | null = null;
   roomTurnOperationId: string | null = null;
   pendingInterruptTurnId: string | null = null;
@@ -2122,6 +2128,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (typedAuthority && nativeLifecycle?.phase === "turn_terminal") handle.state = "idle";
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
+    // Claude names an API error on the assistant row that carries its text. The row comes before the
+    // result, and does not always name its command; the result that follows does.
+    const apiErrorCategory = claudeApiErrorCategory(message, handle.providerContinuationId);
+    if (apiErrorCategory && handle.activeRoomTurnId
+      && (message.user_message_uuid == null || message.user_message_uuid === handle.activeRoomTurnId)) {
+      handle.roomTurnApiError = { turnId: handle.activeRoomTurnId, category: apiErrorCategory };
+    }
+    if (handle.activeRoomTurnId && claudeUsageLimitRejected(message, handle.providerContinuationId)) handle.roomTurnUsageLimit = handle.activeRoomTurnId;
     if (type === "result") {
       const exactTurnId = typeof message.user_message_uuid === "string"
         ? message.user_message_uuid.trim()
@@ -2130,7 +2144,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       if (exactTurnId) {
         const terminal = contextualInterruptTurnId
           ? { turnId: contextualInterruptTurnId, nativeOutcome: "interrupted" as const, error: "Claude command ended interrupted." }
-          : exactClaudeStreamTerminal(message, exactTurnId, handle.providerContinuationId);
+          : exactClaudeStreamTerminal(message, exactTurnId, handle.providerContinuationId,
+            handle.roomTurnApiError?.turnId === exactTurnId ? handle.roomTurnApiError.category : null,
+            handle.roomTurnUsageLimit === exactTurnId);
         if (terminal) {
           exactTurnFailed = "error" in terminal && handle.activeRoomTurnId === exactTurnId;
           handle.roomTurnResults.set(exactTurnId, terminal);
@@ -2425,7 +2441,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       return { turnId: terminal.turnId, providerContinuationId: handle.providerContinuationId,
         outcome: terminal.nativeOutcome, text: null, evidence: "stream",
         error: String(safeStreamPayload(terminal.error).payload).slice(0, 2000),
-        ...(terminal.unrecognizedResult ? { unrecognizedResult: true as const } : {}) };
+        ...(terminal.unrecognizedResult ? { unrecognizedResult: true as const } : {}),
+        ...(terminal.apiFailure ? { claudeApiFailure: terminal.apiFailure } : {}),
+        ...(terminal.refusal ? { refusal: true as const } : {}) };
     }
     if (terminal.outcome === "reply") {
       return {
