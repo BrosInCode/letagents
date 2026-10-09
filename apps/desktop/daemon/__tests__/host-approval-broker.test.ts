@@ -779,17 +779,76 @@ test("a permission-mode save does not let a request be answered for another runt
     const rejects = (authority: typeof seen.authority) => assert.rejects(
       f.store.validateExecutionApprovalAuthority(seen.expected, authority),
       error => error instanceof ApprovalJournalError && error.code === "missing_turn");
+    // The owner's own stored choice proceeds while a saved edit waits. The authority carries no claim
+    // about who chose: the journal reads that from the decision it stored.
     await f.store.validateExecutionApprovalAuthority(seen.expected, seen.authority);
-    // Only the owner's own answer may proceed while a saved edit waits. A decision that
-    // depends on the configuration in force (automatic, delegated, a saved rule) may not.
-    const { ownerAnswer: _owner, ...notTheOwners } = seen.authority;
-    assert.equal(_owner, true);
-    await rejects(notTheOwners);
+    await assert.rejects(f.store.validateExecutionApprovalAuthority(seen.expected, { ...seen.authority, ownerAnswer: true } as typeof seen.authority),
+      error => error instanceof ApprovalJournalError && error.code === "invalid_input", "a caller cannot assert the owner answered");
     await rejects({ ...seen.authority, configurationRevision: 2 }); // Authority from a runtime that never started.
     f.db.exec("UPDATE agent_configurations SET runtime_configuration_revision=2 WHERE agent_id='agent'");
     await rejects(seen.authority); // A runtime already replaced at the saved revision.
     f.db.exec("UPDATE agent_configurations SET config_revision=1 WHERE agent_id='agent'");
     await rejects({ ...seen.authority, configurationRevision: 2 }); // A saved revision can never trail the applied one.
+  } finally { await f.close(); }
+});
+
+// While a saved edit waits, only a person's own Allow once or Deny may use the old runtime's authority.
+// The journal reads who chose from its own records: the stored source, the actor, and any saved rule bound to the decision.
+for (const chooser of ["owner", "automatic review", "saved rule"] as const) {
+  test(`the journal accepts the ${chooser}'s decision while a saved edit waits only if a person chose it`, async () => {
+    const f = await savedRuleFixture("claude-code");
+    try {
+      const [candidate] = await f.broker.list("room");
+      f.broker.close(); // No automatic matching races: the selections below are the only decisions.
+      const authority = { inboxItemId: f.item.inbox_item_id, workAttemptId: "workspace", executionGenerationId: "generation",
+        provider: "claude-code" as const, providerConnection: f.handle.providerConnection as any, configurationRevision: 1 };
+      const selection = { ...decision(candidate!), authority, atMs: now + 10,
+        actorId: chooser === "automatic review" ? "automatic-review" : "host-owner" };
+      const refused = (work: Promise<unknown>) => assert.rejects(work,
+        error => error instanceof ApprovalJournalError && error.code === "missing_turn");
+      const select = () => chooser === "saved rule"
+        ? f.store.selectHostToolApproval(selection, { scope: candidate!.presentation.alwaysAllow!, create: true }, async commit => commit())
+        : f.store.selectHostApproval(selection, async commit => commit());
+      const dispatch = { authority, expected: selection.expected, decisionId: selection.decisionId, dispatchId: "dispatch",
+        projectionSha256: selection.projectionSha256, atMs: now + 20 };
+      const answers = chooser === "owner"; // Only a person's own Allow once or Deny.
+
+      f.db.exec("UPDATE agent_configurations SET config_revision=2");
+      if (answers) await select(); else await refused(select());
+      f.db.exec("UPDATE agent_configurations SET config_revision=1");
+      if (!answers) await select(); // Recorded while the saved and applied settings agree.
+      f.db.exec("UPDATE agent_configurations SET config_revision=2");
+      // The same stored decision, read again after the save: retry validation, dispatch and the final send.
+      const stillValid = f.store.validateExecutionApprovalAuthority(selection.expected, authority);
+      if (answers) {
+        const assertNativeWrite = await stillValid;
+        assert.equal((await f.store.beginExecutionApprovalDispatch(dispatch, async commit => commit())).dispatch, true);
+        assertNativeWrite();
+      } else {
+        await refused(stillValid);
+        await refused(f.store.beginExecutionApprovalDispatch(dispatch, async commit => commit()));
+        assert.equal((await f.store.getExecutionApproval(selection.expected))!.decision!.dispatchId, null);
+      }
+    } finally { await f.close(); }
+  });
+}
+
+test("a saved rule's recorded choice that was not sent is not retried by the owner while a saved edit waits", async () => {
+  const f = await savedRuleFixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room");
+    f.state.failBefore = true;
+    // A saved rule is created and records its decision under the owner's own actor, but the send fails.
+    await assert.rejects(f.broker.decide({ ...decision(candidate!), decision: "allow_always" }), /recorded but could not be sent/);
+    f.state.failBefore = false;
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM host_tool_rule_decisions").get()!.n, 1);
+    // A saved edit that leaves the card alone.
+    f.db.exec("UPDATE agent_configurations SET config_revision=2");
+    const [card] = await f.broker.list("room");
+    assert.notEqual(card?.status, "decision_recorded", "the rule's decision is not offered as the owner's to retry");
+    assert.equal(card?.detail, "The decision was recorded but not sent.");
+    await assert.rejects(f.broker.decide(decision(candidate!)), /could not be matched|authority|rejected|unavailable/i);
+    assert.deepEqual(f.sends, [], "nothing reaches the provider for a decision no person chose");
   } finally { await f.close(); }
 });
 
