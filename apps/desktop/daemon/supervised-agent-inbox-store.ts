@@ -11,7 +11,7 @@ import { prepareRoomContext } from "./prepared-room-context.js";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
 import { assertNoPollingActivation } from "./custodial-polling-activation.js";
-import { parseClaudeApiFailure, parseTaskContinuation, type ClaudeApiFailure, type ContinuityTask, type TaskContinuation } from "./task-continuity.js";
+import { FOLLOW_UP_ENDED, parseClaudeApiFailure, parseTaskContinuation, type ClaudeApiFailure, type ContinuityTask, type TaskContinuation } from "./task-continuity.js";
 import {
   MAX_QUEUED_NOTICES_PER_TURN, peopleFirstOrder, queuedDeliveryKind, queuedNoticeIds, queuedNoticeReason, queuedNoticesFor, roomArrival,
   type QueuedDeliveryKind,
@@ -627,12 +627,11 @@ export class SupervisedAgentInboxStore {
       run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
         JSON.stringify({ ...parent.activation, task_continuity_considered: childSource }), parent.inbox_item_id);
       const setLastError = database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?");
-      if (this.hasUncertainTaskEffects(database, parent)) {
-        run(setLastError, "Automatic task continuation stopped because a previous action has an uncertain result. Check its external result, then send an instruction to continue only the verified unfinished work.", this.now(), parent.inbox_item_id);
-        return null;
-      }
-      if (input.tasks?.length === 0) return null;
-      if (input.settleReason) {
+      // An uncertain earlier action ends the series like a settled one: no follow-up, and the reason where its owner looks.
+      const uncertain = this.hasUncertainTaskEffects(database, parent);
+      if (!uncertain && input.tasks?.length === 0) return null;
+      const settleReason = uncertain ? FOLLOW_UP_ENDED.uncertainEffects : input.settleReason;
+      if (settleReason) {
         // Also show the reason on the room message the task continued from;
         // a synthetic follow-up has no chat message of its own.
         let origin = parent;
@@ -643,7 +642,7 @@ export class SupervisedAgentInboxStore {
           origin = rowToItem(row);
         }
         const timestamp = this.now();
-        for (const id of new Set([parent.inbox_item_id, origin.inbox_item_id])) run(setLastError, input.settleReason, timestamp, id);
+        for (const id of new Set([parent.inbox_item_id, origin.inbox_item_id])) run(setLastError, settleReason, timestamp, id);
         return null;
       }
       // No model turn is replayed. The same native conversation retains its files and tool history.
@@ -724,6 +723,40 @@ export class SupervisedAgentInboxStore {
       run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=?,source_message_json=? WHERE inbox_item_id=?"),
         JSON.stringify({ ...item.activation, task_continuity: metadata }), JSON.stringify({ ...source, text }), inboxItemId);
       return metadata;
+    }));
+  }
+
+  /** A follow-up that waits for its time, and that nothing has started: the only kind its owner can start now or stop. */
+  private scheduledTaskContinuation(database: DatabaseSync, inboxItemId: string): SupervisedInboxItem {
+    const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+    const item = row ? rowToItem(row) : null;
+    if (!item || !this.readTaskContinuation(database, item) || item.state !== "pending" || item.provider_turn_id || item.outcome) {
+      throw new Error("This automatic attempt has already started or ended.");
+    }
+    this.assertCurrentHead(database, item);
+    return item;
+  }
+
+  /** Try now: the follow-up's time is now. It stays the same follow-up, so it is the same attempt. */
+  async startTaskContinuationNow(inboxItemId: string): Promise<void> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      this.scheduledTaskContinuation(database, inboxItemId);
+      const timestamp = this.now();
+      run(database.prepare("UPDATE supervised_agent_inbox SET next_attempt_at_ms=?,updated_at=? WHERE inbox_item_id=?"), Date.parse(timestamp), timestamp, inboxItemId);
+      this.recordEvent(database, inboxItemId, `task-continuation:now:${timestamp}`, "retry_scheduled", timestamp, "Started now, as its owner asked.");
+    }));
+  }
+
+  /** Stop trying: the follow-up ends before anything started, and no other is made for it. Later messages go ahead. */
+  async stopTaskContinuation(inboxItemId: string, detail: string): Promise<void> {
+    return this.exclusive(async (database) => this.transaction(database, () => {
+      const item = this.scheduledTaskContinuation(database, inboxItemId);
+      const timestamp = this.now();
+      run(database.prepare(`UPDATE supervised_agent_inbox SET state='cancelled_by_user',last_error=?,next_attempt_at_ms=NULL,acknowledged_at=?,updated_at=?
+        WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
+      this.settleTerminalItem(database, item, timestamp);
+      this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, detail);
+      this.pruneAgentHistory(database, item.agent_id);
     }));
   }
 

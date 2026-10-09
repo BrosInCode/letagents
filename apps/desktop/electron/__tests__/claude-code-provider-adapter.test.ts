@@ -3380,7 +3380,10 @@ for (const [name, expected] of Object.entries(CLAUDE_API_FAILURE_POLICY)) {
         assert.deepEqual((await phases("retry_scheduled")).map((event) => event.detail), [expected.reads], "the follow-up says why it runs");
         assert.deepEqual(await phases("blocked"), []);
         assert.equal(agent.followUpWaits.length, 1);
-        assert.ok(agent.followUpWaits[0]! > 9_000 && agent.followUpWaits[0]! <= 10_000, `the follow-up was scheduled ten seconds ahead (${agent.followUpWaits[0]} ms)`);
+        // A short provider fault waits thirty seconds before its first follow-up. A turn that ended without a reply waits ten.
+        const scheduledAheadMs = expected.kind === "short_fault" ? 30_000 : 10_000;
+        assert.ok(agent.followUpWaits[0]! > scheduledAheadMs - 1_000 && agent.followUpWaits[0]! <= scheduledAheadMs,
+          `the follow-up was scheduled ${scheduledAheadMs / 1000} seconds ahead (${agent.followUpWaits[0]} ms)`);
         agent.reportStarted(followUpTurn);
         agent.answer(followUpTurn, "Continued the task.");
         await agent.eventually(async () => (await rows())[1]?.state === "acknowledged", "the follow-up turn is answered");

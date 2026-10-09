@@ -181,14 +181,14 @@ const RETRY_DELIVERY = "Resolve this issue, then use Retry delivery to continue 
 const NOT_CONTINUED = "The unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.";
 /** What the owner reads on the follow-up item of each kind of failure. */
 export const CLAUDE_FAILURE_TEXT = {
-  temporary: "The provider failed temporarily. Continuing the unfinished task after a short delay.",
+  temporary: "The provider failed temporarily. The agent will try again by itself.",
   authentication: `The model provider needs authentication or account access. ${RETRY_DELIVERY}`,
   billing: `The model provider has insufficient credit or quota. ${RETRY_DELIVERY}`,
   model: `The model provider cannot find the selected model, or this account cannot use it. ${RETRY_DELIVERY}`,
   /** Added to Claude's own text on the follow-up item: what the failure means for the conversation, and what Start fresh costs. */
   conversation: "The request does not fit the model's context, so each turn in this conversation fails the same way. Start fresh opens a new conversation and discards the context of this one. After it, use Retry delivery, then send a message to continue the task. If the size comes from attachments or tools, a new conversation may not help.",
   unknown: `The provider failed and safe automatic recovery could not be established. ${RETRY_DELIVERY}`,
-  noReply: "The model stopped before writing a reply. Continuing the unfinished task after a short delay.",
+  noReply: "The model stopped before writing a reply. The agent will try again once, after a short wait.",
   /** Added to Claude's own text on the failed message, when nothing is queued. */
   cannotSucceed: `Sending it again unchanged cannot help, so the unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.`,
   refused: NOT_CONTINUED,

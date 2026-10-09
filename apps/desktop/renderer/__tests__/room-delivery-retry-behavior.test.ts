@@ -1157,6 +1157,134 @@ test("missing-conversation controls render only before provider work starts", ()
   ambiguous.app.unmount();
 });
 
+test("a mounted message counts down in view to the saved time, and its buttons ask for the agent's follow-up", async (context) => {
+  // The time of day is the test's, and a second passes only when the test says so. The two are apart: after a
+  // sleep the time is far ahead and one tick comes.
+  const start = Date.parse("2026-10-09T14:30:00.000Z");
+  let now = start;
+  context.mock.method(Date, "now", () => now);
+  context.mock.timers.enable({ apis: ["setInterval"] });
+  const second = async (passedMs = 1_000) => { now += passedMs; context.mock.timers.tick(1_000); await nextTick(); };
+  const retries: Array<[string, string]> = [];
+  const skips: Array<[string, string]> = [];
+  const failed = { agentId: "oak", agentName: "Oak", state: "acknowledged_failed", blockedByMessageId: null, failureCode: null, terminalReason: null,
+    attemptCount: 1, providerTurnId: "turn_1", error: "API Error: Repeated 529 Overloaded errors." };
+  const props = Vue.reactive({
+    message: message(), threadSummary: emptyThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
+    deliveryRecoveryAvailable: true, roomDeliverySkipAvailable: true,
+    deliveryReceipts: [{ ...failed, scheduledRetry: { atMs: start + 100_000, attempt: 2, attempts: 3, kind: "provider_fault", sourceMessageId: "task-continuation:inbox_1" } }] as unknown[],
+    onRetryDelivery: (agentId: string, sourceMessageId: string) => retries.push([agentId, sourceMessageId]),
+    onSkipDelivery: (agentId: string, sourceMessageId: string) => skips.push([agentId, sourceMessageId]),
+  });
+  const mounted = mount({ setup: () => () => Vue.h(DesktopChatMessage, { ...props }) }, {});
+  const textOf = (node: HostNode) => descendants(node).map((child) => child.text).join("").trim();
+  const receipt = () => descendants(mounted.root).find((node) => node.type === "li" && node.props["data-state"] === "acknowledged_failed")!;
+  const notes = () => descendants(receipt()).filter((node) => node.type === "small").map(textOf);
+  const countdown = () => textOf(descendants(receipt()).find((node) => node.type === "small" && node.props["aria-hidden"] === "true")!);
+  try {
+    await nextTick();
+    // What is in view: the count, which moves; what is read aloud: a clock time, which does not.
+    assert.equal(countdown(), "Trying again in 1 min 40 s (attempt 2 of 3)");
+    const spoken = String(receipt().props["aria-label"]);
+    assert.match(spoken, /^Oak: API Error: Repeated 529 Overloaded errors\. Trying again at \S.* \(attempt 2 of 3\)\. If all 3 attempts fail, the agent stops and waits for you\.$/);
+    await second();
+    assert.equal(countdown(), "Trying again in 1 min 39 s (attempt 2 of 3)");
+    await second(); await second();
+    assert.equal(countdown(), "Trying again in 1 min 37 s (attempt 2 of 3)");
+    assert.equal(receipt().props["aria-label"], spoken, "the spoken label did not change with the count");
+    // The machine sleeps for a minute and one tick comes: the count is the saved time minus the time now.
+    await second(60_000);
+    assert.equal(countdown(), "Trying again in 37 s (attempt 2 of 3)");
+    await second(36_000);
+    assert.equal(countdown(), "Trying again in 1 s (attempt 2 of 3)");
+    // At the time, and after it while the turn has not started: nothing says that the agent tries now.
+    await second();
+    assert.equal(countdown(), "About to try again (attempt 2 of 3)");
+    assert.match(String(receipt().props["aria-label"]), /^Oak: API Error: Repeated 529 Overloaded errors\. About to try again \(attempt 2 of 3\)\. /);
+    await second(300_000);
+    assert.equal(countdown(), "About to try again (attempt 2 of 3)");
+
+    // The two controls ask for the follow-up by its own id, not for this message.
+    const tryNow = buttonByText(receipt(), "Try now");
+    const stop = buttonByText(receipt(), "Stop trying");
+    assert.deepEqual([tryNow.props.type, tryNow.props.disabled, tryNow.props["aria-label"]], ["button", false, "Try again now for Oak"]);
+    assert.deepEqual([stop.props.type, stop.props.disabled, stop.props["aria-label"]], ["button", false, "Stop the automatic attempts for Oak"]);
+    (tryNow.props.onClick as () => void)();
+    (stop.props.onClick as () => void)();
+    assert.deepEqual([retries, skips], [[["oak", "task-continuation:inbox_1"]], [["oak", "task-continuation:inbox_1"]]]);
+
+    // The turn starts: the follow-up no longer waits, so the message shows what failed and nothing else.
+    props.deliveryReceipts = [failed];
+    await nextTick();
+    assert.deepEqual(notes(), ["API Error: Repeated 529 Overloaded errors."]);
+    assert.equal(buttons(receipt()).length, 0);
+
+    // All attempts failed: the message says that the agent waits for its owner, and Retry asks for that follow-up.
+    const waits = "All three automatic attempts failed. The agent now waits for you: check the provider, then use Retry delivery to try again. Existing work is preserved.";
+    props.deliveryReceipts = [{ ...failed, followUpNote: { state: "waiting_for_owner", sourceMessageId: "task-continuation:inbox_4", text: waits, canRetry: true } }];
+    await nextTick();
+    assert.deepEqual(notes(), ["API Error: Repeated 529 Overloaded errors.", waits]);
+    assert.equal(buttons(receipt()).length, 1);
+    (buttonByText(receipt(), "Retry").props.onClick as () => void)();
+    assert.deepEqual(retries.at(-1), ["oak", "task-continuation:inbox_4"]);
+
+    // Its owner stopped the attempts: the message says so, with no control, for as long as the receipt is kept.
+    const stopped = "You stopped the automatic attempts. The task is still assigned to this agent. Send it a message to continue.";
+    props.deliveryReceipts = [{ ...failed, followUpNote: { state: "ended", sourceMessageId: "task-continuation:inbox_1", text: stopped, canRetry: false } }];
+    await nextTick();
+    assert.deepEqual(notes(), ["API Error: Repeated 529 Overloaded errors.", stopped]);
+    assert.equal(buttons(receipt()).length, 0);
+    assert.equal(receipt().props["aria-label"], `Oak: API Error: Repeated 529 Overloaded errors. ${stopped}`);
+    await second(3_600_000);
+    assert.deepEqual(notes(), ["API Error: Repeated 529 Overloaded errors.", stopped]);
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("the room's live strip shows an agent that waits to try again as a row at rest, which no room message retires", async () => {
+  const waiting = { id: "agent-a:waiting", displayName: "Agent A", summary: "Waiting to try again, due at 14:32 (attempt 2 of 3)",
+    startedAt: "2026-10-09T14:32:00.000Z", agentSessionId: "session-a", agentKey: null, sourceMessageId: null, waiting: true as const };
+  const props = Vue.reactive({
+    active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
+    loadingOlderMessages: false, messages: [message("msg_1")], threadMessages: [] as ReturnType<typeof message>[],
+    messageNamespace: "waiting-row", localAgentWork: [waiting] as unknown[],
+    deliveryReceiptsByMessage: {}, hasFilteredRoomActivity: false,
+    roomIdentifier: "room", githubActivityAvailable: false, roomLoading: false, searchQuery: "", taskReferenceIds: new Set(),
+  });
+  const opened: unknown[] = [];
+  const viewport = mount({ setup: () => () => Vue.h(RoomMessageViewport, { ...props, onOpenAgent: (target: unknown) => opened.push(target) }) }, {});
+  const rows = () => descendants(viewport.root).filter((node) => node.props["data-testid"] === "room-local-agent-work");
+  const echo = (row: HostNode) => descendants(row).filter((node) => node.props["data-testid"] === "room-local-agent-work-echo")
+    .map((node) => descendants(node).map((child) => child.text).join("")).join("");
+  try {
+    await nextTick();
+    assert.equal(rows().length, 1);
+    const [row] = rows();
+    assert.equal(row!.props["data-waiting"], true, "the row is marked as one that waits, which is what puts it at rest");
+    assert.equal(echo(row!), "Waiting to try again, due at 14:32 (attempt 2 of 3)");
+    assert.equal(row!.props["aria-label"], "Agent A: Waiting to try again, due at 14:32 (attempt 2 of 3). Open live activity");
+    (row!.props.onClick as () => void)();
+    assert.equal((opened[0] as { agentSessionId: string }).agentSessionId, "session-a", "it opens that agent");
+
+    // The agent wrote to the room earlier, and other messages arrive: the row stays, because the agent still waits.
+    props.messages = [message("msg_1"), { ...message("msg_2"), agentIdentity: { agentSessionId: "session-a" } } as never, message("msg_3")];
+    await nextTick();
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0]!.props["data-waiting"], true);
+
+    // The attempt starts. The agent's working row takes its place at once, with its own text, and is not at rest.
+    props.localAgentWork = [{ id: "agent-a", displayName: "Agent A", summary: "Working", startedAt: "2026-10-09T14:32:05.000Z",
+      agentSessionId: "session-a", agentKey: null, sourceMessageId: null }];
+    await nextTick();
+    assert.equal(rows().length, 1);
+    assert.equal(rows()[0]!.props["data-waiting"], undefined);
+    assert.equal(echo(rows()[0]!), "Working");
+  } finally {
+    viewport.app.unmount();
+  }
+});
+
 test("history failure offers explicit retry without viewport or scroll retries", async () => {
   let calls = 0;
   const viewport = mount(RoomMessageViewport, {

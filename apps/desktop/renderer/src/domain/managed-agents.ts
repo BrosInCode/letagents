@@ -621,6 +621,8 @@ export interface ManagedAgentWorkIndicator {
   agentKey?: string | null;
   /** Exact activating room message; establishes causal order without comparing host clocks. */
   sourceMessageId?: string | null;
+  /** The agent is not working: it waits for the time of its automatic attempt. The row rests. */
+  waiting?: true;
 }
 
 /** Longest live-activity echo shown in the room work indicator. */

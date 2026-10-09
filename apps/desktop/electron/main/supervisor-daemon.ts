@@ -45,7 +45,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.215";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.216";
 /**
  * The room-level state channel carries activity summaries, not history. Keep in
  * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
@@ -256,6 +256,7 @@ type WireEntry = {
   delivery_receipts?: Array<{
     inbox_item_id: string; source_message_id: string; fifo_sequence?: number; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
     provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code?: string | null; terminal_reason?: string | null; updated_at: string;
+    follow_up?: { for_message_id: string | null; state: string; scheduled: { at_ms: number; attempt: number; attempts: number; kind: string } | null };
     timeline?: Array<{ event_sequence?: number; phase: string; observed_at: string; detail: string | null }>;
   }>;
 };
@@ -2678,8 +2679,27 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       const sequence = Number(rawSequence);
       timeline.push({ sequence, phase, observedAt, detail });
     }
-    return [{ inboxItemId, sourceMessageId, fifoSequence, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt, timeline }];
+    const followUp = projectFollowUp(receipt.follow_up);
+    return [{ inboxItemId, sourceMessageId, fifoSequence, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt,
+      ...(followUp ? { followUp } : {}), timeline }];
   });
+}
+
+/** A follow-up is shown only when every part of it is what the daemon writes; anything else reads as none. */
+function projectFollowUp(value: unknown): import("../ipc-types/agents.js").DesktopRoomAgentFollowUp | null {
+  const followUp = record(value);
+  if (!followUp) return null;
+  const forMessageId = nullableNonEmptyString(followUp.for_message_id);
+  const state = enumValue(followUp.state, ["scheduled", "waiting_for_owner", "ended"] as const);
+  if (forMessageId === undefined || !state) return null;
+  if (state !== "scheduled") return followUp.scheduled === null ? { forMessageId, state, scheduled: null } : null;
+  const scheduled = record(followUp.scheduled);
+  const kind = enumValue(scheduled?.kind, ["provider_fault", "no_reply"] as const);
+  const { at_ms: atMs, attempt, attempts } = scheduled ?? {};
+  if (!kind || typeof atMs !== "number" || !Number.isSafeInteger(atMs) || atMs <= 0
+    || typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 1
+    || typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < attempt) return null;
+  return { forMessageId, state, scheduled: { atMs, attempt, attempts, kind } };
 }
 
 /**
