@@ -516,9 +516,8 @@ export class HostApprovalBroker {
     const requestSha256 = digest(inspected);
     let prior = await this.options.store.readLatestExecutionApproval(requestId);
     if (prior?.decision && !prior.decision.dispatchId && !prior.decision.withdrawnBeforeSend) {
-      // The owner's own recorded choice stays retryable while a saved edit waits for a restart.
-      const ownersChoice = prior.decision.actorId === this.options.hostActorId?.();
-      try { await this.options.store.validateExecutionApprovalAuthority(reference(prior), ownersChoice ? { ...owned, ownerAnswer: true } : owned); }
+      // The journal tells the owner's own recorded choice, which stays retryable while a saved edit waits for a restart.
+      try { await this.options.store.validateExecutionApprovalAuthority(reference(prior), owned); }
       catch (error) {
         if (error instanceof HostToolRuleRevokedError) {
           await this.options.store.withdrawHostToolApproval({ expected: reference(prior), decisionId: prior.decision.decisionId,
@@ -633,8 +632,6 @@ export class HostApprovalBroker {
       actorId: value.actorId,
       decision: value.decision === "allow_always" ? "allow_once" : value.decision,
       projectionSha256: value.projectionSha256,
-      // Allow once and Deny are the owner's consent for this one request. A saved tool rule is not.
-      ...(value.decision === "allow_always" ? {} : { byOwner: true as const }),
     }, async (prepared) => {
       if (!isDeepStrictEqual(prepared.expected, value.expected)
         || digest(prepared.presentation) !== value.projectionSha256) {
@@ -685,7 +682,7 @@ export class HostApprovalBroker {
         return {
           expected: prepared.candidate.reference,
           presentation: prepared.candidate.presentation,
-          approvalAuthority: input.byOwner ? { ...prepared.owned, ownerAnswer: true as const } : prepared.owned,
+          approvalAuthority: prepared.owned,
           approval: prepared.approval,
           handle: lane.handle,
           native,

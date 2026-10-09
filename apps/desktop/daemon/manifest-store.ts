@@ -685,7 +685,8 @@ export class ManifestStore {
       if (prior?.decision && !db.prepare("SELECT 1 FROM host_tool_rule_decisions WHERE decision_id=?").get(snapshot.input.decisionId)) {
         throw new Error("The existing decision did not create a saved tool permission.");
       }
-      const selected = selectHostApproval(db, snapshot.input, entry);
+      // A saved rule never answers on a saved edit that is not applied yet: the journal is told which path this is.
+      const selected = selectHostApproval(db, snapshot.input, entry, true);
       bindHostToolRule(db, { ...snapshot.rule, decisionId: snapshot.input.decisionId, ownerId: snapshot.input.actorId,
         atMs: snapshot.input.atMs }, entry);
       return selected;
