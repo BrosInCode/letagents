@@ -16,7 +16,40 @@ export type TaskFailurePolicy = {
   settle?: true;
   /** Added to the follow-up prompt so the next turn can avoid the same failure. */
   note?: string;
+  /** How long an automatic follow-up waits before it starts. Without it, `defaultFollowUpDelayMs` says. */
+  delayMs?: number;
 };
+
+/** How many follow-ups a failed task turn gets by itself. After the last of them the follow-up waits for the owner. */
+export const MAX_AUTOMATIC_FOLLOW_UPS = 3;
+/**
+ * What a scheduled follow-up says while it waits, after a turn that ended without a reply. Such a turn gets one
+ * automatic attempt and no more; what the owner is shown reads this text to tell it from a provider fault.
+ */
+export const NO_REPLY_FOLLOW_UP_DETAIL = "The model stopped before writing a reply. The agent will try again once, after a short wait.";
+/** What the follow-up says that waits for the owner after the last automatic attempt failed. */
+export const AUTOMATIC_ATTEMPTS_FAILED_DETAIL = "All three automatic attempts failed. The agent now waits for you: check the provider, then use Retry delivery to try again. Existing work is preserved.";
+/** Why a follow-up that waited for its time ended with nothing started. The owner reads these on the room message. */
+export const FOLLOW_UP_ENDED = {
+  stoppedByOwner: "You stopped the automatic attempts. The task is still assigned to this agent. Send it a message to continue.",
+  agentChanged: "The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task.",
+  taskNotHeld: "The agent did not try again: the task is finished, or is no longer this agent's.",
+  uncertainEffects: "The agent did not try again: an earlier action has an uncertain result. Check that result, then send an instruction to continue only the verified unfinished work.",
+} as const;
+/**
+ * How long each follow-up waits after a short provider fault: a rate limit, a
+ * server error, an overloaded provider, a lost connection. Such a fault often
+ * lasts minutes, so the waits grow: 30 seconds, 2 minutes, 10 minutes.
+ */
+export const SHORT_FAULT_FOLLOW_UP_DELAYS_MS = [30_000, 2 * 60_000, 10 * 60_000] as const;
+/** The wait of a first follow-up that has no schedule of its own, as after a turn that ended without a reply. */
+export const FIRST_FOLLOW_UP_DELAY_MS = 10_000;
+/** No such follow-up waits longer than this. */
+export const LONGEST_DEFAULT_FOLLOW_UP_DELAY_MS = 60_000;
+/** A follow-up with no schedule of its own waits 10, 20, then 40 seconds. */
+export function defaultFollowUpDelayMs(attempt: number): number {
+  return Math.min(LONGEST_DEFAULT_FOLLOW_UP_DELAY_MS, FIRST_FOLLOW_UP_DELAY_MS * 2 ** Math.min(attempt - 1, 3));
+}
 
 /** Claude Code's own structured account of a request to the model that failed. */
 export type ClaudeApiFailure = { status: number | null; terminalReason: string | null; category: string | null;
@@ -88,11 +121,15 @@ const OUT_OF_CREDIT_OR_QUOTA = /\b402\b|insufficient.{0,30}(?:credit|balance|quo
  * name no "usage limit": "Credit balance is too low", and the starts of its
  * usage messages ("You've hit your session limit", "weekly limit", "Opus
  * limit", "team's shared budget", "You're out of extra usage"...). A brief
- * rate limit that is worded "your ... rate limit" is not one of them. These
- * are read for a Claude failure alone: another provider can word a brief
- * limit of its own as "you've hit your ... limit".
+ * rate limit that is worded "your ... rate limit" is not one of them.
+ *
+ * Claude Code writes such a message as the whole text, and knows it by its
+ * start. So the words count at the start of the text alone: the same words
+ * in a server's message, which the CLI puts after "API Error: ...", are that
+ * server's and say nothing about the account. They are read for a Claude
+ * failure alone: another provider can word a brief limit of its own this way.
  */
-const CLAUDE_OUT_OF_USAGE = /credit balance (?:is )?too low|you['’]ve (?:hit|reached) your (?:(?!rate[ -]?limit)[^.\n]){0,60}?(?:limit|budget)|you['’]re out of (?:usage credits|extra usage)|your org is out of usage|your seat type doesn['’]t include (?:extra )?usage|your usage allocation has been disabled|requires usage credits|this service is disabled for your org/i;
+const CLAUDE_OUT_OF_USAGE = /^(?:credit balance (?:is )?too low|you['’]ve (?:hit|reached) your (?:(?!rate[ -]?limit)[^.\n]){0,60}?(?:limit|budget)|you['’]re out of (?:usage credits|extra usage)|your org is out of usage|your seat type doesn['’]t include (?:extra )?usage|your usage allocation has been disabled|[^\n\u00b7:]{1,40} requires usage credits|this service is disabled for your org)/i;
 /** Claude Code words a brief rate limit of a subscription login as "(not your usage limit)". Those words name no usage limit. */
 const CLAUDE_NOT_A_USAGE_LIMIT = /\(not your usage limit\)/gi;
 
@@ -132,7 +169,7 @@ export function taskFailurePolicy(error: string | null, attempt: number, refusal
   const readsLimitText = !kind || (kind === "short_fault" && (claudeApiFailure?.category === "rate_limit" || claudeApiFailure?.status === 429));
   // Claude Code's own words are read for a Claude failure alone.
   const limitText = claudeCode ? (error ?? "").replace(CLAUDE_NOT_A_USAGE_LIMIT, "") : error ?? "";
-  if (kind === "billing" || (readsLimitText && (OUT_OF_CREDIT_OR_QUOTA.test(limitText) || (claudeCode && CLAUDE_OUT_OF_USAGE.test(limitText))))) {
+  if (kind === "billing" || (readsLimitText && (OUT_OF_CREDIT_OR_QUOTA.test(limitText) || (claudeCode && CLAUDE_OUT_OF_USAGE.test(limitText.trim()))))) {
     return { automatic: false, detail: `The model provider has insufficient credit or quota. ${retry}` };
   }
   if (kind === "authentication" || (!kind && /\b40[13]\b|unauthorized|invalid api key|authentication|sign[ -]?in required|access.{0,15}denied/i.test(error ?? ""))) {
@@ -166,16 +203,18 @@ export function taskFailurePolicy(error: string | null, attempt: number, refusal
     if (attempt > 1) {
       return { automatic: false, settle: true, detail: `${NO_REPLY_FAILURE[noReply]} It happened again, so the unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
     }
-    return { automatic: true, detail: "The model stopped before writing a reply. Continuing the unfinished task after a short delay.",
+    return { automatic: true, detail: NO_REPLY_FOLLOW_UP_DETAIL,
       note: noReply === "outputLimit"
         ? "Your previous turn hit the model's output limit before it wrote a reply. Keep replies short and split large tool calls."
         : noReply === "deniedTool"
           ? "In your previous turn a tool call was denied, so it did not run, and the turn ended before you replied. Do not run it again. Continue without it, or say in your reply why you need it. End this turn with a short reply."
           : "Your previous turn ended without a reply. End this turn with a short reply." };
   }
-  if (attempt > 3) return { automatic: false, detail: `Automatic task recovery stopped after three continuations. Check the provider, then use Retry delivery. Existing work is preserved.` };
+  if (attempt > MAX_AUTOMATIC_FOLLOW_UPS) return { automatic: false, detail: AUTOMATIC_ATTEMPTS_FAILED_DETAIL };
   if (kind === "short_fault" || (!kind && /\b(?:429|500|502|503|504|529)\b|rate.?limit|temporar(?:y|ily)|overloaded|service unavailable|connection reset|ECONNRESET|ETIMEDOUT|socket closed|network error/i.test(error ?? ""))) {
-    return { automatic: true, detail: "The provider failed temporarily. Continuing the unfinished task after a short delay." };
+    // The same for every provider: a short fault is the same thing whoever reports it.
+    return { automatic: true, detail: "The provider failed temporarily. The agent will try again by itself.",
+      delayMs: SHORT_FAULT_FOLLOW_UP_DELAYS_MS[attempt - 1] ?? SHORT_FAULT_FOLLOW_UP_DELAYS_MS.at(-1)! };
   }
   return { automatic: false, detail: `The provider failed and safe automatic recovery could not be established. ${retry}` };
 }

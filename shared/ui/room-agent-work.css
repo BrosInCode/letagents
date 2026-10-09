@@ -57,6 +57,17 @@
   animation: local-agent-work-pulse 1.8s ease-in-out infinite;
 }
 
+/* An agent that waits to try again is not working: its row rests. */
+.room-local-agent-work[data-waiting] .room-local-agent-work-pulse {
+  background: var(--amber, #f59e0b);
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.08);
+  animation: none;
+}
+
+.room-local-agent-work[data-waiting] .room-local-agent-work-dots {
+  display: none;
+}
+
 .room-local-agent-work-copy {
   display: flex;
   min-width: 0;

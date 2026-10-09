@@ -139,6 +139,8 @@ import { configurationHasRuntimeLag, permissionPendingBadge } from "../../../../
 import { homeHarnessBadge } from "../../../../domain/agent-home-harness";
 import { initialTabEffects } from "../../../../domain/agent-inspector-identity";
 import { agentInspectorSignal, agentInspectorProviderLabel } from "../../../../domain/agent-inspector-presentation";
+import { agentScheduledRetry } from "../../../../domain/scheduled-retry";
+import { useSecondClock } from "../../../../composables/useSecondClock";
 import AgentInspectorSignal from "./AgentInspectorSignal.vue";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
@@ -208,7 +210,9 @@ const providerModelLabel = computed(() => [
     && !configurationHasRuntimeLag(props.settingsResource.configuration)
     ? props.settingsResource.configuration.reasoningEffort : null,
 ].filter(Boolean).join(" · "));
-const signal = computed(() => agentInspectorSignal(props.projection));
+// While the agent waits to try again, its time is read against a clock that moves, not against the last state push.
+const retryClock = useSecondClock(() => Boolean(agentScheduledRetry(props.projection.entry.deliveryReceipts)));
+const signal = computed(() => agentInspectorSignal(props.projection, retryClock.value));
 const recoveryKinds = new Set(["resume", "recover", "reconnect", "retry_delivery", "recovery_options"]);
 const recoveryActions = computed(() => props.projection.actions.filter(action => action.available && recoveryKinds.has(action.kind)));
 const headerActions = computed(() => props.projection.actions.filter(action => !recoveryKinds.has(action.kind)));

@@ -328,15 +328,18 @@ describe("durable room delivery UI contracts", () => {
   });
 
   it("carries grouped receipts, disabled retry capability, and reveal events across chat surfaces", async () => {
-    const [app, shell, chat, viewport, thread, message] = await Promise.all([
+    const [app, shell, chat, viewport, thread, message, receipts] = await Promise.all([
       source("src/App.vue"),
       source("src/components/desktop/content/DesktopRoomShell.vue"),
       source("src/components/desktop/content/RoomChatView.vue"),
       source("src/components/desktop/content/room-chat/RoomMessageViewport.vue"),
       source("src/components/desktop/content/room-chat/RoomThreadPanel.vue"),
       source("src/components/desktop/content/DesktopChatMessage.vue"),
+      source("src/domain/room-message-receipts.ts"),
     ]);
-    assert.match(shell, /\(grouped\[receipt\.sourceMessageId\] \?\?= \[\]\)\.push/);
+    // The shell groups receipts by room message with the domain function, which is where the grouping lives.
+    assert.match(shell, /roomMessageDeliveryReceipts\(supervisorEntries\.value\)/);
+    assert.match(receipts, /\(grouped\[receipt\.sourceMessageId\] \?\?= \[\]\)\.push/);
     assert.match(shell, /supervisedAgentWorkIndicators/);
     for (const content of [shell, chat, viewport, thread]) {
       assert.match(content, /delivery-receipts/);

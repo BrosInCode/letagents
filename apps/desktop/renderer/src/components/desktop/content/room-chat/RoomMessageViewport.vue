@@ -133,6 +133,7 @@
           :data-motion-session="work.agentSessionId"
           :data-motion-agent="work.agentKey"
           :data-motion-after="work.sourceMessageId"
+          :data-waiting="work.waiting || undefined"
           type="button"
           class="room-local-agent-work"
           :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"

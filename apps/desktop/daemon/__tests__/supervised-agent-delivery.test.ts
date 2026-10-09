@@ -17,7 +17,8 @@ import {
 } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
-import { claudeApiFailureClass, parseClaudeApiFailure, taskFailurePolicy } from "../task-continuity.js";
+import { claudeApiFailureClass, defaultFollowUpDelayMs, MAX_AUTOMATIC_FOLLOW_UPS, parseClaudeApiFailure, SHORT_FAULT_FOLLOW_UP_DELAYS_MS, taskFailurePolicy } from "../task-continuity.js";
+import { projectDeliveryReceipts } from "../manifest-view-projection.js";
 import { cursorAuthorityUnprovenDetail } from "../../electron/main/agents/cursor-turn-settlement.js";
 import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
@@ -1792,9 +1793,18 @@ test("only the adapter's mark keeps a failure text from being read: the same wor
 
 type ClaudeFacts = { status: number | null; terminalReason: string | null; category: string | null; usageLimit?: true; promptTooLong?: true };
 const RETRY_DELIVERY = "Resolve this issue, then use Retry delivery to continue the existing task.";
+/** How long each of the three follow-ups waits after a short provider fault: 30 seconds, 2 minutes, 10 minutes. */
+const SHORT_FAULT_WAITS = [30_000, 120_000, 600_000] as const;
+/** The decision for a short fault at this follow-up attempt. */
+const temporaryAt = (attempt: number) => ({ automatic: true, detail: "The provider failed temporarily. The agent will try again by itself.",
+  delayMs: SHORT_FAULT_WAITS[attempt - 1]! });
 /** Added to Claude's own text on the follow-up of a request that does not fit the model's context. */
 const DOES_NOT_FIT = "The request does not fit the model's context, so each turn in this conversation fails the same way. Start fresh opens a new conversation and discards the context of this one. After it, use Retry delivery, then send a message to continue the task. If the size comes from attachments or tools, a new conversation may not help.";
-const STOPPED_AFTER_THREE = "Automatic task recovery stopped after three continuations. Check the provider, then use Retry delivery. Existing work is preserved.";
+const STOPPED_AFTER_THREE = "All three automatic attempts failed. The agent now waits for you: check the provider, then use Retry delivery to try again. Existing work is preserved.";
+/** What the manifest says of a follow-up that waits for its time after a short provider fault. */
+const scheduledFault = (at_ms: number, attempt: number, for_message_id: string | null = "1") =>
+  ({ for_message_id, state: "scheduled", scheduled: { at_ms, attempt, attempts: 3, kind: "provider_fault" } });
+const STOPPED_BY_OWNER = "You stopped the automatic attempts. The task is still assigned to this agent. Send it a message to continue.";
 
 /**
  * A lease holder on the provider `providerId` whose turns fail as listed, in order, and then end with no reply. A
@@ -1935,8 +1945,7 @@ test("each kind of Claude failure has its own decision for a lease holder, whate
   const policy = (text: string, attempt: number, facts: ClaudeFacts) => taskFailurePolicy(text, attempt, false, false, facts);
   const shortFault = { status: null, terminalReason: "api_error", category: "server_error" };
   for (const attempt of [1, 2, 3]) {
-    assert.deepEqual(policy("Connection refused. 401 unauthorized, credit limit.", attempt, shortFault),
-      { automatic: true, detail: "The provider failed temporarily. Continuing the unfinished task after a short delay." });
+    assert.deepEqual(policy("Connection refused. 401 unauthorized, credit limit.", attempt, shortFault), temporaryAt(attempt));
   }
   assert.deepEqual(policy("Connection refused.", 4, shortFault), { automatic: false, detail: STOPPED_AFTER_THREE }, "the bound holds for a short fault");
   for (const attempt of [1, 4]) {
@@ -1994,7 +2003,7 @@ test("each kind of Claude failure has its own decision for a lease holder, whate
 
 test("the account's usage limit is never retried as a short fault: a rejected usage window, or the text that names the limit, decides first", async () => {
   const quota = { automatic: false, detail: `The model provider has insufficient credit or quota. ${RETRY_DELIVERY}` };
-  const temporary = { automatic: true, detail: "The provider failed temporarily. Continuing the unfinished task after a short delay." };
+  const temporary = temporaryAt(1);
   const rateLimit = { status: 429, terminalReason: "api_error", category: "rate_limit" };
   // A brief rate limit, as Claude Code 2.1.278 words it with an API key: retried, as before.
   const brief = "API Error: Request rejected (429) · This request would exceed your organization's rate limit.";
@@ -2043,19 +2052,34 @@ test("the account's usage limit is never retried as a short fault: a rejected us
   const briefLimits = [brief, ...notUsageLimit, "You've hit your organization's rate limit, try again in 20 seconds", "You've hit your rate limit.", "You've hit your rate-limit."];
   for (const text of briefLimits) {
     for (const attempt of [1, 2, 3]) {
-      assert.deepEqual(taskFailurePolicy(text, attempt, false, false, rateLimit), temporary, text);
-      assert.deepEqual(taskFailurePolicy(text, attempt, false, false, bare429), temporary, `${text} (a 429 with no name)`);
-      assert.deepEqual(claudeWithNoAccount(text, attempt), temporary, `${text} (Claude, no account)`);
+      assert.deepEqual(taskFailurePolicy(text, attempt, false, false, rateLimit), temporaryAt(attempt), text);
+      assert.deepEqual(taskFailurePolicy(text, attempt, false, false, bare429), temporaryAt(attempt), `${text} (a 429 with no name)`);
+      assert.deepEqual(claudeWithNoAccount(text, attempt), temporaryAt(attempt), `${text} (Claude, no account)`);
       // From another provider those words are not excused: "usage limit" is read in them, as before.
-      assert.deepEqual(anotherProvider(text, attempt), notUsageLimit.includes(text) ? quota : temporary, `${text} (another provider)`);
+      assert.deepEqual(anotherProvider(text, attempt), notUsageLimit.includes(text) ? quota : temporaryAt(attempt), `${text} (another provider)`);
     }
   }
-  // Four texts that another provider can write. They get what they got before Claude's words were read. The
-  // same texts from Claude Code are read with its words.
+  // Claude Code writes a limit of the account as the whole text, and knows it by its start. The same words inside
+  // a longer text are a server's own: a gateway can say "You've hit your concurrency limit", and the CLI puts
+  // that after "API Error: ...". That is a brief limit, with a follow-up, whatever account the failure has.
+  for (const text of ["API Error: Request rejected (429) \u00b7 You've hit your concurrency limit", "API Error: Request rejected (429) \u00b7 You've reached your requests per minute limit",
+    "API Error: Server is temporarily limiting requests (not your usage limit) \u00b7 You've hit your session limit", "API Error: 429 You're out of extra usage",
+    "API Error: Request rejected (429) \u00b7 Fable 5 requires usage credits", "Request rejected (429): Credit balance is too low"]) {
+    for (const policy of [taskFailurePolicy(text, 1, false, false, rateLimit), taskFailurePolicy(text, 1, false, false, { ...rateLimit, terminalReason: null }),
+      taskFailurePolicy(text, 1, false, false, bare429), claudeWithNoAccount(text)]) assert.deepEqual(policy, temporary, text);
+  }
+  // At the start they are Claude Code's own, with or without space before them.
+  for (const text of ["You've hit your concurrency limit", "  You've hit your session limit \u00b7 resets 3pm", "Opus 4.5 requires usage credits. Switch to another model to continue."]) {
+    assert.deepEqual(taskFailurePolicy(text, 1, false, false, rateLimit), quota, text);
+    assert.deepEqual(claudeWithNoAccount(text), quota, text);
+  }
+  // Four texts that another provider can write. They get what they got before Claude's words were read. The first
+  // three have Claude's words in the middle, so Claude Code gets the same for them. The last has the words that
+  // Claude Code excuses.
   const elsewhere: Array<[text: string, anotherProviders: ReturnType<typeof taskFailurePolicy>, claudes: ReturnType<typeof taskFailurePolicy>]> = [
-    ["429 Too Many Requests: you've hit your concurrency limit", temporary, quota],
-    ["429 You've reached your requests per minute limit", temporary, quota],
-    ["stream error: You've hit your context window limit", unknown, quota],
+    ["429 Too Many Requests: you've hit your concurrency limit", temporary, temporary],
+    ["429 You've reached your requests per minute limit", temporary, temporary],
+    ["stream error: You've hit your context window limit", unknown, unknown],
     ["temporarily overloaded (not your usage limit)", quota, temporary],
   ];
   for (const [text, anotherProviders, claudes] of elsewhere) {
@@ -2091,7 +2115,7 @@ test("the account's usage limit is never retried as a short fault: a rejected us
   const notUsage = { error: notUsageLimit[0]!, claudeApiFailure: rateLimit };
   const retried = await runFailingLeaseHolder("claude-code", [notUsage], [["1"], []]);
   assert.deepEqual(retried.sources, ["1", "continuation"]);
-  assert.deepEqual(retried.waits, [10_000]);
+  assert.deepEqual(retried.waits, [SHORT_FAULT_WAITS[0]]);
   assert.deepEqual(retried.receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
 });
 
@@ -2168,7 +2192,8 @@ for (const [ending, claudeApiFailure] of Object.entries({
     await waitForAsync(async () => (await store.receipts(agent.agentId))[2]?.state === "acknowledged_no_reply");
     const released = await store.receipts(agent.agentId);
     assert.deepEqual(released.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply", "acknowledged_no_reply"]);
-    assert.match(released[1]!.last_error ?? "", /no continuation was started/, "the task is not continued by itself in the new conversation");
+    assert.equal(released[1]!.last_error, "The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task.",
+      "the task is not continued by itself in the new conversation");
     assert.deepEqual(sources, ["1 in thread", "2 in thread-2"], "the next message runs in the new conversation, and the follow-up runs nowhere");
   } finally {
     await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
@@ -2176,7 +2201,7 @@ for (const [ending, claudeApiFailure] of Object.entries({
 });
 
 test("a failure with no structured account is decided on its text, exactly as before", async () => {
-  const temporary = { automatic: true, detail: "The provider failed temporarily. Continuing the unfinished task after a short delay." };
+  const temporary = temporaryAt(1);
   const authentication = { automatic: false, detail: `The model provider needs authentication or account access. ${RETRY_DELIVERY}` };
   const quota = { automatic: false, detail: `The model provider has insufficient credit or quota. ${RETRY_DELIVERY}` };
   const unknown = { automatic: false, detail: `The provider failed and safe automatic recovery could not be established. ${RETRY_DELIVERY}` };
@@ -2247,7 +2272,7 @@ test("Claude's account decides for a Claude failure only: the same failure from 
     claudeApiFailure: { status: null, terminalReason: "api_error", category: "server_error" } };
   const claude = await runFailingLeaseHolder("claude-code", [refused], [["1"], ["2"]]);
   assert.deepEqual(claude.sources, ["1", "continuation", "2"], "Claude: a follow-up turn, then the next message");
-  assert.deepEqual(claude.waits, [10_000], "the follow-up waits ten seconds");
+  assert.deepEqual(claude.waits, [SHORT_FAULT_WAITS[0]], "the follow-up waits thirty seconds");
   assert.deepEqual(claude.receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply", "acknowledged_no_reply"]);
   assert.equal(claude.receipts[0]!.last_error, refused.error, "the failed message keeps the provider's own text");
 
@@ -2259,17 +2284,582 @@ test("Claude's account decides for a Claude failure only: the same failure from 
   }
 });
 
-test("a short fault that does not end gets three follow-up turns, ten, twenty and forty seconds apart, and then waits for the owner", async () => {
+test("a short fault that does not end gets three follow-up turns, after thirty seconds, two minutes and ten minutes, and then waits for the owner", async () => {
   const refused = { error: "API Error: Connection refused — a firewall or proxy may be blocking it (ConnectionRefused)",
     claudeApiFailure: { status: null, terminalReason: "api_error", category: "server_error" } };
   const { receipts, sources, waits } = await runFailingLeaseHolder("claude-code", Array.from({ length: 8 }, () => refused), [["1"], ["2"]]);
   assert.deepEqual(sources, ["1", "continuation", "continuation", "continuation"], "the message's own turn and three follow-ups: four turns, and no more");
-  assert.deepEqual(waits, [10_000, 20_000, 40_000]);
+  assert.deepEqual(waits, [30_000, 120_000, 600_000]);
   assert.deepEqual(receipts.map((item) => item.state),
     ["acknowledged_failed", "acknowledged_failed", "acknowledged_failed", "acknowledged_failed", "blocked", "pending"],
     "the fourth failure queues a follow-up that waits for the owner, and the next message waits behind it");
   assert.equal(receipts[4]!.last_error, STOPPED_AFTER_THREE);
   for (const failed of receipts.slice(0, 4)) assert.equal(failed.last_error, refused.error, "each failed turn keeps the provider's own text");
+});
+
+test("the waits of a follow-up: thirty seconds, two minutes and ten minutes after a short fault of any provider, and ten, twenty and forty seconds otherwise", async () => {
+  assert.deepEqual([...SHORT_FAULT_FOLLOW_UP_DELAYS_MS], [30_000, 120_000, 600_000]);
+  assert.equal(MAX_AUTOMATIC_FOLLOW_UPS, 3);
+  assert.deepEqual([1, 2, 3].map(defaultFollowUpDelayMs), [10_000, 20_000, 40_000]);
+  // A short fault is the same thing whoever reports it: with Claude's account of it, and by its text for any provider.
+  for (const attempt of [1, 2, 3]) {
+    assert.equal(taskFailurePolicy("Overloaded", attempt, false, false, { status: 529, terminalReason: "api_error", category: "server_error" }).delayMs, SHORT_FAULT_WAITS[attempt - 1]);
+    assert.equal(taskFailurePolicy("HTTP 503 Service Unavailable", attempt).delayMs, SHORT_FAULT_WAITS[attempt - 1]);
+  }
+  // A turn that ended without a reply gets one follow-up, and has no schedule of its own: it waits ten seconds.
+  assert.deepEqual([taskFailurePolicy(NO_REPLY_FAILURE.outputLimit, 1).automatic, taskFailurePolicy(NO_REPLY_FAILURE.outputLimit, 1).delayMs], [true, undefined]);
+  const noReply = await runNoReplyContinuity([NO_REPLY_FAILURE.emptyAnswer], [["1"], []]);
+  assert.deepEqual(noReply.sources, ["1", "continuation"]);
+  // No decision that stops has a wait.
+  for (const stopped of [taskFailurePolicy("HTTP 503", 4), taskFailurePolicy("HTTP 401 unauthorized", 1), taskFailurePolicy("Something went wrong.", 1)]) {
+    assert.deepEqual([stopped.automatic, stopped.delayMs], [false, undefined]);
+  }
+
+  // Through the delivery, for a provider that is not Claude Code: three follow-ups at those times, and then the owner.
+  for (const providerId of ["codex", "cursor", "open-model"]) {
+    const fault = { error: "stream error: 503 Service Unavailable" };
+    const { receipts, sources, waits } = await runFailingLeaseHolder(providerId, Array.from({ length: 8 }, () => fault), [["1"], ["2"]]);
+    assert.deepEqual(sources, ["1", "continuation", "continuation", "continuation"], providerId);
+    assert.deepEqual(waits, [30_000, 120_000, 600_000], providerId);
+    assert.deepEqual(receipts.map((item) => item.state),
+      ["acknowledged_failed", "acknowledged_failed", "acknowledged_failed", "acknowledged_failed", "blocked", "pending"], providerId);
+    assert.equal(receipts[4]!.last_error, STOPPED_AFTER_THREE, providerId);
+  }
+});
+
+/**
+ * A lease holder whose every turn ends on a short provider fault, on a daemon whose waits end only when something
+ * ends them: the daemon stops, or the owner uses Try now or Stop trying. The clock of the inbox is the test's.
+ */
+async function scheduledRetryFixture(providerId = "claude-code") {
+  const root = await mkdtemp(join(tmpdir(), "continuity-scheduled-retry-"));
+  const path = join(root, "state.sqlite");
+  const clock = { nowMs: Date.parse("2026-10-01T00:00:00.000Z") };
+  const fault: { error: string; claudeApiFailure?: ClaudeFacts } =
+    { error: "API Error: Repeated 529 Overloaded errors.", claudeApiFailure: { status: 529, terminalReason: "api_error", category: "server_error" } };
+  const sources: string[] = []; const waits: number[] = [];
+  let failing = true;
+  /**
+   * `turnStarts`: the next turn is held here, after it was claimed and before its turn id is saved.
+   * `ownedTasks`: runs once, the next time the daemon asks which tasks the agent holds. `held`: what it then holds.
+   */
+  const hooks: { turnStarts: Promise<void> | null; ownedTasks: (() => Promise<void>) | null; held: typeof continuityTask[] } =
+    { turnStarts: null, ownedTasks: null, held: [continuityTask] };
+  const port = provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    const source = request.sourceMessage as { id?: string; source?: string };
+    sources.push(source.source === "system" ? "continuation" : String(source.id));
+    const turnId = `turn-${sources.length}`;
+    await hooks.turnStarts;
+    await options?.checkpointTurnStarted?.(turnId);
+    return failing ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream", ...fault }
+      : { turnId, outcome: "no_reply", text: null };
+  });
+  const claude = { ...agent, provider: providerId };
+  let store = new SupervisedAgentInboxStore(path, () => new Date(clock.nowMs).toISOString());
+  const makeDelivery = () => new SupervisedAgentDelivery(store, port, { poll: async () => ({}), publish: async () => {},
+    ownedTasks: async () => { const hook = hooks.ownedTasks; hooks.ownedTasks = null; await hook?.(); return hooks.held; } },
+    currentAuthority, 50, async () => {}, (delayMs, signal) => new Promise<void>((resolve) => {
+      waits.push(delayMs);
+      if (signal.aborted) resolve(); else signal.addEventListener("abort", () => resolve(), { once: true });
+    }));
+  let delivery = makeDelivery();
+  const view = async () => projectDeliveryReceipts(await store.receiptProjection(agent.agentId), null)!;
+  return { clock, fault, sources, waits, claude, view, hooks, path,
+    store: () => store, delivery: () => delivery,
+    /** The provider recovers: the next turn ends with no reply instead of the fault. */
+    providerRecovers: () => { failing = false; },
+    /** The follow-up that waits for its time, as the manifest shows it. */
+    scheduled: async () => (await view()).find((receipt) => receipt.follow_up?.scheduled) ?? null,
+    /** Send room message `id` and let the daemon work until it waits `waiting` times in all, or is idle. */
+    say: async (id: string, waiting: number) => {
+      await ingest(store, id);
+      void delivery.pump(claude).catch(() => undefined);
+      await waitForAsync(async () => waits.length >= waiting);
+    },
+    /**
+     * The daemon ends and a new one takes the same saved state over. The clock goes on by `downMs` in between. The
+     * new one works for `as`, and `beforePump` runs on it before it starts to work. `pump` settles when that work ends:
+     * while a follow-up waits for its time, that is when something ends the wait.
+     */
+    restartDaemon: async (downMs: number, as: typeof claude = claude, beforePump?: () => void) => {
+      await delivery.fenceAndDrain();
+      await store.close();
+      clock.nowMs += downMs;
+      store = new SupervisedAgentInboxStore(path, () => new Date(clock.nowMs).toISOString());
+      delivery = makeDelivery();
+      beforePump?.();
+      return { pump: delivery.pump(as).catch(() => undefined) };
+    },
+    cleanup: async () => { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); },
+  };
+}
+
+test("a scheduled follow-up says when it starts, which attempt it is and which message it is for; Try now starts it at once, as that attempt", async () => {
+  const retry = await scheduledRetryFixture();
+  try {
+    await retry.say("1", 1);
+    const failedAt = retry.clock.nowMs;
+    assert.deepEqual(retry.sources, ["1"]);
+    assert.deepEqual(retry.waits, [30_000]);
+    const first = (await retry.scheduled())!;
+    assert.match(first.source_message_id, /^task-continuation:/);
+    assert.equal(first.state, "pending");
+    assert.deepEqual(first.follow_up, scheduledFault(failedAt + 30_000, 1));
+    // What failed stays on the failed message, in the provider's own words. Nothing is blocked, so nothing needs the owner.
+    const [failed] = await retry.view();
+    assert.deepEqual([failed!.source_message_id, failed!.state, failed!.error, failed!.follow_up], ["1", "acknowledged_failed", retry.fault.error, undefined]);
+    assert.deepEqual((await retry.view()).filter((receipt) => receipt.state === "blocked"), []);
+
+    retry.clock.nowMs += 5_000;
+    // Try now. The follow-up runs at once, 25 seconds early. The provider still fails, so the next follow-up is
+    // attempt 2 with the wait of attempt 2: Try now was attempt 1, not an attempt of its own.
+    await retry.delivery().retry(retry.claude, first.source_message_id);
+    await waitForAsync(async () => retry.waits.length === 2);
+    assert.deepEqual(retry.sources, ["1", "continuation"]);
+    assert.deepEqual(retry.waits, [30_000, 120_000]);
+    const second = (await retry.scheduled())!;
+    assert.notEqual(second.source_message_id, first.source_message_id);
+    assert.deepEqual(second.follow_up, scheduledFault(retry.clock.nowMs + 120_000, 2));
+    assert.deepEqual((await retry.view()).map((receipt) => receipt.state), ["acknowledged_failed", "acknowledged_failed", "pending"]);
+    const tried = (await retry.store().receipts(agent.agentId))[1]!;
+    assert.ok(tried.timeline.some((event) => event.phase === "retry_scheduled" && event.detail === "Started now, as its owner asked."));
+
+    // Try now again, and once more: attempt 2, then attempt 3, the last. After it the follow-up waits for the owner.
+    await retry.delivery().retry(retry.claude, second.source_message_id);
+    await waitForAsync(async () => retry.waits.length === 3);
+    const third = (await retry.scheduled())!;
+    assert.deepEqual(third.follow_up, scheduledFault(retry.clock.nowMs + 600_000, 3));
+    await retry.delivery().retry(retry.claude, third.source_message_id);
+    await waitForAsync(async () => (await retry.view()).some((receipt) => receipt.state === "blocked"));
+    assert.deepEqual(retry.sources, ["1", "continuation", "continuation", "continuation"], "three follow-ups in all, however they were started");
+    assert.deepEqual(retry.waits, [30_000, 120_000, 600_000]);
+    assert.equal(await retry.scheduled(), null, "the blocked follow-up is not a scheduled one");
+    const blocked = (await retry.view()).find((receipt) => receipt.state === "blocked")!;
+    assert.equal(blocked.error, STOPPED_AFTER_THREE);
+    // It has no room message of its own. It names the one the work began with, so that message can say that the
+    // automatic attempts are over, with Retry for this follow-up.
+    assert.deepEqual(blocked.follow_up, { for_message_id: "1", state: "waiting_for_owner", scheduled: null });
+    await ingest(retry.store(), "2");
+    assert.equal((await retry.view()).at(-1)!.state, "queued_behind_blocked", "a later message now waits for the owner");
+    // Try now is for a follow-up that waits for its time. A message that failed, or one that waits behind, has none.
+    await assert.rejects(retry.delivery().retry(retry.claude, "1"), /no longer available/);
+    await assert.rejects(retry.delivery().retry(retry.claude, "2"), /no longer available/);
+    // The inbox refuses the same by itself: only a follow-up that waits for its time is started now or stopped. Not
+    // the follow-up that waits for the owner, not one that ran, and not a room message.
+    const items = await retry.store().receipts(agent.agentId);
+    assert.deepEqual(items.map((item) => item.state), ["acknowledged_failed", "acknowledged_failed", "acknowledged_failed", "acknowledged_failed", "blocked", "pending"]);
+    for (const item of [items[4]!, items[1]!, items[0]!, items[5]!]) {
+      await assert.rejects(retry.store().startTaskContinuationNow(item.inbox_item_id), /already started or ended/, item.state);
+      await assert.rejects(retry.store().stopTaskContinuation(item.inbox_item_id, "stopped"), /already started or ended/, item.state);
+    }
+    assert.deepEqual((await retry.store().receipts(agent.agentId)).map((item) => [item.state, item.next_attempt_at_ms]), items.map((item) => [item.state, item.next_attempt_at_ms]),
+      "and nothing changed");
+  } finally { await retry.cleanup(); }
+});
+
+test("Stop trying ends a scheduled follow-up before anything starts: no other is made, and the next message goes ahead", async () => {
+  const retry = await scheduledRetryFixture("codex");
+  try {
+    await retry.say("1", 1);
+    const first = (await retry.scheduled())!;
+    assert.deepEqual(first.follow_up, scheduledFault(retry.clock.nowMs + 30_000, 1));
+    // A message that arrives during the wait is kept behind the follow-up: it is queued, and nothing runs.
+    await ingest(retry.store(), "2");
+    retry.clock.nowMs += 5_000;
+    await retry.delivery().pump(retry.claude);
+    assert.deepEqual((await retry.view()).map((receipt) => receipt.state), ["acknowledged_failed", "pending", "pending"]);
+    assert.deepEqual(retry.sources, ["1"]);
+    retry.providerRecovers();
+
+    await retry.delivery().skipMessage(retry.claude, first.source_message_id);
+    await waitForAsync(async () => (await retry.view()).at(-1)!.state === "acknowledged_no_reply");
+    assert.deepEqual(retry.sources, ["1", "2"], "no follow-up turn was started, and the message that waited ran");
+    assert.deepEqual(retry.waits, [30_000], "nothing else was scheduled");
+    const receipts = await retry.store().receipts(agent.agentId);
+    assert.deepEqual(receipts.map((item) => [item.source_message_id.replace(/:.*/, ""), item.state]),
+      [["1", "acknowledged_failed"], ["task-continuation", "cancelled_by_user"], ["2", "acknowledged_no_reply"]]);
+    assert.equal(receipts[0]!.last_error, retry.fault.error, "the failed message keeps the provider's own words");
+    assert.equal(receipts[1]!.last_error, STOPPED_BY_OWNER);
+    assert.equal(receipts[1]!.next_attempt_at_ms, null);
+    // The failed message is where its owner reads that: the stopped follow-up names it, and keeps the reason.
+    const stopped = (await retry.view())[1]!;
+    assert.deepEqual([stopped.follow_up, stopped.error], [{ for_message_id: "1", state: "ended", scheduled: null }, STOPPED_BY_OWNER]);
+    assert.ok(receipts[1]!.timeline.some((event) => event.phase === "user_cancelled"));
+    assert.equal(await retry.scheduled(), null);
+    // It is over: neither control finds it again, and a later pump starts nothing for the old failure.
+    await assert.rejects(retry.delivery().skipMessage(retry.claude, first.source_message_id), /^Error: This automatic attempt has already started or ended\.$/);
+    await assert.rejects(retry.delivery().retry(retry.claude, first.source_message_id), /^Error: This automatic attempt has already started or ended\.$/);
+    await retry.delivery().pump(retry.claude);
+    assert.deepEqual(retry.sources, ["1", "2"]);
+  } finally { await retry.cleanup(); }
+});
+
+test("a scheduled follow-up keeps its time across a daemon restart, and Try now and Stop trying work after one", async () => {
+  const retry = await scheduledRetryFixture();
+  try {
+    await retry.say("1", 1);
+    const first = (await retry.scheduled())!;
+    const dueAt = first.follow_up!.scheduled!.at_ms;
+    assert.equal(dueAt, retry.clock.nowMs + 30_000);
+
+    // The daemon is down for 12 seconds of the 30. The next daemon waits the 18 that are left, to the same time.
+    await retry.restartDaemon(12_000);
+    await waitForAsync(async () => retry.waits.length === 2);
+    assert.deepEqual(retry.waits, [30_000, 18_000]);
+    assert.deepEqual((await retry.scheduled())!.follow_up, scheduledFault(dueAt, 1));
+    assert.deepEqual(retry.sources, ["1"], "nothing ran early");
+
+    // Try now on the new daemon: attempt 1 runs, fails, and attempt 2 is scheduled two minutes ahead.
+    await retry.delivery().retry(retry.claude, first.source_message_id);
+    await waitForAsync(async () => retry.waits.length === 3);
+    assert.deepEqual(retry.sources, ["1", "continuation"]);
+    const second = (await retry.scheduled())!;
+    assert.deepEqual(second.follow_up, scheduledFault(retry.clock.nowMs + 120_000, 2));
+
+    // Down again, for longer than the wait. The time has passed, so the next daemon starts attempt 2 without waiting.
+    await retry.restartDaemon(150_000);
+    await waitForAsync(async () => retry.sources.length === 3);
+    assert.deepEqual(retry.sources, ["1", "continuation", "continuation"]);
+    await waitForAsync(async () => retry.waits.length === 4);
+    assert.equal(retry.waits.at(-1), 600_000);
+    const third = (await retry.scheduled())!;
+    assert.deepEqual(third.follow_up, scheduledFault(retry.clock.nowMs + 600_000, 3));
+
+    // Stop trying on a daemon that was started during the wait.
+    await retry.restartDaemon(60_000);
+    await waitForAsync(async () => retry.waits.length === 5);
+    assert.equal(retry.waits.at(-1), 540_000);
+    await retry.delivery().skipMessage(retry.claude, third.source_message_id);
+    assert.equal(await retry.scheduled(), null);
+    assert.deepEqual((await retry.view()).map((receipt) => receipt.state), ["acknowledged_failed", "acknowledged_failed", "acknowledged_failed", "cancelled_by_user"]);
+    assert.deepEqual(retry.sources, ["1", "continuation", "continuation"], "the third follow-up never ran");
+    // And it stays stopped across one more restart, and still says so on the failed message.
+    await retry.restartDaemon(1_000);
+    await retry.delivery().pump(retry.claude);
+    assert.deepEqual(retry.sources, ["1", "continuation", "continuation"]);
+    assert.equal(retry.waits.length, 5);
+    const stopped = (await retry.view()).at(-1)!;
+    assert.deepEqual([stopped.follow_up, stopped.error], [{ for_message_id: "1", state: "ended", scheduled: null }, STOPPED_BY_OWNER]);
+  } finally { await retry.cleanup(); }
+});
+
+test("a follow-up says which room message its work began with, and where it stands: scheduled, waiting for its owner, or ended unstarted", () => {
+  const receipt = (over: Record<string, unknown>) => ({ inbox_item_id: "item", agent_id: "agent", room_id: "room", source_message_id: "msg", fifo_sequence: 1,
+    state: "pending", receipt_state: "pending", attempt_count: 0, action_id: "action", reply_client_message_id: "reply", provider_turn_id: null, outcome: null, last_error: null,
+    failure_code: null, blocked_by_inbox_item_id: null, next_attempt_at_ms: null, terminal_reason: null, created_at: "t", updated_at: "t", acknowledged_at: null,
+    canonical_message_id: null, timeline: [], ...over }) as unknown as Parameters<typeof projectDeliveryReceipts>[0][number];
+  const followUps = (receipts: ReturnType<typeof receipt>[]) => projectDeliveryReceipts(receipts, null)!.map((item) => item.follow_up ?? null);
+  const failed = receipt({ inbox_item_id: "a", source_message_id: "msg_1", state: "acknowledged_failed", receipt_state: "acknowledged_failed" });
+  const followUp = (id: string, parent: string, over: Record<string, unknown> = {}) =>
+    receipt({ inbox_item_id: id, source_message_id: `task-continuation:${parent}`, next_attempt_at_ms: 5_000, ...over });
+  const ran = { state: "acknowledged_failed", receipt_state: "acknowledged_failed", provider_turn_id: "turn", next_attempt_at_ms: null };
+  // The chain back to the room message says which attempt this is.
+  assert.deepEqual(followUps([failed, followUp("b", "a")]), [null, scheduledFault(5_000, 1, "msg_1")]);
+  assert.deepEqual(followUps([failed, followUp("b", "a", ran), followUp("c", "b")]), [null, null, scheduledFault(5_000, 2, "msg_1")]);
+  // A receipt that is no longer kept: the attempt is counted as far as the chain goes, and no message is named.
+  assert.deepEqual(followUps([followUp("c", "b")]), [scheduledFault(5_000, 1, null)]);
+  // A turn that ended without a reply gets one automatic attempt, not three. The follow-up's own text says which it is.
+  assert.deepEqual(followUps([failed, followUp("b", "a", { last_error: "The model stopped before writing a reply. The agent will try again once, after a short wait." })]),
+    [null, { for_message_id: "msg_1", state: "scheduled", scheduled: { at_ms: 5_000, attempt: 1, attempts: 1, kind: "no_reply" } }]);
+  assert.deepEqual(followUps([failed, followUp("b", "a", { last_error: "The provider failed temporarily. The agent will try again by itself." })]), [null, scheduledFault(5_000, 1, "msg_1")]);
+
+  // A follow-up that waits for its owner has no time. It still names the room message: after all three automatic
+  // attempts it is four follow-ups back, and after its owner used Retry on that one, five.
+  const waiting = { for_message_id: "msg_1", state: "waiting_for_owner", scheduled: null };
+  const blocked = { state: "blocked", receipt_state: "blocked", next_attempt_at_ms: null, last_error: STOPPED_AFTER_THREE };
+  assert.deepEqual(followUps([failed, followUp("b", "a", blocked)]), [null, waiting]);
+  assert.deepEqual(followUps([failed, followUp("b", "a", ran), followUp("c", "b", ran), followUp("d", "c", ran), followUp("e", "d", blocked)]), [null, null, null, null, waiting]);
+  assert.deepEqual(followUps([failed, followUp("b", "a", ran), followUp("c", "b", ran), followUp("d", "c", ran), followUp("e", "d", ran), followUp("f", "e", blocked)]),
+    [null, null, null, null, null, waiting]);
+  // A message that waits behind it is shown as that, but it is not a follow-up.
+  assert.deepEqual(followUps([failed, followUp("b", "a", blocked), receipt({ inbox_item_id: "c", source_message_id: "msg_2", receipt_state: "queued_behind_blocked" })]), [null, waiting, null]);
+
+  // A follow-up that ended with nothing started says so, with its reason, for each way that it can end so.
+  const ended = { for_message_id: "msg_1", state: "ended", scheduled: null };
+  for (const [state, reason] of [
+    ["cancelled_by_user", STOPPED_BY_OWNER],
+    ["acknowledged_no_reply", "The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task."],
+    ["acknowledged_no_reply", "The agent did not try again: the task is finished, or is no longer this agent's."],
+    ["acknowledged_no_reply", "The agent did not try again: an earlier action has an uncertain result. Check that result, then send an instruction to continue only the verified unfinished work."],
+  ] as const) {
+    const [, projected] = projectDeliveryReceipts([failed, followUp("b", "a", { state, receipt_state: state, next_attempt_at_ms: null, last_error: reason })], null)!;
+    assert.deepEqual([projected!.follow_up, projected!.error], [ended, reason], reason);
+    // The room message shows at most 180 characters of a reason.
+    assert.ok(reason.length <= 180, reason);
+  }
+  assert.ok(STOPPED_AFTER_THREE.length <= 180);
+
+  // Not a follow-up to show: one that runs, one whose turn ran, one that is pending with no time, and a room message.
+  // One that ended with a turn, or with a text that is not one of those reasons, is not one that ended unstarted: a
+  // blocked follow-up that its owner skipped keeps the text of its block.
+  for (const other of [followUp("b", "a", { state: "dispatching", receipt_state: "dispatching" }), followUp("b", "a", ran),
+    followUp("b", "a", { next_attempt_at_ms: null }),
+    followUp("b", "a", { state: "acknowledged_no_reply", receipt_state: "acknowledged_no_reply", next_attempt_at_ms: null, provider_turn_id: "turn", last_error: STOPPED_BY_OWNER }),
+    followUp("b", "a", { state: "cancelled_by_user", receipt_state: "cancelled_by_user", next_attempt_at_ms: null, last_error: STOPPED_AFTER_THREE }),
+    followUp("b", "a", { state: "cancelled_by_user", receipt_state: "cancelled_by_user", next_attempt_at_ms: null }),
+    followUp("b", "a", { state: "acknowledged", receipt_state: "acknowledged", next_attempt_at_ms: null, last_error: STOPPED_BY_OWNER }),
+    receipt({ inbox_item_id: "b", source_message_id: "msg_2", next_attempt_at_ms: 5_000 }),
+    receipt({ inbox_item_id: "b", source_message_id: "msg_2", state: "blocked", receipt_state: "blocked" })]) {
+    assert.deepEqual(followUps([failed, other]), [null, null], JSON.stringify(other));
+  }
+});
+
+test("after a turn that ended without a reply the follow-up says that it is the only automatic attempt, and a repeat ends the series on the failed message", async () => {
+  const retry = await scheduledRetryFixture("codex");
+  try {
+    // Every turn ends without a reply: the model stopped, and no provider fault is reported.
+    retry.fault.error = NO_REPLY_FAILURE.emptyAnswer;
+    delete retry.fault.claudeApiFailure;
+    await retry.say("1", 1);
+    assert.deepEqual(retry.waits, [10_000]);
+    const first = (await retry.scheduled())!;
+    assert.equal(first.error, "The model stopped before writing a reply. The agent will try again once, after a short wait.");
+    assert.deepEqual(first.follow_up, { for_message_id: "1", state: "scheduled", scheduled: { at_ms: retry.clock.nowMs + 10_000, attempt: 1, attempts: 1, kind: "no_reply" } });
+
+    // Try now. It ends without a reply again: no second attempt, nothing waits for the owner, and the reason is on the room message.
+    await retry.delivery().retry(retry.claude, first.source_message_id);
+    await waitForAsync(async () => (await retry.view())[1]!.state === "acknowledged_failed");
+    await retry.delivery().drainAdmittedTurns([agent.agentId]);
+    const receipts = await retry.view();
+    assert.deepEqual(receipts.map((receipt) => [receipt.state, receipt.follow_up]), [["acknowledged_failed", undefined], ["acknowledged_failed", undefined]]);
+    assert.match(receipts[0]!.error!, /It happened again, so the unfinished task was not continued automatically\. Existing work is preserved; send a message to continue it\.$/);
+    assert.equal(receipts[1]!.error, receipts[0]!.error);
+    assert.deepEqual(retry.sources, ["1", "continuation"]);
+    assert.deepEqual(retry.waits, [10_000]);
+  } finally { await retry.cleanup(); }
+});
+
+test("a daemon handoff during a ten-minute wait is not held up by it, and the follow-up keeps its saved time", async () => {
+  const retry = await scheduledRetryFixture();
+  /** Settles like `work`, or says that it did not within a second: a wait of ten minutes must not be awaited. */
+  const prompt = (work: Promise<unknown>) => Promise.race([work.then(() => "settled"), new Promise<string>((resolve) => setTimeout(() => resolve("still waiting"), 1_000))]);
+  try {
+    // Two attempts fail, started by Try now. The third waits ten minutes.
+    await retry.say("1", 1);
+    await retry.delivery().retry(retry.claude, (await retry.scheduled())!.source_message_id);
+    await waitForAsync(async () => retry.waits.length === 2);
+    await retry.delivery().retry(retry.claude, (await retry.scheduled())!.source_message_id);
+    await waitForAsync(async () => retry.waits.length === 3);
+    assert.deepEqual(retry.waits, [30_000, 120_000, 600_000]);
+    const third = (await retry.scheduled())!;
+    const dueAt = third.follow_up!.scheduled!.at_ms;
+    assert.deepEqual(third.follow_up, scheduledFault(retry.clock.nowMs + 600_000, 3));
+
+    // The handoff pauses dispatch and drains the admitted turns. The pump only waits: it holds no turn, so it ends.
+    retry.clock.nowMs += 100_000;
+    retry.delivery().pauseDispatch();
+    assert.equal(await prompt(retry.delivery().drainAdmittedTurns([agent.agentId])), "settled");
+    assert.deepEqual(retry.sources, ["1", "continuation", "continuation"], "the follow-up did not start early");
+    assert.deepEqual((await retry.scheduled())!.follow_up, scheduledFault(dueAt, 3), "and it keeps its saved time");
+    // While dispatch is paused nothing new starts and nothing waits: a pump ends at once.
+    assert.equal(await prompt(retry.delivery().pump(retry.claude)), "settled");
+    assert.equal(retry.waits.length, 3);
+
+    // Try now during the pause is accepted and saved, and no turn starts until dispatch goes on.
+    await retry.delivery().retry(retry.claude, third.source_message_id);
+    assert.equal(await prompt(retry.delivery().drainAdmittedTurns([agent.agentId])), "settled");
+    assert.deepEqual(retry.sources, ["1", "continuation", "continuation"]);
+    assert.deepEqual((await retry.scheduled())!.follow_up, scheduledFault(retry.clock.nowMs, 3), "it is due now, as the same attempt");
+    assert.equal(retry.waits.length, 3);
+    // The handoff is put off, so the same daemon goes on: the attempt that is due starts.
+    retry.delivery().resumeDispatch();
+    await waitForAsync(async () => (await retry.view()).some((receipt) => receipt.state === "blocked"));
+    assert.deepEqual(retry.sources, ["1", "continuation", "continuation", "continuation"]);
+  } finally { await retry.cleanup(); }
+});
+
+test("after a daemon handoff the same wait goes on to the saved time, and Try now and Stop trying work at once", async () => {
+  const retry = await scheduledRetryFixture();
+  /** The handoff's first steps: no new turn is admitted, and the admitted ones are drained. */
+  const pauseAndDrain = async () => { retry.delivery().pauseDispatch(); await retry.delivery().drainAdmittedTurns([agent.agentId]); };
+  try {
+    await retry.say("1", 1);
+    const first = (await retry.scheduled())!;
+    const firstDueAt = first.follow_up!.scheduled!.at_ms;
+    // Handoff put off after 10 of the 30 seconds, with nothing but the daemon's own wait in play: the same daemon
+    // goes on, and waits the 20 seconds that are left. Not 30 again, and not none.
+    retry.clock.nowMs += 10_000;
+    await pauseAndDrain();
+    retry.delivery().resumeDispatch();
+    await waitForAsync(async () => retry.waits.length === 2);
+    assert.deepEqual(retry.waits, [30_000, 20_000]);
+    assert.deepEqual(retry.sources, ["1"], "it did not start at once");
+    assert.deepEqual((await retry.scheduled())!.follow_up, scheduledFault(firstDueAt, 1));
+
+    // Attempt 1 runs by Try now and fails. Attempt 2 waits two minutes.
+    await retry.delivery().retry(retry.claude, first.source_message_id);
+    await waitForAsync(async () => retry.waits.length === 3);
+    const second = (await retry.scheduled())!;
+    const dueAt = second.follow_up!.scheduled!.at_ms;
+    assert.equal(dueAt, retry.clock.nowMs + 120_000);
+
+    // Handoff put off after 20 seconds: the same daemon waits the 100 seconds that are left.
+    retry.clock.nowMs += 20_000;
+    await pauseAndDrain();
+    retry.delivery().resumeDispatch();
+    await waitForAsync(async () => retry.waits.length === 4);
+    assert.deepEqual(retry.waits, [30_000, 20_000, 120_000, 100_000]);
+    assert.deepEqual(retry.sources, ["1", "continuation"], "it did not start at once");
+
+    // Handoff done after 30 more seconds: the new daemon waits the 70 that are left, to the same saved time.
+    retry.clock.nowMs += 30_000;
+    await pauseAndDrain();
+    await retry.restartDaemon(0);
+    await waitForAsync(async () => retry.waits.length === 5);
+    assert.deepEqual(retry.waits, [30_000, 20_000, 120_000, 100_000, 70_000]);
+    assert.deepEqual((await retry.scheduled())!.follow_up, scheduledFault(dueAt, 2));
+    assert.deepEqual(retry.sources, ["1", "continuation"]);
+
+    // Try now right after the handoff: attempt 2 runs and fails, and attempt 3 waits ten minutes.
+    await retry.delivery().retry(retry.claude, second.source_message_id);
+    await waitForAsync(async () => retry.waits.length === 6);
+    assert.deepEqual(retry.sources, ["1", "continuation", "continuation"]);
+    const third = (await retry.scheduled())!;
+    assert.deepEqual(third.follow_up, scheduledFault(retry.clock.nowMs + 600_000, 3));
+
+    // Another handoff, and Stop trying right after it.
+    retry.clock.nowMs += 60_000;
+    await pauseAndDrain();
+    await retry.restartDaemon(0);
+    await waitForAsync(async () => retry.waits.length === 7);
+    assert.equal(retry.waits.at(-1), 540_000);
+    await retry.delivery().skipMessage(retry.claude, third.source_message_id);
+    assert.deepEqual((await retry.view()).map((receipt) => receipt.state), ["acknowledged_failed", "acknowledged_failed", "acknowledged_failed", "cancelled_by_user"]);
+    assert.deepEqual(retry.sources, ["1", "continuation", "continuation"], "the third follow-up never ran");
+  } finally { await retry.cleanup(); }
+});
+
+test("a pump that is ended while it reads a follow-up's wait does not sleep that wait", async () => {
+  for (const end of ["fence", "pauseDispatch"] as const) {
+    const retry = await scheduledRetryFixture();
+    try {
+      await retry.say("1", 1);
+      const first = (await retry.scheduled())!;
+      // The next daemon is ended at the worst moment: after it read how long to wait, before it waits.
+      const { pump } = await retry.restartDaemon(5_000, retry.claude, () => {
+        const store = retry.store();
+        const read = store.taskContinuationDelay.bind(store);
+        store.taskContinuationDelay = async (inboxItemId) => {
+          const delay = await read(inboxItemId);
+          retry.delivery()[end]();
+          return delay;
+        };
+      });
+      const outcome = await Promise.race([pump.then(() => "ended"), new Promise<string>((resolve) => setTimeout(() => resolve("asleep"), 1_000))]);
+      assert.equal(outcome, "ended", end);
+      assert.deepEqual(retry.sources, ["1"], `${end}: the follow-up did not start`);
+      assert.deepEqual((await retry.scheduled())!.follow_up, first.follow_up, `${end}: and it keeps its saved time`);
+    } finally { await retry.cleanup(); }
+  }
+});
+
+test("Try now and Stop trying come too late for a follow-up whose turn is starting: one turn runs, and nothing is stopped", async () => {
+  const retry = await scheduledRetryFixture();
+  try {
+    await retry.say("1", 1);
+    const first = (await retry.scheduled())!;
+    // The turn of the follow-up is held after it was claimed and before its turn id is saved: only its state says
+    // that it started.
+    const turn = deferred<void>();
+    retry.hooks.turnStarts = turn.promise;
+    await retry.delivery().retry(retry.claude, first.source_message_id);
+    await waitForAsync(async () => retry.sources.length === 2);
+    const [, running] = await retry.store().receipts(agent.agentId);
+    assert.deepEqual([running!.state, running!.provider_turn_id, running!.outcome], ["dispatching", null, null]);
+    assert.equal((await retry.view())[1]!.follow_up, undefined, "it is no longer shown as one that waits");
+
+    // Both controls, through the delivery and at the inbox itself.
+    await assert.rejects(retry.delivery().retry(retry.claude, first.source_message_id), /^Error: This automatic attempt has already started or ended\.$/);
+    await assert.rejects(retry.delivery().skipMessage(retry.claude, first.source_message_id), /^Error: This automatic attempt has already started or ended\.$/);
+    await assert.rejects(retry.store().startTaskContinuationNow(running!.inbox_item_id), /^Error: This automatic attempt has already started or ended\.$/);
+    await assert.rejects(retry.store().stopTaskContinuation(running!.inbox_item_id, STOPPED_BY_OWNER), /^Error: This automatic attempt has already started or ended\.$/);
+    const [, still] = await retry.store().receipts(agent.agentId);
+    assert.deepEqual([still!.state, still!.next_attempt_at_ms, still!.last_error], [running!.state, running!.next_attempt_at_ms, running!.last_error], "nothing changed");
+
+    retry.hooks.turnStarts = null;
+    turn.resolve();
+    await waitForAsync(async () => retry.waits.length === 2);
+    assert.deepEqual(retry.sources, ["1", "continuation"], "the turn ran once");
+    assert.deepEqual((await retry.view()).map((receipt) => receipt.state), ["acknowledged_failed", "acknowledged_failed", "pending"]);
+  } finally { await retry.cleanup(); }
+});
+
+test("a follow-up that ends unstarted during its wait says why on the failed message", async () => {
+  const AGENT_CHANGED = "The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task.";
+  const TASK_NOT_HELD = "The agent did not try again: the task is finished, or is no longer this agent's.";
+  const ended = { for_message_id: "1", state: "ended", scheduled: null };
+  // The agent comes back as another session, with another conversation, or in another workspace.
+  for (const change of [{ agentSessionId: "session-2" }, { providerContinuationId: "thread-2" }, { workAttemptId: "attempt-2" }]) {
+    const retry = await scheduledRetryFixture();
+    try {
+      await retry.say("1", 1);
+      const changed = { ...retry.claude, ...change, handle: { ...retry.claude.handle, ...change } };
+      await (await retry.restartDaemon(5_000, changed)).pump;
+      const receipts = await retry.view();
+      assert.deepEqual(receipts.map((receipt) => [receipt.state, receipt.error]), [["acknowledged_failed", retry.fault.error], ["acknowledged_no_reply", AGENT_CHANGED]], JSON.stringify(change));
+      assert.deepEqual(receipts[1]!.follow_up, ended, JSON.stringify(change));
+      assert.deepEqual(retry.sources, ["1"], "nothing ran");
+      assert.deepEqual(retry.waits, [30_000], "and nothing waits");
+    } finally { await retry.cleanup(); }
+  }
+  // The task was finished, or went to another agent, while the follow-up waited.
+  const retry = await scheduledRetryFixture();
+  try {
+    await retry.say("1", 1);
+    const first = (await retry.scheduled())!;
+    retry.hooks.held = [];
+    await retry.delivery().retry(retry.claude, first.source_message_id);
+    await waitForAsync(async () => (await retry.view())[1]!.state === "acknowledged_no_reply");
+    const receipts = await retry.view();
+    assert.deepEqual([receipts[1]!.error, receipts[1]!.follow_up], [TASK_NOT_HELD, ended]);
+    assert.deepEqual(retry.sources, ["1"], "nothing ran");
+  } finally { await retry.cleanup(); }
+});
+
+test("a series that ends on an action with an uncertain result says so on the room message it began with", async () => {
+  const UNCERTAIN = "The agent did not try again: an earlier action has an uncertain result. Check that result, then send an instruction to continue only the verified unfinished work.";
+  const retry = await scheduledRetryFixture();
+  try {
+    await retry.say("1", 1);
+    const first = (await retry.scheduled())!;
+    // The follow-up's turn starts an action that changes something outside, and fails before the action's result is known.
+    const db = new DatabaseSync(retry.path);
+    db.prepare(`INSERT INTO supervised_agent_effects
+      (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+      VALUES ('effect',?,?,?,'turn-2','request','publish_room_artifact','{}',1,'executing',NULL,NULL,?,?)`)
+      .run(agent.agentId, agent.roomId, "generation-1", new Date().toISOString(), new Date().toISOString());
+    db.close();
+    await retry.delivery().retry(retry.claude, first.source_message_id);
+    await waitForAsync(async () => (await retry.view())[1]!.state === "acknowledged_failed");
+    await retry.delivery().drainAdmittedTurns([agent.agentId]);
+    // No other follow-up is made. The failed follow-up has no room message, so the reason is also on the one it began with.
+    assert.deepEqual((await retry.view()).map((receipt) => [receipt.source_message_id.replace(/:.*/, ""), receipt.state, receipt.error]),
+      [["1", "acknowledged_failed", UNCERTAIN], ["task-continuation", "acknowledged_failed", UNCERTAIN]]);
+    assert.deepEqual(retry.sources, ["1", "continuation"]);
+    assert.deepEqual(retry.waits, [30_000], "nothing else waits");
+  } finally { await retry.cleanup(); }
+});
+
+test("Stop trying at the moment a follow-up's time came is not a delivery fault", async () => {
+  const retry = await scheduledRetryFixture();
+  const warned: unknown[][] = [];
+  const warn = console.warn;
+  console.warn = (...parts: unknown[]) => { warned.push(parts); };
+  try {
+    await retry.say("1", 1);
+    const first = (await retry.scheduled())!;
+    const item = (await retry.store().receipts(agent.agentId))[1]!;
+    // The follow-up is due, and the daemon asks which tasks the agent holds. At that moment its owner stops it.
+    retry.hooks.ownedTasks = () => retry.store().stopTaskContinuation(item.inbox_item_id, STOPPED_BY_OWNER);
+    await retry.delivery().retry(retry.claude, first.source_message_id);
+    await waitForAsync(async () => (await retry.view())[1]!.state === "cancelled_by_user");
+    await retry.delivery().drainAdmittedTurns([agent.agentId]);
+    assert.deepEqual(retry.sources, ["1"], "nothing ran");
+    assert.deepEqual(retry.waits, [30_000], "the pump did not back off as after a fault");
+    assert.deepEqual(warned, [], "and it reported none");
+    assert.deepEqual([(await retry.view())[1]!.follow_up, (await retry.view())[1]!.error], [{ for_message_id: "1", state: "ended", scheduled: null }, STOPPED_BY_OWNER]);
+  } finally { console.warn = warn; await retry.cleanup(); }
 });
 
 test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {
@@ -2383,7 +2973,7 @@ test("task continuity persists its delay and three-continuation budget across re
       assert.equal(runs, expected);
       const head = (await store.head(agent.agentId))!;
       if (expected < 4) {
-        const delay = 10_000 * 2 ** (expected - 1);
+        const delay = SHORT_FAULT_WAITS[expected - 1]!;
         assert.equal(head.next_attempt_at_ms, now + delay);
         await delivery.fenceAndDrain(); await store.close();
         store = new SupervisedAgentInboxStore(path, () => new Date(now).toISOString());
@@ -2392,7 +2982,7 @@ test("task continuity persists its delay and three-continuation budget across re
         delivery = makeDelivery();
       } else {
         assert.equal(head.state, "blocked");
-        assert.match(head.last_error!, /three continuations/);
+        assert.equal(head.last_error, STOPPED_AFTER_THREE);
         await delivery.pump(agent);
         assert.equal(runs, 4, "the original turn plus three automatic continuations is the hard bound");
       }

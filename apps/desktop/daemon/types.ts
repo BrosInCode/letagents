@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.215";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.216";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -404,6 +404,17 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
     canonical_message_id: string | null;
     state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "acknowledged_failed" | "retryable" | "blocked" | "restoring_conversation" | "cancelled_by_room_move" | "cancelled_by_user" | "queued_behind_blocked";
     attempt_count: number; provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; updated_at: string;
+    /**
+     * Set on a follow-up, which has no room message of its own: the room message the failed work began with (null
+     * when that receipt is no longer kept), and where the follow-up stands. `scheduled`: the daemon starts it by
+     * itself at `at_ms`, as automatic attempt `attempt` of `attempts`, after a provider fault or a turn without a
+     * reply. `waiting_for_owner`: it is blocked. `ended`: it ended with nothing started, and its `error` says why.
+     */
+    follow_up?: {
+      for_message_id: string | null;
+      state: "scheduled" | "waiting_for_owner" | "ended";
+      scheduled: { at_ms: number; attempt: number; attempts: number; kind: "provider_fault" | "no_reply" } | null;
+    };
     timeline: Array<{ event_sequence: number; phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled"; observed_at: string; detail: string | null }>;
   }>;
 };

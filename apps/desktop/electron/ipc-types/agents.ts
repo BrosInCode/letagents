@@ -639,7 +639,31 @@ export interface DesktopRoomAgentDeliveryReceipt {
   failureCode: "provider_continuation_missing" | null;
   terminalReason: "upgrade_authority_unavailable" | null;
   updatedAt: string;
+  /** Set on a follow-up of failed work, which has no room message of its own. */
+  followUp?: DesktopRoomAgentFollowUp;
   timeline: DesktopRoomAgentCausalEvent[];
+}
+
+/**
+ * Where an agent's follow-up of failed work stands, and the room message that work began with (null when that
+ * receipt is no longer kept). `scheduled`: the agent tries again by itself at a saved time. `waiting_for_owner`:
+ * the follow-up is blocked. `ended`: it ended with nothing started, and the receipt's error says why.
+ */
+export interface DesktopRoomAgentFollowUp {
+  forMessageId: string | null;
+  state: "scheduled" | "waiting_for_owner" | "ended";
+  scheduled: DesktopRoomAgentScheduledRetry | null;
+}
+
+/** An automatic attempt that waits for its time. The time is the daemon's saved one, so it holds across restarts. */
+export interface DesktopRoomAgentScheduledRetry {
+  /** When the attempt starts, in milliseconds since the epoch. */
+  atMs: number;
+  /** Which automatic attempt this is, from 1, and how many there are in all. */
+  attempt: number;
+  attempts: number;
+  /** What the agent tries again after: a short provider fault, or a turn that ended without a reply. */
+  kind: "provider_fault" | "no_reply";
 }
 
 /** Four independent truths; no field is inferred from another. */
