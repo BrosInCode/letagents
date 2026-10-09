@@ -221,6 +221,7 @@
           v-for="receipt in visibleDeliveryReceipts"
           :key="receipt.agentId"
           :data-state="receipt.state"
+          :data-follow-up="receipt.scheduledRetry ? 'scheduled' : receipt.followUpNote?.state"
           :aria-label="receiptLabel(receipt)"
         >
           <span class="room-message-delivery-indicator" aria-hidden="true">

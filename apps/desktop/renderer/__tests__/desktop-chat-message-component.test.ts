@@ -360,6 +360,41 @@ test("after the last automatic attempt the failed message says that the agent wa
     /<small>The agent stopped and now waits for you\.<\/small>/);
 });
 
+test("a receipt wraps inside its message's column with its controls on one line, and it has the colour of what its follow-up waits for", async () => {
+  const retry = { atMs: Date.now() + 100_000, attempt: 2, attempts: 3, kind: "provider_fault", sourceMessageId: "task-continuation:inbox_1" };
+  const note = (state: string) => ({ state, sourceMessageId: "task-continuation:inbox_4", text: state === "ended" ? STOPPED_BY_OWNER : ATTEMPTS_FAILED, canRetry: state !== "ended" });
+  const item = async (receipt: unknown) => (await renderReceipts("msg_1", [receipt])).match(/<li[^>]*data-state="acknowledged_failed"[^>]*>/)![0];
+  // The receipt names the wait that it shows. Its own state stays, so what failed is still a failure.
+  assert.match(await item({ ...failedReceipt, scheduledRetry: retry }), / data-follow-up="scheduled"/);
+  assert.match(await item({ ...failedReceipt, followUpNote: note("waiting_for_owner") }), / data-follow-up="waiting_for_owner"/);
+  assert.match(await item({ ...failedReceipt, followUpNote: note("ended") }), / data-follow-up="ended"/);
+  assert.doesNotMatch(await item(failedReceipt), /data-follow-up/);
+
+  const css = readFileSync(fileURLToPath(new URL("../src/styles/message-content/message-meta-reply.css", import.meta.url)), "utf8");
+  const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rule = (selector: string) => css.match(new RegExp("(?:^|\\n)" + escaped(selector) + " \\{([^}]*)\\}"))?.[1] ?? "";
+  const has = (selector: string, ...declarations: string[]) => { for (const declaration of declarations) assert.ok(rule(selector).includes(`${declaration};`), `${selector} { ${declaration} }`); };
+  // The list of receipts does not make the message wider, and a receipt wraps inside the list. A fixed radius: a capsule for one line, corners for more.
+  has(".room-message-delivery-receipts", "min-width: 0", "max-width: min(720px, 100%)");
+  has(".room-message-delivery-receipts li", "flex-wrap: wrap", "min-width: 0", "max-width: 100%", "border-radius: 15px");
+  // A text wraps in the room that is left, and a word that is longer than the receipt breaks. A control and the agent's name do not shrink.
+  has(".room-message-delivery-receipts small", "flex: 1 1 0%", "max-width: 100%", "overflow-wrap: break-word");
+  has(".room-message-delivery-receipts strong", "flex: none", "max-width: 100%");
+  has(".room-message-delivery-receipts button", "flex: none", "white-space: nowrap");
+  // The countdown is the one text that is not read aloud. It keeps its number with its unit, on a line of its own, so the controls stay where they are.
+  const source = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopChatMessage.vue", import.meta.url)), "utf8");
+  assert.equal(source.match(/<small aria-hidden="true">/g)?.length, 1);
+  has('.room-message-delivery-receipts li > small[aria-hidden="true"]', "flex: none", "width: 100%", "white-space: nowrap", "font-variant-numeric: tabular-nums");
+  has(".room-message-delivery-receipts li > small + small", "flex-basis: 100%");
+  // A wait that ends by itself has the colour of a recovery. A wait for the owner has the colour of a blocked message.
+  const recovers = '.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-follow-up="scheduled"])';
+  const waitsForOwner = '.room-message-delivery-receipts li:is([data-state="blocked"], [data-state="queued_behind_blocked"], [data-follow-up="waiting_for_owner"])';
+  has(recovers, "border-color: rgba(251, 191, 36, 0.18)", "background: rgba(251, 191, 36, 0.045)");
+  has(`${recovers} > .room-message-delivery-indicator`, "color: #fcd34d");
+  has(waitsForOwner, "border-color: rgba(248, 113, 113, 0.2)", "background: rgba(248, 113, 113, 0.055)");
+  has(`${waitsForOwner} > .room-message-delivery-indicator`, "color: #fca5a5");
+});
+
 /** A mounted message whose script is live: its clock runs, and its controls can be used. */
 function mountedMessage(props: Record<string, unknown>) {
   const renderer = createRenderer<any, any>({
