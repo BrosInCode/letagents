@@ -6,12 +6,10 @@ import { createRenderer, h, nextTick, reactive, ref, ssrContextKey } from 'vue';
 import { createServer, type ViteDevServer } from 'vite';
 
 let vite: ViteDevServer, Composer: any, searchModule: any, ipc: any, toasts: any;
-const originals = { window: globalThis.window, document: globalThis.document };
+const originals = { window: globalThis.window };
 before(async () => {
   ipc = { room: {} };
-  Object.assign(globalThis, { window: Object.assign(new EventTarget(), { letagentsDesktop: ipc, setTimeout: () => 0 }),
-    // The composer listens for visibility changes on the document while mounted.
-    document: Object.assign(new EventTarget(), { visibilityState: 'visible' }) });
+  Object.assign(globalThis, { window: Object.assign(new EventTarget(), { letagentsDesktop: ipc, setTimeout: () => 0 }) });
   vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
   Composer = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-chat/RoomComposer.vue')).default;
   searchModule = await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-shell/useDesktopRoomSearch.ts');

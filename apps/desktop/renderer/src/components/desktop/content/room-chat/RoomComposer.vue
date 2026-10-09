@@ -493,15 +493,21 @@ function holdCardIfShown(): void {
 function onWindowVisibilityChange(): void {
   if (document.visibilityState === "visible") holdCardIfShown();
 }
+// A host without a document (a unit harness) has no visibility to watch.
+function setVisibilityListener(listening: boolean): void {
+  if (typeof document === "undefined") return;
+  if (listening) document.addEventListener("visibilitychange", onWindowVisibilityChange);
+  else document.removeEventListener("visibilitychange", onWindowVisibilityChange);
+}
 watch(() => props.active, (active) => {
   if (active) holdCardIfShown();
 });
 onActivated(() => {
   holdCardIfShown();
-  document.addEventListener("visibilitychange", onWindowVisibilityChange);
+  setVisibilityListener(true);
 });
 onDeactivated(() => {
-  document.removeEventListener("visibilitychange", onWindowVisibilityChange);
+  setVisibilityListener(false);
 });
 
 /** The room checks the request again before it stops anything. */
@@ -619,15 +625,16 @@ watch(
 
 onMounted(() => {
   void refreshRoomHostApprovals();
+  // The listener comes before the interval: if this hook throws, no interval is left running.
+  setVisibilityListener(true);
   approvalTimer = setInterval(() => { approvalNowMs.value = Date.now(); void refreshRoomHostApprovals(); }, 3_000);
-  document.addEventListener("visibilitychange", onWindowVisibilityChange);
   void nextTick(syncTextareaHeight);
 });
 
 onBeforeUnmount(() => {
   if (approvalTimer) clearInterval(approvalTimer);
   if (decisionTimer) clearTimeout(decisionTimer);
-  document.removeEventListener("visibilitychange", onWindowVisibilityChange);
+  setVisibilityListener(false);
 });
 
 async function submitMessage(): Promise<void> {
