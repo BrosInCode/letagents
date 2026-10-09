@@ -229,7 +229,6 @@
         :chat-storage-feedback="chatStorageFeedback"
         :chat-storage-settings="chatStorageSettings"
         :chat-storage-available="chatStorageAvailable"
-        :diagnostics-notes="diagnostics?.notes || []"
         :feedback="settingsFeedback"
         :initial-pane="settingsPaneForActiveEntry"
         :mcp-install-busy="mcpInstallBusy || loading"
@@ -254,6 +253,7 @@
         @install-update="installDesktopUpdate"
         @leave-room="leaveAccountRoom"
         @open-room="openAccountRoomFromSettings"
+        @open-agent="openServiceAgent"
         @restore-room="restoreAccountRoom"
         @select-all-mcp-targets="selectAllMcpTargets"
         @select-mcp-target="selectMcpTarget"
@@ -2298,6 +2298,17 @@ async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
     });
   } finally {
     loading.value = false;
+  }
+}
+
+async function openServiceAgent(intent: AttentionNavigationIntent): Promise<void> {
+  attentionIntent.value = null;
+  notificationRevealMessageId.value = null;
+  try {
+    await openRoomFromAppAgent(intent.roomIdentifier);
+    attentionIntent.value = intent;
+  } catch (error) {
+    pushActionToast(safeUserVisibleErrorDetail(error, "Could not open this agent’s room."), "error");
   }
 }
 
