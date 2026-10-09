@@ -21,8 +21,12 @@ const WORKER_MINT_RECOVERY_RETRY_LIMIT = 5;
 // A usage limit resets on the provider's schedule, often hours or days away.
 // Keep checking for as long as the agent should run, but rarely: a rejected
 // launch does no work, yet an hourly check from every agent is still noise.
-// The first check comes soon, in case the rejection was a brief rate limit.
-// After that, wait until the reset the provider named, or this long.
+// A reset the provider names that is clearly ahead is waited for, up to this
+// long. With no reset, or one that is already past or about to pass (a wrong
+// clock or a stale event), one check comes soon in case the rejection was a
+// brief rate limit. If the agent is still limited after that, it waits this
+// long, so a reset that never moves cannot make every agent launch every
+// few minutes.
 const PROVIDER_QUOTA_FIRST_RETRY_MS = 5 * 60_000;
 const PROVIDER_QUOTA_RETRY_MAX_MS = 6 * 60 * 60_000;
 // A named reset is the provider's clock, not ours; check just after it.
@@ -69,7 +73,8 @@ export type ProviderSchedulerFailurePorts = {
 export class ProviderSchedulerFailureCoordinator {
   private readonly providerStartRetryAttempts = new Map<string, number>();
   private readonly workerMintRecoveryRetryAttempts = new Map<string, number>();
-  private readonly providerQuotaRetryAttempts = new Map<string, number>();
+  /** Agents whose one early usage-limit check was already spent. */
+  private readonly providerQuotaEarlyChecked = new Set<string>();
 
   constructor(private readonly ports: ProviderSchedulerFailurePorts) {}
 
@@ -80,7 +85,7 @@ export class ProviderSchedulerFailureCoordinator {
   clearSuccessfulRecovery(entryId: string): void {
     this.providerStartRetryAttempts.delete(entryId);
     this.workerMintRecoveryRetryAttempts.delete(entryId);
-    this.providerQuotaRetryAttempts.delete(entryId);
+    this.providerQuotaEarlyChecked.delete(entryId);
   }
 
   async record(entryId: string, error: unknown, actor: string): Promise<void> {
@@ -150,14 +155,15 @@ export class ProviderSchedulerFailureCoordinator {
       return;
     }
     if (providerQuotaExhaustedFailure(error)) {
-      const attempts = (this.providerQuotaRetryAttempts.get(entryId) ?? 0) + 1;
-      this.providerQuotaRetryAttempts.set(entryId, attempts);
+      const now = this.ports.nowMs();
       const resetsAtMs = providerQuotaResetAtMs(error);
-      // A reset already past (or a clock that disagrees) must not spin: never sooner than the first check.
-      this.ports.scheduleRecovery(entryId, resetsAtMs !== null
-        ? Math.min(Math.max(resetsAtMs - this.ports.nowMs() + PROVIDER_QUOTA_RESET_MARGIN_MS, PROVIDER_QUOTA_FIRST_RETRY_MS),
-          PROVIDER_QUOTA_RETRY_MAX_MS)
-        : attempts === 1 ? PROVIDER_QUOTA_FIRST_RETRY_MS : PROVIDER_QUOTA_RETRY_MAX_MS);
+      if (resetsAtMs !== null && resetsAtMs > now + PROVIDER_QUOTA_FIRST_RETRY_MS) {
+        this.ports.scheduleRecovery(entryId, Math.min(resetsAtMs - now + PROVIDER_QUOTA_RESET_MARGIN_MS, PROVIDER_QUOTA_RETRY_MAX_MS));
+        return;
+      }
+      const earlyCheckSpent = this.providerQuotaEarlyChecked.has(entryId);
+      this.providerQuotaEarlyChecked.add(entryId);
+      this.ports.scheduleRecovery(entryId, earlyCheckSpent ? PROVIDER_QUOTA_RETRY_MAX_MS : PROVIDER_QUOTA_FIRST_RETRY_MS);
       return;
     }
     if (transientProviderStartFailure(error)) {

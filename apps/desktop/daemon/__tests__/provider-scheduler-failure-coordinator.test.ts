@@ -43,20 +43,43 @@ test("a provider usage limit is checked once soon, then every six hours until a 
   assert.equal(scheduled.at(-1), 5 * MINUTE, "a successful launch restarts the schedule");
 });
 
-test("a usage limit with a reset time waits for that reset, never beyond six hours or under five minutes", async () => {
+test("a usage limit with a reset clearly ahead waits for that reset, never beyond six hours", async () => {
   const clock = { now: 1_000_000_000 };
   const { coordinator, scheduled } = harness(clock);
   const record = (resetsInMs: number) => coordinator.record("agent-1", quotaError(clock.now + resetsInMs), "test");
   await record(2 * HOUR);
   await record(3 * 24 * HOUR);
-  await record(-10 * MINUTE);
-  await record(MINUTE);
-  assert.deepEqual(scheduled, [
-    2 * HOUR + 30_000,
-    6 * HOUR,
-    5 * MINUTE,
-    5 * MINUTE,
-  ], "just after the named reset; a far reset is rechecked every six hours; a past or imminent one cannot spin");
+  await record(5 * MINUTE + 1);
+  assert.deepEqual(scheduled, [2 * HOUR + 30_000, 6 * HOUR, 5 * MINUTE + 1 + 30_000],
+    "just after the named reset; a far reset is rechecked every six hours");
+});
+
+for (const [name, resetsInMs] of [
+  ["already past", -10 * MINUTE],
+  ["a minute away", MINUTE],
+  ["exactly at the early check", 5 * MINUTE],
+] as const) {
+  test(`a reset that is ${name} gets one early check, then six hours, however often it is named`, async () => {
+    const clock = { now: 1_000_000_000 };
+    const { coordinator, scheduled } = harness(clock);
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await coordinator.record("agent-1", quotaError(clock.now + resetsInMs), "test");
+    }
+    assert.deepEqual(scheduled, [5 * MINUTE, 6 * HOUR, 6 * HOUR, 6 * HOUR],
+      "a stale reset must not relaunch every limited agent every five minutes");
+  });
+}
+
+test("a stale reset after a reset that was waited for still gets its one early check", async () => {
+  const clock = { now: 1_000_000_000 };
+  const { coordinator, scheduled } = harness(clock);
+  await coordinator.record("agent-1", quotaError(clock.now + 2 * HOUR), "test");
+  await coordinator.record("agent-1", quotaError(clock.now - MINUTE), "test");
+  await coordinator.record("agent-1", quotaError(clock.now - MINUTE), "test");
+  assert.deepEqual(scheduled, [2 * HOUR + 30_000, 5 * MINUTE, 6 * HOUR]);
+  coordinator.clearSuccessfulRecovery("agent-1");
+  await coordinator.record("agent-1", quotaError(clock.now - MINUTE), "test");
+  assert.equal(scheduled.at(-1), 5 * MINUTE, "a successful launch restarts the early check");
 });
 
 test("a named reset ignores how many launches already failed", async () => {

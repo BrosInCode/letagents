@@ -238,7 +238,7 @@ test("a Claude usage-limit bootstrap failure reads as one plain reason, not the 
   const now = summary(limited());
   assert.equal(agentInspectorOverallState(limited()), "needs_attention");
   assert.equal(now?.kind, "attention");
-  assert.match(now?.summary ?? "", /^Claude's usage limit is reached\. The agent starts again when the limit resets\./);
+  assert.match(now?.summary ?? "", /^Claude's usage limit is reached\. LetAgents checks again by itself and starts the agent after the limit resets\./);
   assert.doesNotMatch(now?.summary ?? "", /failed_response|assistant_error|Startup observations|convergence scheduler/,
     "the observation string stays in Diagnostics");
   // The owner can also ask for a check now through the control the header offers.

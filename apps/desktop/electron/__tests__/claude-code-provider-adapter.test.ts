@@ -1073,6 +1073,10 @@ for (const [name, events, expectedResetMs] of [
     { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "allowed_warning", resetsAt: 1_790_000_100, rateLimitType: "five_hour" } },
     { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", resetsAt: 1_790_000_000, rateLimitType: "seven_day" } },
   ], 1_790_000_000_000],
+  ["the latest of several rejected windows is the reset", sessionId => [
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", resetsAt: 1_790_050_000, rateLimitType: "seven_day" } },
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", resetsAt: 1_790_000_000, rateLimitType: "five_hour" } },
+  ], 1_790_050_000_000],
   ["no event leaves the reset time unknown", () => [], undefined],
   ["a window that is not rejected is not a reset time", sessionId => [
     { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "allowed", resetsAt: 1_790_000_000 } },
