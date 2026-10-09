@@ -234,24 +234,30 @@
   background: rgba(255, 255, 255, 0.86);
 }
 
+/* A receipt never makes its message wider: it stays in the message's column and wraps there. */
 .room-message-delivery-receipts {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
   max-width: min(720px, 100%);
   margin: 9px 0 0;
   padding: 0;
   list-style: none;
 }
 
+/* The radius is half the height of a receipt of one line, which stays a capsule. One of more lines has corners. */
 .room-message-delivery-receipts li {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
+  gap: 5px 7px;
+  min-width: 0;
+  max-width: 100%;
   min-height: 30px;
   padding: 4px 9px 4px 7px;
   border: 1px solid rgba(255, 255, 255, 0.075);
-  border-radius: 999px;
+  border-radius: 15px;
   background: rgba(255, 255, 255, 0.032);
   color: var(--text-secondary);
 }
@@ -260,43 +266,72 @@
   color: var(--text-tertiary);
 }
 
-.room-message-delivery-receipts li:is([data-state="blocked"], [data-state="queued_behind_blocked"]) {
+/* The agent waits for its owner: for a blocked message, or after the last automatic attempt. */
+.room-message-delivery-receipts li:is([data-state="blocked"], [data-state="queued_behind_blocked"], [data-follow-up="waiting_for_owner"]) {
   border-color: rgba(248, 113, 113, 0.2);
   background: rgba(248, 113, 113, 0.055);
 }
 
-.room-message-delivery-receipts li[data-state="result_recovery"] {
+/* The agent recovers by itself: it reads a result again, or it waits to try again. */
+.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-follow-up="scheduled"]) {
   border-color: rgba(251, 191, 36, 0.18);
   background: rgba(251, 191, 36, 0.045);
 }
 
 .room-message-delivery-receipts strong {
+  flex: none;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   color: currentColor;
   font-size: 0.73rem;
   font-weight: 760;
   line-height: 1;
 }
 
+/*
+ * A text takes the room that is left on its line and wraps there, as it did before receipts could wrap.
+ * It starts a line of its own only when its longest word does not fit, and a word longer than the receipt breaks.
+ * `break-word`, not `anywhere`: with `anywhere` the smallest width of a text is one letter, so it would never start a new line.
+ */
 .room-message-delivery-receipts small {
+  flex: 1 1 0%;
+  max-width: 100%;
+  overflow-wrap: break-word;
   color: var(--text-tertiary);
   font-size: 0.66rem;
   font-weight: 660;
-  line-height: 1;
+  line-height: 1.3;
+}
+
+/* What follows the failure, a wait or a note, has a line of its own below what failed. */
+.room-message-delivery-receipts li > small + small {
+  flex-basis: 100%;
+}
+
+/* The countdown is the one text that is not read aloud. It does not wrap, so its number stays with its unit, and the controls are on the line after it, so they do not move as it counts. */
+.room-message-delivery-receipts li > small[aria-hidden="true"] {
+  flex: none;
+  width: 100%;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .room-message-delivery-indicator {
   display: inline-grid;
+  flex: none;
   place-items: center;
   width: 17px;
   height: 17px;
   color: #6ee7b7;
 }
 
-.room-message-delivery-receipts li:is([data-state="blocked"], [data-state="queued_behind_blocked"]) > .room-message-delivery-indicator {
+.room-message-delivery-receipts li:is([data-state="blocked"], [data-state="queued_behind_blocked"], [data-follow-up="waiting_for_owner"]) > .room-message-delivery-indicator {
   color: #fca5a5;
 }
 
-.room-message-delivery-receipts li[data-state="result_recovery"] > .room-message-delivery-indicator {
+.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-follow-up="scheduled"]) > .room-message-delivery-indicator {
   color: #fcd34d;
 }
 
@@ -319,8 +354,10 @@
 .room-message-delivery-dots i:nth-child(3) { animation-delay: 220ms; }
 
 .room-message-delivery-receipts button {
+  flex: none;
   min-height: 22px;
   padding: 0 7px;
+  white-space: nowrap;
   border: 0;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.075);
@@ -330,6 +367,9 @@
   cursor: pointer;
   transition: background var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
 }
+
+/* Try now and Stop trying keep their width while their word changes to "Asking…" or "Stopping…", so the other does not move. */
+.room-message-delivery-receipts li[data-follow-up="scheduled"] > button { min-width: 7.5em; }
 
 .room-message-delivery-receipts button:hover,
 .room-message-delivery-receipts button:focus-visible {
@@ -347,9 +387,11 @@
   opacity: 0.48;
 }
 
-.room-message-delivery-receipts li > small:last-child {
+/* The last text of a receipt with no follow-up is a short column, as before. It can shrink in a receipt that is narrower. */
+.room-message-delivery-receipts li:not([data-follow-up]) > small:last-child {
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 260px;
-  line-height: 1.25;
 }
 
 @keyframes room-message-delivery-dot {
