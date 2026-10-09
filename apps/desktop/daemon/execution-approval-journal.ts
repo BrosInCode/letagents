@@ -23,7 +23,9 @@ const connection = z.discriminatedUnion("kind", [
 ]);
 const authority = z.strictObject({ inboxItemId: executionIdentity, workAttemptId: executionIdentity,
   executionGenerationId: executionIdentity, provider: z.enum(["codex", "open-model", "claude-code"]),
-  providerConnection: connection, configurationRevision: time.min(1) });
+  providerConnection: connection, configurationRevision: time.min(1),
+  /** Set only for an answer the owner chose on the card: a saved edit not yet applied does not stop it. */
+  ownerAnswer: z.literal(true).optional() });
 const reference = z.strictObject({
   requestId: executionIdentity, requestVersion: time.min(1), requestSha256: digest,
   agentId: executionIdentity, roomId: executionIdentity, executionGenerationId: executionIdentity,
@@ -171,7 +173,7 @@ function exact(db: DatabaseSync, expected: ApprovalReference): ExecutionApproval
   return found;
 }
 function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agentId" | "roomId" | "providerContinuationId" | "providerTurnId">, owned: ApprovalAuthority,
-  current: DaemonManifestEntry | undefined): { generation: string; runtimeId: string; turnId: string; sourceMessageId: string; createdAtMs: number } {
+  current: DaemonManifestEntry | undefined, savedEditMayWait: boolean): { generation: string; runtimeId: string; turnId: string; sourceMessageId: string; createdAtMs: number } {
   // Native pendingness comes from the broker's exact adapter callback. Storage
   // authority comes from the operational checkpoint, never observer projections.
   requireForeignKeys(db);
@@ -182,8 +184,17 @@ function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agent
     || current.provider_ref.provider_continuation_id !== expected.providerContinuationId
     || owned.providerConnection.kind !== (owned.provider === "codex" ? "codex_app_server" : owned.provider === "claude-code" ? "claude_cli" : "opencode_server")
     || !sameProviderActionConnectionIdentity(current.provider_ref.provider_connection, owned.providerConnection)) reject("missing_turn");
+  // The applied revision must be the one this runtime started with. The saved
+  // revision may be ahead of it: an owner's edit (a new permission mode, for
+  // example) waits for the next start, so the live runtime still runs the old
+  // configuration and its open requests are still its own. Admitting a request
+  // and the owner's own answer to it may proceed then. Anything that depends on
+  // the configuration in force (an automatic or delegated decision, a saved
+  // tool rule) may not. The saved revision can never trail the applied one.
   const configuration = db.prepare("SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(expected.agentId);
-  if (configuration?.config_revision !== owned.configurationRevision || configuration.runtime_configuration_revision !== owned.configurationRevision
+  if (configuration?.runtime_configuration_revision !== owned.configurationRevision
+    || (configuration.config_revision !== owned.configurationRevision
+      && (!savedEditMayWait || (configuration.config_revision as number) < owned.configurationRevision))
     || !db.prepare("SELECT 1 FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=? AND terminal_json IS NULL")
       .get(owned.executionGenerationId, owned.workAttemptId)) reject("missing_turn");
   const head = db.prepare(`SELECT inbox_item_id,room_id,state,provider_turn_id,outcome,source_message_id,created_at
@@ -216,7 +227,7 @@ export function validateExecutionApprovalAuthority(db: DatabaseSync, expected: A
   current: DaemonManifestEntry | undefined): void {
   const r = parse(reference, expected); const owned = parse(authority, input);
   if (exact(db, r).request.closedAtMs != null) reject("invalid_transition");
-  const turn = eligibleTurn(db, r, owned, current);
+  const turn = eligibleTurn(db, r, owned, current, owned.ownerAnswer === true);
   if (r.executionGenerationId !== turn.generation || r.runtimeGenerationId !== turn.runtimeId || r.turnId !== turn.turnId) reject("missing_turn");
 }
 function liveSelection(db: DatabaseSync, record: ExecutionApprovalRecord, owned: ApprovalAuthority,
@@ -260,7 +271,7 @@ export function admitExecutionApproval(db: DatabaseSync, input: AdmitOperational
       || Object.entries(parsed.request).some(([key, item]) => prior.request[key as keyof AdmitExecutionApproval] !== item)) reject("identity_mismatch");
     return { created: false, approval: prior }; // Receipt only; never reopens a request.
   }
-  const turn = eligibleTurn(db, parsed.request, parsed.authority, current);
+  const turn = eligibleTurn(db, parsed.request, parsed.authority, current, true);
   const value = parse(admission, { ...parsed.request, executionGenerationId: turn.generation, runtimeGenerationId: turn.runtimeId, turnId: turn.turnId });
   if (delegatable && (value.kind !== "file_change" || value.risk !== "low")) reject("invalid_input");
   // A caller cannot alias one native callback under another logical request ID.
