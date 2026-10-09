@@ -158,12 +158,21 @@ export function homeHarnessState(
  * setup has no such record, and neither has one that may not have it. A
  * record that cannot be read says no, exactly as it does for a launch: a
  * launch from such a record starts the agent without the owner's setup.
+ *
+ * `appliedRevision` is the configuration revision the process started with,
+ * as the daemon's store records it. An entry read from the manifest carries
+ * no revision, so a caller reads it from the store and passes it here. With
+ * none to give, the question has no answer and this refuses, rather than
+ * counting the process as older than every change.
  */
 export function startedWithHomeHarness(entry: {
-  id: string; provider: string; delivery_mode?: string; provider_launch_policy?: unknown; runtime_configuration_revision?: number;
-}): boolean {
+  id: string; provider: string; delivery_mode?: string; provider_launch_policy?: unknown;
+}, appliedRevision: number | undefined): boolean {
+  if (!Number.isSafeInteger(appliedRevision) || appliedRevision! < 1) {
+    throw new Error("LetAgents cannot tell which settings this agent's process started with.");
+  }
   const state = homeHarnessState({ id: entry.id, provider: entry.provider, deliveryMode: entry.delivery_mode },
-    entry.provider_launch_policy, entry.runtime_configuration_revision);
+    entry.provider_launch_policy, appliedRevision!);
   return state === "on" || state === "until_restart";
 }
 
@@ -174,9 +183,13 @@ export function startedWithHomeHarness(entry: {
  * process was started: that is said as "unknown", which changes one thing
  * only, that the process is not asked what would make it load a project's
  * config again. Such an agent is otherwise treated as without the setup.
+ * `appliedRevision` is the one `startedWithHomeHarness` asks for.
  */
-export function ownerSetupRef(entry: Parameters<typeof startedWithHomeHarness>[0]): { ownerSetup?: true | "unknown" } {
-  if (startedWithHomeHarness(entry)) return { ownerSetup: true };
+export function ownerSetupRef(
+  entry: Parameters<typeof startedWithHomeHarness>[0],
+  appliedRevision: number | undefined,
+): { ownerSetup?: true | "unknown" } {
+  if (startedWithHomeHarness(entry, appliedRevision)) return { ownerSetup: true };
   const policy = entry.provider_launch_policy;
   return policy !== undefined && policy !== null && !isPlainPolicy(policy) ? { ownerSetup: "unknown" } : {};
 }
@@ -192,18 +205,24 @@ export function ownerSetupRef(entry: Parameters<typeof startedWithHomeHarness>[0
  * it paused with no such record (nothing the provider could attach to), so
  * for a paused agent the caller asks whether the end is recorded and passes
  * an entry without the reference only then.
+ *
+ * `lastStartedAtRevision` is the revision the agent last started at, as the
+ * daemon's store records it: an entry read from the manifest carries none.
+ * Undefined when the store could not say, and then a process is counted as
+ * older than every change.
  */
 export function homeHarnessRosterState(
   entry: {
-    id: string; provider: string; delivery_mode?: string; provider_launch_policy?: unknown; runtime_configuration_revision?: number;
+    id: string; provider: string; delivery_mode?: string; provider_launch_policy?: unknown;
     provider_ref?: unknown; observed_state: string;
   },
+  lastStartedAtRevision: number | undefined,
   held: { startedAtRevision: number | undefined } | null,
 ): HomeHarnessState | null {
   const mayStillRun = Boolean(entry.provider_ref) && !["absent", "stopped", "failed"].includes(entry.observed_state);
   return homeHarnessState({ id: entry.id, provider: entry.provider, deliveryMode: entry.delivery_mode }, entry.provider_launch_policy,
-    held ? held.startedAtRevision ?? entry.runtime_configuration_revision
-      : mayStillRun ? entry.runtime_configuration_revision : null);
+    held ? held.startedAtRevision ?? lastStartedAtRevision
+      : mayStillRun ? lastStartedAtRevision : null);
 }
 
 /** The policy as a provider may see it: without LetAgents' own keys, however they got there. */

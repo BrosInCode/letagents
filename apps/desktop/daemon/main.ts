@@ -651,11 +651,7 @@ export class SupervisorDaemon {
         supportsContinuationRepair: () => Boolean(this.providerPort?.repairContinuation),
       },
       recoveryDiagnostics: () => this.providerStreams.recoveryDiagnostics(),
-      manifest: {
-        load: () => this.store.load(),
-        getEntry: (entryId) => this.store.getEntry(entryId),
-        pendingRuntimeRecovery: (entryId) => this.store.pendingRuntimeRecovery(entryId),
-      },
+      manifest: this.store,
       bindings: this.workerBindings,
       inbox: this.supervisedInbox,
       durability: this.durability,

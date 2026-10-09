@@ -260,7 +260,8 @@ export class DeliveryCutoverExecutionCoordinator {
         // next turn, so its owner's setup could never be taken away again. The
         // move is refused while the setup is on, saved for the next start, or
         // still held by the running process.
-        if (!forward && homeHarnessRosterState(entry, { startedAtRevision: handle.appliedConfigurationRevision }) !== null) {
+        if (!forward && homeHarnessRosterState(entry, (await drain.store.getAgentConfiguration(entry.id))?.runtime_configuration_revision,
+          { startedAtRevision: handle.appliedConfigurationRevision }) !== null) {
           throw new Error("Turn off \"Use your own Codex setup\" for this agent and let it restart before moving it to polling delivery.");
         }
         // Prove the actual resolved MCP runtime, not a version promised by the

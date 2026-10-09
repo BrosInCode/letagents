@@ -552,66 +552,86 @@ test("a running agent's real state is told apart from the saved choice until it 
 
 test("the roster never shows an agent as rid of the owner's setup while a process that started with it may be alive", () => {
   // Turned on at revision 4 and off at revision 6. The agent last started at revision 4, with the setup.
+  // That revision is the store's record: an entry read from the manifest carries none, so it is passed beside the entry.
   const entry = (overrides: Record<string, unknown> = {}) => ({
-    id: "supervised_abc", provider: "codex", delivery_mode: "daemon_inbox", provider_launch_policy: changedAt(4, 6), runtime_configuration_revision: 4,
+    id: "supervised_abc", provider: "codex", delivery_mode: "daemon_inbox", provider_launch_policy: changedAt(4, 6),
     provider_ref: { work_attempt_id: "attempt" }, observed_state: "idle", ...overrides,
   });
   // The background service holds the process.
-  assert.equal(homeHarnessRosterState(entry(), { startedAtRevision: 4 }), "until_restart");
-  assert.equal(homeHarnessRosterState(entry(), { startedAtRevision: 6 }), null, "its successor does not have it");
-  assert.equal(homeHarnessRosterState(entry(), { startedAtRevision: undefined }), "until_restart", "a held process of unknown age is read from the agent's last start");
+  assert.equal(homeHarnessRosterState(entry(), 4, { startedAtRevision: 4 }), "until_restart");
+  assert.equal(homeHarnessRosterState(entry(), 4, { startedAtRevision: 6 }), null, "its successor does not have it");
+  assert.equal(homeHarnessRosterState(entry(), 4, { startedAtRevision: undefined }), "until_restart", "a held process of unknown age is read from the agent's last start");
   // It was restarted and has not re-attached the process yet. The process may well be running.
   // A paused agent is among them: it is marked paused when its process's end is recorded, but one route
   // marks it with no such record, so the read model asks for the record before it drops the reference.
   for (const state of ["idle", "working", "starting", "stopping", "recovering", "checkpointing", "paused", "pausing"]) {
-    assert.equal(homeHarnessRosterState(entry({ observed_state: state }), null), "until_restart", state);
+    assert.equal(homeHarnessRosterState(entry({ observed_state: state }), 4, null), "until_restart", state);
   }
   // Only when the process is known gone, or there never was one, does the saved choice stand alone.
   for (const state of ["stopped", "failed", "absent"]) {
-    assert.equal(homeHarnessRosterState(entry({ observed_state: state }), null), null, state);
+    assert.equal(homeHarnessRosterState(entry({ observed_state: state }), 4, null), null, state);
   }
-  assert.equal(homeHarnessRosterState(entry({ provider_ref: undefined }), null), null);
-  assert.equal(homeHarnessRosterState(entry({ runtime_configuration_revision: 6 }), null), null, "it last started after the setup was turned off");
+  assert.equal(homeHarnessRosterState(entry({ provider_ref: undefined }), 4, null), null);
+  assert.equal(homeHarnessRosterState(entry(), 6, null), null, "it last started after the setup was turned off");
   // The other direction: saved on, and a process that may be alive started without it.
   const on = { ...OWN_SETUP, ...changedAt(4) };
-  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on, runtime_configuration_revision: 3 }), null), "after_restart");
-  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on, runtime_configuration_revision: 3, observed_state: "stopped" }), null), "on");
-  assert.equal(homeHarnessRosterState(entry({ id: "supervised_rental_abc" }), { startedAtRevision: 4 }), null);
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on }), 3, null), "after_restart");
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on, observed_state: "stopped" }), 3, null), "on");
+  // And the same agent whose process started at the revision the setup was turned on at: it has the setup now.
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on }), 4, null), "on");
+  // A revision the store could not give is never read as a start after every change.
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: changedAt(6) }), undefined, null), "until_restart");
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on }), undefined, null), "after_restart");
+  assert.equal(homeHarnessRosterState(entry({ id: "supervised_rental_abc" }), 4, { startedAtRevision: 4 }), null);
 });
 
 test("whether a process was started with the owner's setup is the daemon's own record, and a record that cannot be read says no", () => {
   const entry = (policy: unknown, overrides: Record<string, unknown> = {}) => ({
-    id: "supervised_abc", provider: "codex", delivery_mode: "daemon_inbox", provider_launch_policy: policy, runtime_configuration_revision: 4, ...overrides,
+    id: "supervised_abc", provider: "codex", delivery_mode: "daemon_inbox", provider_launch_policy: policy, ...overrides,
   });
+  // The process last started at revision 4. That is the store's record, passed beside the entry: an entry read from the manifest carries none.
   // An agent that never had the setup has no record of it at all.
   for (const never of [{}, { approvalPolicy: "never" }, undefined]) {
-    assert.equal(startedWithHomeHarness(entry(never)), false);
-    assert.deepEqual(ownerSetupRef(entry(never)), {}, "and its reference carries no key");
+    assert.equal(startedWithHomeHarness(entry(never), 4), false);
+    assert.deepEqual(ownerSetupRef(entry(never), 4), {}, "and its reference carries no key");
   }
-  assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(4) })), true);
-  assert.deepEqual(ownerSetupRef(entry({ ...OWN_SETUP, ...changedAt(4) })), { ownerSetup: true });
-  assert.equal(startedWithHomeHarness(entry(changedAt(5))), true, "turned off since: the process still has it");
-  assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(5) })), false, "turned on since: the process does not have it yet");
-  assert.equal(startedWithHomeHarness(entry(changedAt(5, 6))), false, "on and off again since: it never had it");
+  assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(4) }), 4), true);
+  assert.deepEqual(ownerSetupRef(entry({ ...OWN_SETUP, ...changedAt(4) }), 4), { ownerSetup: true });
+  assert.equal(startedWithHomeHarness(entry(changedAt(5)), 4), true, "turned off since: the process still has it");
+  assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(5) }), 4), false, "turned on since: the process does not have it yet");
+  assert.equal(startedWithHomeHarness(entry(changedAt(5, 6)), 4), false, "on and off again since: it never had it");
   // A stored policy that is not a plain object, or a value that is not the exact one, is not read as on.
   // A launch reads the same record the same way (agentUsesHomeHarness), so such an agent starts isolated.
   for (const unreadable of [null, "letagentsOwnerIsolation", ["letagentsOwnerIsolation"], 7, { letagentsOwnerIsolation: true },
     { letagentsOwnerIsolation: "false" }, { letagentsOwnerIsolation: null }, Object.create({ letagentsOwnerIsolation: false })]) {
-    assert.equal(startedWithHomeHarness(entry(unreadable)), false, JSON.stringify(unreadable));
+    assert.equal(startedWithHomeHarness(entry(unreadable), 4), false, JSON.stringify(unreadable));
     assert.equal(agentUsesHomeHarness({ id: "supervised_abc", provider: "codex", deliveryMode: "daemon_inbox" }, unreadable), false, JSON.stringify(unreadable));
   }
   // A stored policy that is there but is not an object at all cannot say how the process was started.
   // Its reference says so, which keeps the process from being asked to read its project again; nothing else changes.
   for (const unreadable of ["letagentsOwnerIsolation", ["letagentsOwnerIsolation"], 7, true, Object.create({ letagentsOwnerIsolation: false })]) {
-    assert.deepEqual(ownerSetupRef(entry(unreadable)), { ownerSetup: "unknown" }, JSON.stringify(unreadable));
+    assert.deepEqual(ownerSetupRef(entry(unreadable), 4), { ownerSetup: "unknown" }, JSON.stringify(unreadable));
   }
   // A readable record without the setup carries nothing, whatever else it holds, and nor does a row with no policy stored.
   for (const readable of [{}, { approvalPolicy: "never" }, { letagentsOwnerIsolation: true }, { letagentsOwnerIsolation: "false" }, changedAt(3), undefined, null]) {
-    assert.deepEqual(ownerSetupRef(entry(readable)), {}, JSON.stringify(readable));
+    assert.deepEqual(ownerSetupRef(entry(readable), 4), {}, JSON.stringify(readable));
   }
   // An agent that may not have the setup never has it, whatever is stored.
   for (const overrides of [{ id: "supervised_rental_abc" }, { provider: "cursor" }, { provider: "open-model" }, { delivery_mode: "mcp_polling" }, { delivery_mode: undefined }]) {
-    assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(4) }, overrides)), false, JSON.stringify(overrides));
+    assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(4) }, overrides), 4), false, JSON.stringify(overrides));
+  }
+  // The same stored record answers by the revision the process started at, and only by that one.
+  const turnedOnAt4 = entry({ ...OWN_SETUP, ...changedAt(4) });
+  assert.equal(startedWithHomeHarness(turnedOnAt4, 4), true, "started when the setup was turned on");
+  assert.equal(startedWithHomeHarness(turnedOnAt4, 7), true, "started later, with it still on");
+  assert.equal(startedWithHomeHarness(turnedOnAt4, 3), false, "started before it was turned on");
+  assert.equal(startedWithHomeHarness(turnedOnAt4, 1), false);
+  // Without a revision there is no answer to give, and nothing is guessed: not "isolated", and not "the owner's setup".
+  for (const unknown of [undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    for (const stored of [turnedOnAt4, entry(changedAt(5)), entry({}), entry(undefined), entry("not a policy")]) {
+      assert.throws(() => startedWithHomeHarness(stored, unknown), /cannot tell which settings this agent's process started with/, String(unknown));
+      assert.throws(() => ownerSetupRef(stored, unknown), /cannot tell which settings this agent's process started with/, String(unknown));
+    }
   }
 });
 
@@ -684,11 +704,11 @@ test("an agent that collects its own room messages never gets the owner's own se
   assert.equal(homeHarnessAvailability(agentOn("supervised_abc", "cursor", "mcp_polling")), "unsupported");
   // And the roster never marks it, with or without a running process.
   const entry = { id: "supervised_abc", provider: "codex", delivery_mode: "mcp_polling", provider_launch_policy: stored,
-    runtime_configuration_revision: 4, provider_ref: { work_attempt_id: "attempt" }, observed_state: "idle" };
-  assert.equal(homeHarnessRosterState(entry, { startedAtRevision: 4 }), null);
-  assert.equal(homeHarnessRosterState(entry, null), null);
-  assert.equal(homeHarnessRosterState({ ...entry, delivery_mode: undefined }, { startedAtRevision: 4 }), null);
-  assert.equal(homeHarnessRosterState({ ...entry, delivery_mode: "daemon_inbox" }, { startedAtRevision: 4 }), "on");
+    provider_ref: { work_attempt_id: "attempt" }, observed_state: "idle" };
+  assert.equal(homeHarnessRosterState(entry, 4, { startedAtRevision: 4 }), null);
+  assert.equal(homeHarnessRosterState(entry, 4, null), null);
+  assert.equal(homeHarnessRosterState({ ...entry, delivery_mode: undefined }, 4, { startedAtRevision: 4 }), null);
+  assert.equal(homeHarnessRosterState({ ...entry, delivery_mode: "daemon_inbox" }, 4, { startedAtRevision: 4 }), "on");
 });
 
 test("a snapshot names the owner's own setup beside a native policy that never carries the key", () => {

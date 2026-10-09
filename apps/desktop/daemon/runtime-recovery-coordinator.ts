@@ -595,7 +595,8 @@ export class RuntimeRecoveryCoordinator {
         }
         if (!execution.terminal && !recoverIdleCursor) {
           if (!this.provider) throw new Error("Provider recovery is unavailable.");
-          const attachment = await this.provider.attach(providerRef(entry));
+          const startedAt = (await this.store.getAgentConfiguration(entryId))?.runtime_configuration_revision;
+          const attachment = await this.provider.attach(providerRef(entry, startedAt));
           if (!attachment) {
             throw new Error("LetAgents cannot prove that the previous provider process stopped. Recovery was not started.");
           }
@@ -718,8 +719,12 @@ async function boundedRecoveryWait(pending: Promise<void>): Promise<void> {
   } finally { if (timer) clearTimeout(timer); }
 }
 
-/** The reference recovery attaches with. Exported so its record of how the process was started can be checked. */
-export function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
+/**
+ * The reference recovery attaches with. Exported so its record of how the
+ * process was started can be checked. `appliedRevision` is the revision the
+ * store says the process started with: the entry carries none.
+ */
+export function providerRef(entry: DaemonManifestEntry, appliedRevision: number | undefined): ProviderActionRef {
   if (!entry.work_attempt_id || !entry.provider_ref) {
     throw new Error("Provider reference is unavailable.");
   }
@@ -728,7 +733,7 @@ export function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
     providerContinuationId: entry.provider_ref.provider_continuation_id,
     provider: entry.provider,
     providerConnection: entry.provider_ref.provider_connection,
-    ...ownerSetupRef(entry),
+    ...ownerSetupRef(entry, appliedRevision),
   };
 }
 
