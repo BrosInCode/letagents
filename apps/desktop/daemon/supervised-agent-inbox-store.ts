@@ -573,6 +573,21 @@ export class SupervisedAgentInboxStore {
     });
   }
 
+  /**
+   * Whether the provider's own result for this message's turn had a shape its
+   * adapter does not know. The failure text may then be the model's own words.
+   * It is read from the saved result of the turn, as a refusal is.
+   */
+  async providerResultUnrecognized(inboxItemId: string): Promise<boolean> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT terminal_evidence_json FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+        .get(inboxItemId) as Row | undefined;
+      if (!row) return false;
+      try { return (JSON.parse(String(row.terminal_evidence_json)) as { unrecognizedResult?: unknown } | null)?.unrecognizedResult === true; }
+      catch { return false; }
+    });
+  }
+
   /** The considered marker and child commit together; a restart can fill the gap after terminal settlement. */
   async enqueueTaskContinuation(input: { parentId: string; agentId: string; roomId: string; workAttemptId: string;
     providerContinuationId: string; agentSessionId: string; tasks: ContinuityTask[] | null;
