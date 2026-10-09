@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../../../shared/provider-acquisition-evidence.mjs";
+import { NO_REPLY_FAILURE, noReplyFailureKind } from "../../../../shared/room-turn-no-reply.mjs";
 
 import {
   ClaudeCodeProviderAdapter,
@@ -28,11 +29,15 @@ import {
 import type {
   ProviderSpawnRequest,
   ProviderActivityEvent,
+  ProviderRoomTurnResult,
   ProviderStreamEvent,
   ProviderTerminalPayload,
   NativeExecutionObservation,
 } from "../main/agents/provider-adapter.js";
 import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
+import {
+  CLAUDE_API_ERROR_CAPTURES, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT, claudeResultEvent, realClaudeCapture, realClaudeResult,
+} from "./claude-result-shapes.js";
 import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
@@ -453,7 +458,9 @@ test("typed Claude lifecycle ignores foreign failures and settles every exact re
   child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
   assert.equal(handle.observedState(), "working");
   child.emit({ type: "result", session_id, user_message_uuid: turnId });
-  await assert.rejects(running, /without success/);
+  const failed = await running;
+  assert.equal(failed.outcome, "failed", "an exact result ends its turn, whatever else it holds");
+  assert.match((failed as { error: string }).error, /does not recognize \(no subtype, no is_error\)/);
   assert.equal(handle.observedState(), "idle", "an exact failed turn leaves the typed runtime reusable");
   assert.equal(events.filter((event) => event.fact.domain === "turn"
     && event.fact.state === "terminal"
@@ -482,7 +489,7 @@ test("typed-shadow Claude keeps malformed exact-result observation unchanged", a
   const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
   child.emit({ type: "result", session_id: handle.providerContinuationId, user_message_uuid: turnId });
 
-  await assert.rejects(running, /without success/);
+  assert.equal((await running).outcome, "failed", "the delivery ends on the exact result under either authority");
   assert.equal(handle.observedState(), "idle");
   assert.equal(events.some((event) => event.fact.domain === "turn" && event.fact.state === "terminal"), false,
     "the permissive exact-result terminal belongs only to typed authority");
@@ -2166,7 +2173,10 @@ for (const recordEnding of [true, false] as const) {
  * router, delivery, execution capture and stores, over the fake CLI. Only the
  * room, the server and the processes are doubles.
  */
-async function claudeDaemonFixture() {
+async function claudeDaemonFixture(options: {
+  /** The tasks the agent holds a work lease for. Without it the daemon has no way to ask, as before. */
+  ownedTasks?: () => Array<{ id: string; title: string; leaseId: string; epoch: number }>;
+} = {}) {
   const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
   const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
   const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
@@ -2274,6 +2284,7 @@ async function claudeDaemonFixture() {
         published.push(input.text);
         return { messageId: `msg_${900 + published.length}`, roomId: input.roomId };
       },
+      ...(options.ownedTasks ? { ownedTasks: async () => options.ownedTasks!() } : {}),
     }, {
       listWorkLeases: async () => [], readWorkLease: async () => null,
       attestWorkLease: async () => { throw new Error("unused"); },
@@ -2357,9 +2368,14 @@ async function claudeDaemonFixture() {
         recovery.held = new Promise<void>((resolve) => { release = resolve; });
         return () => { recovery.held = null; release(); };
       },
-      /** The daemon ends and a new one, with a new adapter, takes the agent over. */
-      restartDaemon: async () => {
+      /**
+       * The daemon ends and a new one, with a new adapter, takes the agent over. `whileNoDaemonRuns` is what
+       * happens in between, when nothing can react to it: a process that ends then is found ended by the new
+       * daemon, and no daemon launches a replacement that the new one would have to fence first.
+       */
+      restartDaemon: async (whileNoDaemonRuns: () => void = () => {}) => {
         await daemon.stop();
+        whileNoDaemonRuns();
         adapter = makeAdapter();
         daemon = makeDaemon();
         await (await startDaemon())();
@@ -2544,13 +2560,22 @@ for (const left of ["its answer", "half an answer"] as const) {
       await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
       agent.sessionRows.push(...CLAUDE_SESSION_AFTER_EXIT[left](agent.sessionId, turn.id, 1));
       const letRecoveryGo = agent.holdRecovery();
+      // The process ends while the first daemon runs: this test is about a daemon that saw the exit.
       agent.exitProcess();
       await agent.eventually(() => agent.recorded().turns[0]?.state === "lost", "the turn is lost with its process, and that is saved");
-      await agent.restartDaemon();
+      // The first daemon goes as far as it can: it starts a replacement and asks for the turn to be read
+      // back. The read is held, so it never gets the answer. Restarted before this point, the daemon may
+      // or may not have started the replacement, and the next daemon takes one of two paths.
+      await agent.eventually(() => agent.harness.children.length === 2 && agent.recovery.requests.length === 1,
+        "the first daemon has started a replacement and waits for the turn to be read back");
+      // The daemon ends before the read returns. The replacement ends when no daemon runs, so the next
+      // daemon finds no live process that it would have to fence first.
+      await agent.restartDaemon(() => agent.exitProcess());
       letRecoveryGo();
 
       const settled = left === "its answer" ? "acknowledged" : "acknowledged_failed";
       await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === settled, `msg_1 settles ${settled}`);
+      assert.equal(agent.recovery.requests.length, 2, "the new daemon reads the turn back, once");
       assert.equal(agent.recovery.requests.at(-1)?.recordEnding, true, "the new daemon reads from its saved record that the turn is open");
       const next = await agent.begin(2);
       agent.reportStarted(next);
@@ -2559,6 +2584,9 @@ for (const left of ["its answer", "half an answer"] as const) {
       await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
       assert.deepEqual(agent.recorded().endings.map((ending) => ending.n), [1, 1]);
       assert.equal(agent.recorded().gaps, 0);
+      assert.deepEqual(agent.published, left === "its answer" ? ["Recovered 1.", "Answer 2."] : ["Answer 2."],
+        "the read that the first daemon was held in posts nothing when it is let go");
+      assert.equal(agent.harness.children.length, 3, "the first process, the first daemon's replacement, and the next daemon's");
     } finally {
       await agent.cleanup();
     }
@@ -2944,6 +2972,616 @@ for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
     assert.equal((await next).text, "Next message handled.");
     assert.deepEqual(harness.signals, []);
   });
+}
+
+/** Wait until the adapter has written the next frame to the CLI, and return the turn id it carries. */
+async function nextClaudeTurnId(child: FakeClaudeChild, writtenBefore: number): Promise<string> {
+  for (let tick = 0; child.written.length <= writtenBefore; tick += 1) {
+    if (tick > 2_000) throw new Error("the adapter did not write the turn to the CLI");
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+}
+
+for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
+  test(`every Claude result shape ends its room turn once: no throw, no rerun, no answer it did not prove (${lifecycleAuthorityMode})`, async () => {
+    const sessionRows: Array<Record<string, unknown>> = [];
+    const harness = createHarness({ sessionRows });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode }));
+    const child = harness.children[0]!;
+    const session_id = handle.providerContinuationId!;
+    const endings: Array<{ turnId: string; outcome: string }> = [];
+    adapter.onExecution(handle, ({ fact }) => {
+      if (fact.domain === "turn" && fact.kind === "state_changed" && fact.state === "terminal") {
+        endings.push({ turnId: fact.providerTurnId, outcome: String(fact.turnOutcome) });
+      }
+    });
+    /** One turn of the cell: the CLI is sent the message and reports the cell's result for it. */
+    const turn = async (cell: (typeof CLAUDE_RESULT_CELLS)[number], save: (result: ProviderRoomTurnResult) => Promise<void>) => {
+      const writtenBefore = child.written.length;
+      const request = { inboxItemId: `inbox-${writtenBefore}`, actionId: `action-${writtenBefore}`, sourceMessage: {}, activation: {} };
+      const running = adapter.runRoomTurn(handle, request, { checkpointTerminalResult: async (result) => { await save(result); } });
+      const settled = running.then((result) => ({ result }), (error: unknown) => ({ error: error as Error }));
+      const turnId = await nextClaudeTurnId(child, writtenBefore);
+      child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
+      child.emit(claudeResultEvent(cell, session_id, turnId));
+      return { request, turnId, settled: await settled, written: child.written.length };
+    };
+    /** What the room turn must end as. A turn that completed without text is read once more, from the session. */
+    const ending = (cell: (typeof CLAUDE_RESULT_CELLS)[number], turnId: string): ProviderRoomTurnResult =>
+      cell.expected === "answer" ? { turnId, outcome: "reply", text: CLAUDE_RESULT_TEXT, evidence: "stream" }
+        : cell.expected === "no_answer_in_result" ? { turnId, outcome: "unreadable", text: null, evidence: "none" }
+          : { turnId, providerContinuationId: session_id, outcome: cell.expected, text: null, evidence: "stream", error: cell.error!,
+            ...(cell.marked ? { unrecognizedResult: true as const } : {}) };
+    const withoutAnswer = (turnId: string): ProviderRoomTurnResult =>
+      ({ turnId, providerContinuationId: session_id, outcome: "failed", text: null, evidence: "stream", error: NO_REPLY_FAILURE.emptyAnswer });
+
+    for (const cell of CLAUDE_RESULT_CELLS) {
+      // The turn ends on its result, and the daemon is handed that ending once.
+      const saved: ProviderRoomTurnResult[] = [];
+      const first = await turn(cell, async (result) => { saved.push(result); });
+      assert.deepEqual(first.settled, { result: ending(cell, first.turnId) }, cell.name);
+      assert.deepEqual(saved, [ending(cell, first.turnId)], cell.name);
+      assert.equal(handle.observedState(), "idle", `${cell.name}: the agent can take its next message`);
+      if (cell.expected === "no_answer_in_result") {
+        // The daemon reads the completed turn once more. The session holds no answer either: the turn ends.
+        const reread: ProviderRoomTurnResult[] = [];
+        assert.deepEqual(await adapter.recoverRoomTurn(handle, { inboxItemId: first.request.inboxItemId, providerTurnId: first.turnId },
+          { checkpointTerminalResult: async (result) => { reread.push(result); } }), withoutAnswer(first.turnId), cell.name);
+        assert.deepEqual(reread, [withoutAnswer(first.turnId)], cell.name);
+      }
+      assert.equal(child.written.length, first.written, `${cell.name}: the message is not sent to Claude again`);
+
+      // The same result when the daemon could not save it: the ending is read back, and the same, with no new turn.
+      const second = await turn(cell, async () => { throw new Error("the result could not be saved"); });
+      assert.match("error" in second.settled ? second.settled.error.message : "", /could not be saved/, cell.name);
+      const recovered = await adapter.recoverRoomTurn(handle, { inboxItemId: second.request.inboxItemId, providerTurnId: second.turnId },
+        { checkpointTerminalResult: async () => {} });
+      assert.deepEqual(recovered, ending(cell, second.turnId), cell.name);
+      if (cell.expected === "no_answer_in_result") {
+        // This time the session does hold the answer: the second read finds it, and it is the reply.
+        sessionRows.push(
+          { type: "user", uuid: second.turnId, sessionId: session_id, message: { role: "user", content: [{ type: "text", text: "request" }] } },
+          { type: "assistant", sessionId: session_id, message: { id: `answer-${second.turnId}`, role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "Found in the session." }] } });
+        assert.deepEqual(await adapter.recoverRoomTurn(handle, { inboxItemId: second.request.inboxItemId, providerTurnId: second.turnId },
+          { checkpointTerminalResult: async () => {} }), { turnId: second.turnId, outcome: "reply", text: "Found in the session.", evidence: "transcript" }, cell.name);
+      }
+      assert.equal(child.written.length, second.written, `${cell.name}: reading the ending back starts no turn`);
+      assert.equal(handle.observedState(), "idle", cell.name);
+
+      // The execution record's ending for a turn never says something else than the delivery's.
+      const recorded = cell.expected === "answer" || cell.expected === "no_answer_in_result" ? "completed" : cell.expected;
+      const ofThisCell = endings.splice(0);
+      assert.deepEqual([...new Set(ofThisCell.map((entry) => entry.outcome))], ofThisCell.length ? [recorded] : [], cell.name);
+      if (lifecycleAuthorityMode === "typed") {
+        assert.deepEqual(ofThisCell.map((entry) => entry.turnId), [first.turnId, second.turnId], `${cell.name}: each turn has one ending in the record`);
+      }
+    }
+
+    // After all of them the same process answers a message.
+    const writtenBefore = child.written.length;
+    const next = adapter.runRoomTurn(handle, { inboxItemId: "inbox-last", actionId: "action-last", sourceMessage: {}, activation: {} });
+    const nextId = await nextClaudeTurnId(child, writtenBefore);
+    child.emit({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: nextId, result: "Still answering." });
+    assert.deepEqual(await next, { turnId: nextId, outcome: "reply", text: "Still answering.", evidence: "stream" });
+    assert.equal(harness.children.length, 1, "no result shape costs the agent its process");
+    assert.deepEqual(harness.signals, []);
+  });
+
+  test(`real Claude Code results end the room turn as the CLI reported it: API errors fail with Claude's text and are never a reply (${lifecycleAuthorityMode})`, async () => {
+    const sessionRows: Array<Record<string, unknown>> = [];
+    const harness = createHarness({ sessionRows });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode }));
+    const child = harness.children[0]!;
+    const session_id = handle.providerContinuationId!;
+    /** Play one captured turn: the rows and the result the CLI wrote, for this session and the turn the adapter started. */
+    const play = async (name: string) => {
+      const writtenBefore = child.written.length;
+      const saved: ProviderRoomTurnResult[] = [];
+      const request = { inboxItemId: `inbox-${name}`, actionId: `action-${name}`, sourceMessage: {}, activation: {} };
+      const running = adapter.runRoomTurn(handle, request, { checkpointTerminalResult: async (result) => { saved.push(result); } });
+      const turnId = await nextClaudeTurnId(child, writtenBefore);
+      const capture = realClaudeCapture(CLAUDE_REAL_CAPTURES[name]!, session_id, turnId);
+      // Every line the CLI wrote for the turn, in its order: the lifecycle of the command, the retries, the rows, the result.
+      for (const event of capture.stream) child.emit(event);
+      return { request, turnId, capture, result: await running, saved, written: child.written.length };
+    };
+
+    for (const name of Object.keys(CLAUDE_API_ERROR_CAPTURES)) {
+      const played = await play(name);
+      assert.deepEqual(played.result, { turnId: played.turnId, providerContinuationId: session_id, outcome: "failed", text: null,
+        evidence: "stream", error: realClaudeResult(played.capture).result }, name);
+      assert.deepEqual(played.saved, [played.result], name);
+      assert.equal(handle.observedState(), "idle", `${name}: the same process takes the next message`);
+    }
+
+    const answered = await play("completed_answer");
+    assert.deepEqual(answered.result, { turnId: answered.turnId, outcome: "reply", text: "PROBE_OK", evidence: "stream" });
+
+    // Claude completed the turn and wrote no answer: the daemon reads it again, from the session, and the turn ends.
+    const empty = await play("completed_without_answer");
+    assert.deepEqual(empty.result, { turnId: empty.turnId, outcome: "unreadable", text: null, evidence: "none" });
+    sessionRows.push(...empty.capture.session);
+    const ended = await adapter.recoverRoomTurn(handle, { inboxItemId: empty.request.inboxItemId, providerTurnId: empty.turnId },
+      { checkpointTerminalResult: async () => {} });
+    assert.deepEqual(ended, { turnId: empty.turnId, providerContinuationId: session_id, outcome: "failed", text: null, evidence: "stream",
+      error: "The model finished without writing a reply." });
+    assert.equal(noReplyFailureKind((ended as { error?: string }).error), "emptyAnswer",
+      "it is the failure task continuity follows up once, and then leaves without blocking later messages");
+    assert.equal(child.written.length, empty.written, "the message is not sent to Claude again");
+    assert.equal(harness.children.length, 1);
+    assert.deepEqual(harness.signals, []);
+  });
+}
+
+test("a Claude turn ends without an answer only on proof that it completed: its own result's, kept until the ending is saved, or the daemon's", async () => {
+  // Without that proof a session that is missing or cannot be read still proves nothing, and the turn is left for its owner.
+  const harness = createHarness();
+  let session: "empty" | "missing" | "unreadable" = "empty";
+  harness.dependencies.readSessionRows = async () => {
+    if (session === "unreadable") throw new Error("the session file could not be read");
+    return session === "empty" ? [] : null;
+  };
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const child = harness.children[0]!;
+  const session_id = handle.providerContinuationId!;
+  const emptyResult = (turnId: string) => ({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: turnId, result: "" });
+  /** A turn that Claude completes with an empty answer. `save` is the daemon saving that first reading. */
+  const run = async (save: () => Promise<void> = async () => {}) => {
+    const writtenBefore = child.written.length;
+    const running = adapter.runRoomTurn(handle, { inboxItemId: "inbox", actionId: "action", sourceMessage: {}, activation: {} },
+      { checkpointTerminalResult: save });
+    const settled = running.then((result) => result.outcome, (error: Error) => error.message);
+    const turnId = await nextClaudeTurnId(child, writtenBefore);
+    child.emit(emptyResult(turnId));
+    return { turnId, first: await settled };
+  };
+  const recover = (turnId: string, save: () => Promise<void> = async () => {}, savedAsUnreadable = false) =>
+    adapter.recoverRoomTurn(handle, { inboxItemId: "inbox", providerTurnId: turnId, ...(savedAsUnreadable ? { savedAsUnreadable: true } : {}) },
+      { checkpointTerminalResult: save });
+  const endedWithoutReply = async (reading: Promise<ProviderRoomTurnResult>) => assert.deepEqual(await reading,
+    { turnId: (await reading).turnId, providerContinuationId: session_id, outcome: "failed", text: null, evidence: "stream", error: NO_REPLY_FAILURE.emptyAnswer });
+
+  // The result proved the turn completed. A session that is missing, or cannot be read, changes nothing: there is no answer to find.
+  for (const state of ["missing", "unreadable"] as const) {
+    session = state;
+    const completed = await run();
+    assert.equal(completed.first, "unreadable");
+    await endedWithoutReply(recover(completed.turnId));
+    // That proof was used. A later read of the same turn has only the session, and is left for the owner.
+    await assert.rejects(recover(completed.turnId), state === "missing" ? /found no transcript/ : /could not be read/);
+  }
+  // A turn that no result spoke for is left for the owner the first time too.
+  session = "missing";
+  await assert.rejects(recover("a-turn-with-no-result"), /found no transcript/);
+  // The daemon holds the same proof saved, for a read by a process that never saw the result.
+  await endedWithoutReply(recover("a-turn-the-daemon-saved-as-unreadable", async () => {}, true));
+  session = "unreadable";
+  await endedWithoutReply(recover("another-turn-the-daemon-saved-as-unreadable", async () => {}, true));
+
+  // When the daemon cannot save the ending, the proof is kept, and the next read ends the turn the same way.
+  session = "empty";
+  const unsavedEnding = await run();
+  await assert.rejects(recover(unsavedEnding.turnId, async () => { throw new Error("the ending could not be saved"); }), /could not be saved/);
+  await endedWithoutReply(recover(unsavedEnding.turnId));
+
+  // When the daemon cannot save the first reading, the next read gives that reading again. The proof outlives it.
+  const unsavedReading = await run(async () => { throw new Error("the reading could not be saved"); });
+  assert.match(unsavedReading.first, /could not be saved/);
+  assert.equal((await recover(unsavedReading.turnId)).outcome, "unreadable");
+  await endedWithoutReply(recover(unsavedReading.turnId));
+});
+
+test("a Claude session whose last message has no answer is a turn cut off when its process ended, and a turn without a reply only on proof that it completed", async () => {
+  const turnId = "turn-answerless";
+  const sessionId = "sess-old";
+  const harness = createHarness({ sessionRows: [
+    { type: "user", uuid: turnId, sessionId, message: { content: [{ type: "text", text: "source" }] } },
+    { type: "assistant", sessionId, message: { id: "assistant-thinking", stop_reason: "end_turn", content: [{ type: "thinking", thinking: "private" }] } },
+  ] });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.resume({ workAttemptId: "wa-claude-1", providerContinuationId: sessionId }, spawnRequest());
+  const writesBefore = harness.children[0]!.written.length;
+  const recover = (said: { originProcessEnded?: true; savedAsUnreadable?: true }) =>
+    adapter.recoverRoomTurn(handle, { inboxItemId: "inbox", providerTurnId: turnId, ...said }, { checkpointTerminalResult: async () => {} });
+
+  // Nothing says that the process which ran the turn has ended: the reading is what the session holds.
+  assert.deepEqual(await recover({}), { turnId, outcome: "unreadable", text: null, evidence: "none" });
+  // The process ended, and nobody saw the turn's result. The CLI goes on after a message with no visible output,
+  // so the session does not prove that the turn ended there: it was cut off, like any turn without an ending.
+  assert.deepEqual(await recover({ originProcessEnded: true }), { turnId, providerContinuationId: sessionId, outcome: "interrupted", text: null,
+    evidence: "transcript", error: PROCESS_ENDED_DURING_TURN });
+  // The daemon has the turn saved as completed with no readable answer: its own result was seen, and it ended the turn.
+  assert.deepEqual(await recover({ originProcessEnded: true, savedAsUnreadable: true }), { turnId, providerContinuationId: sessionId, outcome: "failed",
+    text: null, evidence: "stream", error: NO_REPLY_FAILURE.emptyAnswer });
+  assert.equal(harness.children[0]!.written.length, writesBefore, "no reading starts a turn");
+});
+
+test("an empty Claude result is proof for its own turn, never for the turn that is running", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const child = harness.children[0]!;
+  const session_id = handle.providerContinuationId!;
+  const start = async () => {
+    const writtenBefore = child.written.length;
+    const running = adapter.runRoomTurn(handle, { inboxItemId: "inbox", actionId: "action", sourceMessage: {}, activation: {} },
+      { checkpointTerminalResult: async () => {} });
+    return { running, turnId: await nextClaudeTurnId(child, writtenBefore) };
+  };
+  const result = (turnId: string, text: string) => ({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: turnId, result: text });
+  const recover = (turnId: string) => adapter.recoverRoomTurn(handle, { inboxItemId: "inbox", providerTurnId: turnId }, { checkpointTerminalResult: async () => {} });
+
+  const earlier = await start();
+  child.emit(result(earlier.turnId, "Answer of the earlier turn."));
+  assert.equal((await earlier.running).outcome, "reply");
+  // While the next turn runs, the CLI sends a second result for the earlier one, and this one is empty.
+  const running = await start();
+  child.emit(result(earlier.turnId, ""));
+  child.emit(result(running.turnId, "Answer of the running turn."));
+  assert.deepEqual(await running.running, { turnId: running.turnId, outcome: "reply", text: "Answer of the running turn.", evidence: "stream" });
+
+  // Nothing says that the turn that was running completed without an answer: a read that finds nothing proves nothing.
+  await assert.rejects(recover(running.turnId), /cannot prove.*terminal boundary/);
+  // The empty result spoke for the earlier turn alone.
+  assert.equal((await recover(earlier.turnId)).outcome, "unreadable");
+  assert.equal((await recover(earlier.turnId) as { error?: string }).error, NO_REPLY_FAILURE.emptyAnswer);
+});
+
+/** A provider failure as the daemon shows it to the owner: one line, credentials removed, at most 1024 characters. */
+function shownToOwner(error: unknown): string {
+  return redactCredentialText(String(error).replace(/[\t\n\r ]+/g, " ").trim(), 1_024).value;
+}
+
+test("a Claude agent whose turns end on real API errors settles each as failed with Claude's text, posts none of them, and keeps answering", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    const names = Object.keys(CLAUDE_API_ERROR_CAPTURES);
+    for (const [index, name] of names.entries()) {
+      const ordinal = index + 1;
+      const turn = await agent.begin(ordinal);
+      // Every line the real CLI wrote for this failure, in its order.
+      const capture = realClaudeCapture(CLAUDE_API_ERROR_CAPTURES[name]!, agent.sessionId, turn.id);
+      for (const event of capture.stream) turn.child.emit(event);
+      await agent.eventually(async () => (await agent.receipt(`msg_${ordinal}`))?.state === "acknowledged_failed", `${name} settles as failed`).catch(async (error) => {
+        const row = await agent.receipt(`msg_${ordinal}`);
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+      });
+      assert.equal((await agent.receipt(`msg_${ordinal}`))!.last_error, shownToOwner(realClaudeResult(capture).result), `${name}: the owner reads Claude's own error`);
+    }
+    const last = await agent.begin(names.length + 1);
+    agent.reportStarted(last);
+    agent.answer(last, "Answer after the errors.");
+    await agent.eventually(async () => (await agent.receipt(`msg_${names.length + 1}`))?.state === "acknowledged", "the next message is answered");
+
+    assert.deepEqual(agent.published, ["Answer after the errors."], "no API error text is posted in the room");
+    assert.equal(agent.turns.length, names.length + 1, "each message started one turn; none was run again");
+    assert.deepEqual(agent.recovery.requests, [], "each turn ended on its result; none had to be read back");
+    const receipts = await agent.receipts() as unknown as Array<{ state: string; timeline: Array<{ phase: string }> }>;
+    assert.deepEqual(receipts.flatMap((receipt) => receipt.timeline.map((event) => event.phase)).filter((phase) => phase === "blocked" || phase === "retry_scheduled"), [],
+      "nothing was retried, and nothing waited for a person");
+    await agent.eventually(() => agent.recorded().turns.every((turn) => turn.state === "terminal"), "every turn has its ending in the record");
+    assert.deepEqual(agent.recorded().endings.map((ending) => ending.outcome), [...names.map(() => "failed"), "completed"]);
+    assert.equal(agent.recorded().gaps, 0);
+    assert.equal(agent.harness.children.length, 1, "the same process ran all of them");
+    assert.equal((await agent.view()).room_agent_state.inbox.state, "empty");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("a Claude agent whose turn ends on a result of a shape nobody expected settles it as failed once, and no later message waits behind it", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    // One of each kind of surprise. The first is the incident's nearest relative: "success" with no word on errors.
+    const cells = ["success / no is_error / result present", "no subtype / no is_error / result missing",
+      "a_subtype_from_the_future / is_error false / result present", "error_max_turns / is_error false / result empty",
+      "interrupted / no is_error / result missing"].map((name) => CLAUDE_RESULT_CELLS.find((cell) => cell.name === name)!);
+    for (const [index, cell] of cells.entries()) {
+      const ordinal = index + 1;
+      const turn = await agent.begin(ordinal);
+      agent.reportStarted(turn);
+      turn.child.emit(claudeResultEvent(cell, agent.sessionId, turn.id));
+      await agent.eventually(async () => (await agent.receipt(`msg_${ordinal}`))?.state === "acknowledged_failed", `"${cell.name}" settles as failed`).catch(async (error) => {
+        const row = await agent.receipt(`msg_${ordinal}`);
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+      });
+      assert.equal((await agent.receipt(`msg_${ordinal}`))!.last_error, shownToOwner(cell.error), cell.name);
+    }
+    assert.deepEqual(agent.recovery.requests, [], "each of them ended on its result; none was read back, and none three times");
+
+    // Claude really completes a turn with no answer at all. Its result and its session are as the CLI wrote them.
+    const emptyOrdinal = cells.length + 1;
+    const emptyTurn = await agent.begin(emptyOrdinal);
+    const empty = realClaudeCapture(CLAUDE_REAL_CAPTURES.completed_without_answer!, agent.sessionId, emptyTurn.id);
+    agent.sessionRows.push(...empty.session);
+    for (const event of empty.stream) emptyTurn.child.emit(event);
+    await agent.eventually(async () => (await agent.receipt(`msg_${emptyOrdinal}`))?.state === "acknowledged_failed", "the turn without an answer settles as failed").catch(async (error) => {
+      const row = await agent.receipt(`msg_${emptyOrdinal}`);
+      throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+    });
+    assert.equal((await agent.receipt(`msg_${emptyOrdinal}`))!.last_error, NO_REPLY_FAILURE.emptyAnswer);
+    assert.equal(agent.recovery.requests.length, 1, "the completed turn is read once more, from its session, and then it ends");
+
+    const last = await agent.begin(emptyOrdinal + 1);
+    agent.reportStarted(last);
+    agent.answer(last, "Answer after the surprises.");
+    await agent.eventually(async () => (await agent.receipt(`msg_${emptyOrdinal + 1}`))?.state === "acknowledged", "the next message is answered");
+
+    assert.deepEqual(agent.published, ["Answer after the surprises."], "none of Claude's unproven text is posted in the room");
+    assert.equal(agent.turns.length, emptyOrdinal + 1, "each message started one turn; none was run again");
+    const receipts = await agent.receipts() as unknown as Array<{ state: string; timeline: Array<{ phase: string }> }>;
+    assert.deepEqual(receipts.flatMap((receipt) => receipt.timeline.map((event) => event.phase)).filter((phase) => phase === "blocked" || phase === "retry_scheduled"), [],
+      "nothing was retried, and nothing waited for a person");
+    await agent.eventually(() => agent.recorded().turns.every((turn) => turn.state === "terminal"), "every turn has its ending in the record");
+    assert.deepEqual(agent.recorded().endings.map((ending) => `${ending.n} ${ending.outcome}`),
+      ["1 failed", "1 failed", "1 failed", "1 failed", "1 interrupted", "1 completed", "1 completed"],
+      "one ending each; the turn without an answer did complete, and its message is what failed");
+    assert.equal(agent.recorded().gaps, 0);
+    assert.equal(agent.harness.children.length, 1);
+    assert.equal((await agent.view()).room_agent_state.inbox.state, "empty", "nothing waits behind a message that needs a person");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const [words, text] of [
+  ["that read like a temporary provider failure", "Done. I changed 500 lines and all tests pass."],
+  ["that read like nothing in particular", "Merged the PR."],
+] as const) {
+  test(`a Claude agent that holds a task and ends a turn on an unproven result, with words ${words}, is sent no second turn and has nothing blocked`, async () => {
+    const agent = await claudeDaemonFixture({ ownedTasks: () => [{ id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 }] });
+    try {
+      const turn = await agent.begin(1);
+      agent.reportStarted(turn);
+      // "success" and no word on errors: nothing proves that this text is an answer, and nothing proves that it is an error.
+      turn.child.emit({ type: "result", subtype: "success", session_id: agent.sessionId, user_message_uuid: turn.id, result: text });
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles as failed");
+      // Task continuity looks at a failed turn of a lease holder when the inbox is empty. It has done so
+      // when it has left its decision on the message, or has queued a follow-up for the task.
+      await agent.eventually(async () => (await agent.receipts()).length > 1
+        || /not continued automatically/.test((await agent.receipt("msg_1"))?.last_error ?? ""), "task continuity has looked at the failed turn");
+      const afterFailure = await agent.receipts();
+      assert.deepEqual(afterFailure.map((receipt) => `${receipt.source_message_id} ${receipt.state}`), ["msg_1 acknowledged_failed"],
+        "no follow-up is queued for the task: none that runs by itself, and none that waits blocked");
+      const reason = afterFailure[0]!.last_error ?? "";
+      assert.ok(reason.includes(text), "the owner still reads what Claude wrote");
+      assert.match(reason, /does not recognize.*not continued automatically.*send a message to continue it/);
+      assert.equal(agent.turns.length, 1, "Claude is not sent a second turn");
+
+      const next = await agent.begin(2);
+      agent.reportStarted(next);
+      agent.answer(next, "Answer 2.");
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
+      assert.deepEqual(agent.published, ["Answer 2."], "the unproven text is never posted");
+      assert.equal(agent.turns.length, 2, "one turn for each room message, and no other");
+      const receipts = await agent.receipts() as unknown as Array<{ source_message_id: string; timeline: Array<{ phase: string }> }>;
+      assert.deepEqual(receipts.map((receipt) => receipt.source_message_id), ["msg_1", "msg_2"]);
+      assert.deepEqual(receipts.flatMap((receipt) => receipt.timeline.map((event) => event.phase)).filter((phase) => phase === "blocked" || phase === "retry_scheduled"), [],
+        "nothing was scheduled, and nothing waited for a person");
+      assert.equal((await agent.view()).room_agent_state.inbox.state, "empty");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+/** What a Claude session can hold of a turn that completed with an empty answer. */
+const CLAUDE_SESSION_WITHOUT_ANSWER = {
+  // The rows Claude Code 2.1.278 really wrote: the request, and its own note that the reply had no visible output.
+  "what the CLI really wrote": (sessionId: string, turnId: string) =>
+    realClaudeCapture(CLAUDE_REAL_CAPTURES.completed_without_answer!, sessionId, turnId).session,
+  "a last row that ends the turn with thinking only": (sessionId: string, turnId: string) => [
+    { type: "user", uuid: turnId, sessionId, message: { role: "user", content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", sessionId, message: { id: "assistant-thinking", role: "assistant", stop_reason: "end_turn", content: [{ type: "thinking", thinking: "private" }] } }],
+} as const;
+
+/**
+ * What a Claude session holds of a turn whose first reply had no visible output, when its process ended before
+ * the turn's result was seen. The request and the CLI's note asking for output are the rows Claude Code
+ * 2.1.278 really wrote.
+ */
+const CLAUDE_SESSION_AFTER_A_REPLY_WITHOUT_OUTPUT = (sessionId: string, turnId: string, ended: "after the model answered" | "before the model answered" | "before the CLI asked for output") => {
+  const [request, askForOutput] = realClaudeCapture(CLAUDE_REAL_CAPTURES.completed_without_answer!, sessionId, turnId).session;
+  return [request!,
+    { type: "assistant", sessionId, message: { id: "assistant-thinking", role: "assistant", stop_reason: "end_turn", content: [{ type: "thinking", thinking: "private" }] } },
+    ...(ended === "before the CLI asked for output" ? [] : [askForOutput!]),
+    ...(ended === "after the model answered" ? [{ type: "assistant", sessionId, message: { id: "assistant-answer", role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "REAL ANSWER" }] } }] : [])];
+};
+
+for (const ended of ["after the model answered", "before the model answered", "before the CLI asked for output"] as const) {
+  const answered = ended === "after the model answered";
+  test(`a Claude turn whose first reply had no visible output, and whose process ended ${ended}, ${answered ? "has that answer posted once" : "is settled as cut off"}, with no follow-up`, async () => {
+    // The agent holds a task: a failed turn of it could be given a follow-up turn.
+    const agent = await claudeDaemonFixture({ ownedTasks: () => [{ id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 }] });
+    try {
+      const turn = await agent.begin(1);
+      agent.reportStarted(turn);
+      await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
+      // The process ends before it reports the turn's result. The session is all there is.
+      agent.sessionRows.push(...CLAUDE_SESSION_AFTER_A_REPLY_WITHOUT_OUTPUT(agent.sessionId, turn.id, ended));
+      agent.exitProcess();
+      const settled = answered ? "acknowledged" : "acknowledged_failed";
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === settled, `msg_1 settles ${settled}`).catch(async (error) => {
+        const row = await agent.receipt("msg_1");
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+      });
+      if (answered) assert.deepEqual(agent.published, ["REAL ANSWER"], "the answer of the last message that ended is posted");
+      else assert.equal((await agent.receipt("msg_1"))!.last_error, PROCESS_ENDED_DURING_TURN, "a turn that was cut off is not called a turn without a reply");
+
+      const next = await agent.begin(2);
+      agent.reportStarted(next);
+      agent.answer(next, "Answer 2.");
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
+      assert.deepEqual(agent.published, answered ? ["REAL ANSWER", "Answer 2."] : ["Answer 2."], "nothing is posted twice, and nothing that was not said");
+      assert.equal(agent.turns.length, 2, "one turn for each room message: the first is not run again, and no follow-up turn is sent");
+      const receipts = await agent.receipts() as unknown as Array<{ source_message_id: string; timeline: Array<{ phase: string }> }>;
+      assert.deepEqual(receipts.map((receipt) => receipt.source_message_id), ["msg_1", "msg_2"], "no follow-up is queued for the task");
+      assert.deepEqual(receipts.flatMap((receipt) => receipt.timeline.map((event) => event.phase)).filter((phase) => phase === "blocked" || phase === "retry_scheduled"), []);
+      assert.equal((await agent.view()).room_agent_state.inbox.state, "empty");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+/** The session rows of a real capture, or the first of them, for this session and this turn. */
+const realClaudeSession = (name: string, first?: number) => (sessionId: string, turnId: string) =>
+  realClaudeCapture(CLAUDE_REAL_CAPTURES[name]!, sessionId, turnId).session.slice(0, first);
+
+/**
+ * What must reach the room for a Claude turn whose process ended under it, by what its session holds. The rows
+ * are those Claude Code 2.1.278 really wrote, but where a line says otherwise. `posted` is the turn's own answer;
+ * null is a turn that was cut off, for which nothing is posted.
+ */
+const CLAUDE_SESSION_READ_BACK: Record<string, { rows: (sessionId: string, turnId: string) => Array<Record<string, unknown>>; posted: string | null }> = {
+  "a Stop hook's refusal of an answer, and the answer after it": { posted: "ANSWER AFTER THE HOOK", rows: realClaudeSession("stop_hook_refuses_end_once") },
+  "an answer and a Stop hook's refusal of it": { posted: null, rows: realClaudeSession("stop_hook_refuses_end_once", 3) },
+  "its answer, then a background command's notice and the CLI's answer to the notice": { posted: "ANSWER OF THE TURN", rows: realClaudeSession("background_command") },
+  "its answer, then a sub-agent's notice and the CLI's answer to the notice": { posted: "ANSWER OF THE TURN", rows: realClaudeSession("subagent_in_background") },
+  "a skill's text, and the answer after it": { posted: "ANSWER OF THE TURN", rows: realClaudeSession("skill_call") },
+  // Claude Code 2.1.278 keeps a sub-agent's rows in a file of their own. In these two they stand in the session file, after the call that started it.
+  "a sub-agent's report after its tool call, and no answer of its own": { posted: null,
+    rows: (sessionId, turnId) => {
+      const { session, subagent_session } = realClaudeCapture(CLAUDE_REAL_CAPTURES.subagent_in_foreground!, sessionId, turnId);
+      return [...session.slice(0, 2), subagent_session!.at(-1)!];
+    } },
+  "a sub-agent's prompt and report among its rows, and its own answer after them": { posted: "ANSWER OF THE TURN",
+    rows: (sessionId, turnId) => {
+      const { session, subagent_session } = realClaudeCapture(CLAUDE_REAL_CAPTURES.subagent_in_foreground!, sessionId, turnId);
+      return [...session.slice(0, 2), ...subagent_session!, ...session.slice(2)];
+    } },
+  // The last rows of these two are written by hand: no capture holds a user row that is neither the turn going on nor the start of another turn.
+  "its answer, then a row that is not known": { posted: "PROBE_OK",
+    rows: (sessionId, turnId) => [...realClaudeSession("completed_answer")(sessionId, turnId),
+      { type: "user", uuid: "another-row", isMeta: true, sessionId, message: { role: "user", content: "A note the CLI wrote." } }] },
+  "a row that is not known, and a message that ended after it": { posted: null,
+    rows: (sessionId, turnId) => [...realClaudeSession("completed_answer", 1)(sessionId, turnId),
+      { type: "user", uuid: "another-row", isMeta: true, sessionId, message: { role: "user", content: "A note the CLI wrote." } },
+      { type: "assistant", sessionId, message: { id: "message-after", role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "A MESSAGE THAT MAY BE ANOTHER TURN'S" }] } }] },
+};
+
+for (const [left, { rows, posted }] of Object.entries(CLAUDE_SESSION_READ_BACK)) {
+  test(`a Claude turn whose process ended, with ${left} in the session, ${posted ? `has "${posted}" posted once` : "is settled as cut off, and nothing is posted for it"}`, async () => {
+    const agent = await claudeDaemonFixture();
+    try {
+      const turn = await agent.begin(1);
+      agent.reportStarted(turn);
+      await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
+      // The process ends before it reports the turn's result. The session is all there is.
+      agent.sessionRows.push(...rows(agent.sessionId, turn.id));
+      agent.exitProcess();
+      const settled = posted ? "acknowledged" : "acknowledged_failed";
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === settled, `msg_1 settles ${settled}`).catch(async (error) => {
+        const row = await agent.receipt("msg_1");
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); posted ${JSON.stringify(agent.published)}`);
+      });
+      if (!posted) assert.equal((await agent.receipt("msg_1"))!.last_error, PROCESS_ENDED_DURING_TURN);
+
+      const next = await agent.begin(2);
+      agent.reportStarted(next);
+      agent.answer(next, "Answer 2.");
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
+      assert.deepEqual(agent.published, posted ? [posted, "Answer 2."] : ["Answer 2."],
+        "the turn's own answer or nothing: never the answer to a task's notice, a sub-agent's report, or a message a hook refused");
+      assert.equal(agent.turns.length, 2, "one turn for each room message");
+      assert.equal((await agent.view()).room_agent_state.inbox.state, "empty");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+/** The answer of the turn in each real capture where the CLI wrote more than a request and an answer. */
+const CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER = {
+  stop_hook_refuses_end_once: "ANSWER AFTER THE HOOK",
+  background_command: "ANSWER OF THE TURN",
+  subagent_in_background: "ANSWER OF THE TURN",
+  subagent_in_foreground: "ANSWER OF THE TURN",
+  subagent_api_error: "ANSWER OF THE TURN",
+  skill_call: "ANSWER OF THE TURN",
+} as const;
+
+for (const [name, answer] of Object.entries(CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER)) {
+  test(`the real stream of a Claude turn (${name}) gets the turn's own answer posted once, and nothing else`, async () => {
+    const agent = await claudeDaemonFixture();
+    try {
+      const turn = await agent.begin(1);
+      // Every line the CLI wrote, in its order: the tool call and its result, a sub-agent's rows, a hook's refusal,
+      // and, where a background task ended, the turn the CLI ran for its notice. That turn's result names no command.
+      const { stream } = realClaudeCapture(CLAUDE_REAL_CAPTURES[name]!, agent.sessionId, turn.id);
+      assert.equal(stream.filter((event) => event.type === "result" && event.user_message_uuid === turn.id).length, 1);
+      for (const event of stream) turn.child.emit(event);
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered").catch(async (error) => {
+        const row = await agent.receipt("msg_1");
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+      });
+
+      const next = await agent.begin(2);
+      agent.reportStarted(next);
+      agent.answer(next, "Answer 2.");
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
+      assert.deepEqual(agent.published, [answer, "Answer 2."],
+        "the room gets the turn's own answer once. The answer to a task's notice names no room message, and is posted nowhere");
+      assert.equal(agent.turns.length, 2, "one turn for each room message");
+      await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
+      assert.deepEqual(agent.recorded().endings.map((ending) => [ending.n, ending.outcome]), [[1, "completed"], [1, "completed"]]);
+      assert.equal(agent.recorded().gaps, 0);
+      const current = await agent.view();
+      assert.equal(current.condition, "none", current.last_error ?? "");
+      assert.equal(current.room_agent_state.inbox.state, "empty");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+for (const [left, rows] of Object.entries(CLAUDE_SESSION_WITHOUT_ANSWER)) {
+  for (const ended of ["Claude process", "Claude process and daemon"] as const) {
+    test(`a Claude turn that completed without an answer, whose ${ended} ended before the second read, with ${left} in the session, still ends as a turn without a reply`, async () => {
+      const agent = await claudeDaemonFixture();
+      try {
+        const turn = await agent.begin(1);
+        const letRecoveryGo = agent.holdRecovery();
+        // The real stream of a turn that Claude completed with an empty answer.
+        for (const event of realClaudeCapture(CLAUDE_REAL_CAPTURES.completed_without_answer!, agent.sessionId, turn.id).stream) turn.child.emit(event);
+        await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "result_recovery", "the daemon has the turn saved as completed with no readable answer");
+        agent.sessionRows.push(...rows(agent.sessionId, turn.id));
+        // Whatever saw the empty result is gone before the turn is read again. Only the daemon's saved state says that it completed.
+        if (ended === "Claude process") {
+          agent.exitProcess();
+          await agent.eventually(() => agent.harness.children.length === 2, "a new process replaces the one that ended");
+        } else {
+          // The process ends when no daemon runs. Ended while the first daemon still ran, that daemon could
+          // launch a replacement before it stopped, and the next daemon would fence that one for ten seconds.
+          // A new daemon has a new adapter too, with nothing of the first read in memory.
+          await agent.restartDaemon(() => agent.exitProcess());
+        }
+        letRecoveryGo();
+
+        await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles as failed").catch(async (error) => {
+          const row = await agent.receipt("msg_1");
+          throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+        });
+        assert.equal((await agent.receipt("msg_1"))!.last_error, NO_REPLY_FAILURE.emptyAnswer,
+          "the owner reads that the model wrote no reply, not that the turn was cut off");
+        assert.equal(agent.recovery.requests.at(-1)?.savedAsUnreadable, true, "the daemon tells the adapter what it has saved");
+
+        const next = await agent.begin(2);
+        agent.reportStarted(next);
+        agent.answer(next, "Answer 2.");
+        await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
+        assert.deepEqual(agent.published, ["Answer 2."]);
+        assert.equal(agent.turns.length, 2, "the turn without an answer is not run again");
+        assert.equal((await agent.view()).room_agent_state.inbox.state, "empty", "nothing waits behind a message that needs a person");
+      } finally {
+        await agent.cleanup();
+      }
+    });
+  }
 }
 
 for (const subtype of ["error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries"]) {

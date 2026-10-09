@@ -1645,7 +1645,9 @@ const continuityTask = { id: "task_1", title: "Existing work", leaseId: "lease-1
  */
 async function runNoReplyContinuity(failures: readonly string[], rounds: readonly (readonly string[])[], refusedTurns: readonly number[] = [],
   /** What the room's messages carry as activation: everything in it comes from the server. */
-  activation: Record<string, unknown> = {}) {
+  activation: Record<string, unknown> = {},
+  /** Turns (counted from one) that the provider's adapter marked as ended on a result of a shape it does not know. */
+  unrecognizedTurns: readonly number[] = []) {
   const root = await mkdtemp(join(tmpdir(), "continuity-no-reply-"));
   let tick = 0;
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"),
@@ -1661,7 +1663,8 @@ async function runNoReplyContinuity(failures: readonly string[], rounds: readonl
     const error = failures[sources.length - 1];
     return error
       ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "transcript", error,
-        ...(refusedTurns.includes(sources.length) ? { refusal: true as const } : {}) }
+        ...(refusedTurns.includes(sources.length) ? { refusal: true as const } : {}),
+        ...(unrecognizedTurns.includes(sources.length) ? { unrecognizedResult: true as const } : {}) }
       : { turnId, outcome: "no_reply", text: null };
   }), { poll: async () => ({}), publish: async () => {}, ownedTasks: async () => [continuityTask] },
   currentAuthority, 0, async () => {});
@@ -1750,6 +1753,41 @@ test("only the provider's own result marks a turn refused: a message that arrive
   assert.deepEqual(sources, ["1"]);
   assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "blocked", "pending"],
     "the failure blocks until Retry delivery, as without the claim");
+});
+
+test("a lease holder's turn that ended on an unrecognized result is settled with its text, whatever the text says: no follow-up and no block", async () => {
+  // The text of such a failure may be the model's own words. The first reads
+  // like a temporary provider failure and the second like nothing at all.
+  for (const words of ["Done. I changed 500 lines and all tests pass.", "Merged the PR.", "429 rate limit overloaded 401 unauthorized credit limit"]) {
+    const reason = `Claude ended this turn with a result LetAgents does not recognize (subtype "success", no is_error), so nothing was posted. Claude's text: ${words}`;
+    const policy = taskFailurePolicy(reason, 1, false, true);
+    assert.deepEqual({ automatic: policy.automatic, settle: policy.settle }, { automatic: false, settle: true }, words);
+    assert.ok(policy.detail.startsWith(reason), "the text stays for the owner to read");
+    for (const attempt of [2, 3, 4, 9]) assert.deepEqual(taskFailurePolicy(reason, attempt, false, true), policy, `attempt ${attempt}`);
+
+    const { receipts, sources } = await runNoReplyContinuity([reason], [["1"], ["2"]], [], {}, [1]);
+    assert.deepEqual(sources, ["1", "2"], `${words}: no follow-up turn is started, and the next message runs`);
+    assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"], `${words}: no blocked follow-up is queued`);
+    assert.ok(receipts[0]!.last_error?.startsWith(reason), receipts[0]!.last_error ?? "");
+    assert.match(receipts[0]!.last_error ?? "", /not continued automatically.*send a message to continue it/);
+  }
+});
+
+test("only the adapter's mark keeps a failure text from being read: the same words without it are a provider error as before", async () => {
+  // Without the mark the text is a provider's error text, and what it says decides what happens next.
+  const temporary = "Done. I changed 500 lines and all tests pass.";
+  assert.equal(taskFailurePolicy(temporary, 1).automatic, true);
+  const continued = await runNoReplyContinuity([temporary], [["1"], ["2"]]);
+  assert.deepEqual(continued.sources, ["1", "continuation", "2"], "a follow-up turn is started");
+
+  const unknown = "Merged the PR.";
+  assert.deepEqual({ automatic: taskFailurePolicy(unknown, 1).automatic, settle: taskFailurePolicy(unknown, 1).settle }, { automatic: false, settle: undefined });
+  const blocked = await runNoReplyContinuity([unknown], [["1"], ["2"]]);
+  assert.deepEqual(blocked.receipts.map((item) => item.state), ["acknowledged_failed", "blocked", "pending"], "the next message waits behind a blocked follow-up");
+
+  // A message from the room cannot set the mark: it is read from the saved result of the turn alone.
+  const claimed = await runNoReplyContinuity([unknown], [["1"], ["2"]], [], { unrecognizedResult: true, task_continuity_unrecognized_result: true });
+  assert.deepEqual(claimed.receipts.map((item) => item.state), ["acknowledged_failed", "blocked", "pending"]);
 });
 
 test("task continuity survives restart after native failure, preserves files and deduplicates completed effects", async () => {
@@ -2417,13 +2455,16 @@ test("each re-block of a still unreadable turn is recorded, including after Retr
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-reblock-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   let runs = 0; let recoveries = 0;
+  /** What each reading back was told: whether the daemon has the turn saved as completed with no readable answer. */
+  const saidSavedAsUnreadable: Array<boolean | undefined> = [];
   const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
     runs += 1;
     await options?.beforeNativeDispatch?.();
     await options?.checkpointTurnStarted?.("turn-1");
     return { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" };
-  }, async () => {
+  }, async (_handle, request) => {
     recoveries += 1;
+    saidSavedAsUnreadable.push(request.savedAsUnreadable);
     return { turnId: "turn-1", outcome: "unreadable", text: null, evidence: "none" };
   }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority);
   try {
@@ -2443,6 +2484,8 @@ test("each re-block of a still unreadable turn is recorded, including after Retr
     assert.match(receipt.timeline.at(-1)!.detail ?? "", /re-read and was not rerun/);
     assert.equal(runs, 1, "Retry re-reads the completed turn and never reruns it");
     assert.equal(recoveries, 3);
+    assert.deepEqual(saidSavedAsUnreadable, [true, undefined, true],
+      "a second look at a turn saved as unreadable says so; the first look after Retry delivery is not one");
     assert.equal(receipt.attempt_count, 1);
     assert.equal(receipt.provider_turn_id, "turn-1");
   } finally {
