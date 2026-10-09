@@ -4307,7 +4307,7 @@ test("Open Model typed facts reject contradictory session evidence even when a l
  * process serves the sessions the agent's runtime directory keeps, as a real
  * one does, and starts a session of its own.
  */
-async function openModelDaemonFixture() {
+async function openModelDaemonFixture(options: { permissionProfileId?: string } = {}) {
   const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
   const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
   const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
@@ -4360,6 +4360,9 @@ async function openModelDaemonFixture() {
   const sessions = new Map<string, FakeTurn[]>();
   const turns: FakeTurn[] = [];
   const streams = new Set<{ port: number; send(event: Record<string, unknown>): void; close(): void }>();
+  /** Permission requests a process is waiting on, and the answers it was given. */
+  const pendingPermissions: Array<{ port: number; request: OpenCodePermissionRequest }> = [];
+  const permissionReplies: Array<{ id: string; reply: string }> = [];
   let nextPort = 43_821;
   const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
   const dependencies: OpenModelProviderAdapterDependencies = {
@@ -4388,7 +4391,15 @@ async function openModelDaemonFixture() {
       const process = processes.find((candidate) => candidate.port === Number(url.port));
       if (!process?.alive) throw refused();
       if (url.pathname === "/global/health") return json({ healthy: true, version: "1.18.20" });
-      if (url.pathname === "/permission") return json([]);
+      if (url.pathname === "/permission") return json(pendingPermissions.filter((pending) => pending.port === process.port).map((pending) => pending.request));
+      const [, permissionId] = url.pathname.match(/^\/permission\/([^/]+)\/reply$/) ?? [];
+      if (permissionId && init?.method === "POST") {
+        const index = pendingPermissions.findIndex((pending) => pending.port === process.port && pending.request.id === decodeURIComponent(permissionId));
+        if (index < 0) return json({ error: "not pending" }, 404);
+        const [answered] = pendingPermissions.splice(index, 1);
+        permissionReplies.push({ id: answered!.request.id, reply: String((JSON.parse(String(init.body)) as { reply: string }).reply) });
+        return json(true);
+      }
       if (url.pathname === "/config") return json({ model: "letagents-open-model/qwen/qwen3-coder" });
       if (url.pathname === "/event") {
         const encoder = new TextEncoder();
@@ -4414,6 +4425,17 @@ async function openModelDaemonFixture() {
       if (url.pathname === "/session/status") {
         // A process knows only the turns it runs itself.
         return json(Object.fromEntries(turns.filter((turn) => turn.runningOn === process.port).map((turn) => [turn.sessionId, { type: "busy" }])));
+      }
+      const [, messageSessionId, messageId] = url.pathname.match(/^\/session\/([^/]+)\/message\/([^/]+)$/) ?? [];
+      if (messageSessionId) {
+        // One message by its id, as the permission lookup reads it.
+        const sessionId = decodeURIComponent(messageSessionId);
+        const wanted = decodeURIComponent(messageId!);
+        const found = (sessions.get(sessionId) ?? []).flatMap((turn) => [userMessage(turn.id), ...turn.assistants])
+          .find((message) => message.info.id === wanted);
+        return found
+          ? json({ info: { ...found.info, sessionID: sessionId }, parts: found.parts.map((part) => ({ ...part, sessionID: sessionId, messageID: wanted })) })
+          : json({ error: "no such message" }, 404);
       }
       const [, sessionId, action] = url.pathname.match(/^\/session\/([^/]+)\/([^/]+)$/) ?? [];
       const session = sessionId ? sessions.get(decodeURIComponent(sessionId)) : undefined;
@@ -4483,7 +4505,7 @@ async function openModelDaemonFixture() {
     } }).supervisedInbox;
     assert.equal((await request("manifest.put", { entry: {
       id, room_id: "room_1", display_name: "Agent", provider: "open-model", model: "qwen/qwen3-coder", charter: "test",
-      desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: "full_access",
+      desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: options.permissionProfileId ?? "full_access",
       created_by: "test", created_at: "2026-01-01T00:00:00.000Z", delivery_mode: "daemon_inbox",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
     } })).ok, true);
@@ -4504,7 +4526,25 @@ async function openModelDaemonFixture() {
     await eventually(() => processes.length === 1, "OpenCode is launched");
     await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
     const receipt = async (messageId: string) => (await inbox.receipts(id)).find((item) => item.source_message_id === messageId);
+    const hostApprovals = (daemon as unknown as { hostApprovals: {
+      list(roomId: string): Promise<Array<{ status: string; detail: string | null; reference: Record<string, unknown> | null; presentation: unknown }>>;
+      decide(input: unknown): Promise<string>;
+    } }).hostApprovals;
+    let asks = 0;
     return { id, request, eventually, view, read, published, roomMessages, turns, sessions, processes, receipt, cleanup,
+      hostApprovals, permissionReplies,
+      /** The newest process asks its owner to allow a shell command the turn's model wants to run. */
+      ask: (turn: FakeTurn, command = "git status") => {
+        asks += 1;
+        const assistant = assistantWithTool(turn.id, `assistant-ask-${asks}`, 10 + asks, { status: "running", input: { command } }, `call-ask-${asks}`);
+        turn.assistants.push(assistant);
+        const port = turn.runningOn!;
+        const native: OpenCodePermissionRequest = { id: `per_ask_${asks}`, sessionID: turn.sessionId, permission: "bash", patterns: [command],
+          metadata: { command }, always: [], tool: { messageID: `assistant-ask-${asks}`, callID: `call-ask-${asks}` } };
+        pendingPermissions.push({ port, request: native });
+        for (const stream of streams) if (stream.port === port) stream.send({ type: "permission.asked", properties: native });
+        return native;
+      },
       receipts: () => inbox.receipts(id),
       /** Send the agent its nth room message and wait until its process has been given the prompt. */
       begin: async (ordinal: number) => {
@@ -4651,3 +4691,68 @@ for (const [left, session] of Object.entries(OPEN_MODEL_SESSION_AFTER_EXIT)) {
     }
   });
 }
+
+type OpenModelDaemonAgent = Awaited<ReturnType<typeof openModelDaemonFixture>>;
+
+/** The owner saves a new permission mode. A running process keeps the one it started with. */
+async function ownerSavesPermissionMode(agent: OpenModelDaemonAgent, permissionProfileId: string): Promise<void> {
+  const daemonGeneration = (await agent.request("daemon.status")).result.generation;
+  const saved = (await agent.request("supervisor.get_agent_configuration", { entry_id: agent.id, daemon_generation: daemonGeneration })).result;
+  const updated = await agent.request("supervisor.update_agent_configuration", { entry_id: agent.id, daemon_generation: daemonGeneration,
+    expected_revision: saved.config_revision,
+    configuration: { model: saved.model, reasoning_effort: saved.reasoning_effort, charter: saved.charter, permission_profile_id: permissionProfileId } });
+  assert.equal(updated.result.outcome, "updated", updated.error);
+  assert.equal(updated.result.configuration.config_revision, saved.config_revision + 1);
+}
+
+/** The model of `turn` asks to run a command. The owner sees one card for it, allows it once, and the process is told so. */
+async function ownerAllowsTheCommand(agent: OpenModelDaemonAgent, turn: Awaited<ReturnType<OpenModelDaemonAgent["begin"]>>): Promise<void> {
+  const { createHash } = await import("node:crypto");
+  const asked = agent.ask(turn, "git status");
+  await agent.eventually(async () => (await agent.hostApprovals.list("room_1")).some((card) => card.status === "pending"), "the request is a card the owner can answer")
+    .catch(async (error) => {
+      const cards = await agent.hostApprovals.list("room_1");
+      throw new Error(`${(error as Error).message}: cards are ${JSON.stringify(cards.map((card) => [card.status, card.detail]))}`);
+    });
+  const cards = (await agent.hostApprovals.list("room_1")).filter((card) => card.status === "pending");
+  assert.equal(cards.length, 1);
+  const card = cards[0]!;
+  assert.ok(card.reference, "the request is journaled, so a decision can name it");
+  assert.equal(agent.read<{ state: string }>("SELECT state FROM execution_approval_requests WHERE agent_id=?").at(-1)?.state, "requested");
+  assert.equal(await agent.hostApprovals.decide({ expected: card.reference, decisionId: "decision-allow-once", actorId: "host-owner",
+    decision: "allow_once", projectionSha256: createHash("sha256").update(JSON.stringify(card.presentation)).digest("hex") }), "resolved");
+  assert.deepEqual(agent.permissionReplies, [{ id: asked.id, reply: "once" }], "the process was told to go ahead, once");
+  assert.equal(agent.read<{ state: string }>("SELECT state FROM execution_approval_requests WHERE agent_id=?").at(-1)?.state, "resolved");
+}
+
+test("an Open Model agent whose process crashed after its owner changed its permission mode still gets answerable approval cards", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    await agent.begin(2);
+    // The next message waits behind the one the process is running when it crashes.
+    agent.roomMessages.push({ id: "msg_3", sender: "someone", text: "request 3", activation: { for_current_agent: { decision: "activate" } } });
+    agent.exitProcess();
+    await agent.eventually(() => agent.processes.length === 2, "a replacement process starts");
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged_failed", "the cut-off message settles");
+    await ownerAllowsTheCommand(agent, await agent.begin(3));
+  } finally { await agent.cleanup(); }
+});
+
+test("an Open Model agent that was paused and resumed after its owner changed its permission mode still gets answerable approval cards", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    await ownerSavesPermissionMode(agent, "auto_review");
+    assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "paused" })).ok, true);
+    await agent.eventually(async () => (await agent.view()).observed_state === "paused", "the agent is paused");
+    assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "running" })).ok, true);
+    await agent.eventually(() => agent.processes.length === 2, "a new process starts on resume");
+    await ownerAllowsTheCommand(agent, await agent.begin(2));
+  } finally { await agent.cleanup(); }
+});
