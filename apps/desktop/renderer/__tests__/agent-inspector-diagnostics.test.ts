@@ -300,7 +300,8 @@ test("a stopped Cursor lane names Recover agent in plain words when that button 
   const check = fixture.assess().checks[1]!;
   assert.equal(check.action?.kind, "recover");
   assert.equal(check.summary, "The agent needs a restart");
-  assert.equal(check.detail, "The agent stopped and LetAgents could not restart it by itself. Press Recover agent to start it again. It keeps its history and its files.");
+  assert.equal(check.detail, "LetAgents could not continue this agent by itself. Press Recover agent to restart it. It keeps its identity and its workspace.");
+  assert.doesNotMatch(check.detail, /stopped|history/);
 });
 
 test("an exact runtime that needs a choice points to Recovery options, not Recover agent", () => {
@@ -311,8 +312,8 @@ test("an exact runtime that needs a choice points to Recovery options, not Recov
   const check = fixture.assess().checks[1]!;
   assert.equal(check.action?.kind, "recovery_options");
   assert.equal(check.summary, "Choose how to restart the agent");
-  assert.match(check.detail, /Open Recovery options/);
-  assert.doesNotMatch(check.detail, /Recover agent/);
+  assert.equal(check.detail, "LetAgents could not continue this agent by itself. Open Recovery options and choose how to restart it.");
+  assert.doesNotMatch(check.detail, /Recover agent|history/);
 });
 
 test("a coordination block with no restart action names no button", () => {
@@ -322,7 +323,8 @@ test("a coordination block with no restart action names no button", () => {
   fixture.entry.observedState = "recovering";
   const check = fixture.assess().checks[1]!;
   assert.equal(check.action, null);
-  assert.equal(check.summary, "The agent cannot restart yet");
+  assert.equal(check.summary, "LetAgents is still checking this agent");
+  assert.match(check.detail, /You can refresh checks/);
   assert.doesNotMatch(check.detail, /Recover agent|Recovery options/);
 });
 
