@@ -1,5 +1,6 @@
 <template>
   <div class="room-message-viewport" data-testid="room-chat-viewport">
+    <div class="room-message-scroll">
     <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll" @scrollend="finishMessageReveal">
       <p v-if="olderMessagesError" role="status" class="room-load-older-error">{{ olderMessagesError }}</p>
       <button
@@ -61,45 +62,6 @@
         </template>
       </template>
 
-      <div
-        v-if="displayedAgentWork.length && !roomLoading"
-        class="room-local-agent-work-list"
-        data-testid="room-local-agent-work-list"
-      >
-        <button
-          v-for="work in collapsedAgentWork.visible"
-          :key="work.id"
-          data-motion-work
-          :data-motion-session="work.agentSessionId"
-          :data-motion-agent="work.agentKey"
-          :data-motion-after="work.sourceMessageId"
-          type="button"
-          class="room-local-agent-work"
-          :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"
-          data-testid="room-local-agent-work"
-          @click="$emit('open-agent', workIndicatorAgentTarget(work))"
-        >
-          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
-          <span class="room-local-agent-work-copy">
-            <strong>{{ work.displayName }}</strong>
-            <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
-          </span>
-          <span class="room-local-agent-work-dots" aria-hidden="true">
-            <i></i>
-            <i></i>
-            <i></i>
-          </span>
-        </button>
-        <p
-          v-if="collapsedAgentWork.hiddenCount > 0"
-          class="room-local-agent-work-overflow"
-          data-testid="room-local-agent-work-overflow"
-          aria-live="polite"
-        >
-          +{{ collapsedAgentWork.hiddenCount }} more {{ collapsedAgentWork.hiddenCount === 1 ? "agent" : "agents" }} working
-        </p>
-      </div>
-
       <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
         <div
           v-for="index in 4"
@@ -151,12 +113,57 @@
     >
       {{ unreadCount > 0 ? `↓ ${unreadCount} new message${unreadCount === 1 ? "" : "s"}` : "↓ Scroll to latest" }}
     </button>
+    </div>
+    <!-- Live strip: who is working or typing right now. It sits outside the
+         scrolling list so it stays in view while the reader is in older history. -->
+    <div ref="liveStripElement" class="room-live-strip" data-testid="room-live-strip">
+      <div
+        v-if="displayedAgentWork.length && !roomLoading"
+        class="room-local-agent-work-list"
+        data-testid="room-local-agent-work-list"
+      >
+        <button
+          v-for="work in collapsedAgentWork.visible"
+          :key="work.id"
+          data-motion-work
+          :data-motion-session="work.agentSessionId"
+          :data-motion-agent="work.agentKey"
+          :data-motion-after="work.sourceMessageId"
+          type="button"
+          class="room-local-agent-work"
+          :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"
+          data-testid="room-local-agent-work"
+          @click="$emit('open-agent', workIndicatorAgentTarget(work))"
+        >
+          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+          <span class="room-local-agent-work-copy">
+            <strong>{{ work.displayName }}</strong>
+            <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
+          </span>
+          <span class="room-local-agent-work-dots" aria-hidden="true">
+            <i></i>
+            <i></i>
+            <i></i>
+          </span>
+        </button>
+        <p
+          v-if="collapsedAgentWork.hiddenCount > 0"
+          class="room-local-agent-work-overflow"
+          data-testid="room-local-agent-work-overflow"
+          aria-live="polite"
+        >
+          +{{ collapsedAgentWork.hiddenCount }} more {{ collapsedAgentWork.hiddenCount === 1 ? "agent" : "agents" }} working
+        </p>
+      </div>
+      <TypingIndicator :key="roomIdentifier ?? ''" :names="roomLoading ? [] : typingNames ?? []" :color-for="typingColor" />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import { provide } from "vue";
+import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
@@ -182,7 +189,7 @@ import {
 import { workIndicatorAgentTarget } from "../../../../domain/agent-inspector-identity";
 import RoomContribution from "./RoomContribution.vue";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
-import { parseSenderIdentity } from "../desktop-chat-message/identity";
+import { getSenderColor, parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
@@ -218,6 +225,8 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  /** People typing in this room now; shown as the last row of the live strip. */
+  typingNames?: readonly string[];
   participants?: DesktopParticipantSummary[];
   presence?: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
@@ -275,6 +284,8 @@ const emptyStateDescription = computed(() => {
 });
 
 const messagesElement = ref<HTMLElement | null>(null);
+const liveStripElement = ref<HTMLElement | null>(null);
+const typingColor = (name: string) => getSenderColor(name, null);
 const unreadRoom = computed(() => props.roomIdentifier);
 provide(unreadMenuKey, { client: roomUnread, room: unreadRoom });
 const revealUnreadMessage = inject(unreadRevealKey, null);
@@ -431,6 +442,7 @@ const motionMessages = () => props.messages.map(toMotionMessage);
 
 const messageMotion = useRoomMessageMotion({
   element: messagesElement,
+  work: liveStripElement,
   scope: () => props.messageNamespace,
   // Loading older history must not disable navigation for a new own send.
   // The motion watcher independently excludes prepended/historical messages.

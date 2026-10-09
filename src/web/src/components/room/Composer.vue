@@ -36,7 +36,6 @@
           @clear="emit('clearReply')"
         />
         <div class="composer-typing-input">
-          <TypingIndicator :label="typing.label.value" />
           <textarea
             ref="textareaEl"
             class="message-textarea"
@@ -160,7 +159,6 @@
 import { injectRoomMessageMotion } from "../../../../../shared/ui/useRoomMessageMotion";
 import { useComposerSlashCommands } from '../../../../../shared/ui/useComposerSlashCommands'
 import { useToast } from '@/composables/useToast'
-import TypingIndicator from '../../../../../shared/ui/TypingIndicator.vue'
 import { useRoomTyping } from '@/composables/roomTyping'
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import {

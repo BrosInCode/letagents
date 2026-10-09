@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { effectScope, ref } from 'vue';
-import { receiveRoomTyping, setTypingAccount, useRoomTyping } from '../src/composables/useRoomTyping';
+import { receiveRoomTyping, setTypingAccount, useRoomTyping, useRoomTypingNames } from '../src/composables/useRoomTyping';
 
 test('native typing state clears on room, account, stream and scope changes, without draft reports', () => {
   const originalWindow = globalThis.window;
@@ -48,5 +48,46 @@ test('native typing state clears on room, account, stream and scope changes, wit
     setTypingAccount('bea');
     receiveRoomTyping('room_two', { ...signal(), room_id: 'room_two' });
     assert.equal(typing.label.value, '', 'disposed receiver has no subscription');
+  } finally { scope.stop(); setTypingAccount(null); globalThis.window = originalWindow; }
+});
+
+test('the display-only names view follows the room and account, and never reports', () => {
+  const originalWindow = globalThis.window;
+  const reported: unknown[] = [];
+  globalThis.window = {
+    letagentsDesktop: { room: { reportTyping(...input: unknown[]) { reported.push(input); return Promise.resolve(); } } },
+    addEventListener() {}, removeEventListener() {},
+  } as any;
+  const scope = effectScope();
+  const room = ref('room_one');
+  const signal = (account_id: string, name: string, room_id = 'room_one') => ({ room_id, account_id, name,
+    client_id: 'composer_source_1', sequence: 1, typing: true, ttl_ms: 5000, expires_at: Date.now() + 5000 });
+  setTypingAccount('bea');
+  try {
+    const names = scope.run(() => useRoomTypingNames(room))!;
+    receiveRoomTyping('room_one', signal('bea', 'Bea'));
+    assert.deepEqual(names.value, [], 'self is never shown');
+    receiveRoomTyping('room_one', signal('cy', 'Cy'));
+    receiveRoomTyping('room_one', signal('ada', 'Ada'));
+    assert.deepEqual(names.value, ['Ada', 'Cy']);
+    const shown = names.value;
+    receiveRoomTyping('room_one', { ...signal('ada', 'Ada'), sequence: 2 });
+    assert.equal(names.value, shown, 'a heartbeat with the same people does not replace the value');
+    receiveRoomTyping('room_two', signal('di', 'Di', 'room_two'));
+    assert.deepEqual(names.value, ['Ada', 'Cy'], 'another room does not leak in');
+    room.value = 'room_two';
+    assert.deepEqual(names.value, [], 'leaving the room clears the row');
+    receiveRoomTyping('room_two', signal('di', 'Di', 'room_two'));
+    assert.deepEqual(names.value, ['Di']);
+    receiveRoomTyping('room_two');
+    assert.deepEqual(names.value, [], 'stream disconnect clears immediately');
+    receiveRoomTyping('room_two', signal('di', 'Di', 'room_two'));
+    setTypingAccount(null);
+    assert.deepEqual(names.value, []);
+    scope.stop();
+    setTypingAccount('bea');
+    receiveRoomTyping('room_two', signal('di', 'Di', 'room_two'));
+    assert.deepEqual(names.value, [], 'disposed view has no subscription');
+    assert.equal(reported.length, 0);
   } finally { scope.stop(); setTypingAccount(null); globalThis.window = originalWindow; }
 });
