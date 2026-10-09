@@ -43,12 +43,15 @@ export function findThreadMessageElement(
 }
 
 export function scrollThreadMessageIntoView(
-  root: Pick<ParentNode, "querySelectorAll"> | null,
+  root: HTMLElement | null,
   messageId: string,
-  behavior?: ScrollBehavior,
+  behavior: ScrollBehavior = "instant",
 ): HTMLElement | null {
   const target = findThreadMessageElement(root, messageId);
-  target?.scrollIntoView({ behavior, block: "center" });
+  if (root && target) {
+    // scrollIntoView would also move the room containing this nested scroller.
+    root.scrollTo({ top: root.scrollTop + target.getBoundingClientRect().top - root.getBoundingClientRect().top - 12, behavior });
+  }
   return target;
 }
 

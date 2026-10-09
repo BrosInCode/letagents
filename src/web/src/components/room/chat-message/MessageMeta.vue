@@ -39,6 +39,9 @@
           <path d="M3 8h5.5c2.485 0 4.5 2.015 4.5 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </button>
+      <button v-if="canOpenThread" class="reply-action" type="button" aria-label="Reply in thread" title="Reply in thread" @click="emit('thread')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 4h16v12H9l-5 4z" /></svg>
+      </button>
       <button class="reply-action info-action" type="button" aria-label="Message info" title="Message info" @click="emit('info')">
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.4"/>
@@ -72,6 +75,7 @@ defineProps<{
   provenanceBadge?: ProvenanceBadge | null
   inlinePromptInjection: boolean
   formattedTime: string
+  canOpenThread?: boolean
   canReact?: boolean
   pickerOpen?: boolean
   canPin?: boolean
@@ -83,6 +87,7 @@ const emit = defineEmits<{
   pin: []
   copy: []
   reply: []
+  thread: []
   info: []
   /** The click that asked for the reaction picker; its target is the anchor. */
   react: [event: MouseEvent]

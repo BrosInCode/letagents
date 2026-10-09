@@ -154,9 +154,9 @@
   height: 14px;
 }
 
-.room-chat-message:hover .room-message-reply-action,
-.room-chat-message:focus-within .room-message-reply-action,
-.room-chat-message.is-reacting .room-message-reply-action {
+.room-chat-message:hover > .room-chat-message-content > .room-message-meta .room-message-reply-action,
+.room-chat-message:focus-within > .room-chat-message-content > .room-message-meta .room-message-reply-action,
+.room-chat-message.is-reacting > .room-chat-message-content > .room-message-meta .room-message-reply-action {
   opacity: 1;
   transform: translateY(0);
 }
@@ -382,12 +382,6 @@
 .room-message-reply:hover {
   background: rgba(255, 255, 255, 0.07);
   border-color: color-mix(in srgb, var(--avatar-color, #71717a) 34%, rgba(255, 255, 255, 0.12));
-}
-
-.room-chat-message.is-active-thread-root .room-message-bubble {
-  border-color: rgba(147, 197, 253, 0.26);
-  background: rgba(96, 165, 250, 0.055);
-  box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.055);
 }
 
 .room-thread-marker {

@@ -24,10 +24,12 @@ export function createRoomMessageActions() {
     onSent?: (messageId: string) => void,
   ): Promise<boolean> {
     if (!room.value) return false
+    const sendingRoom = room.value
+    const roomIdentifier = sendingRoom.identifier
     lastSendError.value = ''
     try {
       const preparedAttachments = attachments.length
-        ? await prepareMessageAttachments(room.value.identifier, attachments)
+        ? await prepareMessageAttachments(roomIdentifier, attachments)
         : []
       const body: Record<string, unknown> = {
         text,
@@ -48,16 +50,18 @@ export function createRoomMessageActions() {
       if (preparedAttachments.length) {
         body.attachments = preparedAttachments
       }
-      const msg = await apiFetch(`${roomPath(room.value.identifier)}/messages`, {
+      const msg = await apiFetch(`${roomPath(roomIdentifier)}/messages`, {
         method: 'POST',
         body: JSON.stringify(body),
       })
+      if (room.value !== sendingRoom) return true
       if (msg?.id && isVisibleRoomMessage(msg)) {
         onSent?.(msg.id)
         appendRoomMessage(msg)
       }
       return true
     } catch (error) {
+      if (room.value !== sendingRoom) return false
       const message = error instanceof Error ? error.message.trim() : ''
       lastSendError.value = /attachment object storage is not configured/i.test(
         message,

@@ -461,19 +461,23 @@ describe("room chat helpers", () => {
   });
 
   it("finds and scrolls the requested thread message through its shared DOM contract", () => {
-    const calls: ScrollIntoViewOptions[] = [];
+    const calls: ScrollToOptions[] = [];
     const elements = ["msg_root", "msg_reply"].map((messageId) => ({
       dataset: { threadMessageId: messageId },
-      scrollIntoView: (options: ScrollIntoViewOptions) => calls.push(options),
+      getBoundingClientRect: () => ({ top: 180 }),
+      scrollIntoView: () => { throw new Error("must not scroll the outer room"); },
     })) as unknown as HTMLElement[];
     const root = {
       querySelectorAll: () => elements,
-    } as unknown as Pick<ParentNode, "querySelectorAll">;
+      scrollTop: 100,
+      getBoundingClientRect: () => ({ top: 80 }),
+      scrollTo: (options: ScrollToOptions) => calls.push(options),
+    } as unknown as HTMLElement;
 
     const target = scrollThreadMessageIntoView(root, "msg_reply", "smooth");
 
     assert.equal(target, elements[1]);
-    assert.deepEqual(calls, [{ behavior: "smooth", block: "center" }]);
+    assert.deepEqual(calls, [{ behavior: "smooth", top: 188 }]);
     assert.equal(scrollThreadMessageIntoView(root, "msg_missing"), null);
   });
 

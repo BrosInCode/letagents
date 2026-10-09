@@ -12,6 +12,7 @@ type SubmitComposerMessage = (
 ) => Promise<boolean>
 
 export function useComposerPrompts(input: {
+  enabled?: Ref<boolean>
   roomIdentifier: Ref<string>
   submitComposerMessage: SubmitComposerMessage
 }) {
@@ -55,6 +56,7 @@ export function useComposerPrompts(input: {
   }
 
   function loadPrefs() {
+    if (input.enabled?.value === false) return
     try {
       const raw = localStorage.getItem(prefsKey())
       if (!raw) return
@@ -86,7 +88,7 @@ export function useComposerPrompts(input: {
 
   function startKeepPollingLoop(sendImmediately = true) {
     stopKeepPollingLoop()
-    if (!autoKeepPolling.value || !input.roomIdentifier.value) return
+    if (input.enabled?.value === false || !autoKeepPolling.value || !input.roomIdentifier.value) return
 
     if (sendImmediately) {
       void sendAutoPollingPrompt()
