@@ -9,6 +9,7 @@ import type {
   CodexAppServerLaunch,
 } from "../main/agents/codex-app-server.js";
 import {
+  CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION,
   CodexProviderAdapter,
   COMMAND_OUTPUT_WINDOW_MS,
   codexMcpWorkplaceConfigOverrides,
@@ -67,6 +68,8 @@ const FAKE_CODEX_MODELS: readonly FakeCodexModel[] = [
 ];
 
 class FakeRpc implements CodexAdapterRpc {
+  /** Set for a stand-in that says which Codex home it runs with, as the real app-server does. */
+  reportedCodexHome?: () => string | null;
   readonly requests: RecordedRequest[] = [];
   readonly threadReadCounts = new Map<string, number>();
   readonly threadResumeCounts = new Map<string, number>();
@@ -233,6 +236,8 @@ class FakeRpc implements CodexAdapterRpc {
       return {
         thread: {
           id: requestedThreadId,
+          // A real app-server says the folder a conversation works in.
+          ...(this.options.threadDirectory ? { cwd: this.options.threadDirectory } : {}),
           status: { type: this.threadStatus },
           turns: [{
             id: `turn-${requestedThreadId}`,
@@ -320,7 +325,7 @@ const custodialRuntimeContract = {
   } },
 };
 
-function createHarness(options: {
+function createHarness(harnessOptions: {
   resumeSupported?: boolean;
   placeholderResumeIsFatal?: boolean;
   workplacePresent?: boolean;
@@ -349,7 +354,16 @@ function createHarness(options: {
   effortFromOwnSettings?: string | null;
   /** Every thread reports `reasoningEffort: null`: Codex says that the conversation has no effort. */
   effortReportedAsNull?: boolean;
+  /** The Codex home the app-server says it runs with; null is an app-server that does not say. Left out, it cannot be asked. */
+  reportedCodexHome?: string | null;
+  /** The Codex home each launch is given in place of the owner's. */
+  launchCodexHome?: string;
 } = {}) {
+  const options = harnessOptions;
+  const reported = { codexHome: options.reportedCodexHome };
+  /** Each time a running process was asked whether a conversation it loaded now would read a command rule, and the answer. */
+  const ruleLoadChecks: Array<{ cwd: string; codexHome: string | null }> = [];
+  const ruleLoad: { refusal: string | null } = { refusal: null };
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
@@ -394,7 +408,7 @@ function createHarness(options: {
       launch.processIdentity = processIdentity ?? `fake-process-${launch.pid}-birth-1`;
       launches.push(launch);
       launchOptions.push({ serverUrl, codexBin, options });
-      return { pid: launch.pid, exited: launch.exited };
+      return { pid: launch.pid, exited: launch.exited, ...(harnessOptions.launchCodexHome ? { codexHome: harnessOptions.launchCodexHome } : {}) };
     },
     waitForServer: async () => true,
     createRpcClient: (serverUrl, notify) => {
@@ -414,6 +428,7 @@ function createHarness(options: {
         effortFromOwnSettings: options.effortFromOwnSettings,
         effortReportedAsNull: options.effortReportedAsNull ?? false,
       });
+      if (reported.codexHome !== undefined) client.reportedCodexHome = () => reported.codexHome!;
       clients.push(client);
       return client;
     },
@@ -448,6 +463,10 @@ function createHarness(options: {
       liveChecks.push(live);
       if (project.changed) throw new Error(project.changed);
     },
+    sandboxedLoadRefusal: async (_codexBin, live) => {
+      ruleLoadChecks.push(live);
+      return ruleLoad.refusal;
+    },
     writeSupervisorBridgeContext: async (cwd, context) => {
       supervisorBridgeContexts.push({ cwd, context });
     },
@@ -466,6 +485,11 @@ function createHarness(options: {
     mcpRuntimeProbes,
     liveChecks,
     commandLineReads,
+    ruleLoadChecks,
+    /** A conversation the running process started or loaded now would read a command rule. */
+    refuseRuleLoad: (refusal: string | null) => { ruleLoad.refusal = refusal; },
+    /** What every app-server connected from now on says its Codex home is. */
+    setReportedCodexHome: (codexHome: string | null) => { reported.codexHome = codexHome; },
     /** The project now adds something the running process was not started with turned off. */
     changeProject: (refusal: string) => { project.changed = refusal; },
     setIdentityObservable: (observable: boolean) => { identityObservable = observable; },
@@ -8422,4 +8446,206 @@ test("without the owner's setup nothing the room's server asks is declined, what
   assert.deepEqual(client.permissionResponses, []);
   assert.deepEqual(client.listPendingRequests(), pending);
   assert.deepEqual(activity, []);
+});
+
+const SANDBOXED_LAUNCH = {
+  deliveryMode: "daemon_inbox" as const, permissionProfileId: "ask_before_write" as const, configurationRevision: 1,
+  launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } },
+};
+const turnOf = (name: string) => ({ inboxItemId: name, actionId: name, sourceMessage: {}, activation: {} });
+/** A stand-in Codex home in a scratch folder; `rule` puts one saved rule in it. */
+async function scratchCodexHome(t: { after(cleanup: () => Promise<void>): void }, rule: boolean): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), "letagents-codex-adapter-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  if (rule) {
+    await mkdir(join(home, "rules"));
+    await writeFile(join(home, "rules", "default.rules"), "saved\n");
+  }
+  return home;
+}
+
+test("at a sandboxed access level a Codex that does not say its home, or says another one, is stopped at once", async (t) => {
+  const given = await scratchCodexHome(t, false);
+  const other = await scratchCodexHome(t, false);
+  const cases: Array<{ name: string; harness: Parameters<typeof createHarness>[0]; refused: RegExp | null }> = [
+    { name: "says nothing", harness: { reportedCodexHome: null, launchCodexHome: given },
+      refused: /^Error: Codex did not say which home folder it runs with, so LetAgents cannot tell that your saved command rules stay away from this agent, and stopped it\. Update Codex, then start the agent again\.$/ },
+    // The owner's home was the one to use, because it holds no rule: Codex must still say so.
+    { name: "says nothing, started with the owner's home", harness: { reportedCodexHome: null }, refused: /^Error: Codex did not say which home folder it runs with/ },
+    { name: "says another home", harness: { reportedCodexHome: other, launchCodexHome: given },
+      refused: /^Error: Codex did not start with the home folder LetAgents gave it for this access level, so LetAgents stopped it\. Check that nothing sets CODEX_HOME for the codex command \(a wrapper script or a shell alias\), update Codex, then start the agent again\.$/ },
+    { name: "says the home it was given", harness: { reportedCodexHome: given, launchCodexHome: given }, refused: null },
+  ];
+  for (const testCase of cases) {
+    const harness = createHarness({ exitOnSignal: true, ...testCase.harness });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    if (testCase.refused) {
+      await assert.rejects(adapter.spawn(spawnRequest(SANDBOXED_LAUNCH)), testCase.refused, testCase.name);
+      assert.deepEqual(harness.signals.map((signal) => signal.signal), ["SIGTERM"], testCase.name);
+      assert.equal(harness.clients[0]!.requests.some((request) => request.method === "thread/start"), false, `${testCase.name}: no conversation was opened`);
+    } else {
+      await adapter.spawn(spawnRequest(SANDBOXED_LAUNCH));
+      assert.deepEqual(harness.signals, [], testCase.name);
+    }
+  }
+  // Full access has no sandbox for a rule to open, so nothing depends on the answer.
+  const fullAccess = createHarness({ reportedCodexHome: null });
+  await new CodexProviderAdapter({ dependencies: fullAccess.dependencies }).spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  assert.deepEqual(fullAccess.signals, []);
+});
+
+test("a sandboxed Codex takes no turn while the home it runs with holds a saved rule, whether LetAgents started it or found it running", async (t) => {
+  const home = await scratchCodexHome(t, false);
+  const harness = createHarness({ reportedCodexHome: home });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const first = await adapter.spawn(spawnRequest(SANDBOXED_LAUNCH));
+  const turnStarts = (client: number) => harness.clients[client]!.requests.filter((request) => request.method === "turn/start").length;
+  const run = (runtime: CodexProviderAdapter, handle: ProviderHandle, client: number, name: string) => runtime.runRoomTurn(handle, turnOf(name), {
+    checkpointTurnStarted: async (turnId) => { harness.clients[client]!.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } }); },
+  });
+  await run(adapter, first, 0, "no-rule");
+  assert.equal(turnStarts(0), 1, "a home with no saved rule is as good as the agents' own");
+
+  // The owner saves a rule after the agent started with their home.
+  await mkdir(join(home, "rules"));
+  await writeFile(join(home, "rules", "default.rules"), "saved\n");
+  const REFUSED = /^Error: This agent's Codex runs with a home folder that holds saved command rules, and a command that matches one runs outside its sandbox\. So LetAgents gives it no work\. Pause the agent and resume it: it then starts with a home folder without those rules\.$/;
+  await assert.rejects(run(adapter, first, 0, "rule-saved"), REFUSED);
+  assert.equal(turnStarts(0), 1, "Codex was sent no turn");
+
+  // A daemon that starts again finds the process running: it is attached, never used as it is.
+  const restarted = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const ref = { workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection, launchPolicy: SANDBOXED_LAUNCH.launchPolicy };
+  const attached = await restarted.attach(ref);
+  assertProviderHandle(attached);
+  await assert.rejects(run(restarted, attached, 1, "found-running"), REFUSED);
+  assert.equal(turnStarts(1), 0);
+  assert.deepEqual(harness.signals, [], "a turn that may be running is never interrupted");
+
+  // One that does not say its home is not used either.
+  harness.setReportedCodexHome(null);
+  const silent = await new CodexProviderAdapter({ dependencies: harness.dependencies }).attach(ref);
+  assertProviderHandle(silent);
+  await assert.rejects(new Promise((resolve, reject) => { try { resolve((silent as unknown as { requireTurnPolicy(): unknown }).requireTurnPolicy()); } catch (error) { reject(error); } }),
+    /^Error: Codex did not say which home folder it runs with, so LetAgents cannot tell that saved command rules stay away from this agent, and gives it no work\. Update Codex, then pause the agent and resume it\.$/);
+
+  // With the rule gone the same process works again, and at Full access a saved rule changes nothing.
+  await rm(join(home, "rules"), { recursive: true });
+  await run(adapter, first, 0, "rule-removed");
+  assert.equal(turnStarts(0), 2);
+  const withRule = await scratchCodexHome(t, true);
+  const fullAccess = createHarness({ reportedCodexHome: withRule });
+  const fullAccessAdapter = new CodexProviderAdapter({ dependencies: fullAccess.dependencies });
+  const unsandboxed = await fullAccessAdapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  await fullAccessAdapter.runRoomTurn(unsandboxed, turnOf("full-access"), {
+    checkpointTurnStarted: async (turnId) => { fullAccess.clients[0]!.emit({ method: "turn/completed", params: { threadId: unsandboxed.providerContinuationId, turnId } }); },
+  });
+});
+
+test("before a sandboxed Codex starts or loads a conversation again it is asked about command rules, and it is stopped when one would be read", async (t) => {
+  const home = await scratchCodexHome(t, false);
+  const repair = (adapter: CodexProviderAdapter, handle: ProviderHandle, launchPolicy: unknown) => adapter.repairContinuation(handle, {
+    workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+    cwd: spawnRequest().cwd, launchPolicy, forceReplacement: true,
+  }, { checkpointReplacement: async () => {} });
+
+  // Nothing would be read: the repair goes on, and Codex was asked with the home it runs with and the agent's folder.
+  const clean = createHarness({ exitOnSignal: true, reportedCodexHome: home });
+  const cleanAdapter = new CodexProviderAdapter({ dependencies: clean.dependencies });
+  const repaired = await cleanAdapter.spawn(spawnRequest(SANDBOXED_LAUNCH));
+  assert.equal((await repair(cleanAdapter, repaired, SANDBOXED_LAUNCH.launchPolicy)).outcome, "replaced");
+  assert.deepEqual(clean.ruleLoadChecks, [{ cwd: spawnRequest().cwd, codexHome: home }]);
+  assert.deepEqual(clean.signals, []);
+
+  // The project gained a rules folder since the launch: no conversation is started, and the agent is stopped and says why.
+  const REFUSAL = "Codex also reads command rules from /etc/codex/rules, a folder of this computer's own Codex settings.";
+  const harness = createHarness({ exitOnSignal: true, reportedCodexHome: home });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest(SANDBOXED_LAUNCH));
+  const said: string[] = [];
+  adapter.onStream(handle, (event) => { if (event.method === "sandboxRules/stopped") said.push(event.summary ?? ""); });
+  const before = harness.clients[0]!.requests.length;
+  harness.refuseRuleLoad(REFUSAL);
+  await assert.rejects(repair(adapter, handle, SANDBOXED_LAUNCH.launchPolicy), (error: Error) => error.message === REFUSAL);
+  assert.deepEqual(harness.clients[0]!.requests.slice(before).map((request) => request.method).filter((method) => /^thread\/(start|resume)$/.test(method)), []);
+  assert.deepEqual(said, [`Stopped this agent. ${REFUSAL}`]);
+  assert.deepEqual(harness.signals.map((signal) => signal.signal), ["SIGTERM"]);
+
+  // At Full access nothing is asked: there is no sandbox for a rule to open.
+  const fullAccess = createHarness({ reportedCodexHome: home });
+  const fullAccessAdapter = new CodexProviderAdapter({ dependencies: fullAccess.dependencies });
+  const unsandboxed = await fullAccessAdapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  fullAccess.refuseRuleLoad(REFUSAL);
+  assert.equal((await repair(fullAccessAdapter, unsandboxed, spawnRequest().launchPolicy)).outcome, "replaced");
+  assert.deepEqual(fullAccess.ruleLoadChecks, []);
+});
+
+test("the managed launch contract is version 2 or later, so a Codex started before agents had a home without saved rules is replaced", () => {
+  assert.ok(CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION >= 2);
+});
+
+test("a sandboxed Codex takes no turn and loads no conversation in a project that has command rules of its own, at launch, when found running, and at every turn", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "letagents-codex-adapter-project-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const top = await realpath(project);
+  const cwd = join(top, "packages", "app");
+  await mkdir(cwd, { recursive: true });
+  await mkdir(join(top, ".git"));
+  const home = await scratchCodexHome(t, false);
+  // The rules are at the top of the repository, two folders above the one the agent works in.
+  const addRules = async () => { await mkdir(join(top, ".codex", "rules"), { recursive: true }); await writeFile(join(top, ".codex", "rules", "allow.rules"), "saved\n"); };
+  const REFUSED = "This project has command rules for Codex in .codex/rules (allow.rules). "
+    + "A sandboxed Codex agent would run every command that matches one with no sandbox and no approval, "
+    + "so LetAgents does not start Codex here, or give it work, at this access level. "
+    + "Remove or rename .codex/rules, or give this agent Full access if you accept that.";
+  const refused = (error: Error) => { assert.equal(error.message, REFUSED); return true; };
+  const run = (harness: ReturnType<typeof createHarness>, adapter: CodexProviderAdapter, handle: ProviderHandle, client: number, name: string) => adapter.runRoomTurn(handle, turnOf(name), {
+    checkpointTurnStarted: async (turnId) => { harness.clients[client]!.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } }); },
+  });
+  const turnStarts = (harness: ReturnType<typeof createHarness>, client: number) => harness.clients[client]!.requests.filter((request) => request.method === "turn/start").length;
+  const repair = (adapter: CodexProviderAdapter, handle: ProviderHandle, launchPolicy: unknown) => adapter.repairContinuation(handle, {
+    workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!, cwd, launchPolicy, forceReplacement: true,
+  }, { checkpointReplacement: async () => {} });
+
+  // A client that says its home, as the real one does, and a stand-in that does not: the folder is looked in for both.
+  for (const reportedCodexHome of [home, undefined]) {
+    const harness = createHarness({ exitOnSignal: true, ...(reportedCodexHome ? { reportedCodexHome } : {}) });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ ...SANDBOXED_LAUNCH, cwd }));
+    // An empty rules folder holds no rule.
+    await mkdir(join(top, ".codex", "rules"), { recursive: true });
+    await run(harness, adapter, handle, 0, "before");
+    assert.equal(turnStarts(harness, 0), 1);
+
+    // The folder gains an entry between two turns, for example through the owner's pull.
+    await addRules();
+    await assert.rejects(run(harness, adapter, handle, 0, "turn"), refused);
+    assert.equal(turnStarts(harness, 0), 1, "Codex was sent no turn");
+    assert.equal(harness.signals.length, 0, "a turn is refused; nothing that runs is stopped");
+
+    // A daemon that starts again finds the process running, and reads the folder from the conversation.
+    const restarted = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const attached = await restarted.attach({ workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!,
+      providerConnection: handle.providerConnection, launchPolicy: SANDBOXED_LAUNCH.launchPolicy });
+    assertProviderHandle(attached);
+    await assert.rejects(run(harness, restarted, attached, 1, "found-running"), refused);
+    assert.equal(turnStarts(harness, 1), 0);
+
+    // No conversation is started or loaded either: the agent is stopped before Codex could read the rules.
+    const before = harness.clients[0]!.requests.length;
+    await assert.rejects(repair(adapter, handle, SANDBOXED_LAUNCH.launchPolicy), refused);
+    assert.deepEqual(harness.clients[0]!.requests.slice(before).map((request) => request.method).filter((method) => /^thread\/(start|resume)$/.test(method)), []);
+    assert.deepEqual(harness.ruleLoadChecks, [], "Codex is not asked whether it trusts the project");
+    assert.deepEqual(harness.signals.map((signal) => signal.signal), ["SIGTERM"]);
+    await rm(join(top, ".codex"), { recursive: true });
+  }
+
+  // At Full access a project's rules change nothing: there is no sandbox for them to open.
+  await addRules();
+  const fullAccess = createHarness({ reportedCodexHome: home });
+  const fullAccessAdapter = new CodexProviderAdapter({ dependencies: fullAccess.dependencies });
+  const unsandboxed = await fullAccessAdapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", cwd }));
+  await run(fullAccess, fullAccessAdapter, unsandboxed, 0, "full-access");
+  assert.equal((await repair(fullAccessAdapter, unsandboxed, spawnRequest().launchPolicy)).outcome, "replaced");
+  assert.deepEqual(fullAccess.signals, []);
 });

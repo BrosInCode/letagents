@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { lstatSync, readdirSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, parse, relative } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
 
 import {
   CODEX_OWNER_FEATURE_OVERRIDES,
@@ -45,6 +46,12 @@ export type CodexProjectLayer = { dotCodexFolder: string; config: Record<string,
 /** A hook Codex would run in the project. `outsideProject`: Codex lists the same hook where no project applies. */
 export type CodexHook = { key: string; source: string; enabled: boolean; outsideProject: boolean };
 export type CodexProjectInspection = { projectLayers: CodexProjectLayer[]; hooks: CodexHook[] };
+/**
+ * `credentialStore`: where Codex keeps its sign-in (`file`, `keyring`, ...). Null when Codex did not say.
+ * `otherRuleFolders`: the `rules` folder of every other layer Codex applies that is a file in a folder:
+ * the system and managed config, and defaults shipped with Codex. Not the user's own layer.
+ */
+export type CodexSettingsInspection = { projectLayers: CodexProjectLayer[]; credentialStore: string | null; otherRuleFolders: string[] };
 type LaunchView = { cwd: string; env: NodeJS.ProcessEnv; configOverrides: readonly string[] };
 
 export type CodexHomeHarnessDependencies = {
@@ -118,21 +125,25 @@ function refusal(reason: string, remedy: string): Error {
 }
 
 /**
- * Ask Codex, without starting anything, what a launch in `cwd` would read
- * from the project. A short-lived app-server is started outside any project,
- * so it loads no project config itself, and is asked for the layered config
- * and the hooks as seen from `cwd`. It opens no thread, so it starts no MCP
- * server and runs no hook. It is always stopped, and a slow one is an error.
+ * Start a short-lived app-server, ask it things, and stop it. It opens no
+ * thread, so it starts no MCP server and runs no hook. It is always stopped,
+ * and a slow one is an error.
  */
-export function inspectCodexProject(codexBin: string, options: LaunchView, timeoutMs = INSPECTION_TIMEOUT_MS): Promise<CodexProjectInspection> {
+export function askCodexAppServer<T>(
+  codexBin: string,
+  options: LaunchView,
+  ask: (request: (method: string, params: unknown) => Promise<unknown>) => Promise<T>,
+  timeoutMs = INSPECTION_TIMEOUT_MS,
+): Promise<T> {
   return new Promise((resolve, reject) => {
     const child = spawn(codexBin, [
       "app-server",
       ...options.configOverrides.flatMap((override) => ["-c", override]),
       "--listen", "stdio://",
-    ], { cwd: parse(options.cwd).root || "/", env: options.env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+    ], { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     let settled = false;
     let buffer = "";
+    let nextId = 1;
     const pending = new Map<number, (result: unknown, error: unknown) => void>();
     const stop = () => {
       try {
@@ -141,7 +152,7 @@ export function inspectCodexProject(codexBin: string, options: LaunchView, timeo
         // Already gone.
       }
     };
-    const finish = (error: Error | null, value?: CodexProjectInspection) => {
+    const finish = (error: Error | null, value?: T) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -150,7 +161,8 @@ export function inspectCodexProject(codexBin: string, options: LaunchView, timeo
       else resolve(value!);
     };
     const timer = setTimeout(() => finish(new Error(DID_NOT_ANSWER_IN_TIME)), timeoutMs);
-    const request = (id: number, method: string, params: unknown) => new Promise<unknown>((done, fail) => {
+    const request = (method: string, params: unknown) => new Promise<unknown>((done, fail) => {
+      const id = nextId++;
       pending.set(id, (result, error) => error ? fail(new Error(`${method} failed`)) : done(result));
       child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
     });
@@ -178,24 +190,63 @@ export function inspectCodexProject(codexBin: string, options: LaunchView, timeo
       }
     });
     void (async () => {
-      await request(1, "initialize", { clientInfo: { name: "letagents", title: "LetAgents", version: "1" } });
+      await request("initialize", { clientInfo: { name: "letagents", title: "LetAgents", version: "1" } });
       child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
-      const outside = parse(options.cwd).root || "/";
-      const [config, hooks] = await Promise.all([
-        request(2, "config/read", { includeLayers: true, cwd: options.cwd }),
-        // The same question for the project and for a folder no project applies to.
-        request(3, "hooks/list", { cwds: [options.cwd, outside] }),
-      ]);
-      finish(null, readInspection(config, hooks, outside));
+      finish(null, await ask(request));
     })().catch((error: unknown) => finish(error instanceof Error ? error : new Error(String(error))));
   });
 }
 
+/**
+ * Ask Codex, without starting anything, what a launch in `cwd` would read
+ * from the project. The app-server is started outside any project, so it
+ * loads no project config itself, and is asked for the layered config and the
+ * hooks as seen from `cwd`.
+ */
+export function inspectCodexProject(codexBin: string, options: LaunchView, timeoutMs = INSPECTION_TIMEOUT_MS): Promise<CodexProjectInspection> {
+  const outside = parse(options.cwd).root || "/";
+  return askCodexAppServer(codexBin, { ...options, cwd: outside }, async (request) => {
+    const [config, hooks] = await Promise.all([
+      request("config/read", { includeLayers: true, cwd: options.cwd }),
+      // The same question for the project and for a folder no project applies to.
+      request("hooks/list", { cwds: [options.cwd, outside] }),
+    ]);
+    return readInspection(config, hooks, outside);
+  }, timeoutMs);
+}
+
+/**
+ * The same question without the hooks: the project layers a launch in `cwd`
+ * would apply, and where Codex keeps its sign-in.
+ */
+export function inspectCodexSettings(codexBin: string, options: LaunchView, timeoutMs = INSPECTION_TIMEOUT_MS): Promise<CodexSettingsInspection> {
+  return askCodexAppServer(codexBin, { ...options, cwd: parse(options.cwd).root || "/" }, async (request) => {
+    const config = await request("config/read", { includeLayers: true, cwd: options.cwd });
+    const credentialStore = record(record(config)?.config)?.cli_auth_credentials_store;
+    const projectLayers = readProjectLayers(config);
+    // Codex reads command rules from the folder of each layer it applies. The
+    // layers that are neither the user's nor a project's are named by a file
+    // (the system config, a managed config, shipped defaults) or by nothing
+    // at all (settings sent by a device manager or the cloud, launch flags),
+    // and only a file has a folder. Codex 0.153.4 names these layer types;
+    // one it adds later is covered when it names a file.
+    const otherRuleFolders = (record(config)!.layers as unknown[]).flatMap((layer) => {
+      const name = record(record(layer)?.name)!;
+      return name.type !== "user" && name.type !== "project" && record(layer)!.disabledReason == null && typeof name.file === "string"
+        ? [join(dirname(name.file), "rules")] : [];
+    });
+    return {
+      projectLayers,
+      credentialStore: typeof credentialStore === "string" ? credentialStore : null,
+      otherRuleFolders: [...new Set(otherRuleFolders)],
+    };
+  }, timeoutMs);
+}
+
 /** An answer Codex gave in a shape this code does not know is an error, never an empty project. */
-function readInspection(config: unknown, hooks: unknown, outsideFolder: string): CodexProjectInspection {
+function readProjectLayers(config: unknown): CodexProjectLayer[] {
   const layers = record(config)?.layers;
-  const listed = record(hooks)?.data;
-  if (!Array.isArray(layers) || !Array.isArray(listed)) throw new Error("Codex returned unreadable settings");
+  if (!Array.isArray(layers)) throw new Error("Codex returned unreadable settings");
   const projectLayers: CodexProjectLayer[] = [];
   for (const layer of layers) {
     const name = record(record(layer)?.name);
@@ -206,6 +257,13 @@ function readInspection(config: unknown, hooks: unknown, outsideFolder: string):
     if (typeof name.dotCodexFolder !== "string" || !layerConfig) throw new Error("Codex returned an unreadable project layer");
     projectLayers.push({ dotCodexFolder: name.dotCodexFolder, config: layerConfig });
   }
+  return projectLayers;
+}
+
+function readInspection(config: unknown, hooks: unknown, outsideFolder: string): CodexProjectInspection {
+  const projectLayers = readProjectLayers(config);
+  const listed = record(hooks)?.data;
+  if (!Array.isArray(listed)) throw new Error("Codex returned unreadable settings");
   // Two answers, in the order asked: the project's folder, then a folder outside any project.
   if (listed.length !== 2 || record(listed[1])?.cwd !== outsideFolder) throw new Error("Codex returned an unreadable hook list");
   const [inProject, outside] = listed.map((entry) => {
@@ -232,12 +290,102 @@ function readInspection(config: unknown, hooks: unknown, outsideFolder: string):
  * folder that is not there at all, or is empty, has none. This can make a
  * launch be refused for a file Codex would have ignored, never the reverse.
  */
-function projectFolderEntries(folder: string): string[] {
+export function projectFolderEntries(folder: string): string[] {
   try {
     return readdirSync(folder).map((name) => join(folder, name));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT" && !lstatSync(folder, { throwIfNoEntry: false })) return [];
     return [folder];
+  }
+}
+
+/**
+ * The folders Codex reads a project's command rules from, for work in `cwd`:
+ * `.codex/rules` in that folder and in each folder above it, up to the top of
+ * its repository. Codex 0.153.4 reads no further up, not from a folder beside
+ * these, and not from a worktree's main clone. With no repository it reads
+ * the folder's own only.
+ */
+export function projectRuleFolders(cwd: string): string[] {
+  let folder = resolve(cwd);
+  try {
+    folder = realpathSync(folder);
+  } catch {
+    // A folder that is not there yet is looked for as it was named.
+  }
+  const hasGit = (path: string) => lstatSync(join(path, ".git"), { throwIfNoEntry: false }) !== undefined;
+  let top = folder;
+  try {
+    while (!hasGit(top) && dirname(top) !== top) top = dirname(top);
+    if (!hasGit(top)) top = folder;
+  } catch {
+    top = folder;
+  }
+  const folders = [folder];
+  while (folders.at(-1) !== top) folders.push(dirname(folders.at(-1)!));
+  return folders.map((path) => join(path, ".codex", "rules"));
+}
+
+/**
+ * Why Codex is not used at a sandboxed access level in a project that has
+ * command rules of its own. Null when it has none. A command that matches a
+ * rule runs outside Codex's sandbox with no approval.
+ *
+ * It does not ask whether Codex trusts the project. Codex reads these folders
+ * once it does, and trust can come at any time from outside this agent: the
+ * owner's own Codex, an agent with Full access, or a conversation that is
+ * started with the folder named, which Codex takes as trust and which turns
+ * the rules on for that same conversation. So a folder that holds anything is
+ * enough. Only the names in it are read.
+ */
+export function projectCommandRulesRefusal(
+  cwd: string,
+  folderEntries: (folder: string) => string[] = projectFolderEntries,
+  folders: readonly string[] = projectRuleFolders(cwd),
+): string | null {
+  for (const path of folders) {
+    const entries = folderEntries(path);
+    if (!entries.length) continue;
+    const names = entries.map((entry) => relative(path, entry)).filter(Boolean);
+    const shown = pathInRepository(cwd, path);
+    return `This project has command rules for Codex in ${shown} (${names.length ? shownNames(names) : "the folder cannot be listed"}). `
+      + "A sandboxed Codex agent would run every command that matches one with no sandbox and no approval, "
+      + "so LetAgents does not start Codex here, or give it work, at this access level. "
+      + `Remove or rename ${shown}, or give this agent Full access if you accept that.`;
+  }
+  return null;
+}
+
+/**
+ * The same for what Codex itself reports: a rule folder of a project layer it
+ * applies, wherever its settings put the top of the project, or of one of the
+ * machine's own layers (the system and managed config folders).
+ */
+export function assertLayersAddNoCommandRules(
+  cwd: string | undefined,
+  inspection: Pick<CodexSettingsInspection, "projectLayers" | "otherRuleFolders">,
+  folderEntries: (folder: string) => string[] = projectFolderEntries,
+): void {
+  const found = (path: string) => {
+    const entries = folderEntries(path);
+    const names = entries.map((entry) => relative(path, entry)).filter(Boolean);
+    return entries.length ? (names.length ? `has entries LetAgents cannot check (${shownNames(names)})` : "cannot be listed") : null;
+  };
+  const outsideSandbox = "and a command that matches one runs outside this agent's sandbox";
+  const layerFolders = inspection.projectLayers.map((layer) => join(layer.dotCodexFolder, "rules"));
+  const inProject = layerFolders.length ? projectCommandRulesRefusal(cwd ?? dirname(dirname(layerFolders[0]!)), folderEntries, layerFolders) : null;
+  if (inProject) throw new Error(inProject);
+  for (const path of inspection.otherRuleFolders) {
+    const holds = found(path);
+    if (!holds) continue;
+    // A folder in the user's own home is named from there, never by its full path.
+    const fromHome = relative(homedir(), path);
+    const shown = fromHome && !fromHome.startsWith("..") && !isAbsolute(fromHome) ? join("~", fromHome) : path;
+    throw new Error(
+      `Codex also reads command rules from ${shown}, a folder of this computer's own Codex settings, ${outsideSandbox}. `
+      + `That folder ${holds}, so LetAgents will not start Codex at this access level. `
+      + `Remove the rules from ${shown} (this can need an administrator), or give this agent Full access.`,
+    );
   }
 }
 
