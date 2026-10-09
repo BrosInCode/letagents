@@ -1,5 +1,6 @@
 <template>
   <div class="messages-wrap">
+    <p v-if="openingThreadId || threadOpenError" class="thread-open-status" role="status">{{ threadOpenError || 'Loading thread…' }}</p>
     <div class="messages-scroll">
     <div class="messages scroll-fade-y" ref="messagesEl" @scrollend="finishMessageReveal">
       <button
@@ -12,12 +13,13 @@
         {{ isLoadingOlderMessages ? 'Loading older messages...' : 'Load older messages' }}
       </button>
 
-        <template v-for="msg in messages" :key="msg.id">
+        <template v-for="msg in timelineMessages" :key="msg.id">
         <div v-if="msg.id === unreadTimeline.dividerId.value" class="explicit-unread" role="separator">New messages</div>
         <ChatMessage
           :message="msg"
           :roomIdentifier="roomIdentifier"
-          :thread="threadSummaries.get(msg.id) || null"
+          :thread="loadedThreadSummaries.get(msg.id) || threadSummaries.get(msg.id) || null"
+          :thread-open="activeThreadId === msg.id"
           :stalePromptTaskStates="stalePromptTaskStates"
           :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
           :class="messageClasses(msg)"
@@ -25,12 +27,27 @@
           :arriving="arrivingMessageIds.has(msg.id)"
           :agentNames="agentNames"
           @reply="emit('reply', $event)"
+          @open-thread="toggleThread"
           @info="handleOpenMessageInfo($event)"
           @openImageViewer="emit('openImageViewer', $event)"
           @scrollToReply="scrollToMessage"
           @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
           @openTask="emit('openTask', $event)"
-        />
+        >
+          <template #thread>
+            <InlineThread v-if="openedThreads.has(msg.id)" v-show="activeThreadId === msg.id"
+              :id="`web-thread-${msg.id}`" :parent="msg" :messages="messages" :room-identifier="roomIdentifier || ''"
+              :reasoning-by-anchor-message="reasoningByAnchorMessage" :stale-prompt-task-states="stalePromptTaskStates"
+              @toggle-stale-prompt-mute="emit('toggleStalePromptMute', $event)"
+              :active="activeThreadId === msg.id" :agent-names="agentNames" :task-reference-ids="taskReferenceIds"
+              :search-query="searchQuery" :reveal-message-id="threadRevealId"
+              @close="toggleThread(msg.id)" @info="handleOpenMessageInfo" @open-image-viewer="emit('openImageViewer', $event)"
+              @open-task="emit('openTask', $event)" @jump="scrollToMessage" @rows-changed="observeMessageRows"
+              @summary="loadedThreadSummaries.set(msg.id, $event)" @messages="rememberThreadMessages(msg.id, $event)">
+              <template #composer="context"><slot name="thread-composer" v-bind="context" /></template>
+            </InlineThread>
+          </template>
+        </ChatMessage>
         </template>
 
     </div>
@@ -83,10 +100,12 @@ import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../shared/
 import { provide, ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomAgentPresence, type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
+import InlineThread from './InlineThread.vue'
+import { apiFetch, roomPath } from '@/composables/room/api'
 import { messageMatchesSearch } from './chat-message/formatting'
 import MessageInfoSurface from './MessageInfoSurface.vue'
 import { mergeMessageArrivalIds, watchMessageListGrowth } from './messageArrival'
-import { buildMessageThreadSummaries } from './messageThreading'
+import { buildMessageThreadSummaries, messageThreadParentId, type MessageThreadSummary } from './messageThreading'
 import { createReadEvidenceReporter } from './readEvidence'
 import { injectRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
@@ -119,6 +138,7 @@ const props = defineProps<{
   agentNames?: ReadonlyMap<string, string>
 }>()
 const emit = defineEmits<{
+  threadMessages: [messages: RoomMessage[]]
   loadOlder: []
   reply: [message: RoomMessage]
   openImageViewer: [imageId: string]
@@ -189,6 +209,81 @@ const matchedIds = computed(() => {
     }
   }
   return ids
+})
+
+const activeThreadId = ref<string | null>(null)
+const loadedThreadRoots = ref(new Map<string, RoomMessage>())
+const openingThreadId = ref<string | null>(null)
+const threadOpenError = ref('')
+let threadRoomRevision = 0
+const allRootMessages = computed(() => [...new Map([...loadedThreadRoots.value.values(), ...props.messages].map(message => [message.id, message])).values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || Number(a.id.slice(4)) - Number(b.id.slice(4))))
+const openedThreads = ref(new Set<string>())
+const loadedThreadMessages = ref(new Map<string, RoomMessage[]>())
+function rememberThreadMessages(id: string, messages: RoomMessage[]) {
+  loadedThreadMessages.value.set(id, messages)
+  emit('threadMessages', [...loadedThreadMessages.value.values()].flat())
+}
+const loadedThreadSummaries = ref(new Map<string, MessageThreadSummary>())
+const threadRevealId = ref<string | null>(null)
+const timelineMessages = computed(() => {
+  const loaded = new Set(allRootMessages.value.map(message => message.id))
+  return allRootMessages.value.filter(message => {
+    const parent = messageThreadParentId(message)
+    return !parent || !loaded.has(parent)
+  })
+})
+async function toggleThread(id: string) {
+  const source = props.messages.find(message => message.id === id)
+  const rootId = source && messageThreadParentId(source)
+  if (rootId) {
+    if (openingThreadId.value) return
+    const revision = threadRoomRevision
+    if (!allRootMessages.value.some(message => message.id === rootId)) {
+      openingThreadId.value = rootId
+      threadOpenError.value = ''
+      try {
+        const page = await apiFetch(`${roomPath(props.roomIdentifier || '')}/messages/${encodeURIComponent(rootId)}/thread`)
+        if (revision !== threadRoomRevision) return
+        loadedThreadRoots.value.set(rootId, page.root)
+        rememberThreadMessages(rootId, page.replies)
+      } catch {
+        if (revision === threadRoomRevision) threadOpenError.value = 'Thread could not be opened. Please try again.'
+        return
+      } finally { if (revision === threadRoomRevision) openingThreadId.value = null }
+    }
+    await toggleThread(rootId)
+    threadRevealId.value = id
+    await nextTick()
+    scrollToMessage(rootId)
+    return
+  }
+  threadOpenError.value = ''
+  const el = messagesEl.value
+  const top = el?.scrollTop ?? 0
+  const returnFocus = activeThreadId.value === id ? el?.querySelector<HTMLButtonElement>(`[data-msg-id="${CSS.escape(id)}"] .thread-marker`) : null
+  scrollRevision++
+  isScrolledToBottom = false
+  messageMotion.cancel()
+  activeThreadId.value = activeThreadId.value === id ? null : id
+  openedThreads.value.add(id)
+  threadRevealId.value = null
+  void nextTick(() => {
+    if (el) el.scrollTo({ top, behavior: 'instant' })
+    checkScroll()
+    observeMessageRows()
+    returnFocus?.focus({ preventScroll: true })
+  })
+}
+watch(() => props.roomIdentifier, () => {
+  threadRoomRevision++
+  openingThreadId.value = null
+  threadOpenError.value = ''
+  loadedThreadRoots.value = new Map()
+  activeThreadId.value = null
+  openedThreads.value = new Set()
+  loadedThreadSummaries.value = new Map()
+  loadedThreadMessages.value = new Map()
+  threadRevealId.value = null
 })
 
 const threadSummaries = computed(() => buildMessageThreadSummaries(props.messages))
@@ -307,6 +402,16 @@ function findMessageElement(messageId: string): HTMLElement | null {
 }
 
 function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth') {
+  const reply = [...props.messages, ...[...loadedThreadMessages.value.values()].flat()].find(message => message.id === messageId)
+  const root = reply && messageThreadParentId(reply)
+  if (root && !allRootMessages.value.some(message => message.id === root)) { void toggleThread(messageId); return }
+  if (root) {
+    if (activeThreadId.value !== root) toggleThread(root)
+    threadRevealId.value = messageId
+    void nextTick(() => scrollToMessage(root, behavior))
+    return
+  }
+
   messageMotion.cancel()
   unreadTimeline.programmaticScroll()
   const target = findMessageElement(messageId)
@@ -325,6 +430,8 @@ function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth')
 // Scroll to first match when search changes
 watch(() => props.searchQuery, async () => {
   await nextTick()
+  const matchingReply = props.messages.find(message => matchedIds.value.has(message.id) && messageThreadParentId(message))
+  if (matchingReply) { scrollToMessage(matchingReply.id); return }
   const firstMatch = messagesEl.value?.querySelector('.search-match')
   if (firstMatch) {
     unreadTimeline.programmaticScroll()
@@ -371,7 +478,7 @@ function keepLatestInViewOnResize() {
   }
 }
 
-watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, addedCount }) => {
+watchMessageListGrowth(() => timelineMessages.value, async ({ prepended, appendedIds, addedCount }) => {
   if (prepended) {
     const el = messagesEl.value
     const previousScrollHeight = el?.scrollHeight || 0
@@ -400,7 +507,7 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
   })
 })
 
-const motionMessages = () => props.messages.map(message => ({
+const motionMessages = () => timelineMessages.value.map(message => ({
   id: message.id, stableId: message.id, text: message.text,
   session: message.agent_identity?.agent_session_id, key: message.agent_identity?.agent_key,
 }))
@@ -441,7 +548,7 @@ function revealRequestedMessage() {
   const historyReady =
     initialScrollSettled &&
     (props.messagesLoaded ?? (props.messages.length > 0 || !props.hasOlderMessages))
-  const found = Boolean(findMessageElement(messageId))
+  const found = props.messages.some(message => message.id === messageId)
     && (!isUnreadReveal || props.messages.some(message => message.id === messageId && (!message.thread_root_id || message.thread_root_id === message.id)))
 
   const action = decideMessageRevealAction({
@@ -500,7 +607,7 @@ const visibleMessageTimers = new Map<string, number>()
  * thread scope or the server (correctly) refuses them as timeline evidence.
  */
 function threadRootSeqForMessage(seq: number): number | null {
-  const message = props.messages.find((candidate) => candidate.id === `msg_${seq}`)
+  const message = [...props.messages, ...[...loadedThreadMessages.value.values()].flat()].find((candidate) => candidate.id === `msg_${seq}`)
   const rootSeq = message?.thread_root_id ? parseMsgNumber(message.thread_root_id) : null
   return rootSeq !== null && rootSeq !== seq ? rootSeq : null
 }
@@ -628,6 +735,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 </script>
 
 <style scoped>
+.thread-open-status { margin: 0; padding: 6px 24px; color: var(--muted); font-size: .8rem; }
 .explicit-unread { transition: none !important; animation: none !important; display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
 .explicit-unread::before, .explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
 .room-local-agent-work-list { margin: 6px auto 8px; }

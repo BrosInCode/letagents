@@ -57,8 +57,11 @@ const flush = async () => { await nextTick(); await new Promise(resolve => setIm
 const message = (id: string) => ({ id, sender: "Ada", source: "browser", text: id, timestamp: "2026-10-02T00:00:00Z", attachments: [], agentIdentity: null });
 
 async function scrollSurface(thread = false, rememberPosition = false, initialScrollTop: number | null = null) {
-  const old = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver };
+  const old = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver, IntersectionObserver: globalThis.IntersectionObserver };
   let resize = () => {};
+  let intersect: (entries: any[]) => void = () => {};
+  const reads: string[] = [];
+  const reading: boolean[] = [];
   let now = 0, nextHandle = 0;
   const frames = new Map<number, () => void>();
   const timers = new Map<number, { at: number; callback: () => void }>();
@@ -69,6 +72,7 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
       setTimeout: (callback: () => void, delay = 0) => { timers.set(++nextHandle, { at: now + delay, callback }); return nextHandle; },
       clearTimeout: (handle: number) => timers.delete(handle), localStorage: { getItem: () => null, setItem() {} } }),
     document: Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => true }), CSS: { escape: (id: string) => id },
+    IntersectionObserver: class { constructor(callback: (entries: any[]) => void) { intersect = callback; } observe() {} disconnect() {} },
     ResizeObserver: class { constructor(callback: () => void) { resize = callback; } observe() {} disconnect() {} },
   });
   const calls: string[] = [];
@@ -78,7 +82,7 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
   const el = Object.assign(new EventTarget(), {
     clientHeight: 400, scrollHeight: 2000, style: { scrollBehavior: "smooth" }, isConnected: true,
     getClientRects: () => [{}], getBoundingClientRect: () => ({ top: 0 }),
-    querySelectorAll: () => thread ? [{ dataset: { threadMessageId: "msg_1" }, scrollIntoView: reveal, classList: { add() {}, remove() {} } }] : [], focus() {},
+    querySelectorAll: () => thread ? [{ dataset: { threadMessageId: "msg_1" }, getBoundingClientRect: () => ({ top: (revealTop ?? top) + 12 - top }), scrollIntoView: reveal, classList: { add() {}, remove() {} } }] : [], focus() {},
     querySelector: () => ({ scrollIntoView: reveal, classList: { add() {}, remove() {} } }),
     scrollTo: ({ top: value }: { top: number }) => { el.scrollTop = value; },
     scrollTop: top,
@@ -97,6 +101,8 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
     motion = provideMotion(() => props.messageNamespace);
     return () => h({ setup() {
       vm = (thread ? Thread : Viewport).setup(props, { expose() {}, emit(event: string, value: unknown) {
+        if (event === "read-message") reads.push(String(value));
+        if (event === "reading-latest") reading.push(Boolean(value));
         // DesktopRoomShell stores each live report and passes it back through
         // initialChatScrollTop on the next parent render, including when the
         // room had no saved position.
@@ -110,7 +116,9 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
   app.provide(ssrContextKey, { modules: new Set() });
   app.mount({}); await flush(); calls.length = 0;
   el.addEventListener("scroll", () => vm.handleScroll?.());
-  return { vm, props, reactions, previews, el, calls, resize: () => resize(),
+  return { vm, props, reactions, previews, el, calls, reads, reading,
+    visibleReply: (id: string, height: number) => intersect([{ target: { dataset: { threadMessageId: id } }, isIntersecting: height > 0, intersectionRect: { height }, boundingClientRect: { height: 160 } }]),
+    resize: () => resize(),
     send: (number = 1) => {
       const finish = motion.capture("my message", { getBoundingClientRect: () => ({ top: 500 }), closest: () => null });
       props.messages = [...props.messages, { ...message(`pending_${number}`), text: "my message", clientMessageId: `send_${number}`, outgoing: { status: "pending" } }];
@@ -395,3 +403,25 @@ for (const thread of [false, true]) {
     });
   }
 }
+
+// An expanded inline thread can leave the room viewport without being closed.
+test("thread: read evidence requires visible replies and never advances an offscreen arrival", async () => {
+  const s = await scrollSurface(true);
+  try {
+    assert.deepEqual(s.reads, []);
+    s.visibleReply("msg_2", 100);
+    assert.deepEqual(s.reads, ["msg_2"]);
+    assert.equal(s.reading.at(-1), true);
+    s.visibleReply("msg_2", 0);
+    s.props.replies = [...s.props.replies, message("msg_3")];
+    await flush();
+    assert.deepEqual(s.reads, ["msg_2"]);
+    assert.equal(s.reading.at(-1), false);
+    s.visibleReply("msg_3", 100);
+    assert.equal(s.reads.at(-1), "msg_3");
+    s.props.active = false;
+    await flush();
+    s.visibleReply("msg_3", 100);
+    assert.equal(s.reading.at(-1), false);
+  } finally { s.close(); }
+});

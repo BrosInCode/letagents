@@ -210,6 +210,8 @@ test("thread routing is a strict bounded-only control, truthfully classified as 
   try {
     await server.connect(serverTransport); await client.connect(clientTransport);
     const tool = (await client.listTools()).tools.find(tool => tool.name === "set_reply_thread")!;
+    assert.match(tool.description || "", /ordinary top-level questions in the main room by default/);
+    assert.match(tool.description || "", /existing thread replies stay threaded automatically/);
     assert.equal(tool.annotations?.readOnlyHint, false);
     assert.deepEqual(tool.inputSchema.properties, {});
     assert.equal(tool.inputSchema.additionalProperties, false);

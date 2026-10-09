@@ -1,11 +1,11 @@
 <template>
-  <div ref="panelEl" id="composer-mention-listbox" class="composer-mention-panel" role="listbox" :aria-label="ariaLabel || 'Mention suggestions'">
+  <div ref="panelEl" :id="`${idPrefix || 'composer'}-mention-listbox`" class="composer-mention-panel" role="listbox" :aria-label="ariaLabel || 'Mention suggestions'">
     <button
       v-for="(candidate, index) in candidates"
       :key="candidate.key"
       class="composer-mention-option"
       type="button"
-      :id="`composer-mention-option-${candidate.key}`"
+      :id="`${idPrefix || 'composer'}-mention-option-${candidate.key}`"
       role="option"
       tabindex="-1"
       :data-active="index === activeIndex"
@@ -27,6 +27,7 @@ import { ref, watch } from 'vue'
 type Suggestion = { key: string; label: string; meta: string }
 
 const props = defineProps<{
+  idPrefix?: string
   candidates: readonly Suggestion[]
   activeIndex: number
   ariaLabel?: string
