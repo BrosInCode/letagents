@@ -8,7 +8,7 @@ import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, type ViteDevServer } from "vite";
 import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-retry";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
-import { hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
+import { HOST_APPROVAL_ARM_MS, hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "../src/components/desktop/content/room-chat/host-approval-dismissals";
 
 interface HostNode {
@@ -212,9 +212,9 @@ async function flushHostApprovals(): Promise<void> {
   await nextTick();
 }
 
-/** A request's actions wake HOST_APPROVAL_SETTLE_MS after it takes the tray; tests that act on it wait that out. */
+/** A request's actions arm HOST_APPROVAL_ARM_MS after it becomes the visible card; tests that act on it wait that out. */
 async function settleTray(context: TestContext): Promise<void> {
-  context.mock.timers.tick(400);
+  context.mock.timers.tick(HOST_APPROVAL_ARM_MS);
   await nextTick();
 }
 
@@ -263,7 +263,7 @@ test("composer presents literal host-only native requests and sends only the sel
     await nextTick();
     assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
     assert.equal(buttons(root).some(node => descendants(node).some(child => child.text === "Allow once")), false);
-    assert.ok(buttonByText(root, "Show 1 approval needing attention"),
+    assert.ok(buttonByText(root, "Show 1 unavailable or unconfirmed approval"),
       "an uncertain decision remains accessible without offering another approval");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
@@ -350,7 +350,7 @@ test("composer rejects stale refreshes and removes retry controls after an uncer
     resolveRefresh({ available: true, approvals: [hostApproval()], error: null });
     await flushHostApprovals();
     assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Retry recorded approval)$/.test(child.text))), false);
-    assert.ok(buttonByText(root, "Show 1 approval needing attention"));
+    assert.ok(buttonByText(root, "Show 1 unavailable or unconfirmed approval"));
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
@@ -373,7 +373,7 @@ test("composer keeps unresolved approval failures visible and dismisses cards lo
     await flushHostApprovals();
     await settleTray(context);
     assert.equal(trayQueueLength(root), 1);
-    await (buttonByText(root, "Show 2 approvals needing attention").props.onClick as () => void)();
+    await (buttonByText(root, "Show 2 unavailable or unconfirmed approvals").props.onClick as () => void)();
     await nextTick();
     assert.equal(trayQueueLength(root), 3);
     assert.equal(buttons(root).filter(node => descendants(node).some(child => child.text === "Allow once")).length, 1,
@@ -385,6 +385,7 @@ test("composer keeps unresolved approval failures visible and dismisses cards lo
     assert.doesNotMatch(unavailableText, /unconfirmed|Your decision will not be sent again/);
     assert.equal(buttons(root).filter(node => descendants(node).some(child => child.text === "Allow once")).length, 0);
     await showTrayRequest(root, "GardenPoint");
+    await settleTray(context);
     const dismiss = descendants(root).find(node => node.props["aria-label"] === "Dismiss approval from GardenPoint");
     assert.ok(dismiss?.props.onClick);
     (dismiss.props.onClick as () => void)();
@@ -477,7 +478,7 @@ test("composer remembers dismissed undecidable records across restarts and bring
   const first = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
-    await (buttonByText(first.root, "Show 1 approval needing attention").props.onClick as () => void)();
+    await (buttonByText(first.root, "Show 1 unavailable or unconfirmed approval").props.onClick as () => void)();
     await nextTick();
     for (const name of ["StaleAgent", "GardenPoint"]) {
       await showTrayRequest(first.root, name);
@@ -492,7 +493,7 @@ test("composer remembers dismissed undecidable records across restarts and bring
   const relaunched = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
-    assert.equal(buttons(relaunched.root).some(node => descendants(node).some(child => /needing attention/.test(child.text))), false,
+    assert.equal(buttons(relaunched.root).some(node => descendants(node).some(child => /unavailable or unconfirmed/.test(child.text))), false,
       "a dismissed record stays dismissed after restart");
     assert.deepEqual(cards(relaunched.root).map(node => descendants(node).some(child => child.text.includes("GardenPoint"))), [true],
       "a live request is never hidden across restarts");
@@ -501,7 +502,7 @@ test("composer remembers dismissed undecidable records across restarts and bring
   const changed = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
-    assert.ok(buttonByText(changed.root, "Show 1 approval needing attention"), "a status change resurfaces the record");
+    assert.ok(buttonByText(changed.root, "Show 1 unavailable or unconfirmed approval"), "a status change resurfaces the record");
   } finally {
     changed.app.unmount();
     delete (window as unknown as Record<string, unknown>).letagentsDesktop;
@@ -523,7 +524,7 @@ test("a record dismissed this session returns when its status changes; a live re
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
-    await (buttonByText(root, "Show 1 approval needing attention").props.onClick as () => void)();
+    await (buttonByText(root, "Show 1 unavailable or unconfirmed approval").props.onClick as () => void)();
     await nextTick();
     for (const name of ["StaleAgent", "GardenPoint"]) {
       await showTrayRequest(root, name);
@@ -599,7 +600,7 @@ test("a decision shows the next request in its place and holds its buttons until
     assert.equal(buttonByText(root, "Allow once").props.disabled, true, "its decisions wait for it to settle");
     await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
     assert.deepEqual(decisions, [{ id: "p-a", decision: "allow_once" }], "a second click never answers the new request unread");
-    context.mock.timers.tick(400);
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS);
     await nextTick();
     assert.equal(buttonByText(root, "Allow once").props.disabled, false);
     await (buttonByText(root, "Deny").props.onClick as () => Promise<void>)();
@@ -622,7 +623,7 @@ test("a request withdrawn from under the pointer gives way to one whose actions 
     assert.equal(trayHeading(root), "GardenPoint · Run a command");
     // The turn ends, or the request is decided in the Inbox: it leaves the listing.
     approvals = [namedApproval("p-b", "SparrowReef")];
-    context.mock.timers.tick(3_000 - 400);
+    context.mock.timers.tick(3_000 - HOST_APPROVAL_ARM_MS);
     await flushHostApprovals();
     assert.equal(trayHeading(root), "SparrowReef · Run a command");
     for (const label of ["Allow once", "Deny"]) assert.equal(buttonByText(root, label).props.disabled, true, `${label} waits to settle`);
@@ -652,7 +653,7 @@ test("a request presented again under a new handle keeps its place, and the deci
     await settleTray(context);
     // Main re-presents request-a: a new presentation ID for the same native request.
     approvals = [namedApproval("p-a-again", "GardenPoint", "request-a"), namedApproval("p-b", "SparrowReef", "request-b")];
-    context.mock.timers.tick(3_000 - 400);
+    context.mock.timers.tick(3_000 - HOST_APPROVAL_ARM_MS);
     await flushHostApprovals();
     assert.equal(trayHeading(root), "GardenPoint · Run a command");
     assert.equal(trayPosition(root), "1 of 2", "still one entry per request");
@@ -660,6 +661,193 @@ test("a request presented again under a new handle keeps its place, and the deci
     await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
     assert.deepEqual(decisions, [{ id: "p-a-again", decision: "allow_once" }]);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a request that appears holds all its decisions until the hold ends, then arms by itself", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint")], error: null }),
+    decideHostApproval: async () => "decision_sent",
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  const held = () => [buttonByText(root, "Deny"), buttonByText(root, "Allow once"), trayButton(root, "Dismiss approval from GardenPoint")!]
+    .map(node => node.props.disabled);
+  try {
+    await flushHostApprovals();
+    assert.deepEqual(held(), [true, true, true], "a request that just appeared holds its decisions");
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS - 1);
+    await nextTick();
+    assert.deepEqual(held(), [true, true, true], "still held one millisecond before the hold ends");
+    context.mock.timers.tick(1);
+    await nextTick();
+    assert.deepEqual(held(), [false, false, false], "armed by the clock alone, with no other event");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("Next shows a different request, and that request holds its decisions until it arms", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint"), namedApproval("p-b", "SparrowReef")], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    (trayButton(root, "Next approval")!.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayHeading(root), "SparrowReef · Run a command");
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "the request it moved to holds its decisions");
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS);
+    await nextTick();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a request that can still be answered leads the stack, even when an unavailable one was listed first", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const unavailable = { ...namedApproval("p-u", "StaleAgent"), status: "unavailable" as const,
+    detail: "No decision was recorded for this request." };
+  let approvals: DesktopHostApproval[] = [unavailable];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await (historyToggle(root)!.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayHeading(root), "StaleAgent · Approval unavailable");
+    // The request it can answer arrives after the unavailable one was listed.
+    approvals = [unavailable, namedApproval("p-a", "GardenPoint")];
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    assert.equal(trayHeading(root), "StaleAgent · Approval unavailable", "the request on screen stays on screen");
+    (trayButton(root, "Previous approval")!.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayHeading(root), "GardenPoint · Run a command", "the request it can answer leads the stack");
+    assert.equal(trayPosition(root), "1 of 2");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+/** A request a turn waits on: the stack shows it without the history toggle once the grace has passed. */
+const waitingOnTurn = (id: string, displayName: string): DesktopHostApproval => ({ ...hostApproval(), id, status: "unavailable",
+  detail: "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified.",
+  presentation: { ...hostApproval().presentation, displayName, title: "Approval unavailable",
+    details: JSON.stringify({ id: `per_${id}`, sessionID: "ses_1", permission: "edit", patterns: ["src/app.mjs"], metadata: {}, always: [] }) } });
+const historyToggle = (root: HostNode) => descendants(root).find(node => node.props.class?.toString().includes("desktop-host-approval-history"));
+const stopTurnButton = (root: HostNode) => buttons(root).find(node => descendants(node).some(child => child.text === "Stop turn"));
+
+test("the history line counts only what its toggle reveals, so none shows when the stack already holds every request", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  let approvals: DesktopHostApproval[] = [waitingOnTurn("waiting-1", "LunarAmber"), waitingOnTurn("waiting-2", "CopperRidge"), namedApproval("p-a", "GardenPoint")];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    context.mock.timers.tick(30_000);
+    await flushHostApprovals();
+    assert.equal(trayPosition(root), "1 of 3", "the stack holds the pending request and both waiting requests");
+    assert.ok(!historyToggle(root), "no history line: the toggle would reveal nothing");
+    // An unavailable request that no turn waits on is the one the toggle reveals.
+    approvals = [...approvals, { ...hostApproval(), id: "stale", status: "unavailable" as const,
+      presentation: { ...hostApproval().presentation, displayName: "StaleAgent", title: "Approval unavailable" as const } }];
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    const toggle = historyToggle(root);
+    assert.ok(toggle, "the line appears for the one request the toggle reveals");
+    assert.equal(descendants(toggle).map(node => node.text).join("").trim(), "Show 1 unavailable or unconfirmed approval");
+    (toggle.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayPosition(root), "1 of 4", "the toggle reveals it");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a card that gains Stop turn on the same request holds that button for the hold", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [waitingOnTurn("waiting-1", "LunarAmber")], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    (historyToggle(root)!.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayHeading(root), "LunarAmber · Approval unavailable");
+    assert.ok(!stopTurnButton(root), "no turn waits on it yet");
+    context.mock.timers.tick(30_000);
+    await flushHostApprovals();
+    const stop = stopTurnButton(root);
+    assert.ok(stop, "Stop turn appears once the turn waits on the same request");
+    assert.equal(stop.props.disabled, true, "its own hold starts when it appears, not when the card first appeared");
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS - 1);
+    await nextTick();
+    assert.equal(stopTurnButton(root)!.props.disabled, true, "still held one millisecond before the end");
+    context.mock.timers.tick(1);
+    await nextTick();
+    assert.equal(stopTurnButton(root)!.props.disabled, false, "armed by the clock alone");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a card that appeared while the chat tab was hidden holds again when the tab is shown", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint")], error: null }),
+  } } });
+  const chatTabActive = Vue.ref(true);
+  const { root, app } = mount({ setup: () => () => Vue.h(RoomComposer, { ...composerProps(), active: chatTabActive.value }) }, {});
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    chatTabActive.value = false;
+    await nextTick();
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS * 2);
+    chatTabActive.value = true;
+    await nextTick();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "shown again, the card holds again");
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("the composer holds its card again when the window comes back to the front, and drops its listener on unmount", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint")], error: null }),
+  } } });
+  const listeners = new Set<() => void>();
+  const doc = document as unknown as { addEventListener: (type: string, listener: () => void) => void;
+    removeEventListener: (type: string, listener: () => void) => void; visibilityState: string };
+  const original = { add: doc.addEventListener, remove: doc.removeEventListener, state: doc.visibilityState };
+  doc.addEventListener = (type, listener) => { if (type === "visibilitychange") listeners.add(listener); };
+  doc.removeEventListener = (type, listener) => { if (type === "visibilitychange") listeners.delete(listener); };
+  const { root, app } = mount(RoomComposer, composerProps());
+  let listenersAfterUnmount = -1;
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.equal(listeners.size, 1, "listening while mounted");
+    doc.visibilityState = "hidden";
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS * 2);
+    doc.visibilityState = "visible";
+    for (const listener of [...listeners]) listener();
+    await nextTick();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "back in front: the card holds again");
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    app.unmount();
+    listenersAfterUnmount = listeners.size;
+  } finally {
+    if (listenersAfterUnmount < 0) app.unmount();
+    doc.addEventListener = original.add;
+    doc.removeEventListener = original.remove;
+    doc.visibilityState = original.state;
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+  }
+  assert.equal(listenersAfterUnmount, 0, "unmounting removes the listener");
 });
 
 test("Deny and Allow keep fixed widths so their hit areas never move between requests", async () => {
