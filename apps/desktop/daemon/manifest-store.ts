@@ -11,7 +11,7 @@ import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import {
   beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
-  closeExecutionApprovalRequest, witnessedRuntimeApprovalClosures, expiredRetiredRuntimeApprovals, settleWitnessedRuntimeApprovalClosures, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
+  closeExecutionApprovalRequest, witnessedRuntimeApprovalClosures, retiredRuntimeApprovals, settleWitnessedRuntimeApprovalClosures, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
   type ApprovalAuthority, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
   type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
 } from "./execution-approval-journal.js";
@@ -685,7 +685,8 @@ export class ManifestStore {
       if (prior?.decision && !db.prepare("SELECT 1 FROM host_tool_rule_decisions WHERE decision_id=?").get(snapshot.input.decisionId)) {
         throw new Error("The existing decision did not create a saved tool permission.");
       }
-      const selected = selectHostApproval(db, snapshot.input, entry);
+      // A saved rule never answers on a saved edit that is not applied yet: the journal is told which path this is.
+      const selected = selectHostApproval(db, snapshot.input, entry, true);
       bindHostToolRule(db, { ...snapshot.rule, decisionId: snapshot.input.decisionId, ownerId: snapshot.input.actorId,
         atMs: snapshot.input.atMs }, entry);
       return selected;
@@ -732,7 +733,7 @@ export class ManifestStore {
     const pending = await this.serialize(async () => {
       const db = await this.getDatabase();
       return witnessedRuntimeApprovalClosures(db, agentId).length > 0
-        || expiredRetiredRuntimeApprovals(db, agentId, nowMs(), () => this.readEntryFromDatabase(db, agentId)).length > 0;
+        || retiredRuntimeApprovals(db, agentId, nowMs(), () => this.readEntryFromDatabase(db, agentId)).length > 0;
     });
     if (!pending) return 0;
     return this.writeOperationalJournal(db => settleWitnessedRuntimeApprovalClosures(db, agentId, nowMs,

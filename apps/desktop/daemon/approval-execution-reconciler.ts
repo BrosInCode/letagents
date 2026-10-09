@@ -64,8 +64,10 @@ function confirmsDecision(fact: NativeExecutionFact, pending: PendingReconciliat
   if (fact.operation !== pending.operation) return false;
   // Claude's generic error result also covers refusal/cancellation before a
   // tool starts. It proves completion of the request, not consumption of allow.
-  if (pending.native.provider === "claude-code") return pending.decision === "allow_once"
-    && fact.kind === "completed" && fact.outcome === "succeeded";
+  // A deny is confirmed only by the adapter's own report that the tool it denied
+  // for this exact request came back as an error and never ran.
+  if (pending.native.provider === "claude-code") return fact.kind === "completed"
+    && fact.outcome === (pending.decision === "allow_once" ? "succeeded" : "denied_before_start");
   if (pending.decision === "deny") return fact.kind === "completed" && fact.outcome === "denied_before_start";
   return fact.kind === "started"
     || (fact.kind === "completed" && !["denied_before_start", "cancelled_before_start"].includes(fact.outcome));
