@@ -46,3 +46,19 @@ export declare function estimateRoomAgentGuidelineTokens(value: unknown): number
 export declare function normalizeGitHubRoomChatEventKinds(value: unknown): GitHubRoomChatEventKind[] | null;
 /** The kind a repository event is filed under, or null when it has none. */
 export declare function githubRoomChatEventKind(event: { kind?: string } | null | undefined): GitHubRoomChatEventKind | null;
+
+export type RoomAgentReplyOrder = "sequential" | "parallel";
+export declare const ROOM_AGENT_REPLY_ORDERS: readonly RoomAgentReplyOrder[];
+export declare const DEFAULT_ROOM_AGENT_REPLY_ORDER: RoomAgentReplyOrder;
+
+export interface RoomAgentReplyOrderSetting {
+  room_id: string;
+  /** The order that applies; "parallel" when the room has not chosen. */
+  order: RoomAgentReplyOrder;
+  /** Whether a room admin chose it, rather than the default applying. */
+  chosen: boolean;
+  can_manage: boolean;
+}
+
+/** A known order, or null when the input is not one. */
+export declare function normalizeRoomAgentReplyOrder(value: unknown): RoomAgentReplyOrder | null;

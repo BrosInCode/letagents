@@ -37,6 +37,11 @@ export type RoomEvent =
     roomId: string;
     message: Message;
     recipientAgentTargetSet: ReadonlySet<string>;
+    /**
+     * A reply-turn wake: only worker subscriptions of these durable agent
+     * keys receive it. Absent for routing passes, which reach everyone.
+     */
+    wakeAgentKeys?: ReadonlySet<string>;
   }
   | { kind: "task_updated"; roomId: string; task: Task }
   | { kind: "github_event_updated"; roomId: string; event: GitHubRoomEvent }
@@ -228,6 +233,7 @@ export class RoomEventBroker {
         projectId: string;
         message: Message;
         recipientAgentTargets?: readonly MessageRecipientAgentTarget[];
+        wakeAgentKeys?: readonly string[];
       };
       const recipientAgentTargetSet = createRecipientAgentTargetSet(event.recipientAgentTargets ?? []);
       return {
@@ -235,6 +241,9 @@ export class RoomEventBroker {
         roomId: event.projectId,
         message: event.message,
         recipientAgentTargetSet,
+        ...(Array.isArray(event.wakeAgentKeys)
+          ? { wakeAgentKeys: new Set(event.wakeAgentKeys.filter((key) => typeof key === "string" && key)) }
+          : {}),
       };
     });
     this.addSource(deps.taskEvents, "task:updated", (payload) => {
