@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createRenderer, createSSRApp, h, markRaw, nextTick, provide, reactive, ref, ssrContextKey } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
+import { useSecondClock } from "../src/composables/useSecondClock";
 import {
   restoreContextMenuFocus,
   shouldRestoreContextMenuFocus,
@@ -234,6 +236,276 @@ test("one room message groups delivery receipts for every activated agent", asyn
   assert.match(failedReceipt, /aria-label="Ash: Open Model request failed \(HTTP 404\): configured model is no longer available\."/);
   assert.match(failedReceipt, /Open Model request failed \(HTTP 404\): configured model is no longer available\.<\/small>/);
   assert.doesNotMatch(failedReceipt, /<button|delivery-dots|Needs attention|replied|lucide-check/);
+});
+
+const ATTEMPTS_FAILED = "All three automatic attempts failed. The agent now waits for you: check the provider, then use Retry delivery to try again. Existing work is preserved.";
+const STOPPED_BY_OWNER = "You stopped the automatic attempts. The task is still assigned to this agent. Send it a message to continue.";
+const retryMessage = (id: string) => ({ id, sender: "EmmyMay", text: "continue the task", attachments: [], agentPromptKind: null, source: "browser",
+  timestamp: "2026-10-09T14:30:00.000Z", actorLabel: null, agentIdentity: null, threadRootId: null, threadReplyToId: null, thread: null, replyTo: null });
+const retryThreadSummary = { count: 0, unreadCount: 0, latest: null, latestPreview: null, latestTimestamp: null, participants: [], hasPartialHistory: false, loadingEarlier: false };
+const renderReceipts = (id: string, deliveryReceipts: unknown[], props: Record<string, unknown> = {}) => renderToString(createSSRApp({
+  render: () => h(DesktopChatMessage as object, { message: retryMessage(id), threadSummary: retryThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
+    deliveryRecoveryAvailable: true, roomDeliverySkipAvailable: true, deliveryReceipts, ...props }),
+}));
+const failedReceipt = { agentId: "ash", agentName: "Ash", state: "acknowledged_failed", blockedByMessageId: null, failureCode: null, terminalReason: null, attemptCount: 1, providerTurnId: "turn_1",
+  error: "API Error: Repeated 529 Overloaded errors." };
+
+test("a failed message shows its agent's automatic attempt with the time, the attempt and two controls; a later message says that it waits for it", async () => {
+  const render = renderReceipts;
+  const retry = { atMs: Date.now() + 100_000, attempt: 2, attempts: 3, kind: "provider_fault", sourceMessageId: "task-continuation:inbox_1" };
+  const failed = { ...failedReceipt, scheduledRetry: retry };
+
+  const html = await render("msg_1", [failed]);
+  const receipt = html.match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
+  assert.ok(receipt);
+  // What failed, in the provider's words; when the agent tries again, and which attempt; what happens if it keeps failing.
+  assert.match(receipt, /API Error: Repeated 529 Overloaded errors\.<\/small>/);
+  assert.match(receipt, /<small aria-hidden="true">Trying again in 1 min (?:39|40) s \(attempt 2 of 3\)<\/small>/);
+  assert.match(receipt, /<small>If all 3 attempts fail, the agent stops and waits for you\.<\/small>/);
+  // Read aloud, the time is a clock time: the list is a live region, and a count would be read out each second.
+  assert.match(receipt, /aria-label="Ash: API Error: Repeated 529 Overloaded errors\. Trying again at [^"(]+ \(attempt 2 of 3\)\. If all 3 attempts fail, the agent stops and waits for you\."/);
+  assert.doesNotMatch(receipt.match(/aria-label="Ash:[^"]*"/)![0], / in \d/);
+  // The two controls, in the receipt's own buttons.
+  assert.match(receipt, /<button type="button" aria-label="Try again now for Ash" title="Asks the agent to start this attempt now instead of waiting\.">Try now<\/button>/);
+  assert.match(receipt, /<button type="button" aria-label="Stop the automatic attempts for Ash" title="No more automatic attempts\. Later messages go ahead\. The task stays assigned to the agent: send it a message to continue\.">Stop trying<\/button>/);
+  assert.equal(receipt.match(/<button/g)?.length, 2);
+  assert.doesNotMatch(receipt, /disabled|Retry delivery|Skip message/);
+
+  // A request that is on its way is named by the follow-up's own id, not by this message's. It is a request: nothing has started.
+  const busy = await render("msg_1", [failed], { deliveryRetryKeys: new Set(["ash:task-continuation:inbox_1"]), roomDeliverySkipKeys: new Set(["ash:msg_1"]) });
+  assert.match(busy, /disabled[^>]*aria-label="Try again now for Ash"[^>]*>Asking…<\/button>/);
+  assert.match(busy, />Stop trying<\/button>/);
+  const stopping = await render("msg_1", [failed], { roomDeliverySkipKeys: new Set(["ash:task-continuation:inbox_1"]) });
+  assert.match(stopping, /disabled[^>]*aria-label="Stop the automatic attempts for Ash"[^>]*>Stopping…<\/button>/);
+  // Without the background service's retry and skip, the controls show and cannot be used.
+  const unavailable = await render("msg_1", [failed], { deliveryRecoveryAvailable: false, roomDeliverySkipAvailable: false });
+  assert.equal(unavailable.match(/<button type="button" disabled/g)?.length, 2);
+  // The last automatic attempt, and a time that has passed. The turn may not have started: the message does not say that it has.
+  const last = await render("msg_1", [{ ...failed, scheduledRetry: { ...retry, atMs: Date.now() - 5_000, attempt: 3 } }]);
+  assert.match(last, /<small aria-hidden="true">About to try again \(attempt 3 of 3\)<\/small>/);
+  assert.match(last, /aria-label="Ash: API Error: Repeated 529 Overloaded errors\. About to try again \(attempt 3 of 3\)\. This is the last automatic attempt\./);
+  assert.match(last, /<small>This is the last automatic attempt\. If it fails, the agent stops and waits for you\.<\/small>/);
+  assert.doesNotMatch(last, /Trying again now|Trying again in/);
+  // A failed message with no follow-up has no controls and no note, as before.
+  const plain = (await render("msg_1", [{ ...failed, scheduledRetry: null, followUpNote: null }])).match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
+  assert.ok(plain);
+  assert.doesNotMatch(plain, /Trying again|try again|Try now|Stop trying|<button/);
+
+  // A message that arrived during the wait.
+  const queued = await render("msg_2", [{ agentId: "ash", agentName: "Ash", state: "queued_behind_retry", blockedByMessageId: "msg_1", failureCode: null, terminalReason: null,
+    attemptCount: 0, providerTurnId: null, error: null }]);
+  const waiting = queued.match(/<li[^>]*data-state="queued_behind_retry"[\s\S]*?<\/li>/)?.[0];
+  assert.ok(waiting);
+  assert.match(waiting, /aria-label="Waiting — Ash will try earlier work again first"/);
+  assert.match(waiting, /<small>Queued until the agent has tried again<\/small>/);
+  assert.match(waiting, /View earlier message/);
+  assert.match(waiting, /room-message-delivery-dots/);
+  // The state's own name is not shown. What the owner reads has one family of words: "try again" and "attempt".
+  assert.doesNotMatch(waiting.replace(/ data-state="[^"]*"/, ""), /an issue|needs attention|Try now|Stop trying|retry/i);
+});
+
+test("after a turn that ended without a reply the message says one attempt, and names no provider problem and no wait for the owner", async () => {
+  const noReply = { atMs: Date.now() + 10_000, attempt: 1, attempts: 1, kind: "no_reply", sourceMessageId: "task-continuation:inbox_1" };
+  const html = await renderReceipts("msg_1", [{ ...failedReceipt, error: "The model returned no reply.", scheduledRetry: noReply }]);
+  const receipt = html.match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
+  assert.ok(receipt);
+  assert.match(receipt, /<small aria-hidden="true">Trying again in (?:9|10) s \(the only automatic attempt\)<\/small>/);
+  assert.match(receipt, /<small>If it ends without a reply again, the agent stops\. Send it a message to continue\.<\/small>/);
+  assert.match(receipt, /aria-label="Ash: The model returned no reply\. Trying again at [^"(]+ \(the only automatic attempt\)\. If it ends without a reply again, the agent stops\. Send it a message to continue\."/);
+  assert.doesNotMatch(receipt, /of 3|all 3|waits for you|provider/);
+  assert.equal(receipt.match(/<button/g)?.length, 2, "Try now and Stop trying are the same");
+});
+
+test("after the last automatic attempt the failed message says that the agent waits for its owner, with Retry; a follow-up that ended unstarted leaves its reason", async () => {
+  const waiting = { state: "waiting_for_owner", sourceMessageId: "task-continuation:inbox_4", text: ATTEMPTS_FAILED, canRetry: true };
+  const html = await renderReceipts("msg_1", [{ ...failedReceipt, followUpNote: waiting }]);
+  const receipt = html.match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
+  assert.ok(receipt);
+  // The provider's own words stay, and the note is whole: it is not cut.
+  assert.match(receipt, /<small>API Error: Repeated 529 Overloaded errors\.<\/small>/);
+  assert.ok(receipt.includes(`<small>${ATTEMPTS_FAILED}</small>`));
+  assert.ok(receipt.includes(`aria-label="Ash: API Error: Repeated 529 Overloaded errors. ${ATTEMPTS_FAILED}"`));
+  // The existing Retry control, for the follow-up.
+  assert.match(receipt, /<button type="button" aria-label="Retry delivery for Ash" title="Retry delivery">Retry<\/button>/);
+  assert.equal(receipt.match(/<button/g)?.length, 1);
+  assert.doesNotMatch(receipt, /Try now|Stop trying|Trying again/);
+  const busy = await renderReceipts("msg_1", [{ ...failedReceipt, followUpNote: waiting }], { deliveryRetryKeys: new Set(["ash:task-continuation:inbox_4"]) });
+  assert.match(busy, /disabled[^>]*aria-label="Retry delivery for Ash"[^>]*>Retrying…<\/button>/);
+  const own = await renderReceipts("msg_1", [{ ...failedReceipt, followUpNote: waiting }], { deliveryRetryKeys: new Set(["ash:msg_1"]) });
+  assert.match(own, />Retry<\/button>/, "a request of this message's own does not hold the follow-up's control");
+  const unavailable = await renderReceipts("msg_1", [{ ...failedReceipt, followUpNote: waiting }], { deliveryRecoveryAvailable: false });
+  assert.match(unavailable, /disabled aria-label="Retry delivery for Ash is unavailable"[^>]*>Retry unavailable<\/button>/);
+  // A follow-up that is recovered another way has the text, and no control here.
+  const other = await renderReceipts("msg_1", [{ ...failedReceipt, followUpNote: { ...waiting, canRetry: false } }]);
+  assert.ok(other.includes(`<small>${ATTEMPTS_FAILED}</small>`));
+  assert.doesNotMatch(other.match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)![0], /<button/);
+
+  // Stopped by its owner, and each other way to end with nothing started: the reason stays on the message, with no control.
+  for (const reason of [STOPPED_BY_OWNER,
+    "The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task.",
+    "The agent did not try again: the task is finished, or is no longer this agent's.",
+    "The agent did not try again: an earlier action has an uncertain result. Check that result, then send an instruction to continue only the verified unfinished work."]) {
+    const ended = (await renderReceipts("msg_1", [{ ...failedReceipt, followUpNote: { state: "ended", sourceMessageId: "task-continuation:inbox_1", text: reason, canRetry: false } }]))
+      .match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
+    assert.ok(ended);
+    const shown = reason.replace(/'/g, "&#39;");
+    assert.ok(ended.includes(`<small>${shown}</small>`), reason);
+    assert.ok(ended.includes(`aria-label="Ash: API Error: Repeated 529 Overloaded errors. ${shown}"`), reason);
+    assert.match(ended, /<small>API Error: Repeated 529 Overloaded errors\.<\/small>/);
+    assert.doesNotMatch(ended, /<button|Trying again/);
+  }
+  // A note with no text still says what happened.
+  assert.match(await renderReceipts("msg_1", [{ ...failedReceipt, followUpNote: { state: "ended", sourceMessageId: "x", text: null, canRetry: false } }]), /<small>The agent did not try again\.<\/small>/);
+  assert.match(await renderReceipts("msg_1", [{ ...failedReceipt, followUpNote: { state: "waiting_for_owner", sourceMessageId: "x", text: null, canRetry: true } }]),
+    /<small>The agent stopped and now waits for you\.<\/small>/);
+});
+
+/** A mounted message whose script is live: its clock runs, and its controls can be used. */
+function mountedMessage(props: Record<string, unknown>) {
+  const renderer = createRenderer<any, any>({
+    patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}),
+    setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null,
+  });
+  const emitted: unknown[][] = [];
+  let vm: any;
+  const app = renderer.createApp({
+    setup() {
+      vm = (DesktopChatMessage as any).setup(reactive({
+        message: { id: "msg_1", sender: "EmmyMay", text: "continue", displayText: null, source: "browser", timestamp: "2026-10-09T14:30:00Z", attachments: [], agentIdentity: null },
+        messageReferenceIds: new Set<string>(), taskReferenceIds: new Set<string>(), highlightQuery: "", context: "timeline", deliveryReceipts: [],
+        threadSummary: { count: 0, unreadCount: 0, participants: [] }, deliveryRecoveryAvailable: true, roomDeliverySkipAvailable: true, ...props,
+      }), { expose() {}, emit: (...args: unknown[]) => emitted.push(args) });
+      return () => h("div");
+    },
+  });
+  app.provide(ssrContextKey, { modules: new Set() });
+  app.mount({});
+  return { vm, emitted, unmount: () => app.unmount() };
+}
+
+test("Try now, Stop trying and Retry name the agent's follow-up, not the message they show on, and do nothing while they cannot be used", () => {
+  const originalWindow = globalThis.window;
+  Object.assign(globalThis, { window: { removeEventListener() {} } });
+  const retry = { atMs: Date.now() + 100_000, attempt: 1, attempts: 3, kind: "provider_fault", sourceMessageId: "task-continuation:inbox_1" };
+  const receipt = { agentId: "ash", agentName: "Ash", state: "acknowledged_failed", scheduledRetry: retry };
+  const blocked = { agentId: "ash", agentName: "Ash", state: "acknowledged_failed",
+    followUpNote: { state: "waiting_for_owner", sourceMessageId: "task-continuation:inbox_4", text: ATTEMPTS_FAILED, canRetry: true } };
+  /** Use the controls of `clicked` on a mounted message with these props, and return what the message asked for. */
+  const controls = (props: Record<string, unknown>, clicked: Record<string, unknown> = receipt) => {
+    const mounted = mountedMessage({ deliveryReceipts: [clicked], ...props });
+    mounted.vm.tryRetryNow(clicked);
+    mounted.vm.stopRetrying(clicked);
+    mounted.vm.retryFollowUp(clicked);
+    mounted.unmount();
+    return mounted.emitted;
+  };
+  try {
+    assert.deepEqual(controls({}), [["retry-delivery", "ash", "task-continuation:inbox_1"], ["skip-delivery", "ash", "task-continuation:inbox_1"]]);
+    // A request of this message's own, for a blocked delivery, holds neither control.
+    assert.equal(controls({ deliveryRetryKeys: new Set(["ash:msg_1"]), roomDeliverySkipKeys: new Set(["ash:msg_1"]) }).length, 2);
+    // While its own request is on its way, a control does nothing. The other still works.
+    assert.deepEqual(controls({ deliveryRetryKeys: new Set(["ash:task-continuation:inbox_1"]) }), [["skip-delivery", "ash", "task-continuation:inbox_1"]]);
+    assert.deepEqual(controls({ roomDeliverySkipKeys: new Set(["ash:task-continuation:inbox_1"]) }), [["retry-delivery", "ash", "task-continuation:inbox_1"]]);
+    // Without the background service's retry or skip, that control does nothing.
+    assert.deepEqual(controls({ deliveryRecoveryAvailable: false }), [["skip-delivery", "ash", "task-continuation:inbox_1"]]);
+    assert.deepEqual(controls({ roomDeliverySkipAvailable: false }), [["retry-delivery", "ash", "task-continuation:inbox_1"]]);
+    // A receipt with no follow-up has nothing to start, stop or retry.
+    assert.deepEqual(controls({}, { agentId: "ash", scheduledRetry: null, followUpNote: null }), []);
+    assert.deepEqual(controls({}, { agentId: "ash" }), []);
+
+    // Retry on the message, for the follow-up that waits for its owner: the request names that follow-up.
+    assert.deepEqual(controls({}, blocked), [["retry-delivery", "ash", "task-continuation:inbox_4"]]);
+    assert.deepEqual(controls({ deliveryRetryKeys: new Set(["ash:msg_1"]) }, blocked), [["retry-delivery", "ash", "task-continuation:inbox_4"]]);
+    assert.deepEqual(controls({ deliveryRetryKeys: new Set(["ash:task-continuation:inbox_4"]) }, blocked), []);
+    assert.deepEqual(controls({ deliveryRecoveryAvailable: false }, blocked), []);
+    // Not for one that is recovered another way, and not for one that ended.
+    assert.deepEqual(controls({}, { ...blocked, followUpNote: { ...blocked.followUpNote, canRetry: false } }), []);
+    assert.deepEqual(controls({}, { ...blocked, followUpNote: { state: "ended", sourceMessageId: "task-continuation:inbox_4", text: STOPPED_BY_OWNER, canRetry: false } }), []);
+  } finally {
+    Object.assign(globalThis, { window: originalWindow });
+  }
+});
+
+test("the countdown that the message shows follows the saved time as the clock goes on, also across a sleep, and is read from the time each second", (t) => {
+  const originalWindow = globalThis.window;
+  Object.assign(globalThis, { window: { removeEventListener() {} } });
+  // The time of day is the test's. A second passes only when the test says so, and the two are apart: after a
+  // sleep the time is far ahead, and one tick comes.
+  const start = Date.parse("2026-10-09T14:30:00.000Z");
+  let now = start;
+  t.mock.method(Date, "now", () => now);
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const receipt = { agentId: "ash", agentName: "Ash", state: "acknowledged_failed",
+    scheduledRetry: { atMs: start + 100_000, attempt: 2, attempts: 3, kind: "provider_fault", sourceMessageId: "task-continuation:inbox_1" } };
+  const mounted = mountedMessage({ deliveryReceipts: [receipt] });
+  const second = (passedMs = 1_000) => { now += passedMs; t.mock.timers.tick(1_000); };
+  try {
+    const shown = () => mounted.vm.scheduledRetryText(receipt);
+    assert.equal(shown(), "Trying again in 1 min 40 s (attempt 2 of 3)");
+    second();
+    assert.equal(shown(), "Trying again in 1 min 39 s (attempt 2 of 3)");
+    second(); second();
+    assert.equal(shown(), "Trying again in 1 min 37 s (attempt 2 of 3)");
+    // The machine sleeps for a minute. One tick comes after it: the count is the saved time minus the time now.
+    second(60_000);
+    assert.equal(shown(), "Trying again in 37 s (attempt 2 of 3)");
+    second(36_000);
+    assert.equal(shown(), "Trying again in 1 s (attempt 2 of 3)");
+    // At the time, and after it while the turn has not started.
+    second();
+    assert.equal(shown(), "About to try again (attempt 2 of 3)");
+    second(120_000);
+    assert.equal(shown(), "About to try again (attempt 2 of 3)");
+    // The spoken label has the clock time, and follows the same clock.
+    assert.match(mounted.vm.receiptLabel({ ...receipt, error: "It failed.", blockedByMessageId: null, terminalReason: null }), /^Ash: It failed\. About to try again \(attempt 2 of 3\)\. /);
+    // A receipt with nothing scheduled shows no count.
+    assert.equal(mounted.vm.scheduledRetryText({ agentId: "ash" }), "");
+  } finally {
+    mounted.unmount();
+    Object.assign(globalThis, { window: originalWindow });
+  }
+  // The message's own markup shows that text, and nothing else counts.
+  const source = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopChatMessage.vue", import.meta.url)), "utf8");
+  assert.match(source, /<small aria-hidden="true">\{\{ scheduledRetryText\(receipt\) \}\}<\/small>/);
+  assert.equal(source.match(/scheduledRetryLabel\(/g)?.length, 1, "the count is made in one place");
+});
+
+test("the second clock is off while nothing counts down, and stops with its owner", (t) => {
+  let now = Date.parse("2026-10-09T14:30:00.000Z");
+  const start = now;
+  t.mock.method(Date, "now", () => now);
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const renderer = createRenderer<any, any>({
+    patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}),
+    setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null,
+  });
+  const active = ref(false);
+  let clock!: { value: number };
+  const app = renderer.createApp({ setup() { clock = useSecondClock(() => active.value); return () => h("div"); } });
+  app.mount({});
+  const second = (passedMs = 1_000) => { now += passedMs; t.mock.timers.tick(1_000); };
+  second(5_000);
+  assert.equal(clock.value, start, "nothing counts down: the clock does not run");
+  // Something starts to count down: the clock is right at once, and then each second.
+  active.value = true;
+  return nextTick().then(async () => {
+    assert.equal(clock.value, start + 5_000);
+    second();
+    assert.equal(clock.value, start + 6_000);
+    // It reads the time. It does not add a second for each tick.
+    second(3_600_000);
+    assert.equal(clock.value, start + 3_606_000);
+    active.value = false;
+    await nextTick();
+    second(9_000);
+    assert.equal(clock.value, start + 3_606_000, "and it is off again");
+    active.value = true;
+    await nextTick();
+    assert.equal(clock.value, start + 3_615_000);
+    app.unmount();
+    second(1_000);
+    assert.equal(clock.value, start + 3_615_000, "no timer is left after its owner is gone");
+  });
 });
 
 test("GitHub event task chips expose the shared Board navigation contract", async () => {

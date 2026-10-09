@@ -377,6 +377,8 @@ import { useAgentPauseRequests } from "../../../domain/agent-pause-requests";
 import { appendAgentInspectorLiveBatch } from "../../../domain/agent-inspector-live";
 import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
+import { roomMessageDeliveryReceipts } from "../../../domain/room-message-receipts";
+import { agentScheduledRetry, waitingAgentIndicators } from "../../../domain/scheduled-retry";
 import { roomMentionCandidates } from "../../../domain/participants";
 import {
   isCurrentAgentInspectorSupervisorUpdate,
@@ -711,36 +713,7 @@ const selectedAgentInspectorWorkArtifacts = computed(() => {
   const projection = selectedAgentDetailProjection.value;
   return projection ? agentInspectorWorkArtifacts(projection.assignedWork, props.roomArtifacts) : [];
 });
-const deliveryReceiptsByMessage = computed(() => {
-  const grouped: Record<string, Array<{
-    agentId: string;
-    agentName: string;
-    state: string;
-    blockedByMessageId: string | null;
-    error: string | null;
-    failureCode: string | null;
-    terminalReason: string | null;
-    attemptCount: number;
-    providerTurnId: string | null;
-    retry: DesktopRoomAgentDeliveryAttention["retry"] | null;
-  }>> = {};
-  for (const entry of supervisorEntries.value) for (const receipt of entry.deliveryReceipts ?? []) {
-    const attention = entry.deliveryAttention;
-    (grouped[receipt.sourceMessageId] ??= []).push({
-      agentId: entry.id,
-      agentName: supervisedAgentDisplayLabel(entry.displayName, entry.id),
-      state: receipt.state,
-      blockedByMessageId: receipt.blockedByMessageId,
-      error: receipt.error,
-      failureCode: receipt.failureCode,
-      terminalReason: receipt.terminalReason,
-      attemptCount: receipt.attemptCount,
-      providerTurnId: receipt.providerTurnId,
-      retry: receipt.state === "blocked" && attention?.sourceMessageId === receipt.sourceMessageId ? attention.retry : null,
-    });
-  }
-  return grouped;
-});
+const deliveryReceiptsByMessage = computed(() => roomMessageDeliveryReceipts(supervisorEntries.value));
 provide(managedAgentSessionsKey, {
   sessions: shallowReadonly(managedAgentSessions),
   refresh: refreshManagedAgentSessions,
@@ -960,6 +933,7 @@ const agentMentionInsertTextByEntryId = computed(() => {
 });
 const localAgentWork = computed(() =>
   [
+    ...waitingAgentIndicators(supervisorEntries.value, props.room.identifier),
     ...activeManagedAgentWorkIndicators(
       roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId),
       props.room.identifier,
@@ -1419,6 +1393,8 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
     return;
   }
   const { workAttemptId, executionGenerationId, agentSessionId } = entry;
+  // Try now: the id names the agent's automatic attempt that waits for its time, not a blocked message.
+  const tryNow = agentScheduledRetry(entry.deliveryReceipts)?.sourceMessageId === sourceMessageId;
   const result = await deliveryRetryCoordinator.run({ agentId, sourceMessageId }, async () => {
     await desktopIpc.supervisor!.retryRoomDelivery({
       entryId: entry.id,
@@ -1435,6 +1411,11 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
   if (!result.started) return;
   if (!result.ok) {
     pushActionToast(result.error instanceof Error ? result.error.message : "Could not retry room delivery.", "error", 7_000);
+    return;
+  }
+  if (tryNow) {
+    // Accepted is all that is known here: the turn has not started yet.
+    pushActionToast("Request accepted. The agent tries again as soon as it can start.", "success", 5_000);
     return;
   }
   pushActionToast(
@@ -1491,6 +1472,8 @@ async function skipRoomDelivery(agentId: string, sourceMessageId: string): Promi
     pushActionToast("This agent binding changed. Refresh the room before skipping the message.", "error", 7_000);
     return;
   }
+  // Stop trying: the id names the agent's automatic attempt that waits for its time, not a blocked message.
+  const stopTrying = agentScheduledRetry(supervisorEntries.value.find((candidate) => candidate.id === agentId)?.deliveryReceipts)?.sourceMessageId === sourceMessageId;
   const result = await roomDeliverySkipCoordinator.run({ agentId, sourceMessageId }, async () => {
     await desktopIpc.supervisor.skipRoomDelivery(input);
   });
@@ -1499,7 +1482,9 @@ async function skipRoomDelivery(agentId: string, sourceMessageId: string): Promi
     pushActionToast(result.error instanceof Error ? result.error.message : "Could not safely skip this message.", "error", 7_000);
     return;
   }
-  pushActionToast("Message skipped. Later room work can continue.", "success", 5_000);
+  pushActionToast(stopTrying
+    ? "Stopped the automatic attempts. The task is still assigned to this agent. Send it a message to continue."
+    : "Message skipped. Later room work can continue.", "success", stopTrying ? 8_000 : 5_000);
 }
 
 async function revealRoomMessage(messageId: string): Promise<void> {

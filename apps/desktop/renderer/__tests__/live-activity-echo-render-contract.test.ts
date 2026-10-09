@@ -102,6 +102,22 @@ test("DesktopRoomShell line count stays strictly under 3000 lines", () => {
   assert.ok(lineCount <= 2998, `DesktopRoomShell line count ${lineCount} must not exceed the 2998-line baseline`);
 });
 
+test("an agent that waits to try again has a row at rest in the live strip, and the inspector's line for it follows a clock that moves", () => {
+  // The shell puts the rows that wait in the same list as the rows that work, so they are in the strip that stays in view.
+  assert.match(shellSource, /const localAgentWork = computed\(\(\) =>\s*\[\s*\.\.\.waitingAgentIndicators\(supervisorEntries\.value, props\.room\.identifier\),/);
+  // The row is the strip's own button, marked as one that waits. Its look is the strip's: the mark only puts it at rest.
+  assert.match(viewportSource, /<button[\s\S]*?:data-waiting="work\.waiting \|\| undefined"[\s\S]*?class="room-local-agent-work"/);
+  assert.match(cssSource, /\.room-local-agent-work\[data-waiting\] \.room-local-agent-work-pulse\s*\{[^}]*animation:\s*none;/);
+  assert.match(cssSource, /\.room-local-agent-work\[data-waiting\] \.room-local-agent-work-dots\s*\{\s*display:\s*none;/);
+  // The inspector reads the wait against the second clock, not against the time of the last state push.
+  assert.match(surfaceSource, /const retryClock = useSecondClock\(\(\) => Boolean\(agentScheduledRetry\(props\.projection\.entry\.deliveryReceipts\)\)\);/);
+  assert.match(surfaceSource, /const signal = computed\(\(\) => agentInspectorSignal\(props\.projection, retryClock\.value\)\);/);
+  // What the owner reads after Try now and Stop trying is true before any turn has started.
+  assert.match(shellSource, /pushActionToast\("Request accepted\. The agent tries again as soon as it can start\.", "success", 5_000\);/);
+  assert.match(shellSource, /"Stopped the automatic attempts\. The task is still assigned to this agent\. Send it a message to continue\."/);
+  assert.doesNotMatch(shellSource, /Trying again now/);
+});
+
 test("the work indicator is pinned outside the scrolling list and still feeds the reply motion", () => {
   const template = viewportSource.split("</template>\n\n<script")[0];
   const strip = template.indexOf('ref="liveStripElement" class="room-live-strip"');
