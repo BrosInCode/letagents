@@ -54,6 +54,7 @@
           :initial-scroll-top="initialScrollTop"
           @load-older="emit('load-older')"
           @open-agent="openAgentModal"
+          @post-agent-answer-now="(agentId, sourceMessageId) => emit('post-agent-answer-now', agentId, sourceMessageId)"
           @open-image="openImageViewer"
           @open-thread="toggleThread"
           @reveal-thread="revealThread"
@@ -342,6 +343,7 @@ const emit = defineEmits<{
   ];
   "thread-read": [threadRootId: string, summary: DesktopRoomMessageThreadSummary];
   "stop-agent-turn": [agentId: string, approvalId: string];
+  "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];
 }>();
 
 const { chips: presenceChips } = useAgentPresenceChips({
