@@ -29,6 +29,7 @@ import {
   createRepoRoomEventTaskResolver,
   toGitHubRoutingContext,
 } from "../repo-event-task-resolution.js";
+import { syncRoomSharedArtifactsForGitHubRoomEvent } from "../room-event-artifacts.js";
 import { rehydratePullRequestRoomEvent } from "../room-events.js";
 import { githubProjectionMessageIdBase } from "../room-event-projection.js";
 import { applyRepoRoomEventToTask, getProjectForResolvedTask } from "./task-projection.js";
@@ -61,7 +62,8 @@ const REPAIR_ACTOR_LABEL = "repair-unapplied-merge-events";
 
 export type MergeRepairDecision =
   | { kind: "would_move" }
-  | { kind: "moved" }
+  /** `artifactSyncError`: the card moved, but its shared pull request artifact could not be brought to merged. */
+  | { kind: "moved"; artifactSyncError?: string }
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; error: string };
 
@@ -90,7 +92,7 @@ function toIsoTime(value: string): string {
 }
 
 /** The database error under a failed query, not the query: its text carries task content. */
-function describeError(error: unknown): string {
+export function describeError(error: unknown): string {
   const cause = error instanceof Error ? error.cause : undefined;
   if (cause instanceof Error) return cause.message;
   return error instanceof Error ? error.message : String(error);
@@ -105,7 +107,9 @@ export function formatMergeRepairLine(line: MergeRepairLine): string {
   const decision = (() => {
     switch (line.decision.kind) {
       case "would_move": return "would move to merged";
-      case "moved": return "moved to merged";
+      case "moved": return line.decision.artifactSyncError === undefined
+        ? "moved to merged"
+        : `moved to merged, but the shared artifact was not synced: ${shorten(line.decision.artifactSyncError, 200)}`;
       case "skipped": return `skipped: ${line.decision.reason}`;
       case "failed": return `failed: ${shorten(line.decision.error, 200)}`;
     }
@@ -132,6 +136,8 @@ export function summarizeMergeRepair(report: MergeRepairReport): string[] {
     skipped.set(reason, (skipped.get(reason) ?? 0) + 1);
   }
 
+  const unsynced = report.lines.filter((line) =>
+    line.decision.kind === "moved" && line.decision.artifactSyncError !== undefined);
   const lines = [
     `Looked at ${report.checked} stored merge event${report.checked === 1 ? "" : "s"} that a task holds.`,
     `Cards a merge could have left behind: ${report.lines.length}.`,
@@ -145,6 +151,13 @@ export function summarizeMergeRepair(report: MergeRepairReport): string[] {
   for (const line of report.lines) {
     if (line.decision.kind === "failed") {
       lines.push(`  ${line.roomId} ${line.taskId}: ${shorten(line.decision.error, 200)}`);
+    }
+  }
+  if (unsynced.length > 0) {
+    lines.push(`Moved, but the shared artifact was not synced: ${unsynced.length}.`);
+    for (const line of unsynced) {
+      const error = line.decision.kind === "moved" ? line.decision.artifactSyncError ?? "" : "";
+      lines.push(`  ${line.roomId} ${line.taskId}: ${shorten(error, 200)}`);
     }
   }
   if (!report.apply) {
@@ -239,7 +252,7 @@ type Examined = { card: Omit<MergeRepairLine, "decision"> } & (
   /** The reason the card stays where it is. */
   | { skip: string }
   /** Moves the card. */
-  | { move: () => Promise<void> }
+  | { move: () => Promise<{ artifactSyncError?: string }> }
 );
 
 /** Reads only. Null when the event cannot have left a card behind. */
@@ -268,6 +281,13 @@ async function examineEvent(stored: GitHubRoomEvent): Promise<Examined | null> {
     mergedAt: toIsoTime(stored.event_order_at),
   };
   const skipped = (reason: string): Examined => ({ card, skip: reason });
+
+  // A card that points at another pull request is not waiting for this merge:
+  // its pull request was reverted and redone, say. The resolver can still reach
+  // it through its work lease, which matches by branch.
+  if (task.pr_url && task.pr_url !== event.pullRequest.url) {
+    return skipped(`the card now points at another pull request (${task.pr_url})`);
+  }
 
   // A merge from before the task existed cannot be the task's work.
   if (!(Date.parse(stored.event_order_at) >= Date.parse(task.created_at))) {
@@ -334,6 +354,22 @@ async function examineEvent(stored: GitHubRoomEvent): Promise<Examined | null> {
           + `the webhook refused it and left the card in ${task.status}.`,
         leaseId: decision.lease.id,
       });
+
+      // The live handler brings the room's shared artifact for the pull request
+      // to merged after the card; the refused delivery never got there. The card
+      // has moved, so a failure here is reported on its line and nothing is undone.
+      try {
+        if (stored.room_id) {
+          await syncRoomSharedArtifactsForGitHubRoomEvent({
+            room_id: stored.room_id,
+            event: { ...stored, roomEvent: event },
+            linked_task_id: task.id,
+          });
+        }
+        return {};
+      } catch (error) {
+        return { artifactSyncError: describeError(error) };
+      }
     },
   };
 }
@@ -385,8 +421,7 @@ export async function repairUnappliedMergeEvents(options: {
       record({ ...examined.card, decision: { kind: "would_move" } });
     } else {
       try {
-        await examined.move();
-        record({ ...examined.card, decision: { kind: "moved" } });
+        record({ ...examined.card, decision: { kind: "moved", ...(await examined.move()) } });
       } catch (error) {
         record({ ...examined.card, decision: failure(error) });
       }
