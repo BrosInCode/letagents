@@ -38,12 +38,15 @@
         :agentNames="agentNames"
         @loadOlder="emit('loadOlder')"
         @reply="emit('reply', $event)"
+        @thread-messages="emit('threadMessages', $event)"
         @openImageViewer="emit('openImageViewer', $event)"
         @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
         @openTask="emit('openTask', $event)"
         @revealed="handleMessageRevealed"
         @revealUnavailable="handleMessageRevealUnavailable"
-      />
+      >
+        <template #thread-composer="context"><slot name="thread-composer" v-bind="context" /></template>
+      </MessageList>
 
       <GitHubEventFeed
         v-else-if="githubEventsSupported && activeTab === 'events'"
@@ -230,6 +233,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   loadOlder: []
   reply: [message: RoomMessage]
+  threadMessages: [messages: RoomMessage[]]
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   addTask: [title: string]

@@ -23,8 +23,8 @@
     :data-message-id="message.id"
     :data-thread-message-id="threadMessageId || undefined"
     :data-testid="testId || `room-message-${message.id}`"
-    @contextmenu="openContextMenu"
-    @pointerup="handleSelectionPointerUp"
+    @contextmenu.stop="openContextMenu"
+    @pointerup.stop="handleSelectionPointerUp"
   >
     <WakeGlyph v-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
     <div
@@ -123,7 +123,7 @@
       </div>
       <div class="room-message-bubble">
         <button
-          v-if="message.replyTo"
+          v-if="message.replyTo && (context !== 'thread-reply' || message.replyTo.id !== message.threadRootId)"
           class="room-message-reply"
           type="button"
           :aria-label="`Reply preview from ${replyDisplayName}`"
@@ -164,6 +164,40 @@
           :attachments="message.attachments"
           @open-image="$emit('open-image', $event)"
         />
+      <button
+        v-if="context === 'timeline' && (threadIndicatorVisible || activeThreadRoot)"
+        class="room-thread-marker"
+        :class="{ 'is-active': activeThreadRoot }"
+        type="button"
+        :aria-label="threadMarkerAriaLabel"
+        :aria-expanded="activeThreadRoot"
+        :aria-controls="`room-inline-thread-${message.id}`"
+        @click="$emit('open-thread', message.id)"
+      >
+        <span class="room-thread-marker-main">
+          <MessageSquare :size="13" aria-hidden="true" />
+          <strong>{{ threadMarkerCountLabel }}</strong>
+          <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-count">
+            {{ threadSummary.unreadCount }}
+          </span>
+          <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
+        </span>
+        <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
+          <span
+            v-for="participant in threadSummary.participants"
+            :key="participant.key"
+            class="room-thread-participant-avatar"
+            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.displayName, null) }"
+            :title="participant.displayName"
+          >
+            {{ participantInitials(participant.displayName) }}
+          </span>
+        </span>
+        <span v-if="threadMarkerPreview" class="room-thread-marker-preview">
+          {{ threadMarkerPreview }}
+        </span>
+      </button>
+        <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread" /></div>
       </div>
 
       <MessageReactionBar
@@ -241,37 +275,7 @@
         </li>
       </ul>
 
-      <button
-        v-if="context === 'timeline' && threadIndicatorVisible"
-        class="room-thread-marker"
-        :class="{ 'is-active': activeThreadRoot }"
-        type="button"
-        :aria-label="threadMarkerAriaLabel"
-        @click="$emit('open-thread', message.id)"
-      >
-        <span class="room-thread-marker-main">
-          <MessageSquare :size="13" aria-hidden="true" />
-          <strong>{{ threadMarkerCountLabel }}</strong>
-          <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-count">
-            {{ threadSummary.unreadCount }}
-          </span>
-          <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
-        </span>
-        <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
-          <span
-            v-for="participant in threadSummary.participants"
-            :key="participant.key"
-            class="room-thread-participant-avatar"
-            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.displayName, null) }"
-            :title="participant.displayName"
-          >
-            {{ participantInitials(participant.displayName) }}
-          </span>
-        </span>
-        <span v-if="threadMarkerPreview" class="room-thread-marker-preview">
-          {{ threadMarkerPreview }}
-        </span>
-      </button>
+
     </div>
 
     <Teleport to="body">
@@ -620,7 +624,7 @@ const threadMarkerPreview = computed(() => {
 });
 const threadMarkerAriaLabel = computed(() => {
   const unread = props.threadSummary.unreadCount > 0 ? `, ${props.threadSummary.unreadCount} unread` : "";
-  return `${threadMarkerCountLabel.value}${unread}. Open thread.`;
+  return `${threadMarkerCountLabel.value}${unread}. ${props.activeThreadRoot ? "Collapse replies" : "Open thread"}.`;
 });
 const agentModalTarget = computed<AgentModalTarget>(() => ({
   messageId: props.message.id,

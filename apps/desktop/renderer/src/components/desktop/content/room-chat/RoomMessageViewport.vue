@@ -58,7 +58,11 @@
           @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
           @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
-        />
+        >
+          <template v-if="entry.message.id === activeThreadParentId" #thread>
+            <slot name="thread" />
+          </template>
+        </DesktopChatMessage>
         </template>
       </template>
 
@@ -218,6 +222,7 @@ const props = defineProps<{
   active: boolean;
   activeSearchMessageId: string | null;
   activeThreadParentId: string | null;
+  readingThreadParentId?: string | null;
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
   olderMessagesError?: string | null;
@@ -253,6 +258,7 @@ const emit = defineEmits<{
   "open-agent": [target: AgentModalTarget];
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
+  "reveal-thread": [messageId: string];
   "quote-reply": [messageId: string];
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   "retry-delivery": [agentId: string, sourceMessageId: string];
@@ -339,7 +345,7 @@ onUpdated(() => { anchorElements = null; });
 
 function getAnchorElements(): HTMLElement[] {
   if (!anchorElements) {
-    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []);
+    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>(".room-message-list > [data-message-id]") ?? []);
     anchorElementsById = new Map(anchorElements.map(element => [element.dataset.messageId!, element]));
   }
   return anchorElements;
@@ -565,14 +571,14 @@ watch(
     );
     const latestReply = newestMessage(newThreadReplies);
     const parentId = latestReply ? threadParentId(latestReply) : null;
-    if (!latestReply || !parentId || parentId === props.activeThreadParentId) return;
+    if (!latestReply || !parentId || parentId === props.readingThreadParentId) return;
 
     threadActivityNotice.value = buildThreadActivityNotice(latestReply, parentId);
   },
 );
 
 watch(
-  () => props.activeThreadParentId,
+  () => props.readingThreadParentId,
   (parentId) => {
     if (parentId && threadActivityNotice.value?.parentId === parentId) {
       threadActivityNotice.value = null;
@@ -1069,7 +1075,7 @@ function openThreadActivityNotice(): void {
   const notice = threadActivityNotice.value;
   if (!notice) return;
   threadActivityNotice.value = null;
-  emit("open-thread", notice.parentId);
+  emit("reveal-thread", notice.parentId);
 }
 
 function revealOrScrollToMessage(messageId: string | null): void {

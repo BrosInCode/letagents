@@ -1,5 +1,5 @@
 <template>
-  <aside
+  <section
     ref="panelElement"
     class="room-thread-panel"
     data-testid="room-thread-panel"
@@ -11,22 +11,7 @@
     @drop.stop.prevent="handleAttachmentDrop"
     @keydown.escape.stop.prevent="$emit('close')"
   >
-    <header class="room-thread-header">
-      <div class="room-thread-heading">
-        <strong>Thread</strong>
-        <span>{{ replyCountLabel }}</span>
-      </div>
-      <div class="room-thread-header-actions">
-        <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-pill">
-          {{ threadSummary.unreadCount }} unread
-        </span>
-        <button type="button" aria-label="Close thread" data-testid="room-thread-close" @click="$emit('close')">
-          <X :size="16" aria-hidden="true" />
-        </button>
-      </div>
-    </header>
-
-    <section ref="bodyElement" @scroll="handleScroll" @scrollend="finishMessageReveal" class="room-thread-body">
+    <section ref="bodyElement" @scroll="handleScroll" @scrollend="finishMessageReveal" class="room-thread-body" tabindex="0" aria-label="Thread replies">
       <div v-if="loadingOlderReplies" class="room-thread-history-state" data-testid="room-thread-loading-earlier">
         <span class="room-thread-history-spinner" aria-hidden="true"></span>
         <span>Loading earlier replies...</span>
@@ -43,45 +28,6 @@
       </div>
 
       <div class="room-thread-conversation">
-      <DesktopChatMessage
-        context="thread-root"
-        :message="parent"
-        :thread-summary="threadSummary"
-        :active-thread-root="false"
-        :highlight-query="searchQuery"
-        :room-identifier="roomIdentifier"
-        :message-reference-ids="threadMessageReferenceIds"
-        :task-reference-ids="taskReferenceIds"
-        :search-active="parent.id === activeSearchMessageId"
-        :thread-message-id="parent.id"
-        :test-id="`room-thread-message-${parent.id}`"
-        :delivery-receipts="deliveryReceiptsByMessage[parent.id] || []"
-        :delivery-recovery-available="deliveryRecoveryAvailable"
-        :continuation-repair-available="continuationRepairAvailable"
-        :room-delivery-skip-available="roomDeliverySkipAvailable"
-        :delivery-retry-keys="deliveryRetryKeys"
-        :continuation-repair-keys="continuationRepairKeys"
-        :room-delivery-skip-keys="roomDeliverySkipKeys"
-        :provider-label="resolveProviderLabel(parent)"
-        @quote-reply="quoteInThread(parent)"
-        @message-info="(messageId, context) => $emit('message-info', messageId, context)"
-        @quote-selection="(_messageId, text) => quoteSelectionInThread(parent, text)"
-        @jump-to-thread-root="$emit('jump-message', parent.id)"
-        @scroll-to-message="navigateThreadMessageReference"
-        @open-image="$emit('open-image', $event)"
-        @open-agent="$emit('open-agent', $event)"
-        @open-github-event="$emit('open-github-event', $event)"
-        @open-task="$emit('open-task', $event)"
-        @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
-        @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
-        @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
-      />
-
-      <RoomContribution v-for="work in contributionsFor(parent.id)" :key="work.attemptId" :work="work" :participants="participants" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="$emit('open-agent', workspaceAgentTarget($event, participants))" />
-      <div class="room-thread-divider">
-        <span>Replies</span>
-      </div>
-
       <template v-for="reply in replies" :key="reply.clientMessageId || reply.id">
         <div
           v-if="readState.firstUnreadReplyId === reply.id"
@@ -129,12 +75,13 @@
       <div v-if="!replies.length" class="room-thread-empty" data-testid="room-thread-empty">
         <MessageSquarePlus :size="18" aria-hidden="true" />
         <div>
-          <strong>Start this thread</strong>
-          <span>Reply here to keep follow-up out of the main timeline.</span>
+          <span>No replies yet.</span>
         </div>
       </div>
       </div>
     </section>
+
+    <button v-if="isScrolledUp" type="button" class="room-thread-latest" @click="scrollToLatest">Latest replies ↓</button>
 
     <form class="room-thread-composer" data-testid="room-thread-composer" @submit.prevent="submitThreadReply">
       <div v-if="quoteTarget" class="room-thread-quote-preview" data-testid="room-thread-quote-preview">
@@ -149,9 +96,10 @@
       <textarea
         ref="textareaElement"
         v-model="draft"
-        rows="2"
+        rows="1"
         :disabled="!roomIdentifier"
         :placeholder="composerPlaceholder"
+        :aria-label="composerPlaceholder"
         role="combobox"
         aria-autocomplete="list"
         :aria-expanded="mentionOpen"
@@ -198,7 +146,7 @@
         <p v-if="sendError || attachmentError" class="room-thread-composer-error" data-testid="room-thread-send-error">
           {{ sendError || attachmentError }}
         </p>
-        <span v-else>{{ roomIdentifier ? "Reply in thread" : "Open a room to reply" }}</span>
+
         <div class="room-thread-composer-actions">
           <button
             type="button"
@@ -210,24 +158,24 @@
           >
             <Paperclip :size="14" aria-hidden="true" />
           </button>
-          <button type="submit" :disabled="!canSend" data-testid="room-thread-send">
-            {{ sending ? "Sending..." : "Reply" }}
+          <button type="submit" :disabled="!canSend" :aria-label="sending ? 'Sending reply' : 'Send reply'" data-testid="room-thread-send">
+            <ArrowUp :size="16" aria-hidden="true" />
           </button>
         </div>
       </div>
     </form>
-  </aside>
+  </section>
 </template>
 
 <script setup lang="ts">
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import RoomContribution from "./RoomContribution.vue";
 import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
-import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { injectRoomMessageReactions } from "../../../../composables/useRoomMessageReactions";
 import { injectRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
-import { MessageSquarePlus, Paperclip, X } from "@lucide/vue";
+import { ArrowUp, MessageSquarePlus, Paperclip, X } from "@lucide/vue";
 import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
@@ -247,7 +195,6 @@ import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { applySelectedTextQuoteToDraft } from "./message-format";
 import {
   applyThreadQuoteToDraft,
-  buildThreadIndicatorSummary,
   scrollThreadMessageIntoView,
   threadQuotePreview,
   threadReadState,
@@ -264,6 +211,7 @@ const props = defineProps<{
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   parent: DesktopRoomMessage;
+  active?: boolean;
   initialThreadSummary: DesktopRoomMessageThreadSummary | null;
   replies: DesktopRoomMessage[];
   participants: DesktopParticipantSummary[];
@@ -280,6 +228,7 @@ const props = defineProps<{
   hasOlderReplies: boolean;
   loadingOlderReplies: boolean;
   revealMessageId?: string | null;
+  initialScrollTop?: number | null;
   searchQuery: string;
   activeSearchMessageId: string | null;
   taskReferenceIds: ReadonlySet<string>;
@@ -296,6 +245,9 @@ const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null)
 const emit = defineEmits<{
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   close: [];
+  "read-message": [messageId: string];
+  "reading-latest": [reading: boolean];
+  "scroll-position": [parentId: string, top: number, namespace: string];
   "open-image": [imageId: string];
   "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
   "open-github-event": [url: string];
@@ -320,6 +272,7 @@ const { text: draft, quote: quoteTarget, selectedQuoteText, captureSubmittedDraf
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
 const bodyElement = ref<HTMLElement | null>(null);
+const isScrolledUp = ref(false);
 const mentionQuery = ref<string | null>(null);
 let scrollRevision = 0;
 let revealingMessage = false;
@@ -332,8 +285,17 @@ function cancelMessageRevealFrame(): void {
 }
 
 function handleScroll(): void {
+  const body = bodyElement.value;
+  isScrolledUp.value = Boolean(body && body.scrollHeight - body.scrollTop - body.clientHeight > 96);
   scrollRevision++;
   cancelMessageRevealFrame();
+}
+
+function scrollToLatest(): void {
+  finishMessageReveal();
+  const body = bodyElement.value;
+  body?.scrollTo({ top: body.scrollHeight, behavior: "instant" });
+  isScrolledUp.value = false;
 }
 
 function finishMessageReveal(): void {
@@ -358,7 +320,52 @@ function beginMessageReveal(): void {
   });
   revealTimer = window.setTimeout(finishMessageReveal, 800);
 }
-onBeforeUnmount(finishMessageReveal);
+onBeforeUnmount(() => {
+  if (bodyElement.value) emit("scroll-position", props.parent.id, bodyElement.value.scrollTop, props.messageNamespace || props.roomIdentifier || "");
+  finishMessageReveal();
+});
+
+// IntersectionObserver clips against both the reply scroller and the room viewport.
+// Merely keeping a thread expanded is not evidence that its replies were read.
+let readObserver: IntersectionObserver | null = null;
+const visibleReplies = new Set<string>();
+function reportVisibleReplies(): void {
+  const visible = props.active !== false && document.visibilityState === "visible" && document.hasFocus();
+  const readable = props.replies.filter(reply => !reply.outgoing && visibleReplies.has(reply.id));
+  const latest = props.replies.filter(reply => !reply.outgoing).at(-1);
+  emit("reading-latest", Boolean(visible && latest && visibleReplies.has(latest.id)));
+  if (visible && readable.length) emit("read-message", readable.at(-1)!.id);
+}
+function observeReplies(): void {
+  readObserver?.disconnect();
+  visibleReplies.clear();
+  emit("reading-latest", false);
+  if (typeof IntersectionObserver === "undefined") return;
+  readObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      const id = (entry.target as HTMLElement).dataset.threadMessageId;
+      if (!id) continue;
+      if (entry.isIntersecting && entry.intersectionRect.height >= Math.min(80, entry.boundingClientRect.height)) visibleReplies.add(id);
+      else visibleReplies.delete(id);
+    }
+    reportVisibleReplies();
+  }, { threshold: Array.from({ length: 21 }, (_, index) => index / 20) });
+  bodyElement.value?.querySelectorAll("[data-thread-message-id]").forEach(row => readObserver?.observe(row));
+}
+onMounted(() => {
+  observeReplies();
+  document.addEventListener("visibilitychange", reportVisibleReplies);
+  window.addEventListener("focus", reportVisibleReplies);
+  window.addEventListener("blur", reportVisibleReplies);
+});
+watch(() => [props.replies, props.active], () => void nextTick(observeReplies));
+onBeforeUnmount(() => {
+  readObserver?.disconnect();
+  document.removeEventListener("visibilitychange", reportVisibleReplies);
+  window.removeEventListener("focus", reportVisibleReplies);
+  window.removeEventListener("blur", reportVisibleReplies);
+  emit("reading-latest", false);
+});
 
 const activeMentionIndex = ref(0);
 const emptyThreadSummary: ThreadIndicatorSummary = {
@@ -372,13 +379,6 @@ const emptyThreadSummary: ThreadIndicatorSummary = {
   loadingEarlier: false,
 };
 
-const threadSummary = computed(() =>
-  buildThreadIndicatorSummary(props.parent, {
-    count: props.replies.length,
-    latest: props.replies[props.replies.length - 1] || null,
-    replies: props.replies,
-  }, attentionResponseAgentNames?.value)
-);
 const readStateParent = computed(() =>
   props.initialThreadSummary ? { ...props.parent, thread: props.initialThreadSummary } : props.parent
 );
@@ -386,11 +386,6 @@ const readState = computed(() => threadReadState(readStateParent.value, props.re
 const threadMessageReferenceIds = computed(() =>
   new Set([props.parent.id, ...props.replies.map((reply) => reply.id)])
 );
-const replyCountLabel = computed(() => {
-  if (props.loadingOlderReplies && props.replies.length === 0) return "Loading replies";
-  if (threadSummary.value.count === 1) return "1 reply";
-  return `${threadSummary.value.count} replies`;
-});
 const composerPlaceholder = computed(() =>
   props.roomIdentifier ? `Reply to ${displayName(props.parent)}...` : "Open a room to reply"
 );
@@ -419,10 +414,9 @@ watch(
     finishMessageReveal();
     mentionQuery.value = null;
     await nextTick();
-    panelElement.value?.focus({ preventScroll: true });
     if (!props.activeSearchMessageId && !props.revealMessageId) {
-      if (bodyElement.value) bodyElement.value.scrollTop = bodyElement.value.scrollHeight;
-      textareaElement.value?.focus({ preventScroll: true });
+      if (bodyElement.value) bodyElement.value.scrollTop = props.initialScrollTop ?? bodyElement.value.scrollHeight;
+      handleScroll();
     }
   },
   { immediate: true },
@@ -474,13 +468,13 @@ function displayName(message: DesktopRoomMessage): string {
 function quoteInThread(message: DesktopRoomMessage): void {
   quoteTarget.value = message;
   selectedQuoteText.value = null;
-  void nextTick(() => textareaElement.value?.focus());
+  void nextTick(() => textareaElement.value?.focus({ preventScroll: true }));
 }
 
 function quoteSelectionInThread(message: DesktopRoomMessage, text: string): void {
   quoteTarget.value = message;
   selectedQuoteText.value = text;
-  void nextTick(() => textareaElement.value?.focus());
+  void nextTick(() => textareaElement.value?.focus({ preventScroll: true }));
 }
 
 function clearThreadQuote(): void {
@@ -495,7 +489,7 @@ function scrollActiveSearchMessage(): boolean {
   }
   scrollRevision++;
   beginMessageReveal();
-  const target = scrollThreadMessageIntoView(panelElement.value, messageId);
+  const target = scrollThreadMessageIntoView(bodyElement.value, messageId);
   if (!target) finishMessageReveal();
   return Boolean(target);
 }
@@ -503,7 +497,7 @@ function scrollActiveSearchMessage(): boolean {
 function jumpToThreadMessageReference(messageId: string): void {
   scrollRevision++;
   beginMessageReveal();
-  const target = scrollThreadMessageIntoView(panelElement.value, messageId, "smooth");
+  const target = scrollThreadMessageIntoView(bodyElement.value, messageId, "smooth");
   if (!target) { finishMessageReveal(); return; }
   target.classList.add("jump-target");
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
@@ -511,7 +505,7 @@ function jumpToThreadMessageReference(messageId: string): void {
 
 function navigateThreadMessageReference(messageId: string | null): void {
   if (!messageId) return;
-  const isInThread = messageId === props.parent.id || props.replies.some((reply) => reply.id === messageId);
+  const isInThread = props.replies.some((reply) => reply.id === messageId);
   if (isInThread) {
     jumpToThreadMessageReference(messageId);
     return;
@@ -543,7 +537,8 @@ function submitThreadReply(): void {
       const cleared = clearSubmittedText();
       if (props.roomIdentifier !== roomIdentifier || props.parent.id !== parentId) return;
       if (cleared) mentionQuery.value = null;
-      void nextTick(() => textareaElement.value?.focus());
+      void nextTick(scrollToLatest);
+      void nextTick(() => textareaElement.value?.focus({ preventScroll: true }));
     },
   );
 }
@@ -594,7 +589,7 @@ function closeMentionForTab(): void {
 function insertMention(mentionText: string): void {
   draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/, `$1@${mentionText} `);
   mentionQuery.value = null;
-  void nextTick(() => textareaElement.value?.focus());
+  void nextTick(() => textareaElement.value?.focus({ preventScroll: true }));
 }
 
 function handleComposerEscape(): void {

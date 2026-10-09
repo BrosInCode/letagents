@@ -1,7 +1,7 @@
 <template>
-  <form class="composer" @submit.prevent="handleSend">
-    <PresenceChips :chips="presenceChips" />
-    <div class="composer-pills-row">
+  <form class="composer" :class="{ 'inline-thread-composer': inlineThread }" @submit.prevent="handleSend">
+    <PresenceChips v-if="!inlineThread" :chips="presenceChips" />
+    <div v-if="!inlineThread" class="composer-pills-row">
       <div class="composer-identity">
         <span class="composer-sender-label">
           Sending as <strong>{{ senderName }}</strong>
@@ -39,14 +39,14 @@
           <textarea
             ref="textareaEl"
             class="message-textarea"
-            placeholder="Write a message…"
-            aria-label="Write a message"
+            :placeholder="inlineThread ? 'Reply in thread…' : 'Write a message…'"
+            :aria-label="inlineThread ? 'Reply in thread' : 'Write a message'"
             v-model="text"
             role="combobox"
             aria-autocomplete="list"
             :aria-expanded="suggestionsOpen"
-            aria-controls="composer-mention-listbox"
-            :aria-activedescendant="suggestionsOpen ? `composer-mention-option-${suggestions[suggestionIndex]?.key}` : undefined"
+            :aria-controls="`${composerId}-mention-listbox`"
+            :aria-activedescendant="suggestionsOpen ? `${composerId}-mention-option-${suggestions[suggestionIndex]?.key}` : undefined"
             @input="handleTypingInput"
             @click="syncMentionContext"
             @select="syncMentionContext"
@@ -69,7 +69,7 @@
       </div>
       <div class="composer-toolbar">
         <div class="composer-toolbar-left">
-          <div class="composer-toolbar-pills">
+          <div v-if="!inlineThread" class="composer-toolbar-pills">
             <!-- Prompt injection pill -->
             <div class="prompt-menu" ref="menuEl">
               <button
@@ -139,13 +139,14 @@
             {{ attachmentDrafts.length }} / {{ MAX_ATTACHMENTS }}
           </span>
         </div>
-        <button class="send-btn" type="submit" :disabled="!canSend" aria-label="Send message">
+        <button class="send-btn" type="submit" :disabled="!canSend" :aria-label="inlineThread ? 'Send reply' : 'Send message'">
           <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
         </button>
       </div>
     </div>
     <MentionPanel
       v-if="suggestionsOpen"
+      :id-prefix="composerId"
       :candidates="suggestions"
       :active-index="suggestionIndex"
       :aria-label="slash.open.value ? 'Command suggestions' : 'Mention suggestions'"
@@ -182,6 +183,8 @@ import PresenceChips from './composer/PresenceChips.vue'
 import { usePresenceChips } from './composer/usePresenceChips'
 
 const props = withDefaults(defineProps<{
+  inlineThread?: boolean
+  threadRootId?: string
   senderName?: string
   disabled?: boolean
   isSignedIn?: boolean
@@ -217,6 +220,7 @@ const emit = defineEmits<{
   signIn: []
 }>()
 
+const composerId = computed(() => props.inlineThread ? `thread-${props.threadRootId}` : 'composer')
 const text = ref('')
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
 const isSending = ref(false)
@@ -259,6 +263,7 @@ const {
   toggleAutoKeepPolling,
   toggleInjectPrompt,
 } = useComposerPrompts({
+  enabled: computed(() => !props.inlineThread),
   roomIdentifier: roomIdentifierRef,
   submitComposerMessage,
 })
@@ -339,8 +344,8 @@ const slash = useComposerSlashCommands({
   platform: 'web',
   scope: () => props.roomIdentifier,
   hasAttachments: () => attachmentDrafts.value.length > 0,
-  isReply: () => Boolean(props.replyTo),
-  focus: () => { void nextTick(() => textareaEl.value?.focus()) },
+  isReply: () => Boolean(props.replyTo || props.inlineThread),
+  focus: () => { void nextTick(() => textareaEl.value?.focus({ preventScroll: props.inlineThread })) },
   onError: () => toast.error('Command could not be completed. Your draft is still here.'),
   run: async (command, argument) => {
     if (command.name === 'task') {
@@ -380,7 +385,9 @@ async function handleSend() {
 const messageMotion = injectRoomMessageMotion()
 
 async function sendRoomMessage() {
-  const trimmed = text.value.trim()
+  const submittedText = text.value
+  const submittedRoom = props.roomIdentifier
+  const trimmed = submittedText.trim()
   if (!canSend.value) return
   if (!attachmentsAvailable.value && attachmentDrafts.value.length > 0) {
     attachmentError.value = 'Attachments are unavailable right now.'
@@ -388,15 +395,15 @@ async function sendRoomMessage() {
     return
   }
 
-  const finishMotion = messageMotion?.capture(trimmed, textareaEl.value)
+  const finishMotion = props.inlineThread ? undefined : messageMotion?.capture(trimmed, textareaEl.value)
   const kind = injectPrompt.value ? 'inline' : null
   isSending.value = true
   try {
     const sent = await submitComposerMessage(trimmed, kind, props.replyTo?.id || null, buildOutgoingAttachments())
-    if (!sent) return
+    if (!sent || props.roomIdentifier !== submittedRoom) return
 
     typing.stop()
-    text.value = ''
+    if (text.value === submittedText) text.value = ''
     clearAttachments()
     attachmentError.value = ''
     resetMentionContext()
@@ -459,7 +466,7 @@ function handleKeyUp(e: KeyboardEvent) {
 }
 
 onMounted(() => {
-  textareaEl.value?.focus()
+  if (!props.inlineThread) textareaEl.value?.focus({ preventScroll: props.inlineThread })
 })
 
 onUnmounted(() => {
@@ -475,7 +482,7 @@ watch(() => props.roomIdentifier, (newId, oldId) => {
 
 watch(() => props.replyTo, (newVal) => {
   if (newVal) {
-    textareaEl.value?.focus()
+    textareaEl.value?.focus({ preventScroll: props.inlineThread })
   }
 })
 </script>
