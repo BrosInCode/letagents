@@ -9,8 +9,10 @@ import { join, parse } from "node:path";
 // The owner's config, auth and session history are not modified, and the
 // project's own skills and AGENTS.md still load. Codex has no launch switch
 // for its global AGENTS.md or its saved command rules, so those still reach
-// the agent. Shared by the desktop and the published MCP package, so it uses
-// nothing but Node.
+// the agent. A matching saved rule lets a command out of Codex's sandbox, so
+// the desktop gives an agent at a sandboxed access level a Codex home that has
+// none (codex-agent-home.ts). Shared by the desktop and the published MCP
+// package, so it uses nothing but Node.
 
 /** Plugins (with their MCP servers and skills), app connectors, computer and browser use, hooks, memories, notifier. */
 export const CODEX_OWNER_FEATURE_OVERRIDES = Object.freeze([
