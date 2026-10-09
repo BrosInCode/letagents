@@ -43,6 +43,17 @@ const actionImpacts: Partial<Record<AgentInspectorActionAvailability["kind"], st
   restore_conversation: "Create a replacement private conversation and retry the message that could not start. The missing conversation’s private context cannot be recovered.",
 };
 
+/** Plain words for a runtime the daemon will not restart alone. Name only the button that is offered. */
+function coordinationBlockedReason(offered: AgentInspectorActionAvailability["kind"] | undefined): readonly [string, string] {
+  if (offered === "recover") {
+    return ["The agent needs a restart", "The agent stopped and LetAgents could not restart it by itself. Press Recover agent to start it again. It keeps its history and its files."];
+  }
+  if (offered === "recovery_options") {
+    return ["Choose how to restart the agent", "LetAgents cannot restart this agent by itself. Open Recovery options and choose how to start it again. Your workspace and saved history stay available."];
+  }
+  return ["The agent cannot restart yet", "LetAgents cannot restart this agent by itself, and no restart action is available right now. Refresh checks to read its latest state."];
+}
+
 /** Read-only explanations over existing authority. Never infer failure from silence. */
 export function projectAgentTroubleshooting(
   projection: AgentInspectorProjection,
@@ -91,15 +102,16 @@ export function projectAgentTroubleshooting(
     paused ? "This agent is intentionally paused. Room work is held until it resumes." : "This saved agent has been stopped. Its retained work is still available.",
     paused ? "Resume the agent when you want it to receive work again." : "Open Work to inspect its saved history.", null, paused ? action("resume") : null, "work");
   else if (["quarantined", "security_blocked", "budget_blocked", "coordination_blocked"].includes(entry.condition)) {
+    const recovery = action("recovery_options", "recover");
     const reasons = {
       quarantined: ["Repeated runtime failures", "Automatic recovery was stopped after repeated provider exits. Resolve the reported cause before recovering the agent."],
       security_blocked: ["Permission needs attention", "A security or permission requirement is blocking this agent. Review the reported cause before trying again."],
       budget_blocked: ["Usage limit needs attention", "A budget or usage requirement is blocking this agent. Review the reported limit before trying again."],
-      coordination_blocked: ["Recovery is waiting for ownership", "LetAgents cannot yet establish the authority needed to continue this agent safely."],
+      coordination_blocked: coordinationBlockedReason(recovery?.kind),
     } as const;
     const [summary, explanation] = reasons[entry.condition as keyof typeof reasons];
     provider = check("provider", "Agent runtime", "attention", summary, explanation,
-      "Review the latest error in Technical details. Resolve that cause, then use the available recovery action or refresh checks.", null, action("recovery_options", "recover"));
+      "Review the latest error in Technical details. Resolve that cause, then use the available recovery action or refresh checks.", null, recovery);
   } else if (control) {
     const state = control.state === "responsive" ? "passed" : ["lost", "exited"].includes(control.state) ? "attention"
       : ["connecting", "stopping"].includes(control.state) ? "pending" : "unknown";

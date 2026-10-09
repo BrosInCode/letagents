@@ -11,6 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import {
+  boundedCursorRoomTurnPrompt,
   CURSOR_NO_ROOM_REPLY_SENTINEL,
   CursorProviderAdapter,
   cursorCliEnv,
@@ -20,6 +21,7 @@ import {
   type CursorCliChild,
   type CursorProviderAdapterDependencies,
 } from "../main/agents/cursor-provider-adapter.js";
+import { boundedClaudeRoomTurnPrompt } from "../main/agents/claude-code-provider-adapter.js";
 import type {
   ProviderHandle,
   ProviderRoomTurnOptions,
@@ -736,6 +738,15 @@ test("Cursor resume ownership rejects occupied or unsafe structures without chan
     assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /not private/);
     assert.equal(existsSync(join(root, "elsewhere")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("supervised Cursor room turns say git, gh and the network are unavailable only for sandboxed writes", () => {
+  const limit = /git, gh and the network are not available inside your workspace/;
+  const sandboxed = boundedCursorRoomTurnPrompt(roomTurnRequest(), "turn_cursor_1", "sandboxed_write");
+  assert.match(sandboxed, limit);
+  assert.match(sandboxed, /An Xcode license error is caused by this sandbox\. It is not a problem on the owner's Mac\./);
+  assert.doesNotMatch(boundedCursorRoomTurnPrompt(roomTurnRequest(), "turn_cursor_2", "full_access"), limit);
+  assert.doesNotMatch(boundedClaudeRoomTurnPrompt(roomTurnRequest()), limit);
 });
 
 test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags", () => {
