@@ -109,13 +109,15 @@ function response() {
 // The notice throttle lives for the process, so every fixture uses its own agent.
 let fixtures = 0;
 
-async function routeFixture(options: { enabled?: boolean; grantRefused?: boolean; agentOwner?: string; post?: () => Promise<unknown> } = {}) {
+async function routeFixture(options: { enabled?: boolean; grantRefused?: boolean; agentOwner?: string; post?: () => Promise<unknown>;
+  fenceCurrent?: () => boolean; } = {}) {
   const previous = process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED;
   process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = options.enabled === false ? "" : "1";
   const agentKey = `kd/calmlake-${fixtures += 1}`;
   const routes: Array<{ path: string; handler: Handler }> = [];
   const posted: Array<{ room: string; sender: string; text: string; options: unknown }> = [];
   const grants: unknown[] = [];
+  const fences: unknown[] = [];
   const clock = { now: Date.parse("2026-10-09T12:00:00.000Z") };
   try {
     registerProviderUsageLimitNoticeRoutes({ post: (path: string, handler: Handler) => { routes.push({ path, handler }); } } as never, {
@@ -129,13 +131,22 @@ async function routeFixture(options: { enabled?: boolean; grantRefused?: boolean
           res.status(409).json({ error: "Supervisor grant fence is stale." });
           return null;
         }
-        return { grant_id: "grant", owner_account_id: "acct_1", allowed_room_ids: ["room", "focus_92"], allowed_agent_keys: [agentKey] };
+        return { grant_id: "grant", current_generation: 3, token_version: 2, owner_account_id: "acct_1",
+          allowed_room_ids: ["room", "focus_92"], allowed_agent_keys: [agentKey] };
       }) as never,
       getAgentIdentityByCanonicalKey: (async (key: string) => ({ canonical_key: key, display_name: "CalmLake",
         owner_account_id: options.agentOwner ?? "acct_1" })) as never,
-      emitProjectMessage: (async (room: string, sender: string, text: string, messageOptions: unknown) => {
+      assertSupervisorGrantFenceTx: (async (tx: unknown, fence: unknown) => {
+        assert.equal(tx, "tx");
+        fences.push(fence);
+        return options.fenceCurrent?.() ?? true;
+      }) as never,
+      emitProjectMessage: (async (room: string, sender: string, text: string, messageOptions: Record<string, unknown>) => {
         if (options.post) await options.post();
-        posted.push({ room, sender, text, options: messageOptions });
+        // The message is written, then checked in the same transaction; a throw rolls it back.
+        const { with_created_message_in_transaction: inTransaction, ...rest } = messageOptions;
+        await (inTransaction as (tx: unknown, message: unknown) => Promise<void>)("tx", { id: "msg_9" });
+        posted.push({ room, sender, text, options: rest });
         return { id: "msg_9" };
       }) as never,
     });
@@ -152,7 +163,7 @@ async function routeFixture(options: { enabled?: boolean; grantRefused?: boolean
     await routes[0]!.handler(request(change), res);
     return res.sent;
   };
-  return { routes, posted, grants, send, body, clock, agentKey };
+  return { routes, posted, grants, fences, send, body, clock, agentKey };
 }
 
 test("the room posts one silent notice, written by the room, for a current grant's own agent", async () => {
@@ -162,6 +173,7 @@ test("the room posts one silent notice, written by the room, for a current grant
   assert.deepEqual(await f.send(), { status: 201, body: { status: "created", message_id: "msg_9", room_id: "focus_92" },
     headers: { "cache-control": "no-store" } });
   assert.deepEqual(f.grants, [{ kind: "rooms", room_ids: ["focus_92"] }]);
+  assert.deepEqual(f.fences, [{ grant_id: "grant", generation: 3, token_version: 2 }]);
   assert.deepEqual(f.posted, [{ room: "focus_92", sender: "letagents",
     text: "CalmLake stopped: Claude's usage limit was reached. Its messages wait until the limit resets at 2026-10-09T14:00:00.000Z.",
     options: { source: PROVIDER_USAGE_LIMIT_SOURCE, client_message_id: `provider_usage_limit:${f.agentKey}:turn:${RESET}` } }]);
@@ -217,4 +229,32 @@ test("a notice that cannot be posted says so and can be tried again, and the rou
   fail = false;
   assert.equal((await failing.send()).status, 201, "a failed post does not start the ten-minute wait");
   assert.deepEqual((await routeFixture({ enabled: false })).routes, []);
+});
+
+test("notices sent together still post only one, and a failed post gives the interval back", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const f = await routeFixture({ post: () => held });
+  // Each request names a different, valid reset, so none is a replay of another.
+  const sends = Array.from({ length: 20 }, (_, i) => {
+    const reset = RESET + i * 60_000;
+    return f.send({ body: { ...f.body, resets_at: new Date(reset).toISOString(), occurrence: String(reset) } });
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  const statuses = (await Promise.all(sends)).map((sent) => sent.status);
+  assert.deepEqual(statuses.filter((status) => status === 201).length, 1, String(statuses));
+  assert.deepEqual(statuses.filter((status) => status === 429).length, 19, String(statuses));
+  assert.equal(f.posted.length, 1);
+});
+
+test("a grant that stops being current before the notice is written posts nothing", async () => {
+  let current = false;
+  const f = await routeFixture({ fenceCurrent: () => current });
+  assert.deepEqual(await f.send(), { status: 409, body: { error: "Supervisor grant fence is stale." }, headers: {} });
+  assert.deepEqual(f.posted, []);
+  assert.deepEqual(f.fences, [{ grant_id: "grant", generation: 3, token_version: 2 }]);
+  // The refused notice did not use up the agent's interval.
+  current = true;
+  assert.equal((await f.send()).status, 201);
 });
