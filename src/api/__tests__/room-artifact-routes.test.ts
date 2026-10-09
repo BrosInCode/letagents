@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import type { Express } from "express";
 
-import type { Project, RoomSharedArtifact } from "../db.js";
+import type { Project, RoomSharedArtifact, TaskLease } from "../db.js";
 import type { RoomArtifactRouteDeps } from "../routes/rooms/artifacts.js";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
@@ -75,6 +75,75 @@ function artifactRow(overrides: Partial<RoomSharedArtifact> = {}): RoomSharedArt
   };
 }
 
+function workLease(overrides: Partial<TaskLease> = {}): TaskLease {
+  return {
+    id: "lease_1",
+    room_id: ROOM_ID,
+    task_id: "task_4",
+    kind: "work",
+    status: "active",
+    agent_key: "emmy/cedarvista",
+    agent_instance_id: null,
+    agent_session_id: "agent_session_1",
+    actor_label: "CedarVista | Emmy's agent | Claude Code",
+    epoch: 1,
+    branch_ref: "feature/x",
+    pr_url: null,
+    output_intent: null,
+    expires_at: null,
+    last_heartbeat_at: null,
+    revoked_reason: null,
+    created_by: "emmy",
+    created_at: "2026-06-28T10:00:00.000Z",
+    updated_at: "2026-06-28T10:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function sessionNineWorker() {
+  return {
+    ok: true as const,
+    identity: {
+      actor_label: "Generic | Emmy's agent | Codex",
+      agent_key: "codex",
+      agent_instance_id: null,
+      agent_session_id: "agent_session_9",
+      session_kind: "worker" as const,
+      runtime: "codex",
+      display_name: "Generic",
+      owner_label: "Emmy",
+      ide_label: "Codex",
+      repo_branch: "feature/x",
+    },
+  };
+}
+
+function sessionNineLease(overrides: Partial<TaskLease> = {}): TaskLease {
+  return workLease({
+    id: "lease_9",
+    agent_key: "codex",
+    agent_session_id: "agent_session_9",
+    actor_label: "Generic | Emmy's agent | Codex",
+    branch_ref: "feature/x",
+    ...overrides,
+  });
+}
+
+function sessionNineChangeSummaryBody(extra: Record<string, unknown>) {
+  return {
+    agent_session_id: "agent_session_9",
+    agent_session_token: "token_9",
+    artifact: {
+      provider: "git",
+      kind: "change_summary",
+      id: "managed-agent:session:agent_session_9:branch:feature/x",
+      ref: "feature/x",
+      state: "updated",
+    },
+    ...extra,
+  };
+}
+
 function routeDeps(
   calls: unknown[],
   overrides: Partial<RoomArtifactRouteDeps> = {}
@@ -103,6 +172,12 @@ function routeDeps(
     },
     requireWorkerRequestAgentIdentity: async () => {
       throw new Error("unexpected worker identity check");
+    },
+    getActiveTaskLeases: async () => {
+      throw new Error("unexpected lease lookup");
+    },
+    publishWorkerArtifactFenced: async () => {
+      throw new Error("unexpected fenced publish");
     },
     ...overrides,
   };
@@ -306,12 +381,20 @@ test("room artifact route stores agent-session publishes as workflow artifacts",
         },
       };
     },
-    upsertRoomSharedArtifact: async (input) => {
-      calls.push({ upsert: { source: input.source } });
-      return artifactRow({ room_id: input.room_id, source: "task_workflow_artifact" });
+    getActiveTaskLeases: async (roomId, taskId) => {
+      calls.push({ activeLeases: { room_id: roomId, task_id: taskId } });
+      return [workLease()];
     },
-    linkRoomSharedArtifactToTask: async (input) => {
-      calls.push({ link: { task_id: input.task_id, source: input.source } });
+    publishWorkerArtifactFenced: async (input) => {
+      calls.push({
+        fencedPublish: {
+          leaseFence: input.leaseFence,
+          room_id: input.room_id,
+          linked_task_id: input.linked_task_id,
+          source: input.source,
+        },
+      });
+      return artifactRow({ room_id: input.room_id, source: "task_workflow_artifact" });
     },
     getRoomSharedArtifactByIdentityKey: async () => hydratedArtifact,
   }));
@@ -349,8 +432,27 @@ test("room artifact route stores agent-session publishes as workflow artifacts",
         agent_session_id: "agent_session_1",
       },
     },
-    { upsert: { source: "task_workflow_artifact" } },
-    { link: { task_id: "task_4", source: "task_workflow_artifact" } },
+    {
+      activeLeases: {
+        room_id: "github.com/brosincode/letagents",
+        task_id: "task_4",
+      },
+    },
+    {
+      fencedPublish: {
+        leaseFence: {
+          lease_id: "lease_1",
+          room_id: "github.com/brosincode/letagents",
+          task_id: "task_4",
+          kind: "work",
+          expected_epoch: 1,
+          agent_session_id: "agent_session_1",
+        },
+        room_id: "github.com/brosincode/letagents",
+        linked_task_id: "task_4",
+        source: "task_workflow_artifact",
+      },
+    },
   ]);
   assert.deepEqual(res.body, {
     room_id: ROOM_ID,
@@ -422,7 +524,16 @@ test("room artifact route accepts a session-based change_summary id matching the
         repo_branch: "feature/x",
       },
     }),
-    upsertRoomSharedArtifact: async (input) =>
+    getActiveTaskLeases: async () => [
+      workLease({
+        id: "lease_9",
+        agent_key: "codex",
+        agent_session_id: "agent_session_9",
+        actor_label: "Generic | Emmy's agent | Codex",
+        branch_ref: "feature/x",
+      }),
+    ],
+    publishWorkerArtifactFenced: async (input) =>
       artifactRow({ room_id: input.room_id, kind: "change_summary" }),
     getRoomSharedArtifactByIdentityKey: async () => hydratedArtifact,
   }));
@@ -435,6 +546,7 @@ test("room artifact route accepts a session-based change_summary id matching the
       body: {
         agent_session_id: "agent_session_9",
         agent_session_token: "token_9",
+        task_id: "task_4",
         artifact: {
           provider: "git",
           kind: "change_summary",
@@ -449,6 +561,265 @@ test("room artifact route accepts a session-based change_summary id matching the
   );
 
   assert.equal(res.statusCode, 200);
+});
+
+test("room artifact route refuses a worker artifact when the task lease belongs to another session", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => ({
+      ok: true,
+      identity: {
+        actor_label: "Generic | Emmy's agent | Codex",
+        agent_key: "codex",
+        agent_instance_id: null,
+        agent_session_id: "agent_session_9",
+        session_kind: "worker",
+        runtime: "codex",
+        display_name: "Generic",
+        owner_label: "Emmy",
+        ide_label: "Codex",
+        repo_branch: "feature/x",
+      },
+    }),
+    getActiveTaskLeases: async () => [
+      workLease({
+        id: "lease_2",
+        agent_key: "emmy/other",
+        agent_session_id: "agent_session_2",
+      }),
+    ],
+    // publishWorkerArtifactFenced is left as the throwing stub — must not be reached.
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: {
+        agent_session_id: "agent_session_9",
+        agent_session_token: "token_9",
+        task_id: "task_4",
+        artifact: {
+          provider: "git",
+          kind: "change_summary",
+          id: "managed-agent:session:agent_session_9:branch:feature/x",
+          ref: "feature/x",
+          state: "updated",
+        },
+      },
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, {
+    error: "Worker artifacts must be bound to the caller's active work lease.",
+  });
+});
+
+test("room artifact route refuses a worker artifact bound to no task", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => sessionNineWorker(),
+    getActiveTaskLeases: async (roomId, taskId) => {
+      calls.push({ activeLeases: { room_id: roomId, task_id: taskId } });
+      return [sessionNineLease()];
+    },
+    publishWorkerArtifactFenced: async (input) => {
+      calls.push({ fencedPublish: { room_id: input.room_id } });
+      return artifactRow({ room_id: input.room_id, kind: "change_summary" });
+    },
+    getRoomSharedArtifactByIdentityKey: async () => artifactRow({ kind: "change_summary" }),
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: sessionNineChangeSummaryBody({}),
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, {
+    error: "Worker artifacts must be bound to exactly one active task.",
+  });
+  assert.deepEqual(calls, [
+    { resolve: "github.com/brosincode/letagents" },
+    { participant: "github.com/brosincode/letagents" },
+  ]);
+});
+
+test("room artifact route refuses a worker artifact bound to two tasks", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => sessionNineWorker(),
+    getActiveTaskLeases: async (roomId, taskId) => {
+      calls.push({ activeLeases: { room_id: roomId, task_id: taskId } });
+      return [sessionNineLease()];
+    },
+    publishWorkerArtifactFenced: async (input) => {
+      calls.push({ fencedPublish: { room_id: input.room_id } });
+      return artifactRow({ room_id: input.room_id, kind: "change_summary" });
+    },
+    getRoomSharedArtifactByIdentityKey: async () => artifactRow({ kind: "change_summary" }),
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: sessionNineChangeSummaryBody({
+        task_id: "task_4",
+        linked_task_ids: ["task_5"],
+      }),
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, {
+    error: "Worker artifacts must be bound to exactly one active task.",
+  });
+  assert.deepEqual(calls, [
+    { resolve: "github.com/brosincode/letagents" },
+    { participant: "github.com/brosincode/letagents" },
+  ]);
+});
+
+test("room artifact route refuses a worker artifact whose only lease is a review lease", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => sessionNineWorker(),
+    getActiveTaskLeases: async (roomId, taskId) => {
+      calls.push({ activeLeases: { room_id: roomId, task_id: taskId } });
+      return [sessionNineLease({ kind: "review" })];
+    },
+    publishWorkerArtifactFenced: async (input) => {
+      calls.push({ fencedPublish: { room_id: input.room_id } });
+      return artifactRow({ room_id: input.room_id, kind: "change_summary" });
+    },
+    getRoomSharedArtifactByIdentityKey: async () => artifactRow({ kind: "change_summary" }),
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: sessionNineChangeSummaryBody({ task_id: "task_4" }),
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, {
+    error: "Worker artifacts must be bound to the caller's active work lease.",
+  });
+  assert.deepEqual(calls, [
+    { resolve: "github.com/brosincode/letagents" },
+    { participant: "github.com/brosincode/letagents" },
+    { activeLeases: { room_id: "github.com/brosincode/letagents", task_id: "task_4" } },
+  ]);
+});
+
+test("room artifact route refuses a worker artifact whose work lease is not active", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => sessionNineWorker(),
+    getActiveTaskLeases: async (roomId, taskId) => {
+      calls.push({ activeLeases: { room_id: roomId, task_id: taskId } });
+      return [sessionNineLease({ status: "released" })];
+    },
+    publishWorkerArtifactFenced: async (input) => {
+      calls.push({ fencedPublish: { room_id: input.room_id } });
+      return artifactRow({ room_id: input.room_id, kind: "change_summary" });
+    },
+    getRoomSharedArtifactByIdentityKey: async () => artifactRow({ kind: "change_summary" }),
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: sessionNineChangeSummaryBody({ task_id: "task_4" }),
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, {
+    error: "Worker artifacts must be bound to the caller's active work lease.",
+  });
+  assert.deepEqual(calls, [
+    { resolve: "github.com/brosincode/letagents" },
+    { participant: "github.com/brosincode/letagents" },
+    { activeLeases: { room_id: "github.com/brosincode/letagents", task_id: "task_4" } },
+  ]);
+});
+
+test("room artifact route binds a worker publish to its own work lease, not the first lease listed", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => sessionNineWorker(),
+    getActiveTaskLeases: async (roomId, taskId) => {
+      calls.push({ activeLeases: { room_id: roomId, task_id: taskId } });
+      return [
+        workLease({
+          id: "lease_other",
+          agent_key: "emmy/other",
+          agent_session_id: "agent_session_2",
+          epoch: 4,
+        }),
+        sessionNineLease({ id: "lease_own", epoch: 2 }),
+      ];
+    },
+    publishWorkerArtifactFenced: async (input) => {
+      calls.push({ fencedPublish: { leaseFence: input.leaseFence } });
+      return artifactRow({ room_id: input.room_id, kind: "change_summary" });
+    },
+    getRoomSharedArtifactByIdentityKey: async () => artifactRow({ kind: "change_summary" }),
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: sessionNineChangeSummaryBody({ task_id: "task_4" }),
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(calls, [
+    { resolve: "github.com/brosincode/letagents" },
+    { participant: "github.com/brosincode/letagents" },
+    { activeLeases: { room_id: "github.com/brosincode/letagents", task_id: "task_4" } },
+    {
+      fencedPublish: {
+        leaseFence: {
+          lease_id: "lease_own",
+          room_id: "github.com/brosincode/letagents",
+          task_id: "task_4",
+          kind: "work",
+          expected_epoch: 2,
+          agent_session_id: "agent_session_9",
+        },
+      },
+    },
+  ]);
 });
 
 test("room artifact route rejects a malformed managed-agent change_summary identity form", async () => {
@@ -578,11 +949,11 @@ test("room artifact route rejects invalid agent session credentials instead of d
   ]);
 });
 
-test("room artifact route passes change_summary detail through to the upsert", async () => {
+test("room artifact route passes change_summary detail through to the fenced publish", async () => {
   // Regression guard: normalizePublishedArtifact rebuilds the artifact field by
   // field, so a new field is silently dropped unless it is threaded through.
   const calls: unknown[] = [];
-  let capturedUpsert: { artifact?: { detail?: unknown } } | null = null;
+  let capturedPublish: { artifact?: { detail?: unknown } } | null = null;
   const handler = registeredHandler("post", routeDeps(calls, {
     requireWorkerRequestAgentIdentity: async () => ({
       ok: true,
@@ -599,8 +970,15 @@ test("room artifact route passes change_summary detail through to the upsert", a
         repo_branch: "feature/y",
       },
     }),
-    upsertRoomSharedArtifact: async (input) => {
-      capturedUpsert = input as { artifact?: { detail?: unknown } };
+    getActiveTaskLeases: async () => [
+      workLease({
+        agent_key: "emmy/x",
+        actor_label: "X | Emmy's agent | Claude Code",
+        branch_ref: "feature/y",
+      }),
+    ],
+    publishWorkerArtifactFenced: async (input) => {
+      capturedPublish = input as { artifact?: { detail?: unknown } };
       return artifactRow({ room_id: input.room_id, kind: "change_summary" });
     },
     getRoomSharedArtifactByIdentityKey: async () => artifactRow({ kind: "change_summary" }),
@@ -614,6 +992,7 @@ test("room artifact route passes change_summary detail through to the upsert", a
       body: {
         agent_session_id: "agent_session_1",
         agent_session_token: "token_1",
+        task_id: "task_4",
         artifact: {
           provider: "git",
           kind: "change_summary",
@@ -652,10 +1031,10 @@ test("room artifact route passes change_summary detail through to the upsert", a
   );
 
   assert.equal(res.statusCode, 200);
-  const detail = capturedUpsert?.artifact?.detail as
+  const detail = capturedPublish?.artifact?.detail as
     | { type: string; files: unknown[] }
     | undefined;
-  assert.ok(detail, "detail must survive validation + normalization into the upsert");
+  assert.ok(detail, "detail must survive validation + normalization into the fenced publish");
   assert.equal(detail?.type, "change_summary");
   assert.equal(detail?.files.length, 1);
 });
