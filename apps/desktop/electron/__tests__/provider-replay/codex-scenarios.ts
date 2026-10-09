@@ -38,6 +38,8 @@ export interface CodexScenarioEnvironment {
 export interface CodexScenarioOutcome {
   threadId: string;
   stateAfterSpawn: ProviderObservedState;
+  /** The owner-visible lines of the launch. */
+  launchNotices: readonly string[];
   roomTurn: ProviderRoomTurnResult;
   /** What `controlExactTurn` returned, in a scenario that interrupts. */
   interrupt: { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null } | null;
@@ -77,6 +79,13 @@ export type CodexScenarioName = keyof typeof CODEX_SCENARIOS;
 
 const WORK_ATTEMPT_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
 
+/**
+ * The reasoning effort every scenario's agent is given. It is not the effort
+ * of the recording owner's Codex settings, so a recording shows whether Codex
+ * took it.
+ */
+export const CODEX_SCENARIO_REASONING_EFFORT = "low";
+
 function spawnRequest(environment: CodexScenarioEnvironment): ProviderSpawnRequest {
   return {
     workAttemptId: WORK_ATTEMPT_ID,
@@ -92,7 +101,7 @@ function spawnRequest(environment: CodexScenarioEnvironment): ProviderSpawnReque
       approvalPolicy: "never",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
     },
-    reasoningEffort: "low",
+    reasoningEffort: CODEX_SCENARIO_REASONING_EFFORT,
     ...environment.launch,
   };
 }
@@ -134,6 +143,7 @@ export async function runCodexScenario(
   const subscription = adapter.onExecution(handle, (event) => { execution.push(event); });
   try {
     const stateAfterSpawn = handle.observedState();
+    const launchNotices = [...(handle.launchNotices ?? [])];
     const threadId = handle.providerContinuationId ?? "";
 
     let turnId: string | null = null;
@@ -165,7 +175,7 @@ export async function runCodexScenario(
 
     const terminal = await adapter.stop(handle);
     return {
-      threadId, stateAfterSpawn, roomTurn, interrupt, stateAfterTurn,
+      threadId, stateAfterSpawn, launchNotices, roomTurn, interrupt, stateAfterTurn,
       terminal, stateAfterStop: handle.observedState(), stream, activity, execution,
     };
   } catch (error) {

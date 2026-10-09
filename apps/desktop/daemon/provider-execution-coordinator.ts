@@ -531,6 +531,11 @@ export class ProviderExecutionCoordinator {
     void this.recordLaunchNotices(entryId, [EXIT_UNSETTLED_NOTICE], false, exitId).catch(() => undefined);
   }
 
+  /** The owner-visible lines of a conversation repair: recorded in the agent's activity as a launch's are. */
+  noteRepairNotices(entryId: string, notices: readonly string[]): Promise<void> {
+    return this.recordLaunchNotices(entryId, notices);
+  }
+
   private async recordLaunchNotices(entryId: string, notices: readonly string[], unlessLatest = false, exit?: string): Promise<void> {
     await this.options.updateManifestEntry(entryId, (current) => {
       if (unlessLatest && current.activity?.filter((event) => event.kind === "launch_notice").at(-1)?.summary === notices.at(-1)) return current;
