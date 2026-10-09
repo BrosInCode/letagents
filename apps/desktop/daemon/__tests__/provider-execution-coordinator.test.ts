@@ -2444,6 +2444,19 @@ test("a provider's launch notices are recorded in the agent's activity", async (
   assert.equal(notices[0]!.method, "workspace_boundary");
 });
 
+test("a conversation repair's lines are recorded in the agent's activity as a launch's are", async () => {
+  const runtime = harness({
+    entry: { ...baseEntry(), provider: "open-model", delivery_mode: "daemon_inbox", source_repo_path: null },
+    workspaceIdentity: scratchWorkspaceIdentity,
+    provider: provider({ spawn: async () => openModelHandle }),
+  });
+  await runtime.coordinator.noteRepairNotices("agent-1", ["The first line of the repair.", "The second line."]);
+  assert.deepEqual(
+    (runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice").map((event) => [event.summary, event.method, event.status]),
+    [["The first line of the repair.", "workspace_boundary", "idle"], ["The second line.", "workspace_boundary", "idle"]],
+  );
+});
+
 test("an agent whose record stops under a running runtime, or was carried past a gap at its start, says so once in its activity", async () => {
   const stopped = "LetAgents stopped recording this agent's activity: part of the record could not be kept. The agent keeps working, and its messages are not affected.";
   const continued = "Part of this agent's activity record is missing; LetAgents continued with a new record.";

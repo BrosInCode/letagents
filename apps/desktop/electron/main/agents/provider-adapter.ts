@@ -467,6 +467,8 @@ export interface ProviderContinuationRepairResult {
   outcome: "rematerialized" | "replaced";
   previousProviderContinuationId: string;
   replacementProviderContinuationId: string;
+  /** Owner-visible lines of this repair; the daemon records each in the agent's activity. */
+  notices?: readonly string[];
 }
 
 export class ProviderContinuationMissingError extends Error {

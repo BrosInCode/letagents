@@ -8,6 +8,7 @@ import type { NativeExecutionObservation } from "../../shared/execution-protocol
 import { CODEX_REPLAY_PROMPT, CodexReplay, normalizeCodexOutbound } from "./provider-replay/codex-replay.js";
 import {
   CODEX_SCENARIOS,
+  CODEX_SCENARIO_REASONING_EFFORT,
   runCodexScenario,
   scenarioSourceMessageLine,
   type CodexScenarioName,
@@ -256,6 +257,59 @@ test("Codex replay, turn_interrupt: the interrupt's acknowledgement does not end
   ]);
   assert.equal(outcome.terminal.terminalCause, "stopped");
   assert.equal(outcome.stateAfterStop, "stopped");
+});
+
+test("Codex replay: the thread runs with the reasoning effort the agent was given", async () => {
+  // The adapter once sent `reasoningEffort`, a parameter Codex does not have.
+  // Codex ignored it, and its reply reported the effort of its owner's own
+  // settings instead of the agent's.
+  for (const name of ["simple", "turn_interrupt"] as const) {
+    const { transcript, replay, outcome } = await replayScenario(name);
+    const real = recorded(transcript);
+    // What the adapter sent: the effort in the form Codex takes it, and after Codex listed its models.
+    const [threadStart, ...otherThreadStarts] = sentFrames(replay, "thread/start");
+    assert.deepEqual(otherThreadStarts, [], name);
+    assert.deepEqual((threadStart!.params as Row).config, { model_reasoning_effort: CODEX_SCENARIO_REASONING_EFFORT }, name);
+    assert.equal(Object.hasOwn(threadStart!.params as Row, "reasoningEffort"), false, name);
+    const sent = replay.session.outbound.map((frame) => frame.method);
+    assert.ok(sent.indexOf("model/list") >= 0 && sent.indexOf("model/list") < sent.indexOf("thread/start"), name);
+    // A turn names no effort of its own: it runs with the thread's.
+    for (const turnStart of sentFrames(replay, "turn/start")) assert.equal(Object.hasOwn(turnStart.params as Row, "effort"), false, name);
+    // What real Codex answered: the thread has that effort from its start, and keeps it through the turn.
+    const started = real.response("thread/start").frame.result as Row;
+    assert.equal(started.reasoningEffort, CODEX_SCENARIO_REASONING_EFFORT, name);
+    assert.equal(started.thread.reasoningEffort, CODEX_SCENARIO_REASONING_EFFORT, name);
+    const reads = real.inbound.filter((entry) => entry.label === "thread/read" && Object.hasOwn(entry.frame, "result"));
+    assert.ok(reads.length > 0, `${name}: the recording holds a thread/read reply`);
+    for (const read of reads) {
+      assert.equal((read.frame.result as Row).thread.reasoningEffort, CODEX_SCENARIO_REASONING_EFFORT, `${name}, line ${read.line}`);
+    }
+    // The effort was one Codex lists for its models, and the adapter read in the reply that Codex
+    // took it. So the launch has nothing to tell the owner.
+    const listed = (real.response("model/list").frame.result as Row).data as Row[];
+    assert.ok(listed.length > 0 && listed.every((model) =>
+      (model.supportedReasoningEfforts as Row[]).some((option) => option.reasoningEffort === CODEX_SCENARIO_REASONING_EFFORT)), name);
+    assert.deepEqual(outcome.launchNotices, [], name);
+  }
+});
+
+test("Codex replay: a reply that reports another effort than the agent's is told to the owner, and the agent still works", async () => {
+  const fixture = loadFixture("simple");
+  // Not a recording: the effort in the recorded reply is changed here to the one real Codex
+  // reported when it ignored the agent's effort. Nothing else told anyone then.
+  const ignored: ProviderReplayTranscript = {
+    ...fixture,
+    entries: fixture.entries.map((entry) => entry.type === "emit_inbound" && entry.label === "thread/start" && Object.hasOwn(entry.frame, "result")
+      ? { ...entry, frame: { ...entry.frame, result: { ...(entry.frame.result as JsonObject), reasoningEffort: "xhigh" } } }
+      : entry),
+  };
+  const { outcome } = await replayScenario("simple", ignored);
+  assert.deepEqual(outcome.launchNotices, [
+    `This agent's reasoning effort "${CODEX_SCENARIO_REASONING_EFFORT}" was given to Codex, but Codex reports "xhigh" for the conversation. `
+    + "The agent runs with the effort Codex reports.",
+  ]);
+  assert.equal(outcome.stateAfterSpawn, "idle");
+  assert.equal(outcome.roomTurn.outcome, "reply");
 });
 
 test("Codex replay fails when the adapter no longer sends what was recorded", async () => {
