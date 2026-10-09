@@ -100,6 +100,7 @@ export class CodexRpcClient {
   private intentionalClose = false;
   private disconnectNotified = false;
   private readonly disconnectListeners = new Set<() => void>();
+  private codexHome: string | null = null;
   private nextId = 1;
   private readonly pending = new Map<
     number,
@@ -172,7 +173,7 @@ export class CodexRpcClient {
 
     try {
       if (this.ws !== connectedSocket!) throw new Error("WebSocket connection replaced");
-      await this.request("initialize", {
+      const initialized = await this.request<{ codexHome?: unknown } | null>("initialize", {
         clientInfo: {
           name: "letagents-desktop-codex-supervisor",
           title: "LetAgents Desktop Codex Supervisor",
@@ -180,6 +181,7 @@ export class CodexRpcClient {
         },
         capabilities: { experimentalApi: true },
       });
+      this.codexHome = typeof initialized?.codexHome === "string" ? initialized.codexHome : null;
       if (this.ws !== connectedSocket!) throw new Error("WebSocket connection replaced");
       this.notify("initialized");
     } catch (error) {
@@ -224,6 +226,11 @@ export class CodexRpcClient {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  /** The Codex home the app-server said it runs with when this client connected. Null when it did not say. */
+  reportedCodexHome(): string | null {
+    return this.codexHome;
   }
 
   close(): void {

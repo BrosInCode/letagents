@@ -1149,6 +1149,8 @@ async function verifyNativeApproval(scenario: "command" | "command_restored_befo
     if (frame.method === "thread/resume") assert.deepEqual(frame.params,
       { threadId: "continuation", ...((frame.params as Record<string, unknown>).cwd ? { cwd: f.workspace, approvalsReviewer: "user" } : {}) });
     const result = frame.method === "mcpServerStatus/list" ? { data: [{ name: "letagents" }] }
+      // As every real app-server does, it says which Codex home it runs with: here one that holds no saved rule.
+      : frame.method === "initialize" ? { codexHome: f.workspace }
       : frame.method === "thread/resume" ? { thread: { id: "continuation" } }
       : frame.method === "thread/read" ? { thread: { id: "continuation", status: { type: "active" },
         turns: isFileChange ? [] : [{ id: "native-turn", status: "inProgress", items: [] }] } }
@@ -1169,6 +1171,8 @@ async function verifyNativeApproval(scenario: "command" | "command_restored_befo
       // The stand-in is this test's own process, whose command line carries no isolation override at all.
       readCommandLine: () => assert.fail("nothing is read off the process of an agent that never had its owner's setup"),
       assertLiveProjectUnchanged: () => assert.fail("an agent without its owner's setup is never inspected"),
+      // Before a sandboxed agent's conversation is loaded again, Codex is asked about command rules with the home it runs with.
+      sandboxedLoadRefusal: async (_codexBin, live) => { assert.deepEqual(live, { cwd: f.workspace, codexHome: f.workspace }); return null; },
       observeProcessExit: () => new Promise(() => {}),
       createRpcClient: (url, notify) => {
         rpc = new CodexRpcClient(url, notify, 1_000);
