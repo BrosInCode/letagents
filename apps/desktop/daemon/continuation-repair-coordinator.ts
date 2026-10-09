@@ -91,6 +91,8 @@ export type ContinuationRepairCoordinatorOptions = {
   bindings: ContinuationRepairBindings;
   durability: ContinuationRepairDurability;
   runtime: ContinuationRepairRuntime;
+  /** Record a repair's owner-visible lines in the agent's activity. */
+  recordNotices(entryId: string, notices: readonly string[]): Promise<void>;
   notifyStateChanged(): void;
 };
 
@@ -103,6 +105,7 @@ export class ContinuationRepairCoordinator {
   private readonly bindings: ContinuationRepairBindings;
   private readonly durability: ContinuationRepairDurability;
   private readonly runtime: ContinuationRepairRuntime;
+  private readonly recordNotices: ContinuationRepairCoordinatorOptions["recordNotices"];
   private readonly notifyStateChanged: () => void;
 
   constructor(options: ContinuationRepairCoordinatorOptions) {
@@ -113,6 +116,7 @@ export class ContinuationRepairCoordinator {
     this.bindings = options.bindings;
     this.durability = options.durability;
     this.runtime = options.runtime;
+    this.recordNotices = options.recordNotices;
     this.notifyStateChanged = options.notifyStateChanged;
   }
 
@@ -296,6 +300,10 @@ export class ContinuationRepairCoordinator {
           result.replacementProviderContinuationId,
           continuityReset,
         );
+        // The provider returns its owner-visible lines. A line that it streams waits for this lane, and
+        // is dropped once the handle of a replaced conversation is promoted. A line that cannot be
+        // recorded does not undo the repair.
+        if (result.notices?.length) await this.recordNotices(entry.id, result.notices).catch(() => undefined);
         this.notifyStateChanged();
         return continuityReset ? "replaced" : "restored";
       } catch (error) {

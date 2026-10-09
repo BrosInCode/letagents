@@ -58,6 +58,14 @@ function assertProviderHandle(
   assert.ok(value && !("state" in value && value.state === "terminal"), "expected a live provider handle");
 }
 
+/** `model` is the name a thread is started with; it is the entry's `id` unless a test says otherwise. */
+type FakeCodexModel = { id: string; model?: string; efforts: readonly string[] };
+/** Two models with the efforts a real Codex 0.153 lists for them: a current one, and an older one that takes no `max`. */
+const FAKE_CODEX_MODELS: readonly FakeCodexModel[] = [
+  { id: "gpt-5.6-sol", efforts: ["low", "medium", "high", "xhigh", "max"] },
+  { id: "gpt-5.5", efforts: ["low", "medium", "high", "xhigh"] },
+];
+
 class FakeRpc implements CodexAdapterRpc {
   readonly requests: RecordedRequest[] = [];
   readonly threadReadCounts = new Map<string, number>();
@@ -92,9 +100,31 @@ class FakeRpc implements CodexAdapterRpc {
       reviewerFromOwnSettings: string | null;
       /** The folder a new thread reports: where its app-server was launched, unless a test says otherwise. */
       threadDirectory: string | null;
+      /** What `model/list` reports; null is an app-server that cannot list its models, "timeout" one that does not answer in time. */
+      models: readonly FakeCodexModel[] | null | "timeout";
+      /** The list has more pages than the one `model/list` returns. */
+      moreModelPages: boolean;
+      effortFromOwnSettings: string | null | undefined;
     },
   ) {
     this.reviewerFromOwnSettings = options.reviewerFromOwnSettings;
+    this.effortFromOwnSettings = options.effortFromOwnSettings;
+  }
+
+  /** The time limit each request was given, for the requests that were given one. */
+  readonly requestTimeouts: Array<{ method: string; timeoutMs: number }> = [];
+
+  /**
+   * A current app-server reports the effort a thread was given. Set when it
+   * reports this one instead: it ignored the effort, or the thread is already
+   * loaded and keeps its own. Null is an app-server that reports no effort.
+   */
+  effortFromOwnSettings: string | null | undefined;
+
+  private reportedEffort(params: unknown): { reasoningEffort?: string } {
+    const given = (params as { config?: { model_reasoning_effort?: unknown } } | undefined)?.config?.model_reasoning_effort;
+    const reported = this.effortFromOwnSettings === undefined ? given : this.effortFromOwnSettings;
+    return typeof reported === "string" ? { reasoningEffort: reported } : {};
   }
 
   /** Set when the app-server ignores the requested reviewer and reports this one. */
@@ -110,8 +140,9 @@ class FakeRpc implements CodexAdapterRpc {
     this.connected = true;
   }
 
-  async request<T>(method: string, params?: unknown): Promise<T> {
+  async request<T>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T> {
     this.requests.push({ method, params });
+    if (options?.timeoutMs !== undefined) this.requestTimeouts.push({ method, timeoutMs: options.timeoutMs });
     if (method === "thread/turns/list") return { data: [{ id: `turn-${this.threadId}`, status: this.turnStatus, itemsView: "full",
       items: [{ id: "item-1", type: "fileChange", status: "inProgress", changes: this.permissionChanges }] }], nextCursor: null, backwardsCursor: null } as T;
     if (method === "mcpServerStatus/list") {
@@ -127,6 +158,17 @@ class FakeRpc implements CodexAdapterRpc {
       if (this.options.workplaceProbeTimesOut) throw new Error("Codex app-server request timed out: mcpServer/resource/read");
       return (this.options.workplacePresent ? roomReadiness() : { contents: [] }) as T;
     }
+    if (method === "model/list") {
+      if (this.options.models === "timeout") throw new Error("Codex app-server request timed out: model/list");
+      if (!this.options.models) throw new Error("JSON-RPC -32601: method not found");
+      return {
+        data: this.options.models.map(({ id, model, efforts }) => ({
+          id, model: model ?? id, hidden: false,
+          supportedReasoningEfforts: efforts.map((reasoningEffort) => ({ reasoningEffort, description: "" })),
+        })),
+        nextCursor: this.options.moreModelPages ? "page-2" : null,
+      } as T;
+    }
     if (method === "thread/start") {
       this.threadStartCount += 1;
       return {
@@ -136,6 +178,7 @@ class FakeRpc implements CodexAdapterRpc {
             : `${this.threadId}-replacement-${this.threadStartCount - 1}`,
         },
         approvalsReviewer: this.appliedReviewer(params),
+        ...this.reportedEffort(params),
         ...(this.options.threadDirectory === null ? {} : { cwd: this.options.threadDirectory }),
       } as T;
     }
@@ -154,7 +197,7 @@ class FakeRpc implements CodexAdapterRpc {
         if (Number.isFinite(missingResumes)) this.missingThreadResumes.set(threadId, missingResumes - 1);
         throw new Error(`thread not found: ${threadId}`);
       }
-      return { thread: { id: threadId }, approvalsReviewer: this.appliedReviewer(params) } as T;
+      return { thread: { id: threadId }, approvalsReviewer: this.appliedReviewer(params), ...this.reportedEffort(params) } as T;
     }
     if (method === "turn/start") {
       const threadId = (params as { threadId?: string } | undefined)?.threadId ?? this.threadId;
@@ -295,6 +338,12 @@ function createHarness(options: {
   processUnreadable?: boolean;
   /** The running process's command line carries every isolation override, whatever it was started with. */
   commandLineClaimsIsolation?: boolean;
+  /** The models the app-server lists instead of the usual two; null is one that cannot list its models, "timeout" one that does not answer in time. */
+  models?: readonly FakeCodexModel[] | null | "timeout";
+  /** The model list has more pages than the first. */
+  moreModelPages?: boolean;
+  /** The effort every thread reports instead of the one it was given; null reports none. */
+  effortFromOwnSettings?: string | null;
 } = {}) {
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
@@ -355,6 +404,9 @@ function createHarness(options: {
         threadReadTimesOut: options.threadReadTimesOut ?? false,
         threadReadUnmaterialized: options.threadReadUnmaterialized ?? false,
         reviewerFromOwnSettings: options.reviewerFromOwnSettings ?? null,
+        models: options.models === undefined ? FAKE_CODEX_MODELS : options.models,
+        moreModelPages: options.moreModelPages ?? false,
+        effortFromOwnSettings: options.effortFromOwnSettings,
       });
       clients.push(client);
       return client;
@@ -5628,6 +5680,284 @@ test("Codex resume reopens the exact native thread and preserves the same launch
     event.providerContinuationId === continuation
       && event.source === "transcript_tail"
       && event.summary === "Transcript checkpoint persisted."));
+});
+
+test("Codex is given a thread's reasoning effort as the config override it takes, at a start, a repair and a resume", async () => {
+  const harness = createHarness();
+  const request = spawnRequest({ deliveryMode: "daemon_inbox", model: "gpt-5.6-sol", reasoningEffort: "high" });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(request);
+  const sent = (client: FakeRpc, method: string) => client.requests
+    .filter((entry) => entry.method === method).map((entry) => entry.params as Record<string, unknown>);
+  const effort = { model_reasoning_effort: "high" };
+
+  const client = harness.clients[0]!;
+  const [started] = sent(client, "thread/start");
+  assert.deepEqual(started!.config, effort);
+  assert.equal(started!.model, "gpt-5.6-sol");
+  // Codex has no such parameter: it ignores one and keeps the effort of its owner's settings.
+  assert.equal(Object.hasOwn(started!, "reasoningEffort"), false);
+  assert.deepEqual(sent(client, "model/list"), [{ includeHidden: true }], "Codex is asked once which efforts its models take");
+  // The question has a time limit of its own: an app-server that does not answer it must not hold the launch.
+  assert.deepEqual(client.requestTimeouts.filter((entry) => entry.method === "model/list"), [{ method: "model/list", timeoutMs: 5_000 }]);
+  assert.deepEqual(handle.launchNotices, []);
+
+  // A repair probes the conversation, then starts another one on the same process.
+  client.markThreadMissing("thread-1");
+  await adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId, expectedProviderContinuationId: "thread-1", cwd: request.cwd,
+    launchPolicy: request.launchPolicy, model: "gpt-5.6-sol", reasoningEffort: "high",
+  }, { checkpointReplacement: async () => {} });
+  const probes = sent(client, "thread/resume");
+  assert.equal(probes.length, 4);
+  for (const probe of probes) {
+    assert.deepEqual(probe.config, effort);
+    assert.equal(Object.hasOwn(probe, "reasoningEffort"), false);
+  }
+  const replacement = sent(client, "thread/start")[1]!;
+  assert.deepEqual(replacement.config, effort);
+  assert.equal(Object.hasOwn(replacement, "reasoningEffort"), false);
+
+  // A resume is another process. An effort the owner has changed since reaches the thread there.
+  harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await flush();
+  const resumed = await new CodexProviderAdapter({ dependencies: harness.dependencies }).resume(
+    { workAttemptId: request.workAttemptId, providerContinuationId: handle.providerContinuationId! },
+    { ...request, reasoningEffort: "low" },
+  );
+  const [resume] = sent(harness.clients[1]!, "thread/resume");
+  assert.deepEqual(resume!.config, { model_reasoning_effort: "low" });
+  assert.equal(Object.hasOwn(resume!, "reasoningEffort"), false);
+  assert.deepEqual(resumed.launchNotices, []);
+});
+
+test("Codex is not given a reasoning effort that the thread's model can refuse, and the owner is told", async () => {
+  const level = spawnRequest().launchPolicy as Record<string, unknown>;
+  const started = async (overrides: Partial<ProviderSpawnRequest>, options: Parameters<typeof createHarness>[0] = {}) => {
+    const harness = createHarness(options);
+    // The agent still starts, whatever becomes of its effort.
+    const handle = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({ deliveryMode: "daemon_inbox", ...overrides }));
+    const client = harness.clients[0]!;
+    const start = requestByMethod(client, "thread/start").params as Record<string, unknown>;
+    assert.equal(Object.hasOwn(start, "reasoningEffort"), false);
+    return { config: start.config, notices: handle.launchNotices ?? [], asked: client.requests.filter((entry) => entry.method === "model/list").length };
+  };
+  const leftOut = (effort: string, reason: string, choose: string | null) => ({
+    config: undefined,
+    notices: [`This agent's reasoning effort "${effort}" was not given to Codex, because ${reason}. The agent runs with the effort Codex gives it.`
+      + (choose ? ` Choose ${choose} in the agent's settings.` : "")],
+    asked: 1,
+  });
+  const given = (effort: string) => ({ config: { model_reasoning_effort: effort }, notices: [], asked: 1 });
+  const unchecked = (why: string) => `${why}, so the effort could not be checked`;
+
+  // No effort was chosen: Codex is asked nothing more.
+  assert.deepEqual(await started({ model: "gpt-5.5" }), { config: undefined, notices: [], asked: 0 });
+  // The agent's model takes the effort.
+  assert.deepEqual(await started({ model: "gpt-5.6-sol", reasoningEffort: "max" }), given("max"));
+  // It does not: real Codex starts such a thread and then fails every turn of it.
+  assert.deepEqual(await started({ model: "gpt-5.5", reasoningEffort: "max" }),
+    leftOut("max", 'the model "gpt-5.5" does not take it', "another effort"));
+  // An agent with no model of its own runs a model that is not known here, so every listed model must take its effort.
+  assert.deepEqual(await started({ reasoningEffort: "xhigh" }), given("xhigh"));
+  assert.deepEqual(await started({ model: null, reasoningEffort: "max" }),
+    leftOut("max", "not every Codex model takes it and this agent has no model of its own", "a model or another effort"));
+
+  // An effort that cannot be checked is not sent, and the line says what could not be done.
+  assert.deepEqual(await started({ model: "a-model-of-my-own", reasoningEffort: "high" }),
+    leftOut("high", unchecked('Codex does not list the model "a-model-of-my-own"'), null));
+  assert.deepEqual(await started({ reasoningEffort: "high" }, { models: [] }), leftOut("high", unchecked("Codex listed no models"), null));
+  // Codex gave no list: an error, or no answer within the time limit. That is not a list without the agent's model.
+  for (const models of [null, "timeout"] as const) {
+    for (const model of ["gpt-5.6-sol", null]) {
+      assert.deepEqual(await started({ model, reasoningEffort: "high" }, { models }),
+        leftOut("high", unchecked("Codex did not say which efforts its models take"), null), `${models} ${model}`);
+    }
+  }
+
+  // Only the first page of the list is read. With more pages, "every listed model" is not known,
+  // and a model that is not on the first page is not found: both leave the effort out.
+  const morePages = { moreModelPages: true };
+  assert.deepEqual(await started({ reasoningEffort: "high" }, morePages), leftOut("high", unchecked("Codex did not list all its models"), null));
+  assert.deepEqual(await started({ model: "a-model-on-a-later-page", reasoningEffort: "high" }, morePages),
+    leftOut("high", unchecked("Codex did not list all its models"), null));
+  // A model on the first page is checked against its own entry, whatever the other pages hold.
+  assert.deepEqual(await started({ model: "gpt-5.6-sol", reasoningEffort: "max" }, morePages), given("max"));
+  assert.deepEqual(await started({ model: "gpt-5.5", reasoningEffort: "max" }, morePages),
+    leftOut("max", 'the model "gpt-5.5" does not take it', "another effort"));
+
+  // A thread is started with an entry's `model`. An `id` that reads the same names another entry.
+  const models: FakeCodexModel[] = [
+    { id: "preset-a", model: "gpt-new", efforts: ["low", "max"] },
+    { id: "gpt-new", model: "gpt-old", efforts: ["low"] },
+  ];
+  assert.deepEqual(await started({ model: "gpt-new", reasoningEffort: "max" }, { models }), given("max"));
+  assert.deepEqual(await started({ model: "preset-a", reasoningEffort: "low" }, { models }),
+    leftOut("low", unchecked('Codex does not list the model "preset-a"'), null));
+
+  // A stored `config` option keeps its other keys, and the agent's own effort wins over one stored there.
+  assert.deepEqual((await started({
+    model: "gpt-5.6-sol", reasoningEffort: "low",
+    launchPolicy: { ...level, config: { model_verbosity: "low", model_reasoning_effort: "xhigh" } },
+  })).config, { model_verbosity: "low", model_reasoning_effort: "low" });
+});
+
+const effortNotGiven = (effort: string, model: string) =>
+  `This agent's reasoning effort "${effort}" was not given to Codex, because the model "${model}" does not take it. `
+  + "The agent runs with the effort Codex gives it. Choose another effort in the agent's settings.";
+const effortNotReported = (given: string, reported: string) =>
+  `This agent's reasoning effort "${given}" was given to Codex, but Codex reports "${reported}" for the conversation. `
+  + "The agent runs with the effort Codex reports.";
+
+test("the owner is told when Codex reports another reasoning effort than the one it was given, and the agent still starts", async () => {
+  const request = spawnRequest({ deliveryMode: "daemon_inbox", model: "gpt-5.6-sol", reasoningEffort: "low" });
+
+  // Codex reports the effort it was given: there is nothing to say.
+  const taking = createHarness();
+  assert.deepEqual((await new CodexProviderAdapter({ dependencies: taking.dependencies }).spawn(request)).launchNotices, []);
+  // An app-server that reports no effort says nothing either way.
+  const silent = createHarness({ effortFromOwnSettings: null });
+  assert.deepEqual((await new CodexProviderAdapter({ dependencies: silent.dependencies }).spawn(request)).launchNotices, []);
+
+  // At a start: Codex ignores the effort and reports its owner's. This is how the effort was once lost with no word.
+  const ignoring = createHarness({ effortFromOwnSettings: "xhigh" });
+  const handle = await new CodexProviderAdapter({ dependencies: ignoring.dependencies }).spawn(request);
+  assert.deepEqual((requestByMethod(ignoring.clients[0]!, "thread/start").params as Record<string, unknown>).config, { model_reasoning_effort: "low" });
+  assert.deepEqual(handle.launchNotices, [effortNotReported("low", "xhigh")]);
+  assert.equal(handle.observedState(), "idle");
+
+  // At a resume, in another process.
+  ignoring.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await flush();
+  const resumed = await new CodexProviderAdapter({ dependencies: ignoring.dependencies }).resume(
+    { workAttemptId: request.workAttemptId, providerContinuationId: handle.providerContinuationId! },
+    { ...request, reasoningEffort: "high" },
+  );
+  assert.deepEqual((requestByMethod(ignoring.clients[1]!, "thread/resume").params as Record<string, unknown>).config, { model_reasoning_effort: "high" });
+  assert.deepEqual(resumed.launchNotices, [effortNotReported("high", "xhigh")]);
+  assert.equal(resumed.observedState(), "idle");
+});
+
+test("a Codex repair returns what its launch did not say about the reasoning effort, and returns it once", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const request = spawnRequest({ deliveryMode: "daemon_inbox", model: "gpt-5.6-sol", reasoningEffort: "low" });
+  const handle = await adapter.spawn(request);
+  assert.deepEqual(handle.launchNotices, []);
+  const client = harness.clients[0]!;
+  // The daemon drops a line that is streamed while a repair replaces the conversation, so a repair streams none.
+  const streamed: string[] = [];
+  adapter.onStream(handle, (event) => { if (/reasoning effort/.test(event.summary ?? "")) streamed.push(event.method); });
+  const repair = async (overrides: { model?: string; reasoningEffort: "low" | "high" | "max"; replace?: boolean }) => {
+    // A repair that must replace the conversation probes the missing one four times, then starts another.
+    if (overrides.replace) client.markThreadMissing(handle.providerContinuationId!);
+    const result = await adapter.repairContinuation!(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!, cwd: request.cwd,
+      launchPolicy: request.launchPolicy, model: overrides.model ?? "gpt-5.6-sol", reasoningEffort: overrides.reasoningEffort,
+    }, { checkpointReplacement: async () => {} });
+    assert.equal(result.outcome, overrides.replace ? "replaced" : "rematerialized");
+    return result.notices ?? [];
+  };
+
+  // The process has the thread loaded, and Codex keeps a loaded thread's own effort whatever a resume names.
+  client.effortFromOwnSettings = "low";
+  assert.deepEqual(await repair({ reasoningEffort: "low" }), [], "the thread has the effort the repair names");
+  // The owner chose another effort since the launch. The loaded thread does not take it, and the repair says so.
+  assert.deepEqual(await repair({ reasoningEffort: "high" }), [effortNotReported("high", "low")]);
+  // The same again says nothing more: not at the next repair, and not for each probe and the new conversation of one repair.
+  assert.deepEqual(await repair({ reasoningEffort: "high" }), []);
+  assert.deepEqual(await repair({ reasoningEffort: "high", replace: true }), []);
+  assert.equal(client.requests.filter((entry) => entry.method === "thread/start").length, 2);
+  // An effort that the repair cannot send is said the same way.
+  assert.deepEqual(await repair({ model: "gpt-5.5", reasoningEffort: "max" }), [effortNotGiven("max", "gpt-5.5")]);
+  // The conversation that a repair starts is compared too, and its line is returned once for the four probes and the start.
+  client.effortFromOwnSettings = "xhigh";
+  assert.deepEqual(await repair({ reasoningEffort: "low", replace: true }), [effortNotReported("low", "xhigh")]);
+  assert.deepEqual(streamed, []);
+});
+
+test("a Codex repair does not say again what the launch of its process said about the reasoning effort", async () => {
+  const repaired = async (overrides: Partial<ProviderSpawnRequest>, options: Parameters<typeof createHarness>[0] = {}) => {
+    const harness = createHarness(options);
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const request = spawnRequest({ deliveryMode: "daemon_inbox", ...overrides });
+    const handle = await adapter.spawn(request);
+    const repair = async (effort: ProviderSpawnRequest["reasoningEffort"]) => (await adapter.repairContinuation!(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!, cwd: request.cwd,
+      launchPolicy: request.launchPolicy, model: request.model, reasoningEffort: effort,
+    }, { checkpointReplacement: async () => {} })).notices ?? [];
+    return { launch: handle.launchNotices ?? [], same: await repair(request.reasoningEffort), other: await repair("medium") };
+  };
+  // The launch said that Codex reports another effort. A repair with the same effort finds the same, and is quiet.
+  assert.deepEqual(await repaired({ model: "gpt-5.6-sol", reasoningEffort: "low" }, { effortFromOwnSettings: "xhigh" }), {
+    launch: [effortNotReported("low", "xhigh")],
+    same: [],
+    other: [effortNotReported("medium", "xhigh")],
+  });
+  // The launch said that the effort was not given. The same holds for it.
+  assert.deepEqual(await repaired({ model: "gpt-5.5", reasoningEffort: "max" }), {
+    launch: [effortNotGiven("max", "gpt-5.5")],
+    same: [],
+    other: [],
+  });
+});
+
+test("a Codex agent is told about its reasoning effort when the line changes, not at every start", async () => {
+  const supervised = (agent: string) => ({ deliveryMode: "daemon_inbox" as const, supervisorEntryId: agent,
+    supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS });
+  const told = async (agent: string | undefined, overrides: Partial<ProviderSpawnRequest>, options: Parameters<typeof createHarness>[0] = {}) => {
+    const harness = createHarness({ exitOnSignal: true, ...options });
+    const handle = await new CodexProviderAdapter({ dependencies: harness.dependencies })
+      .spawn(spawnRequest({ ...(agent === undefined ? { deliveryMode: "daemon_inbox" } : supervised(agent)), ...overrides }));
+    return handle.launchNotices ?? [];
+  };
+  const refused = { model: "gpt-5.5", reasoningEffort: "max" } as const;
+  const taken = { model: "gpt-5.6-sol", reasoningEffort: "low" } as const;
+
+  // An effort that is not sent.
+  assert.deepEqual(await told("supervised_effort_once", refused), [effortNotGiven("max", "gpt-5.5")], "its first start says it");
+  assert.deepEqual(await told("supervised_effort_once", refused), [], "the same again says nothing");
+  assert.deepEqual(await told("supervised_effort_once", { model: "a-model-of-my-own", reasoningEffort: "max" }),
+    [`This agent's reasoning effort "max" was not given to Codex, because Codex does not list the model "a-model-of-my-own", so the effort could not be checked. The agent runs with the effort Codex gives it.`],
+    "another cause is another line");
+  assert.deepEqual(await told("supervised_effort_once", taken), [], "an effort that Codex takes has no line");
+  assert.deepEqual(await told("supervised_effort_once", refused), [effortNotGiven("max", "gpt-5.5")], "a line that comes back is said again");
+
+  // An effort that Codex does not report back.
+  assert.deepEqual(await told("supervised_effort_reported", taken, { effortFromOwnSettings: "xhigh" }), [effortNotReported("low", "xhigh")]);
+  assert.deepEqual(await told("supervised_effort_reported", taken, { effortFromOwnSettings: "xhigh" }), []);
+  assert.deepEqual(await told("supervised_effort_reported", taken, { effortFromOwnSettings: "medium" }), [effortNotReported("low", "medium")]);
+
+  // Each agent is told for itself, and an agent with no id is told at every start.
+  assert.deepEqual(await told("supervised_effort_other", refused), [effortNotGiven("max", "gpt-5.5")]);
+  assert.deepEqual(await told(undefined, refused), [effortNotGiven("max", "gpt-5.5")]);
+  assert.deepEqual(await told(undefined, refused), [effortNotGiven("max", "gpt-5.5")]);
+
+  // The line about the effort and the line about saved options do not hide each other.
+  const level = spawnRequest().launchPolicy as Record<string, unknown>;
+  const both = { ...refused, homeHarness: true, launchPolicy: { ...level, personality: "pragmatic" } };
+  assert.deepEqual(await told("supervised_effort_and_options", both), [
+    `With your own setup on, this agent starts with its access level's own Codex options only. These saved options were not used: "personality".`,
+    effortNotGiven("max", "gpt-5.5"),
+  ]);
+  assert.deepEqual(await told("supervised_effort_and_options", both), []);
+
+  // A start that failed after it was given the line never showed it, so the next start says it.
+  const failing = createHarness({ exitOnSignal: true });
+  const createRpcClient = failing.dependencies.createRpcClient;
+  failing.dependencies.createRpcClient = (serverUrl, notify) => {
+    const client = createRpcClient(serverUrl, notify) as FakeRpc;
+    const request = client.request.bind(client);
+    client.request = async <T>(method: string, params?: unknown, options?: { timeoutMs?: number }) => {
+      // This agent collects its own room messages, so its start ends with a first turn.
+      if (method === "turn/start") throw new Error("the first turn was refused");
+      return request<T>(method, params, options);
+    };
+    return client;
+  };
+  await assert.rejects(new CodexProviderAdapter({ dependencies: failing.dependencies })
+    .spawn(spawnRequest({ ...supervised("supervised_effort_failed"), deliveryMode: "mcp_polling", ...refused })), /the first turn was refused/);
+  assert.deepEqual(await told("supervised_effort_failed", refused), [effortNotGiven("max", "gpt-5.5")]);
 });
 
 test("reattachment subscribes the exact thread and observes native approvals without replay or policy overrides", async () => {
