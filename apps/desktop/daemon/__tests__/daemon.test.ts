@@ -42,7 +42,7 @@ import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIn
 import { createGitCommand, RepositoryNetworkError, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
-import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs } from "../reconciler-policy.js";
+import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS, decideReconciliation, restartBackoffMs, restartsAfterNextFailure } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
 import { advanceReconciliationState, recordReconciliationActionFailure, rememberCompletedControlAction } from "../reconciler-state.js";
 import type { ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
@@ -4667,6 +4667,16 @@ test("direct provider convergence quarantines persisted crash loops without anot
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
+});
+
+test("the lane outlook mirrors the crash-loop check that runs before every provider restart", () => {
+  const now = 50_000_000;
+  const recent = (count: number) => Array.from({ length: count }, (_, index) => now - 1_000 * (index + 1));
+  assert.equal(restartsAfterNextFailure([], now), true);
+  assert.equal(restartsAfterNextFailure(recent(CRASH_LOOP_EXIT_LIMIT - 2), now), true, "the next ending is the last one still restarted");
+  assert.equal(restartsAfterNextFailure(recent(CRASH_LOOP_EXIT_LIMIT - 1), now), false, "the next ending reaches the limit, so the agent is quarantined");
+  assert.equal(restartsAfterNextFailure(Array.from({ length: CRASH_LOOP_EXIT_LIMIT }, () => now - CRASH_LOOP_WINDOW_MS - 1), now), true,
+    "endings outside the window do not count");
 });
 
 test("reconciler policy may poke stalled addressed work but silence never proves runtime loss", () => {
