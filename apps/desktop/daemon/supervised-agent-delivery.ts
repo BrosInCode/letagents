@@ -1472,12 +1472,16 @@ export class SupervisedAgentDelivery {
   private async usageLimitPause(agent: SupervisedIngressAgent): Promise<{ resumeAtMs: number; detail: string } | null> {
     const limit = await this.inbox.latestUsageLimit(agent.agentId, agent.workAttemptId);
     if (!limit || this.usageLimitOverrides.get(agent.agentId) === limit.sourceInboxItemId) return null;
-    const resumeAtMs = limit.resetsAtMs !== null
-      ? limit.resetsAtMs + USAGE_LIMIT_RESET_MARGIN_MS
+    // A reset that had already passed when the provider refused is stale (a
+    // cached snapshot, say): it says nothing about when work is accepted, so
+    // the refusal waits as one with no reset time.
+    const knownReset = limit.resetsAtMs !== null && limit.resetsAtMs + USAGE_LIMIT_RESET_MARGIN_MS > limit.observedAtMs;
+    const resumeAtMs = knownReset
+      ? limit.resetsAtMs! + USAGE_LIMIT_RESET_MARGIN_MS
       : limit.observedAtMs + Math.min(USAGE_LIMIT_MAX_WAIT_MS, USAGE_LIMIT_UNKNOWN_RESET_WAIT_MS * 3 ** (limit.consecutive - 1));
     const nowMs = this.inbox.nowMs();
     if (resumeAtMs <= nowMs) return null;
-    return { resumeAtMs, detail: usageLimitPauseDetail(agent.provider, resumeAtMs, limit.resetsAtMs !== null, nowMs) };
+    return { resumeAtMs, detail: usageLimitPauseDetail(agent.provider, resumeAtMs, knownReset, nowMs) };
   }
 
   /** Wake this agent's delivery when its usage-limit hold ends. */
@@ -1806,8 +1810,10 @@ export class SupervisedAgentDelivery {
         }
         if (acceptedResult.outcome === "failed" && publicationResult.outcome === "failed" && publicationResult.usageLimit) {
           const resetsAtMs = publicationResult.usageLimit.resetsAtMs;
+          // A reset already past is stale, so the room is told no reset time.
           this.reportUsageLimitOnce(agent, item.inbox_item_id,
-            typeof resetsAtMs === "number" && Number.isSafeInteger(resetsAtMs) && resetsAtMs > 0 ? resetsAtMs : null);
+            typeof resetsAtMs === "number" && Number.isSafeInteger(resetsAtMs)
+              && resetsAtMs + USAGE_LIMIT_RESET_MARGIN_MS > this.inbox.nowMs() ? resetsAtMs : null);
         }
         const disposition = {
           acceptedResult,

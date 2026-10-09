@@ -1828,6 +1828,22 @@ test("with no reset time, the next message is tried after an hour, then after lo
   assert.match(holds[0]!.error ?? "", /This message waits and is tried again at .+\. To continue sooner, change the account and use Retry delivery\./);
 });
 
+test("a refusal that still names a reset already past waits as one with no reset time", async () => {
+  // Codex, for one, can repeat the reset of a cached snapshot after it passed.
+  const resetsAtMs = Date.parse("2026-10-09T14:00:00.000Z");
+  const { sources, reports, holds, receipts } = await runUsageLimit({ resetsAtMs, ids: ["1", "2", "3", "4"], failures: 3 });
+  assert.deepEqual(holds.map((hold) => hold.id), ["2", "3", "4"], "each later message waited after a refusal");
+  assert.equal(holds[0]!.resumeAtMs, resetsAtMs + 30_000);
+  const secondRefusalAtMs = resetsAtMs + 30_000 + 1_000;
+  assert.equal(holds[1]!.resumeAtMs, secondRefusalAtMs + 3 * 60 * 60_000, "the stale reset is not used; the second refusal in a row waits three hours");
+  assert.match(holds[1]!.error ?? "", /This message waits and is tried again at /);
+  assert.equal(holds[2]!.resumeAtMs! - holds[1]!.resumeAtMs!, 6 * 60 * 60_000 + 1_000);
+  assert.deepEqual(sources, ["1", "2", "3", "4"]);
+  assert.deepEqual(reports.map((report) => (report as { resetsAtMs: unknown }).resetsAtMs), [resetsAtMs, null, null],
+    "the room is not told a reset that has passed");
+  assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_failed", "acknowledged_failed", "acknowledged_no_reply"]);
+});
+
 test("Retry delivery ends a usage-limit hold at once, for example after the owner changes the account", async () => {
   const resetsAtMs = Date.parse("2026-10-09T18:00:00.000Z");
   const { sources, holds, timers, receipts, clock } = await runUsageLimit({ resetsAtMs, ids: ["1", "2"],

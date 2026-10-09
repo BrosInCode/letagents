@@ -7,6 +7,7 @@ import {
 } from "../../../shared/provider-usage-limit.mjs";
 import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { getAgentIdentityByCanonicalKey } from "../db.js";
+import { assertSupervisorGrantFenceTx, SupervisorGrantFenceStaleError } from "../db/auth.js";
 import { respondWithInternalError, type AuthenticatedRequest } from "../http/helpers.js";
 import { normalizeRoomId } from "../rooms/routing.js";
 import type { emitProjectMessage } from "../server/events.js";
@@ -20,6 +21,7 @@ export type ProviderUsageLimitNoticeRouteDeps = RoomResolverDeps & {
   emitProjectMessage: typeof emitProjectMessage;
   requireCurrentSupervisorGrant?: typeof requireCurrentSupervisorGrant;
   getAgentIdentityByCanonicalKey?: typeof getAgentIdentityByCanonicalKey;
+  assertSupervisorGrantFenceTx?: typeof assertSupervisorGrantFenceTx;
   nowMs?: () => number;
 };
 
@@ -101,14 +103,32 @@ export function registerProviderUsageLimitNoticeRoutes(app: Express, deps: Provi
           res.status(429).json({ error: "This agent's usage-limit notice was posted moments ago." });
           return;
         }
-        const displayName = noticeAgentName(body.display_name, noticeAgentName(agent.display_name, "An agent"));
-        const text = providerUsageLimitNoticeText({ agentName: displayName, provider, resetsAt: resetsAtMs, phase });
-        const message = await deps.emitProjectMessage(project.id, "letagents", text, {
-          source: PROVIDER_USAGE_LIMIT_SOURCE,
-          client_message_id: `${PROVIDER_USAGE_LIMIT_SOURCE}:${agent.canonical_key}:${phase}:${occurrence}`,
-        });
+        // Reserve the interval before posting, so requests that arrive
+        // together cannot all pass the check; a failed post gives it back.
         lastNoticeAt.set(throttleKey, nowMs);
         if (lastNoticeAt.size > 10_000) lastNoticeAt.delete(lastNoticeAt.keys().next().value!);
+        const fence = { grant_id: grant.grant_id, generation: grant.current_generation, token_version: grant.token_version };
+        const assertFence = deps.assertSupervisorGrantFenceTx ?? assertSupervisorGrantFenceTx;
+        const displayName = noticeAgentName(body.display_name, noticeAgentName(agent.display_name, "An agent"));
+        const text = providerUsageLimitNoticeText({ agentName: displayName, provider, resetsAt: resetsAtMs, phase });
+        let message: Awaited<ReturnType<typeof emitProjectMessage>>;
+        try {
+          message = await deps.emitProjectMessage(project.id, "letagents", text, {
+            source: PROVIDER_USAGE_LIMIT_SOURCE,
+            client_message_id: `${PROVIDER_USAGE_LIMIT_SOURCE}:${agent.canonical_key}:${phase}:${occurrence}`,
+            // A grant revoked, rotated or handed off since the check above
+            // must not post: the fence is checked again where the message is written.
+            with_created_message_in_transaction: async (tx) => {
+              if (!await assertFence(tx, fence)) throw new SupervisorGrantFenceStaleError();
+            },
+          });
+        } catch (error) {
+          if (lastNoticeAt.get(throttleKey) === nowMs) {
+            if (last === undefined) lastNoticeAt.delete(throttleKey);
+            else lastNoticeAt.set(throttleKey, last);
+          }
+          throw error;
+        }
         res.setHeader("Cache-Control", "no-store");
         res.status(201).json({ status: "created", message_id: message.id, room_id: project.id });
       } catch (error) {
