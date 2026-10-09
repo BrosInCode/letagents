@@ -174,7 +174,6 @@
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
     <div class="desktop-composer-input-row">
-      <TypingIndicator :label="typing.label.value" />
       <button
         class="desktop-composer-add-agent"
         type="button"
@@ -270,7 +269,6 @@
 
 <script setup lang="ts">
 import { injectRoomMessageMotion } from "../../../../../../../../shared/ui/useRoomMessageMotion";
-import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
 import { useComposerSlashCommands } from "../../../../../../../../shared/ui/useComposerSlashCommands";
 import { roomSearchCommandKey } from "../room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../../ipc/index.js";

@@ -101,3 +101,14 @@ test("DesktopRoomShell line count stays strictly under 3000 lines", () => {
   assert.ok(lineCount < 3000, `DesktopRoomShell line count ${lineCount} exceeds 3000-line cap`);
   assert.ok(lineCount <= 2998, `DesktopRoomShell line count ${lineCount} must not exceed the 2998-line baseline`);
 });
+
+test("the work indicator is pinned outside the scrolling list and still feeds the reply motion", () => {
+  const template = viewportSource.split("</template>\n\n<script")[0];
+  const strip = template.indexOf('ref="liveStripElement" class="room-live-strip"');
+  assert.ok(strip > template.indexOf('class="room-new-messages-pill"'), "the strip follows the list and its pills");
+  assert.ok(template.indexOf('class="room-local-agent-work-list"') > strip);
+  const before = template.slice(0, template.lastIndexOf("<div", strip));
+  assert.equal((before.match(/<div\b/g) || []).length - (before.match(/<\/div>/g) || []).length, 1, "only the viewport root is open");
+  // The reply still grows out of its work row, so the motion must look in the strip.
+  assert.match(viewportSource, /useRoomMessageMotion\(\{\s*element: messagesElement,\s*work: liveStripElement,/);
+});

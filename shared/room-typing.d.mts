@@ -9,8 +9,10 @@ export function createTypingSender(options: {
   schedule?: (callback: () => void, ms: number) => any; cancel?: (timer: any) => void;
 }): { input(nonempty: boolean): void; stop(): void };
 export function createTypingReceiver(now?: () => number): {
-  receive(raw: unknown, self: string | null): void; clear(): void; label(): string; nextExpiry(): number | null;
+  receive(raw: unknown, self: string | null): void; clear(): void; names(): string[]; label(): string; nextExpiry(): number | null;
 };
-export function createTypingDisplay(update: (label: string) => void, clock?: {
+export function typingLabel(names: readonly string[]): string;
+export function typingSentence(names: readonly string[]): Array<{ text: string; name: boolean }>;
+export function createTypingDisplay(update: (label: string, names: string[]) => void, clock?: {
   now?: () => number; schedule?: (callback: () => void, ms: number) => any; cancel?: (timer: any) => void;
 }): { receive(raw: unknown, self: string | null): void; clear(): void };
