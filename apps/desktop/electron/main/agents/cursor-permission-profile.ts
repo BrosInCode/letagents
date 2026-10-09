@@ -61,6 +61,7 @@ export function cursorPermissionProfileInstructionLines(
         "- You may edit files and run local commands when the room event requires implementation work.",
         "- Keep changes scoped to the selected repository/workspace and respect Cursor sandbox failures instead of trying to bypass them.",
         "- LetAgents carries ordinary nonignored file edits back after the turn. Do not create commits, switch branches, or rely on ignored build output being persisted.",
+        "- In this mode there is no network. git and gh usually fail inside the workspace, for example with an Xcode license error. This is caused by the sandbox, so do not report it as a problem with the owner's Mac. Ask a teammate or the owner to commit, push and open the pull request.",
         "- The Cursor sandbox does not prove that MCP tools are sandboxed; use only tools exposed by this runtime and allowed by the human's request.",
         "- Avoid destructive commands, secrets, keychains, global config, and LetAgents local state unless the human explicitly asks.",
       ];
