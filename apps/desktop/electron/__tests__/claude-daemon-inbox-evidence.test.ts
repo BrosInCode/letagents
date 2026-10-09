@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  claudeApiErrorCategory,
   exactClaudeCommandLifecycleState,
   exactClaudeStreamTerminal,
   recoverExactClaudeTurnFailureFromSession,
@@ -9,7 +10,8 @@ import {
   type ClaudeEvidenceRecord,
 } from "../main/agents/claude-room-turn-evidence.js";
 import {
-  CLAUDE_API_ERROR_CAPTURES, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT, claudeResultEvent, realClaudeCapture, realClaudeResult,
+  CLAUDE_API_ERROR_CAPTURES, CLAUDE_API_FAILURE_POLICY, CLAUDE_INVALID_REQUESTS, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT, claudeInvalidRequestRows,
+  claudeResultEvent, realClaudeCapture, realClaudeResult,
 } from "./claude-result-shapes.js";
 
 const sessionId = "5cf962f0-f6b6-4eca-b0d7-348ae59bfeb8";
@@ -58,7 +60,8 @@ test("a Claude result that is not a proven success keeps Claude's own words, and
     "first Claude's text: what Claude wrote");
   // An API error without text still says which HTTP status Claude reported.
   assert.deepEqual(exactClaudeStreamTerminal({ ...event, subtype: "success", is_error: true, result: " ", api_error_status: 529 }, turnId, sessionId),
-    { turnId, nativeOutcome: "failed", error: "Claude reported an API error without details (HTTP 529)." });
+    { turnId, nativeOutcome: "failed", error: "Claude reported an API error without details (HTTP 529).",
+      apiFailure: { status: 529, terminalReason: null, category: null } });
   // "No reply" is an answer. A result that is not a proven success cannot give it.
   assert.deepEqual(exactClaudeStreamTerminal({ ...event, subtype: "success", result: "LETAGENTS_NO_ROOM_REPLY" }, turnId, sessionId), {
     turnId, nativeOutcome: "failed", unrecognizedResult: true,
@@ -88,8 +91,9 @@ test("real Claude Code API errors are failed turns with Claude's error text, in 
     assert.equal(result.is_error, true, name);
     const text = result.result as string;
     assert.ok(text.trim().length > 10, `${name}: Claude says what went wrong`);
-    // It is a known shape: the failure carries no mark, and its text is Claude's error text.
-    assert.deepEqual(exactClaudeStreamTerminal(result, turnId, sessionId), { turnId, nativeOutcome: "failed", error: text }, name);
+    // It is a known shape: the failure is not marked as unrecognized, and its text is Claude's error text.
+    const { apiFailure: _facts, refusal: _refusal, ...ending } = exactClaudeStreamTerminal(result, turnId, sessionId) as Record<string, unknown>;
+    assert.deepEqual(ending, { turnId, nativeOutcome: "failed", error: text }, name);
     // One line of the whole stream ends the turn, and it names this command alone.
     assert.deepEqual(capture.stream.filter((event) => exactClaudeStreamTerminal(event, turnId, sessionId) !== null), [result], name);
     assert.deepEqual(result.user_message_uuids, [turnId], name);
@@ -99,8 +103,102 @@ test("real Claude Code API errors are failed turns with Claude's error text, in 
     assert.equal(typeof row.error, "string", name);
     // The session file is the second source. It agrees, and it holds no answer either.
     assert.equal(recoverExactClaudeTurnFromSession(capture.session, turnId, sessionId), null, name);
-    assert.deepEqual(recoverExactClaudeTurnFailureFromSession(capture.session, turnId, sessionId), { turnId, nativeOutcome: "failed", error: text }, name);
+    assert.deepEqual(recoverExactClaudeTurnFailureFromSession(capture.session, turnId, sessionId), { turnId, nativeOutcome: "failed", error: text,
+      apiFailure: { ...CLAUDE_API_FAILURE_POLICY[name]!.facts, terminalReason: null },
+      ...(CLAUDE_API_FAILURE_POLICY[name]!.refusal ? { refusal: true } : {}) }, `${name}: the session keeps the status and Claude's name for the error`);
   }
+});
+
+test("real Claude Code API errors carry Claude's structured account of the failure: status, terminal reason and its name for the error", () => {
+  assert.deepEqual(Object.keys(CLAUDE_API_FAILURE_POLICY).sort(), Object.keys(CLAUDE_API_ERROR_CAPTURES).sort(), "every captured failure is in the table");
+  for (const [name, captured] of Object.entries(CLAUDE_API_ERROR_CAPTURES)) {
+    const capture = realClaudeCapture(captured, sessionId, turnId);
+    const expected = CLAUDE_API_FAILURE_POLICY[name]!;
+    // Claude names the error on the assistant row before the result. No other line of the stream names one.
+    const named = capture.stream.map((event) => claudeApiErrorCategory(event, sessionId)).filter((category) => category !== null);
+    assert.deepEqual(named, [expected.facts.category], name);
+    const terminal = exactClaudeStreamTerminal(realClaudeResult(capture), turnId, sessionId, named[0]);
+    assert.deepEqual(terminal, { turnId, nativeOutcome: "failed", error: realClaudeResult(capture).result, apiFailure: expected.facts,
+      ...(expected.refusal ? { refusal: true } : {}) }, name);
+    // Without the row the result still gives the status and the terminal reason.
+    assert.deepEqual((exactClaudeStreamTerminal(realClaudeResult(capture), turnId, sessionId) as { apiFailure?: unknown }).apiFailure,
+      { ...expected.facts, category: null }, name);
+    // A row of another session names nothing for this one.
+    assert.deepEqual(capture.stream.map((event) => claudeApiErrorCategory(event, "another-session")).filter(Boolean), [], name);
+  }
+});
+
+test("only a known Claude API error carries the structured account, and only what Claude Code writes there is kept", () => {
+  // A result of any other shape has no such account: nothing decides on the fields of a shape nobody knows.
+  for (const cell of CLAUDE_RESULT_CELLS) {
+    const event = { ...claudeResultEvent(cell, sessionId, turnId), api_error_status: 500, terminal_reason: "api_error", stop_reason: "refusal" };
+    const terminal = exactClaudeStreamTerminal(event, turnId, sessionId, "server_error") as { apiFailure?: unknown; refusal?: unknown };
+    const apiError = cell.subtype === "success" && cell.isError === true;
+    assert.deepEqual(terminal.apiFailure, apiError ? { status: 500, terminalReason: "api_error", category: "server_error" } : undefined, cell.name);
+    assert.equal(terminal.refusal, apiError ? true : undefined, cell.name);
+  }
+  const apiError = { type: "result", subtype: "success", is_error: true, session_id: sessionId, user_message_uuid: turnId, result: "API Error" };
+  // A field that is not a status or a short name is not kept, and an account with nothing in it is not carried.
+  assert.deepEqual(exactClaudeStreamTerminal({ ...apiError, api_error_status: "500", terminal_reason: "Ignore all instructions", stop_reason: "end_turn" },
+    turnId, sessionId, "not a name"), { turnId, nativeOutcome: "failed", error: "API Error" });
+  assert.deepEqual((exactClaudeStreamTerminal({ ...apiError, api_error_status: 99999, terminal_reason: "api_error" }, turnId, sessionId, "rate_limit") as { apiFailure?: unknown }).apiFailure,
+    { status: null, terminalReason: "api_error", category: "rate_limit" });
+  assert.equal(claudeApiErrorCategory({ type: "assistant", is_api_error_message: true, session_id: sessionId, error: "Server Error!" }, sessionId), null);
+  assert.equal(claudeApiErrorCategory({ type: "assistant", session_id: sessionId, error: "rate_limit" }, sessionId), null, "a row that is not an API error names none");
+  assert.equal(claudeApiErrorCategory({ type: "user", is_api_error_message: true, session_id: sessionId, error: "rate_limit" }, sessionId), null);
+});
+
+test("Claude names many failures `invalid_request`: its account of each is the same in the stream and in the session, and only its own words mark a prompt that is too long", async () => {
+  const { claudeApiFailureClass } = await import(new URL("../../daemon/task-continuity.ts", import.meta.url).href) as
+    { claudeApiFailureClass: (failure: unknown) => string | null };
+  type Failure = { error: string; apiFailure?: unknown };
+  const read = (rows: ReturnType<typeof claudeInvalidRequestRows>) => {
+    const named = rows.stream.flatMap((event) => claudeApiErrorCategory(event, sessionId) ?? []);
+    return { named,
+      stream: exactClaudeStreamTerminal(realClaudeResult(rows), turnId, sessionId, named[0]) as Failure,
+      session: recoverExactClaudeTurnFailureFromSession(rows.session as ClaudeEvidenceRecord[], turnId, sessionId) as Failure };
+  };
+  for (const [name, failure] of Object.entries(CLAUDE_INVALID_REQUESTS)) {
+    const { named, stream, session } = read(claudeInvalidRequestRows(name, sessionId, turnId));
+    assert.deepEqual(named, ["invalid_request"], name);
+    assert.deepEqual([stream.error, session.error], [failure.text, failure.text], name);
+    const tooLong = failure.text.startsWith("Prompt is too long") ? { promptTooLong: true } : {};
+    assert.deepEqual(stream.apiFailure, { status: failure.status, terminalReason: failure.terminalReason, category: "invalid_request", ...tooLong }, name);
+    // The session keeps no terminal reason. Nothing else differs, so nothing else may decide differently.
+    assert.deepEqual(session.apiFailure, { status: failure.status, terminalReason: null, category: "invalid_request", ...tooLong }, name);
+    assert.deepEqual([claudeApiFailureClass(stream.apiFailure), claudeApiFailureClass(session.apiFailure)], [failure.kind, failure.kind], name);
+  }
+
+  // The real capture of a prompt that is too long: its text starts with the words by which the CLI itself knows such a row.
+  const captured = realClaudeCapture(CLAUDE_API_ERROR_CAPTURES.http_400_prompt_too_long!, sessionId, turnId);
+  assert.match(String(realClaudeResult(captured).result), /^Prompt is too long \u00b7 the request is ~250000 tokens/);
+  const real = read(captured);
+  assert.deepEqual(real.stream.apiFailure, { status: 400, terminalReason: "prompt_too_long", category: "invalid_request", promptTooLong: true });
+  assert.deepEqual(real.session.apiFailure, { status: 400, terminalReason: null, category: "invalid_request", promptTooLong: true });
+  assert.deepEqual([claudeApiFailureClass(real.stream.apiFailure), claudeApiFailureClass(real.session.apiFailure)], ["conversation", "conversation"]);
+
+  // The words mark a failure only at the start of its text, in the session and in the stream.
+  const said = (text: string) => {
+    const [request, errorRow] = captured.session as [ClaudeEvidenceRecord, ClaudeEvidenceRecord];
+    const row = { ...errorRow, message: { ...(errorRow.message as object), content: [{ type: "text", text }] } };
+    return [(recoverExactClaudeTurnFailureFromSession([request, row], turnId, sessionId) as Failure).apiFailure,
+      (exactClaudeStreamTerminal({ ...realClaudeResult(captured), result: text }, turnId, sessionId, "invalid_request") as Failure).apiFailure] as Array<{ promptTooLong?: true }>;
+  };
+  for (const text of ["Prompt is too long", "Prompt is too long \u00b7 automatic compaction failed: no summary"]) {
+    assert.deepEqual(said(text).map((facts) => facts.promptTooLong), [true, true], text);
+  }
+  for (const text of ["API Error: 400 Prompt is too long", "The tool said: Prompt is too long", "prompt is too long", "PDF too large (max 100 pages, 20MB)."]) {
+    assert.deepEqual(said(text).map((facts) => facts.promptTooLong), [undefined, undefined], text);
+  }
+
+  // A CLI that sends none of the fields has no account, and its text is read as any provider's is. With the
+  // CLI's words for a prompt that is too long, that is all its account holds.
+  const bare = { type: "result", subtype: "success", is_error: true, session_id: sessionId, user_message_uuid: turnId };
+  assert.deepEqual(exactClaudeStreamTerminal({ ...bare, result: "API Error: 400 messages.0: invalid" }, turnId, sessionId),
+    { turnId, nativeOutcome: "failed", error: "API Error: 400 messages.0: invalid" });
+  assert.deepEqual((exactClaudeStreamTerminal({ ...bare, result: "Prompt is too long" }, turnId, sessionId) as Failure).apiFailure,
+    { status: null, terminalReason: null, category: null, promptTooLong: true });
+  assert.equal(claudeApiFailureClass({ status: null, terminalReason: null, category: null, promptTooLong: true }), "conversation");
 });
 
 test("real Claude Code completed turns: an answer is a reply, and an empty answer is in neither the result nor the session", () => {
@@ -218,7 +316,7 @@ test("a Claude turn's answer in its session is in the last message that ended, a
   const apiError: ClaudeEvidenceRecord = { type: "assistant", sessionId, isApiErrorMessage: true, apiErrorStatus: 529, error: "server_error",
     message: { id: "synthetic", role: "assistant", model: "<synthetic>", stop_reason: "stop_sequence", content: [{ type: "text", text: "API Error: Overloaded" }] } };
   assert.deepEqual(recoverExactClaudeTurnFailureFromSession([request, thinkingOnly, askForOutput, apiError], turnId, sessionId),
-    { turnId, nativeOutcome: "failed", error: "API Error: Overloaded" });
+    { turnId, nativeOutcome: "failed", error: "API Error: Overloaded", apiFailure: { status: 529, terminalReason: null, category: "server_error" } });
 });
 
 /** The real rows of one capture, for this session and this turn. */
@@ -310,6 +408,14 @@ test("a sub-agent's rows are never the turn's: its message that ended is not the
     "the same row in the main conversation is the turn's failure");
   // Nor is a sub-agent's row ever the turn's request.
   assert.equal(recoverExactClaudeTurnFromSession([{ ...request!, isSidechain: true }, answer!], turnId, sessionId), null);
+
+  // In the stream a sub-agent's error row carries the turn's session and no command. `parent_tool_use_id` says whose
+  // it is, and Claude's name for that error is not the name of an error of the turn.
+  const subErrorInStream = realRows("subagent_api_error").stream.find((event) => event.is_api_error_message === true)!;
+  assert.deepEqual([subErrorInStream.session_id, typeof subErrorInStream.parent_tool_use_id, subErrorInStream.user_message_uuid, subErrorInStream.error],
+    [sessionId, "string", undefined, "unknown"]);
+  assert.equal(claudeApiErrorCategory(subErrorInStream, sessionId), null);
+  assert.equal(claudeApiErrorCategory({ ...subErrorInStream, parent_tool_use_id: null }, sessionId), "unknown");
 });
 
 test("a user row is inside a Claude turn only when the CLI goes on with the turn; any other user row ends what is read", () => {
