@@ -2348,7 +2348,11 @@ test('typing reaches only opted-in other people; agent SSE/poll stay parked and 
 
 for (const failure of ['denied', 'throws'] as const) {
   test(`typing authorization ${failure} drops only the hint; message delivery owns stream closure`, async (context) => {
-    context.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    // Stub only Date.now: the first `mock.timers.enable()` in a process makes Node queue an
+    // ExperimentalWarning, which prints through console.error. If that tick runs after the
+    // console.error mock below, the warning is counted as a log of this test.
+    let now = Date.now();
+    context.mock.method(Date, 'now', () => now);
     const { roomTyping } = await import('../server/room-typing.js');
     const handlers = new Map<string, Function>();
     const app = Object.fromEntries(['get', 'post', 'put', 'delete'].map(method => [method,
@@ -2378,7 +2382,7 @@ for (const failure of ['denied', 'throws'] as const) {
       await handlers.get('get:/^\\/rooms\\/(.+)\\/messages\\/stream$/')!(req, res);
       res.writes.length = 0;
       failing = true;
-      context.mock.timers.tick(60001);
+      now += 60001;
       roomTyping.report(room, 'ada', 'Ada', { client_id: 'composer_auth_test', sequence: 1, typing: true, ttl_ms: 5000 });
       await flushAsyncEvents();
       assert.equal(res.writes.length, 0, 'denied/failed hint is dropped');
