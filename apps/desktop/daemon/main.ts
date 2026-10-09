@@ -414,11 +414,8 @@ export class SupervisorDaemon {
         requestConvergence: (entryId) => this.requestConvergence(entryId),
       },
     });
-    this.usageLimitNotices = new ProviderUsageLimitNotices({
-      loadEntry: async (entryId) => (await this.store.load()).entries.find((entry) => entry.id === entryId) ?? null,
-      currentGrant: (entry) => this.workerAuthority.currentHostGrant(entry),
-      warn: (message) => console.warn(message),
-    });
+    this.usageLimitNotices = new ProviderUsageLimitNotices({ loadEntry: async (id) => (await this.store.load()).entries.find((entry) => entry.id === id) ?? null,
+      currentGrant: (entry) => this.workerAuthority.currentHostGrant(entry), warn: (message) => console.warn(message) });
     this.providerSchedulerFailures = new ProviderSchedulerFailureCoordinator({
       nativeHeartbeatIntervalMs: this.nativeHeartbeatIntervalMs,
       currentDaemonGeneration: () => this.singleton.currentGeneration,
@@ -645,9 +642,7 @@ export class SupervisorDaemon {
         (agentId) => this.requestConvergence(agentId),
         (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),
         async (agentId) => { await this.providerExecution?.archiveEndedRuntimes(agentId); },
-        ({ agent, sourceInboxItemId, resetsAtMs }) => this.usageLimitNotices.report({
-          entryId: agent.agentId, phase: "turn", resetsAtMs, occurrence: sourceInboxItemId,
-        }),
+        ({ agent, sourceInboxItemId, resetsAtMs }) => this.usageLimitNotices.report({ entryId: agent.agentId, phase: "turn", resetsAtMs, occurrence: sourceInboxItemId }),
       ) : null;
     this.readModel = new DaemonReadModel({
       compactionProgress: (entry) => entry.work_attempt_id
@@ -1078,7 +1073,6 @@ export class SupervisorDaemon {
     let executionDelegationDrain: Promise<void> | undefined;
     await runEveryStopStep([
       () => this.convergencePacer.close(), () => this.providerTerminals.close(), () => this.hostApprovals.close(),
-      () => this.usageLimitNotices.close(),
       () => { executionDelegationDrain = this.executionDelegations.fenceAndDrain(); },
       () => this.roomWorkPublisher?.close(), () => this.executionCapture?.close(), () => this.supervisedDelivery?.fence(),
       () => this.typedLifecycleEffects?.close(),
@@ -1088,7 +1082,7 @@ export class SupervisorDaemon {
       () => this.supervisedDelivery?.fenceAndDrain(),
       () => this.fenceAndDrainRoomMoveReconciliations(),
       () => this.boundedEffects.drainJournalReservations(),
-      () => this.providerExecution?.clearRecoveryTimers(),
+      () => this.providerExecution?.clearRecoveryTimers(), () => this.usageLimitNotices.close(),
       () => this.providerReconciliation?.disposeAll(),
       () => this.providerExecution?.drainConvergence(),
       () => this.providerStreams.disposeAll(),
