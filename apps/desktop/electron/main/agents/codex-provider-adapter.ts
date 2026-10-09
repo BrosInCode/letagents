@@ -106,7 +106,7 @@ type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown
 
 /** How long a start waits for Codex to list its models before it leaves the reasoning effort out. */
 const CODEX_MODEL_LIST_TIMEOUT_MS = 5_000;
-/** The line about an agent's reasoning effort is said when it changes, not at every start. */
+/** The line about an agent's reasoning effort is said when it changes, not at every start. A repair whose line was recorded keeps it here too. */
 const codexEffortNoticeSaidOnce = launchNoticeSaidOnce();
 /** A value as a notice shows it: printable, short, and in quotes. */
 function shownInNotice(text: string): string {
@@ -192,11 +192,22 @@ async function codexThreadEffort(
  * The effort Codex reports for a thread, against the effort it was sent.
  * Codex once ignored the effort and said nothing, and it keeps the effort of
  * a thread that is already loaded. Neither stops the agent: the owner is told
- * both values. A reply that reports no effort says nothing either way.
+ * both values.
+ *
+ * Codex 0.153 reports the effort of a thread it was sent one for, and writes
+ * a value it does not have as null. So a null in that place is Codex saying
+ * that the thread has no effort, and the owner is told that too. A reply with
+ * no such field is an app-server that does not report the effort: it says
+ * nothing either way.
  */
 function codexEffortMismatchNotice(sent: string | null, result: CodexThreadResult): string | null {
   const reported = result.reasoningEffort;
-  if (sent === null || typeof reported !== "string" || !reported || reported === sent) return null;
+  if (sent === null) return null;
+  if (reported === null) {
+    return `This agent's reasoning effort ${shownInNotice(sent)} was given to Codex, but Codex reports no effort for the conversation. `
+      + "The agent runs with the effort Codex gives it.";
+  }
+  if (typeof reported !== "string" || !reported || reported === sent) return null;
   return `This agent's reasoning effort ${shownInNotice(sent)} was given to Codex, but Codex reports ${shownInNotice(reported)} for the conversation. `
     + "The agent runs with the effort Codex reports.";
 }
@@ -914,7 +925,7 @@ class CodexProviderHandle implements ProviderHandle {
   ownerSetup = false;
   /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
   launchNotices: readonly string[] = [];
-  /** What this runtime last had to say about its reasoning effort, so a repair does not say it again. */
+  /** What this runtime's launch, or its last repair that the daemon recorded, found about its reasoning effort. A repair does not say it again. */
   effortNotice: string | null = null;
   custodyLaunchAgentSessionId?: string;
   managedLaunchContract?: string;
@@ -1827,16 +1838,29 @@ export class CodexProviderAdapter implements ProviderAdapter {
     });
     const effort = await codexThreadEffort(handle.client, policy, request.model, request.reasoningEffort);
     // The daemon reads launch notices when a launch returns, and it drops a line that a repair
-    // streams when the repair replaces the conversation. So a repair returns its lines, and the
-    // daemon records them when the repair is done. A line the launch already said is not said again.
-    const notices: string[] = [];
-    const sayEffort = (line: string | null) => {
-      if (line === null || line === handle.effortNotice) return;
-      handle.effortNotice = line;
-      notices.push(line);
+    // streams when the repair replaces the conversation. So a repair returns its line, and the
+    // daemon records it when the repair is done.
+    // The line is that of the conversation the repair ends on, read as a launch reads it.
+    let effortNotice = effort.notice;
+    const readEffort = (thread: CodexThreadResult) => {
+      effortNotice = effort.notice ?? codexEffortMismatchNotice(effort.sent, thread);
     };
-    const said = () => (notices.length ? { notices: [...notices] } : {});
-    sayEffort(effort.notice);
+    // The line is returned when it is not what the agent was last told and not what this runtime
+    // last found. It counts as said when the daemon has recorded it, and not before: a repair that
+    // fails, and a line that the daemon could not record, leave it to be said by the retry or by
+    // the next launch. It is then kept where a launch looks, so that launch does not say it again.
+    const said = (): Pick<ProviderContinuationRepairResult, "notices" | "noticesRecorded"> => {
+      const line = effortNotice;
+      const agent = request.supervisorEntryId;
+      const unsaid = line !== null && line !== handle.effortNotice && !codexEffortNoticeSaidOnce.isLastTold(agent, line);
+      return {
+        ...(unsaid ? { notices: [line] } : {}),
+        noticesRecorded: () => {
+          handle.effortNotice = line;
+          codexEffortNoticeSaidOnce.told(agent, line);
+        },
+      };
+    };
     const probeDelays = [0, 1_000, 2_000, 4_000];
     const probe = async (threadId: string): Promise<boolean> => {
       for (const waitMs of probeDelays) {
@@ -1856,7 +1880,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           });
           assertAttached();
           assertCodexReviewerApplied(policy, resumed);
-          sayEffort(codexEffortMismatchNotice(effort.sent, resumed));
+          readEffort(resumed);
           if (resumed.thread?.id === threadId) return true;
           throw new Error("Codex continuation repair resolved a different thread.");
         } catch (error) {
@@ -1909,7 +1933,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     });
     assertCodexReviewerApplied(policy, started);
     assertCodexThreadDirectory(request.cwd, started);
-    sayEffort(codexEffortMismatchNotice(effort.sent, started));
+    readEffort(started);
     const replacement = started.thread?.id?.trim();
     if (!replacement || replacement === expected) {
       throw new Error("Codex continuation repair did not return a distinct replacement thread.");
