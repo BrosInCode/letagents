@@ -402,6 +402,25 @@ test("a credential key written as one word is blanked, as a frame key and inside
     assert.deepEqual(leakRules(entry(redactedInside)), [], key);
   }
 
+  // A passkey is a credential, under any key that holds the word, written as one word or as two.
+  // A key that only has those letters in it is not one.
+  const passkeys = { passkey: "opaque value", passKey: "opaque value", user_passkeys: ["opaque one"], PASSKEY: "opaque value",
+    pass_key: "opaque value", "pass-key": "opaque value", userPassKey: "opaque value", PASS_KEYS: ["opaque one"] };
+  assert.deepEqual(leakRules(entry({ method: "note", params: passkeys })), ["credential-key"]);
+  assert.deepEqual(new ReplayRedactor(CONTEXT).redactFrame({ method: "note", params: passkeys }), {
+    method: "note",
+    params: { passkey: REPLAY_REDACTED, passKey: REPLAY_REDACTED, user_passkeys: [REPLAY_REDACTED], PASSKEY: REPLAY_REDACTED,
+      pass_key: REPLAY_REDACTED, "pass-key": REPLAY_REDACTED, userPassKey: REPLAY_REDACTED, PASS_KEYS: [REPLAY_REDACTED] },
+  });
+  const passkeyInside = { id: 4, result: { contents: [{ uri: "x://y", text: JSON.stringify({ passkey: "opaque value", note: "kept" }) }] } };
+  assert.deepEqual(leakRules(entry(passkeyInside)), ["credential-key"]);
+  assert.deepEqual(JSON.parse(((new ReplayRedactor(CONTEXT).redactFrame(passkeyInside).result as JsonObject).contents as JsonObject[])[0]!.text as string),
+    { passkey: REPLAY_REDACTED, note: "kept" });
+  const notPasskeys = { method: "note", params: { compasskey: "kept", passkeyboard: "kept", bypasskeys: "kept",
+    compass_key: "kept", bypassKey: "kept", pass_keyboard: "kept", passKeyboard: "kept" } };
+  assert.deepEqual(new ReplayRedactor(CONTEXT).redactFrame(notPasskeys), notPasskeys);
+  assert.deepEqual(leakRules(entry(notPasskeys)), []);
+
   // A counter is not a credential, however it is written, and a credential key with no value has nothing to blank.
   const counters = {
     tokenUsage: { inputTokens: 12, cachedInputTokens: 2, outputTokens: 3, reasoningOutputTokens: 1, totalTokens: 15 },

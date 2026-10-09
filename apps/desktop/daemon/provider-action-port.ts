@@ -211,6 +211,8 @@ export type ProviderContinuationRepairRequest = {
   launchPolicy: unknown;
   model?: string | null;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  /** The agent, as its launch names it: a line this repair says is not said again by the agent's next launch. */
+  supervisorEntryId?: string;
 };
 export type ProviderContinuationRepairResult = {
   handle: ProviderActionHandle;
@@ -219,6 +221,11 @@ export type ProviderContinuationRepairResult = {
   replacementProviderContinuationId: string;
   /** Owner-visible lines of this repair, recorded in the agent's activity once the repair is done. */
   notices?: readonly string[];
+  /**
+   * The daemon calls this when the repair is committed and its lines, if it has any, are in the agent's
+   * activity. A provider that says a line once counts it as said only then.
+   */
+  noticesRecorded?: () => void;
 };
 export type ProviderFailureCode = "provider_continuation_missing";
 
