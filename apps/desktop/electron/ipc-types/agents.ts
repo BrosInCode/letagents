@@ -426,6 +426,13 @@ export interface DesktopSupervisorStateSnapshot {
   entries: DesktopSupervisorManifestEntry[];
 }
 
+/** Read-only service observation. Null state means unavailable, not an empty fleet. */
+export interface DesktopSupervisorServiceSnapshot {
+  status: DesktopSupervisorDaemonStatus | null;
+  state: DesktopSupervisorStateSnapshot | null;
+  observedAt: string;
+}
+
 /** One human retirement request. The renderer supplies the stable operation
  * id before dispatch so a completion event cannot race ahead of correlation. */
 export interface DesktopSupervisorRetirementInput {
