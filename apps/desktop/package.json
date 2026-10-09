@@ -41,10 +41,10 @@
     "smoke:opencode-contract": "npm run build:electron && node electron/scripts/opencode-runtime-contract-smoke.mjs",
     "smoke:claude-daemon-inbox": "node --import tsx electron/scripts/claude-daemon-inbox-spike.ts",
     "test": "npm run test:renderer && npm run test:electron && npm run test:daemon && npm run test:packaging",
-    "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
-    "test:electron": "node --import tsx --test --test-concurrency=1 --experimental-test-module-mocks electron/__tests__/*.test.ts",
+    "test:renderer": "node --import tsx --test --test-timeout=600000 renderer/__tests__/*.test.ts",
+    "test:electron": "node --import tsx --test --test-concurrency=1 --test-timeout=600000 --experimental-test-module-mocks electron/__tests__/*.test.ts",
     "test:daemon": "node --import tsx --test --test-timeout=180000 daemon/__tests__/*.test.ts",
-    "test:packaging": "node --test electron/scripts/*.test.mjs",
+    "test:packaging": "node --test --test-timeout=600000 electron/scripts/*.test.mjs",
     "lint:vue-components": "eslint \"renderer/src/**/*.vue\"",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
   },

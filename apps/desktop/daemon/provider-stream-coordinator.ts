@@ -226,6 +226,7 @@ export type ProviderStreamCoordinatorOptions = {
     entryId: string,
     event: DaemonActivityEvent,
     activityOnly: boolean,
+    position?: "exact" | "after_latest",
   ): Promise<void>;
   publishNativeActivity(
     entryId: string,
@@ -1347,8 +1348,9 @@ export class ProviderStreamCoordinator {
       }
       await this.options.serializeEntry(entryId, async () => {
         if (!this.isCurrentInstallation(installation)) return;
+        // Its position was read before this write was serialized; a notice may have taken it since.
         await this.options.appendNativeActivity(entryId, sanitizedEvent,
-          daemonInbox && this.typedDaemonInboxInstallations.has(installation));
+          daemonInbox && this.typedDaemonInboxInstallations.has(installation), "after_latest");
       });
       if (!this.isCurrentInstallation(installation)) return;
     }
