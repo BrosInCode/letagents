@@ -36,6 +36,7 @@
           :thread-messages="threadMessagesWithThreadOverrides"
           :message-namespace="messageNamespace"
           :local-agent-work="localAgentWork"
+          :typing-names="typingNames"
           :delivery-receipts-by-message="deliveryReceiptsByMessage"
           :delivery-recovery-available="deliveryRecoveryAvailable"
           :continuation-repair-available="continuationRepairAvailable"
@@ -272,6 +273,7 @@ import {
   threadReplies,
 } from "./room-chat/thread-utils";
 import { useAgentReasoningLauncher } from "./room-chat/useAgentReasoningLauncher";
+import { useRoomTypingNames } from "../../../composables/useRoomTyping";
 import { useRoomAttachments } from "./room-chat/useRoomAttachments";
 import { useRoomImages } from "./room-chat/useRoomImages";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -321,6 +323,7 @@ const props = defineProps<{
 }>();
 
 const { pushActionToast } = useDesktopActionToasts();
+const typingNames = useRoomTypingNames(computed(() => props.roomIdentifier ?? ""));
 const messagePins = useRoomMessagePins(computed(() => props.roomIdentifier ?? ""),
   (message) => pushActionToast(message, "error", 6_000));
 provideRoomMessagePins(messagePins);
