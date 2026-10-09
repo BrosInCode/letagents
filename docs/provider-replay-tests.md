@@ -64,6 +64,10 @@ own read of every distinct value in a new transcript is the final control.
   user-like key. A bare user name is not rewritten; the check reports it.
 - Workspace, temp folder, repository: `<workspace>`, `<tmp>`, `<repo>`.
 - Email addresses: `replay-user@example.com`. Tokens and keys: `<redacted>`.
+- A credential written into text loses its whole value: `name=value` to the
+  next space, a quoted value to its closing quote, an `Authorization` or
+  `Cookie` header to the end of its line. The check fails on a value that is
+  only partly redacted.
 - A key that names a credential: everything under it is blanked.
 - Ids (thread, turn, item, installation, account): one stable fake id each.
 - Your own MCP server names, also in tool names: `owner-setup-name-N`.
