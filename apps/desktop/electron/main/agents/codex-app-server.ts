@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import { codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
+import { codexHomeForSandboxedLaunch } from "./codex-agent-home.js";
 import { codexHomeHarnessOverrides, runCodexMcpListForLaunch } from "./codex-home-harness.js";
 import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
@@ -30,6 +31,8 @@ export interface CodexAppServerOutput {
 export interface CodexAppServerLaunch {
   pid: number | null;
   exited: Promise<CodexAppServerExit>;
+  /** The Codex home this launch was given in place of the owner's. */
+  codexHome?: string;
 }
 
 interface CodexAppServerLaunchOptions {
@@ -50,6 +53,14 @@ interface CodexAppServerLaunchOptions {
    * `configOverrides`: the process environment then carries none of it.
    */
   homeHarness?: boolean;
+  /**
+   * The agent's access level has a sandbox. A managed launch then gives Codex
+   * a home without the owner's saved command rules, which let a matching
+   * command out of the sandbox, or does not start.
+   */
+  sandboxed?: boolean;
+  /** The Codex home for this launch, in place of the owner's. A managed launch sets it. */
+  codexHome?: string;
 }
 
 function readyUrlFromServerUrl(serverUrl: string): string {
@@ -455,7 +466,7 @@ export function codexAppServerLaunchArgs(
  * never carry the owner's identity.
  */
 export function codexAppServerEnvironment(
-  options: Pick<CodexAppServerLaunchOptions, "env" | "commitEnvironment" | "homeHarness"> = {},
+  options: Pick<CodexAppServerLaunchOptions, "env" | "commitEnvironment" | "homeHarness" | "codexHome"> = {},
 ): { env: NodeJS.ProcessEnv; commitEnvironment: Record<string, string>; rental: boolean } {
   const runtimeEnv = desktopRuntimeEnvironment();
   const configuredEnv = options.env && Object.keys(options.env).length
@@ -481,8 +492,9 @@ export function codexAppServerEnvironment(
   // Codex hands its own environment to every hook, the notifier and every
   // command. With the owner's setup on those are the owner's programs, so the
   // room agent's coordinates stay out of it; the room's server has its own copy.
-  if (options.homeHarness === true && !rental) return { env: withoutRoomAuthority(env), commitEnvironment, rental };
-  return { env, commitEnvironment, rental };
+  const launchEnv = options.homeHarness === true && !rental ? withoutRoomAuthority(env) : env;
+  // Set last, so a rental's isolated environment carries it too.
+  return { env: options.codexHome ? { ...launchEnv, CODEX_HOME: options.codexHome } : launchEnv, commitEnvironment, rental };
 }
 
 /**
@@ -523,6 +535,7 @@ export function launchCodexAppServer(
   return {
     pid: child.pid ?? null,
     exited,
+    ...(options.codexHome ? { codexHome: options.codexHome } : {}),
   };
 }
 
@@ -537,14 +550,21 @@ export function launchCodexAppServer(
  * that would commit as the host's global Git identity commits as the owner's
  * GitHub noreply identity instead. When the owner has turned their own setup
  * on for this agent, only the extensions are left alone; the rest holds.
+ * At a sandboxed access level, with or without that setup, Codex gets a home
+ * without the owner's saved command rules.
  */
 export async function launchManagedCodexAppServer(
   serverUrl: string,
   codexBin: string,
   options: CodexAppServerLaunchOptions = {},
 ): Promise<CodexAppServerLaunch> {
-  const { env, rental } = codexAppServerEnvironment(options);
+  const { env: ownerHomeEnv, rental } = codexAppServerEnvironment({ ...options, codexHome: undefined });
   const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
+  // Decided before anything else is asked of Codex, so every listing below reads the home the launch will.
+  const codexHome = options.sandboxed === true
+    ? await codexHomeForSandboxedLaunch(codexBin, { cwd: trustedProjectPath, env: ownerHomeEnv }) ?? undefined
+    : undefined;
+  const env = codexHome ? { ...ownerHomeEnv, CODEX_HOME: codexHome } : ownerHomeEnv;
   // The launch's own directory and overrides, so the server list matches.
   const view = { cwd: trustedProjectPath, env, configOverrides: options.configOverrides ?? [] };
   const [isolation, commitEnvironment] = await Promise.all([
@@ -558,6 +578,7 @@ export async function launchManagedCodexAppServer(
     ...options,
     commitEnvironment,
     configOverrides: [...isolation, ...(options.configOverrides ?? [])],
+    codexHome,
   });
 }
 

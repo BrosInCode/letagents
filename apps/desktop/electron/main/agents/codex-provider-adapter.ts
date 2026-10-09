@@ -267,6 +267,8 @@ export interface CodexAdapterRpc {
   close(): void;
   onDisconnect(listener: () => void): () => void;
   currentConnectionId(): string | null;
+  /** The Codex home the app-server said it runs with. Null when it did not say. */
+  reportedCodexHome?(): string | null;
   listPendingRequests(): readonly RpcServerRequest[];
   /** Told of each server request as it arrives, before any observer of the pending set. */
   onRequest?(listener: (request: RpcServerRequest) => void): () => void;
@@ -296,7 +298,7 @@ export interface CodexProviderAdapterDependencies {
   launchServer(
     serverUrl: string,
     codexBin: string,
-    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean },
+    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean; sandboxed?: boolean },
   ): CodexAppServerLaunch | Promise<CodexAppServerLaunch>;
   waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
   createRpcClient(
@@ -503,8 +505,10 @@ function boundedLaunchContract(apiUrl: string, tools: string[]): string {
   const override = custodialMcpOverride("<sealed-entry>", "<workspace>", {
     ...boundedMcpEnvironment, LETAGENTS_API_URL: apiUrl,
   }, [...tools].sort());
+  // Version 2: a sandboxed agent runs with a Codex home that has no saved
+  // command rules. A process started before that is replaced when it is idle.
   return createHash("sha256").update(JSON.stringify({
-    version: 1, provider: "codex", runtimeTree: LETAGENTS_MCP_RUNTIME_TREE_SHA256, override,
+    version: 2, provider: "codex", runtimeTree: LETAGENTS_MCP_RUNTIME_TREE_SHA256, override,
   })).digest("hex");
 }
 
@@ -2268,6 +2272,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
       // The owner's own Codex setup stays on for this agent's app-server.
       ...(homeHarness ? { homeHarness: true } : {}),
+      // Every access level but an exact Full access has a sandbox the owner's saved command rules would open.
+      ...(policy.sandbox === "danger-full-access" ? {} : { sandboxed: true }),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {
@@ -2306,6 +2312,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
     try {
       await client.connect();
+      // A Codex that says it runs with another home than the one it was given has the owner's rules.
+      const reportedHome = launch.codexHome ? client.reportedCodexHome?.() : null;
+      if (reportedHome && !sameDirectory(reportedHome, launch.codexHome!)) {
+        throw new Error("Codex did not start with the home LetAgents gave it for this access level, so LetAgents stopped it.");
+      }
       await requireLetAgentsWorkplace(client);
       if (resumeRef && !this.resumeSupported) {
         throw new Error(
