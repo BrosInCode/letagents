@@ -290,6 +290,42 @@ test("provider health is fenced by daemon, execution, runtime, entry, and room i
   assert.equal(fixture.assess().checks[1]!.state, "unknown");
 });
 
+test("a stopped Cursor lane names Recover agent in plain words when that button is offered", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.provider = "cursor";
+  fixture.entry.providerPid = null;
+  fixture.entry.observedState = "idle";
+  fixture.entry.condition = "coordination_blocked";
+  fixture.entry.roomAgentState.inbox = { state: "blocked", pendingCount: 1, blockedByMessageId: "msg_1", detail: null };
+  const check = fixture.assess().checks[1]!;
+  assert.equal(check.action?.kind, "recover");
+  assert.equal(check.summary, "The agent needs a restart");
+  assert.equal(check.detail, "The agent stopped and LetAgents could not restart it by itself. Press Recover agent to start it again. It keeps its history and its files.");
+});
+
+test("an exact runtime that needs a choice points to Recovery options, not Recover agent", () => {
+  const fixture = diagnosticFixture();
+  fixture.daemon.capabilities.agentRuntimeRecoveryV2 = true;
+  fixture.entry.condition = "coordination_blocked";
+  fixture.entry.observedState = "recovering";
+  const check = fixture.assess().checks[1]!;
+  assert.equal(check.action?.kind, "recovery_options");
+  assert.equal(check.summary, "Choose how to restart the agent");
+  assert.match(check.detail, /Open Recovery options/);
+  assert.doesNotMatch(check.detail, /Recover agent/);
+});
+
+test("a coordination block with no restart action names no button", () => {
+  const fixture = diagnosticFixture();
+  fixture.daemon.capabilities.agentRuntimeRecoveryV2 = false;
+  fixture.entry.condition = "coordination_blocked";
+  fixture.entry.observedState = "recovering";
+  const check = fixture.assess().checks[1]!;
+  assert.equal(check.action, null);
+  assert.equal(check.summary, "The agent cannot restart yet");
+  assert.doesNotMatch(check.detail, /Recover agent|Recovery options/);
+});
+
 test("room credential recovery explains the running provider separately", () => {
   const fixture = diagnosticFixture();
   fixture.entry.observedState = "recovering";
