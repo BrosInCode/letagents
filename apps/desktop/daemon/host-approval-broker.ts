@@ -109,6 +109,7 @@ type Options = {
 const AUTOMATIC_REVIEW_TIMEOUT_MS = 10_000;
 const MAX_REQUESTS = 32;
 const MAX_PRESENTATION_BYTES = 24 * 1024;
+const SAVED_EDIT_WAITING = "You saved new settings for this agent. It keeps its old settings until it restarts. Your answer applies to this request only.";
 const CODEX_FILE_CHANGE_UNAVAILABLE = "Codex has requested file changes, but the actual edits are not available to inspect here. Decisions are disabled until those exact edits can be shown.";
 class ApprovalPreparationUnavailableError extends Error {}
 const id = z.string().min(1).max(256);
@@ -392,6 +393,8 @@ export class HostApprovalBroker {
             const expected = prepared.candidate.reference;
             if (!expected || prepared.candidate.status !== "pending" || prepared.approval.decision
               || prepared.approval.request.state !== "requested") continue;
+            // The saved mode is not the one this runtime runs, so no automatic answer is given for it.
+            if (prepared.savedEditWaiting) continue;
             lane.reviewed.add(native.native);
             if (await this.reviewWithin(lane, signal => reviewer.review({ entry, request: native.native, signal })) !== "allow") continue;
             prepared.assertCurrent();
@@ -513,7 +516,9 @@ export class HostApprovalBroker {
     const requestSha256 = digest(inspected);
     let prior = await this.options.store.readLatestExecutionApproval(requestId);
     if (prior?.decision && !prior.decision.dispatchId && !prior.decision.withdrawnBeforeSend) {
-      try { await this.options.store.validateExecutionApprovalAuthority(reference(prior), owned); }
+      // The owner's own recorded choice stays retryable while a saved edit waits for a restart.
+      const ownersChoice = prior.decision.actorId === this.options.hostActorId?.();
+      try { await this.options.store.validateExecutionApprovalAuthority(reference(prior), ownersChoice ? { ...owned, ownerAnswer: true } : owned); }
       catch (error) {
         if (error instanceof HostToolRuleRevokedError) {
           await this.options.store.withdrawHostToolApproval({ expected: reference(prior), decisionId: prior.decision.decisionId,
@@ -562,7 +567,8 @@ export class HostApprovalBroker {
     await assertAuthority();
     assertCurrent();
     return { owned, approval, projection: admittedProjection, sourceMessageId: head.source_message_id,
-      assertCurrent, fileChanges, entry, now, kind: correlated.kind };
+      assertCurrent, fileChanges, entry, now, kind: correlated.kind,
+      savedEditWaiting: configuration.config_revision > configuration.runtime_configuration_revision };
   }
 
   private async prepare(lane: Lane, native: ProviderPermissionRequest) {
@@ -572,7 +578,9 @@ export class HostApprovalBroker {
         || (native.provider === "codex" && native.native.method === "mcpServer/elicitation/request") ? "Run a tool"
         : prepared.kind === "command" ? "Run a command"
         : prepared.kind === "file_change" ? "Change files" : "Grant for this turn", prepared.fileChanges);
-    if (this.options.hostActorId?.()) {
+    // A saved tool rule would outlive the configuration it was chosen under, so none is offered while an
+    // edit waits. A card that already holds a recorded decision keeps the presentation it was made against.
+    if (this.options.hostActorId?.() && (!prepared.savedEditWaiting || prepared.approval.decision)) {
       const scope = await resolveHostToolScope(prepared.entry, native, await this.options.store.readHostToolContext(prepared.owned.workAttemptId)).catch(() => null);
       prepared.assertCurrent();
       if (scope) presentation.alwaysAllow = scope;
@@ -581,7 +589,8 @@ export class HostApprovalBroker {
     const candidate: HostApprovalCandidate = { reference: reference(result.approval), presentation,
       recordedDecision: recordedDecision(result.approval),
       status: now >= result.approval.request.expiresAtMs ? "unavailable" : status(result.approval),
-      detail: now >= result.approval.request.expiresAtMs ? "This approval has expired. No new decision can be sent from this card." : null };
+      detail: now >= result.approval.request.expiresAtMs ? "This approval has expired. No new decision can be sent from this card."
+        : result.savedEditWaiting ? SAVED_EDIT_WAITING : null };
     return { ...result, candidate };
   }
 
@@ -624,6 +633,8 @@ export class HostApprovalBroker {
       actorId: value.actorId,
       decision: value.decision === "allow_always" ? "allow_once" : value.decision,
       projectionSha256: value.projectionSha256,
+      // Allow once and Deny are the owner's consent for this one request. A saved tool rule is not.
+      ...(value.decision === "allow_always" ? {} : { byOwner: true as const }),
     }, async (prepared) => {
       if (!isDeepStrictEqual(prepared.expected, value.expected)
         || digest(prepared.presentation) !== value.projectionSha256) {
@@ -636,6 +647,7 @@ export class HostApprovalBroker {
       const selection = { ...value, decision: value.decision === "allow_always" ? "allow_once" as const : value.decision,
         authority: prepared.approvalAuthority, atMs: this.now() };
       if (value.decision === "allow_always") {
+        if (!prepared.presentation.alwaysAllow) throw new Error("This request has no reusable tool permission.");
         const scope = hostToolScopeSchema.parse(prepared.presentation.alwaysAllow);
         if (this.options.hostActorId?.() !== value.actorId) throw new Error("The permission owner changed.");
         return this.options.store.selectHostToolApproval(selection, { scope, create: true }, fence);
@@ -673,7 +685,7 @@ export class HostApprovalBroker {
         return {
           expected: prepared.candidate.reference,
           presentation: prepared.candidate.presentation,
-          approvalAuthority: prepared.owned,
+          approvalAuthority: input.byOwner ? { ...prepared.owned, ownerAnswer: true as const } : prepared.owned,
           approval: prepared.approval,
           handle: lane.handle,
           native,
