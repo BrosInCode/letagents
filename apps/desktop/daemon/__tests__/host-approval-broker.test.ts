@@ -14,6 +14,7 @@ import { WebSocketServer } from "ws";
 
 import type { HostApprovalReference } from "../../shared/host-approvals.js";
 import { HostApprovalBroker } from "../host-approval-broker.js";
+import { ApprovalJournalError } from "../execution-approval-journal.js";
 import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../../shared/execution-delegation-decision.mjs";
 import { EphemeralWorkspaceProvisioner } from "../ephemeral-workspace-provisioner.js";
 import { assertHostToolScope, hostToolScopeSchema } from "../host-tool-rules.js";
@@ -698,6 +699,185 @@ test("Claude completion arriving inside native dispatch is reconciled after the 
   } finally { await f.close(); }
 });
 
+// The owner saved a new permission mode while the running agent had an open
+// request. The runtime keeps the mode it started with until it restarts, so
+// the request is still the live runtime's request and still the owner's to answer.
+async function saveNewPermissionMode(f: Awaited<ReturnType<typeof fixture>>) {
+  const { generation } = await f.store.load();
+  const saved = await f.store.updateAgentConfiguration(generation, { agentId: "agent", expectedRevision: 1, model: null,
+    reasoningEffort: null, charter: "Help", permissionProfileId: "auto_review", providerLaunchPolicy: {} });
+  assert.equal(saved.outcome, "updated");
+  assert.deepEqual({ ...f.db.prepare("SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id='agent'").get() },
+    { config_revision: 2, runtime_configuration_revision: 1 }, "a save moves only the saved revision");
+}
+
+for (const choice of ["allow_once", "deny"] as const) {
+  test(`an open request stays answerable after the owner saves a new permission mode (${choice})`, async () => {
+    const f = await fixture("claude-code");
+    try {
+      const [candidate] = await f.broker.list("room");
+      assert.equal(candidate?.status, "pending");
+      await saveNewPermissionMode(f);
+      const [refreshed] = await f.broker.list("room");
+      assert.equal(refreshed?.status, "pending", "refreshing shows the same open card");
+      assert.deepEqual(refreshed.reference, candidate.reference);
+      assert.equal(await f.broker.decide(decision(refreshed, { decision: choice })), "decision_sent");
+      assert.deepEqual(f.sends, [choice === "deny" ? "reject" : "once"], "the answer reaches the provider");
+      assert.deepEqual({ ...f.db.prepare("SELECT decision,dispatch_state FROM execution_approval_decisions").get() },
+        { decision: choice, dispatch_state: "uncertain" });
+    } finally { await f.close(); }
+  });
+}
+
+test("a permission-mode save that lands while the answer is being sent does not stop it", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room");
+    f.state.afterBefore = () => saveNewPermissionMode(f);
+    assert.equal(await f.broker.decide(decision(candidate!)), "decision_sent");
+    assert.deepEqual(f.sends, ["once"]);
+  } finally { await f.close(); }
+});
+
+test("once a restart has applied the saved permission mode, the old runtime's request is no longer answerable", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room");
+    await saveNewPermissionMode(f);
+    // The restart: a new native birth that runs the saved configuration.
+    f.db.exec("UPDATE agent_configurations SET runtime_configuration_revision=2");
+    retireRuntime(f, "replaced");
+    const outcome = await f.broker.decide(decision(candidate!)).catch(() => "rejected");
+    assert.ok(outcome === "rejected" || outcome === "unavailable", `answered the old runtime's request: ${outcome}`);
+    assert.deepEqual(f.sends, []);
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM execution_approval_decisions").get()!.n, 0);
+  } finally { await f.close(); }
+});
+
+test("a request raised after a permission-mode save is admitted, because the runtime still runs its old mode", async () => {
+  const f = await fixture("claude-code");
+  try {
+    await saveNewPermissionMode(f);
+    f.emit([f.native, { provider: "claude-code", native: { id: "later",
+      request: { subtype: "can_use_tool", tool_name: "Bash", tool_use_id: "later-tool", input: { command: "ls" } } } }]);
+    const later = (await f.broker.list("room")).filter(item => item.status === "pending");
+    assert.equal(later.length, 2);
+    assert.equal(await f.broker.decide(decision(later[1]!, { decisionId: "later-decision" })), "decision_sent");
+    assert.deepEqual(f.sends, ["once"]);
+  } finally { await f.close(); }
+});
+
+test("a permission-mode save does not let a request be answered for another runtime revision", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room");
+    await saveNewPermissionMode(f);
+    const selectHostApproval = f.store.selectHostApproval.bind(f.store);
+    let seen!: Parameters<typeof selectHostApproval>[0];
+    f.store.selectHostApproval = (input, fence) => { seen = input; return selectHostApproval(input, fence); };
+    await f.broker.decide(decision(candidate!));
+    const rejects = (authority: typeof seen.authority) => assert.rejects(
+      f.store.validateExecutionApprovalAuthority(seen.expected, authority),
+      error => error instanceof ApprovalJournalError && error.code === "missing_turn");
+    await f.store.validateExecutionApprovalAuthority(seen.expected, seen.authority);
+    // Only the owner's own answer may proceed while a saved edit waits. A decision that
+    // depends on the configuration in force (automatic, delegated, a saved rule) may not.
+    const { ownerAnswer: _owner, ...notTheOwners } = seen.authority;
+    assert.equal(_owner, true);
+    await rejects(notTheOwners);
+    await rejects({ ...seen.authority, configurationRevision: 2 }); // Authority from a runtime that never started.
+    f.db.exec("UPDATE agent_configurations SET runtime_configuration_revision=2 WHERE agent_id='agent'");
+    await rejects(seen.authority); // A runtime already replaced at the saved revision.
+    f.db.exec("UPDATE agent_configurations SET config_revision=1 WHERE agent_id='agent'");
+    await rejects({ ...seen.authority, configurationRevision: 2 }); // A saved revision can never trail the applied one.
+  } finally { await f.close(); }
+});
+
+test("an automatic review that ends after a permission-mode save records nothing, and the owner can still answer", async () => {
+  const review = heldReview();
+  const f = await fixture("claude-code", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => review.reviewed.length === 1, "the review to start");
+    await saveNewPermissionMode(f);
+    review.answers[0]!("allow");
+    await eventually(async () => (await f.broker.list("room")).some(item => item.status === "pending"), "the card to return to its owner");
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM execution_approval_decisions").get()!.n, 0, "the automatic allow was refused");
+    assert.deepEqual(f.sends, []);
+    const [card] = await f.broker.list("room");
+    assert.equal(await f.broker.decide(decision(card!, { actorId: "host-owner" })), "decision_sent");
+    assert.deepEqual(f.sends, ["once"]);
+  } finally { review.answers.forEach(answer => answer("ask")); await f.close(); }
+});
+
+test("no automatic review starts for a saved mode the runtime is not running yet", async () => {
+  const review = reviewer("ask");
+  const f = await fixture("claude-code", { automaticReview: review.automaticReview });
+  try {
+    await eventually(() => review.reviewed.length === 1, "the first review");
+    await saveNewPermissionMode(f);
+    f.emit([f.native, { provider: "claude-code", native: { id: "later",
+      request: { subtype: "can_use_tool", tool_name: "Bash", tool_use_id: "later-tool", input: { command: "ls" } } } }]);
+    await eventually(async () => (await f.broker.list("room")).filter(item => item.status === "pending").length === 2, "both cards for the owner");
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(review.reviewed.length, 1, "the new request was not reviewed under a mode that is not in force");
+  } finally { await f.close(); }
+});
+
+test("Always allow is not offered or accepted while a saved edit waits, and Allow once still works", async () => {
+  const f = await savedRuleFixture("claude-code");
+  try {
+    const [before] = await f.broker.list("room");
+    assert.ok(before!.presentation.alwaysAllow, "offered before the save");
+    await saveNewPermissionMode(f);
+    const [after] = await f.broker.list("room");
+    assert.equal(after!.status, "pending");
+    assert.equal(after!.presentation.alwaysAllow, undefined, "no button for a rule that would outlive this configuration");
+    assert.match(after!.detail!, /saved new settings/);
+    await assert.rejects(f.broker.decide({ ...decision(before!), decision: "allow_always" }), /displayed approval request has changed/);
+    await assert.rejects(f.broker.decide({ ...decision(after!), decision: "allow_always" }), /no reusable tool permission/);
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM execution_approval_decisions").get()!.n, 0);
+    assert.deepEqual(await f.broker.listToolRules({ agentId: "agent" }), []);
+    assert.deepEqual(f.sends, []);
+    assert.equal(await f.broker.decide(decision(after!)), "decision_sent");
+    assert.deepEqual(f.sends, ["once"]);
+  } finally { await f.close(); }
+});
+
+test("a saved tool rule does not answer a request while an edit waits", async () => {
+  const f = await savedRuleFixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room");
+    await f.broker.decide({ ...decision(candidate!), decision: "allow_always" });
+    const [rule] = await f.broker.listToolRules({ agentId: "agent" });
+    assert.ok(rule);
+    await saveNewPermissionMode(f);
+    f.reinstall();
+    f.emit([nextPermission(f.native, "after-save")]);
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.deepEqual(f.sends, ["once"], "only the first, owner-chosen request was answered");
+    const [card] = await f.broker.list("room");
+    assert.equal(card!.status, "pending", "the owner is asked instead");
+    assert.equal(await f.broker.decide({ ...decision(card!), decisionId: "owner-after-save", decision: "deny" }), "decision_sent");
+    assert.deepEqual(f.sends, ["once", "reject"]);
+  } finally { await f.close(); }
+});
+
+test("an owner's recorded choice that was not sent stays retryable while a saved edit waits", async () => {
+  const f = await savedRuleFixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room");
+    f.state.failBefore = true;
+    await assert.rejects(f.broker.decide(decision(candidate!)), /recorded but could not be sent/);
+    f.state.failBefore = false;
+    // A saved edit that leaves the card's presentation alone: the same choice can be retried.
+    f.db.exec("UPDATE agent_configurations SET config_revision=2");
+    const [again] = await f.broker.list("room");
+    assert.equal(again?.status, "decision_recorded", again?.detail ?? "");
+    assert.equal(await f.broker.decide(decision(again!)), "decision_sent");
+    assert.deepEqual(f.sends, ["once"]);
+  } finally { await f.close(); }
+});
+
 test("Claude generic failure cannot confirm a decision, and a retired runtime cannot confirm success", async () => {
   for (const scenario of ["allow", "deny", "retired"] as const) {
     const f = await fixture("claude-code");
@@ -721,7 +901,8 @@ test("Claude generic failure cannot confirm a decision, and a retired runtime ca
 test("host approval final synchronous native fence catches state changes after async dispatch admission", async () => {
   for (const mutate of [
     (f: Awaited<ReturnType<typeof fixture>>) => f.db.exec("UPDATE agent_launch_intents SET desired_state='paused'"),
-    (f: Awaited<ReturnType<typeof fixture>>) => f.db.exec("UPDATE agent_configurations SET config_revision=2"),
+    // A runtime replaced at a newer configuration is another runtime. A save alone is not (see the permission-mode tests).
+    (f: Awaited<ReturnType<typeof fixture>>) => f.db.exec("UPDATE agent_configurations SET config_revision=2,runtime_configuration_revision=2"),
     (f: Awaited<ReturnType<typeof fixture>>) => f.db.exec("UPDATE supervised_agent_inbox SET outcome='{}'"),
     (f: Awaited<ReturnType<typeof fixture>>) => { f.state.current = false; },
   ]) {
@@ -2233,14 +2414,15 @@ for (const provider of ["codex", "open-model", "claude-code"] as const) {
       assert.deepEqual(applied.sends, ["once"]);
     } finally { await applied.close(); }
 
-    // A saved change the runtime has not applied yet still cannot be answered.
+    // A saved change the runtime has not applied yet does not change what this runtime asked.
     const unapplied = await fixture(provider);
     try {
       unapplied.db.exec("UPDATE agent_configurations SET config_revision=3, runtime_configuration_revision=2");
       const [candidate] = await unapplied.broker.list("room");
-      assert.equal(candidate?.status, "unavailable");
-      assert.equal(candidate.reference, null);
-      assert.deepEqual(unapplied.sends, []);
+      assert.equal(candidate?.status, "pending", candidate?.detail ?? "");
+      assert.ok(candidate.reference, "the request is journaled");
+      assert.equal(await unapplied.broker.decide(decision(candidate)), provider === "open-model" ? "resolved" : "decision_sent");
+      assert.deepEqual(unapplied.sends, ["once"]);
     } finally { await unapplied.close(); }
   });
 }
