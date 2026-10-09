@@ -986,6 +986,8 @@ function fakeChild(): ChildProcess {
 
 test("service health snapshot never starts a daemon and reads only matching bounded state", async () => {
   const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
   const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
     spawnDaemon: () => { assert.fail("Troubleshooting must not start the daemon"); },
     now: () => new Date("2026-10-09T12:00:00.000Z") });
@@ -1016,7 +1018,11 @@ test("service health snapshot never starts a daemon and reads only matching boun
       assert.equal(snapshot.state, null);
       assert.deepEqual(old.requests.map(request => request.method), ["daemon.negotiate"], "no handoff or unsupported state read");
     } finally { await closeServer(old.server, env.socketPath); }
-  } finally { await env.cleanup(); }
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
 });
 
 function fakeDaemonProcessIdentity(
