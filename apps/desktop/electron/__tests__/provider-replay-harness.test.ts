@@ -339,8 +339,8 @@ test("redaction reads a string that is JSON as data, so the keys inside it count
   const redactor = new ReplayRedactor(CONTEXT);
   const inside = { accessToken: "opaque-value", password: "hunter2", accountId: "acct-77", userId: 4411, note: "kept" };
   const frame = { id: 4, result: { contents: [{ uri: "x://y", text: JSON.stringify(inside) }] } };
-  // Found as text (`"password":"…"` in a string) and as data (the keys of the JSON inside it).
-  assert.deepEqual(leakRules(JSON.stringify({ type: "emit_inbound", frame })), ["credential-key", "credential-text", "identity-key"],
+  // Found as data: the keys of the JSON inside the string. A string that is JSON is not also read as free text.
+  assert.deepEqual(leakRules(JSON.stringify({ type: "emit_inbound", frame })), ["credential-key", "identity-key"],
     "the leak check reads the inner JSON too");
   const redacted = redactor.redactFrame(frame);
   assert.deepEqual(JSON.parse(((redacted.result as JsonObject).contents as JsonObject[])[0]!.text as string),
@@ -350,6 +350,73 @@ test("redaction reads a string that is JSON as data, so the keys inside it count
   // A JSON string with nothing to redact is not rewritten, whatever its spacing.
   const spaced = '{\n  "format": 1,\n  "tools": [ "send_message" ]\n}';
   assert.deepEqual(redactor.redactFrame({ result: { text: spaced } }), { result: { text: spaced } });
+});
+
+test("a string that is JSON is not cut by the rule for a credential written into text", () => {
+  // That rule reads a value with no quotes to the next space. Compact JSON has no space after `null`,
+  // so the rule read on through the JSON and replaced what it read.
+  const page = JSON.stringify({ next_page_token: null, items: [{ title: "read me" }, { title: "second" }] });
+  const readiness = JSON.stringify({ format: 1, profile: "supervised_room_turn", token: null, tools: ["claim_task", "get_board"], note: "ready to work" });
+  for (const text of [page, readiness]) {
+    const frame = { id: 4, result: { contents: [{ uri: "x://y", text }] } };
+    assert.deepEqual(new ReplayRedactor(CONTEXT).redactFrame(frame), frame, text);
+    assert.deepEqual(leakRules(JSON.stringify({ type: "emit_inbound", frame })), [], text);
+  }
+
+  // A credential in such a string is still found and blanked, as data, and the rest of the JSON stays.
+  const withCursor = JSON.stringify({ next_page_token: "opaque cursor", items: [{ title: "read me" }] });
+  const frame = { id: 5, result: { text: withCursor } };
+  assert.deepEqual(leakRules(JSON.stringify({ type: "emit_inbound", frame })), ["credential-key"]);
+  const redacted = new ReplayRedactor(CONTEXT).redactFrame(frame);
+  assert.deepEqual(JSON.parse((redacted.result as JsonObject).text as string),
+    { next_page_token: REPLAY_REDACTED, items: [{ title: "read me" }] });
+  assert.deepEqual(leakRules(JSON.stringify({ type: "emit_inbound", frame: redacted })), []);
+
+  // Text that only holds JSON is free text: the rule reads the quoted value there, to its closing quote.
+  const inText = { id: 6, result: { text: `the page was ${withCursor}` } };
+  assert.deepEqual(leakRules(JSON.stringify({ type: "emit_inbound", frame: inText })), ["credential-text"]);
+  assert.deepEqual(new ReplayRedactor(CONTEXT).redactFrame(inText),
+    { id: 6, result: { text: `the page was {"next_page_token":"${REPLAY_REDACTED}","items":[{"title":"read me"}]}` } });
+});
+
+test("a credential key written as one word is blanked, as a frame key and inside a string that is JSON; a counter is not", () => {
+  // Each is two words that name a credential. Written with a separator or a capital they were always found.
+  const names = ["authtoken", "accesstoken", "refreshtoken", "idtoken", "sessiontoken", "bearertoken", "accesskey", "privatekey", "clientsecret"];
+  // Any letter case: as it is, all capitals, one capital, and capitals where no word starts.
+  const cased = (name: string) => [name, name.toUpperCase(), name[0]!.toUpperCase() + name.slice(1),
+    [...name].map((letter, index) => (index % 2 ? letter.toUpperCase() : letter)).join("")];
+  const entry = (frame: JsonObject) => JSON.stringify({ type: "emit_inbound", frame });
+  for (const key of names.flatMap(cased)) {
+    const frame = { method: "note", params: { [key]: "opaque value", note: "kept" } };
+    assert.deepEqual(leakRules(entry(frame)), ["credential-key"], `${key}: reported as a frame key`);
+    const redacted = new ReplayRedactor(CONTEXT).redactFrame(frame);
+    assert.deepEqual(redacted, { method: "note", params: { [key]: REPLAY_REDACTED, note: "kept" } }, key);
+    assert.deepEqual(leakRules(entry(redacted)), [], key);
+
+    // A tool result whose text is JSON. The text is read as data, so only the key can find the credential.
+    const inside = { id: 4, result: { contents: [{ uri: "x://y", text: JSON.stringify({ [key]: "opaque value", items: [{ title: "read me" }] }) }] } };
+    assert.deepEqual(leakRules(entry(inside)), ["credential-key"], `${key}: reported inside a string that is JSON`);
+    const redactedInside = new ReplayRedactor(CONTEXT).redactFrame(inside);
+    assert.deepEqual(JSON.parse(((redactedInside.result as JsonObject).contents as JsonObject[])[0]!.text as string),
+      { [key]: REPLAY_REDACTED, items: [{ title: "read me" }] }, key);
+    assert.deepEqual(leakRules(entry(redactedInside)), [], key);
+  }
+
+  // A counter is not a credential, however it is written, and a credential key with no value has nothing to blank.
+  const counters = {
+    tokenUsage: { inputTokens: 12, cachedInputTokens: 2, outputTokens: 3, reasoningOutputTokens: 1, totalTokens: 15 },
+    maxTokens: 4096, tokenType: "example", token_count: 2, tokens: ["a", "b"],
+    tokenusage: 1, inputtokens: 12, outputtokens: 3, reasoningoutputtokens: 1, totaltokens: 15, maxtokens: 4096, MAXTOKENS: 4096,
+    accessKeyboard: "kept", idTokenizer: "kept", keyring: "kept",
+    next_page_token: null, nextPageToken: null, authtoken: null, sessiontoken: "",
+  };
+  for (const frame of [
+    { method: "note", params: counters },
+    { id: 5, result: { contents: [{ uri: "x://y", text: JSON.stringify(counters) }] } },
+  ] as JsonObject[]) {
+    assert.deepEqual(new ReplayRedactor(CONTEXT).redactFrame(frame), frame);
+    assert.deepEqual(leakRules(entry(frame)), []);
+  }
 });
 
 test("redaction blanks everything under a credential key, whatever its type", () => {
@@ -446,6 +513,102 @@ test("redaction knows more credential shapes: cloud keys, long hex, and credenti
     },
   });
   assert.deepEqual(leakRules(JSON.stringify(redacted)), []);
+});
+
+/** The last part of a secret: the part a rule that stops early leaves in the text. */
+const MARK = "LEFTOVER";
+
+test("a credential written into text is redacted whole, and one that is partly redacted is reported", () => {
+  const basic = Buffer.from("ada:open sesame").toString("base64");
+  // `left` is what redaction once wrote for `text`: a placeholder, with the rest of the secret beside it.
+  type Sample = { text: string; redacted: string; left?: string };
+  const probes: Sample[] = [
+    // A value with no quotes ends at a space, not at a comma.
+    { text: `password=ab,${MARK}`, redacted: `password=${REPLAY_REDACTED}`, left: `password=${REPLAY_REDACTED},${MARK}` },
+    // A quoted value ends at its closing quote, not at its first space.
+    { text: `password: "correct horse ${MARK}"`, redacted: `password: "${REPLAY_REDACTED}"`, left: `password: "${REPLAY_REDACTED} horse ${MARK}"` },
+    // An authorization value is redacted after any scheme, not only after `Bearer`.
+    { text: `Authorization: ApiKey ${MARK}`, redacted: `Authorization: ApiKey ${REPLAY_REDACTED}`, left: `Authorization: ${REPLAY_REDACTED} ${MARK}` },
+    { text: `Authorization: Basic ${basic}`, redacted: `Authorization: Basic ${REPLAY_REDACTED}` },
+    // A value may start with `<`.
+    { text: `api_key=<${MARK}>`, redacted: `api_key=${REPLAY_REDACTED}` },
+  ];
+  // `String.raw` keeps each backslash as it is written here.
+  const others: Sample[] = [
+    // A scheme that is not a known one is not kept: it can be the first word of a secret.
+    { text: `Authorization: ab ${MARK}`, redacted: `Authorization: ${REPLAY_REDACTED}` },
+    {
+      text: String.raw`"authorization": "Digest realm=\"api\", response=\"${MARK}\""`,
+      redacted: `"authorization": "Digest ${REPLAY_REDACTED}"`,
+    },
+    // A header ends with its line: its value holds spaces, commas and semicolons.
+    { text: `Cookie: session=abc; theme=${MARK}\nAccept: text/html`, redacted: `Cookie: ${REPLAY_REDACTED}\nAccept: text/html` },
+    // Quotes: an escaped quote inside, single quotes, and one that is never closed.
+    { text: String.raw`password: "a \" ${MARK}" mode=fast`, redacted: `password: "${REPLAY_REDACTED}" mode=fast` },
+    { text: `token='a b ${MARK}' next`, redacted: `token='${REPLAY_REDACTED}' next` },
+    { text: `secret: "a b ${MARK}`, redacted: `secret: "${REPLAY_REDACTED}` },
+    // A string inside a string: `\"` opens and closes the value, and `\\\"` is a quote inside it.
+    {
+      text: String.raw`sent {\"password\":\"a \\\" ${MARK}\",\"mode\":\"fast\"} ok`,
+      redacted: String.raw`sent {\"password\":\"${REPLAY_REDACTED}\",\"mode\":\"fast\"} ok`,
+    },
+    // A URL query value ends at `&` or `#`, whatever the name before the credential word.
+    { text: `https://x.example.test/cb?code=ab<${MARK}>&state=1#top`, redacted: `https://x.example.test/cb?code=${REPLAY_REDACTED}&state=1#top` },
+    { text: `https://x.example.test/cb?my_token=ab,${MARK}&page=2`, redacted: `https://x.example.test/cb?my_token=${REPLAY_REDACTED}&page=2` },
+  ];
+  const entry = (text: string) => JSON.stringify({ type: "emit_inbound", frame: { method: "note", params: { text } } });
+  for (const { text, redacted, left } of [...probes, ...others]) {
+    assert.ok(text.includes(MARK) || text.includes(basic), text);
+    assert.equal(new ReplayRedactor(CONTEXT).redactText(text), redacted, text);
+    assert.equal(redacted.includes(MARK) || redacted.includes(basic), false, text);
+    assert.deepEqual(leakRules(entry(text)), ["credential-text"], `${text}: reported before redaction`);
+    assert.deepEqual(leakRules(entry(redacted)), [], `${text}: passed after redaction`);
+    // What redaction wrote is not redacted again.
+    assert.equal(new ReplayRedactor(CONTEXT).redactText(redacted), redacted, text);
+    if (left === undefined) continue;
+    // The check no longer passes text that only looks finished, and redaction finishes it.
+    assert.deepEqual(leakRules(entry(left)), ["credential-text"], `${left}: a partly redacted value is reported`);
+    const finished = new ReplayRedactor(CONTEXT).redactText(left);
+    assert.equal(finished.includes(MARK), false, left);
+    assert.deepEqual(leakRules(entry(finished)), [], left);
+  }
+});
+
+test("the leak check accepts a numeric id that an account frame blanked to 0", () => {
+  const frame = { method: "account/updated", params: { userId: 4411, planType: "pro" } };
+  const redacted = new ReplayRedactor(CONTEXT).redactFrame(frame);
+  assert.deepEqual(redacted, { method: "account/updated", params: { userId: 0, planType: REPLAY_REDACTED } });
+  assert.deepEqual(leakRules(JSON.stringify({ type: "emit_inbound", frame: redacted })), []);
+  // A numeric id that nothing blanked is still a real one.
+  assert.deepEqual(leakRules(JSON.stringify({ type: "emit_inbound", frame: { method: "thread/started", params: { userId: 4411 } } })), ["identity-key"]);
+});
+
+test("the leak check sees a long hex run after `0x`, and a temp folder path", () => {
+  const frame = { method: "note", params: { digest: `0x${sampleHexSecret}`, same: sampleHexSecret, scratch: "/var/folders/xy/T/other" } };
+  assert.deepEqual(leakRules(JSON.stringify(frame)), ["long-hex", "temp-directory"]);
+  assert.deepEqual(leakRules(JSON.stringify({ params: { digest: `0x${sampleHexSecret}` } })), ["long-hex"]);
+  assert.deepEqual(leakRules(JSON.stringify({ params: { scratch: "/private/var/folders/xy/T" } })), ["temp-directory"]);
+  const redacted = new ReplayRedactor(CONTEXT).redactFrame(frame);
+  // The `0x` stays, and the digits get the fake that the same digits get without it.
+  assert.deepEqual(redacted, { method: "note", params: { digest: "0x<redacted-hex-1>", same: "<redacted-hex-1>", scratch: "<tmp>/other" } });
+  assert.deepEqual(leakRules(JSON.stringify(redacted)), []);
+});
+
+test("a long run with no `@` is read once, not once for each of its characters", () => {
+  // Each character of a run once started a new email match that read to the end of the run:
+  // 320 KB took most of a minute. Read once, it takes a few milliseconds, so the bound is loose.
+  // The last one is not a run: it is as much text, made of credentials, for the rule that reads each to its end.
+  const texts = ["a".repeat(320_000), "0123456789abcdef".repeat(20_000), `${"a-b.c_d%e+".repeat(32_000)} end`, "token=x ".repeat(40_000)];
+  const startedAt = performance.now();
+  for (const text of texts) {
+    new ReplayRedactor(CONTEXT).redactText(text);
+    findReplayLeaks(JSON.stringify({ type: "emit_inbound", frame: { params: { text } } }), CONTEXT);
+  }
+  const elapsedMs = performance.now() - startedAt;
+  assert.ok(elapsedMs < 10_000, `four texts of 320 KB took ${Math.round(elapsedMs)} ms`);
+  // The rule itself is unchanged: an address is found wherever it starts.
+  assert.equal(new ReplayRedactor(CONTEXT).redactText("mail grace.hopper+notes@example.org, (x.y@example.org)"),
+    `mail ${REPLAY_EMAIL}, (${REPLAY_EMAIL})`);
 });
 
 test("redaction replaces an owner's server name inside an MCP tool name", () => {
