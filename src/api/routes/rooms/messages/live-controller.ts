@@ -4,6 +4,7 @@ import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identi
 import { beginRoomAgentDelivery } from "../../../rooms/agent-delivery.js";
 import { acquireLiveRoomAuthorization } from "../../../rooms/live-authorization.js";
 import {
+  liveRecheckIsFreshAtEntry,
   reauthorizeGitRoomParticipant,
 } from "../../../rooms/access.js";
 import {
@@ -69,6 +70,11 @@ export async function openLiveRoomDeliveryController(input: {
     roomId: input.project.id,
     accessRoomName: input.accessRoomName,
     deliveryCredentialFence: activationIdentity?.credential_fence,
+    // A delivery credential is validated per connection by its first
+    // checkCredential, so only connections without one (app sessions,
+    // anonymous readers, owner tokens with no agent identity) whose entry
+    // check was exact skip the first recheck.
+    freshAtEntry: !delivery && liveRecheckIsFreshAtEntry(input.req),
     authorize: async () => {
       // A bridge-loss marker may stand in for a dropped exact credential
       // retirement. Validate the durable delivery fence before any later body;
