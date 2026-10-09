@@ -6,6 +6,8 @@ import {
   configurationDraft,
   configurationHasRuntimeLag,
   isStaleDaemonGenerationError,
+  permissionPendingBadge,
+  permissionTimingNote,
   recoveredRoomMoveState,
   roomMovePresentation,
   settleConfigurationAlreadyApplied,
@@ -178,4 +180,27 @@ test("durable room-move discovery restores nonterminal work and clears completed
   assert.equal(completed.resource.move, null);
   assert.equal(completed.shouldPoll, false);
   assert.equal(completed.refreshAgents, true);
+});
+
+test("a saved access level that has not reached the running agent is marked, and said in a sentence that tells when it will", () => {
+  const badge = permissionPendingBadge("daemon_inbox");
+  assert.equal(badge.label, "Settings pending");
+  assert.equal(badge.title, "You changed this agent's access level. It applies when the current turn ends, or when the agent restarts.");
+  for (const mode of ["mcp_polling", "desktop_events", undefined]) {
+    assert.equal(permissionPendingBadge(mode).label, "Settings pending");
+    assert.equal(permissionPendingBadge(mode).title, "You changed this agent's access level. It applies the next time the agent starts.", String(mode));
+  }
+  // The label stays short so the agent's name keeps its room.
+  assert.ok(badge.label.length <= 16);
+  // An agent that LetAgents delivers messages to switches as soon as it is idle, and a turn that is running is not stopped.
+  assert.equal(permissionTimingNote("daemon_inbox", false),
+    "Choose what the agent can access. A new level applies as soon as the agent is idle. A turn that is running is not stopped.");
+  assert.equal(permissionTimingNote("daemon_inbox", true),
+    "Your new access level is saved. The agent switches to it when its current turn ends, or when it restarts.");
+  // Any other agent gets it when it starts again, and nothing promises more.
+  for (const mode of ["mcp_polling", "desktop_events", undefined]) {
+    assert.equal(permissionTimingNote(mode, false), "Choose what the agent can access the next time it starts.");
+    assert.equal(permissionTimingNote(mode, true), "Your new access level is saved. The agent gets it the next time it starts.");
+  }
+  assert.equal(permissionTimingNote("daemon_inbox"), permissionTimingNote("daemon_inbox", false));
 });

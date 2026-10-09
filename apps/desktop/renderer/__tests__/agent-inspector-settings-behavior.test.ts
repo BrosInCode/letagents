@@ -1671,3 +1671,49 @@ test("the inspector header marks an agent that is set to use the owner's own set
     mounted.app.unmount();
   }
 });
+
+test("the inspector header marks an agent whose saved access level has not reached it yet", async () => {
+  for (const [permissionPending, shown] of [[true, true], [undefined, false]] as const) {
+    const state = troubleshootingProps();
+    Object.assign(state.projection.entry, {
+      displayName: "QuartzMeadow", createdBy: "owner", charter: "Notes", provider: "open-model", deliveryMode: "daemon_inbox",
+      observedState: "working", condition: "none", runtimeGenerationId: "runtime_a",
+      providerContinuationId: "continuation_a", workAttemptId: "attempt_a", lastTerminal: null,
+      turnControl: null, lastTurnControlSequence: 0, ...(permissionPending ? { permissionPending } : {}),
+    });
+    state.projection.entry.roomAgentState.task = { state: "none", taskId: null, title: null };
+    state.projection = projectAgentInspector(state.projection.entry, { roomId: "room_a" });
+    const mounted = mount(AgentInspectorSurface, {
+      ...state, compact: false, initialTab: "overview", actionState: null, requestVersion: 1, selectedWorkSourceMessageId: null,
+      workArtifacts: [], settingsResource: readyResource, roomMoveResource: noMove, roomMoveAvailable: false,
+      providers: [], destinations: [], settingsConflict: false, liveFeed: { events: [], ended: false, droppedEvents: 0 },
+    });
+    await settle();
+    const badge = descendants(mounted.root).find((node) => node.props["data-testid"] === "agent-inspector-settings-pending");
+    if (shown) {
+      assert.ok(badge);
+      assert.equal(textContent(badge), "Settings pending");
+      assert.equal(badge.props.title, "You changed this agent's access level. It applies when the current turn ends, or when the agent restarts.");
+    } else {
+      assert.equal(badge, undefined, "an agent that runs with the saved level carries no mark");
+    }
+    mounted.app.unmount();
+  }
+});
+
+test("the Permissions section says when a new access level reaches the agent, and says it is waiting once it is saved", async () => {
+  const timing = (root: HostNode) => descendants(root).find((node) => node.props["data-testid"] === "agent-inspector-permission-timing")!;
+  for (const [props, text, tone] of [
+    [{ deliveryMode: "daemon_inbox" }, "Choose what the agent can access. A new level applies as soon as the agent is idle. A turn that is running is not stopped.", undefined],
+    [{ deliveryMode: "daemon_inbox", permissionPending: true }, "Your new access level is saved. The agent switches to it when its current turn ends, or when it restarts.", "warning"],
+    [{ deliveryMode: "mcp_polling" }, "Choose what the agent can access the next time it starts.", undefined],
+    [{ deliveryMode: "mcp_polling", permissionPending: true }, "Your new access level is saved. The agent gets it the next time it starts.", "warning"],
+    [{}, "Choose what the agent can access the next time it starts.", undefined],
+  ] as const) {
+    const mounted = mount(AgentInspectorSettings, settingsProps(props));
+    await settle();
+    assert.equal(textContent(timing(mounted.root)), text, JSON.stringify(props));
+    assert.equal(timing(mounted.root).props["data-tone"], tone, JSON.stringify(props));
+    mounted.app.unmount();
+  }
+});
