@@ -633,8 +633,14 @@ export class HostApprovalBroker {
       decision: value.decision === "allow_always" ? "allow_once" : value.decision,
       projectionSha256: value.projectionSha256,
     }, async (prepared) => {
+      // A retry of a choice already recorded is judged against the digest that choice was made on. The card
+      // may differ from it now (a saved mode changes the tool scope inside the card) while the request does not.
+      const recorded = prepared.approval.decision;
+      const retry = value.decision !== "allow_always" && recorded?.decisionId === value.decisionId
+        && recorded.actorId === value.actorId && recorded.decision === value.decision
+        && recorded.projectionSha256 === value.projectionSha256;
       if (!isDeepStrictEqual(prepared.expected, value.expected)
-        || digest(prepared.presentation) !== value.projectionSha256) {
+        || (!retry && digest(prepared.presentation) !== value.projectionSha256)) {
         throw new Error("The displayed approval request has changed.");
       }
       const fence = (commit: () => Promise<void>) => this.options.fenceCommit(async () => {

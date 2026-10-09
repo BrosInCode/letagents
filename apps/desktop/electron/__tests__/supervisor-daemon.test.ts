@@ -162,7 +162,7 @@ test("host approval client authenticates raw presentations and restores exact re
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 
-test("host approval client rejects stale recorded hashes, foreign actors, malformed candidates, and renderer authority fields", async () => {
+test("host approval client rejects a missing recorded hash, foreign actors, malformed candidates, and renderer authority fields", async () => {
   const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
   const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
   const verifier = new HostApprovalVerifier(7, signer.publicKey); const base = hostApprovalCandidate();
@@ -185,7 +185,7 @@ test("host approval client rejects stale recorded hashes, foreign actors, malfor
     }
     const recorded = { decisionId: "durable-decision", actorId: `host-${verifier.challenge()!.keyFingerprint}`,
       decision: "allow_once" as const, projectionSha256: createHash("sha256").update(JSON.stringify(base.presentation)).digest("hex") };
-    for (const decision of [null, { ...recorded, projectionSha256: null }, { ...recorded, projectionSha256: "b".repeat(64) }, { ...recorded, actorId: "other-host" }]) {
+    for (const decision of [null, { ...recorded, projectionSha256: null }, { ...recorded, actorId: "other-host" }]) {
       candidates = [{ ...base, status: "decision_recorded", recordedDecision: decision }];
       const snapshot = await client.listHostApprovals("room_1"); assert.equal(snapshot.available, true);
       assert.equal(snapshot.approvals[0]!.status, "unavailable"); assert.equal(snapshot.approvals[0]!.retryDecision, null);
@@ -217,6 +217,37 @@ test("host approval client rejects stale recorded hashes, foreign actors, malfor
       await assert.rejects(client.decideHostApproval({ id: prior.id, decision: "allow_once" }), /Refresh/);
     }
     assert.equal(decisions, 0);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval client retries a recorded choice against the digest it was made on when the card has moved on", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey); const candidate = hostApprovalCandidate();
+  // A saved mode changes the tool scope inside the card, so its digest is no longer the one the choice was made on.
+  const decidedOn = "b".repeat(64);
+  assert.notEqual(createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex"), decidedOn);
+  candidate.status = "decision_recorded";
+  candidate.recordedDecision = { decisionId: "durable-decision", actorId: `host-${verifier.challenge()!.keyFingerprint}`,
+    decision: "deny", projectionSha256: decidedOn };
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge(); const sent: HostApprovalDecision[] = [];
+  wire.hostApprovals.request = envelope => {
+    const request = verifier.verify(envelope); assert.ok(request);
+    if (request.operation === "list") return [candidate];
+    sent.push(request.input as HostApprovalDecision); return "decision_sent";
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
+  try {
+    const [view] = (await client.listHostApprovals("room_1")).approvals;
+    assert.equal(view!.status, "decision_recorded"); assert.equal(view!.retryDecision, "deny");
+    await assert.rejects(client.decideHostApproval({ id: view!.id, decision: "allow_once" }), /Refresh/, "only the recorded choice can be retried");
+    assert.equal(sent.length, 0);
+    assert.equal(await client.decideHostApproval({ id: view!.id, decision: "deny" }), "decision_sent");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]!.decisionId, "durable-decision", "no new decision is made");
+    assert.equal(sent[0]!.projectionSha256, decidedOn, "the retry names the digest the choice was made on, not the card's");
+    assert.deepEqual(sent[0]!.expected, candidate.reference, "the request is still named exactly");
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 
