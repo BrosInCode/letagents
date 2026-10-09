@@ -17,7 +17,7 @@
       :busy="busyAction !== null"
       :manager-mode="boardManagerMode"
       :manager-title="boardManagerTitle"
-      :pending-intent-count="boardPendingIntentCount"
+      :pending-intent-count="pendingIntentCount"
       :governance-open="governanceOpen"
       @update:search-query="searchQuery = $event"
       @update:active-filter="setActiveFilter"
@@ -222,7 +222,8 @@ const {
   setManagerMode,
   decideIntent,
   loadGovernance,
-} = useBoardGovernance(props.roomIdentifier);
+  pendingIntentCount,
+} = useBoardGovernance(props.roomIdentifier, () => props.boardSettings);
 
 watch(() => props.governanceSection, (section) => {
   if (!section) return;
@@ -233,9 +234,6 @@ watch(() => props.governanceSection, (section) => {
 
 const liveBoardManagerAgents = computed(() => activeBoardManagerAgents(props.presence));
 const boardManagerMode = computed(() => props.boardSettings?.managerMode || "manager_optional");
-const boardPendingIntentCount = computed(() =>
-  Math.max(0, props.boardSettings?.pendingIntentCount || 0)
-);
 const boardManagerLabel = computed(() => {
   const settings = props.boardSettings;
   if (boardManagerMode.value === "off") return "Manager off";
@@ -251,7 +249,7 @@ const boardManagerLabel = computed(() => {
 });
 const boardManagerTitle = computed(() => {
   const settings = props.boardSettings;
-  const pending = boardPendingIntentCount.value;
+  const pending = pendingIntentCount.value;
   const pendingText = pending === 1 ? "1 pending intent" : `${pending} pending intents`;
   if (!settings?.activeManager) return `${boardManagerLabel.value}. ${pendingText}.`;
   return `${boardManagerLabel.value}: ${settings.activeManager.actorLabel}. ${pendingText}.`;

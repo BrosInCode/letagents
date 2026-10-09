@@ -1,12 +1,16 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { desktopIpc } from "../../../../ipc/index.js";
 import type {
   DesktopBoardGovernanceSection,
   DesktopBoardGovernanceSnapshot,
   DesktopBoardManagerMode,
+  DesktopBoardSettingsSummary,
 } from "../../../../../../electron/ipc-types";
 
-export function useBoardGovernance(roomIdentifier: string) {
+export function useBoardGovernance(
+  roomIdentifier: string,
+  roomBoardSettings: () => DesktopBoardSettingsSummary | null | undefined = () => null,
+) {
   const governanceOpen = ref(false);
   const governanceLoading = ref(false);
   const governanceBusy = ref(false);
@@ -15,6 +19,13 @@ export function useBoardGovernance(roomIdentifier: string) {
   const governance = ref<DesktopBoardGovernanceSnapshot | null>(null);
   const activeSection = ref<DesktopBoardGovernanceSection>("manager");
   const selectedCandidateId = ref<string | null>(null);
+  // The room snapshot refreshes later. Until then, show the count the last manager change returned.
+  const decidedPendingIntentCount = ref<number | null>(null);
+  watch(roomBoardSettings, () => { decidedPendingIntentCount.value = null; }, { flush: "sync" });
+  const pendingIntentCount = computed(() => Math.max(
+    0,
+    decidedPendingIntentCount.value ?? roomBoardSettings()?.pendingIntentCount ?? 0,
+  ));
 
   const sections = computed(() => [
     { id: "manager" as const, label: "Manager" },
@@ -67,7 +78,9 @@ export function useBoardGovernance(roomIdentifier: string) {
     governanceErrorRetryable.value = false;
     try {
       const result = await action();
-      governance.value = "governance" in result ? result.governance : result;
+      const next = "governance" in result ? result.governance : result;
+      governance.value = next;
+      decidedPendingIntentCount.value = next.pendingIntentCount;
       return true;
     } catch (error) {
       const failure = governanceFailure(
@@ -117,6 +130,7 @@ export function useBoardGovernance(roomIdentifier: string) {
     activeSection,
     selectedCandidateId,
     sections,
+    pendingIntentCount,
     openGovernance,
     closeGovernance,
     loadGovernance,
