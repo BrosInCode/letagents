@@ -290,6 +290,44 @@ test("provider health is fenced by daemon, execution, runtime, entry, and room i
   assert.equal(fixture.assess().checks[1]!.state, "unknown");
 });
 
+test("a stopped Cursor lane names Recover agent in plain words when that button is offered", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.provider = "cursor";
+  fixture.entry.providerPid = null;
+  fixture.entry.observedState = "idle";
+  fixture.entry.condition = "coordination_blocked";
+  fixture.entry.roomAgentState.inbox = { state: "blocked", pendingCount: 1, blockedByMessageId: "msg_1", detail: null };
+  const check = fixture.assess().checks[1]!;
+  assert.equal(check.action?.kind, "recover");
+  assert.equal(check.summary, "The agent needs a restart");
+  assert.equal(check.detail, "LetAgents could not continue this agent by itself. Press Recover agent to restart it. It keeps its identity and its workspace.");
+  assert.doesNotMatch(check.detail, /stopped|history/);
+});
+
+test("an exact runtime that needs a choice points to Recovery options, not Recover agent", () => {
+  const fixture = diagnosticFixture();
+  fixture.daemon.capabilities.agentRuntimeRecoveryV2 = true;
+  fixture.entry.condition = "coordination_blocked";
+  fixture.entry.observedState = "recovering";
+  const check = fixture.assess().checks[1]!;
+  assert.equal(check.action?.kind, "recovery_options");
+  assert.equal(check.summary, "Choose how to restart the agent");
+  assert.equal(check.detail, "LetAgents could not continue this agent by itself. Open Recovery options and choose how to restart it.");
+  assert.doesNotMatch(check.detail, /Recover agent|history/);
+});
+
+test("a coordination block with no restart action names no button", () => {
+  const fixture = diagnosticFixture();
+  fixture.daemon.capabilities.agentRuntimeRecoveryV2 = false;
+  fixture.entry.condition = "coordination_blocked";
+  fixture.entry.observedState = "recovering";
+  const check = fixture.assess().checks[1]!;
+  assert.equal(check.action, null);
+  assert.equal(check.summary, "LetAgents is still checking this agent");
+  assert.match(check.detail, /You can refresh checks/);
+  assert.doesNotMatch(check.detail, /Recover agent|Recovery options/);
+});
+
 test("room credential recovery explains the running provider separately", () => {
   const fixture = diagnosticFixture();
   fixture.entry.observedState = "recovering";
