@@ -1,6 +1,6 @@
 <template>
   <div class="agent-inspector-overview">
-    <AgentInspectorDeliveryProgress :progress="projection.deliveryProgress" />
+    <AgentInspectorDeliveryProgress v-if="projection.deliveryProgress?.requestedLocally" :progress="projection.deliveryProgress" />
     <AgentInspectorContinuationRecovery
       :entry-id="projection.entryId"
       :recovery="projection.continuationRecovery"
@@ -8,8 +8,9 @@
       @restore="emit('restore-conversation', $event)"
       @skip="emit('skip-message', $event)"
     />
-    <AgentInspectorNow :now="projection.now" />
     <AgentInspectorWaiting :agent-key="projection.agentKey" />
+    <details v-if="projection.turnControl" class="agent-inspector-correction" :open="projection.turnControl.status !== 'ready' || correctionRequest?.entryId === projection.entryId">
+    <summary>{{ projection.turnControl.status === 'ready' ? 'Adjust this turn' : projection.turnControl.label }}</summary>
     <AgentInspectorTurnControl
       :entry-id="projection.entryId"
       :control="projection.turnControl"
@@ -20,17 +21,34 @@
       @retry="emit('retry-turn-control')"
       @resolve="emit('resolve-turn-control', $event)"
     />
-    <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-charter-title">
-      <div class="agent-inspector-section-heading">
-        <p id="agent-inspector-charter-title">Initial message</p>
+    </details>
+    <section class="agent-inspector-overview-section agent-inspector-usage" aria-labelledby="agent-inspector-usage-title">
+      <div class="agent-inspector-section-heading"><p id="agent-inspector-usage-title">Usage</p></div>
+      <p class="agent-inspector-work-empty">Account limits aren’t reported by this connection.</p>
+      <div class="agent-inspector-context-heading"><span>Context window</span><span>Not reported</span></div>
+      <div class="agent-inspector-context-meter" :data-compacting="compacting" aria-hidden="true">
+        <span v-for="bar in 48" :key="bar" :style="{ '--bar': bar }"></span>
       </div>
-      <p class="agent-inspector-charter">{{ projection.charter || "No initial message was recorded for this agent." }}</p>
+      <p v-if="compacting" class="agent-inspector-context-note">Compacting context…</p>
     </section>
 
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-context-title">
       <div class="agent-inspector-section-heading">
         <p id="agent-inspector-context-title">Room and work</p>
       </div>
+      <dl class="agent-inspector-context-list">
+        <div><dt>Current room</dt><dd>{{ roomName || friendlyRoomLabel(projection.roomId) }}</dd></div>
+        <div>
+          <dt>Assigned work</dt>
+          <dd v-if="projection.assignedWork.length">
+            <span v-for="task in projection.assignedWork" :key="task.id">{{ task.title }} · {{ task.status }}</span>
+          </dd>
+          <dd v-else>None</dd>
+        </div>
+      </dl>
+    </section>
+    <details class="agent-inspector-session-details">
+      <summary>Session details</summary>
       <dl class="agent-inspector-context-list">
         <div>
           <dt>Agent app status</dt>
@@ -40,20 +58,8 @@
             <small :aria-hidden="!runtimeControl?.observedAt || undefined">{{ runtimeControl?.observedAt ? `Checked ${formatFullTimestamp(runtimeControl.observedAt)}` : "\u00a0" }}</small>
           </dd>
         </div>
-        <div><dt>Current room</dt><dd>{{ roomName || friendlyRoomLabel(projection.roomId) }}</dd></div>
-        <div>
-          <dt>Assigned work</dt>
-          <dd v-if="projection.assignedWork.length">
-            <span v-for="task in projection.assignedWork" :key="task.id">{{ task.title }} · {{ task.status }}</span>
-          </dd>
-          <dd v-else>None</dd>
-        </div>
-        <div v-if="projection.recentOutcome">
-          <dt>Recent outcome</dt>
-          <dd>{{ projection.recentOutcome.label }}</dd>
-        </div>
       </dl>
-    </section>
+    </details>
   </div>
 </template>
 
@@ -65,7 +71,7 @@ import type { AgentInspectorCorrectionRequest, AgentInspectorProjection } from "
 import { describeAgentInspectorRuntimeControl } from "../../../../domain/agent-inspector-work";
 import { formatFullTimestamp } from "../../../../domain/time";
 import AgentInspectorDeliveryProgress from "./AgentInspectorDeliveryProgress.vue";
-import AgentInspectorNow from "./AgentInspectorNow.vue";
+import { agentCompactionProgress } from "../../../../domain/managed-agents";
 import AgentInspectorWaiting from "./AgentInspectorWaiting.vue";
 import AgentInspectorContinuationRecovery from "./AgentInspectorContinuationRecovery.vue";
 import AgentInspectorTurnControl from "./AgentInspectorTurnControl.vue";
@@ -78,6 +84,7 @@ const props = defineProps<{
   runtimeControlPending: boolean;
   correctionRequest?: AgentInspectorCorrectionRequest | null;
 }>();
+const compacting = computed(() => props.projection.resourceFreshness === "fresh" && Boolean(agentCompactionProgress(props.projection.entry)));
 const runtimeControl = computed(() => describeAgentInspectorRuntimeControl(props.runtimeControl));
 const emit = defineEmits<{
   "stop-turn": [];
