@@ -21,8 +21,10 @@ import type { JsonObject, JsonValue } from "./transcript.js";
  *   path, before `@`, or under a user-like key. Never as a bare word.
  * - email addresses
  * - tokens and keys, by shape: API keys (OpenAI, AWS, Google), GitHub
- *   tokens, JWTs, authorization values, long hex strings, `name=value` and
- *   URL query credentials
+ *   tokens, JWTs, long hex strings
+ * - a credential written into text, as a whole value: `name=value` to the
+ *   next space, a quoted value to its closing quote, an `Authorization` or
+ *   `Cookie` header to the end of its line, a URL query value
  * - everything under a key that names a credential, whatever its type
  * - provider and account ids: each real id maps to one fake id, the same one
  *   every time it appears, so frames still correlate
@@ -97,18 +99,29 @@ const TOKEN_SHAPE_SOURCES: readonly string[] = [
   `${NOT_AFTER_WORD}A(?:KIA|SIA|GPA|IDA|ROA|NPA)[0-9A-Z]{16}${NOT_BEFORE_WORD}`,
   `${NOT_AFTER_WORD}AIza${TOKEN_TAIL}{35}${NOT_BEFORE_WORD}`,
 ];
-/** The value after an HTTP authorization scheme. */
+/** A `Bearer` token where no `authorization` names it. */
 const AUTHORIZATION_VALUE_SOURCE = "\\b(bearer)\\s+[A-Za-z0-9._~+/=-]{16,}";
 const CREDENTIAL_WORDS = "password|passwd|secret|client[_-]?secret|api[_-]?key|access[_-]?key|private[_-]?key"
   + "|(?:access|refresh|id|auth|session|bearer)[_-]?token|token|authorization|cookie";
-/** A credential written into text: `password=…`, `"apiKey": "…"`, `LETAGENTS_TOKEN=…`. */
-const CREDENTIAL_ASSIGNMENT_SOURCE = `(${NOT_AFTER_WORD}(?:${CREDENTIAL_WORDS})\\\\?["']?\\s*[:=]\\s*\\\\?["']?)`
-  + "(?!(?:bearer|basic)\\b)([^\\\\\\s\"',;&}\\]<]+)";
+/**
+ * Where a credential written into text starts: its name, then `:` or `=`, with
+ * the quotes that JSON or a shell puts around either. The quote that opens the
+ * value is kept, with the backslash before it in a string inside a string.
+ */
+const CREDENTIAL_HEAD_SOURCE = `${NOT_AFTER_WORD}(${CREDENTIAL_WORDS})\\\\?["']?\\s*[:=]\\s*(\\\\?["'])?`;
+/** A header holds spaces, commas and semicolons, so its value is the rest of its line. */
+const HEADER_CREDENTIAL = /^(?:authorization|cookie)$/i;
+/** The scheme of an authorization value is kept when it is one of these. None is a secret. */
+const AUTHORIZATION_SCHEME = /^(?:basic|bearer|digest|negotiate|ntlm|dpop|token|api-?key)\s+/i;
 /** A credential in a URL query: `?api_key=…`. */
-const QUERY_CREDENTIAL_SOURCE = `([?&](?:${CREDENTIAL_WORDS}|key|auth|signature|sig|code)=)([^&#\\s"'<>]+)`;
-/** A long run of hex digits: a key, a digest, a session secret. Looked for after ids are mapped. */
-const LONG_HEX_SOURCE = `${NOT_AFTER_WORD}[0-9a-fA-F]{32,}${NOT_BEFORE_WORD}`;
-const EMAIL_SOURCE = "[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+";
+const QUERY_CREDENTIAL_SOURCE = `([?&](?:${CREDENTIAL_WORDS}|key|auth|signature|sig|code)=)([^&#\\s"']+)`;
+/**
+ * A long run of hex digits: a key, a digest, a session secret. Looked for
+ * after ids are mapped. The digits after `0x` count too; the `0x` stays.
+ */
+const LONG_HEX_SOURCE = `(?:${NOT_AFTER_WORD}|(?<=${NOT_AFTER_WORD}0[xX]))[0-9a-fA-F]{32,}${NOT_BEFORE_WORD}`;
+/** The lookbehind makes a match start only where a name starts, so a long run with no `@` is read once. */
+const EMAIL_SOURCE = "(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+";
 const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 /** Provider object ids: a short lowercase prefix, an underscore, and a long opaque tail. */
 const PREFIXED_ID_SOURCE = "\\b([a-z]{2,8})_([A-Za-z0-9]{20,})\\b";
@@ -125,9 +138,23 @@ function keyWords(key: string): string {
 /**
  * Keys that hold a credential. Everything under one is blanked, whatever its
  * type. Counters such as `inputTokens` and `tokenUsage` are not credentials:
- * only a key that ends in the word `token` is.
+ * only a key that ends in the word `token` is. A name of two words is the
+ * same name when it is written as one: `authtoken`, `accesskey`, `clientsecret`.
  */
-const CREDENTIAL_KEY = /(?:^|_)(?:authorization|cookies?|credentials?|password|passwd|secrets?|bearer|apikey|api_key|access_key|private_key|signing_key|session_key)(?:_|$)|(?:^|_)token$/;
+const CREDENTIAL_KEY = new RegExp(
+  "(?:^|_)(?:authorization|cookies?|credentials?|password|passwd|secrets?|client_?secrets?|bearer"
+  + "|api_?key|access_?key|private_?key|signing_?key|session_?key)(?:_|$)"
+  + "|(?:^|_)(?:(?:access|refresh|id|auth|session|bearer)_?)?token$",
+);
+/**
+ * A key is read in two ways: split at each capital, where `accessToken` is
+ * `access_token`, and as it is written, where `ACCESSTOKEN` and `aCcEsStOkEn`
+ * are both `accesstoken`. So a credential name is found in any letter case.
+ */
+function isCredentialKey(key: string | null): boolean {
+  return key !== null
+    && (CREDENTIAL_KEY.test(keyWords(key)) || CREDENTIAL_KEY.test(key.replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()));
+}
 /** Keys whose value identifies an account, an installation or an organization. */
 const IDENTITY_KEY = /(?:^|_)(?:account|installation|organi[sz]ation|org|user|device|machine|tenant|customer)_id$/;
 /** Keys whose value names a person. */
@@ -171,6 +198,72 @@ function personContextSource(word: string): string {
   return `(?<=[/\\\\])${name}(?=$|[^A-Za-z0-9._-])`
     + `|(?<=-(?:Users|home)-)${name}(?=$|[^A-Za-z0-9])`
     + `|(?<![A-Za-z0-9._-])${name}(?=@)`;
+}
+
+/**
+ * Where the value of a credential ends. A value that stops early leaves the
+ * rest of the secret in the text, next to a placeholder that looks finished.
+ * So a value is read to the end of what it can be:
+ *
+ * - a quoted value, to the quote that closes it, or to the end of the text
+ * - a header, to the end of its line
+ * - a URL query value, to the next `&`, `#`, space or quote
+ * - every other value, to the next space
+ */
+function credentialValueEnd(text: string, from: number, quote: string | undefined, header: boolean, query: boolean): number {
+  if (!quote) {
+    const stop = header ? /[\r\n]/g : query ? /[&#\s"']/g : /\s/g;
+    stop.lastIndex = from;
+    return stop.exec(text)?.index ?? text.length;
+  }
+  const mark = quote.at(-1)!;
+  // `\"` opened it: the text is a string inside a string, and `\"` closes it.
+  const nested = quote.length === 2;
+  for (let index = from; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === mark && !nested) return index;
+    if (char !== "\\") continue;
+    if (!nested) index += 1;
+    else if (text[index + 1] === mark) return index;
+    // In a string inside a string, `\\` is one backslash of the inner string, and it escapes what follows.
+    else if (text[index + 1] === "\\") index += text[index + 2] === "\\" ? 3 : 2;
+    else index += 1;
+  }
+  return text.length;
+}
+
+/**
+ * Replace the value of every credential written into `text`. Redaction and the
+ * leak check both call this, so the check passes exactly the text that
+ * redaction leaves alone. `placeholder` is what a redacted value reads as:
+ * a value that is exactly it, alone or after a known authorization scheme, is
+ * kept.
+ */
+function redactCredentialText(text: string, placeholder: string, redacted: () => void = () => {}): string {
+  // The URL rule first: it knows more names, and a query value that is redacted is then left alone below.
+  const source = text.replace(new RegExp(QUERY_CREDENTIAL_SOURCE, "gi"), (match, name: string, value: string) => {
+    if (value === placeholder) return match;
+    redacted();
+    return `${name}${placeholder}`;
+  });
+  const head = new RegExp(CREDENTIAL_HEAD_SOURCE, "gi");
+  let result = "";
+  let copied = 0;
+  for (let match = head.exec(source); match; match = head.exec(source)) {
+    const [whole, name, quote] = match as unknown as [string, string, string | undefined];
+    const from = match.index + whole.length;
+    const query = !quote && /[?&][\w.-]*$/.test(source.slice(Math.max(0, match.index - 64), match.index));
+    const end = credentialValueEnd(source, from, quote, !quote && !query && HEADER_CREDENTIAL.test(name), query);
+    // The next name is looked for after this value: a name inside a value is part of the value.
+    head.lastIndex = end;
+    const scheme = /^authorization$/i.test(name) ? AUTHORIZATION_SCHEME.exec(source.slice(from, end))?.[0] ?? "" : "";
+    const value = source.slice(from + scheme.length, end);
+    if (!value.trim() || value === placeholder) continue;
+    result += `${source.slice(copied, from)}${scheme}${placeholder}`;
+    copied = end;
+    redacted();
+  }
+  return result + source.slice(copied);
 }
 
 /** What redaction writes. A later rule must not read one of these as real text and redact it again. */
@@ -303,7 +396,7 @@ export class ReplayRedactor {
 
   private redactValue(value: JsonValue, key: string | null, depth: number): JsonValue {
     const words = key === null ? "" : keyWords(key);
-    if (value !== null && value !== "" && CREDENTIAL_KEY.test(words)) {
+    if (value !== null && value !== "" && isCredentialKey(key)) {
       this.count("credential-key");
       return this.blank(value);
     }
@@ -319,7 +412,9 @@ export class ReplayRedactor {
         const redacted = this.redactValue(inside, null, depth + 1);
         if (JSON.stringify(redacted) !== JSON.stringify(inside)) return JSON.stringify(redacted);
       }
-      const text = this.redactString(value);
+      // Text that was read as JSON is not also read for a credential written into text. That rule reads
+      // a value to the next space, and compact JSON has none: it would replace the rest of the JSON.
+      const text = this.redactString(value, inside === null);
       const personWord = this.personWordRule;
       if (!PERSON_KEY.test(words) || !personWord) return text;
       return outsidePlaceholders(text, (part) => part.replace(personWord, () => this.personName()));
@@ -376,7 +471,8 @@ export class ReplayRedactor {
     return fake;
   }
 
-  private redactString(input: string): string {
+  /** `credentialText` is off for a string that was read as JSON: its credentials were found as data. */
+  private redactString(input: string, credentialText = true): string {
     let text = input;
     for (const { rule, pattern, replacement } of this.literalRules) {
       text = text.replace(pattern, (match) => {
@@ -400,13 +496,7 @@ export class ReplayRedactor {
       this.count("token");
       return `${scheme} ${REPLAY_REDACTED}`;
     });
-    // The URL rule first: it knows where a query value ends.
-    for (const source of [QUERY_CREDENTIAL_SOURCE, CREDENTIAL_ASSIGNMENT_SOURCE]) {
-      text = text.replace(new RegExp(source, "gi"), (_match, name: string) => {
-        this.count("credential-text");
-        return `${name}${REPLAY_REDACTED}`;
-      });
-    }
+    if (credentialText) text = redactCredentialText(text, REPLAY_REDACTED, () => { this.count("credential-text"); });
     for (const source of TOKEN_SHAPE_SOURCES) {
       text = text.replace(new RegExp(source, "g"), () => { this.count("token"); return REPLAY_REDACTED; });
     }
@@ -436,7 +526,8 @@ export interface ReplayLeak {
 /** What redaction writes for an id: a numbered fake of its kind, or a fake UUID. */
 const FAKE_UUID_SOURCE = "00000000-0000-4000-8000-\\d{12}";
 function isFakeIdentity(value: JsonValue, keyWordsOfId: string): boolean {
-  if (value === null || value === "") return true;
+  // A numeric id in a blanked frame is 0.
+  if (value === null || value === "" || value === 0) return true;
   return typeof value === "string"
     && new RegExp(`^(?:${escapeRegExp(keyWordsOfId.replace(/_/g, "-"))}-\\d+|${FAKE_UUID_SOURCE}|${escapeRegExp(REPLAY_REDACTED)})$`).test(value);
 }
@@ -471,6 +562,7 @@ export function findReplayLeaks(text: string, context: ReplayRedactionContext): 
     ["personal-name", personPhrases(context)],
     ["workspace", distinct(context.workspacePaths, 3)],
     ["repository", distinct(context.repositoryPaths, 3)],
+    ["temp-directory", distinct(context.tempDirectories, 3)],
   ];
   const wholeWords: Array<[string, RegExp]> = [
     ...distinct(context.hostnames, 3).map((value): [string, RegExp] => ["hostname", new RegExp(wholeWord(value), "i")]),
@@ -481,14 +573,13 @@ export function findReplayLeaks(text: string, context: ReplayRedactionContext): 
     ["home-directory", new RegExp(HOME_ROOT_SOURCE)],
     ["email", new RegExp(EMAIL_SOURCE)],
     ["token", new RegExp(AUTHORIZATION_VALUE_SOURCE, "i")],
-    ["credential-text", new RegExp(CREDENTIAL_ASSIGNMENT_SOURCE, "i")],
-    ["credential-text", new RegExp(QUERY_CREDENTIAL_SOURCE, "i")],
     ["long-hex", new RegExp(LONG_HEX_SOURCE)],
     ...TOKEN_SHAPE_SOURCES.map((source): [string, RegExp] => ["token", new RegExp(source)]),
   ];
   const ownerToolNames = context.ownerSetupNames.flatMap(mcpToolNameSpellings).map((name) => `mcp__${name}__`);
 
-  const checkText = (raw: string, line: number, path: string) => {
+  /** `credentialText` is off for a string that is checked as JSON: redaction leaves that rule out there too. */
+  const checkText = (raw: string, line: number, path: string, credentialText = true) => {
     const found = (rule: string) => { report(rule, line, path); };
     if (context.ownerSetupNames.includes(raw)) found("owner-setup-name");
     if (ownerToolNames.some((name) => raw.includes(name))) found("owner-setup-name");
@@ -502,6 +593,9 @@ export function findReplayLeaks(text: string, context: ReplayRedactionContext): 
     for (const [rule, pattern] of [...wholeWords, ...shapes]) {
       if (pattern.test(content)) found(rule);
     }
+    // A credential value must be the placeholder and nothing else. One that is only partly
+    // redacted reads as finished to a person, so anything redaction would still change is a leak.
+    if (credentialText && redactCredentialText(content, "<>") !== content) found("credential-text");
     // An id that redaction did not map is a real one.
     const realIds = raw.replace(new RegExp(FAKE_UUID_SOURCE, "g"), "<>");
     if (new RegExp(`\\b${UUID_SOURCE}\\b`, "i").test(realIds)) found("uuid");
@@ -510,14 +604,14 @@ export function findReplayLeaks(text: string, context: ReplayRedactionContext): 
   /** `structural` is off for the header: its keys are the recorder's own words, not provider data. */
   const checkValue = (value: JsonValue, key: string | null, line: number, path: string, structural: boolean, depth: number) => {
     const words = key === null ? "" : keyWords(key);
-    if (structural && CREDENTIAL_KEY.test(words) && !isBlank(value)) report("credential-key", line, path);
+    if (structural && isCredentialKey(key) && !isBlank(value)) report("credential-key", line, path);
     if (structural && IDENTITY_KEY.test(words) && !Array.isArray(value) && (value === null || typeof value !== "object")
       && !isFakeIdentity(value, words)) {
       report("identity-key", line, path);
     }
     if (typeof value === "string") {
-      checkText(value, line, path);
       const inside = depth < MAX_EMBEDDED_JSON_DEPTH ? embeddedJson(value) : null;
+      checkText(value, line, path, inside === null);
       if (inside !== null) checkValue(inside, null, line, `${path}<json>`, structural, depth + 1);
     } else if (Array.isArray(value)) {
       value.forEach((item, index) => checkValue(item, key, line, `${path}[${index}]`, structural, depth));
