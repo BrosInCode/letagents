@@ -19,6 +19,8 @@ import { CodexRpcClient, type CodexRpcWebSocketCtor } from "../main/agents/codex
 import { defaultSignalProcess } from "../main/agents/provider-evidence.js";
 import { CODEX_REPLAY_PROTOCOL } from "../__tests__/provider-replay/codex-replay.js";
 import {
+  CODEX_RESUMED_SCENARIO,
+  CODEX_SCENARIO_REASONING_EFFORT,
   CODEX_SCENARIOS,
   runCodexScenario,
   type CodexScenarioName,
@@ -45,6 +47,12 @@ import {
 // `codex app-server` for one scenario, and writes it as a replay transcript.
 // It is a manual developer tool: it spends a real model turn, and CI never
 // runs it. It starts no LetAgents desktop app and no daemon.
+//
+// A scenario that resumes a conversation spends two turns. The recorder first
+// runs the scenario that starts the conversation, in a process of its own, and
+// does not record its traffic. The transcript holds the second process only.
+// Codex's own history of the conversation, which a resume reply holds, shows
+// the earlier turn.
 //
 //   LETAGENTS_RECORD_LIVE_CODEX=1 node --import tsx \
 //     electron/scripts/record-codex-replay.ts --scenario simple
@@ -264,6 +272,8 @@ function parseArguments(argv: string[]): { scenario: CodexScenarioName; out: str
 function summarize(outcome: CodexScenarioOutcome): Record<string, unknown> {
   return {
     stateAfterSpawn: outcome.stateAfterSpawn,
+    launchNotices: outcome.launchNotices,
+    loadedResume: outcome.loadedResume,
     roomTurn: outcome.roomTurn,
     interrupt: outcome.interrupt,
     stateAfterTurn: outcome.stateAfterTurn,
@@ -289,9 +299,15 @@ async function main(): Promise<void> {
   // A fresh empty folder: the agent has nothing to read and, read-only, nothing to change.
   const workspace = await realpath(await mkdtemp(join(tmpdir(), "letagents-codex-replay-")));
   const capture = new CodexCapture();
+  // The process that starts the conversation a resume scenario continues. It is tapped only to be stopped and awaited.
+  const earlier = new CodexCapture();
   let outcome: CodexScenarioOutcome;
   let exit: CodexAppServerExit | null = null;
-  const discard = () => discardRecording({ pid: capture.pid, exited: exit !== null, workspace });
+  let earlierExited = false;
+  const discard = () => {
+    discardRecording({ pid: earlier.pid, exited: earlierExited, workspace });
+    discardRecording({ pid: capture.pid, exited: exit !== null, workspace });
+  };
   // Ctrl-C, or a stop from outside, must not leave the app-server running or the folder behind.
   const interrupted = (signal: NodeJS.Signals) => {
     discard();
@@ -300,12 +316,33 @@ async function main(): Promise<void> {
   process.once("SIGINT", interrupted);
   process.once("SIGTERM", interrupted);
   try {
+    let resumeThreadId: string | undefined;
+    if ("resume" in scenario) {
+      const started = await withDeadline(runCodexScenario(CODEX_SCENARIOS[CODEX_RESUMED_SCENARIO], {
+        dependencies: earlier.dependencies(),
+        codexBin,
+        workspace,
+        launch: { devMcpServerEntryPath: roomStubPath },
+        settled: () => earlier.settled(),
+      }), SCENARIO_TIMEOUT_MS, `Scenario ${CODEX_RESUMED_SCENARIO}, which starts the conversation`);
+      if (!earlier.exit) throw new Error("The conversation to resume was started without a Codex app-server.");
+      const earlierExit = await withDeadline(earlier.exit, EXIT_TIMEOUT_MS, "The exit of the Codex app-server that started the conversation");
+      earlierExited = true;
+      if (earlierExit.type !== "exit") throw new Error(`The Codex app-server that started the conversation did not exit cleanly: ${earlierExit.error.message}`);
+      // The header says which effort the conversation was started with. A launch that has a line
+      // about its effort did not give it to Codex, or Codex reported another one.
+      if (started.launchNotices.length) {
+        throw new Error(`The conversation to resume was not started with the effort "${CODEX_SCENARIO_REASONING_EFFORT}": ${started.launchNotices.join(" ")}`);
+      }
+      resumeThreadId = started.threadId;
+    }
     outcome = await withDeadline(runCodexScenario(scenario, {
       dependencies: capture.dependencies(),
       codexBin,
       workspace,
       launch: { devMcpServerEntryPath: roomStubPath },
       settled: () => capture.settled(),
+      ...(resumeThreadId ? { resumeThreadId } : {}),
     }), SCENARIO_TIMEOUT_MS, `Scenario ${scenario.name}`);
     if (!capture.exit) throw new Error("The scenario ended without launching a Codex app-server.");
     exit = await withDeadline(capture.exit, EXIT_TIMEOUT_MS, "The Codex app-server exit");
@@ -334,8 +371,8 @@ async function main(): Promise<void> {
     // A reply has no method of its own; its label is the method it answers.
     frame: redactor.redactFrame(entry.frame, entry.label),
   } satisfies ProviderReplayFrameEntry);
-  const threadStart = entries.find((entry) => entry.type === "emit_inbound" && entry.label === "thread/start");
-  const model = threadStart?.type === "emit_inbound" ? (threadStart.frame.result as JsonObject | undefined)?.model : undefined;
+  const threadOpened = entries.find((entry) => entry.type === "emit_inbound" && (entry.label === "thread/start" || entry.label === "thread/resume"));
+  const model = threadOpened?.type === "emit_inbound" ? (threadOpened.frame.result as JsonObject | undefined)?.model : undefined;
   const start: TranscriptStartEntry = {
     type: "transcript_start",
     format: PROVIDER_REPLAY_FORMAT,
@@ -352,6 +389,9 @@ async function main(): Promise<void> {
       model: typeof model === "string" ? model : null,
       // Codex is the real one. The room's MCP server is a stand-in with no room and no network.
       roomServer: "stand-in: record-codex-replay-room-stub.mjs",
+      ...("resume" in scenario ? {
+        resumes: `a conversation that the scenario "${CODEX_RESUMED_SCENARIO}" started in an earlier process, with the reasoning effort "${CODEX_SCENARIO_REASONING_EFFORT}"; the traffic of that process is not in this recording`,
+      } : {}),
       redactions: { ...redactor.counts },
     },
   };

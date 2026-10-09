@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -734,8 +734,12 @@ test("the committed recordings hold no known leak shape and do not change under 
     workspacePaths: [], tempDirectories: [], repositoryPaths: [], homeDirectory: "", username: "",
     personalNames: [], hostnames: [], secrets: [], ownerSetupNames: [], accountMethods: [/^account\//],
   };
-  for (const name of ["simple", "turn_interrupt"]) {
-    const text = readFileSync(fileURLToPath(new URL(`./provider-replay/fixtures/codex/${name}.ndjson`, import.meta.url)), "utf8");
+  // Every recording in the folder. One that is added fails here until it is named, so none goes unchecked.
+  const folder = fileURLToPath(new URL("./provider-replay/fixtures/codex/", import.meta.url));
+  const names = readdirSync(folder).filter((file) => file.endsWith(".ndjson")).map((file) => file.slice(0, -".ndjson".length)).sort();
+  assert.deepEqual(names, ["resume", "simple", "turn_interrupt"]);
+  for (const name of names) {
+    const text = readFileSync(join(folder, `${name}.ndjson`), "utf8");
     const transcript = parseProviderReplayTranscript(text, name);
     assert.deepEqual(findReplayLeaks(text, context), [], `${name} holds no known leak shape`);
     const redactor = new ReplayRedactor(context);
