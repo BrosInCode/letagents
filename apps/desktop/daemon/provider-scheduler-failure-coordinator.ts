@@ -1,6 +1,7 @@
 import {
   exhaustedTransientWorkerMint,
   providerQuotaExhaustedFailure,
+  providerQuotaResetAtMs,
   providerRuntimeGoneFailure,
   schedulerErrorDetail,
   transientProviderStartFailure,
@@ -17,11 +18,15 @@ import { RepositoryNetworkError, UnusableSourceRepositoryError } from "./workspa
 
 const PROVIDER_START_RETRY_LIMIT = 3;
 const WORKER_MINT_RECOVERY_RETRY_LIMIT = 5;
-// A usage limit resets on the provider's schedule, often hours away. Keep
-// trying for as long as the agent should run, slowly enough that a rejected
-// launch costs almost nothing.
-const PROVIDER_QUOTA_RETRY_BASE_MS = 5 * 60_000;
-const PROVIDER_QUOTA_RETRY_MAX_MS = 60 * 60_000;
+// A usage limit resets on the provider's schedule, often hours or days away.
+// Keep checking for as long as the agent should run, but rarely: a rejected
+// launch does no work, yet an hourly check from every agent is still noise.
+// The first check comes soon, in case the rejection was a brief rate limit.
+// After that, wait until the reset the provider named, or this long.
+const PROVIDER_QUOTA_FIRST_RETRY_MS = 5 * 60_000;
+const PROVIDER_QUOTA_RETRY_MAX_MS = 6 * 60 * 60_000;
+// A named reset is the provider's clock, not ours; check just after it.
+const PROVIDER_QUOTA_RESET_MARGIN_MS = 30_000;
 
 export type ProviderSchedulerFailurePorts = {
   nativeHeartbeatIntervalMs: number;
@@ -147,10 +152,12 @@ export class ProviderSchedulerFailureCoordinator {
     if (providerQuotaExhaustedFailure(error)) {
       const attempts = (this.providerQuotaRetryAttempts.get(entryId) ?? 0) + 1;
       this.providerQuotaRetryAttempts.set(entryId, attempts);
-      this.ports.scheduleRecovery(entryId, Math.min(
-        PROVIDER_QUOTA_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 10),
-        PROVIDER_QUOTA_RETRY_MAX_MS,
-      ));
+      const resetsAtMs = providerQuotaResetAtMs(error);
+      // A reset already past (or a clock that disagrees) must not spin: never sooner than the first check.
+      this.ports.scheduleRecovery(entryId, resetsAtMs !== null
+        ? Math.min(Math.max(resetsAtMs - this.ports.nowMs() + PROVIDER_QUOTA_RESET_MARGIN_MS, PROVIDER_QUOTA_FIRST_RETRY_MS),
+          PROVIDER_QUOTA_RETRY_MAX_MS)
+        : attempts === 1 ? PROVIDER_QUOTA_FIRST_RETRY_MS : PROVIDER_QUOTA_RETRY_MAX_MS);
       return;
     }
     if (transientProviderStartFailure(error)) {

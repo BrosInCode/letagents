@@ -551,6 +551,8 @@ const CLAUDE_API_ERROR_CATEGORIES = new Set([
   "authentication_failed", "oauth_org_not_allowed", "billing_error", "rate_limit",
   "overloaded", "invalid_request", "model_not_found", "server_error", "unknown", "max_output_tokens",
 ]);
+/** Year 2100: a later value is a millisecond timestamp or garbage, not a reset time in seconds. */
+const CLAUDE_MAX_RESET_EPOCH_SECONDS = 4_102_444_800;
 const CLAUDE_RESULT_CATEGORIES = new Set([
   "success", "error_during_execution", "error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries",
 ]);
@@ -610,6 +612,7 @@ class ClaudeBootstrapDiagnostics {
   private authenticating: boolean | null = null;
   private lastApiRetry: string | null = null;
   private assistantError: string | null = null;
+  private limitResetsAtMs: number | null = null;
   private result: string | null = null;
   private uncorrelatedResult: string | null = null;
   private readonly lineTypes = new Map<string, number>();
@@ -622,6 +625,9 @@ class ClaudeBootstrapDiagnostics {
 
   /** The allowlisted API error category Claude reported for the bootstrap turn. */
   get apiError(): string | null { return this.assistantError; }
+
+  /** When Claude said the rejecting usage limit resets (epoch ms), if it said so. */
+  get usageLimitResetsAtMs(): number | null { return this.limitResetsAtMs; }
 
   observe(line: string): void {
     this.stdoutLines = Math.min(Number.MAX_SAFE_INTEGER, this.stdoutLines + 1);
@@ -652,6 +658,15 @@ class ClaudeBootstrapDiagnostics {
       if (message.user_message_uuid === this.turnId) {
         this.result = subtype;
       } else this.uncorrelatedResult = subtype;
+    } else if (message.type === "rate_limit_event") {
+      // The CLI reports each usage window it reads. Only a rejected one names
+      // the reset that matters, as epoch seconds (SDKRateLimitEvent). A value
+      // outside the seconds range is not that field, so it is not trusted.
+      const info = message.rate_limit_info as { status?: unknown; resetsAt?: unknown } | null | undefined;
+      if (info?.status === "rejected" && typeof info.resetsAt === "number" && Number.isSafeInteger(info.resetsAt)
+        && info.resetsAt > 0 && info.resetsAt <= CLAUDE_MAX_RESET_EPOCH_SECONDS) {
+        this.limitResetsAtMs = info.resetsAt * 1000;
+      }
     } else if (message.type === "auth_status") {
       this.authMessages = Math.min(Number.MAX_SAFE_INTEGER, this.authMessages + 1);
       this.authenticating = typeof message.isAuthenticating === "boolean" ? message.isAuthenticating : null;
@@ -680,6 +695,7 @@ class ClaudeBootstrapDiagnostics {
       ...compactionFields,
       ...(this.lastApiRetry === null ? [] : [`last_api_retry=${this.lastApiRetry}`]),
       ...(this.assistantError === null ? [] : [`assistant_error=${this.assistantError}`]),
+      ...(this.limitResetsAtMs === null ? [] : [`usage_limit_resets_at=${new Date(this.limitResetsAtMs).toISOString()}`]),
       ...(this.result === null ? [] : [`result=${this.result}`]),
       ...(this.uncorrelatedResult === null ? [] : [`uncorrelated_result=${this.uncorrelatedResult}`]),
       ...(this.authMessages === 0 ? [] : [`auth_status_count=${this.authMessages}`, `authenticating=${this.authenticating ?? "unlisted"}`]),
@@ -708,6 +724,8 @@ class ClaudeBootstrapError extends Error {
   readonly signal?: string | null;
   /** The account's usage limit rejected the turn; retrying only helps after it resets. */
   readonly providerQuotaExhausted?: true;
+  /** When Claude said that usage limit resets (epoch ms); absent when it did not say. */
+  readonly providerQuotaResetsAtMs?: number;
   /** Claude reported a service-side failure that a fresh attempt may clear. */
   readonly transientProviderStart?: true;
 
@@ -716,6 +734,7 @@ class ClaudeBootstrapError extends Error {
     failure: ProviderProcessExit | { type: ClaudeStartupDeadline | "failed_response" },
     observations: string,
     apiError: string | null = null,
+    limitResetsAtMs: number | null = null,
   ) {
     const reason = failure.type === "exit" ? "native_exit"
       : failure.type === "error" ? "transport_error" : failure.type;
@@ -731,7 +750,10 @@ class ClaudeBootstrapError extends Error {
     }
     // Only an explicit API rejection of the bootstrap turn is classified. A
     // deadline stays unretried: a stalled resume can spend tokens each time.
-    if (reason === "failed_response" && apiError === "rate_limit") this.providerQuotaExhausted = true;
+    if (reason === "failed_response" && apiError === "rate_limit") {
+      this.providerQuotaExhausted = true;
+      if (limitResetsAtMs !== null) this.providerQuotaResetsAtMs = limitResetsAtMs;
+    }
     if (reason === "failed_response" && (apiError === "overloaded" || apiError === "server_error")) this.transientProviderStart = true;
   }
 }
@@ -1903,7 +1925,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       }
       if ("error" in bootstrapTerminal) {
         throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" },
-          diagnostics.summary(child, compaction.diagnosticFields()), diagnostics.apiError);
+          diagnostics.summary(child, compaction.diagnosticFields()), diagnostics.apiError, diagnostics.usageLimitResetsAtMs);
       }
       handle.roomTurnResults.delete(bootstrapTurnId);
       handle.state = "idle";
