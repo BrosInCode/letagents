@@ -713,10 +713,9 @@ test("a request that can still be answered leads the stack, even when an unavail
     listHostApprovals: async () => ({ available: true, approvals, error: null }),
   } } });
   const { root, app } = mount(RoomComposer, composerProps());
-  const historyToggle = () => descendants(root).find(node => node.props.class?.toString().includes("desktop-host-approval-history"));
   try {
     await flushHostApprovals();
-    await (historyToggle()!.props.onClick as () => void)();
+    await (historyToggle(root)!.props.onClick as () => void)();
     await nextTick();
     assert.equal(trayHeading(root), "StaleAgent · Approval unavailable");
     // The request it can answer arrives after the unavailable one was listed.
@@ -729,6 +728,126 @@ test("a request that can still be answered leads the stack, even when an unavail
     assert.equal(trayHeading(root), "GardenPoint · Run a command", "the request it can answer leads the stack");
     assert.equal(trayPosition(root), "1 of 2");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+/** A request a turn waits on: the stack shows it without the history toggle once the grace has passed. */
+const waitingOnTurn = (id: string, displayName: string): DesktopHostApproval => ({ ...hostApproval(), id, status: "unavailable",
+  detail: "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified.",
+  presentation: { ...hostApproval().presentation, displayName, title: "Approval unavailable",
+    details: JSON.stringify({ id: `per_${id}`, sessionID: "ses_1", permission: "edit", patterns: ["src/app.mjs"], metadata: {}, always: [] }) } });
+const historyToggle = (root: HostNode) => descendants(root).find(node => node.props.class?.toString().includes("desktop-host-approval-history"));
+const stopTurnButton = (root: HostNode) => buttons(root).find(node => descendants(node).some(child => child.text === "Stop turn"));
+
+test("the history line counts only what its toggle reveals, so none shows when the stack already holds every request", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  let approvals: DesktopHostApproval[] = [waitingOnTurn("waiting-1", "LunarAmber"), waitingOnTurn("waiting-2", "CopperRidge"), namedApproval("p-a", "GardenPoint")];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    context.mock.timers.tick(30_000);
+    await flushHostApprovals();
+    assert.equal(trayPosition(root), "1 of 3", "the stack holds the pending request and both waiting requests");
+    assert.ok(!historyToggle(root), "no history line: the toggle would reveal nothing");
+    // An unavailable request that no turn waits on is the one the toggle reveals.
+    approvals = [...approvals, { ...hostApproval(), id: "stale", status: "unavailable" as const,
+      presentation: { ...hostApproval().presentation, displayName: "StaleAgent", title: "Approval unavailable" as const } }];
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    const toggle = historyToggle(root);
+    assert.ok(toggle, "the line appears for the one request the toggle reveals");
+    assert.equal(descendants(toggle).map(node => node.text).join("").trim(), "Show 1 unavailable or unconfirmed approval");
+    (toggle.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayPosition(root), "1 of 4", "the toggle reveals it");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a card that gains Stop turn on the same request holds that button for the hold", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [waitingOnTurn("waiting-1", "LunarAmber")], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    (historyToggle(root)!.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayHeading(root), "LunarAmber · Approval unavailable");
+    assert.ok(!stopTurnButton(root), "no turn waits on it yet");
+    context.mock.timers.tick(30_000);
+    await flushHostApprovals();
+    const stop = stopTurnButton(root);
+    assert.ok(stop, "Stop turn appears once the turn waits on the same request");
+    assert.equal(stop.props.disabled, true, "its own hold starts when it appears, not when the card first appeared");
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS - 1);
+    await nextTick();
+    assert.equal(stopTurnButton(root)!.props.disabled, true, "still held one millisecond before the end");
+    context.mock.timers.tick(1);
+    await nextTick();
+    assert.equal(stopTurnButton(root)!.props.disabled, false, "armed by the clock alone");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a card that appeared while the chat tab was hidden holds again when the tab is shown", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint")], error: null }),
+  } } });
+  const chatTabActive = Vue.ref(true);
+  const { root, app } = mount({ setup: () => () => Vue.h(RoomComposer, { ...composerProps(), active: chatTabActive.value }) }, {});
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    chatTabActive.value = false;
+    await nextTick();
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS * 2);
+    chatTabActive.value = true;
+    await nextTick();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "shown again, the card holds again");
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("the composer holds its card again when the window comes back to the front, and drops its listener on unmount", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint")], error: null }),
+  } } });
+  const listeners = new Set<() => void>();
+  const doc = document as unknown as { addEventListener: (type: string, listener: () => void) => void;
+    removeEventListener: (type: string, listener: () => void) => void; visibilityState: string };
+  const original = { add: doc.addEventListener, remove: doc.removeEventListener, state: doc.visibilityState };
+  doc.addEventListener = (type, listener) => { if (type === "visibilitychange") listeners.add(listener); };
+  doc.removeEventListener = (type, listener) => { if (type === "visibilitychange") listeners.delete(listener); };
+  const { root, app } = mount(RoomComposer, composerProps());
+  let listenersAfterUnmount = -1;
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.equal(listeners.size, 1, "listening while mounted");
+    doc.visibilityState = "hidden";
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS * 2);
+    doc.visibilityState = "visible";
+    for (const listener of [...listeners]) listener();
+    await nextTick();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "back in front: the card holds again");
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    app.unmount();
+    listenersAfterUnmount = listeners.size;
+  } finally {
+    if (listenersAfterUnmount < 0) app.unmount();
+    doc.addEventListener = original.add;
+    doc.removeEventListener = original.remove;
+    doc.visibilityState = original.state;
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+  }
+  assert.equal(listenersAfterUnmount, 0, "unmounting removes the listener");
 });
 
 test("Deny and Allow keep fixed widths so their hit areas never move between requests", async () => {

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { HostApprovalStatus } from "../../shared/host-approvals";
+import type { DesktopHostApproval, HostApprovalStatus } from "../../shared/host-approvals";
 import {
   HOST_APPROVAL_ARM_MS,
+  hostApprovalActionKey,
   hostApprovalDecisionsArmed,
   hostApprovalHistoryCount,
   hostApprovalHistoryLabel,
@@ -17,6 +18,21 @@ test("a request that becomes the visible card holds its decisions for the arming
   assert.equal(hostApprovalDecisionsArmed(SHOWN_AT, SHOWN_AT + HOST_APPROVAL_ARM_MS - 1), false, "held one millisecond before the end");
   assert.equal(hostApprovalDecisionsArmed(SHOWN_AT, SHOWN_AT + HOST_APPROVAL_ARM_MS), true, "armed when the hold ends");
   assert.equal(hostApprovalDecisionsArmed(SHOWN_AT, SHOWN_AT + 60_000), true, "stays armed while it is shown");
+});
+
+test("a card's action key changes when a decision button appears on the same request", () => {
+  const presentation = { agentId: "agent", displayName: "Agent", provider: "open-model", title: "Run a command",
+    details: "{}", denyScope: "session_pending" } as DesktopHostApproval["presentation"];
+  const waiting = { presentation, status: "unavailable" as const, retryDecision: null };
+  const pending = { ...waiting, status: "pending" as const };
+  const recorded = { ...waiting, status: "decision_recorded" as const, retryDecision: "allow_once" as const };
+  assert.equal(hostApprovalActionKey(pending, false), "deny allow_once");
+  assert.equal(hostApprovalActionKey(recorded, false), "retry_allow_once");
+  assert.equal(hostApprovalActionKey(waiting, false), "", "an unavailable card that no turn waits on offers nothing");
+  // Same request, same card: only the turn starting to wait on it changes the key.
+  assert.notEqual(hostApprovalActionKey(waiting, false), hostApprovalActionKey(waiting, true), "Stop turn appears");
+  assert.equal(hostApprovalActionKey(waiting, true), "stop_turn");
+  assert.equal(hostApprovalActionKey(waiting, true), hostApprovalActionKey(waiting, true), "a steady card keeps its key");
 });
 
 const card = (id: string, status: HostApprovalStatus) => ({ id, status });
