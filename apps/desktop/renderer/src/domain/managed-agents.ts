@@ -408,6 +408,9 @@ export function supervisedAgentWorkIndicators(
         summary: resourceFreshness === "fresh" && agentCompactionProgress(entry) ? "Compacting conversation" : latest
           ? humanFacingSupervisorActivitySummary(latest)
           : roomTurnFallbackSummary(turn.state),
+        // The turn has its answer and only waits: its owner may have the answer posted now.
+        ...(resourceFreshness === "fresh" && turn.state === "responding" && latest?.method.trim().toLowerCase() === BACKGROUND_WORK_METHOD
+          ? { waitsForBackgroundWork: true } : {}),
         startedAt: turnStartedAt
           ?? latest?.observedAt
           ?? entry.roomAgentState?.connection.observedAt
@@ -456,6 +459,11 @@ function roomTurnFallbackSummary(state: string): string {
 const PROVIDER_RETRY_METHOD = "letagents/providerretry";
 const PROVIDER_RETRY_SUMMARY = /^The model provider returned an error\. Retrying \(attempt \d{1,3}\)\.$/;
 
+/** A Claude turn that stays open for background work it started is not thinking, and looks stuck unless its
+ * owner is told what it waits for and for how long. The adapter sends this as a `provider_event` too. */
+const BACKGROUND_WORK_METHOD = "letagents/backgroundwork";
+const BACKGROUND_WORK_SUMMARY = /^(?:Waiting for (?:a sub-agent|sub-agents) to finish \((?:under 1 min|\d{1,4} min)\): "[^\n]{1,600}\.|Waiting up to \d{1,3} min for (?:a background command|background commands): "[^\n]{1,400}\.|Waiting for Claude's answer about background work that has ended \((?:under 1 min|\d{1,4} min)\)\.)$/;
+
 /** Provider transport/account notifications remain in diagnostics, but they
  * are not evidence that an agent is doing work for the room. */
 export function isHumanVisibleSupervisorActivity(
@@ -467,7 +475,7 @@ export function isHumanVisibleSupervisorActivity(
     || method === "account/ratelimitsupdated"
     || method === "thread/read"
   ) return false;
-  if (method === PROVIDER_RETRY_METHOD) return true;
+  if (method === PROVIDER_RETRY_METHOD || method === BACKGROUND_WORK_METHOD) return true;
   return event.kind !== "usage" && event.kind !== "provider_event";
 }
 
@@ -484,6 +492,11 @@ export function humanFacingSupervisorActivitySummary(
     // method gets fixed copy, so provider text cannot be shown here.
     const summary = event.summary.trim();
     return PROVIDER_RETRY_SUMMARY.test(summary) ? summary : "Waiting for the model provider";
+  }
+  if (method === BACKGROUND_WORK_METHOD) {
+    // The adapter's sentence, with the model's own short description of the work. Anything else gets fixed copy.
+    const summary = event.summary.trim();
+    return BACKGROUND_WORK_SUMMARY.test(summary) ? liveActivityEchoText(summary) : "Waiting for background work to finish";
   }
   if (method === "item/reasoning/summarytextdelta") {
     // The Codex adapter places only the provider-approved reasoning summary in
@@ -621,6 +634,8 @@ export interface ManagedAgentWorkIndicator {
   agentKey?: string | null;
   /** Exact activating room message; establishes causal order without comparing host clocks. */
   sourceMessageId?: string | null;
+  /** The turn is held open for background work. Its answer exists, and its owner can end the wait. */
+  waitsForBackgroundWork?: boolean;
 }
 
 /** Longest live-activity echo shown in the room work indicator. */

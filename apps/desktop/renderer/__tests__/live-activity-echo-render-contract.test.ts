@@ -80,6 +80,26 @@ test("work indicator button has interactive styling, accessible focus, and theme
   assert.match(cssSource, /\.room-local-agent-work-copy/);
 });
 
+const chatViewSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/RoomChatView.vue",
+  import.meta.url,
+)), "utf8");
+
+test("the wait for background work has a button of its own that asks for the existing stop of the turn", () => {
+  // A button beside the indicator, never inside it: the indicator is a button itself.
+  assert.match(viewportSource, /<template v-for="work in collapsedAgentWork\.visible" :key="work\.id">\s*<button[\s\S]*?class="room-local-agent-work"[\s\S]*?<\/button>\s*<button\s+v-if="work\.waitsForBackgroundWork"\s+type="button"\s+class="room-local-agent-work-action"/);
+  assert.match(viewportSource, /title="Post the answer that the agent has now\. The background work keeps running, and its later result will not be posted\."/);
+  assert.match(viewportSource, /@click="\$emit\('post-agent-answer-now', work\.id\)"\s*>\s*Post answer now\s*<\/button>/);
+  assert.match(viewportSource, /"post-agent-answer-now": \[agentId: string\];/);
+  assert.match(chatViewSource, /@post-agent-answer-now="emit\('post-agent-answer-now', \$event\)"/);
+  assert.match(chatViewSource, /"post-agent-answer-now": \[agentId: string\];/);
+  // The room shell sends no request of its own: it runs the stop of the turn that the inspector has.
+  assert.match(shellSource, /@post-agent-answer-now="postAgentAnswerNow"/);
+  assert.match(shellSource, /function postAgentAnswerNow\(entryId: string\): void \{ \/\/ [^\n]+\n[\s\S]*?candidate\.id === entryId && candidate\.roomId === props\.room\.identifier[\s\S]*?openAgentDetailRequest\([\s\S]*?void runAgentInspectorAction\(\{ entryId, roomId: entry\.roomId, kind: "stop_turn" \}\);\s*\}/);
+  assert.match(cssSource, /\.room-local-agent-work-action\s*\{[\s\S]*?cursor:\s*pointer;/);
+  assert.match(cssSource, /\.room-local-agent-work-action:focus-visible\s*\{[\s\S]*?outline:/);
+});
+
 test("agent inspector host falls back to composer only when opener row is non-null and disconnected", () => {
   assert.match(hostSource, /if\s*\(restoreFocusOnClose\s*&&\s*restoreFocusElement\)\s*\{/);
   assert.match(hostSource, /restoreFocusElement\.isConnected/);

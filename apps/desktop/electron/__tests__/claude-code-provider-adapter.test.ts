@@ -10,7 +10,15 @@ import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../
 import { NO_REPLY_FAILURE, noReplyFailureKind } from "../../../../shared/room-turn-no-reply.mjs";
 
 import {
+  CLAUDE_BACKGROUND_COMMAND_WAIT_LIMIT_MS,
+  CLAUDE_BACKGROUND_NOTICE_START_LIMIT_MS,
+  CLAUDE_BACKGROUND_SUBAGENT_WAIT_LIMIT_MS,
+  CLAUDE_BACKGROUND_WORK_ANSWER_METHOD,
+  CLAUDE_BACKGROUND_WORK_FINISHED_METHOD,
+  CLAUDE_BACKGROUND_WORK_METHOD,
+  CLAUDE_BACKGROUND_WORK_TEXT,
   ClaudeCodeProviderAdapter,
+  claudeBackgroundWorkWaitSummary,
   claudeSessionTranscriptCandidates,
   claudeChildEnvironment,
   claudeCliEnv,
@@ -25,6 +33,7 @@ import {
   ownerMcpStartupTimeoutMs,
   type ClaudeCliChild,
   type ClaudeCodeProviderAdapterDependencies,
+  type ClaudeCodeProviderAdapterOptions,
 } from "../main/agents/claude-code-provider-adapter.js";
 import type {
   ProviderSpawnRequest,
@@ -46,6 +55,8 @@ import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProce
 const { providerStreamLifecycle } = await import(new URL("../../daemon/provider-stream-policy.ts", import.meta.url).href);
 const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+// What Chat shows of an agent's activity is decided in the renderer.
+const { humanFacingSupervisorActivitySummary, isHumanVisibleSupervisorActivity } = await import(new URL("../../renderer/src/domain/managed-agents.ts", import.meta.url).href);
 const { ProviderSchedulerFailureCoordinator } = await import(new URL("../../daemon/provider-scheduler-failure-coordinator.ts", import.meta.url).href);
 const { redactCredentialText } = await import(new URL("../../daemon/credential-redaction.ts", import.meta.url).href);
 
@@ -2184,6 +2195,8 @@ async function claudeDaemonFixture(options: {
    * more). The waits that were asked for are kept, for a test to read.
    */
   skipFollowUpDelay?: boolean;
+  /** The adapter's own waits, for a test that cannot wait as long as an agent does. */
+  adapter?: Pick<ClaudeCodeProviderAdapterOptions, "backgroundSubagentWaitLimitMs" | "backgroundCommandWaitLimitMs" | "backgroundNoticeStartLimitMs" | "backgroundWorkNoticeEveryMs">;
 } = {}) {
   const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
   const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
@@ -2257,7 +2270,7 @@ async function claudeDaemonFixture(options: {
   /** What a test makes the first saving of a turn's result fail with. */
   let failNextResultCheckpoint: Error | null = null;
   const makeAdapter = () => {
-    const adapter = new ClaudeCodeProviderAdapter({ dependencies: { ...harness.dependencies, now: () => new Date().toISOString() } });
+    const adapter = new ClaudeCodeProviderAdapter({ ...options.adapter, dependencies: { ...harness.dependencies, now: () => new Date().toISOString() } });
     const recover = adapter.recoverRoomTurn!.bind(adapter);
     adapter.recoverRoomTurn = async (handle, turn, options) => {
       recovery.requests.push({ ...turn });
@@ -2334,7 +2347,7 @@ async function claudeDaemonFixture(options: {
     await daemon.stop();
     await rm(root, { recursive: true, force: true });
   };
-  type Receipt = { source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null };
+  type Receipt = { inbox_item_id: string; source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null };
   const inbox = () => (daemon as unknown as { supervisedInbox: {
     bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<unknown>;
     receipts(agentId: string): Promise<Receipt[]>;
@@ -2360,24 +2373,38 @@ async function claudeDaemonFixture(options: {
     await inbox().bootstrapCursor({ agent_id: id, room_id: "room_1", last_observed_message_id: null });
     await installGrant();
     const view = async () => (await request("manifest.list")).result[0] as {
-      observed_state: string; condition: string; last_error: string | null; provider_ref: { provider_continuation_id: string };
-      room_agent_state: { ingress: { state: string }; inbox: { state: string; detail: string | null } };
+      observed_state: string; condition: string; last_error: string | null; work_attempt_id: string;
+      provider_ref: { provider_continuation_id: string; execution_generation_id: string };
+      room_agent_state: { ingress: { state: string }; inbox: { state: string; detail: string | null }; turn: { state: string } };
+      activity: Array<{ kind: string; method: string; summary: string; status: string }>;
     };
     await eventually(() => harness.children.length === 1, "the CLI is launched");
     await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
     const sessionId = (await view()).provider_ref.provider_continuation_id;
     const receipt = async (messageId: string) => (await inbox().receipts(id)).find((item) => item.source_message_id === messageId);
+    /** Send the agent its nth room message. */
+    const send = (ordinal: number) => {
+      roomMessages.push({ id: `msg_${ordinal}`, sender: "someone", text: `request ${ordinal}`, activation: { for_current_agent: { decision: "activate" } } });
+    };
     /** Send the agent its nth room message and wait until its process has been asked to run the turn. */
     const begin = async (ordinal: number) => {
-      roomMessages.push({ id: `msg_${ordinal}`, sender: "someone", text: `request ${ordinal}`, activation: { for_current_agent: { decision: "activate" } } });
+      send(ordinal);
       await eventually(async () => turns.length === ordinal && Boolean((await receipt(`msg_${ordinal}`))?.provider_turn_id), `msg_${ordinal} starts its turn`).catch(async (error) => {
         const current = await view();
         throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); inbox ${current.room_agent_state.inbox.state} (${current.room_agent_state.inbox.detail})`);
       });
       return turns[ordinal - 1]!;
     };
-    return { id, harness, request, eventually, view, read, published, roomMessages, turns, sessionRows, sessionId, receipt, begin, cleanup, recovery, transcript,
+    return { id, harness, request, eventually, view, read, published, roomMessages, turns, sessionRows, sessionId, receipt, send, begin, cleanup, recovery, transcript,
       followUpWaits,
+      /** The owner stops the turn of a room message, as the desktop asks the daemon to. */
+      stopTurn: async (messageId: string, turn: { id: string }) => {
+        const entry = await view();
+        return request("manifest.control_turn", { id, daemon_generation: (await request("daemon.status")).result.generation, room_id: "room_1",
+          work_attempt_id: entry.work_attempt_id, execution_generation_id: entry.provider_ref.execution_generation_id,
+          provider_continuation_id: entry.provider_ref.provider_continuation_id, provider_turn_id: turn.id,
+          inbox_item_id: (await receipt(messageId))!.inbox_item_id, source_message_id: messageId, action_id: `stop-${messageId}`, action_sequence: 1 });
+      },
       receipts: () => inbox().receipts(id),
       /** The CLI reports that the turn has started. */
       reportStarted: (turn: { id: string; child: FakeClaudeChild }) =>
@@ -3862,23 +3889,67 @@ for (const [left, { rows, posted }] of Object.entries(CLAUDE_SESSION_READ_BACK))
   });
 }
 
-/** The answer of the turn in each real capture where the CLI wrote more than a request and an answer. */
-const CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER = {
-  stop_hook_refuses_end_once: "ANSWER AFTER THE HOOK",
-  background_command: "ANSWER OF THE TURN",
-  subagent_in_background: "ANSWER OF THE TURN",
-  subagent_in_foreground: "ANSWER OF THE TURN",
-  subagent_api_error: "ANSWER OF THE TURN",
-  skill_call: "ANSWER OF THE TURN",
-} as const;
+const TURNS_ANSWER = "ANSWER OF THE TURN";
+const NOTICE_ANSWER = "ANSWER TO THE TASK NOTICE";
+/**
+ * What the model wrote for the room in each real capture where the CLI wrote more than a request and an answer:
+ * the turn's own answer, then its answer to the notice of each background task that the turn started. The room
+ * gets these as one reply. A sub-agent's report is never among them.
+ */
+const CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER: Record<string, readonly string[]> = {
+  stop_hook_refuses_end_once: ["ANSWER AFTER THE HOOK"],
+  background_command: [TURNS_ANSWER, NOTICE_ANSWER],
+  subagent_in_background: [TURNS_ANSWER, NOTICE_ANSWER],
+  subagent_in_foreground: [TURNS_ANSWER],
+  // The sub-agent failed. The model was told so, and answered.
+  subagent_api_error: [TURNS_ANSWER, NOTICE_ANSWER],
+  skill_call: [TURNS_ANSWER],
+  // One notice and one answer for each task.
+  two_background_commands: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"],
+  two_subagents_in_background: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"],
+  // Both notices went to the model in one request. The CLI wrote a result for each: an empty one, and the answer.
+  two_background_commands_end_together: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE"],
+  // The command failed. The model was told so, and answered.
+  background_command_fails: [TURNS_ANSWER, NOTICE_ANSWER],
+  // The model wrote nothing about the notice, twice.
+  background_command_notice_answer_empty: [TURNS_ANSWER],
+  // The request that held the notice failed at the provider. The turn ends with what it has, and says so.
+  background_command_notice_api_error: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported],
+  // The task ended while the turn still ran, and the turn's last request took its notice. No answer to a notice follows.
+  task_ends_while_turn_goes_on: ["ANSWER OF THE TURN, TO A REQUEST THAT HOLDS THE TASK NOTICE"],
+  // The second task ended while the first notice was answered, and that answer's last request took both notices.
+  task_ends_while_notice_is_answered: [TURNS_ANSWER, "ANSWER NUMBER 1 AFTER THE TURN, TO A REQUEST THAT HOLDS 2 TASK NOTICES"],
+  // An interrupt that reaches the CLI when no turn runs stops nothing: the command ends later, and its notice is answered.
+  background_command_running_at_interrupt: [TURNS_ANSWER, NOTICE_ANSWER],
+  // An interrupt that reaches the CLI while it answers the notice ends that answer.
+  interrupt_during_task_notice_answer: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported],
+  // The model is not told of a command that was stopped. It is told of a sub-agent that was.
+  background_command_stopped_by_request: [TURNS_ANSWER],
+  background_command_running_at_input_close: [TURNS_ANSWER],
+  subagent_stopped_by_request: [TURNS_ANSWER, NOTICE_ANSWER],
+  // A sub-agent and a command in one turn. Both end, each in its time, and each notice is answered.
+  subagent_and_background_command: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"],
+};
 
-for (const [name, answer] of Object.entries(CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER)) {
-  test(`the real stream of a Claude turn (${name}) gets the turn's own answer posted once, and nothing else`, async () => {
+test("every real capture of a turn with a tool call, a hook or a sub-agent is replayed against the daemon", () => {
+  // The turn that ends on an API error, and the one that completes without an answer, have replays of their own.
+  const replayed = [...Object.keys(CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER), "task_ends_during_next_turn", "completed_without_answer", ...Object.keys(CLAUDE_API_ERROR_CAPTURES)];
+  for (const [name, capture] of Object.entries(CLAUDE_REAL_CAPTURES)) {
+    if (capture.session.some((row) => row.type === "user" && row.uuid !== "TURN_ID")) assert.ok(replayed.includes(name), `${name} has a replay`);
+  }
+  // No reply ever holds a sub-agent's own words.
+  assert.ok(Object.values(CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER).flat().every((text) => !text.includes("SUBAGENT REPORT")));
+});
+
+for (const [name, texts] of Object.entries(CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER)) {
+  const answer = texts.join("\n\n");
+  test(`the real stream of a Claude turn (${name}) gets one reply posted, with all that the model wrote for the room, and nothing else`, async () => {
     const agent = await claudeDaemonFixture();
     try {
       const turn = await agent.begin(1);
       // Every line the CLI wrote, in its order: the tool call and its result, a sub-agent's rows, a hook's refusal,
-      // and, where a background task ended, the turn the CLI ran for its notice. That turn's result names no command.
+      // and, where a background task ended, the turn the CLI ran for its notice. That turn's result names no command:
+      // its text belongs to the turn that started the task, which stays open for it.
       const { stream } = realClaudeCapture(CLAUDE_REAL_CAPTURES[name]!, agent.sessionId, turn.id);
       assert.equal(stream.filter((event) => event.type === "result" && event.user_message_uuid === turn.id).length, 1);
       for (const event of stream) turn.child.emit(event);
@@ -3892,7 +3963,7 @@ for (const [name, answer] of Object.entries(CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANS
       agent.answer(next, "Answer 2.");
       await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
       assert.deepEqual(agent.published, [answer, "Answer 2."],
-        "the room gets the turn's own answer once. The answer to a task's notice names no room message, and is posted nowhere");
+        "the room gets one reply for the turn: its own answer and, after it, the answer to each notice of its background work");
       assert.equal(agent.turns.length, 2, "one turn for each room message");
       await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
       assert.deepEqual(agent.recorded().endings.map((ending) => [ending.n, ending.outcome]), [[1, "completed"], [1, "completed"]]);
@@ -5240,5 +5311,636 @@ test("one of the owner's MCP tools asks for approval through the same flow as th
     } });
     child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId, result: "Done" });
     await running.catch(() => {}); controller.abort(); await observing; await adapter.stop(handle);
+  }
+});
+
+// A room turn stays open for background work that it started.
+
+/** The lines of a real capture up to the turn's own result and the lifecycle line after it, and the lines the CLI wrote after those. */
+function splitAtOwnResult(stream: Array<Record<string, unknown>>, turnId: string) {
+  const result = stream.findIndex((event) => event.type === "result" && event.user_message_uuid === turnId);
+  const end = stream[result + 1]?.type === "command_lifecycle" ? result + 2 : result + 1;
+  return { own: stream.slice(0, end), after: stream.slice(end) };
+}
+/** The same lines with one text in place of another, for a turn the CLI was not recorded in. */
+const withText = (events: Array<Record<string, unknown>>, from: string, to: string) =>
+  JSON.parse(JSON.stringify(events).replaceAll(JSON.stringify(from), JSON.stringify(to))) as Array<Record<string, unknown>>;
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const MINUTE = 60_000;
+const WAITS_FOR_COMMAND = 'Waiting up to 2 min for a background command: "probe".';
+const WAITS_FOR_ANSWER = "Waiting for Claude's answer about background work that has ended (under 1 min).";
+
+test("a Claude turn that started background work stays open: the owner reads what it waits for, the next message waits behind it, and the room gets one reply", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    const turn = await agent.begin(1);
+    const { own, after } = splitAtOwnResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.background_command!, agent.sessionId, turn.id).stream, turn.id);
+    for (const event of own) turn.child.emit(event);
+    // The turn's own result has arrived, and the command that the turn started still runs.
+    const waiting = async () => (await agent.view()).activity.filter((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD).at(-1);
+    await agent.eventually(async () => Boolean(await waiting()), "the owner is told that the turn waits");
+    const notice = (await waiting())!;
+    assert.deepEqual([notice.summary, notice.status, notice.kind], [WAITS_FOR_COMMAND, "working", "provider_event"]);
+    assert.equal(isHumanVisibleSupervisorActivity(notice), true, "Chat shows it");
+    assert.equal(humanFacingSupervisorActivitySummary(notice), WAITS_FOR_COMMAND, "in the adapter's own words");
+
+    // A message that arrives now waits behind the open turn, as behind any turn that runs.
+    agent.send(2);
+    await agent.eventually(async () => Boolean(await agent.receipt("msg_2")), "msg_2 is in the inbox");
+    await pause(200);
+    assert.deepEqual(agent.published, [], "nothing is posted while the turn is open");
+    assert.equal(agent.turns.length, 1, "and the CLI is sent no new prompt");
+    assert.equal((await agent.receipt("msg_1"))!.state, "dispatching");
+    assert.equal((await agent.receipt("msg_2"))!.state, "pending");
+    const open = await agent.view();
+    assert.deepEqual([open.observed_state, open.condition, open.room_agent_state.turn.state], ["working", "none", "responding"]);
+    assert.deepEqual(agent.recorded().turns.map((recorded) => recorded.state), ["active"], "the record holds the turn open too");
+
+    // The command ends, and the CLI answers its notice in a turn of its own.
+    for (const event of after) turn.child.emit(event);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    assert.deepEqual(agent.published, [`${TURNS_ANSWER}\n\n${NOTICE_ANSWER}`], "one reply: the interim answer, a blank line, the later answer");
+    await agent.eventually(() => agent.turns.length === 2, "msg_2 starts its turn when the first has ended");
+    agent.reportStarted(agent.turns[1]!);
+    agent.answer(agent.turns[1]!, "Answer 2.");
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+    assert.deepEqual(agent.published, [`${TURNS_ANSWER}\n\n${NOTICE_ANSWER}`, "Answer 2."], "and nothing is posted twice");
+    await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
+    assert.deepEqual(agent.recorded().endings.map((ending) => [ending.n, ending.outcome]), [[1, "completed"], [1, "completed"]]);
+    assert.equal(agent.recorded().gaps, 0);
+    assert.equal((await agent.view()).room_agent_state.inbox.state, "empty");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const lateNotice of ["after the next turn's result, as the CLI wrote it", "before the next turn's result"] as const) {
+  test(`a Claude turn whose background command outlasts its limit ends with its answer and one line, and the agent is free; the notice that is answered ${lateNotice} is posted nowhere and ends no turn`, async () => {
+    const agent = await claudeDaemonFixture({ adapter: { backgroundCommandWaitLimitMs: 400 } });
+    try {
+      const turn = await agent.begin(1);
+      // Real lines: a turn, then a second prompt, and the task ends while the second turn runs.
+      const stream = realClaudeCapture(CLAUDE_REAL_CAPTURES.task_ends_during_next_turn!, agent.sessionId, turn.id).stream;
+      const { own, after } = splitAtOwnResult(stream, turn.id);
+      for (const event of own) turn.child.emit(event);
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered at the limit");
+      assert.deepEqual(agent.published, [`${TURNS_ANSWER}\n\n${CLAUDE_BACKGROUND_WORK_TEXT.commandStillRuns}`]);
+
+      const next = await agent.begin(2);
+      const later = withText(after, "SECOND_TURN_ID", next.id);
+      const nextResult = later.findIndex((event) => event.type === "result" && event.user_message_uuid === next.id);
+      assert.ok(nextResult > 0 && later.slice(nextResult).some((event) => event.type === "result" && event.user_message_uuid === undefined));
+      // The lines of the task's end and of the answer to its notice, which the CLI wrote after the second turn's result.
+      const noticeAnswer = later.slice(nextResult + 2);
+      if (lateNotice === "before the next turn's result") {
+        // The same lines, in the order of a CLI that answers the notice before it starts the prompt that waits.
+        for (const event of [...later.slice(0, nextResult - 1).filter((event) => event.type === "system"), ...noticeAnswer]) next.child.emit(event);
+        await pause(200);
+        assert.equal((await agent.receipt("msg_2"))!.state, "dispatching", "the answer to another turn's notice does not end this turn");
+        assert.equal(agent.published.length, 1, "and is not posted as its answer");
+        for (const event of later.slice(0, nextResult + 2).filter((event) => event.type !== "system")) next.child.emit(event);
+      } else {
+        for (const event of later) next.child.emit(event);
+      }
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+      const third = await agent.begin(3);
+      agent.reportStarted(third);
+      agent.answer(third, "Answer 3.");
+      await agent.eventually(async () => (await agent.receipt("msg_3"))?.state === "acknowledged", "msg_3 is answered");
+      assert.deepEqual(agent.published, [`${TURNS_ANSWER}\n\n${CLAUDE_BACKGROUND_WORK_TEXT.commandStillRuns}`, "ANSWER OF THE SECOND TURN", "Answer 3."],
+        "the late answer to the notice is in no reply");
+      await agent.eventually(async () => (await agent.view()).activity.some((event) => event.summary === CLAUDE_BACKGROUND_WORK_TEXT.notPosted), "the owner reads that it was not posted");
+      const current = await agent.view();
+      assert.equal(current.activity.some((event) => event.summary === CLAUDE_BACKGROUND_WORK_TEXT.limitReached), false, "a command that still runs is no fault to report");
+      assert.equal(current.condition, "none", current.last_error ?? "");
+      assert.deepEqual(agent.recorded().endings.map((ending) => [ending.n, ending.outcome]), [[1, "completed"], [1, "completed"], [1, "completed"]]);
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+test("the owner's Stop on a Claude turn that waits for background work posts the answer the turn has, and frees the agent; the work's later notice is no other turn's", async () => {
+  const agent = await claudeDaemonFixture();
+  try {
+    const turn = await agent.begin(1);
+    const first = splitAtOwnResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.background_command!, agent.sessionId, turn.id).stream, turn.id);
+    for (const event of first.own) turn.child.emit(event);
+    await agent.eventually(async () => (await agent.view()).activity.some((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD), "the turn waits");
+    const written = turn.child.written.length;
+    const startedAt = Date.now();
+    const stopped = await agent.stopTurn("msg_1", turn);
+    assert.equal(stopped.ok, true, stopped.error);
+    assert.ok(Date.now() - startedAt < 5_000, "Stop does not wait for the CLI: the command had ended with its answer");
+    assert.equal(stopped.result.interrupted, false, "nothing was interrupted: the turn's reply stands");
+    assert.deepEqual(turn.child.written.slice(written).map((line) => (JSON.parse(line) as { request?: { subtype?: string } }).request?.subtype), ["interrupt"],
+      "the CLI is sent an interrupt, which stops the answer to a notice when one runs, and no background work");
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered").catch(async (error) => {
+      const row = await agent.receipt("msg_1");
+      throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); posted ${JSON.stringify(agent.published)}`);
+    });
+    assert.deepEqual(agent.published, [`${TURNS_ANSWER}\n\n${CLAUDE_BACKGROUND_WORK_TEXT.ownerEnded}`], "the answer is not thrown away: it is posted, with a line that the owner ended the wait");
+    assert.equal((await agent.receipt("msg_1"))!.last_error, null);
+
+    // The next message starts background work of its own. Then the first turn's command ends, and its notice is answered.
+    const next = await agent.begin(2);
+    const second = splitAtOwnResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.background_command_fails!, agent.sessionId, next.id).stream, next.id);
+    for (const event of second.own) next.child.emit(event);
+    for (const event of withText(first.after, NOTICE_ANSWER, "ANSWER TO THE STOPPED TURN'S TASK NOTICE")) next.child.emit(event);
+    await pause(200);
+    assert.equal((await agent.receipt("msg_2"))!.state, "dispatching", "the notice of the first turn's work does not end the turn that waits for its own");
+    assert.equal(agent.published.length, 1);
+    for (const event of second.after) next.child.emit(event);
+    await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+    assert.deepEqual(agent.published.slice(1), [`${TURNS_ANSWER}\n\n${NOTICE_ANSWER}`], "with the answer to its own work's notice, and not to the other's. Nothing is posted twice");
+    await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
+    assert.deepEqual(agent.recorded().endings.map((ending) => [ending.n, ending.outcome]), [[1, "completed"], [1, "completed"]]);
+    assert.equal(agent.recorded().gaps, 0);
+    const current = await agent.view();
+    assert.equal(current.condition, "none", current.last_error ?? "");
+    assert.equal(current.room_agent_state.inbox.state, "empty");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+for (const ended of ["Claude process", "Claude process and daemon"] as const) {
+  test(`a Claude turn that waits for background work when its ${ended} ends gets its own answer posted once, read from the session`, async () => {
+    const agent = await claudeDaemonFixture();
+    try {
+      const turn = await agent.begin(1);
+      const capture = realClaudeCapture(CLAUDE_REAL_CAPTURES.background_command!, agent.sessionId, turn.id);
+      for (const event of splitAtOwnResult(capture.stream, turn.id).own) turn.child.emit(event);
+      await agent.eventually(async () => (await agent.view()).activity.some((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD), "the turn waits");
+      assert.deepEqual(agent.published, []);
+      // The session as the CLI kept it: the turn, and after it the task's notice with the answer to it.
+      agent.sessionRows.push(...capture.session);
+      if (ended === "Claude process") agent.exitProcess();
+      else await agent.restartDaemon(() => agent.exitProcess());
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered").catch(async (error) => {
+        const row = await agent.receipt("msg_1");
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error})`);
+      });
+      const next = await agent.begin(2);
+      agent.reportStarted(next);
+      agent.answer(next, "Answer 2.");
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
+      assert.deepEqual(agent.published, [TURNS_ANSWER, "Answer 2."], "the turn's own answer, once. The answer to the notice is another turn's in the session, and is not read");
+      assert.equal(agent.turns.length, 2, "the turn is not run again");
+      assert.equal((await agent.view()).room_agent_state.inbox.state, "empty");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+test("a Claude agent that holds a task gets one reply for a turn with background work, and no follow-up when the answer to the notice fails", async () => {
+  const agent = await claudeDaemonFixture({ ownedTasks: () => [{ id: "task_1", title: "Task", leaseId: "lease_1", epoch: 1 }], skipFollowUpDelay: true });
+  try {
+    for (const [ordinal, name, reply] of [[1, "background_command", `${TURNS_ANSWER}\n\n${NOTICE_ANSWER}`],
+      [2, "background_command_notice_api_error", `${TURNS_ANSWER}\n\n${CLAUDE_BACKGROUND_WORK_TEXT.notReported}`]] as const) {
+      const turn = await agent.begin(ordinal);
+      for (const event of realClaudeCapture(CLAUDE_REAL_CAPTURES[name]!, agent.sessionId, turn.id).stream) turn.child.emit(event);
+      await agent.eventually(async () => (await agent.receipt(`msg_${ordinal}`))?.state === "acknowledged", `msg_${ordinal} is answered`);
+      assert.equal(agent.published.at(-1), reply);
+    }
+    await pause(200);
+    assert.equal(agent.published.length, 2);
+    assert.deepEqual((await agent.receipts()).map((item) => item.state), ["acknowledged", "acknowledged"], "no follow-up turn is queued, and nothing is blocked");
+    assert.deepEqual(agent.followUpWaits, []);
+    const failure = async () => (await agent.view()).activity.find((event) => event.method === CLAUDE_BACKGROUND_WORK_ANSWER_METHOD && event.summary.startsWith(CLAUDE_BACKGROUND_WORK_TEXT.answerFailed));
+    await agent.eventually(async () => Boolean(await failure()), "the failure is in the agent's activity");
+    assert.equal((await failure())!.summary, `${CLAUDE_BACKGROUND_WORK_TEXT.answerFailed} API Error: 400 probe says the request with the task's notice is invalid`,
+      "the failure's text is kept for the owner");
+    assert.equal((await agent.view()).condition, "none");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+/**
+ * One Claude agent on the fake CLI, with every event the adapter published, and a clock that a test moves.
+ * The adapter looks at a held turn again at a short pace, so a limit that the clock has passed ends the turn
+ * within a moment of real time.
+ */
+async function claudeBackgroundHarness(options: { lifecycleAuthorityMode?: "typed" | "typed_shadow" } = {}) {
+  const harness = createHarness();
+  const stream: ProviderStreamEvent[] = [];
+  const activity: ProviderActivityEvent[] = [];
+  const clock = { ms: Date.parse("2026-01-01T00:00:00.000Z") };
+  const adapter = new ClaudeCodeProviderAdapter({ backgroundWorkNoticeEveryMs: 10, dependencies: { ...harness.dependencies, now: () => new Date(clock.ms).toISOString() },
+    streamSink: (event) => stream.push(event), activitySink: (event) => activity.push(event) });
+  const handle = await adapter.spawn(spawnRequest(options.lifecycleAuthorityMode ? { lifecycleAuthorityMode: options.lifecycleAuthorityMode } : {}));
+  const child = harness.children[0]!;
+  const sessionId = handle.providerContinuationId!;
+  const endings: Array<{ turnId: string; outcome: string }> = [];
+  adapter.onExecution(handle, ({ fact }) => {
+    if (fact.domain === "turn" && fact.kind === "state_changed" && fact.state === "terminal") endings.push({ turnId: fact.providerTurnId, outcome: String(fact.turnOutcome) });
+  });
+  let turns = 0;
+  /** Start a room turn, and return the lines of a real capture for it. */
+  const start = async (name: string) => {
+    const writtenBefore = child.written.length;
+    turns += 1;
+    const saved: ProviderRoomTurnResult[] = [];
+    const running = adapter.runRoomTurn(handle, { inboxItemId: `inbox-${turns}`, actionId: `action-${turns}`, sourceMessage: {}, activation: {} },
+      { checkpointTerminalResult: async (result) => { saved.push(result); } });
+    let settled = false;
+    void running.then(() => { settled = true; }, () => { settled = true; });
+    const turnId = await nextClaudeTurnId(child, writtenBefore);
+    const lines = realClaudeCapture(CLAUDE_REAL_CAPTURES[name]!, sessionId, turnId).stream;
+    return { turnId, running, saved, lines, ...splitAtOwnResult(lines, turnId), settled: () => settled, publishedBefore: stream.length };
+  };
+  const emit = (events: Array<Record<string, unknown>>) => { for (const event of events) child.emit(event); };
+  /** Move the clock, and give the adapter the time to look at its held turn again. */
+  const after = async (ms: number) => { clock.ms += ms; await pause(40); };
+  /** What the adapter said last about the wait. */
+  const waits = () => stream.filter((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD).at(-1)?.summary;
+  return { harness, adapter, handle, child, sessionId, stream, activity, endings, start, emit, after, waits };
+}
+const methodOf = (event: Record<string, unknown>) => typeof event.subtype === "string" ? `${event.type}/${event.subtype}` : String(event.type);
+const reply = (turnId: string, ...texts: string[]) => ({ turnId, outcome: "reply", text: texts.join("\n\n"), evidence: "stream" });
+/** The published events of a turn, without the lines that say again, at the adapter's pace, what the turn waits for. */
+const withoutRepeats = (events: ProviderStreamEvent[]) => events.filter((event, index) => event.method !== CLAUDE_BACKGROUND_WORK_METHOD
+  || events.slice(0, index).filter((earlier) => earlier.method === CLAUDE_BACKGROUND_WORK_METHOD).at(-1)?.summary !== event.summary);
+
+for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
+  test(`a Claude turn with no background work, a foreground sub-agent, a skill or a Stop hook is published line for line and ends on its own result (${lifecycleAuthorityMode})`, async () => {
+    const agent = await claudeBackgroundHarness({ lifecycleAuthorityMode });
+    for (const [name, answer] of [["completed_answer", "PROBE_OK"], ["subagent_in_foreground", TURNS_ANSWER], ["skill_call", TURNS_ANSWER],
+      ["stop_hook_refuses_end_once", "ANSWER AFTER THE HOOK"], ["task_ends_while_turn_goes_on", "ANSWER OF THE TURN, TO A REQUEST THAT HOLDS THE TASK NOTICE"]] as const) {
+      const turn = await agent.start(name);
+      const result = turn.lines.findIndex((event) => event.type === "result");
+      agent.emit(turn.lines.slice(0, result));
+      assert.equal(turn.settled(), false, name);
+      agent.emit(turn.lines.slice(result, result + 1));
+      assert.deepEqual(await turn.running, reply(turn.turnId, answer), `${name}: the turn ends on its own result`);
+      agent.emit(turn.lines.slice(result + 1));
+      const published = agent.stream.slice(turn.publishedBefore);
+      assert.deepEqual(published.map((event) => event.method), turn.lines.map(methodOf), `${name}: each line of the CLI is published once, as itself, in its order`);
+      assert.deepEqual(published.map((event) => event.payload), turn.lines, `${name}: with the line as its payload`);
+      assert.deepEqual(published.filter((event) => event.nativeLifecyclePhase === "turn_terminal").map((event) => event.method), ["result/success"], name);
+      assert.deepEqual(turn.saved, [reply(turn.turnId, answer)], name);
+      assert.equal(agent.handle.observedState(), "idle", name);
+    }
+    assert.equal(agent.endings.length, 5, "one ending for each turn");
+    await agent.adapter.stop(agent.handle);
+  });
+
+  test(`a Claude turn that is held open for background work publishes its own result when it ends, and says that it waits until then (${lifecycleAuthorityMode})`, async () => {
+    const agent = await claudeBackgroundHarness({ lifecycleAuthorityMode });
+    const turn = await agent.start("background_command");
+    agent.emit(turn.own);
+    await flush();
+    assert.equal(turn.settled(), false, "the turn's own result does not end the turn");
+    assert.equal(agent.handle.observedState(), "working", "and the agent is not idle");
+    assert.deepEqual(agent.endings, [], "nothing says that the turn has ended");
+    assert.deepEqual(agent.activity.at(-1), { workAttemptId: "wa-claude-1", providerContinuationId: agent.sessionId, observedAt: agent.activity.at(-1)!.observedAt,
+      source: "native_harness", method: CLAUDE_BACKGROUND_WORK_METHOD, summary: WAITS_FOR_COMMAND, status: "working", checking: "", nextAction: "" });
+    // A second prompt is refused while the turn is open, as for any turn that runs.
+    await assert.rejects(agent.adapter.runRoomTurn(agent.handle, { inboxItemId: "inbox-other", actionId: "action-other", sourceMessage: {}, activation: {} }),
+      /already has a bounded room turn in progress/);
+    agent.emit(turn.after);
+    assert.deepEqual(await turn.running, reply(turn.turnId, TURNS_ANSWER, NOTICE_ANSWER));
+    assert.deepEqual(turn.saved, [reply(turn.turnId, TURNS_ANSWER, NOTICE_ANSWER)], "the result is saved once");
+    assert.deepEqual(agent.endings, [{ turnId: turn.turnId, outcome: "completed" }], "one ending, when the turn ended");
+    assert.equal(agent.handle.observedState(), "idle");
+
+    const published = withoutRepeats(agent.stream.slice(turn.publishedBefore));
+    const result = turn.lines.findIndex((event) => event.type === "result");
+    assert.deepEqual(published.map((event) => event.method), [
+      ...turn.lines.slice(0, result).map(methodOf),
+      // In place of the turn's own result: the turn waits for the command.
+      CLAUDE_BACKGROUND_WORK_METHOD,
+      "command_lifecycle", "system/background_tasks_changed", "system/task_updated", "system/task_notification",
+      // The command has ended: the turn waits for the answer to its notice.
+      CLAUDE_BACKGROUND_WORK_METHOD,
+      "assistant",
+      // The result that answers the notice. It names no command and ends no turn.
+      CLAUDE_BACKGROUND_WORK_ANSWER_METHOD,
+      // The turn's own result, now that the turn has ended.
+      "result/success",
+    ]);
+    assert.deepEqual(published.filter((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD).map((event) => event.summary), [WAITS_FOR_COMMAND, WAITS_FOR_ANSWER]);
+    assert.deepEqual(published.at(-1)!.payload, turn.lines[result], "the line is the CLI's own");
+    assert.deepEqual(published.filter((event) => event.nativeLifecyclePhase !== undefined).map((event) => [event.method, event.nativeLifecyclePhase]),
+      [["command_lifecycle", "turn_active"], ["result/success", "turn_terminal"]]);
+    // The daemon reads the agent as working for as long as the turn is open, and never as failed.
+    const waitStarted = published.findIndex((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD);
+    assert.deepEqual([...new Set(published.slice(waitStarted, -1).map((event) => providerStreamLifecycle(event, true)))], ["working"]);
+    assert.equal(providerStreamLifecycle(published.at(-1)!, true), "terminal");
+    const count = agent.stream.length;
+    await pause(60);
+    assert.equal(agent.stream.length, count, "a turn that has ended says nothing more");
+    await agent.adapter.stop(agent.handle);
+  });
+}
+
+test("what the owner reads while a Claude turn is held open: what it waits for, by kind, and what to expect", async () => {
+  assert.equal(CLAUDE_BACKGROUND_SUBAGENT_WAIT_LIMIT_MS, 30 * MINUTE);
+  assert.equal(CLAUDE_BACKGROUND_COMMAND_WAIT_LIMIT_MS, 2 * MINUTE);
+  assert.equal(CLAUDE_BACKGROUND_NOTICE_START_LIMIT_MS, 5 * MINUTE);
+  const shown = (summary: string) => humanFacingSupervisorActivitySummary({ kind: "provider_event", method: CLAUDE_BACKGROUND_WORK_METHOD, summary });
+  const command = (description: string, running = true) => ({ description, subagent: false, running });
+  const subagent = (description: string, running = true) => ({ description, subagent: true, running });
+  for (const [waitsFor, waitedMs, summary] of [
+    // A command: the owner reads how long the turn waits for it at most.
+    [[command("probe")], 0, WAITS_FOR_COMMAND],
+    [[command("Start the server"), command("Watch the tests")], 90_000, 'Waiting up to 2 min for background commands: "Start the server", "Watch the tests".'],
+    // A sub-agent: the owner reads how long the turn has waited.
+    [[subagent("Review")], 59_999, 'Waiting for a sub-agent to finish (under 1 min): "Review".'],
+    [[subagent("Review"), subagent("Plan")], 12 * MINUTE + 5, 'Waiting for sub-agents to finish (12 min): "Review", "Plan".'],
+    [[subagent("one"), subagent("two"), subagent("three"), subagent("four"), subagent("five")], 29 * MINUTE, 'Waiting for sub-agents to finish (29 min): "one", "two", "three" and 2 more.'],
+    // Both, in one line.
+    [[command("Server"), subagent("Review")], MINUTE, 'Waiting for a sub-agent to finish (1 min): "Review". Also up to 2 min for a background command: "Server".'],
+    // Work that has ended is no longer named: the turn waits for the answer about it.
+    [[command("Server", false), subagent("Review")], 3 * MINUTE, 'Waiting for a sub-agent to finish (3 min): "Review".'],
+    [[command("Server", false)], 3 * MINUTE, "Waiting for Claude's answer about background work that has ended (3 min)."],
+  ] as const) {
+    assert.equal(claudeBackgroundWorkWaitSummary(waitsFor, waitedMs), summary);
+    // Chat shows the adapter's sentence, and cuts a line of more than a hundred characters at its end.
+    assert.equal(shown(summary), summary.length <= 100 ? summary : `${summary.slice(0, 99).trimEnd()}…`);
+  }
+  // Only the event that says the turn waits is shown in Chat. The rest stays in the agent's activity.
+  assert.equal(isHumanVisibleSupervisorActivity({ kind: "provider_event", method: CLAUDE_BACKGROUND_WORK_METHOD }), true);
+  for (const method of [CLAUDE_BACKGROUND_WORK_ANSWER_METHOD, CLAUDE_BACKGROUND_WORK_FINISHED_METHOD]) {
+    assert.equal(isHumanVisibleSupervisorActivity({ kind: "provider_event", method }), false);
+  }
+  // The daemon reads an answer to a notice that belongs to no open turn as the end of work, and never as a failure of the agent.
+  const failedAnswer = { provider: "claude-code", kind: "provider_event", payload: { type: "result", subtype: "success", is_error: true } };
+  assert.equal(providerStreamLifecycle({ ...failedAnswer, method: CLAUDE_BACKGROUND_WORK_FINISHED_METHOD }, true), "idle");
+  assert.equal(providerStreamLifecycle({ ...failedAnswer, method: CLAUDE_BACKGROUND_WORK_ANSWER_METHOD }, true), "working");
+  assert.equal(providerStreamLifecycle({ ...failedAnswer, method: "result/success" }, true), "failed", "as the same result is under its own name");
+
+  // The time is the adapter's clock. The description is the model's own, as one printable line.
+  const agent = await claudeBackgroundHarness();
+  // Real lines of a turn whose sub-agent still runs after the turn's own result.
+  const turn = await agent.start("subagent_stopped_by_request");
+  agent.emit(withText(turn.own, "probe", "Review the\n\"full\" diff\u0007 " + "x".repeat(200)));
+  const described = `Review the full diff ${"x".repeat(59)}`;
+  assert.equal(agent.waits(), `Waiting for a sub-agent to finish (under 1 min): "${described}".`);
+  await agent.after(3 * MINUTE + 20);
+  assert.equal(agent.waits(), `Waiting for a sub-agent to finish (3 min): "${described}".`, "the turn says again that it waits, with the time it has waited");
+  assert.deepEqual(agent.stream.filter((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD).at(-1)!.payload, { waiting_for: [described], waited_ms: 3 * MINUTE + 20 });
+  assert.equal(shown(agent.waits()!), `${agent.waits()!.slice(0, 99).trimEnd()}…`, "Chat cuts a long line at its end, after the time");
+  assert.equal(turn.settled(), false);
+  await agent.adapter.stop(agent.handle);
+});
+
+test("a Claude turn waits two minutes for a background command that still runs, then posts its answer with one line and frees the agent", async () => {
+  const agent = await claudeBackgroundHarness();
+  const turn = await agent.start("background_command");
+  agent.emit(turn.own);
+  assert.equal(agent.waits(), WAITS_FOR_COMMAND, "the owner reads what to expect");
+  await agent.after(2 * MINUTE - 1);
+  assert.equal(turn.settled(), false, "before the limit the turn waits");
+  await agent.after(1);
+  // A server or a watcher is meant to go on: the turn does not wait for it any longer.
+  assert.deepEqual(await turn.running, reply(turn.turnId, TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.commandStillRuns));
+  assert.deepEqual(agent.endings, [{ turnId: turn.turnId, outcome: "completed" }]);
+  assert.equal(agent.handle.observedState(), "idle");
+  assert.equal(agent.stream.some((event) => event.summary === CLAUDE_BACKGROUND_WORK_TEXT.limitReached), false, "this is the usual end, and no fault for the owner to read");
+
+  // The agent is free: the next turn starts. The command ends during it, and its notice is answered. That reaches no turn.
+  const next = await agent.start("completed_answer");
+  agent.emit(turn.after);
+  await flush();
+  assert.equal(next.settled(), false, "the next turn does not end on the answer to the notice");
+  assert.deepEqual([agent.stream.at(-1)!.method, agent.stream.at(-1)!.summary], [CLAUDE_BACKGROUND_WORK_ANSWER_METHOD, CLAUDE_BACKGROUND_WORK_TEXT.notPosted]);
+  agent.emit(next.lines);
+  assert.deepEqual(await next.running, reply(next.turnId, "PROBE_OK"), "and is in no reply");
+  await agent.adapter.stop(agent.handle);
+});
+
+test("a Claude turn with a sub-agent and a long-running command waits for the sub-agent, and not for the command beyond its two minutes", async () => {
+  const agent = await claudeBackgroundHarness();
+  // Real lines: one message starts a sub-agent and a background command. The sub-agent ends first.
+  const turn = await agent.start("subagent_and_background_command");
+  agent.emit(turn.own);
+  assert.equal(agent.waits(), 'Waiting for a sub-agent to finish (under 1 min): "review probe". Also up to 2 min for a background command: "server probe".');
+  await agent.after(2 * MINUTE);
+  // The command has passed its limit. The sub-agent has not: the turn stays open for the sub-agent alone.
+  assert.equal(turn.settled(), false, "a command that passed its limit does not end a turn that still waits for a sub-agent");
+  assert.equal(agent.waits(), 'Waiting for a sub-agent to finish (2 min): "review probe".', "and the owner reads that the turn waits for the sub-agent only");
+  await agent.after(20 * MINUTE);
+  assert.equal(turn.settled(), false, "the sub-agent has thirty minutes");
+  // The sub-agent ends, and the model answers its notice. The command still runs.
+  const firstAnswer = turn.after.findIndex((event) => event.type === "result");
+  agent.emit(turn.after.slice(0, firstAnswer + 1));
+  assert.deepEqual(await turn.running, reply(turn.turnId, TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", CLAUDE_BACKGROUND_WORK_TEXT.commandStillRuns),
+    "the turn ends when the sub-agent is answered: it does not go back to waiting for the command");
+  // The command ends later. The answer to its notice is posted nowhere.
+  agent.emit(turn.after.slice(firstAnswer + 1));
+  assert.deepEqual([agent.stream.at(-1)!.method, agent.stream.at(-1)!.summary], [CLAUDE_BACKGROUND_WORK_FINISHED_METHOD, CLAUDE_BACKGROUND_WORK_TEXT.notPosted]);
+  assert.deepEqual(turn.saved, [reply(turn.turnId, TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", CLAUDE_BACKGROUND_WORK_TEXT.commandStillRuns)], "one result");
+
+  // A command that ends within its two minutes is answered in the same reply, whenever the sub-agent ends.
+  const both = await agent.start("subagent_and_background_command");
+  const another = (events: Array<Record<string, unknown>>) => JSON.parse(JSON.stringify(events).replaceAll("af5ebe5d209b7a59d", "a0there5ubagent").replaceAll("b0hd77560", "b0therta5k")) as Array<Record<string, unknown>>;
+  agent.emit(another(both.lines));
+  assert.deepEqual(await both.running, reply(both.turnId, TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"));
+
+  // A sub-agent that does not finish in thirty minutes is a fault, and the reply says so. The command is still no fault.
+  const slow = await agent.start("subagent_and_background_command");
+  const slower = (events: Array<Record<string, unknown>>) => JSON.parse(JSON.stringify(events).replaceAll("af5ebe5d209b7a59d", "a510w5ubagent").replaceAll("b0hd77560", "b510wta5k")) as Array<Record<string, unknown>>;
+  agent.emit(slower(slow.own));
+  await agent.after(30 * MINUTE - 1);
+  assert.equal(slow.settled(), false);
+  await agent.after(1);
+  assert.deepEqual(await slow.running, reply(slow.turnId, TURNS_ANSWER,
+    `A sub-agent that this turn started did not finish in 30 minutes. Its report is not in this reply and will not be posted. ${CLAUDE_BACKGROUND_WORK_TEXT.commandStillRuns}`));
+  assert.equal(CLAUDE_BACKGROUND_WORK_TEXT.commandStillRuns, "A command that this turn started still runs in the background, as a server or a watcher does. Its later output will not be posted.");
+  assert.equal(agent.stream.filter((event) => event.summary === CLAUDE_BACKGROUND_WORK_TEXT.limitReached).length, 1, "and the owner reads that a limit was reached");
+  await agent.adapter.stop(agent.handle);
+});
+
+test("the owner's Stop on a Claude turn that waits for background work ends the wait at once and keeps the answer; what the CLI writes afterwards reaches no later turn", async () => {
+  const agent = await claudeBackgroundHarness();
+  // Real lines: a turn, then the answer to its task's notice, which an interrupt ends.
+  const turn = await agent.start("interrupt_during_task_notice_answer");
+  agent.emit(turn.own);
+  const notification = turn.after.findIndex((event) => event.subtype === "task_notification");
+  // The command has ended, and the CLI answers its notice when the owner stops the turn.
+  agent.emit(turn.after.slice(0, notification + 1));
+  assert.equal(turn.settled(), false);
+  const calls: string[] = [];
+  const written = agent.child.written.length;
+  const startedAt = Date.now();
+  const control = await agent.adapter.controlTurn(agent.handle, null, { targetTurnId: turn.turnId,
+    checkpointTurnStarted: async (turnId) => { calls.push(`checkpoint ${turnId === turn.turnId}`); }, markDispatched: async () => { calls.push("dispatched"); } });
+  // The turn's command had ended with its answer: nothing was interrupted, and the daemon lets the reply stand.
+  assert.deepEqual(control, { capability: "native_interrupt", interrupted: false, resumed: false, state: "idle" });
+  assert.ok(Date.now() - startedAt < 2_000, "with no wait for a result of the CLI");
+  assert.deepEqual(calls, ["checkpoint true", "dispatched"], "the daemon is told before the wait is ended");
+  assert.deepEqual(agent.child.written.slice(written).map((line) => (JSON.parse(line) as { request?: { subtype?: string } }).request?.subtype), ["interrupt"],
+    "the CLI is sent an interrupt for the answer that runs. Nothing asks it to stop the background work");
+  assert.deepEqual(await turn.running, reply(turn.turnId, TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.ownerEnded), "the answer is posted, with one line that the owner ended the wait");
+  assert.deepEqual(turn.saved, [reply(turn.turnId, TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.ownerEnded)]);
+  assert.deepEqual(agent.endings, [{ turnId: turn.turnId, outcome: "completed" }]);
+  assert.equal(agent.handle.observedState(), "idle");
+  assert.equal(agent.activity.at(-1)!.summary, "Turn completed");
+
+  // The next turn has started when the CLI writes how the interrupted answer ended: a result with an error, which names no command.
+  const next = await agent.start("completed_answer");
+  agent.emit(turn.after.slice(notification + 1));
+  await flush();
+  assert.equal(next.settled(), false, "the next turn does not end on it");
+  assert.equal(agent.handle.observedState(), "working", "and the agent has not failed: it runs the next turn");
+  assert.deepEqual([agent.stream.at(-1)!.method, agent.stream.at(-1)!.summary], [CLAUDE_BACKGROUND_WORK_ANSWER_METHOD, CLAUDE_BACKGROUND_WORK_TEXT.notPosted]);
+  agent.emit(next.lines);
+  assert.deepEqual(await next.running, reply(next.turnId, "PROBE_OK"));
+  // A second Stop for the turn that has ended does nothing.
+  assert.deepEqual(await agent.adapter.controlTurn(agent.handle, null, { targetTurnId: turn.turnId }), { capability: "native_interrupt", interrupted: false, resumed: false, state: "idle" });
+
+  // A turn in which the model had no reply for the room posts nothing when its owner ends the wait.
+  const silent = await agent.start("background_command");
+  agent.emit(withText(silent.own, TURNS_ANSWER, "LETAGENTS_NO_ROOM_REPLY"));
+  await agent.adapter.controlTurn(agent.handle, null, { targetTurnId: silent.turnId });
+  assert.deepEqual(await silent.running, { turnId: silent.turnId, outcome: "no_reply", text: null, evidence: "stream" });
+  await agent.adapter.stop(agent.handle);
+});
+
+test("a Stop that the owner sent before a Claude turn's own result is an ordinary stop, with background work or without", async () => {
+  const agent = await claudeBackgroundHarness();
+  // The model had answered before the interrupt reached it: the turn ends with its answer, and is not held open.
+  const answered = await agent.start("background_command");
+  const result = answered.own.findIndex((event) => event.type === "result");
+  agent.emit(answered.own.slice(0, result));
+  const written = agent.child.written.length;
+  const refused = assert.rejects(agent.adapter.controlTurn(agent.handle, null, { targetTurnId: answered.turnId }),
+    (error: unknown) => (error as { turnControlOutcome?: string }).turnControlOutcome === "not_applied");
+  while (agent.child.written.length === written) await new Promise((resolve) => setImmediate(resolve));
+  agent.emit(answered.own.slice(result));
+  assert.deepEqual(await answered.running, reply(answered.turnId, TURNS_ANSWER), "the turn is not held open against the owner's Stop");
+  await refused;
+
+  // The interrupt reached the model: the turn ends interrupted, as before, and nothing of it is posted.
+  const stopped = await agent.start("background_command_fails");
+  agent.emit(stopped.own.slice(0, stopped.own.findIndex((event) => event.type === "result")));
+  const writtenThen = agent.child.written.length;
+  const stopping = agent.adapter.controlTurn(agent.handle, null, { targetTurnId: stopped.turnId });
+  while (agent.child.written.length === writtenThen) await new Promise((resolve) => setImmediate(resolve));
+  agent.emit([{ type: "result", subtype: "error_during_execution", is_error: true, terminal_reason: "aborted_streaming", session_id: agent.sessionId, user_message_uuid: stopped.turnId }]);
+  assert.deepEqual(await stopping, { capability: "native_interrupt", interrupted: true, resumed: false, state: "idle" });
+  assert.deepEqual(await stopped.running, { turnId: stopped.turnId, providerContinuationId: agent.sessionId, outcome: "interrupted", text: null, evidence: "stream",
+    error: "Claude command ended interrupted." });
+  assert.equal(agent.stream.some((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD), false, "neither turn was held open");
+  await agent.adapter.stop(agent.handle);
+});
+
+test("a Claude turn whose background work has all ended does not wait long for an answer that never begins", async () => {
+  const agent = await claudeBackgroundHarness();
+  const turn = await agent.start("background_command");
+  agent.emit(turn.own);
+  await agent.after(MINUTE);
+  assert.equal(turn.settled(), false);
+  const notification = turn.after.findIndex((event) => event.subtype === "task_notification");
+  // The command ends and the CLI writes nothing more: a turn that still ran took the notice with its last request.
+  agent.emit(turn.after.slice(0, notification + 1));
+  assert.equal(agent.waits(), "Waiting for Claude's answer about background work that has ended (1 min).");
+  await agent.after(5 * MINUTE - 1);
+  assert.equal(turn.settled(), false, "the answer has five minutes to begin, whatever the limit for the command was");
+  await agent.after(1);
+  assert.deepEqual(await turn.running, reply(turn.turnId, TURNS_ANSWER), "the turn ends with the answer it has, and no added line");
+  assert.deepEqual(agent.stream.slice(-2).map((event) => [event.method, event.summary]),
+    [[CLAUDE_BACKGROUND_WORK_ANSWER_METHOD, CLAUDE_BACKGROUND_WORK_TEXT.noAnswerBegan], ["result/success", undefined]], "the owner reads why");
+
+  // A first line of the answer shows that it has begun. From then on the turn waits for its result.
+  const second = await agent.start("background_command");
+  // Another command: the CLI gives each task an id of its own.
+  const another = (events: Array<Record<string, unknown>>) => JSON.parse(JSON.stringify(events).replaceAll("bvn6jsv90", "b0therta5k")) as Array<Record<string, unknown>>;
+  agent.emit(another(second.own));
+  agent.emit(another(second.after.slice(0, -1)));
+  await agent.after(20 * MINUTE);
+  assert.equal(second.settled(), false, "the answer that has begun is waited for");
+  agent.emit(another(second.after.slice(-1)));
+  assert.deepEqual(await second.running, reply(second.turnId, TURNS_ANSWER, NOTICE_ANSWER));
+
+  // No turn stays open for more than thirty minutes after its own result: an answer that never ends is given up.
+  const third = await agent.start("background_command_fails");
+  agent.emit(third.own);
+  agent.emit(third.after.slice(0, -1));
+  await agent.after(30 * MINUTE - 1);
+  assert.equal(third.settled(), false);
+  await agent.after(1);
+  assert.deepEqual(await third.running, reply(third.turnId, TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported));
+  assert.equal(agent.stream.filter((event) => event.summary === CLAUDE_BACKGROUND_WORK_TEXT.limitReached).length, 1);
+  await agent.adapter.stop(agent.handle);
+});
+
+test("a Claude turn's reply holds each of the model's texts once, in their order, and never a text that was not for the room", async () => {
+  const agent = await claudeBackgroundHarness();
+  const play = async (name: string, change: (lines: Array<Record<string, unknown>>) => Array<Record<string, unknown>>, thenAfterMs = 0) => {
+    const turn = await agent.start(name);
+    agent.emit(change(turn.lines));
+    if (thenAfterMs) await agent.after(thenAfterMs);
+    return { turnId: turn.turnId, result: await turn.running };
+  };
+  // The answer to the notice repeats the turn's own answer.
+  const repeated = await play("background_command", (lines) => withText(lines, NOTICE_ANSWER, TURNS_ANSWER));
+  assert.deepEqual(repeated.result, reply(repeated.turnId, TURNS_ANSWER), "the same text is not posted twice");
+  // The model had no reply for the room at first, and one after the work ended.
+  const later = await play("background_command", (lines) => withText(lines, TURNS_ANSWER, "LETAGENTS_NO_ROOM_REPLY"));
+  assert.deepEqual(later.result, reply(later.turnId, NOTICE_ANSWER));
+  // The model has no more to say after the work ended.
+  const interim = await play("background_command", (lines) => withText(lines, NOTICE_ANSWER, "LETAGENTS_NO_ROOM_REPLY"));
+  assert.deepEqual(interim.result, reply(interim.turnId, TURNS_ANSWER));
+  // The model has no reply for the room at all: nothing is posted, with or without a line of the adapter's.
+  const none = await play("background_command", (lines) => withText(withText(lines, TURNS_ANSWER, "LETAGENTS_NO_ROOM_REPLY"), NOTICE_ANSWER, "LETAGENTS_NO_ROOM_REPLY"));
+  assert.deepEqual(none.result, { turnId: none.turnId, outcome: "no_reply", text: null, evidence: "stream" });
+  const ownLines = (lines: Array<Record<string, unknown>>) => splitAtOwnResult(lines, lines.find((event) => event.type === "result")!.user_message_uuid as string);
+  const silent = await play("background_command", (lines) => ownLines(withText(lines, TURNS_ANSWER, "LETAGENTS_NO_ROOM_REPLY")).own, 2 * MINUTE);
+  assert.deepEqual(silent.result, { turnId: silent.turnId, outcome: "no_reply", text: null, evidence: "stream" }, "at a limit too");
+  // A sub-agent's report reaches the model, and is in no reply.
+  for (const name of ["subagent_in_background", "two_subagents_in_background", "subagent_stopped_by_request", "subagent_and_background_command"]) {
+    const played = await play(name, (lines) => lines);
+    assert.equal(played.result.outcome, "reply", name);
+    assert.ok(!(played.result as { text: string }).text.includes("SUBAGENT REPORT"), name);
+  }
+  await agent.adapter.stop(agent.handle);
+});
+
+test("a Claude turn that failed ends on its own result, whatever background work it started", async () => {
+  const agent = await claudeBackgroundHarness();
+  const turn = await agent.start("background_command");
+  // The same lines, with the result of a request that the provider refused.
+  const failed = realClaudeResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.http_400_invalid_request!, agent.sessionId, turn.turnId));
+  agent.emit(turn.own.map((event) => event.type === "result" ? failed : event));
+  const result = await turn.running;
+  assert.deepEqual([result.outcome, result.text], ["failed", null]);
+  assert.equal(agent.stream.some((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD), false, "a failed turn is not held open");
+  // The answer to the notice comes when no room turn runs: the agent is idle after it, and nothing ends on it.
+  agent.emit(turn.after);
+  assert.deepEqual([agent.stream.at(-1)!.method, agent.stream.at(-1)!.summary], [CLAUDE_BACKGROUND_WORK_FINISHED_METHOD, CLAUDE_BACKGROUND_WORK_TEXT.notPosted]);
+  assert.equal(providerStreamLifecycle(agent.stream.at(-1)!, true), "idle");
+  const next = await agent.start("completed_answer");
+  agent.emit(next.lines);
+  assert.deepEqual(await next.running, reply(next.turnId, "PROBE_OK"));
+  await agent.adapter.stop(agent.handle);
+});
+
+test("an approval that Claude asks for while it answers a task's notice reaches the owner, for the turn that is held open", async () => {
+  const h = await approvalHarness();
+  try {
+    const sessionId = h.handle.providerContinuationId!;
+    // Real lines of a turn that starts a background command, for the turn that the harness started.
+    const { own, after } = splitAtOwnResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.background_command!, sessionId, h.turnId).stream, h.turnId);
+    for (const event of own) h.child.emit(event);
+    const notification = after.findIndex((event) => event.subtype === "task_notification");
+    for (const event of after.slice(0, notification + 1)) h.child.emit(event);
+    // The model answers the notice with a tool call that the owner has to allow.
+    h.tool();
+    h.permission();
+    await flush();
+    assert.equal(h.requests.length, 1, "the owner sees it as a pending approval");
+    assert.deepEqual(await h.adapter.correlatePermissionTurn(h.handle, h.requests[0]!), { outcome: "correlated", providerContinuationId: sessionId, providerTurnId: h.turnId });
+    assert.deepEqual(await h.adapter.replyPermission(h.handle, h.requests[0]!, "once", { beforeNativeDispatch: async () => {} }), { outcome: "sent", scope: "request" });
+    assert.equal((JSON.parse(h.child.written.at(-1)!) as { response: { response: { behavior: string } } }).response.response.behavior, "allow");
+    h.child.emit({ type: "user", session_id: sessionId, parent_tool_use_id: null, message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-write", content: "written", is_error: false }] } });
+    for (const event of after.slice(notification + 1)) h.child.emit(event);
+    assert.equal(h.streams.at(-1)!.nativeLifecyclePhase, "turn_terminal", "the turn has ended");
+    assert.equal(h.streams.filter((event) => event.method === CLAUDE_BACKGROUND_WORK_ANSWER_METHOD).length, 1);
+  } finally {
+    await h.close();
   }
 });
