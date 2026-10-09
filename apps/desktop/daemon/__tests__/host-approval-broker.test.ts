@@ -683,6 +683,66 @@ test("Claude successful tool result confirms its exact allowed request after dis
   } finally { await f.close(); }
 });
 
+test("Claude's report that a tool was denied before it started settles its exact denied request", async () => {
+  const f = await fixture("claude-code");
+  const fact: NativeExecutionFact = { domain: "execution", kind: "completed", operation: "file_change",
+    providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+    outcome: "denied_before_start", sideEffects: "none" };
+  try {
+    const [candidate] = await f.broker.list("room");
+    const selected = decision(candidate!, { decision: "deny" });
+    f.execution(fact); // An old report must not settle the later response.
+    await f.broker.decide(selected);
+    const unsettled = async () => {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
+    };
+    await unsettled();
+    for (const changed of [{ executionId: "other" }, { providerTurnId: "other" },
+      { providerContinuationId: "other" }, { operation: "command" as const },
+      // Success, or a generic failure, says nothing about a deny.
+      { outcome: "succeeded" as const, sideEffects: "possible" as const },
+      { outcome: "failed" as const, sideEffects: "possible" as const }]) {
+      f.execution({ ...fact, ...changed });
+      await unsettled();
+    }
+    for (const changed of [{ sourceId: "other" }, { nativeProcessIdentity: "other-birth" },
+      { nativeProcessPid: 1234 }, { sequence: 0 }]) {
+      f.execution(fact, changed);
+      await unsettled();
+    }
+    f.emit([]); // Disappearance alone is not acknowledgment.
+    await unsettled();
+    f.execution(fact);
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    const record = (await f.store.getExecutionApproval(selected.expected))!;
+    assert.equal(record.request.state, "resolved");
+    assert.equal(record.decision!.dispatchState, "acknowledged");
+    assert.deepEqual(await f.broker.list("room"), []);
+    assert.equal(await f.broker.decide(selected), "resolved");
+    assert.deepEqual(f.sends, ["reject"], "confirmation never resends the response");
+  } finally { await f.close(); }
+});
+
+test("Claude's denied-before-start report does not settle an allowed request", async () => {
+  const f = await fixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room");
+    const selected = decision(candidate!);
+    await f.broker.decide(selected);
+    f.execution({ domain: "execution", kind: "completed", operation: "file_change",
+      providerContinuationId: "continuation", providerTurnId: "native-turn", executionId: "tool",
+      outcome: "denied_before_start", sideEffects: "none" });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await f.store.getExecutionApproval(selected.expected))!.request.state, "dispatching");
+    f.emit([]);
+    assert.equal(await f.broker.decide(selected), "uncertain");
+  } finally { await f.close(); }
+});
+
 test("Claude completion arriving inside native dispatch is reconciled after the journal is armed", async () => {
   const f = await fixture("claude-code");
   try {
@@ -779,17 +839,76 @@ test("a permission-mode save does not let a request be answered for another runt
     const rejects = (authority: typeof seen.authority) => assert.rejects(
       f.store.validateExecutionApprovalAuthority(seen.expected, authority),
       error => error instanceof ApprovalJournalError && error.code === "missing_turn");
+    // The owner's own stored choice proceeds while a saved edit waits. The authority carries no claim
+    // about who chose: the journal reads that from the decision it stored.
     await f.store.validateExecutionApprovalAuthority(seen.expected, seen.authority);
-    // Only the owner's own answer may proceed while a saved edit waits. A decision that
-    // depends on the configuration in force (automatic, delegated, a saved rule) may not.
-    const { ownerAnswer: _owner, ...notTheOwners } = seen.authority;
-    assert.equal(_owner, true);
-    await rejects(notTheOwners);
+    await assert.rejects(f.store.validateExecutionApprovalAuthority(seen.expected, { ...seen.authority, ownerAnswer: true } as typeof seen.authority),
+      error => error instanceof ApprovalJournalError && error.code === "invalid_input", "a caller cannot assert the owner answered");
     await rejects({ ...seen.authority, configurationRevision: 2 }); // Authority from a runtime that never started.
     f.db.exec("UPDATE agent_configurations SET runtime_configuration_revision=2 WHERE agent_id='agent'");
     await rejects(seen.authority); // A runtime already replaced at the saved revision.
     f.db.exec("UPDATE agent_configurations SET config_revision=1 WHERE agent_id='agent'");
     await rejects({ ...seen.authority, configurationRevision: 2 }); // A saved revision can never trail the applied one.
+  } finally { await f.close(); }
+});
+
+// While a saved edit waits, only a person's own Allow once or Deny may use the old runtime's authority.
+// The journal reads who chose from its own records: the stored source, the actor, and any saved rule bound to the decision.
+for (const chooser of ["owner", "automatic review", "saved rule"] as const) {
+  test(`the journal accepts the ${chooser}'s decision while a saved edit waits only if a person chose it`, async () => {
+    const f = await savedRuleFixture("claude-code");
+    try {
+      const [candidate] = await f.broker.list("room");
+      f.broker.close(); // No automatic matching races: the selections below are the only decisions.
+      const authority = { inboxItemId: f.item.inbox_item_id, workAttemptId: "workspace", executionGenerationId: "generation",
+        provider: "claude-code" as const, providerConnection: f.handle.providerConnection as any, configurationRevision: 1 };
+      const selection = { ...decision(candidate!), authority, atMs: now + 10,
+        actorId: chooser === "automatic review" ? "automatic-review" : "host-owner" };
+      const refused = (work: Promise<unknown>) => assert.rejects(work,
+        error => error instanceof ApprovalJournalError && error.code === "missing_turn");
+      const select = () => chooser === "saved rule"
+        ? f.store.selectHostToolApproval(selection, { scope: candidate!.presentation.alwaysAllow!, create: true }, async commit => commit())
+        : f.store.selectHostApproval(selection, async commit => commit());
+      const dispatch = { authority, expected: selection.expected, decisionId: selection.decisionId, dispatchId: "dispatch",
+        projectionSha256: selection.projectionSha256, atMs: now + 20 };
+      const answers = chooser === "owner"; // Only a person's own Allow once or Deny.
+
+      f.db.exec("UPDATE agent_configurations SET config_revision=2");
+      if (answers) await select(); else await refused(select());
+      f.db.exec("UPDATE agent_configurations SET config_revision=1");
+      if (!answers) await select(); // Recorded while the saved and applied settings agree.
+      f.db.exec("UPDATE agent_configurations SET config_revision=2");
+      // The same stored decision, read again after the save: retry validation, dispatch and the final send.
+      const stillValid = f.store.validateExecutionApprovalAuthority(selection.expected, authority);
+      if (answers) {
+        const assertNativeWrite = await stillValid;
+        assert.equal((await f.store.beginExecutionApprovalDispatch(dispatch, async commit => commit())).dispatch, true);
+        assertNativeWrite();
+      } else {
+        await refused(stillValid);
+        await refused(f.store.beginExecutionApprovalDispatch(dispatch, async commit => commit()));
+        assert.equal((await f.store.getExecutionApproval(selection.expected))!.decision!.dispatchId, null);
+      }
+    } finally { await f.close(); }
+  });
+}
+
+test("a saved rule's recorded choice that was not sent is not retried by the owner while a saved edit waits", async () => {
+  const f = await savedRuleFixture("claude-code");
+  try {
+    const [candidate] = await f.broker.list("room");
+    f.state.failBefore = true;
+    // A saved rule is created and records its decision under the owner's own actor, but the send fails.
+    await assert.rejects(f.broker.decide({ ...decision(candidate!), decision: "allow_always" }), /recorded but could not be sent/);
+    f.state.failBefore = false;
+    assert.equal(f.db.prepare("SELECT count(*) AS n FROM host_tool_rule_decisions").get()!.n, 1);
+    // A saved edit that leaves the card alone.
+    f.db.exec("UPDATE agent_configurations SET config_revision=2");
+    const [card] = await f.broker.list("room");
+    assert.notEqual(card?.status, "decision_recorded", "the rule's decision is not offered as the owner's to retry");
+    assert.equal(card?.detail, "The decision was recorded but not sent.");
+    await assert.rejects(f.broker.decide(decision(candidate!)), /could not be matched|authority|rejected|unavailable/i);
+    assert.deepEqual(f.sends, [], "nothing reaches the provider for a decision no person chose");
   } finally { await f.close(); }
 });
 
@@ -877,6 +996,37 @@ test("an owner's recorded choice that was not sent stays retryable while a saved
     assert.deepEqual(f.sends, ["once"]);
   } finally { await f.close(); }
 });
+
+// A real save moves the saved tool scope inside the card, so the card's digest is no longer the one the
+// owner decided on. The recorded choice is then retried against its own stored digest.
+for (const choice of ["allow_once", "deny"] as const) {
+  test(`the owner's recorded ${choice} that was not sent is sent after a real permission-mode save`, async () => {
+    const f = await savedRuleFixture("claude-code");
+    try {
+      const [candidate] = await f.broker.list("room");
+      f.state.failBefore = true;
+      await assert.rejects(f.broker.decide(decision(candidate!, { decision: choice })), /recorded but could not be sent/);
+      f.state.failBefore = false;
+      const decidedOn = hash(candidate!.presentation);
+      await saveNewPermissionMode(f);
+      const [card] = await f.broker.list("room");
+      assert.equal(card?.status, "decision_recorded", card?.detail ?? "");
+      assert.notEqual(hash(card!.presentation), decidedOn, "a real save changes the card's digest");
+      assert.equal(card!.recordedDecision?.projectionSha256, decidedOn, "the journal still holds the digest the owner decided on");
+      const retry = (changes: Partial<HostApprovalDecision> = {}) =>
+        f.broker.decide(decision(card!, { decision: choice, projectionSha256: decidedOn, ...changes }));
+      // Only the stored digest matches a retry. The card's own digest and any other do not.
+      await assert.rejects(retry({ projectionSha256: hash(card!.presentation) }), /already recorded/);
+      await assert.rejects(retry({ projectionSha256: "a".repeat(64) }), /already recorded/);
+      await assert.rejects(retry({ decision: choice === "deny" ? "allow_once" : "deny" }), /already recorded/);
+      await assert.rejects(retry({ decisionId: "another" }), /already recorded/);
+      await assert.rejects(retry({ expected: { ...card!.reference!, requestSha256: "f".repeat(64) } }), /changed/);
+      assert.deepEqual(f.sends, []);
+      assert.equal(await retry(), "decision_sent");
+      assert.deepEqual(f.sends, [choice === "deny" ? "reject" : "once"]);
+    } finally { await f.close(); }
+  });
+}
 
 test("Claude generic failure cannot confirm a decision, and a retired runtime cannot confirm success", async () => {
   for (const scenario of ["allow", "deny", "retired"] as const) {
@@ -1811,7 +1961,8 @@ function retireRuntime(f: Awaited<ReturnType<typeof fixture>>, how: "replaced" |
 for (const provider of ["claude-code", "codex", "open-model"] as const) {
   for (const phase of ["requested", "selected", "dispatched"] as const) {
     if (provider === "open-model" && phase === "dispatched") continue; // OpenCode confirms processing; nothing remains.
-    for (const how of ["replaced", "stopped", "removed"] as const) {
+    // A replaced runtime is known to be gone and closes at once (see below). Without a successor, only expiry retires it.
+    for (const how of ["stopped", "removed"] as const) {
       test(`${provider} expired ${phase} approval of a ${how} runtime closes without a death witness`, async () => {
         const f = await fixture(provider);
         try {
@@ -1840,6 +1991,68 @@ for (const provider of ["claude-code", "codex", "open-model"] as const) {
       });
     }
   }
+}
+
+// A restart or a recovery put another process in the agent's place. The old runtime's request can no longer be
+// observed, answered or sent, so it closes at once instead of waiting a day for its expiry.
+for (const provider of ["claude-code", "codex", "open-model"] as const) {
+  for (const phase of ["requested", "selected", "dispatched"] as const) {
+    if (provider === "open-model" && phase === "dispatched") continue; // OpenCode confirms processing; nothing remains.
+    test(`${provider} ${phase} approval of a replaced runtime closes at once, before it expires`, async () => {
+      const f = await fixture(provider);
+      try {
+        const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+        if (phase === "selected") f.state.failBefore = true;
+        if (phase === "selected") await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
+        else if (phase === "dispatched") await f.broker.decide(selected);
+        const before = (await f.store.getExecutionApproval(selected.expected))!;
+        const sent = f.sends.length;
+        retireRuntime(f, "replaced");
+        assert.equal((await f.broker.list("room")).filter(item => item.reference).length, 1, "the retired prompt is still shown until it is settled");
+        const reopened = new ManifestStore(f.path);
+        try {
+          await assert.rejects(reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30,
+            async () => { throw new Error("ownership changed"); }), /ownership changed/);
+          assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1,
+            "closed long before the prompt expires");
+          assert.ok(now + 30 < approvalExpiry);
+          assert.deepEqual(await reopened.getExecutionApproval(selected.expected),
+            { ...before, request: { ...before.request, closedAtMs: now + 30 } }, "the decision and its certainty are unchanged");
+          assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 40,
+            async () => { throw new Error("no empty write expected"); }), 0);
+        } finally { await reopened.close(); }
+        assert.deepEqual(await f.broker.list("room"), [], "it cannot be listed any more");
+        assert.equal(await f.broker.decide(selected), "request_closed", "nor answered");
+        assert.equal(f.sends.length, sent, "closing sends nothing");
+      } finally { await f.close(); }
+    });
+  }
+}
+
+// A request of a runtime that may still be alive is not closed before it expires.
+for (const live of ["current", "recovered_turn", "unverifiable_birth", "stopped", "removed"] as const) {
+  test(`unexpired approval of a ${live} runtime stays open`, async () => {
+    const f = await fixture();
+    try {
+      const [candidate] = await f.broker.list("room"); const expected = candidate!.reference!;
+      if (live === "recovered_turn") {
+        f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'")
+          .run(JSON.stringify({ ended_at: new Date(now + 20).toISOString(), exit_code: null, signal: null, stdio_archive_ref: null,
+            stdio_tail: "", terminal_cause: "stopped", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation" }));
+        f.db.prepare("INSERT INTO work_attempt_executions VALUES('recovery-generation','workspace',?,'provider',2,NULL)")
+          .run(new Date(now + 21).toISOString());
+        const manifest = await f.store.load(); const [entry] = manifest.entries;
+        await f.store.write(manifest.generation, [{ ...entry!, run_id: "recovery-generation",
+          deployment_id: serializeDaemonDeploymentId("agent", "recovery-generation"),
+          provider_ref: { ...entry!.provider_ref!, execution_generation_id: "recovery-generation" } }]);
+      } else if (live === "unverifiable_birth") {
+        f.db.prepare("UPDATE runtime_deployments SET provider_connection_pid=NULL WHERE agent_id='agent'").run();
+      } else if (live === "stopped" || live === "removed") retireRuntime(f, live);
+      assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30,
+        async () => { throw new Error("a runtime that may be alive must not request a write"); }), 0);
+      assert.equal((await f.store.getExecutionApproval(expected))!.request.closedAtMs, null);
+    } finally { await f.close(); }
+  });
 }
 
 test("expired retired-runtime closure skips resolved, unreadable, and other agents' records", async () => {

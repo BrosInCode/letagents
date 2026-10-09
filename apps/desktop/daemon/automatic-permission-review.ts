@@ -12,8 +12,8 @@ import { currentWorkerPublicationAuthority } from "./worker-publication-authorit
 import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 
 export const AUTOMATIC_REVIEW_PROFILE_ID = "auto_review";
-/** Recorded as the decider, so the journal shows no person chose. */
-export const AUTOMATIC_REVIEW_ACTOR_ID = "automatic-review";
+// The journal names this decider itself, so it can tell an automatic answer from a person's.
+export { AUTOMATIC_REVIEW_ACTOR_ID } from "./execution-approval-journal.js";
 const MAX_EDITED_FILES = 64;
 
 const CONTROL_FILES = new Set([
