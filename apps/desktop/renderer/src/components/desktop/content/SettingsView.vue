@@ -16,12 +16,12 @@
         <button
           class="ghost-button settings-header-button"
           type="button"
-          :disabled="busy"
+          :disabled="busy || diagnosticsPane?.busy"
           data-testid="settings-refresh"
-          @click="$emit('refresh')"
+          @click="activePane === 'system:diagnostics' ? diagnosticsPane?.refresh() : $emit('refresh')"
         >
           <RefreshCw aria-hidden="true" />
-          <span>{{ busy ? "Refreshing" : "Refresh" }}</span>
+          <span>{{ busy || diagnosticsPane?.busy ? "Refreshing" : "Refresh" }}</span>
         </button>
       </header>
 
@@ -126,7 +126,9 @@
 
       <SettingsDiagnosticsPane
         v-else
-        :diagnostics-notes="diagnosticsNotes"
+        ref="diagnosticsPane"
+        :rooms="accountRooms"
+        @open-agent="$emit('open-agent', $event)"
       />
     </main>
   </section>
@@ -165,6 +167,7 @@ import SettingsSidebar from "../settings/SettingsSidebar.vue";
 import type { SettingsFeedback, SettingsPaneId } from "../settings/types";
 import { settingsNavGroups, settingsSubsections, settingsSectionFor } from "../settings/navigation";
 import type { DesktopMcpWizardStep } from "../setup/types";
+import type { AttentionNavigationIntent } from "./room-shell/types";
 
 const props = defineProps<{
   accountRooms: DesktopAccountRoomEntry[];
@@ -176,7 +179,6 @@ const props = defineProps<{
   authStatus: DesktopAuthStatus | null;
   busy: boolean;
   chatStorageAvailable: boolean;
-  diagnosticsNotes: string[];
   feedback: SettingsFeedback | null;
   initialPane: SettingsPaneId;
   chatStorageBusy: boolean;
@@ -207,6 +209,7 @@ defineEmits<{
   "install-update": [];
   "leave-room": [room: DesktopAccountRoomEntry];
   "open-room": [room: DesktopAccountRoomEntry];
+  "open-agent": [intent: AttentionNavigationIntent];
   "restore-room": [room: DesktopAccountRoomEntry];
   "select-all-mcp-targets": [];
   "select-mcp-target": [targetId: DesktopMcpInstallTargetId];
@@ -220,6 +223,7 @@ defineEmits<{
 }>();
 
 const activePane = ref<SettingsPaneId>(props.initialPane);
+const diagnosticsPane = ref<{ refresh: () => Promise<void>; busy: boolean } | null>(null);
 
 const activeSection = computed(() => settingsSectionFor(activePane.value));
 const subsections = computed(() => settingsSubsections[activeSection.value] ?? []);
