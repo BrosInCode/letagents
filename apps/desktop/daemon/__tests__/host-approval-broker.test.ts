@@ -2219,3 +2219,28 @@ test("a review is told to stop when its agent's connection is replaced", async (
     assert.deepEqual(f.sends, []);
   } finally { await f.close(); }
 });
+
+for (const provider of ["codex", "open-model", "claude-code"] as const) {
+  test(`${provider} approvals name the configuration revision the runtime started with, not revision one`, async () => {
+    // An agent whose owner has saved a change and applied it by restarting it.
+    const applied = await fixture(provider);
+    try {
+      applied.db.exec("UPDATE agent_configurations SET config_revision=2, runtime_configuration_revision=2");
+      const [candidate] = await applied.broker.list("room");
+      assert.equal(candidate?.status, "pending", candidate?.detail ?? "");
+      assert.ok(candidate.reference, "the request is journaled");
+      assert.equal(await applied.broker.decide(decision(candidate)), provider === "open-model" ? "resolved" : "decision_sent");
+      assert.deepEqual(applied.sends, ["once"]);
+    } finally { await applied.close(); }
+
+    // A saved change the runtime has not applied yet still cannot be answered.
+    const unapplied = await fixture(provider);
+    try {
+      unapplied.db.exec("UPDATE agent_configurations SET config_revision=3, runtime_configuration_revision=2");
+      const [candidate] = await unapplied.broker.list("room");
+      assert.equal(candidate?.status, "unavailable");
+      assert.equal(candidate.reference, null);
+      assert.deepEqual(unapplied.sends, []);
+    } finally { await unapplied.close(); }
+  });
+}
