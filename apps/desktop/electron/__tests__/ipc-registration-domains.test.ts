@@ -162,6 +162,7 @@ const expectedDirectChannels = [
   "desktop:supervisor:get-launch-events",
   "desktop:supervisor:get-retirement-status",
   "desktop:supervisor:get-room-move",
+  "desktop:supervisor:get-service-snapshot",
   "desktop:supervisor:get-status",
   "desktop:supervisor:list-agents",
   "desktop:supervisor:list-host-approvals",

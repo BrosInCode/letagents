@@ -984,6 +984,41 @@ function fakeChild(): ChildProcess {
   return child as unknown as ChildProcess;
 }
 
+test("service health snapshot never starts a daemon and reads only matching bounded state", async () => {
+  const env = await fixture();
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { assert.fail("Troubleshooting must not start the daemon"); },
+    now: () => new Date("2026-10-09T12:00:00.000Z") });
+  try {
+    assert.deepEqual(await client.getServiceSnapshot(), {
+      status: null, state: null, observedAt: "2026-10-09T12:00:00.000Z",
+    });
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+    wire.entries.push(wireEntryWithCausalProjection());
+    try {
+      const snapshot = await client.getServiceSnapshot();
+      assert.equal(snapshot.status?.generation, 19);
+      assert.equal(snapshot.status?.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+      assert.equal(snapshot.state?.entries[0]?.id, "agent_1");
+      assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate", "manifest.watch_state"]);
+      assert.equal(wire.requests.at(-1)?.params?.wait_ms, 0);
+      wire.maintenance.id = "hold";
+      assert.equal((await client.getServiceSnapshot()).state, null, "maintenance is not an empty fleet");
+      wire.maintenance.id = null;
+      const watchState = client.watchState.bind(client);
+      client.watchState = async input => ({ ...await watchState(input), daemonGeneration: 20 });
+      await assert.rejects(client.getServiceSnapshot(), /restarted during this read/);
+    } finally { await closeServer(wire.server, env.socketPath); }
+    const old = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 18, undefined, "older");
+    try {
+      const snapshot = await client.getServiceSnapshot();
+      assert.equal(snapshot.status?.implementationVersion, "older");
+      assert.equal(snapshot.state, null);
+      assert.deepEqual(old.requests.map(request => request.method), ["daemon.negotiate"], "no handoff or unsupported state read");
+    } finally { await closeServer(old.server, env.socketPath); }
+  } finally { await env.cleanup(); }
+});
+
 function fakeDaemonProcessIdentity(
   overrides: Partial<Omit<DaemonProcessIdentity, "expectedScriptPath">> = {},
 ): Omit<DaemonProcessIdentity, "expectedScriptPath"> {
