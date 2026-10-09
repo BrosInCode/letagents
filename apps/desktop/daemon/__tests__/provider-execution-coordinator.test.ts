@@ -1808,6 +1808,62 @@ test("a crashed Cursor lane whose failed turn already settled resumes its conver
   assert.notEqual(runtime.entry().condition, "coordination_blocked");
 });
 
+test("a Cursor lane that ended on a protocol error after its turn settled as lost resumes its conversation without manual recovery", async () => {
+  const runtime = ownedRecoveryHarness();
+  // An unproven-authority ending retires the lane as a protocol error. The
+  // delivery has already settled the lost turn, so no blocked head remains.
+  const ended = { ...terminal(returnedHandle), exitCode: 1, terminalCause: "protocol_error" as const };
+  runtime.executionGenerations[0]!.terminal = runtime.options.terminalPayload(ended, "test");
+  const idle = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
+  runtime.setEntry({
+    ...runtime.entry(), provider: "cursor", observed_state: "failed", condition: "none",
+    provider_ref: { ...runtime.entry().provider_ref!, provider_connection: idle },
+  });
+  runtime.options.inbox.head = async () => null;
+  runtime.options.host.requiresGrant = () => false;
+  const capabilities = runtime.options.provider.capabilities;
+  runtime.options.provider.capabilities = async (...args) => ({ ...await capabilities(...args), resume: true });
+  const resumed: Array<string | null> = [];
+  runtime.options.provider.resume = async (ref) => {
+    resumed.push(ref.providerContinuationId);
+    return { ...returnedHandle, pid: null, observedState: "idle", providerConnection: idle };
+  };
+  runtime.options.provider.spawn = async () => { throw new Error("a settled protocol ending keeps its conversation"); };
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.deepEqual(resumed, ["continuation-1"], "the lane restarts on the same Cursor conversation");
+  assert.equal(runtime.installed.length, 1);
+  assert.notEqual(runtime.entry().condition, "coordination_blocked");
+});
+
+test("a Cursor lane that keeps ending on protocol errors stops restarting at the crash-loop limit", async () => {
+  const runtime = ownedRecoveryHarness();
+  const nowMs = 20_000_000;
+  runtime.options.nowMs = () => nowMs;
+  const ended = { ...terminal(returnedHandle), exitCode: 1, terminalCause: "protocol_error" as const };
+  runtime.executionGenerations[0]!.terminal = runtime.options.terminalPayload(ended, "test");
+  const idle = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
+  let reconciliation = runtime.entry().reconciliation;
+  for (let ending = 0; ending < 5; ending += 1) {
+    reconciliation = advanceReconciliationState(advanceReconciliationState(reconciliation, "idle", nowMs - 60_000 + ending), "failed", nowMs - 60_000 + ending);
+  }
+  runtime.setEntry({
+    ...runtime.entry(), provider: "cursor", observed_state: "failed", condition: "none", reconciliation,
+    provider_ref: { ...runtime.entry().provider_ref!, provider_connection: idle },
+  });
+  runtime.options.inbox.head = async () => null;
+  runtime.options.host.requiresGrant = () => false;
+  let launches = 0;
+  runtime.options.provider.resume = async () => { launches++; return returnedHandle; };
+  runtime.options.provider.spawn = async () => { launches++; return returnedHandle; };
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.equal(launches, 0, "five failed lanes inside the window start nothing more");
+  assert.equal(runtime.entry().condition, "quarantined", "the owner sees a quarantined agent, not an endless restart loop");
+});
+
 test("a live generation without an attachable handle re-checks with capped backoff and one durable write", async () => {
   const runtime = ownedRecoveryHarness();
   let attaches = 0;

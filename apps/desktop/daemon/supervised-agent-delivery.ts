@@ -34,6 +34,12 @@ export type SupervisedIngressAgent = {
   /** Exact daemon generation that owns this room worker binding. */
   executionGenerationId: string;
   daemonGeneration: number;
+  /**
+   * What happens to this lane if its current runtime ends now: restarted by
+   * the convergence loop, or left for the owner. Absent when unknown, and the
+   * messages then make no promise about it.
+   */
+  laneOutlook?: () => Promise<"restarts" | "needs_owner" | undefined>;
 };
 
 /** The bearer is intentionally memory-only and must never be persisted or logged. */
@@ -253,6 +259,17 @@ export class SupervisedAgentDelivery {
     // version. They cannot be rerun, so their already-retired exact aggregate
     // remains the publication source for that one recovered legacy turn.
     if (result.publicationContract === "legacy_cursor_aggregate_v0") return result;
+    // The wrapper could not prove this turn's authority ended, so even its
+    // journaled proposal stays unpublished. The turn is settled as lost, and its
+    // reason says truthfully what happens to the agent next.
+    if (result.outcome === "interrupted" && result.authorityUnproven) {
+      const outlook = await agent.laneOutlook?.().catch(() => undefined);
+      const next = outlook === "restarts" ? "LetAgents restarts the agent."
+        : outlook === "needs_owner"
+          ? "Automatic recovery was stopped after repeated provider exits. The agent needs you to recover it."
+          : "";
+      return { ...result, error: [result.error, next].filter(Boolean).join(" ") };
+    }
     const proposals = await this.inbox.roomTurnCompletionEffects(
       agent.agentId,
       originExecutionGenerationId,
