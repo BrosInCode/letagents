@@ -59,7 +59,7 @@ async function replayStoredEvent(input: {
   if (!(Date.parse(stored.event_order_at) >= Date.parse(task.created_at))) return null;
 
   const projected = projectRepoRoomEvent({ event, currentStatus: task.status });
-  if (!projected || !isValidTransition(task.status, projected.newStatus as TaskStatus)) return null;
+  if (!projected || !isValidTransition(task.status, projected.newStatus as TaskStatus, { githubEvent: true })) return null;
 
   // The live resolver, so the event goes to the one task it would have gone to.
   const resolution = await resolveLinkedTaskForRepoRoomEvent(repoProject, event);
@@ -140,7 +140,7 @@ export async function replayStoredPullRequestMergeForTask(input: {
     merged: true,
     currentStatus: task.status,
   });
-  if (!wouldMerge || !isValidTransition(task.status, wouldMerge.newStatus as TaskStatus)) return null;
+  if (!wouldMerge || !isValidTransition(task.status, wouldMerge.newStatus as TaskStatus, { githubEvent: true })) return null;
 
   const urls = linkedPullRequestUrls(task, await getActiveTaskLeases(input.project.id, task.id));
   if (urls.length === 0) return null;
