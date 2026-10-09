@@ -18,5 +18,8 @@ test("supervisor grant registry is exact and default-deny", () => {
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/execution-delegation-decisions"), false);
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/execution-delegations"), false);
   assert.equal(isSupervisorGrantRouteAllowed("DELETE", "/supervisor-host-grants/grant_1"), false);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/usage-limit-notices"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("GET", "/supervisor-host-grants/grant_1/usage-limit-notices"), false);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/usage-limit-notices/extra"), false);
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/rooms/example/messages"), false);
 });

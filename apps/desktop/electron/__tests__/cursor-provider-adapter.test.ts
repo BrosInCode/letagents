@@ -41,7 +41,7 @@ import {
 import { prepareCursorResumeOwnershipLock } from "../main/agents/cursor-sandbox-policy.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import { removeSupervisedWorkspaceGenerationReceipt } from "../main/agents/supervised-workspace-generation.js";
-import { cursorAuthorityUnprovenDetail } from "../main/agents/cursor-turn-settlement.js";
+import { cursorAttemptEndingResult, cursorAuthorityUnprovenDetail, CursorRoomTurnTerminalError } from "../main/agents/cursor-turn-settlement.js";
 const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -7974,6 +7974,25 @@ test("a result line delivered after exit resolution still counts: the lane goes 
 
   assert.deepEqual(terminals, [], "a cleanly completed turn is never misread as a crash");
   assert.equal(handle.observedState(), "idle");
+});
+
+test("a room turn that ends at the Cursor usage limit settles as failed with usage-limit evidence", () => {
+  const base = { turnId: "turn-quota", providerContinuationId: "sess-cursor-1", terminalError: undefined };
+  assert.deepEqual(cursorAttemptEndingResult({ ...base, cause: "provider_quota", protocolError: false }), {
+    turnId: "turn-quota",
+    providerContinuationId: "sess-cursor-1",
+    outcome: "failed",
+    text: null,
+    evidence: "stream",
+    error: "Cursor could not complete this turn because the provider usage limit was reached.",
+    usageLimit: {},
+  }, "the turn settles instead of throwing, and Cursor gives no reset time");
+  assert.throws(() => cursorAttemptEndingResult({ ...base, cause: "provider_quota", protocolError: true }),
+    CursorRoomTurnTerminalError, "a protocol error still throws");
+  assert.throws(() => cursorAttemptEndingResult({ ...base, cause: "stopped", protocolError: false }), CursorRoomTurnTerminalError);
+  const crashed = cursorAttemptEndingResult({ ...base, cause: "crashed", protocolError: false });
+  assert.equal(crashed.outcome, "interrupted");
+  assert.equal((crashed as { usageLimit?: unknown }).usageLimit, undefined, "a crash is never a usage limit");
 });
 
 test("the proven usage-limit signature classifies as provider_quota, not crashed (msg_1708)", async () => {

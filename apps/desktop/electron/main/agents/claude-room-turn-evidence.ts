@@ -1,3 +1,6 @@
+import { looksLikeProviderUsageLimit, normalizeUsageLimitResetMs } from "../../../../../shared/provider-usage-limit.mjs";
+import type { ProviderUsageLimitEvidence } from "./provider-adapter.js";
+
 export const CLAUDE_NO_ROOM_REPLY_SENTINEL = "LETAGENTS_NO_ROOM_REPLY";
 
 export type ClaudeEvidenceRecord = Record<string, unknown>;
@@ -26,7 +29,27 @@ export type ClaudeExactTurnFailure = {
   nativeOutcome?: "failed" | "interrupted";
   turnId: string;
   error: string;
+  /** The turn failed because the account's usage limit or credit is used up. */
+  usageLimit?: ProviderUsageLimitEvidence;
 };
+
+/** API error categories Claude gives a request refused at the account's usage limit or credit. */
+export const CLAUDE_USAGE_LIMIT_API_ERRORS: ReadonlySet<string> = new Set(["rate_limit", "billing_error"]);
+
+/**
+ * The reset time an older Claude Code writes into its usage-limit text,
+ * "Claude AI usage limit reached|<epoch seconds>", as epoch milliseconds.
+ */
+export function claudeUsageLimitTextResetMs(text: string): number | null {
+  const match = /usage limit reached\|(\d{9,11})\b/i.exec(text);
+  return match ? normalizeUsageLimitResetMs(Number(match[1]) * 1000) : null;
+}
+
+/** Usage-limit evidence with its reset time when one is known. */
+export function claudeUsageLimitEvidence(resetsAtMs: number | null): ProviderUsageLimitEvidence {
+  const reset = normalizeUsageLimitResetMs(resetsAtMs);
+  return reset === null ? {} : { resetsAtMs: reset };
+}
 
 function record(value: unknown): ClaudeEvidenceRecord | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -161,7 +184,10 @@ export function recoverExactClaudeTurnFailureFromSession(
   if (!failure) return null;
   const text = assistantText(failure).join("").trim();
   const status = typeof failure.apiErrorStatus === "number" ? ` (HTTP ${failure.apiErrorStatus})` : "";
-  return { turnId, nativeOutcome: "failed", error: text || `The model provider refused the request${status}.` };
+  const usageLimit = (typeof failure.error === "string" && CLAUDE_USAGE_LIMIT_API_ERRORS.has(failure.error))
+    || looksLikeProviderUsageLimit(text);
+  return { turnId, nativeOutcome: "failed", error: text || `The model provider refused the request${status}.`,
+    ...(usageLimit ? { usageLimit: claudeUsageLimitEvidence(claudeUsageLimitTextResetMs(text)) } : {}) };
 }
 
 /** The rows of one exact command in its session: from its user row to the next command's. */

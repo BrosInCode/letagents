@@ -18,6 +18,7 @@ export declare function humanConversationFallback(input: {
  * channel for a managed local worker.
  */
 export declare function isUntrustedExternalActivationSource(source: unknown): boolean;
+export declare function isSilentSystemEventSource(source: unknown): boolean;
 export interface AgentMessageActivation {
     for_current_agent: {
         decision: AgentMessageActivationDecision;

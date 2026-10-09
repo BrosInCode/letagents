@@ -94,7 +94,8 @@ export function cursorTerminalAuthorityProof(raw: Record<string, unknown>): "pro
  * unrequested exit is a trusted ending: the wrapper already proved its native
  * process group retired, so the turn cannot still be running. It settles as
  * interrupted instead of blocking the FIFO behind a turn that can be neither
- * skipped nor re-read. Quota, stop, and protocol endings keep throwing. The one
+ * skipped nor re-read. A used-up usage limit (provider_quota) settles as failed
+ * with usage-limit evidence. Stop and protocol endings keep throwing. The one
  * protocol exception is a finished turn whose wrapper only failed to prove it
  * revoked its remote authority: it settles as lost and withholds its reply.
  */
@@ -122,6 +123,14 @@ export function cursorAttemptEndingResult(input: {
     : input.terminalError
       ? `Cursor supervised turn failed: ${input.terminalError}`
     : "Cursor ended before the bounded room turn produced a terminal result.";
+  if (!input.protocolError && input.cause === "provider_quota") {
+    // The account's usage limit is used up. The turn did not run and cannot
+    // run until the limit allows, so it settles as failed with usage-limit
+    // evidence: the daemon pauses delivery and tells the room once. Cursor
+    // does not say when the limit resets.
+    return { turnId: input.turnId, providerContinuationId: input.providerContinuationId, outcome: "failed",
+      text: null, evidence: "stream", error: redactCredentialText(detail).value.slice(0, 2000), usageLimit: {} };
+  }
   if (input.protocolError || (input.cause !== "crashed" && input.cause !== "exited")) {
     throw new CursorRoomTurnTerminalError(detail);
   }

@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 
 import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import { probeScratchWorkspaceGit } from "../../../../../shared/scratch-workspace-repository.mjs";
+import { looksLikeProviderUsageLimit } from "../../../../../shared/provider-usage-limit.mjs";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
 import {
   ProviderContinuationMissingError,
@@ -29,6 +30,7 @@ import {
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnRequest,
   type ProviderRoomTurnResult,
+  type ProviderUsageLimitEvidence,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
   type ProviderStreamEvent,
@@ -482,6 +484,19 @@ class OpenCodeTerminalTurnError extends Error {
     super(message);
     this.name = "OpenCodeTerminalTurnError";
   }
+}
+
+/**
+ * Usage-limit evidence when the model provider refused the turn because the
+ * account's credit or quota is used up: HTTP 402, or an error that says so
+ * (for example `insufficient_quota`). A plain HTTP 429 is a short rate limit,
+ * not a usage limit. OpenCode does not report when such a limit resets.
+ */
+function openCodeUsageLimit(message: OpenCodeMessage | null): { usageLimit: ProviderUsageLimitEvidence } | null {
+  const failure = messageError(message);
+  if (!failure) return null;
+  return failure.statusCode === 402 || looksLikeProviderUsageLimit(failure.name) || looksLikeProviderUsageLimit(failure.message)
+    ? { usageLimit: {} } : null;
 }
 
 function safeProviderErrorMessage(message: OpenCodeMessage | null): string | null {
@@ -1127,7 +1142,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const finalAssistant = finalAssistantFor(messages, turnId, turnUserIds);
     const failure = safeProviderErrorMessage(finalAssistant);
     if (failure) {
-      return { turnId, providerContinuationId: sessionId, outcome: "failed", text: null, evidence: "transcript", error: failure };
+      return { turnId, providerContinuationId: sessionId, outcome: "failed", text: null, evidence: "transcript", error: failure,
+        ...openCodeUsageLimit(finalAssistant) };
     }
     // A last step that called tools is not where the turn ends: it was to go
     // on with their results, and the process ended first. What the model said
@@ -1750,6 +1766,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           text: null,
           evidence: "transcript" as const,
           error: terminalError,
+          ...openCodeUsageLimit(finalAssistant),
         } : null;
         if (terminalResult) this.emitTurnTerminal(handle, turnId, "failed");
         throw new OpenCodeTerminalTurnError(terminalError, terminalResult);

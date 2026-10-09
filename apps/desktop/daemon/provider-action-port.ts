@@ -164,6 +164,8 @@ export type ProviderRoomTurnResult =
   | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string;
     /** The provider declined this turn's content on policy grounds; `error` carries its reason. */
     refusal?: true;
+    /** The account's usage limit or credit is used up; `resetsAtMs` is when the provider said it resets. */
+    usageLimit?: { resetsAtMs?: number };
     /** The turn finished, but the wrapper could not prove its remote authority ended. Its journaled reply is never published. */
     authorityUnproven?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };

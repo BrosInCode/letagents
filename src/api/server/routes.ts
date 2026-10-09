@@ -158,6 +158,7 @@ import { registerExecutionDelegationRoutes } from "../routes/execution-delegatio
 import { registerExecutionDelegationDecisionRoutes } from "../routes/execution-delegation-decisions.js";
 import { registerExecutionApprovalPublicationRoutes } from "../routes/execution-approval-publications.js";
 import { registerCommandReviewRoutes } from "../routes/command-reviews.js";
+import { registerProviderUsageLimitNoticeRoutes } from "../routes/provider-usage-limit-notices.js";
 import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
 import {
@@ -540,6 +541,7 @@ export function registerApiRoutes(app: Express): void {
     getProjectById,
   });
   registerCommandReviewRoutes(app, roomPresenceRouteDeps);
+  registerProviderUsageLimitNoticeRoutes(app, roomPresenceRouteDeps);
   registerRoomAgentWorkRoutes(app, roomMessageRouteDeps, roomPresenceRouteDeps);
   registerRoomReasoningRoutes(app, roomReasoningRouteDeps);
   registerRoomFocusRoutes(app, roomFocusRouteDeps);

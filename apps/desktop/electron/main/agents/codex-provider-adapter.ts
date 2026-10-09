@@ -1,6 +1,7 @@
 import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
+import { looksLikeProviderUsageLimit, normalizeUsageLimitResetMs } from "../../../../../shared/provider-usage-limit.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -80,6 +81,7 @@ import {
   type ProviderRoomTurnRequest,
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnResult,
+  type ProviderUsageLimitEvidence,
   type ProviderRoomTurnOptions,
   type ProviderContinuationRepairRequest,
   type ProviderContinuationRepairResult,
@@ -717,6 +719,43 @@ function isCodexPolicyRefusal(codexErrorInfo: unknown): boolean {
 }
 
 /**
+ * The account's usage limit or credit is used up. Codex names it with the
+ * `usageLimitExceeded` error info; an older or wrapped error says so only in
+ * its message. A short rate limit that Codex retries itself is not one.
+ */
+function isCodexUsageLimit(error: ThreadReadTurn["error"]): boolean {
+  const info = error?.codexErrorInfo;
+  if (info === "usageLimitExceeded") return true;
+  if (recordValue(info) && Object.prototype.hasOwnProperty.call(info, "usageLimitExceeded")) return true;
+  return looksLikeProviderUsageLimit(typeof error?.message === "string" ? error.message : null);
+}
+
+/**
+ * When the used-up limit resets, from the last `account/rateLimits/updated`
+ * snapshot: the latest reset of a window that is fully used (epoch seconds
+ * from Codex). Null when no window is full or none says when it resets.
+ */
+export function codexUsageLimitResetMs(snapshot: unknown): number | null {
+  const params = recordValue(snapshot);
+  const limits = recordValue(params?.rateLimits) ?? params;
+  let latest: number | null = null;
+  for (const key of ["primary", "secondary"] as const) {
+    const window = recordValue(limits?.[key]);
+    const used = window?.usedPercent;
+    if (typeof used !== "number" || used < 100) continue;
+    const resetsAt = window?.resetsAt;
+    const ms = typeof resetsAt === "number" ? normalizeUsageLimitResetMs(resetsAt * 1000) : null;
+    if (ms !== null && (latest === null || ms > latest)) latest = ms;
+  }
+  return latest;
+}
+
+function codexUsageLimitEvidence(snapshot: unknown): ProviderUsageLimitEvidence {
+  const resetsAtMs = codexUsageLimitResetMs(snapshot);
+  return resetsAtMs === null ? {} : { resetsAtMs };
+}
+
+/**
  * How long after a thread reports `systemError` its turn's own ending is
  * awaited before the ending is read from the thread instead. The app-server
  * sends the two within milliseconds of each other.
@@ -944,6 +983,8 @@ class CodexProviderHandle implements ProviderHandle {
   /** At most one terminal fact per recent native turn; never infer a latest turn. */
   readonly terminalTurns = new Map<string, string>();
   readonly turnWaiters = new Map<string, { owner: symbol; resolve: (status: string) => void; reject: (error: Error) => void }>();
+  /** The last `account/rateLimits/updated` snapshot, read for when a used-up usage limit resets. */
+  lastRateLimits: unknown = null;
   threadIdleEpoch = 0;
   threadIdleReconciledEpoch = 0;
   threadIdleReconciliation: Promise<void> | null = null;
@@ -2792,6 +2833,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     this.observePermissionFileChangeProposal(handle, notification);
     const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);
     handle.roomTurnResults.observe(notification.method, notification.params);
+    if (notification.method === "account/rateLimits/updated") handle.lastRateLimits = notification.params ?? null;
     // Record the durable in-memory terminal edge first. Stream/activity
     // observers are best-effort and must never suppress exact turn settlement.
     if (exactTurnId && exactThreadId === handle.providerContinuationId && terminalMatch) {
@@ -3119,7 +3161,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
       : { turnId, providerContinuationId: handle.providerContinuationId,
         outcome: status === "failed" ? "failed" : "interrupted", text: null, evidence: "transcript",
         error: String(safeStreamPayload(turn.error?.message || `Codex bounded room turn ended ${status}.`).payload).slice(0, 2000),
-        ...(status === "failed" && isCodexPolicyRefusal(turn.error?.codexErrorInfo) ? { refusal: true as const } : {}) };
+        ...(status === "failed" && isCodexPolicyRefusal(turn.error?.codexErrorInfo) ? { refusal: true as const } : {}),
+        ...(status === "failed" && isCodexUsageLimit(turn.error) ? { usageLimit: codexUsageLimitEvidence(handle.lastRateLimits) } : {}) };
     await checkpointTerminalResult?.(terminalResult);
     handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
     return terminalResult;

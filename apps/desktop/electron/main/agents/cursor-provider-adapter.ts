@@ -1,3 +1,4 @@
+import { looksLikeProviderUsageLimit } from "../../../../../shared/provider-usage-limit.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants as fsConstants, fsyncSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
@@ -3165,6 +3166,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       if (!terminal.nativeFailure) throw new CursorRoomTurnTerminalError("Cursor returned an unproven error result for the bounded room turn.");
       return { turnId, providerContinuationId, outcome: "failed", text: null, evidence: "stream",
         error: redactCredentialText(terminal.text || "Cursor returned an error result for the bounded room turn.").value.slice(0, 2000),
+        ...(looksLikeProviderUsageLimit(terminal.text) ? { usageLimit: {} } : {}),
         publicationContract: terminal.publicationContract };
     }
     const text = terminal.text?.trim() || null;

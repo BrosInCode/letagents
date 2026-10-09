@@ -33,6 +33,7 @@ import type {
   NativeExecutionObservation,
 } from "../main/agents/provider-adapter.js";
 import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
+import { recoverExactClaudeTurnFailureFromSession } from "../main/agents/claude-room-turn-evidence.js";
 import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
@@ -2608,6 +2609,72 @@ test("Claude keeps an exact stream result when terminal checkpointing fails so r
     evidence: "stream",
   });
   assert.equal(child.written.length, writesBeforeRecovery, "recovery consumes cached exact evidence without another native turn");
+});
+
+test("a Claude room turn refused at the account's usage limit fails with usage-limit evidence and the latest rejected reset", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  const sessionId = handle.providerContinuationId;
+  const run = async (index: number, lines: (turnId: string) => Array<Record<string, unknown>>) => {
+    const running = adapter.runRoomTurn!(handle, { inboxItemId: `inbox-limit-${index}`, actionId: `action-limit-${index}`, sourceMessage: {}, activation: {} }, {
+      beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {},
+    });
+    await flush();
+    const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+    for (const line of lines(turnId)) child.emit(line);
+    return { turnId, result: await running as Record<string, unknown> };
+  };
+  const apiError = (turnId: string, result: string) => ({ type: "result", subtype: "success", is_error: true,
+    session_id: sessionId, user_message_uuid: turnId, result });
+
+  const limited = await run(1, (turnId) => [
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", rateLimitType: "five_hour", resetsAt: 1_790_000_000 } },
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", rateLimitType: "seven_day", resetsAt: 1_790_400_000 } },
+    { type: "rate_limit_event", session_id: "another-session", rate_limit_info: { status: "rejected", resetsAt: 1_799_000_000 } },
+    { type: "assistant", session_id: sessionId, error: "rate_limit", message: { content: [{ type: "text", text: "You've hit your limit" }] } },
+    apiError(turnId, "You've hit your limit · resets 3pm"),
+  ]);
+  assert.deepEqual(limited.result, { turnId: limited.turnId, providerContinuationId: sessionId, outcome: "failed", text: null,
+    evidence: "stream", error: "You've hit your limit · resets 3pm", usageLimit: { resetsAtMs: 1_790_400_000_000 } });
+
+  // What the last turn saw does not carry over: this one only says so in its text.
+  const textOnly = await run(2, (turnId) => [apiError(turnId, "Claude AI usage limit reached|1790000000")]);
+  assert.deepEqual(textOnly.result.usageLimit, { resetsAtMs: 1_790_000_000_000 });
+  const billing = await run(3, (turnId) => [
+    { type: "assistant", session_id: sessionId, error: "billing_error", message: { content: [{ type: "text", text: "API Error" }] } },
+    apiError(turnId, "API Error"),
+  ]);
+  assert.deepEqual(billing.result.usageLimit, {});
+
+  // An overload Claude gave up on, or another failure, is not a usage limit.
+  const overloaded = await run(4, (turnId) => [
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "allowed_warning", resetsAt: 1_790_000_000 } },
+    { type: "assistant", session_id: sessionId, error: "overloaded", message: { content: [{ type: "text", text: "API Error: 529 Overloaded" }] } },
+    apiError(turnId, "API Error: 529 Overloaded"),
+  ]);
+  assert.equal(overloaded.result.outcome, "failed");
+  assert.equal("usageLimit" in overloaded.result, false);
+  const answered = await run(5, (turnId) => [
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", resetsAt: 1_790_000_000 } },
+    { type: "result", subtype: "success", is_error: false, session_id: sessionId, user_message_uuid: turnId, result: "Answered on overage." },
+  ]);
+  assert.equal(answered.result.outcome, "reply", "a turn that still answered is only an answer");
+});
+
+test("a Claude turn recovered from its session marks a usage-limit failure", () => {
+  const sessionId = "session-limit";
+  const rows = (turnId: string, error: string, text: string) => [
+    { type: "user", uuid: turnId, sessionId, message: { role: "user", content: [{ type: "text", text: "request" }] } },
+    { type: "assistant", uuid: `api-error-${turnId}`, parentUuid: turnId, sessionId, isApiErrorMessage: true, apiErrorStatus: 429, error,
+      message: { id: `synthetic-${turnId}`, role: "assistant", model: "<synthetic>", stop_reason: "stop_sequence", content: [{ type: "text", text }] } },
+  ];
+  assert.deepEqual(recoverExactClaudeTurnFailureFromSession(rows("t1", "rate_limit", "You've hit your limit · resets 3pm"), "t1", sessionId),
+    { turnId: "t1", nativeOutcome: "failed", error: "You've hit your limit · resets 3pm", usageLimit: {} });
+  assert.deepEqual(recoverExactClaudeTurnFailureFromSession(rows("t2", "unknown", "Claude AI usage limit reached|1790000000"), "t2", sessionId)?.usageLimit,
+    { resetsAtMs: 1_790_000_000_000 });
+  assert.equal(recoverExactClaudeTurnFailureFromSession(rows("t3", "overloaded", "API Error: 529 Overloaded"), "t3", sessionId)?.usageLimit, undefined);
 });
 
 test("Claude clears exact-turn observation and fails the continuation when stdin dispatch throws", async () => {
