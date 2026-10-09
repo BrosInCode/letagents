@@ -55,7 +55,8 @@ function recorded(transcript: ProviderReplayTranscript) {
     response,
     notifications,
     turnCompleted,
-    threadId: (response("thread/start").frame.result as Row).thread.id as string,
+    // A recording opens its conversation with a start, or with a resume of one that an earlier process started.
+    threadId: (response(inbound.some((entry) => entry.label === "thread/start") ? "thread/start" : "thread/resume").frame.result as Row).thread.id as string,
     turnId: (response("turn/start").frame.result as Row).turn.id as string,
     exit: transcript.entries.at(-1) as Located<RuntimeExitEntry>,
   };
@@ -87,6 +88,9 @@ async function replayScenario(
   const published: ProviderStreamEvent[] = [];
   let spawnedState: (() => ProviderObservedState) | null = null;
   replay.session.onInboundDelivered((entry) => afterInbound?.(entry, () => [...published], replay, () => spawnedState?.() ?? null));
+  // A recording that resumes a conversation names it in its first `thread/resume`. An earlier process started it.
+  const resumed = transcript.entries.find((entry) => entry.type === "expect_outbound" && entry.label === "thread/resume");
+  const resumeThreadId = resumed?.type === "expect_outbound" ? (resumed.frame.params as Row | undefined)?.threadId as string | undefined : undefined;
   const outcome = await replay.session.run(() => runCodexScenario(CODEX_SCENARIOS[name], {
     dependencies: replay.dependencies,
     codexBin: "codex-replay",
@@ -94,6 +98,7 @@ async function replayScenario(
     settled: () => replay.session.untilExitIsNext(),
     onStream: (event) => { published.push(event); },
     onSpawned: (observedState) => { spawnedState = observedState; },
+    ...(resumeThreadId ? { resumeThreadId } : {}),
   }));
   return { transcript, replay, outcome };
 }
@@ -338,6 +343,123 @@ test("Codex replay: a reply that reports no effort is told to the owner, and a r
   // An app-server that does not report the effort leaves the field out. That says nothing either way.
   const silent = await replayScenario("simple", replied(({ reasoningEffort: _notReported, ...result }) => result));
   assert.deepEqual(silent.outcome.launchNotices, []);
+  assert.equal(silent.outcome.roomTurn.outcome, "reply");
+});
+
+test("Codex replay: a resume in a second process gives the conversation the effort it names, and a resume of a loaded conversation does not", async () => {
+  // An earlier process started the conversation with "low". Its traffic is not in the recording.
+  const { transcript, replay, outcome } = await replayScenario("resume");
+  const real = recorded(transcript);
+  const { reasoningEffort, loadedReasoningEffort } = CODEX_SCENARIOS.resume.resume;
+
+  // What the adapter sent: it starts no conversation, and resumes the one it was given twice.
+  assert.deepEqual(sentFrames(replay, "thread/start"), []);
+  const [resume, loadedResume, ...otherResumes] = sentFrames(replay, "thread/resume");
+  assert.deepEqual(otherResumes, []);
+  for (const [sent, effort] of [[resume!, reasoningEffort], [loadedResume!, loadedReasoningEffort]] as const) {
+    assert.equal((sent.params as Row).threadId, real.threadId);
+    assert.deepEqual((sent.params as Row).config, { model_reasoning_effort: effort });
+    assert.equal(Object.hasOwn(sent.params as Row, "reasoningEffort"), false);
+  }
+  // It asks Codex for its models before each resume. (That it waits for the answer is a matter for the adapter's own tests.)
+  const sent = replay.session.outbound.map((frame) => frame.method);
+  assert.deepEqual(sent.filter((method) => method === "model/list" || method === "thread/resume"),
+    ["model/list", "thread/resume", "model/list", "thread/resume"]);
+
+  const [resumed, resumedLoaded, ...otherReplies] = real.inbound
+    .filter((entry) => entry.label === "thread/resume" && Object.hasOwn(entry.frame, "result"))
+    .map((entry) => entry.frame.result as Row);
+  assert.deepEqual(otherReplies, []);
+
+  // What real Codex answered to the resume in a new process: the reply holds the effort, as the
+  // reply of a start does, and it is the effort that the resume named.
+  assert.equal(resumed.thread.id, real.threadId);
+  assert.equal(resumed.reasoningEffort, reasoningEffort);
+  assert.equal(resumed.thread.reasoningEffort, reasoningEffort);
+  // Codex can report that effort for one reason only. It is not the effort the conversation was
+  // started with, and it is not the default effort of the conversation's model, which Codex
+  // listed in this same recording.
+  assert.notEqual(reasoningEffort, CODEX_SCENARIO_REASONING_EFFORT);
+  const listed = (real.response("model/list").frame.result as Row).data as Row[];
+  const model = listed.find((entry) => entry.model === resumed.model);
+  assert.ok(model, "the recording lists the conversation's model");
+  assert.equal(typeof model.defaultReasoningEffort, "string");
+  assert.notEqual(reasoningEffort, model.defaultReasoningEffort);
+  // The conversation holds the one turn of the earlier process, with its answer.
+  assert.equal(resumed.thread.turns.length, 1);
+  assert.notEqual(resumed.thread.turns[0].id, real.turnId);
+  const earlierAnswers = (resumed.thread.turns[0].items as Row[]).filter((item) => item.type === "agentMessage").map((item) => item.text);
+  assert.deepEqual(earlierAnswers, ["ready"]);
+  // So the launch has nothing to tell the owner.
+  assert.deepEqual(outcome.launchNotices, []);
+  assert.equal(outcome.stateAfterSpawn, "idle");
+
+  // What real Codex answered to the resume of the conversation it had loaded: the conversation
+  // keeps its own effort. It takes neither the effort that the resume names nor, here, the
+  // default of its model. This is the resume a continuation repair sends first; the recording
+  // does not hold a repair of a conversation that Codex did not find.
+  assert.notEqual(loadedReasoningEffort, reasoningEffort);
+  assert.equal(resumedLoaded.thread.id, real.threadId);
+  assert.equal(resumedLoaded.reasoningEffort, reasoningEffort);
+  assert.equal(resumedLoaded.thread.reasoningEffort, reasoningEffort);
+  // The adapter read that in the reply, replaced nothing, and returned the line for the owner.
+  assert.deepEqual(outcome.loadedResume, {
+    outcome: "rematerialized",
+    notices: [
+      `This agent's reasoning effort "${loadedReasoningEffort}" was given to Codex, but Codex reports "${reasoningEffort}" for the conversation. `
+      + "The agent runs with the effort Codex reports.",
+    ],
+  });
+
+  // The turn after it names no effort of its own, and Codex reports the conversation's effort through it.
+  const [turnStart, ...otherTurnStarts] = sentFrames(replay, "turn/start");
+  assert.deepEqual(otherTurnStarts, []);
+  assert.equal((turnStart!.params as Row).threadId, real.threadId);
+  assert.equal(Object.hasOwn(turnStart!.params as Row, "effort"), false);
+  const reads = real.inbound.filter((entry) => entry.label === "thread/read" && Object.hasOwn(entry.frame, "result"));
+  assert.ok(reads.length > 0, "the recording holds a thread/read reply");
+  for (const read of reads) {
+    assert.equal((read.frame.result as Row).thread.reasoningEffort, reasoningEffort, `line ${read.line}`);
+  }
+  // The answer is this turn's: the recorded turn of the earlier process answered with another word.
+  assert.equal(outcome.roomTurn.outcome, "reply");
+  assert.equal(outcome.roomTurn.turnId, real.turnId);
+  assert.equal(outcome.roomTurn.text, "resumed");
+  assert.equal(earlierAnswers.includes(outcome.roomTurn.text!), false);
+  assert.equal(outcome.stateAfterTurn, "idle");
+  assert.equal(outcome.terminal.terminalCause, "stopped");
+  assert.equal(outcome.stateAfterStop, "stopped");
+});
+
+test("Codex replay: a resume reply that reports no effort is told to the owner, and one with no effort field is not", async () => {
+  const fixture = loadFixture("resume");
+  const { reasoningEffort, loadedReasoningEffort } = CODEX_SCENARIOS.resume.resume;
+  // Not a recording: the effort in the first recorded resume reply, the one of the launch, is changed here.
+  const replied = (change: (result: JsonObject) => JsonObject): ProviderReplayTranscript => {
+    const launchReply = fixture.entries.find((entry) => entry.type === "emit_inbound" && entry.label === "thread/resume" && Object.hasOwn(entry.frame, "result"));
+    return {
+      ...fixture,
+      entries: fixture.entries.map((entry) => entry === launchReply && entry.type === "emit_inbound"
+        ? { ...entry, frame: { ...entry.frame, result: change(entry.frame.result as JsonObject) } }
+        : entry),
+    };
+  };
+  const loadedLine = `This agent's reasoning effort "${loadedReasoningEffort}" was given to Codex, but Codex reports "${reasoningEffort}" for the conversation. `
+    + "The agent runs with the effort Codex reports.";
+
+  const none = await replayScenario("resume", replied((result) => ({ ...result, reasoningEffort: null })));
+  assert.deepEqual(none.outcome.launchNotices, [
+    `This agent's reasoning effort "${reasoningEffort}" was given to Codex, but Codex reports no effort for the conversation. `
+    + "The agent runs with the effort Codex gives it.",
+  ]);
+  assert.equal(none.outcome.stateAfterSpawn, "idle");
+  // The resume of the loaded conversation is as recorded, and its line is another one.
+  assert.deepEqual(none.outcome.loadedResume, { outcome: "rematerialized", notices: [loadedLine] });
+  assert.equal(none.outcome.roomTurn.outcome, "reply");
+
+  const silent = await replayScenario("resume", replied(({ reasoningEffort: _notReported, ...result }) => result));
+  assert.deepEqual(silent.outcome.launchNotices, []);
+  assert.deepEqual(silent.outcome.loadedResume, { outcome: "rematerialized", notices: [loadedLine] });
   assert.equal(silent.outcome.roomTurn.outcome, "reply");
 });
 
