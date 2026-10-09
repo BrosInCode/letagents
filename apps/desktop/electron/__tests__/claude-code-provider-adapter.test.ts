@@ -1067,6 +1067,59 @@ for (const [apiError, expected] of [
   });
 }
 
+// The CLI's SDKRateLimitEvent: rate_limit_info.resetsAt is epoch seconds and only a rejected window blocks the turn.
+for (const [name, events, expectedResetMs] of [
+  ["a rejected window names when the limit resets", sessionId => [
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "allowed_warning", resetsAt: 1_790_000_100, rateLimitType: "five_hour" } },
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", resetsAt: 1_790_000_000, rateLimitType: "seven_day" } },
+  ], 1_790_000_000_000],
+  ["no event leaves the reset time unknown", () => [], undefined],
+  ["a window that is not rejected is not a reset time", sessionId => [
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "allowed", resetsAt: 1_790_000_000 } },
+  ], undefined],
+  ["a millisecond value is not trusted as seconds", sessionId => [
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", resetsAt: 1_790_000_000_000 } },
+  ], undefined],
+  ["a rejection without a reset time stays unknown", sessionId => [
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected" } },
+  ], undefined],
+] as const satisfies ReadonlyArray<readonly [string, (sessionId: string) => Record<string, unknown>[], number | undefined]>) {
+  test(`a usage-limit bootstrap rejection: ${name}`, async () => {
+    const harness = createHarness({
+      bootstrapResultSubtype: "success",
+      bootstrapMessages: sessionId => [...events(sessionId), { type: "assistant", session_id: sessionId, error: "rate_limit",
+        message: { content: [{ type: "text", text: "limit" }] } }],
+    });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+    await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      const flags = error as { providerQuotaExhausted?: true; providerQuotaResetsAtMs?: number };
+      assert.equal(flags.providerQuotaExhausted, true, "still classified as a usage limit");
+      assert.equal(flags.providerQuotaResetsAtMs, expectedResetMs);
+      if (expectedResetMs === undefined) assert.doesNotMatch(error.message, /usage_limit_resets_at/);
+      else assert.match(error.message, new RegExp(`assistant_error=rate_limit; usage_limit_resets_at=${new Date(expectedResetMs).toISOString()};`));
+      return true;
+    });
+  });
+}
+
+test("a reset time never marks another API error as a usage limit", async () => {
+  const harness = createHarness({
+    bootstrapResultSubtype: "success",
+    bootstrapMessages: sessionId => [
+      { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", resetsAt: 1_790_000_000 } },
+      { type: "assistant", session_id: sessionId, error: "authentication_failed", message: { content: [{ type: "text", text: "no" }] } },
+    ],
+  });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 40 });
+  await assert.rejects(withLoopAlive(adapter.spawn(spawnRequest())), (error: unknown) => {
+    const flags = error as { providerQuotaExhausted?: true; providerQuotaResetsAtMs?: number };
+    assert.equal(flags.providerQuotaExhausted, undefined);
+    assert.equal(flags.providerQuotaResetsAtMs, undefined);
+    return true;
+  });
+});
+
 test("a bootstrap deadline stays unretried even after Claude reported a rate-limit retry", async () => {
   const harness = createHarness({
     omitBootstrapResult: true,
