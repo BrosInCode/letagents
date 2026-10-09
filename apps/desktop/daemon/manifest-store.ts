@@ -11,7 +11,7 @@ import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import {
   beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
-  closeExecutionApprovalRequest, witnessedRuntimeApprovalClosures, expiredRetiredRuntimeApprovals, settleWitnessedRuntimeApprovalClosures, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
+  closeExecutionApprovalRequest, witnessedRuntimeApprovalClosures, retiredRuntimeApprovals, settleWitnessedRuntimeApprovalClosures, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
   type ApprovalAuthority, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
   type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
 } from "./execution-approval-journal.js";
@@ -733,7 +733,7 @@ export class ManifestStore {
     const pending = await this.serialize(async () => {
       const db = await this.getDatabase();
       return witnessedRuntimeApprovalClosures(db, agentId).length > 0
-        || expiredRetiredRuntimeApprovals(db, agentId, nowMs(), () => this.readEntryFromDatabase(db, agentId)).length > 0;
+        || retiredRuntimeApprovals(db, agentId, nowMs(), () => this.readEntryFromDatabase(db, agentId)).length > 0;
     });
     if (!pending) return 0;
     return this.writeOperationalJournal(db => settleWitnessedRuntimeApprovalClosures(db, agentId, nowMs,

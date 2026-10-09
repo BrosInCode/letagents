@@ -472,22 +472,26 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
 }
 
 /**
- * Expired prompts of a native runtime other than the agent's live one. Expiry
- * already refuses every selection and dispatch, and only the live runtime has a
- * lane that can observe its prompts, so these can never become actionable. This
- * covers terminals without a death witness, such as those recorded before
- * witnesses existed, without inferring process death or decision application.
+ * Open prompts of a native runtime other than the agent's live one. Only the live
+ * runtime has a lane that can observe its prompts, and every selection and dispatch
+ * for another runtime is refused, so these can never become actionable.
+ *
+ * A runtime that another exact birth has replaced (a restart or a recovery put a
+ * new process in its place) is known to be gone, and its prompts close now.
+ * Without such a successor (a stopped agent, no provider reference) the old process
+ * may still be alive, so its prompts close only once they have expired. Either way
+ * this infers neither process death nor that a decision was applied.
  */
-export function expiredRetiredRuntimeApprovals(db: DatabaseSync, agentId: string, atMs: number,
+export function retiredRuntimeApprovals(db: DatabaseSync, agentId: string, atMs: number,
   currentEntry: () => DaemonManifestEntry | undefined): ExecutionApprovalRecord[] {
   parse(executionIdentity, agentId);
   const now = parse(time, atMs);
-  const rows = db.prepare(`SELECT request_id,request_version,execution_generation_id,runtime_generation_id
-    FROM execution_approval_requests r WHERE agent_id=? AND expires_at_ms<=?
+  const rows = db.prepare(`SELECT request_id,request_version,execution_generation_id,runtime_generation_id,expires_at_ms
+    FROM execution_approval_requests r WHERE agent_id=?
       AND state IN ('requested','decision_recorded','dispatching','lost')
       AND NOT EXISTS (SELECT 1 FROM execution_approval_requests newer WHERE newer.request_id=r.request_id AND newer.request_version>r.request_version)
       AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
-        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId, now);
+        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
   if (!rows.length) return [];
   const current = currentEntry();
   const ref = current?.id === agentId ? current.provider_ref : null;
@@ -501,6 +505,8 @@ export function expiredRetiredRuntimeApprovals(db: DatabaseSync, agentId: string
     // an older origin generation, so compare births in each request's generation.
     if (live && executionRuntimeStorageIdentity(agentId, String(row.execution_generation_id),
       live.kind, live.pid!, live.processIdentity!) === row.runtime_generation_id) continue;
+    // Another exact birth runs this agent. With none known, wait for expiry.
+    if (!live && Number(row.expires_at_ms) > now) continue;
     // Closure is hygiene. An old record whose evidence cannot be read stays as
     // it was rather than failing convergence for the agent on every pass.
     try { records.push(read(db, String(row.request_id), Number(row.request_version))!); }
@@ -514,7 +520,7 @@ export function settleWitnessedRuntimeApprovalClosures(db: DatabaseSync, agentId
   requireForeignKeys(db);
   if (!db.isTransaction) reject("invalid_transition");
   const records = [...new Map([...witnessedRuntimeApprovalClosures(db, agentId),
-    ...expiredRetiredRuntimeApprovals(db, agentId, nowMs(), currentEntry)]
+    ...retiredRuntimeApprovals(db, agentId, nowMs(), currentEntry)]
     .map(record => [JSON.stringify([record.request.requestId, record.request.requestVersion]), record])).values()];
   const insert = db.prepare(`INSERT INTO execution_approval_request_closures
     (request_id,request_version,decision_id,dispatch_id,observed_at_ms) VALUES(?,?,?,?,?)`);

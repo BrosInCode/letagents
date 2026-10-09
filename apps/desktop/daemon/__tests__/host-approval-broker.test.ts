@@ -1961,7 +1961,8 @@ function retireRuntime(f: Awaited<ReturnType<typeof fixture>>, how: "replaced" |
 for (const provider of ["claude-code", "codex", "open-model"] as const) {
   for (const phase of ["requested", "selected", "dispatched"] as const) {
     if (provider === "open-model" && phase === "dispatched") continue; // OpenCode confirms processing; nothing remains.
-    for (const how of ["replaced", "stopped", "removed"] as const) {
+    // A replaced runtime is known to be gone and closes at once (see below). Without a successor, only expiry retires it.
+    for (const how of ["stopped", "removed"] as const) {
       test(`${provider} expired ${phase} approval of a ${how} runtime closes without a death witness`, async () => {
         const f = await fixture(provider);
         try {
@@ -1990,6 +1991,68 @@ for (const provider of ["claude-code", "codex", "open-model"] as const) {
       });
     }
   }
+}
+
+// A restart or a recovery put another process in the agent's place. The old runtime's request can no longer be
+// observed, answered or sent, so it closes at once instead of waiting a day for its expiry.
+for (const provider of ["claude-code", "codex", "open-model"] as const) {
+  for (const phase of ["requested", "selected", "dispatched"] as const) {
+    if (provider === "open-model" && phase === "dispatched") continue; // OpenCode confirms processing; nothing remains.
+    test(`${provider} ${phase} approval of a replaced runtime closes at once, before it expires`, async () => {
+      const f = await fixture(provider);
+      try {
+        const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+        if (phase === "selected") f.state.failBefore = true;
+        if (phase === "selected") await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
+        else if (phase === "dispatched") await f.broker.decide(selected);
+        const before = (await f.store.getExecutionApproval(selected.expected))!;
+        const sent = f.sends.length;
+        retireRuntime(f, "replaced");
+        assert.equal((await f.broker.list("room")).filter(item => item.reference).length, 1, "the retired prompt is still shown until it is settled");
+        const reopened = new ManifestStore(f.path);
+        try {
+          await assert.rejects(reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30,
+            async () => { throw new Error("ownership changed"); }), /ownership changed/);
+          assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30, async commit => commit()), 1,
+            "closed long before the prompt expires");
+          assert.ok(now + 30 < approvalExpiry);
+          assert.deepEqual(await reopened.getExecutionApproval(selected.expected),
+            { ...before, request: { ...before.request, closedAtMs: now + 30 } }, "the decision and its certainty are unchanged");
+          assert.equal(await reopened.settleWitnessedRuntimeApprovalClosures("agent", () => now + 40,
+            async () => { throw new Error("no empty write expected"); }), 0);
+        } finally { await reopened.close(); }
+        assert.deepEqual(await f.broker.list("room"), [], "it cannot be listed any more");
+        assert.equal(await f.broker.decide(selected), "request_closed", "nor answered");
+        assert.equal(f.sends.length, sent, "closing sends nothing");
+      } finally { await f.close(); }
+    });
+  }
+}
+
+// A request of a runtime that may still be alive is not closed before it expires.
+for (const live of ["current", "recovered_turn", "unverifiable_birth", "stopped", "removed"] as const) {
+  test(`unexpired approval of a ${live} runtime stays open`, async () => {
+    const f = await fixture();
+    try {
+      const [candidate] = await f.broker.list("room"); const expected = candidate!.reference!;
+      if (live === "recovered_turn") {
+        f.db.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='generation'")
+          .run(JSON.stringify({ ended_at: new Date(now + 20).toISOString(), exit_code: null, signal: null, stdio_archive_ref: null,
+            stdio_tail: "", terminal_cause: "stopped", actor: "daemon-provider", generation: 1, provider_continuation_id: "continuation" }));
+        f.db.prepare("INSERT INTO work_attempt_executions VALUES('recovery-generation','workspace',?,'provider',2,NULL)")
+          .run(new Date(now + 21).toISOString());
+        const manifest = await f.store.load(); const [entry] = manifest.entries;
+        await f.store.write(manifest.generation, [{ ...entry!, run_id: "recovery-generation",
+          deployment_id: serializeDaemonDeploymentId("agent", "recovery-generation"),
+          provider_ref: { ...entry!.provider_ref!, execution_generation_id: "recovery-generation" } }]);
+      } else if (live === "unverifiable_birth") {
+        f.db.prepare("UPDATE runtime_deployments SET provider_connection_pid=NULL WHERE agent_id='agent'").run();
+      } else if (live === "stopped" || live === "removed") retireRuntime(f, live);
+      assert.equal(await f.store.settleWitnessedRuntimeApprovalClosures("agent", () => now + 30,
+        async () => { throw new Error("a runtime that may be alive must not request a write"); }), 0);
+      assert.equal((await f.store.getExecutionApproval(expected))!.request.closedAtMs, null);
+    } finally { await f.close(); }
+  });
 }
 
 test("expired retired-runtime closure skips resolved, unreadable, and other agents' records", async () => {
