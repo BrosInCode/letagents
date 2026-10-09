@@ -105,6 +105,8 @@ class FakeRpc implements CodexAdapterRpc {
       /** The list has more pages than the one `model/list` returns. */
       moreModelPages: boolean;
       effortFromOwnSettings: string | null | undefined;
+      /** Every thread reports `reasoningEffort: null`, whatever it was given: Codex has no effort for it. */
+      effortReportedAsNull: boolean;
     },
   ) {
     this.reviewerFromOwnSettings = options.reviewerFromOwnSettings;
@@ -117,11 +119,12 @@ class FakeRpc implements CodexAdapterRpc {
   /**
    * A current app-server reports the effort a thread was given. Set when it
    * reports this one instead: it ignored the effort, or the thread is already
-   * loaded and keeps its own. Null is an app-server that reports no effort.
+   * loaded and keeps its own. Null is an app-server whose reply has no effort field.
    */
   effortFromOwnSettings: string | null | undefined;
 
-  private reportedEffort(params: unknown): { reasoningEffort?: string } {
+  private reportedEffort(params: unknown): { reasoningEffort?: string | null } {
+    if (this.options.effortReportedAsNull) return { reasoningEffort: null };
     const given = (params as { config?: { model_reasoning_effort?: unknown } } | undefined)?.config?.model_reasoning_effort;
     const reported = this.effortFromOwnSettings === undefined ? given : this.effortFromOwnSettings;
     return typeof reported === "string" ? { reasoningEffort: reported } : {};
@@ -342,8 +345,10 @@ function createHarness(options: {
   models?: readonly FakeCodexModel[] | null | "timeout";
   /** The model list has more pages than the first. */
   moreModelPages?: boolean;
-  /** The effort every thread reports instead of the one it was given; null reports none. */
+  /** The effort every thread reports instead of the one it was given; null leaves the field out of the reply. */
   effortFromOwnSettings?: string | null;
+  /** Every thread reports `reasoningEffort: null`: Codex says that the conversation has no effort. */
+  effortReportedAsNull?: boolean;
 } = {}) {
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
@@ -407,6 +412,7 @@ function createHarness(options: {
         models: options.models === undefined ? FAKE_CODEX_MODELS : options.models,
         moreModelPages: options.moreModelPages ?? false,
         effortFromOwnSettings: options.effortFromOwnSettings,
+        effortReportedAsNull: options.effortReportedAsNull ?? false,
       });
       clients.push(client);
       return client;
@@ -4893,7 +4899,10 @@ test("Codex repairs a readable-but-not-runnable conversation on the same app-ser
   });
 
   assert.equal(result.handle, handle, "repair retains the sole process/stream owner");
-  assert.deepEqual(result, {
+  // The result also holds the way to tell the provider that its lines are recorded. This repair has no line.
+  const { noticesRecorded, ...repaired } = result;
+  assert.equal(typeof noticesRecorded, "function");
+  assert.deepEqual(repaired, {
     handle,
     outcome: "replaced",
     previousProviderContinuationId: "thread-1",
@@ -5808,6 +5817,14 @@ const effortNotGiven = (effort: string, model: string) =>
 const effortNotReported = (given: string, reported: string) =>
   `This agent's reasoning effort "${given}" was given to Codex, but Codex reports "${reported}" for the conversation. `
   + "The agent runs with the effort Codex reports.";
+/** What the daemon does with a repair's result: it records the lines, then tells the provider that they are recorded. */
+function recordedByDaemon(result: { notices?: readonly string[]; noticesRecorded?: () => void }): readonly string[] {
+  result.noticesRecorded?.();
+  return result.notices ?? [];
+}
+const effortReportedAsNone = (given: string) =>
+  `This agent's reasoning effort "${given}" was given to Codex, but Codex reports no effort for the conversation. `
+  + "The agent runs with the effort Codex gives it.";
 
 test("the owner is told when Codex reports another reasoning effort than the one it was given, and the agent still starts", async () => {
   const request = spawnRequest({ deliveryMode: "daemon_inbox", model: "gpt-5.6-sol", reasoningEffort: "low" });
@@ -5815,7 +5832,7 @@ test("the owner is told when Codex reports another reasoning effort than the one
   // Codex reports the effort it was given: there is nothing to say.
   const taking = createHarness();
   assert.deepEqual((await new CodexProviderAdapter({ dependencies: taking.dependencies }).spawn(request)).launchNotices, []);
-  // An app-server that reports no effort says nothing either way.
+  // An app-server whose reply has no effort field does not report the effort: that says nothing either way.
   const silent = createHarness({ effortFromOwnSettings: null });
   assert.deepEqual((await new CodexProviderAdapter({ dependencies: silent.dependencies }).spawn(request)).launchNotices, []);
 
@@ -5856,7 +5873,7 @@ test("a Codex repair returns what its launch did not say about the reasoning eff
       launchPolicy: request.launchPolicy, model: overrides.model ?? "gpt-5.6-sol", reasoningEffort: overrides.reasoningEffort,
     }, { checkpointReplacement: async () => {} });
     assert.equal(result.outcome, overrides.replace ? "replaced" : "rematerialized");
-    return result.notices ?? [];
+    return recordedByDaemon(result);
   };
 
   // The process has the thread loaded, and Codex keeps a loaded thread's own effort whatever a resume names.
@@ -5882,10 +5899,10 @@ test("a Codex repair does not say again what the launch of its process said abou
     const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
     const request = spawnRequest({ deliveryMode: "daemon_inbox", ...overrides });
     const handle = await adapter.spawn(request);
-    const repair = async (effort: ProviderSpawnRequest["reasoningEffort"]) => (await adapter.repairContinuation!(handle, {
+    const repair = async (effort: ProviderSpawnRequest["reasoningEffort"]) => recordedByDaemon(await adapter.repairContinuation!(handle, {
       workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!, cwd: request.cwd,
       launchPolicy: request.launchPolicy, model: request.model, reasoningEffort: effort,
-    }, { checkpointReplacement: async () => {} })).notices ?? [];
+    }, { checkpointReplacement: async () => {} }));
     return { launch: handle.launchNotices ?? [], same: await repair(request.reasoningEffort), other: await repair("medium") };
   };
   // The launch said that Codex reports another effort. A repair with the same effort finds the same, and is quiet.
@@ -5900,6 +5917,156 @@ test("a Codex repair does not say again what the launch of its process said abou
     same: [],
     other: [],
   });
+});
+
+test("the owner is told when Codex reports no reasoning effort for a conversation that was given one", async () => {
+  // Real Codex 0.153 reports the effort of a thread it was given one for, as a string. A null in
+  // that place is Codex saying that the conversation has no effort, which is not what was chosen.
+  const request = spawnRequest({ deliveryMode: "daemon_inbox", model: "gpt-5.6-sol", reasoningEffort: "low" });
+  const none = createHarness({ effortReportedAsNull: true });
+  const adapter = new CodexProviderAdapter({ dependencies: none.dependencies });
+  const handle = await adapter.spawn(request);
+  assert.deepEqual((requestByMethod(none.clients[0]!, "thread/start").params as Record<string, unknown>).config, { model_reasoning_effort: "low" });
+  assert.deepEqual(handle.launchNotices, [effortReportedAsNone("low")]);
+  assert.equal(handle.observedState(), "idle", "the agent still starts");
+
+  // A repair reads the reply of a resume and of a new conversation the same way.
+  const repair = async (effort: "low" | "high", replace = false) => {
+    if (replace) none.clients[0]!.markThreadMissing(handle.providerContinuationId!);
+    return recordedByDaemon(await adapter.repairContinuation!(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!, cwd: request.cwd,
+      launchPolicy: request.launchPolicy, model: request.model, reasoningEffort: effort,
+    }, { checkpointReplacement: async () => {} }));
+  };
+  assert.deepEqual(await repair("low"), [], "the launch of this process said it");
+  assert.deepEqual(await repair("high"), [effortReportedAsNone("high")], "at a resume");
+  assert.deepEqual(await repair("low", true), [effortReportedAsNone("low")], "at the start of a replacement conversation");
+
+  // No effort was given: Codex was asked for none, and a null is no news.
+  const unasked = createHarness({ effortReportedAsNull: true });
+  assert.deepEqual((await new CodexProviderAdapter({ dependencies: unasked.dependencies }).spawn({ ...request, reasoningEffort: null })).launchNotices, []);
+  // An effort that was not sent has its own line, and a null adds nothing to it.
+  const refused = createHarness({ effortReportedAsNull: true });
+  assert.deepEqual((await new CodexProviderAdapter({ dependencies: refused.dependencies })
+    .spawn({ ...request, model: "gpt-5.5", reasoningEffort: "max" })).launchNotices, [effortNotGiven("max", "gpt-5.5")]);
+});
+
+test("a reasoning effort line that a Codex repair says first is not said again by the agent's next start", async () => {
+  const supervised = (agent: string) => ({ deliveryMode: "daemon_inbox" as const, supervisorEntryId: agent,
+    supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS });
+  const taken = { model: "gpt-5.6-sol", reasoningEffort: "low" } as const;
+  const refused = { model: "gpt-5.5", reasoningEffort: "max" } as const;
+  const start = async (agent: string, overrides: Partial<ProviderSpawnRequest>, options: Parameters<typeof createHarness>[0] = {}) => {
+    const harness = createHarness({ exitOnSignal: true, ...options });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const request = spawnRequest({ ...supervised(agent), ...overrides });
+    const handle = await adapter.spawn(request);
+    /** The daemon names the agent to a repair as it names it to a launch. Null is a repair that names none. */
+    const repair = async (effort: Partial<ProviderSpawnRequest>, named: string | null = agent) => recordedByDaemon(await adapter.repairContinuation!(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!, cwd: request.cwd,
+      launchPolicy: request.launchPolicy, model: effort.model, reasoningEffort: effort.reasoningEffort,
+      ...(named === null ? {} : { supervisorEntryId: named }),
+    }, { checkpointReplacement: async () => {} }));
+    return { told: handle.launchNotices ?? [], repair };
+  };
+
+  // The owner chose an effort that the model refuses, and a repair is the first to find it.
+  const first = await start("supervised_effort_repair_first", taken);
+  assert.deepEqual(first.told, []);
+  assert.deepEqual(await first.repair(refused), [effortNotGiven("max", "gpt-5.5")]);
+  // The agent's next start finds the same. The owner has been told, so it says nothing.
+  const second = await start("supervised_effort_repair_first", refused);
+  assert.deepEqual(second.told, [], "the repair said this line");
+  assert.deepEqual(await second.repair(refused), [], "and a repair of the new process does not say it either");
+  // A repair that finds the effort taken has no line. The line that comes back at a later start is said again, as after a start with no line.
+  assert.deepEqual(await second.repair(taken), []);
+  assert.deepEqual((await start("supervised_effort_repair_first", refused)).told, [effortNotGiven("max", "gpt-5.5")], "a line that comes back is said again");
+
+  // The same holds for an effort that Codex does not report back.
+  const reporting = { effortFromOwnSettings: "xhigh" };
+  const medium = { model: "gpt-5.6-sol", reasoningEffort: "medium" } as const;
+  const reported = await start("supervised_effort_repair_reported", taken, reporting);
+  assert.deepEqual(reported.told, [effortNotReported("low", "xhigh")]);
+  assert.deepEqual(await reported.repair(medium), [effortNotReported("medium", "xhigh")]);
+  assert.deepEqual((await start("supervised_effort_repair_reported", medium, reporting)).told, [], "the repair said this line");
+  // Each agent is told for itself: the repair of one agent does not speak for another.
+  assert.deepEqual((await start("supervised_effort_repair_other", medium, reporting)).told, [effortNotReported("medium", "xhigh")]);
+
+  // A repair that names no agent keeps what it said with its own runtime, and the agent's next start says it.
+  const unnamed = await start("supervised_effort_repair_unnamed", taken);
+  assert.deepEqual(await unnamed.repair(refused, null), [effortNotGiven("max", "gpt-5.5")]);
+  assert.deepEqual(await unnamed.repair(refused, null), []);
+  assert.deepEqual((await start("supervised_effort_repair_unnamed", refused)).told, [effortNotGiven("max", "gpt-5.5")]);
+});
+
+test("a Codex repair has said its reasoning effort line only when the daemon recorded it, so a retry and the next start say a line that was lost", async () => {
+  const supervised = (agent: string) => ({ deliveryMode: "daemon_inbox" as const, supervisorEntryId: agent,
+    supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact", ...FULL_ACCESS });
+  const taken = { model: "gpt-5.6-sol", reasoningEffort: "low" } as const;
+  const refused = { model: "gpt-5.5", reasoningEffort: "max" } as const;
+  const started = async (agent: string | undefined) => {
+    const harness = createHarness({ exitOnSignal: true });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const request = spawnRequest({ ...(agent === undefined ? { deliveryMode: "daemon_inbox" as const } : supervised(agent)), ...taken });
+    const handle = await adapter.spawn(request);
+    assert.deepEqual(handle.launchNotices, []);
+    const repair = (effort: Partial<ProviderSpawnRequest>, checkpointReplacement: () => Promise<void> = async () => {}) => adapter.repairContinuation!(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!, cwd: request.cwd,
+      launchPolicy: request.launchPolicy, model: effort.model, reasoningEffort: effort.reasoningEffort,
+      ...(agent === undefined ? {} : { supervisorEntryId: agent }),
+    }, { checkpointReplacement });
+    return { client: harness.clients[0]!, handle, repair };
+  };
+  const journalDown = async () => { throw new Error("the replacement could not be journaled"); };
+
+  // An effort that is not sent: the repair knows its line before it asks Codex for the conversation,
+  // and then fails where the replacement conversation is made durable. Its result never reached the daemon.
+  for (const agent of ["supervised_effort_repair_failed", undefined]) {
+    const { client, handle, repair } = await started(agent);
+    client.markThreadMissing(handle.providerContinuationId!);
+    await assert.rejects(repair(refused, journalDown), /could not be journaled/);
+    const retried = await repair(refused);
+    assert.equal(retried.outcome, "replaced");
+    assert.deepEqual(recordedByDaemon(retried), [effortNotGiven("max", "gpt-5.5")], `${agent}: the retry says what the failed repair did not`);
+    assert.deepEqual(recordedByDaemon(await repair(refused)), [], `${agent}: and says it once`);
+  }
+
+  // An effort that Codex does not report back: the line is read in the reply of the new conversation, and the repair fails after it.
+  {
+    const { client, handle, repair } = await started(undefined);
+    const high = { model: "gpt-5.6-sol", reasoningEffort: "high" } as const;
+    client.effortFromOwnSettings = "xhigh";
+    client.markThreadMissing(handle.providerContinuationId!);
+    await assert.rejects(repair(high, journalDown), /could not be journaled/);
+    assert.deepEqual(recordedByDaemon(await repair(high)), [effortNotReported("high", "xhigh")]);
+  }
+
+  // The repair returned its line, and the daemon did not record it: it failed the repair after the
+  // provider returned, or it could not write the agent's activity. The provider was not told that
+  // the line is recorded, so the line is still to be said.
+  for (const agent of ["supervised_effort_repair_unrecorded", undefined]) {
+    const { repair } = await started(agent);
+    assert.deepEqual((await repair(refused)).notices, [effortNotGiven("max", "gpt-5.5")]);
+    assert.deepEqual((await repair(refused)).notices, [effortNotGiven("max", "gpt-5.5")], `${agent}: a retry says the line that was lost`);
+    assert.deepEqual(recordedByDaemon(await repair(refused)), [effortNotGiven("max", "gpt-5.5")], `${agent}: until it is recorded`);
+    assert.deepEqual(recordedByDaemon(await repair(refused)), [], `${agent}: and then it is said`);
+  }
+  // With no retry, the agent's next start says the line that was lost.
+  {
+    const { repair } = await started("supervised_effort_repair_unrecorded_then_start");
+    assert.deepEqual((await repair(refused)).notices, [effortNotGiven("max", "gpt-5.5")]);
+    const next = createHarness({ exitOnSignal: true });
+    assert.deepEqual((await new CodexProviderAdapter({ dependencies: next.dependencies })
+      .spawn(spawnRequest({ ...supervised("supervised_effort_repair_unrecorded_then_start"), ...refused }))).launchNotices, [effortNotGiven("max", "gpt-5.5")]);
+  }
+
+  // A repair that failed is not what the agent was last told: with no retry, the next start says the line.
+  const { client, handle, repair } = await started("supervised_effort_repair_failed_then_start");
+  client.markThreadMissing(handle.providerContinuationId!);
+  await assert.rejects(repair(refused, journalDown), /could not be journaled/);
+  const next = createHarness({ exitOnSignal: true });
+  assert.deepEqual((await new CodexProviderAdapter({ dependencies: next.dependencies })
+    .spawn(spawnRequest({ ...supervised("supervised_effort_repair_failed_then_start"), ...refused }))).launchNotices, [effortNotGiven("max", "gpt-5.5")]);
 });
 
 test("a Codex agent is told about its reasoning effort when the line changes, not at every start", async () => {

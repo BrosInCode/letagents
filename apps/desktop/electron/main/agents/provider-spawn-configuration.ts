@@ -123,19 +123,30 @@ export function ownerSetupUnusedOptionsNotice(provider: "Codex" | "Claude Code",
 
 /**
  * A launch notice that is said when what it says changes, not at every start.
- * This process remembers what each agent's last start was told and passes the
- * line on only when it differs. Nothing is stored, so the line is said once
- * more after the app restarts. A start that failed after it was given the
- * line forgets it, so the next one says it. An agent with no id is always told.
+ * This process remembers what each agent was last told and passes the line on
+ * only when it differs. Nothing is stored, so the line is said once more after
+ * the app restarts. A start that failed after it was given the line forgets
+ * it, so the next one says it. An agent with no id is always told.
  * Each kind of notice has a memory of its own, so one kind does not hide another.
+ *
+ * A conversation repair can be the first to find a line. It asks `isLastTold`
+ * before it says the line, and calls `told` when the line has reached the
+ * owner, so the agent's next start does not say it again.
  */
 export function launchNoticeSaidOnce() {
   const lastSaid = new Map<string, string>();
+  const isLastTold = (agentId: string | undefined, notice: string | null): boolean =>
+    agentId !== undefined && lastSaid.get(agentId) === (notice ?? "");
+  const told = (agentId: string | undefined, notice: string | null): void => {
+    if (agentId !== undefined) lastSaid.set(agentId, notice ?? "");
+  };
   return {
+    isLastTold,
+    told,
     whenChanged(agentId: string | undefined, notice: string | null): string | null {
       if (agentId === undefined) return notice;
-      if (lastSaid.get(agentId) === (notice ?? "")) return null;
-      lastSaid.set(agentId, notice ?? "");
+      if (isLastTold(agentId, notice)) return null;
+      told(agentId, notice);
       return notice;
     },
     forget(agentId: string | undefined, given: readonly string[]): void {

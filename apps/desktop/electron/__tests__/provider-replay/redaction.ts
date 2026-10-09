@@ -142,7 +142,7 @@ function keyWords(key: string): string {
  * same name when it is written as one: `authtoken`, `accesskey`, `clientsecret`.
  */
 const CREDENTIAL_KEY = new RegExp(
-  "(?:^|_)(?:authorization|cookies?|credentials?|password|passwd|secrets?|client_?secrets?|bearer"
+  "(?:^|_)(?:authorization|cookies?|credentials?|password|passwd|pass_?keys?|secrets?|client_?secrets?|bearer"
   + "|api_?key|access_?key|private_?key|signing_?key|session_?key)(?:_|$)"
   + "|(?:^|_)(?:(?:access|refresh|id|auth|session|bearer)_?)?token$",
 );

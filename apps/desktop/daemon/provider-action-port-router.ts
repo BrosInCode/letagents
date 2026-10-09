@@ -69,6 +69,7 @@ export type NativeProviderAdapter = {
     previousProviderContinuationId: string;
     replacementProviderContinuationId: string;
     notices?: readonly string[];
+    noticesRecorded?: () => void;
   }>;
   stopRef?(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   describeManagedLaunchContract?(input: { apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null>;
