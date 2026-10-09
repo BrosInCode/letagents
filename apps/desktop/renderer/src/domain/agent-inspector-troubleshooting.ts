@@ -46,12 +46,12 @@ const actionImpacts: Partial<Record<AgentInspectorActionAvailability["kind"], st
 /** Plain words for a runtime the daemon will not restart alone. Name only the button that is offered. */
 function coordinationBlockedReason(offered: AgentInspectorActionAvailability["kind"] | undefined): readonly [string, string] {
   if (offered === "recover") {
-    return ["The agent needs a restart", "The agent stopped and LetAgents could not restart it by itself. Press Recover agent to start it again. It keeps its history and its files."];
+    return ["The agent needs a restart", "LetAgents could not continue this agent by itself. Press Recover agent to restart it. It keeps its identity and its workspace."];
   }
   if (offered === "recovery_options") {
-    return ["Choose how to restart the agent", "LetAgents cannot restart this agent by itself. Open Recovery options and choose how to start it again. Your workspace and saved history stay available."];
+    return ["Choose how to restart the agent", "LetAgents could not continue this agent by itself. Open Recovery options and choose how to restart it."];
   }
-  return ["The agent cannot restart yet", "LetAgents cannot restart this agent by itself, and no restart action is available right now. Refresh checks to read its latest state."];
+  return ["LetAgents is still checking this agent", "LetAgents could not continue this agent by itself. It is still checking this agent. You can refresh checks to read its latest state."];
 }
 
 /** Read-only explanations over existing authority. Never infer failure from silence. */

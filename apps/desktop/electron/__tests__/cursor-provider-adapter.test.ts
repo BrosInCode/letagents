@@ -740,11 +740,11 @@ test("Cursor resume ownership rejects occupied or unsafe structures without chan
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("supervised Cursor room turns say git, gh and the network are unavailable only for sandboxed writes", () => {
-  const limit = /git, gh and the network are not available inside your workspace/;
+test("supervised Cursor room turns say there is no network and git fails from the sandbox only for sandboxed writes", () => {
+  const limit = /In this mode there is no network\. git and gh usually fail inside the workspace/;
   const sandboxed = boundedCursorRoomTurnPrompt(roomTurnRequest(), "turn_cursor_1", "sandboxed_write");
   assert.match(sandboxed, limit);
-  assert.match(sandboxed, /An Xcode license error is caused by this sandbox\. It is not a problem on the owner's Mac\./);
+  assert.match(sandboxed, /This is caused by the sandbox, so do not report it as a problem with the owner's Mac\./);
   assert.doesNotMatch(boundedCursorRoomTurnPrompt(roomTurnRequest(), "turn_cursor_2", "full_access"), limit);
   assert.doesNotMatch(boundedClaudeRoomTurnPrompt(roomTurnRequest()), limit);
 });

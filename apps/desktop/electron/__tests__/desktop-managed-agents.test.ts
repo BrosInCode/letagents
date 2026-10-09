@@ -2596,14 +2596,14 @@ test("Cursor desktop event prompts keep top-level messages free of thread contex
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
-test("Cursor sandboxed-write prompts say git, gh and the network are unavailable, and no other mode does", () => {
-  const limit = /git, gh and the network are not available inside your workspace/;
+test("Cursor sandboxed-write prompts say there is no network and git fails from the sandbox, and no other mode does", () => {
+  const limit = /In this mode there is no network\. git and gh usually fail inside the workspace/;
   const sandboxed = buildCursorDesktopEventPrompt(
     cursorLiveSession({ permission_profile_id: "sandboxed_write" }),
     messageEvent(),
   );
   assert.match(sandboxed, limit);
-  assert.match(sandboxed, /An Xcode license error is caused by this sandbox\. It is not a problem on the owner's Mac\./);
+  assert.match(sandboxed, /This is caused by the sandbox, so do not report it as a problem with the owner's Mac\./);
   assert.match(sandboxed, /Ask a teammate or the owner to commit, push and open the pull request\./);
   const fullAccess = buildCursorDesktopEventPrompt(
     cursorLiveSession({ permission_profile_id: "full_access" }),
