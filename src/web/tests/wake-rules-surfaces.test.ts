@@ -18,16 +18,18 @@ const roomPage = source('../src/pages/Room.vue')
 test('wake notices render as one quiet line with the shared crescent instead of the sender dot', () => {
   assert.match(chatMessage, /import WakeGlyph from '\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/shared\/ui\/WakeGlyph\.vue'/)
   assert.match(chatMessage, /props\.message\.source === WAKE_NOTICE_SOURCE/)
-  assert.match(chatMessage, /<WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" \/>\s*<div v-else class="message-avatar"/)
+  // A usage-limit notice shares the quiet line with its own glyph (see usage-limit-notice.test.ts).
+  assert.match(chatMessage, /<WakeGlyph v-else-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" \/>\s*<div v-else class="message-avatar"/)
   // No meta row, bubble, or reply affordance: the line is the whole message.
   const wakeBody = chatMessage.slice(
-    chatMessage.indexOf('<div v-if="isWakeNotice" class="message-body wake-notice-body">'),
+    chatMessage.indexOf('<div v-if="isQuietNotice" class="message-body wake-notice-body">'),
     chatMessage.indexOf('<div v-else class="message-body">'),
   )
   assert.ok(wakeBody.length > 0)
   assert.doesNotMatch(wakeBody, /MessageMeta|message-bubble|ReplyPreview|emit\('reply'/)
   assert.match(wakeBody, /<time :datetime="message\.timestamp"/)
-  assert.match(chatMessage, /<button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply<\/button>/)
+  assert.match(chatMessage, /<button v-if="!isQuietNotice" type="button" role="menuitem" @click="replyFromMenu">Reply<\/button>/)
+  assert.match(chatMessage, /const isQuietNotice = computed\(\(\) => isWakeNotice\.value \|\| usageLimitNotice\.value !== null\)/)
 })
 
 test('the crescent only draws in for a notice that arrives while the room is open', () => {

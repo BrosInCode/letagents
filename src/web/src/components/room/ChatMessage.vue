@@ -8,18 +8,22 @@
       'thinking-message': Boolean(thinkingCard),
       'reply-message': Boolean(message.reply_to),
       'has-thread': hasThread,
-      'wake-notice': isWakeNotice,
+      'wake-notice': isQuietNotice,
+      'usage-limit-notice': Boolean(usageLimitNotice),
     }"
     :data-msg-id="message.id"
     @contextmenu="openContextMenu"
   >
-    <WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" />
+    <!-- An hourglass: the agent waits for its usage limit to reset. -->
+    <svg v-if="usageLimitNotice" class="wake-notice-glyph usage-limit-glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.25 2h7.5M4.25 14h7.5M5.25 2v1.75c0 1.5 1 2.6 2.75 4.25 1.75-1.65 2.75-2.75 2.75-4.25V2M5.25 14v-1.75C5.25 10.75 6.25 9.65 8 8c1.75 1.65 2.75 2.75 2.75 4.25V14" /></svg>
+    <WakeGlyph v-else-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" />
     <div v-else class="message-avatar" :style="{ '--sender-color': senderColor }" />
-    <div v-if="isWakeNotice" class="message-body wake-notice-body">
+    <div v-if="isQuietNotice" class="message-body wake-notice-body">
       <p class="wake-notice-line">
-        <span class="wake-notice-text">{{ visibleText }}</span>
+        <span class="wake-notice-text">{{ usageLimitNotice ? usageLimitNotice.title : visibleText }}</span>
         <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
         <time :datetime="message.timestamp" :title="fullTimestamp">{{ formattedTime }}</time>
+        <span v-if="usageLimitNotice" class="usage-limit-notice-detail">{{ usageLimitNotice.detail }}</span>
       </p>
       <ThreadMarker
         v-if="hasThread"
@@ -152,7 +156,7 @@
       >
         <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
         <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromMenu">Copy link to message</button>
-        <button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
+        <button v-if="!isQuietNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
         <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromMenu">{{ pinned ? 'Unpin message' : 'Pin message' }}</button>
         <button v-if="reactable" type="button" role="menuitem" @click="reactFromMenu">Add reaction…</button>
         <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromMenu">Mark unread from here</button>
@@ -200,6 +204,7 @@ import {
   renderMessageContent,
   stripStatusPrefix,
 } from './chat-message/formatting'
+import { usageLimitNoticePresentation } from './chat-message/usageLimitNotice'
 import { isCurrentStalePrompt, stalePromptTaskIdFor } from './chat-message/stalePrompt'
 import type { MessageThreadSummary, ProvenanceBadge } from './chat-message/types'
 import { parseGitHubEventPresentation } from './githubEventMessage'
@@ -341,7 +346,7 @@ const reactionContext = injectRoomMessageReactions()
 const reactions = computed(() => reactionContext?.reactionsFor(props.message.id) ?? [])
 const reactable = computed(() => Boolean(reactionContext?.canReact.value)
   && props.message.reactions !== undefined
-  && !isWakeNotice.value
+  && !isQuietNotice.value
   && /^msg_\d+$/.test(props.message.id))
 const viewerReacted = (emoji: string): boolean => reactionContext?.viewerReacted(props.message.id, emoji) ?? false
 
@@ -447,6 +452,10 @@ const isAmbientSystem = computed(() =>
 )
 /** An agent's wake rule fired: one quiet line, not a conversation to reply to. */
 const isWakeNotice = computed(() => props.message.source === WAKE_NOTICE_SOURCE)
+/** An agent reached its provider's usage limit: a quiet line with what happens next. */
+const usageLimitNotice = computed(() => usageLimitNoticePresentation(props.message))
+/** A LetAgents line about an agent, not a conversation to reply to. */
+const isQuietNotice = computed(() => isWakeNotice.value || usageLimitNotice.value !== null)
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source))
 const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
 const githubEvent = computed(() => parseGitHubEventPresentation(props.message))
@@ -815,6 +824,12 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 
 .wake-notice-text {
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.usage-limit-notice-detail {
+  flex-basis: 100%;
+  color: var(--text-tertiary, #71717a);
   overflow-wrap: anywhere;
 }
 

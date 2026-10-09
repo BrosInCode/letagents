@@ -18,7 +18,7 @@ import {
   isHumanVisibleSupervisorActivity,
 } from "./managed-agents";
 import { ownerSetupRefusalReason, ownerSetupStartHint } from "./agent-home-harness";
-import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
+import { claudeUsageLimitReached, claudeUsageLimitReason } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
 
 export type AgentInspectorOverallState =
@@ -416,9 +416,9 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   if (claudeUsageLimitReached(detail)) {
     // The daemon checks again by itself when the limit resets; the owner can also ask for a check now.
     const recovery = roomAgentRecoveryAction(entry);
-    const nextStep = recovery === "recovery_options" ? " To try again now, open Recovery options."
-      : recovery === "recover" ? " To try again now, recover the agent." : "";
-    return `${CLAUDE_USAGE_LIMIT_REASON}${nextStep}`;
+    const action = recovery === "recovery_options" ? "open Recovery options"
+      : recovery === "recover" ? "recover the agent" : null;
+    return claudeUsageLimitReason(detail, { action });
   }
   // The daemon deliberately does not retry a startup deadline: a stalled
   // resume can spend tokens on every attempt.

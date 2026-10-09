@@ -1,6 +1,7 @@
 import type { DesktopSupervisorDaemonStatus } from "../../../electron/ipc-types";
 import type { AgentInspectorActionAvailability, AgentInspectorProjection } from "./agent-inspector";
 import { sanitizeAgentInspectorDiagnosticsValue } from "./agent-inspector-diagnostics";
+import { formatUsageLimitResetTime } from "./provider-usage-limit-presentation";
 import { agentInspectorRuntimeControlMatchesFence, describeAgentInspectorRuntimeControl, type AgentInspectorWorkResource } from "./agent-inspector-work";
 
 export type DiagnosticCheckId = "service" | "provider" | "room" | "delivery";
@@ -175,11 +176,19 @@ export function projectAgentTroubleshooting(
     const attention = entry.deliveryAttention ?? null;
     const rereads = blocked && attention?.retry === "reread_saved_turn";
     const posts = blocked && attention?.retry === "publish_saved_reply";
+    // A message held at the provider's usage limit is the only blocked receipt with a resume time:
+    // it is delivered by itself then, and Retry delivery stays available to continue sooner.
+    const resumeAtMs = fresh && blocked && !uncertain && !missing && resource.status === "ready" && detail?.receipt?.state === "blocked"
+      && (detail.source_message?.id ?? detail.requested_source_message_id) === (attention?.sourceMessageId ?? room.inbox.blockedByMessageId)
+      && typeof detail.receipt.next_attempt_at_ms === "number" && Number.isSafeInteger(detail.receipt.next_attempt_at_ms) && detail.receipt.next_attempt_at_ms > 0
+      ? detail.receipt.next_attempt_at_ms : null;
+    const resumeAt = resumeAtMs === null ? null : formatUsageLimitResetTime(resumeAtMs);
     const skipNote = !attention ? ""
       : attention.canSkip ? " You can also skip the message so the messages behind it can continue."
       : attention.skipUnavailableReason ? ` Skip isn’t available: ${safeDiagnosticText(attention.skipUnavailableReason)}` : "";
-    delivery = check("delivery", "Message delivery", held ? "paused" : uncertain || blocked ? "attention" : repairing || active || queued ? "pending" : "passed",
+    delivery = check("delivery", "Message delivery", held ? "paused" : resumeAt ? "pending" : uncertain || blocked ? "attention" : repairing || active || queued ? "pending" : "passed",
       held ? "Waiting for the agent to resume" : uncertain ? "An outcome needs verification" : repairing ? "Restoring the conversation"
+      : resumeAt ? `Delivery resumes at ${resumeAt}`
       : blocked ? missing ? "Saved conversation is missing" : "A message needs attention"
       : room.turn.state === "publishing" ? "Publishing the reply" : room.turn.state === "retrying" ? "Retrying message delivery"
       : active ? "The agent is working" : queued ? `${room.inbox.pendingCount} ${room.inbox.pendingCount === 1 ? "message" : "messages"} waiting` : "No messages waiting",
@@ -187,9 +196,11 @@ export function projectAgentTroubleshooting(
       : uncertain ? "An operation may have taken effect before its outcome was saved. Verify the recorded work before repeating it."
       : repairing ? "LetAgents is creating a replacement private conversation for the message that could not start."
       : blocked && missing ? "The saved private conversation is unavailable. The blocked message could not start; later messages may be waiting behind it."
+      : resumeAt ? safeDiagnosticText(detail?.receipt?.last_error || room.inbox.detail) || `The provider's usage limit was reached. The message waits until ${resumeAt}.`
       : safeDiagnosticText(room.inbox.detail || room.turn.detail) || (active ? "The message is moving through the provider and reply pipeline. Activity alone does not prove it finished."
         : queued ? "Messages are waiting in this agent’s inbox." : "The current inbox has no pending messages. This does not mean every earlier request succeeded."),
       uncertain ? "Open the recorded work and verify the affected operation before retrying."
+      : resumeAt ? `LetAgents delivers the message by itself at ${resumeAt}. To continue sooner, change the provider account, then use Retry delivery.${skipNote}`
       : blocked ? missing ? "Restore the conversation when available, then verify that the blocked message progresses."
         : rereads ? `The agent already worked on this message. Read the reply again to re-check its saved answer; the turn is not rerun.${skipNote}`
         : posts ? `The agent’s reply is saved but wasn’t posted. Post the saved reply; the provider is not asked again.${skipNote}`
