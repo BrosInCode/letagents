@@ -5,7 +5,7 @@ import {
 import type { WorkDurabilityStore } from "./durability-store.js";
 import { executionRuntimeStorageIdentity } from "./execution-shadow-store.js";
 import type { ProviderActionHandle } from "./provider-action-port.js";
-import { homeHarnessRosterState } from "./provider-configuration.js";
+import { homeHarnessAvailability, homeHarnessRosterState } from "./provider-configuration.js";
 import type { ProviderRecoveryDiagnostics } from "./provider-stream-coordinator.js";
 import type { LifecycleCaptureAdmissionStatus } from "./lifecycle-projection-ledger.js";
 import {
@@ -52,6 +52,7 @@ export type DaemonReadModelPorts = {
     pendingRuntimeRecovery(agentId: string): Promise<import("./runtime-recovery-journal.js").RuntimeRecoveryRecord | null>;
     load(): Promise<{ entries: DaemonManifestEntry[] }>;
     getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+    getAgentConfiguration(entryId: string): Promise<{ runtime_configuration_revision: number } | undefined>;
   };
   bindings: Pick<WorkerBindingStore, "credentialFor" | "get" | "list">;
   inbox: Pick<
@@ -207,11 +208,14 @@ export class DaemonReadModel {
     });
     const pollingContract = await this.ports.workerAuthority.pollingContract(entry);
     const recovery = await this.ports.manifest.pendingRuntimeRecovery(entry.id);
-    let homeHarness = homeHarnessRosterState(entry, liveHandle ? { startedAtRevision: liveHandle.appliedConfigurationRevision } : null);
+    // The entry carries no revision: the one the agent last started at is the store's. Nothing is read for an agent that may not have the setup.
+    const lastStartedAt = homeHarnessAvailability({ id: entry.id, provider: entry.provider, deliveryMode: entry.delivery_mode }) === "available"
+      ? (await this.ports.manifest.getAgentConfiguration(entry.id))?.runtime_configuration_revision : undefined;
+    let homeHarness = homeHarnessRosterState(entry, lastStartedAt, liveHandle ? { startedAtRevision: liveHandle.appliedConfigurationRevision } : null);
     // A paused agent keeps the reference to its process for its conversation.
     // Its process is gone once the daemon has recorded its end, and not before.
     if (homeHarness && !liveHandle && entry.observed_state === "paused" && await this.processEnded(entry)) {
-      homeHarness = homeHarnessRosterState({ ...entry, provider_ref: undefined }, null);
+      homeHarness = homeHarnessRosterState({ ...entry, provider_ref: undefined }, lastStartedAt, null);
     }
     // The owner turned their setup off, the process that still has it is idle
     // and could not be replaced, and a message has been waiting for that. The

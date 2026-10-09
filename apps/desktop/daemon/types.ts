@@ -309,6 +309,11 @@ export type DaemonManifestEntry = {
   model: string | null;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
   charter: string;
+  /**
+   * Neither revision is ever on an entry read back from the store, so no
+   * reader may use them from a flat entry: read them from the store
+   * (`getAgentConfiguration`), where they are the record.
+   */
   config_revision?: number;
   runtime_configuration_revision?: number;
   desired_state: DesiredState;

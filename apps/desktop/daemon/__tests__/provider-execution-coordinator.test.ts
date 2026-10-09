@@ -2502,26 +2502,29 @@ test("a launch is refused unless its handle says whether the process was started
 });
 
 test("a reference to an agent's process says it was started with the owner's setup only when the daemon's own records do", async () => {
-  const attachedWith = async (entry: DaemonManifestEntry) => {
+  // The revision a process started at is the store's record. An entry read from the manifest carries none,
+  // so none is put on the entries here: the store gives it, as the daemon's store does.
+  const attachedWith = async (entry: DaemonManifestEntry, startedAt = 4) => {
     const current: DaemonManifestEntry = { ...entry, provider_ref: { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
       provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection } };
     let seen: ProviderActionRef | null = null;
     const runtime = harness({ entry: current, provider: provider({ attach: async (ref) => { seen = ref; return null; } }) });
+    const readConfiguration = runtime.options.store.getAgentConfiguration;
+    runtime.options.store.getAgentConfiguration = async id => ({ ...(await readConfiguration(id))!, config_revision: startedAt, runtime_configuration_revision: startedAt });
     runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
       started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
     await runtime.coordinator.attachLiveProvider(current);
     assert.ok(seen, "the provider was asked to attach");
     // The same record goes on every reference the coordinator builds, a stop's included,
     // and on the one a runtime recovery attaches with.
-    assert.equal(runtime.coordinator.providerRef(current).ownerSetup, (seen as ProviderActionRef).ownerSetup);
-    assert.equal(recoveryProviderRef(current).ownerSetup, (seen as ProviderActionRef).ownerSetup);
-    assert.deepEqual(Object.keys(recoveryProviderRef(current)).sort(),
+    assert.equal((await runtime.coordinator.providerRef(current)).ownerSetup, (seen as ProviderActionRef).ownerSetup);
+    assert.equal(recoveryProviderRef(current, startedAt).ownerSetup, (seen as ProviderActionRef).ownerSetup);
+    assert.deepEqual(Object.keys(recoveryProviderRef(current, startedAt)).sort(),
       ["provider", "providerConnection", "providerContinuationId", "workAttemptId", ...((seen as ProviderActionRef).ownerSetup ? ["ownerSetup"] : [])].sort());
     return seen as ProviderActionRef;
   };
-  // The process last started at revision 4.
   const delivered = (policy: unknown, overrides: Partial<DaemonManifestEntry> = {}): DaemonManifestEntry =>
-    ({ ...baseEntry(), delivery_mode: "daemon_inbox", runtime_configuration_revision: 4, provider_launch_policy: policy, ...overrides });
+    ({ ...baseEntry(), delivery_mode: "daemon_inbox", provider_launch_policy: policy, ...overrides });
   const on = { letagentsOwnerIsolation: false };
   const changed = (...revisions: number[]) => Object.fromEntries(revisions.map((revision) => [`letagentsOwnerIsolationChangedAt${revision}`, false]));
 
@@ -2547,8 +2550,6 @@ test("a reference to an agent's process says it was started with the owner's set
     ["turned on after it started", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(5) })],
     ["on and off again after it started", delivered({ ...OWNER_SETUP_NATIVE, ...changed(5, 6) })],
     ["turned off before it started", delivered({ ...OWNER_SETUP_NATIVE, ...changed(3) })],
-    // A start whose revision was never recorded is older than every change.
-    ["a start with no recorded revision", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(2) }, { runtime_configuration_revision: undefined })],
     // An agent that may not have the setup never has it, whatever is stored.
     ["an agent that collects its own messages", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }, { delivery_mode: "mcp_polling" })],
     ["an agent with no delivery recorded", delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(4) }, { delivery_mode: undefined })],
@@ -2561,16 +2562,35 @@ test("a reference to an agent's process says it was started with the owner's set
   ] as const) {
     assert.equal(Object.hasOwn(await attachedWith(entry), "ownerSetup"), false, name);
   }
+
+  // The same stored record, read against the revision the store gives for the process: only that revision decides.
+  const turnedOn = delivered({ ...OWNER_SETUP_NATIVE, ...on, ...changed(2) });
+  assert.equal((await attachedWith(turnedOn, 2)).ownerSetup, true, "started when the setup was turned on");
+  assert.equal((await attachedWith(turnedOn, 3)).ownerSetup, true, "started later, with it still on");
+  assert.equal(Object.hasOwn(await attachedWith(turnedOn, 1), "ownerSetup"), false, "started before it was turned on");
+
+  // A start whose revision the store cannot give is not guessed at, either way: the provider is not asked to attach at all.
+  let asked = 0;
+  const current: DaemonManifestEntry = { ...turnedOn, provider_ref: { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+    provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection } };
+  const unknown = harness({ entry: current, provider: provider({ attach: async () => { asked += 1; return null; } }) });
+  unknown.options.store.getAgentConfiguration = async () => undefined;
+  unknown.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
+  await assert.rejects(unknown.coordinator.attachLiveProvider(current), /no exact durable applied configuration/);
+  await assert.rejects(unknown.coordinator.providerRef(current), /cannot tell which settings this agent's process started with/);
+  assert.throws(() => recoveryProviderRef(current, undefined), /cannot tell which settings this agent's process started with/);
+  assert.equal(asked, 0);
 });
 
-test("a reference built from a stored policy that cannot be read says so, for a re-attach and for a recovery alike", () => {
+test("a reference built from a stored policy that cannot be read says so, for a re-attach and for a recovery alike", async () => {
   const runtime = harness();
   for (const unreadable of ["not a policy", ["not", "a", "policy"], 7]) {
-    const current: DaemonManifestEntry = { ...baseEntry(), delivery_mode: "daemon_inbox", runtime_configuration_revision: 4, provider_launch_policy: unreadable,
+    const current: DaemonManifestEntry = { ...baseEntry(), delivery_mode: "daemon_inbox", provider_launch_policy: unreadable,
       provider_ref: { work_attempt_id: "attempt-1", execution_generation_id: "generation-1", provider_continuation_id: "continuation-1",
         provider_connection: returnedHandle.providerConnection } };
-    assert.equal(runtime.coordinator.providerRef(current).ownerSetup, "unknown", JSON.stringify(unreadable));
-    assert.equal(recoveryProviderRef(current).ownerSetup, "unknown", JSON.stringify(unreadable));
+    assert.equal((await runtime.coordinator.providerRef(current, undefined, 4)).ownerSetup, "unknown", JSON.stringify(unreadable));
+    assert.equal(recoveryProviderRef(current, 4).ownerSetup, "unknown", JSON.stringify(unreadable));
   }
 });
 

@@ -600,13 +600,16 @@ function readModel(input: {
   ended?: boolean | "unreadable";
   /** The agent's room credential is missing, so delivery could not run whatever its setup. */
   noCredential?: boolean;
+  /** The configuration revision the store records the agent's process as last started at. An entry read from the manifest carries none. */
+  lastStartedAt?: number;
 }) {
   let durabilityReads = 0;
   const model = new DaemonReadModel({
     currentDaemonGeneration: () => 1, nowMs: () => input.nowMs, startedAt: "2026-08-26T00:00:00.000Z",
     capabilities: { hasDelivery: () => true, supportsRoomTurns: () => true, supportsContinuationRepair: () => false },
     recoveryDiagnostics: () => { throw new Error("unused"); }, deliveryAdmission: () => null,
-    manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null },
+    manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null,
+      getAgentConfiguration: async () => input.lastStartedAt === undefined ? undefined : { runtime_configuration_revision: input.lastStartedAt } },
     bindings: { credentialFor: async () => input.noCredential ? null : "bearer", get: async () => binding, list: async () => [binding] },
     inbox: { detail: async () => { throw new Error("unused"); }, latestContinuationRepair: async () => null,
       ingressHealth: async () => ({ room_id: "room_1", state: "observing", detail: null, execution_generation_id: "generation_1" }),
@@ -631,10 +634,10 @@ const WAITING_SINCE = Date.parse("2026-08-26T00:01:00.000Z");
 
 test("an agent that cannot be restarted to end the owner's setup needs attention once a message has waited for it, and no longer once it is replaced", async () => {
   // Turned off at revision 5. The idle process started at revision 4, with the setup, and two messages wait for its successor.
-  const ending: DaemonManifestEntry = { ...entry, observed_state: "idle", provider_launch_policy: ownerSetupChangedAt(5), runtime_configuration_revision: 4 };
+  const ending: DaemonManifestEntry = { ...entry, observed_state: "idle", provider_launch_policy: ownerSetupChangedAt(5) };
   const queue = [receipt(), receipt({ inbox_item_id: "inbox_2", source_message_id: "message_2", fifo_sequence: 2 })];
   const at = async (seconds: number, agent: DaemonManifestEntry = ending, input: Partial<Parameters<typeof readModel>[0]> = {}) =>
-    readModel({ nowMs: WAITING_SINCE + seconds * 1_000, receipts: queue, held: heldSince(4), ...input }).model.entryWithDerivedLiveness(agent);
+    readModel({ nowMs: WAITING_SINCE + seconds * 1_000, receipts: queue, held: heldSince(4), lastStartedAt: 4, ...input }).model.entryWithDerivedLiveness(agent);
 
   // While the daemon's own retries are still young nothing is said: a restart normally takes a moment.
   const young = await at(29);
@@ -675,7 +678,7 @@ test("an agent that cannot be restarted to end the owner's setup needs attention
   assert.deepEqual([other.condition, other.last_error], ["auth_blocked", "Sign in again."]);
 
   // The replacement succeeds: its successor started at revision 5, without the setup, and the state is gone with no one clearing it.
-  const replaced = await at(3_600, { ...ending, runtime_configuration_revision: 5 }, { held: heldSince(5) });
+  const replaced = await at(3_600, ending, { held: heldSince(5), lastStartedAt: 5 });
   assert.equal(replaced.home_harness, undefined);
   assert.equal(replaced.condition, "none");
   assert.equal(replaced.last_error ?? null, null);
@@ -685,9 +688,9 @@ test("an agent that cannot be restarted to end the owner's setup needs attention
 test("a paused agent is shown with the owner's setup until the end of its process is recorded", async () => {
   // Turned off at revision 5 while the process from revision 4 ran. The agent is paused and the daemon holds no process.
   const paused: DaemonManifestEntry = { ...entry, desired_state: "paused", observed_state: "paused",
-    provider_launch_policy: ownerSetupChangedAt(5), runtime_configuration_revision: 4 };
+    provider_launch_policy: ownerSetupChangedAt(5) };
   const shown = async (agent: DaemonManifestEntry, input: Partial<Parameters<typeof readModel>[0]>) => {
-    const subject = readModel({ nowMs: WAITING_SINCE, ...input });
+    const subject = readModel({ nowMs: WAITING_SINCE, lastStartedAt: 4, ...input });
     return { state: (await subject.model.entryWithDerivedLiveness(agent)).home_harness, reads: subject.durabilityReads() };
   };
   // A pause ends the process and the daemon records that end: then nothing has the setup any more.
@@ -703,4 +706,20 @@ test("a paused agent is shown with the owner's setup until the end of its proces
   assert.deepEqual(await shown(on, { ended: false }), { state: "after_restart", reads: 1 });
   // An agent that never had the setup costs no read at all, paused or not.
   assert.deepEqual(await shown({ ...paused, provider_launch_policy: {} }, { ended: false }), { state: undefined, reads: 0 });
+});
+
+test("a process the daemon has not re-attached yet is shown by the revision the store records for it, which the entry does not carry", async () => {
+  const shown = async (policy: Record<string, unknown>, lastStartedAt: number | undefined) =>
+    (await readModel({ nowMs: WAITING_SINCE, lastStartedAt }).model.entryWithDerivedLiveness(
+      { ...entry, observed_state: "idle", provider_launch_policy: policy })).home_harness;
+  // Turned on at revision 2, and the agent's process started at revision 2: it has the setup. Re-attached or not.
+  assert.equal(await shown({ ...ownerSetupOn, ...ownerSetupChangedAt(2) }, 2), "on");
+  // Turned on at revision 2 and the process started at revision 1: not yet.
+  assert.equal(await shown({ ...ownerSetupOn, ...ownerSetupChangedAt(2) }, 1), "after_restart");
+  // Turned on at 2 and off at 3, the process started at revision 2: it still has the setup. Started at 3: it does not.
+  assert.equal(await shown(ownerSetupChangedAt(3), 2), "until_restart");
+  assert.equal(await shown(ownerSetupChangedAt(3), 3), undefined);
+  // A revision the store could not give is counted as older than every change, never as a start after them all.
+  assert.equal(await shown({ ...ownerSetupOn, ...ownerSetupChangedAt(2) }, undefined), "after_restart");
+  assert.equal(await shown(ownerSetupChangedAt(3), undefined), "until_restart");
 });
