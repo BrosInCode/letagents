@@ -217,6 +217,17 @@ test("a stuck agent waits out a brief recovery, and a blocked queue is dated by 
   assert.equal(inboxCategoryLabel(inboxItem.category), "Stuck agent");
 });
 
+test("a Claude usage limit reaches Needs you as its plain reason", () => {
+  const limited = agent({ provider: "claude", observedState: "recovering", condition: "coordination_blocked",
+    lastError: "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (failed_response). "
+      + "Startup observations: assistant_error=rate_limit; result=success; init_ms=512." });
+  const [item] = buildAgentAttentionItems({ agents: [limited], agentFirstSeenAt: { supervised_copper: at(AGENT_ATTENTION_GRACE_MS) }, nowMs: NOW });
+  assert.equal(item.kind, "agent_attention");
+  const [inboxItem] = filterUniversalInbox(buildUniversalInbox(needsYou(), [], [item]), "needs-you", [], {});
+  assert.match(inboxItem.body, /^Claude's usage limit is reached\. LetAgents checks again by itself and starts the agent after the limit resets\./);
+  assert.doesNotMatch(inboxItem.body, /failed_response|assistant_error|Startup observations/);
+});
+
 test("Needs you counts an approval once when the chat composer lists it too, and a decision in the Inbox clears both", async () => {
   const listed = [approval()];
   const ipc = installApprovals(room => (room === "room-a" ? listed : []));

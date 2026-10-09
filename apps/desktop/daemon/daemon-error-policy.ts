@@ -87,6 +87,18 @@ export function providerQuotaExhaustedFailure(error: unknown): boolean {
   return false;
 }
 
+/** When the provider said the usage limit that rejected a launch resets (epoch ms), if it said so. */
+export function providerQuotaResetAtMs(error: unknown): number | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    const resetsAtMs = (current as { providerQuotaResetsAtMs?: unknown } | null)?.providerQuotaResetsAtMs;
+    if (typeof resetsAtMs === "number" && Number.isFinite(resetsAtMs)) return resetsAtMs;
+    if (!(current instanceof Error)) return null;
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  return null;
+}
+
 /** A saved provider runtime that is provably gone cannot be resumed. */
 export function providerRuntimeGoneFailure(error: unknown): boolean {
   let current: unknown = error;
