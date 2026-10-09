@@ -378,6 +378,21 @@
   order: 3;
   flex-basis: 100%;
 }
+/* A usage-limit line: what happened, then on its own line what happens next. */
+.room-chat-message.is-usage-limit-notice :is(.room-usage-limit-notice-title, .room-usage-limit-notice-detail) {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.room-chat-message.is-usage-limit-notice .room-usage-limit-notice-title {
+  font-weight: 650;
+}
+.room-chat-message.is-usage-limit-notice .room-usage-limit-notice-detail {
+  order: 3;
+  flex-basis: 100%;
+}
 
 .room-chat-message[data-owner-kind="github"] .room-message-bubble {
   width: 100%;

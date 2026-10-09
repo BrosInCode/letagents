@@ -3,7 +3,7 @@ import type {
 } from "../../../electron/ipc-types";
 import { agentCompactionProgress } from "./managed-agents";
 import { ownerSetupRefusalReason } from "./agent-home-harness";
-import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
+import { claudeUsageLimitReached, claudeUsageLimitReason } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
@@ -236,7 +236,8 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
         : stopFailed
         ? safeUserVisibleErrorDetail(entry.lastError, `The supervisor couldn't stop the ${providerLabel} agent. Check its status and try again.`)
         : claudeUsageLimitReached(entry.lastError)
-        ? CLAUDE_USAGE_LIMIT_REASON
+        // The launch dialog shows Try again for a failed launch that is not waiting to reconnect.
+        ? claudeUsageLimitReason(entry.lastError, { action: recoverableBlocked ? null : "use Try again" })
         : entry.condition === "coordination_blocked" && hasProviderExecution
         ? `LetAgents can't currently reconnect to the previous ${providerLabel} process. It may still reconnect; you can wait or cancel this launch and start a new agent.`
         : entry.condition === "coordination_blocked"

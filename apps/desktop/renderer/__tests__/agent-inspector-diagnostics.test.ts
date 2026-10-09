@@ -416,6 +416,27 @@ test("a blocked message the agent already worked on offers an honest re-read and
   assert.match(component, /sourceMessageId !== skipTarget\.value\) skipTarget\.value = null/);
 });
 
+test("a message held at the usage limit says it is delivered by itself and keeps Retry delivery", () => {
+  const fixture = diagnosticFixture();
+  const reason = "Claude's usage limit was reached. This message waits until the limit resets and is delivered at 3:00 PM. To continue sooner, change the account and use Retry delivery.";
+  fixture.entry.roomAgentState.inbox = { state: "blocked", pendingCount: 2, blockedByMessageId: "msg_1", detail: reason };
+  fixture.entry.deliveryReceipts = [{ state: "blocked", failureCode: null, sourceMessageId: "msg_1", attemptCount: 0, providerTurnId: null, fifoSequence: 1, timeline: [] }];
+  fixture.resource.detail.requested_source_message_id = "msg_1";
+  fixture.resource.detail.receipt = { state: "blocked", next_attempt_at_ms: Date.parse("2026-09-14T15:00:00Z"), last_error: reason };
+  const check = fixture.assess().checks[3]!;
+  assert.equal(check.state, "pending", "it resumes by itself, so it does not ask for attention");
+  assert.match(check.summary, /^Delivery resumes at .+/);
+  assert.equal(check.detail, reason);
+  assert.match(check.nextStep, /^LetAgents delivers the message by itself at .+\. To continue sooner, change the provider account, then use Retry delivery\./);
+  assert.equal(check.action?.kind, "retry_delivery", "Retry delivery stays available");
+
+  // A blocked receipt for another message keeps the ordinary wording.
+  fixture.resource.detail.requested_source_message_id = "msg_0";
+  const other = fixture.assess().checks[3]!;
+  assert.equal(other.state, "attention");
+  assert.equal(other.summary, "A message needs attention");
+});
+
 test("uncertain side effects suppress retry and send the user to evidence", () => {
   const fixture = diagnosticFixture();
   fixture.entry.roomAgentState.inbox.state = "blocked";

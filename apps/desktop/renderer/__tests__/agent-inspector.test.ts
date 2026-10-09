@@ -238,12 +238,22 @@ test("a Claude usage-limit bootstrap failure reads as one plain reason, not the 
   const now = summary(limited());
   assert.equal(agentInspectorOverallState(limited()), "needs_attention");
   assert.equal(now?.kind, "attention");
-  assert.match(now?.summary ?? "", /^Claude's usage limit is reached\. LetAgents checks again by itself and starts the agent after the limit resets\./);
+  // The retained reset time has passed, so the summary says the limit reset.
+  assert.match(now?.summary ?? "", /^Claude's usage limit was reached\. The limit reset at .+\. LetAgents checks again by itself and starts the agent\./);
   assert.doesNotMatch(now?.summary ?? "", /failed_response|assistant_error|Startup observations|convergence scheduler/,
     "the observation string stays in Diagnostics");
   // The owner can also ask for a check now through the control the header offers.
-  assert.match(summary(limited({ executionGenerationId: null, providerContinuationId: null }))?.summary ?? "", /To try again now, recover the agent\.$/);
-  assert.match(summary(limited({ runtimeGenerationId: "runtime_1" }))?.summary ?? "", /To try again now, open Recovery options\.$/);
+  assert.match(summary(limited({ executionGenerationId: null, providerContinuationId: null }))?.summary ?? "", /To start it now, recover the agent\.$/);
+  assert.match(summary(limited({ runtimeGenerationId: "runtime_1" }))?.summary ?? "", /To start it now, open Recovery options\.$/);
+  // A reset still ahead names its time and how to start sooner with the Claude CLI's own sign-in.
+  const ahead = (overrides: Partial<DesktopSupervisorManifestEntry> = {}) => limited({
+    lastError: raw.replace("2026-10-07T15:00:00.000Z", new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString()), ...overrides });
+  assert.match(summary(ahead())?.summary ?? "", /^Claude's usage limit is reached\. LetAgents starts the agent by itself after the limit resets at [^.]+\. To start sooner, sign the Claude CLI in to an account with usage left/);
+  assert.match(summary(ahead({ executionGenerationId: null, providerContinuationId: null }))?.summary ?? "",
+    /sign the Claude CLI in to an account with usage left, then recover the agent\.$/);
+  // Without a reset time, the plain reason stays.
+  assert.match(summary(limited({ lastError: raw.replace(" usage_limit_resets_at=2026-10-07T15:00:00.000Z;", "") }))?.summary ?? "",
+    /^Claude's usage limit is reached\. LetAgents checks again by itself and starts the agent after the limit resets\. To start sooner, sign the Claude CLI in/);
   assert.equal(projectAgentInspectorDiagnostics(projectAgentInspector(limited(), { roomId: "focus_1", deliveryRetryAvailable: false })!)
     .recovery.lastError, raw, "the raw observation is kept in technical details");
 });

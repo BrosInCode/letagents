@@ -10,8 +10,9 @@
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
       'is-compact-continuation': compactWithPrevious,
-      'is-ambient-system-message': isAmbientSystem || isWakeNotice,
-      'is-wake-notice': isWakeNotice,
+      'is-ambient-system-message': isAmbientSystem || isQuietNotice,
+      'is-wake-notice': isQuietNotice,
+      'is-usage-limit-notice': Boolean(usageLimitNotice),
       'is-arriving': animateArrival,
       'is-reacting': reactionPickerAnchor !== null,
       'is-thread-context': context !== 'timeline',
@@ -26,7 +27,9 @@
     @contextmenu="openContextMenu"
     @pointerup="handleSelectionPointerUp"
   >
-    <WakeGlyph v-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
+    <!-- An hourglass: the agent waits for its usage limit to reset. -->
+    <svg v-if="usageLimitNotice" class="room-chat-wake-glyph room-chat-usage-limit-glyph" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.25 2h7.5M4.25 14h7.5M5.25 2v1.75c0 1.5 1 2.6 2.75 4.25 1.75-1.65 2.75-2.75 2.75-4.25V2M5.25 14v-1.75C5.25 10.75 6.25 9.65 8 8c1.75 1.65 2.75 2.75 2.75 4.25V14" /></svg>
+    <WakeGlyph v-else-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
     <div
       v-else
       class="room-chat-avatar"
@@ -142,6 +145,8 @@
           @open-task="$emit('open-task', $event)"
         />
 
+        <p v-else-if="usageLimitNotice" class="room-usage-limit-notice-title">{{ usageLimitNotice.title }}</p>
+
         <DesktopLongMessageContent
           v-else
           :text="visibleText || 'No message body.'"
@@ -165,6 +170,7 @@
           @open-image="$emit('open-image', $event)"
         />
       </div>
+      <p v-if="usageLimitNotice" class="room-usage-limit-notice-detail">{{ usageLimitNotice.detail }}</p>
 
       <MessageReactionBar
         v-if="reactions.length"
@@ -305,10 +311,10 @@
           <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromContext">
             <span>Copy link to message</span>
           </button>
-          <button type="button" role="menuitem" @click="quoteReplyFromContext">
+          <button v-if="!usageLimitNotice" type="button" role="menuitem" @click="quoteReplyFromContext">
             <span>Quote reply</span>
           </button>
-          <button type="button" role="menuitem" @click="tertiaryActionFromContext">
+          <button v-if="!usageLimitNotice || context !== 'timeline'" type="button" role="menuitem" @click="tertiaryActionFromContext">
             <span>{{ tertiaryActionLabel }}</span>
           </button>
           <MessageReminderMenu v-if="remindable" :room="roomIdentifier ?? ''" :message="message.id" @scheduled="reminderScheduled" />
@@ -406,6 +412,7 @@ import { excludeGitHubEventLink, linkPreviewPresentation } from "../../../../../
 import { injectRoomMessagePins } from "../../../composables/useRoomMessagePins";
 import { injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
+import { usageLimitNoticePresentation } from "../../../domain/provider-usage-limit-presentation";
 
 const props = withDefaults(defineProps<{
   message: DesktopRoomMessage;
@@ -554,6 +561,10 @@ const ideLabel = computed(() => props.providerLabel || props.message.agentIdenti
 const isSystem = computed(() => ["system", "letagents"].includes(props.message.sender.toLowerCase()));
 /** An agent's wake rule fired: a quiet line, not a conversation. */
 const isWakeNotice = computed(() => props.message.source === WAKE_NOTICE_SOURCE);
+/** An agent reached its provider's usage limit: a quiet line with what happens next. */
+const usageLimitNotice = computed(() => usageLimitNoticePresentation(props.message));
+/** A LetAgents line about an agent, not a conversation to reply to. */
+const isQuietNotice = computed(() => isWakeNotice.value || usageLimitNotice.value !== null);
 const isAmbientSystem = computed(() =>
   isAmbientSystemMessage(props.message.sender, props.message.text || "")
 );
@@ -748,7 +759,7 @@ const reactions = computed(() => reactionContext?.reactionsFor(props.message.id)
 const reactable = computed(() => Boolean(reactionContext?.canReact.value)
   && props.message.reactions !== undefined
   && !props.message.outgoing
-  && !isWakeNotice.value
+  && !isQuietNotice.value
   && /^msg_\d+$/.test(props.message.id));
 const viewerReacted = (emoji: string): boolean => reactionContext?.viewerReacted(props.message.id, emoji) ?? false;
 

@@ -477,7 +477,13 @@ test("a Claude launch refused by the usage limit says so instead of a generic st
   });
   const progress = supervisedLaunchProgress(limited);
   assert.equal(progress.failed, true);
-  assert.equal(progress.failureDetail, "Claude's usage limit is reached. LetAgents checks again by itself and starts the agent after the limit resets.");
+  assert.equal(progress.failureDetail, "Claude's usage limit is reached. LetAgents checks again by itself and starts the agent after the limit resets. "
+    + "To start sooner, sign the Claude CLI in to an account with usage left, then use Try again.");
+  // When Claude said when the limit resets, the dialog names that time.
+  const resetsAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+  const timed = supervisedLaunchProgress({ ...limited, lastError: limited.lastError!.replace("result=success", `usage_limit_resets_at=${resetsAt}; result=success`) });
+  assert.match(timed.failureDetail ?? "", /^Claude's usage limit is reached\. LetAgents starts the agent by itself after the limit resets at .+\. To start sooner, sign the Claude CLI in to an account with usage left, then use Try again\.$/);
+  assert.doesNotMatch(timed.failureDetail ?? "", /usage_limit_resets_at|\d{4}-\d{2}-\d{2}T/, "the time is shown, not the raw value");
   assert.equal(supervisedLaunchProgress({ ...limited, lastError: "convergence scheduler failure: spawn failed" }).failureDetail,
     "LetAgents couldn't start Claude Code in the private project area. Try this launch again or cancel it and start a new agent.",
     "another start failure keeps its own wording");
