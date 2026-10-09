@@ -553,6 +553,21 @@ test("activity-only persistence sanitizes presentation without acquiring lifecyc
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
 });
 
+test("a provider stream's event whose position a notice took meanwhile is written after the newest, not refused", async () => {
+  for (const activityOnly of [false, true]) {
+    const state = harness([entry({ observed_state: "idle", activity: Array.from({ length: 6 }, (_, sequence) => activity({ sequence })) })]);
+    // The event read position 5 as the next free one; a notice has taken it since.
+    await assert.rejects(state.subject.appendNativeActivity("agent-1", activity({ sequence: 5 }), activityOnly), /not newer than 5/,
+      "an exact position is still admitted exactly");
+    await state.subject.appendNativeActivity("agent-1", activity({ sequence: 5, summary: "stream event" }), activityOnly, "after_latest");
+    assert.deepEqual(state.manifest.entries[0]!.activity!.slice(-2).map(event => [event.sequence, event.summary]),
+      [[5, activity({ sequence: 5 }).summary], [6, "stream event"]]);
+    // A position that is still free is kept as it is.
+    await state.subject.appendNativeActivity("agent-1", activity({ sequence: 9, summary: "later event" }), activityOnly, "after_latest");
+    assert.equal(state.manifest.entries[0]!.activity!.at(-1)!.sequence, 9);
+  }
+});
+
 test("native activity keeps scalar admission, redaction, lifecycle ownership, and fencing without entry reads", async () => {
   for (const activityOnly of [false, true]) {
     const nativeLiveness = { state: "idle" as const, detail: "prior native evidence" };
