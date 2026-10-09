@@ -1,8 +1,8 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
-    <button v-if="attentionApprovalCount" type="button" class="desktop-host-approval-history"
+    <button v-if="unanswerableApprovalCount" type="button" class="desktop-host-approval-history"
       :aria-expanded="showApprovalHistory" @click="showApprovalHistory = !showApprovalHistory">
-      {{ `${showApprovalHistory ? 'Hide' : 'Show'} ${attentionApprovalCount} ${attentionApprovalCount === 1 ? 'approval' : 'approvals'} needing attention` }}
+      {{ hostApprovalHistoryLabel(unanswerableApprovalCount, showApprovalHistory) }}
     </button>
     <RoomPresenceChips :chips="presenceChips ?? []" />
     <RoomComposerEventChips
@@ -54,7 +54,7 @@
             <ChevronRight :size="14" aria-hidden="true" />
           </button>
         </template>
-        <button type="button" class="desktop-host-approval-dismiss" :disabled="approvalSettling"
+        <button type="button" class="desktop-host-approval-dismiss" :disabled="!decisionsArmed"
           :aria-label="`Dismiss approval from ${currentHostApproval.presentation.displayName}`"
           @click="dismissHostApproval(currentHostApproval.id)">
           <X :size="15" aria-hidden="true" />
@@ -80,7 +80,7 @@
         </details>
         <!-- One action group per state, each in this chain, then Always allow.
           Every action here, destructive ones included, is disabled by
-          hostApprovalDecisionsDisabled so it waits out the settle hold. The
+          hostApprovalDecisionsDisabled so it waits out the arming hold. The
           row runs right to left: the chain's group sits at the right edge, and
           Always allow takes its own line above when it would not fit beside it. -->
         <div class="desktop-host-approval-decisions">
@@ -285,7 +285,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
-import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_SETTLE_MS, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalFields, hostApprovalHeading, hostApprovalSummary } from "./host-approval-presentation";
+import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_ARM_MS, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalDecisionsArmed, hostApprovalFields, hostApprovalHeading, hostApprovalHistoryCount, hostApprovalHistoryLabel, hostApprovalSummary, hostApprovalTrayOrder } from "./host-approval-presentation";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "./host-approval-dismissals";
 import { decideHostApproval, hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./host-approvals";
 import { roomMentionCandidates } from "../../../../domain/participants";
@@ -381,8 +381,7 @@ const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approv
     || approval.status === "unavailable" || approval.status === "uncertain")
   && !dismissedHostApprovalIds.value.has(approval.id)
   && !(approval.dismissKey && rememberedHostApprovalDismissals.value.has(approval.dismissKey))));
-const attentionApprovalCount = computed(() => unresolvedHostApprovals.value.filter(approval =>
-  approval.status === "uncertain" || approval.status === "unavailable").length);
+const unanswerableApprovalCount = computed(() => hostApprovalHistoryCount(unresolvedHostApprovals.value));
 function approvalBlocksTurn(approval: DesktopHostApproval): boolean {
   return hostApprovalBlocksTurn(approval, approvalRoom.value.firstSeenAt[hostApprovalIdentity(approval)], approvalNowMs.value);
 }
@@ -394,7 +393,7 @@ const visibleHostApprovals = computed(() => unresolvedHostApprovals.value.filter
 // An undecidable record stays dismissed across restarts until its status
 // changes. A live request is dismissed only for this session.
 function dismissHostApproval(id: string): void {
-  if (approvalSettling.value) return;
+  if (!decisionsArmed.value) return;
   const dismissKey = hostApprovals.value.find(approval => approval.id === id)?.dismissKey;
   if (dismissKey) {
     rememberedHostApprovalDismissals.value = rememberHostApprovalDismissal(rememberedHostApprovalDismissals.value, dismissKey);
@@ -410,10 +409,15 @@ function refreshRoomHostApprovals(): Promise<void> {
 // The tray shows one request. Requests keep the order this composer first
 // listed them, and a new one joins the end, so an arrival never replaces or
 // moves the request being decided. A re-presented request keeps its place.
+// Requests that can still be answered lead; unavailable ones follow.
 const trayOrder = ref<string[]>([]);
 const currentApprovalKey = ref<string | null>(null);
-const approvalSettling = ref(false);
-let approvalSettleTimer: ReturnType<typeof setTimeout> | null = null;
+// When the visible card appeared, and the clock its decisions arm on. The clock
+// moves to the arm time itself, so a timer that fires a millisecond early still arms.
+const cardShownAtMs = ref(0);
+const decisionClockMs = ref(0);
+let decisionTimer: ReturnType<typeof setTimeout> | null = null;
+const decisionsArmed = computed(() => hostApprovalDecisionsArmed(cardShownAtMs.value, decisionClockMs.value));
 const trayApprovals = computed(() => {
   const byKey = new Map<string, DesktopHostApproval>();
   for (const approval of visibleHostApprovals.value) {
@@ -425,22 +429,23 @@ const trayApprovals = computed(() => {
 const currentHostApproval = computed(() => trayApprovals.value.find(approval =>
   hostApprovalIdentity(approval) === currentApprovalKey.value) ?? trayApprovals.value[0] ?? null);
 const currentApprovalIndex = computed(() => currentHostApproval.value ? trayApprovals.value.indexOf(currentHostApproval.value) : -1);
-const hostApprovalDecisionsDisabled = computed(() => hostApprovalBusy.value !== null || hostApprovalError.value !== null || approvalSettling.value);
+const hostApprovalDecisionsDisabled = computed(() => hostApprovalBusy.value !== null || hostApprovalError.value !== null || !decisionsArmed.value);
 
 watch(visibleHostApprovals, (approvals) => {
   const keys = [...new Set(approvals.map(hostApprovalIdentity))];
   const previous = trayOrder.value;
-  const order = [...previous.filter(key => keys.includes(key)), ...keys.filter(key => !previous.includes(key))];
+  const listed = [...previous.filter(key => keys.includes(key)), ...keys.filter(key => !previous.includes(key))];
+  // The stored order is the order shown, so "takes its place" below follows the stack.
+  const order = hostApprovalTrayOrder(listed.map(key => approvals.find(approval => hostApprovalIdentity(approval) === key)!))
+    .map(hostApprovalIdentity);
   const current = currentApprovalKey.value;
   if (!current || !order.includes(current)) {
     // The request on screen was decided, withdrawn or hidden, or the tray just
     // appeared: show the one that takes its place, under a pointer aimed at
-    // the old one, and hold its actions until it settles.
+    // the old one. The watch below holds its decisions until they arm.
     const index = current ? previous.indexOf(current) : -1;
     const position = index < 0 ? 0 : previous.slice(0, index).filter(key => order.includes(key)).length;
-    const next = order[position] ?? order[position - 1] ?? null;
-    if (next) settleApprovalTray();
-    currentApprovalKey.value = next;
+    currentApprovalKey.value = order[position] ?? order[position - 1] ?? null;
   }
   trayOrder.value = order;
 }, { immediate: true });
@@ -450,20 +455,32 @@ function showApprovalAt(index: number): void {
   if (approval) currentApprovalKey.value = hostApprovalIdentity(approval);
 }
 
-function settleApprovalTray(): void {
-  approvalSettling.value = true;
-  if (approvalSettleTimer) clearTimeout(approvalSettleTimer);
-  approvalSettleTimer = setTimeout(() => { approvalSettling.value = false; approvalSettleTimer = null; }, HOST_APPROVAL_SETTLE_MS);
+/** Start the hold for the card now on screen. Its decisions arm when the hold ends. */
+function holdCardDecisions(): void {
+  const shownAtMs = Date.now();
+  cardShownAtMs.value = shownAtMs;
+  decisionClockMs.value = shownAtMs;
+  if (decisionTimer) clearTimeout(decisionTimer);
+  decisionTimer = setTimeout(() => {
+    decisionTimer = null;
+    decisionClockMs.value = shownAtMs + HOST_APPROVAL_ARM_MS;
+  }, HOST_APPROVAL_ARM_MS);
 }
+
+// Every request that becomes the visible card holds first: when it mounts, and
+// when Previous, Next, a decision or a withdrawal shows a different request.
+watch(() => currentHostApproval.value ? hostApprovalIdentity(currentHostApproval.value) : null, (key) => {
+  if (key) holdCardDecisions();
+}, { immediate: true });
 
 /** The room checks the request again before it stops anything. */
 function stopAgentTurnFor(approval: DesktopHostApproval): void {
-  if (approvalSettling.value) return;
+  if (!decisionsArmed.value) return;
   emit("stop-agent-turn", approval.presentation.agentId, approval.id);
 }
 
 function decideRoomHostApproval(approval: DesktopHostApproval, decision: HostApprovalSelection): Promise<void> {
-  if (!props.roomIdentifier || approvalSettling.value) return Promise.resolve();
+  if (!props.roomIdentifier || !decisionsArmed.value) return Promise.resolve();
   return decideHostApproval(props.roomIdentifier, approval.id, decision);
 }
 
@@ -577,7 +594,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (approvalTimer) clearInterval(approvalTimer);
-  if (approvalSettleTimer) clearTimeout(approvalSettleTimer);
+  if (decisionTimer) clearTimeout(decisionTimer);
 });
 
 async function submitMessage(): Promise<void> {
