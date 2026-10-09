@@ -36,7 +36,8 @@ export function captureWork(element: HTMLElement): WorkGeometry | null {
     }),
   };
 }
-export function createRoomMessageAnimator(viewport: () => HTMLElement | null) {
+/** `work` is where work rows live when they are pinned outside the scrolling `viewport`. */
+export function createRoomMessageAnimator(viewport: () => HTMLElement | null, work: () => HTMLElement | null = () => null) {
   const animations = new Set<Animation>();
   const cleanups = new Set<() => void>();
   function animate(element: Element | null, frames: Keyframe[], options: KeyframeAnimationOptions) {
@@ -101,8 +102,13 @@ export function createRoomMessageAnimator(viewport: () => HTMLElement | null) {
   function reply(row: HTMLElement, source: WorkGeometry) {
     const bubble = row.querySelector<HTMLElement>(bubbleSelector), stream = viewport();
     if (!bubble || !stream) return;
-    const target = bubble.getBoundingClientRect(), bounds = stream.getBoundingClientRect();
-    if (source.bounds.bottom < bounds.top || source.bounds.top > bounds.bottom || target.height > bounds.height * .8) { reveal(row); return; }
+    const target = bubble.getBoundingClientRect(), list = stream.getBoundingClientRect();
+    // The flight starts in the pinned work rows and lands in the list, so it is clipped to both.
+    const pinned = work()?.getBoundingClientRect();
+    const left = Math.min(list.left, pinned?.left ?? list.left), top = Math.min(list.top, pinned?.top ?? list.top);
+    const bottom = Math.max(list.bottom, pinned?.bottom ?? list.bottom);
+    const bounds = { left, top, bottom, width: Math.max(list.right, pinned?.right ?? list.right) - left, height: bottom - top };
+    if (source.bounds.bottom < bounds.top || source.bounds.top > bounds.bottom || target.height > list.height * .8) { reveal(row); return; }
     const duration = 440, style = getComputedStyle(bubble);
     const overlay = layer();
     Object.assign(overlay.element.style, { inset: 'auto', left: `${bounds.left}px`, top: `${bounds.top}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });

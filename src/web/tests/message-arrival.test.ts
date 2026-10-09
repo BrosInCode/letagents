@@ -414,3 +414,60 @@ test('real reply watcher transforms retained work once across split updates and 
     assert.equal(follows,0,'incoming replies never request scrolling to latest')
   } finally {app.unmount();Object.assign(globalThis,saved)}
 })
+
+test('a reply grows from a work row pinned outside the scrolling list', async () => {
+  const saved = { document: globalThis.document, window: globalThis.window, getComputedStyle: globalThis.getComputedStyle }
+  const calls: {name:string;duration:number}[] = [], layers: any[] = []
+  const box = (top:number, bottom:number) => ({left:20,top,right:220,bottom,width:200,height:bottom-top})
+  function element(name:string, rect = box(100,150)): any {
+    return { style:{opacity:''}, dataset:{}, isConnected:true, clientHeight:600,
+      getBoundingClientRect:() => ({...rect}), querySelectorAll:() => [], querySelector:() => null,
+      setAttribute() {}, removeAttribute() {}, append() {}, remove() {}, addEventListener() {}, removeEventListener() {},
+      cloneNode:() => element(`${name} clone`, rect),
+      animate(_frames:unknown, options:{duration:number}) {
+        calls.push({name,duration:options.duration})
+        let reject!: (error:Error) => void
+        return {finished:new Promise((_resolve,r) => {reject=r}),cancel:() => reject(new Error('cancelled'))}
+      } }
+  }
+  let workRows:any[] = [], rows:any[] = []
+  const list = element('list', box(0,600)), strip = element('strip', box(600,640))
+  list.querySelectorAll = (selector:string) => selector === '[data-motion-work]' ? [] : rows
+  strip.querySelectorAll = (selector:string) => selector === '[data-motion-work]' ? workRows : []
+  Object.assign(globalThis, {
+    document:{visibilityState:'visible',body:{append() {}},createElement:() => { const layer = element('overlay'); layers.push(layer); return layer }},
+    window:{matchMedia:() => ({matches:false,addEventListener() {},removeEventListener() {}}),addEventListener() {},removeEventListener() {}},
+    getComputedStyle:() => ({[Symbol.iterator]:function* () {}}),
+  })
+  const renderer = createRenderer({createComment:() => ({}),createText:() => ({}),createElement:() => ({}),insert() {},remove() {},setText() {},setElementText() {},patchProp() {},parentNode:() => null,nextSibling:() => null})
+  const messages = ref<any[]>([{id:'request',stableId:'request',text:'Request'}]), active = ref<any[]>([])
+  const Component = defineComponent({setup() {
+    const handoff = motion.useRoomWorkHandoff<any>({work:() => active.value,identity:value => value,after:value => value.after,
+      messages:() => messages.value,scope:() => 'room',enabled:() => true})
+    motion.useRoomMessageMotion({element:ref(list),work:ref(strip),messages:() => messages.value.map(message => ({...message})),scope:() => 'room',
+      ready:() => true,following:() => true,scrollToLatest() {},onInterrupt:handoff.clear})
+    return () => {
+      workRows = handoff.work.value.map(value => {
+        // The row sits below the list's bottom edge, inside the strip.
+        const work = element('work', box(606,630)); work.dataset = {motionSession:value.session,motionAgent:value.key,motionAfter:value.after}
+        work.querySelector = () => element('work detail', box(606,630)); return work
+      })
+      rows = messages.value.map(value => {
+        const row = element(value.id, box(500,560)), bubble = element(`${value.id} bubble`, box(500,560)); row.dataset.messageId = value.id
+        row.querySelector = (selector:string) => selector.includes('bubble') ? bubble : null; return row
+      })
+      return null
+    }
+  }})
+  const app = renderer.createApp(Component)
+  const settle = async () => {await nextTick();await nextTick();await nextTick()}
+  try {
+    app.mount({})
+    active.value = [{session:'a',key:'owner/a',after:'request'}]; await settle()
+    messages.value.push({id:'reply',stableId:'reply',text:'Reply',session:'a',key:'owner/a'}); await settle()
+    assert.equal(calls.filter(call => call.name==='reply bubble'&&call.duration===440).length,1,'the pinned row is the flight origin, not a plain reveal')
+    const flight = layers[0]
+    assert.equal(flight.style.top,'0px')
+    assert.equal(flight.style.height,'640px','the flight is clipped to the list and the strip together')
+  } finally {app.unmount();Object.assign(globalThis,saved)}
+})

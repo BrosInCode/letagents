@@ -60,6 +60,22 @@ export function createTypingSender({ send, clientId, now = Date.now, schedule = 
   };
 }
 
+/** Plain-text sentence for assistive technology and compact surfaces. */
+export function typingLabel(names) {
+  if (names.length > 2) return 'Several people are typing…';
+  return names.length ? `${names.join(' and ')} ${names.length === 1 ? 'is' : 'are'} typing…` : '';
+}
+
+/** The same sentence as parts, so a view can emphasise names without building HTML. */
+export function typingSentence(names) {
+  const name = text => ({ text, name: true }), plain = text => ({ text, name: false });
+  if (names.length === 1) return [name(names[0]), plain(' is typing')];
+  if (names.length === 2) return [name(names[0]), plain(' and '), name(names[1]), plain(' are typing')];
+  if (names.length < 3) return [];
+  const others = names.length - 2;
+  return [name(names[0]), plain(', '), name(names[1]), plain(` and ${others} ${others === 1 ? 'other' : 'others'} are typing`)];
+}
+
 /** Sequence guards survive stops briefly; no snapshot or replay. */
 export function createTypingReceiver(now = Date.now) {
   const sources = new Map();
@@ -81,16 +97,16 @@ export function createTypingReceiver(now = Date.now) {
       }
       return Number.isFinite(earliest) ? earliest : null;
     },
-    label() {
+    /** One name per account, in a stable order, so a row does not reshuffle between refreshes. */
+    names() {
       const people = new Map();
       for (const [key, value] of sources) {
         if (value.forget <= now()) sources.delete(key);
         else if (value.typing && value.until > now()) people.set(value.account_id, value.name);
       }
-      const names = [...people].sort(([a], [b]) => a.localeCompare(b)).map(([, name]) => name);
-      if (names.length > 2) return 'Several people are typing…';
-      return names.length ? `${names.join(' and ')} ${names.length === 1 ? 'is' : 'are'} typing…` : '';
+      return [...people].sort(([a], [b]) => a.localeCompare(b)).map(([, name]) => name);
     },
+    label() { return typingLabel(this.names()); },
   };
 }
 
@@ -101,7 +117,8 @@ export function createTypingDisplay(update, { now = Date.now, schedule = setTime
   function refresh() {
     if (timer !== null) cancel(timer);
     timer = null;
-    update(receiver.label());
+    const names = receiver.names();
+    update(typingLabel(names), names);
     const expiry = receiver.nextExpiry();
     if (expiry !== null) timer = schedule(refresh, Math.max(0, expiry - now()));
   }
