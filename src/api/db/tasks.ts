@@ -32,8 +32,26 @@ export const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   cancelled: ["accepted"],
 };
 
-export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
-  return VALID_TRANSITIONS[from]?.includes(to) ?? false;
+/**
+ * Status changes only a GitHub event may make: a linked pull request merged
+ * before the task reached review, and the card follows the merge. A person, a
+ * worker or a board intent cannot make them: only a write that passes
+ * `githubEvent` to `updateTask` can, and that is the webhook projection and
+ * the stored merge replay.
+ */
+export const GITHUB_EVENT_TRANSITIONS: Partial<Record<TaskStatus, TaskStatus[]>> = {
+  assigned: ["merged"],
+  in_progress: ["merged"],
+  blocked: ["merged"],
+};
+
+export function isValidTransition(
+  from: TaskStatus,
+  to: TaskStatus,
+  options?: { githubEvent?: boolean }
+): boolean {
+  return (VALID_TRANSITIONS[from]?.includes(to) ?? false)
+    || (options?.githubEvent === true && (GITHUB_EVENT_TRANSITIONS[from]?.includes(to) ?? false));
 }
 
 function optionalPayloadString(payload: BoardIntentPayload, key: string): string | null {
@@ -450,6 +468,9 @@ export async function updateTask(
     // LeaseFenceStaleError instead of a stale predecessor overwriting the
     // successor's task state. Absent for owner/admin or lease-creation writes.
     leaseFence?: LeaseFence | null;
+    // The write projects a GitHub event onto the task, so it may also make the
+    // status changes in GITHUB_EVENT_TRANSITIONS.
+    githubEvent?: boolean;
   },
   executor?: Parameters<Parameters<(typeof db)["transaction"]>[0]>[0]
 ): Promise<Task | null> {
@@ -483,7 +504,8 @@ export async function updateTask(
     && task.status !== "accepted" && !retryingOwnClaim) {
     throw new LeaseFenceStaleError();
   }
-  if (updates.status && !isValidTransition(task.status, updates.status) && !retryingOwnClaim && !retryingProgress) {
+  if (updates.status && !isValidTransition(task.status, updates.status, { githubEvent: options?.githubEvent })
+    && !retryingOwnClaim && !retryingProgress) {
     throw new Error(
       `Invalid transition: ${task.status} → ${updates.status}. ` +
         `Allowed: ${VALID_TRANSITIONS[task.status].join(", ") || "none"}`

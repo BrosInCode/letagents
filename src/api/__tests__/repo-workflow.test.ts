@@ -642,6 +642,19 @@ test("projectPullRequestEvent: PR merged transitions assigned → merged", () =>
   assert.deepEqual(result, { newStatus: "merged", reason: "pr_merged" });
 });
 
+test("projectPullRequestEvent: PR merged transitions in_progress and blocked → merged, and no other open or shipped status", () => {
+  for (const currentStatus of ["in_progress", "blocked"] as const) {
+    assert.deepEqual(
+      projectPullRequestEvent({ action: "closed", merged: true, currentStatus }),
+      { newStatus: "merged", reason: "pr_merged" },
+      currentStatus,
+    );
+  }
+  for (const currentStatus of ["proposed", "accepted", "merged", "done", "cancelled"] as const) {
+    assert.equal(projectPullRequestEvent({ action: "closed", merged: true, currentStatus }), null, currentStatus);
+  }
+});
+
 test("projectPullRequestEvent: PR closed without merge has no transition", () => {
   const result = projectPullRequestEvent({ action: "closed", merged: false, currentStatus: "in_review" });
   assert.equal(result, null);
