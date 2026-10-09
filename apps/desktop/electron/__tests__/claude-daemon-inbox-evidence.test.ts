@@ -11,6 +11,24 @@ import {
 const sessionId = "5cf962f0-f6b6-4eca-b0d7-348ae59bfeb8";
 const turnId = "e7757cc3-966d-4535-86eb-d07f33aa647a";
 
+test("Claude success-subtype API errors are exact failed turns, never room replies", () => {
+  const event = { type: "result", subtype: "success", is_error: true,
+    user_message_uuid: turnId, session_id: sessionId, result: "API Error: Response stalled mid-stream." };
+  assert.deepEqual(exactClaudeStreamTerminal(event, turnId, sessionId), {
+    turnId, nativeOutcome: "failed", error: event.result,
+  });
+  assert.deepEqual(exactClaudeStreamTerminal({ ...event, result: "" }, turnId, sessionId), {
+    turnId, nativeOutcome: "failed", error: "Claude reported an API error without details.",
+  });
+  assert.equal(exactClaudeStreamTerminal({ ...event, user_message_uuid: "other-turn" }, turnId, sessionId), null);
+  assert.equal(exactClaudeStreamTerminal({ ...event, session_id: "other-session" }, turnId, sessionId), null);
+  for (const is_error of [undefined, null, "true"]) {
+    const terminal = exactClaudeStreamTerminal({ ...event, is_error }, turnId, sessionId);
+    assert.ok(terminal && "error" in terminal && !terminal.nativeOutcome,
+      "malformed flags must not become proven failures or replies");
+  }
+});
+
 test("Claude stream evidence correlates lifecycle and terminal result to the caller-supplied turn UUID", () => {
   assert.equal(exactClaudeCommandLifecycleState({
     type: "command_lifecycle",
