@@ -211,6 +211,22 @@ test("worker handles isolate chats and workspace captures, survive process loss,
     const archived = decodeWorkspaceReview(chunks.map(page => page.data).join(''), chunks[0].digest);
     assert.deepEqual(archived.contribution.files.map(file => file.path), ['jessica.txt']);
     assert.equal(archived.contribution.patch_truncated, false);
+    // The server asks the remote for its branches when a capture begins. What the remote
+    // held then is the base: pulling it is not this worker's change.
+    const stale = repo('stale'), upstream = join(temp, 'upstream.git'), teammate = join(temp, 'teammate');
+    execFileSync('git', ['clone', '-q', '--bare', stale.cwd, upstream]);
+    execFileSync('git', ['clone', '-q', upstream, teammate]);
+    const land = (...args: string[]) => execFileSync('git', args, { cwd: teammate, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    land('config', 'user.email', 'test@example.invalid'); land('config', 'user.name', 'Test');
+    writeFileSync(join(teammate, 'landed.txt'), 'landed before the capture\n');
+    land('add', '.'); land('commit', '-m', 'landed'); land('push', '-q', 'origin', 'HEAD');
+    stale.git('remote', 'add', 'origin', upstream);
+    const captureStale = await call(first.client, 'begin_workspace_capture', { ...workspaceArgs(two), cwd: stale.cwd });
+    stale.git('pull', '-q', '--ff-only', 'origin', stale.git('branch', '--show-current'));
+    writeFileSync(join(stale.cwd, 'own.txt'), 'own work\n');
+    const publishedStale = await call(first.client, 'publish_workspace_capture', { ...workspaceArgs(two), capture_id: captureStale.capture_id, summary: 'Pulled, then added one file.' });
+    assert.deepEqual(work.get(publishedStale.source_message_id).summary.contribution.changes.files.map((file: any) => file.path), ['own.txt']);
+    assert.deepEqual(work.get(publishedStale.source_message_id).summary.workspace.files.map((file: any) => file.path).sort(), ['landed.txt', 'own.txt']);
     const unavailable = repo('unavailable');
     writeFileSync(join(unavailable.cwd, 'oversized.txt'), Buffer.alloc(8 * 1024 * 1024 + 1));
     const missing = await call(first.client, 'begin_workspace_capture', { ...workspaceArgs(two), cwd: unavailable.cwd });
