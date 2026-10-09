@@ -78,6 +78,7 @@ owns it. "Today" notes what the existing `rental` code already does, from
 | F3 | Two givers accept the same open request. | Second accept on a request already accepted. | First accept wins; second giver is told it was already taken. Nothing starts twice. | Server | Unverified. |
 | F4 | Requester cancels after the giver accepted. | Cancel during `accepted` or `provisioning`. | Startup stops; nothing billed beyond what ran. | Server, giver runtime | Allowed by state machine. |
 | F5 | Request spam or harassment. | Rate per requester/giver. | Rate limits; giver can block a requester. | Server | Not built. |
+| F27 | Accept or start succeeds but the reply is lost, and the client retries. | Same request ID accepted/provisioned again. | Retry returns the existing session; one accept never becomes two running agents or double billing. | Server | Provisioning was made retry-safe (`cad70e71`); accept-path idempotency unverified. |
 
 ### 5.2 Startup
 
@@ -101,6 +102,8 @@ owns it. "Today" notes what the existing `rental` code already does, from
 | F16 | Agent loops, crashes, or produces nothing useful. | No progress events / process exit. | Show it; let either side stop; keep partial work. | Giver runtime, server | Unverified. |
 | F17 | Requester goes offline. | Requester presence. | Work continues within limits; results wait in the room/server for them. | Server | Unverified. |
 | F18 | LetAgents server or daemon restarts. | Reconnect. | Session state and saved work survive; agent reconnects. | Server, giver runtime | Unverified for rentals. |
+| F28 | Giver stops, or a limit is hit, while a tool call is half-done (file partly edited, command still running). | Stop arrives with a step in flight. | The in-flight step is aborted; half-applied workspace edits are never shipped as a patch. Requester sees the last complete checkpoint and that one step was discarded. | Giver runtime | Unverified. |
+| F29 | Giver's machine comes back after the session expired, was cancelled, or was handed to a replacement. | Heartbeat or event for a session no longer `active`. | Agent re-checks its grant before doing anything. If the grant is gone it stops, and any unsent work is offered only as a proposal; it never publishes under stale authority. | Server, giver runtime | Unverified. |
 
 ### 5.4 Handing back the result
 
