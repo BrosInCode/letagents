@@ -12,7 +12,8 @@ try {
   if (workerData.operation === 'begin') {
     parentPort.postMessage({ baseline: await captureWorkspaceTree(capture.workspace, identity) });
   } else {
-    const pair = await captureWorkspacePair(capture.workspace, capture.base_revision, capture.baseline, `${identity}:${capture.preparation_id}`);
+    // The starting snapshot was taken on `base_revision`. With what the remotes held then, it tells a base update from the work.
+    const pair = await captureWorkspacePair(capture.workspace, capture.base_revision, capture.baseline, `${identity}:${capture.preparation_id}`, capture.base_revision, workerData.remoteTips ?? null);
     pair.contribution.summary = text;
     const { review, ...preview } = pair;
     const summary = { version: 3, recorded_state: 'completed', evidence_incomplete: true, elapsed_ms: null,

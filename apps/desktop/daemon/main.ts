@@ -41,7 +41,7 @@ import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { NativeActivityPublicationCoordinator } from "./native-activity-publication-coordinator.js";
 import { ConvergencePacer } from "./convergence-pacer.js";
-import { RoomWorkPublisher } from "./room-work-publisher.js";
+import { recordedRemote, RoomWorkPublisher } from "./room-work-publisher.js";
 import { assertMacOS } from "./platform.js";
 import { type ProviderActionHandle, type ProviderActionPort, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
 import { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
@@ -1026,7 +1026,7 @@ export class SupervisorDaemon {
       this.typedLifecycleEffects.start();
       this.roomWorkPublisher = RoomWorkPublisher.open(this.stateDatabasePath, {
         workspaceLocation: (id) => this.durability.getAttempt(id).then(({ workspace_path: path, workspace_identity }) =>
-          ({ path, revision: workspace_identity.resolved_revision })),
+          ({ path, revision: workspace_identity.resolved_revision, remote: recordedRemote(workspace_identity) })),
         custody: this.workerRuntimeCustody, daemonGeneration: () => this.singleton.currentGeneration,
         isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
       });
