@@ -99,6 +99,7 @@
       :clearDisconnectedParticipants="clearDisconnectedParticipants"
       @loadOlder="loadOlderMessages"
       @reply="selectedReply = $event"
+      @thread-messages="threadImageMessages = $event"
       @openImageViewer="openImageViewer"
       @toggleStalePromptMute="handleToggleStalePromptMute"
       @addTask="handleAddTask"
@@ -116,7 +117,17 @@
       @shareResults="handleShareFocusResults"
       @updateFocusSettings="handleUpdateFocusSettings"
       @openChat="handleActiveTabChange('chat')"
-    />
+    >
+      <template #thread-composer="{ parent, quote, clearQuote, sent }">
+        <Composer v-if="isConnected" :inline-thread="true" :thread-root-id="parent.id" :sender-name="senderName"
+          :room-identifier="room?.identifier || ''" :attachments-enabled="room?.attachmentsEnabled !== false"
+          :submit-message="(text, kind, reply, files) => handleThreadSend(parent.id, text, kind, reply, files, sent)"
+          :stage-attachment-draft="stageAttachmentUpload" :discard-attachment-draft="discardAttachmentUpload"
+          :reply-to="quote" :messages="messages" :presence="presence" :participants="participants"
+          :refresh-reachability="refreshRoomReachability" :is-signed-in="auth.isSignedIn.value"
+          @clear-reply="clearQuote" @sign-in="handleSignIn" />
+      </template>
+    </RoomTabPanels>
 
     <Composer
       v-if="activeTab === 'chat' && isConnected"
@@ -322,6 +333,9 @@ const {
   githubEventsSupported,
   isConnected,
 })
+const threadImageMessages = ref<RoomMessage[]>([])
+watch(() => room.value?.identifier, () => { threadImageMessages.value = [] })
+const imageMessages = computed(() => [...new Map([...threadImageMessages.value, ...messages.value].map(message => [message.id, message])).values()])
 const {
   activeImageId,
   roomImages,
@@ -329,7 +343,7 @@ const {
   closeImageViewer,
   showNextImage,
   showPreviousImage,
-} = useRoomImages(messages)
+} = useRoomImages(imageMessages)
 
 const matchCount = computed(() => roomTabPanelsRef.value?.matchCount ?? 0)
 
@@ -435,6 +449,16 @@ async function handleSend(
   }
   toast.error(lastSendError.value || 'Message could not be sent.')
   return false
+}
+
+async function handleThreadSend(rootId: string, text: string, kind: string | null,
+  replyTo: string | null, attachments: OutgoingMessageAttachment[] = [], complete: (quoteId: string | null) => void): Promise<boolean> {
+  const sendingRoom = room.value
+  const sent = await sendMessage(text, senderName.value, kind, replyTo || rootId, attachments, rootId)
+  if (room.value !== sendingRoom) return sent
+  if (sent) complete(replyTo)
+  else toast.error(lastSendError.value || 'Reply could not be sent.')
+  return sent
 }
 
 async function handleRename() {

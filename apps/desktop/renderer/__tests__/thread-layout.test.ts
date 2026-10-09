@@ -2,44 +2,32 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import {
-  maxThreadPaneWidthForContainer,
-  shouldOverlayThreadPane,
-} from "../src/components/desktop/content/room-chat/thread-layout";
+const styles = readFileSync(new URL("../src/styles/message-content/thread-panel.css", import.meta.url), "utf8");
+const view = readFileSync(new URL("../src/components/desktop/content/RoomChatView.vue", import.meta.url), "utf8");
+const message = readFileSync(new URL("../src/components/desktop/content/DesktopChatMessage.vue", import.meta.url), "utf8");
 
-const threadStyles = readFileSync(new URL("../src/styles/message-content/thread-panel.css", import.meta.url), "utf8");
-
-describe("desktop thread layout", () => {
-  it("uses an overlay when the chat container cannot fit both panes", () => {
-    assert.equal(shouldOverlayThreadPane(788), true);
-    assert.equal(shouldOverlayThreadPane(889), true);
-    assert.equal(shouldOverlayThreadPane(890), false);
+describe("inline room thread layout", () => {
+  it("keeps the reply surface inside the owner bubble with no modal or resize pane", () => {
+    assert.match(view, /<template #thread>[\s\S]*<RoomThreadPanel/);
+    assert.doesNotMatch(view, /room-thread-backdrop|room-thread-resize-handle|threadPaneOverlay/);
+    const bubble = message.slice(message.indexOf('<div class="room-message-bubble">'), message.indexOf('<MessageReactionBar'));
+    assert.match(bubble, /aria-expanded="activeThreadRoot"/);
+    assert.match(bubble, /<slot name="thread"/);
   });
-
-  it("sizes the thread pane from its chat container rather than the window", () => {
-    assert.equal(maxThreadPaneWidthForContainer(950), 380);
-    assert.equal(maxThreadPaneWidthForContainer(1_200), 560);
+  it("contains wheel chaining within a bounded, focusable reply scroller", () => {
+    const body = styles.match(/\.room-thread-body\s*\{([^}]*)\}/)?.[1] || "";
+    assert.match(body, /height:\s*clamp\(/);
+    assert.match(body, /overflow-y:\s*auto/);
+    assert.match(body, /overscroll-behavior:\s*contain/);
+    assert.match(body, /overflow-anchor:\s*none/);
+    const panel = readFileSync(new URL("../src/components/desktop/content/room-chat/RoomThreadPanel.vue", import.meta.url), "utf8");
+    assert.match(panel, /class="room-thread-body" tabindex="0" aria-label="Thread replies"/);
+    assert.doesNotMatch(panel, /context="thread-root"/);
   });
-
-  it("bounds the message grid without clipping horizontally scrollable code blocks", () => {
-    const contentRule = threadStyles.match(/\.room-thread-panel \.room-chat-message\.is-thread-context \.room-chat-message-content\s*\{([^}]*)\}/)?.[1] || "";
-    assert.match(contentRule, /grid-template-columns:\s*minmax\(0, 1fr\);/);
-    assert.doesNotMatch(threadStyles, /overflow-x:\s*(?:hidden|clip);/);
-    const readerStyles = readFileSync(new URL("../src/styles/message-content/long-message-reader.css", import.meta.url), "utf8");
-    const codeRule = readerStyles.match(/\.desktop-long-message-html :is\(pre\)\s*\{([^}]*)\}/)?.[1] || "";
-    assert.match(codeRule, /overflow-x:\s*auto;/);
-  });
-
-  it("lets thread sender groups shrink so their existing ellipsis can take effect", () => {
-    const authorRule = threadStyles.match(/\.room-thread-panel \.room-chat-message\.is-thread-context \.room-message-author-block\s*\{([^}]*)\}/)?.[1] || "";
-    assert.match(authorRule, /min-width:\s*0;/);
-    assert.match(authorRule, /max-width:\s*100%;/);
-  });
-
-  it("wraps long quoted text and sender labels within the thread reply preview", () => {
-    const quoteRule = threadStyles.match(/\.room-thread-panel \.room-chat-message\.is-thread-context \.room-message-reply\s*\{([^}]*)\}/)?.[1] || "";
-    assert.match(quoteRule, /grid-template-columns:\s*minmax\(0, 1fr\);/);
-    assert.match(quoteRule, /min-width:\s*0;/);
-    assert.match(quoteRule, /overflow-wrap:\s*anywhere;/);
+  it("leaves horizontal code scrolling available and honors reduced motion", () => {
+    assert.doesNotMatch(styles, /overflow-x:\s*(?:hidden|clip)/);
+    assert.match(styles, /prefers-reduced-motion: reduce/);
+    const reader = readFileSync(new URL("../src/styles/message-content/long-message-reader.css", import.meta.url), "utf8");
+    assert.match(reader, /overflow-x:\s*auto/);
   });
 });

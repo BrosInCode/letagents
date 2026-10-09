@@ -1327,7 +1327,7 @@ test("mounted main viewport and thread panel forward the same retry event contra
 
   const threadCalls: Array<[string, string]> = [];
   const thread = mount(RoomThreadPanel, {
-    parent: message(), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
+    parent: message("root_1"), initialThreadSummary: null, replies: [message()], participants: [], roomIdentifier: "room",
     sending: false, sendError: null, attaching: false, attachmentDrafts: [], attachmentError: null,
     pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false, revealMessageId: null,
     searchQuery: "", activeSearchMessageId: null, taskReferenceIds: new Set(),

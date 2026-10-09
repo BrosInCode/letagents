@@ -9,12 +9,8 @@
     @drop.prevent="handleAttachmentDrop"
   >
     <div
-      ref="threadLayoutElement"
       class="room-chat-layout"
       :data-thread-open="Boolean(activeThreadParent)"
-      :data-thread-overlay="threadPaneOverlay"
-      :data-thread-resizing="isResizingThreadPane"
-      :style="threadLayoutStyle"
     >
       <div class="room-chat-main">
         <div v-if="isDraggingAttachment" class="room-attachment-drop-overlay" data-testid="room-attachment-drop-overlay">
@@ -28,11 +24,12 @@
           v-bind="{ roomAgentWork, roomAgentWorkStatus }" @open-workspace="emit('open-agent-detail', workspaceAgentTarget($event, participants))"
           :active-search-message-id="activeTimelineMessageId"
           :active-thread-parent-id="activeThreadParentId"
+          :reading-thread-parent-id="readingThreadLatest ? activeThreadParentId : null"
           :has-older-messages="hasOlderMessages"
           :active="active"
           :loading-older-messages="loadingOlderMessages"
           :older-messages-error="olderMessagesError"
-          :messages="messagesWithThreadOverrides"
+          :messages="timelineMessagesWithThreadRoot"
           :thread-messages="threadMessagesWithThreadOverrides"
           :message-namespace="messageNamespace"
           :local-agent-work="localAgentWork"
@@ -58,7 +55,8 @@
           @load-older="emit('load-older')"
           @open-agent="openAgentModal"
           @open-image="openImageViewer"
-          @open-thread="openThread"
+          @open-thread="toggleThread"
+          @reveal-thread="revealThread"
           @quote-reply="quoteReply"
           @message-info="openMessageInfo"
           @quote-selection="quoteSelectedText"
@@ -68,7 +66,61 @@
           @restore-conversation="(agentId, sourceMessageId) => emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => emit('skip-delivery', agentId, sourceMessageId)"
           @scroll-position="emit('scroll-position', $event)"
-        />
+        >
+          <template #thread>
+            <RoomThreadPanel
+              v-bind="{ roomAgentWork, roomAgentWorkStatus }"
+              v-if="activeThreadPanelParent"
+              @message-info="openMessageInfo"
+              :parent="activeThreadPanelParent"
+              :active="active"
+              @read-message="(id) => markThreadRead(activeThreadPanelParent!.id, id)"
+              @reading-latest="readingThreadLatest = $event"
+              :message-namespace="messageNamespace"
+              :initial-thread-summary="activeThreadInitialSummary"
+              :initial-scroll-top="threadScrollPositions.get(`${messageNamespace}|${activeThreadPanelParent.id}`)"
+              @scroll-position="(id, top, namespace) => threadScrollPositions.set(`${namespace}|${id}`, top)"
+              :replies="activeThreadReplies"
+              :participants="participants"
+              :room-identifier="roomIdentifier"
+              :sending="sending"
+              :send-error="sendError"
+              :attaching="threadAttaching"
+              :attachment-drafts="threadAttachmentDrafts"
+              :attachment-error="threadAttachmentError"
+              :pending-attachment-drafts="threadPendingAttachmentDrafts"
+              :has-older-replies="activeThreadHasOlder"
+              :loading-older-replies="loadingOlderThreadReplies"
+              :reveal-message-id="threadRevealTargetId"
+              :search-query="searchQuery"
+              :active-search-message-id="activeSearchMessageId"
+              :task-reference-ids="taskReferenceIds"
+              :delivery-receipts-by-message="deliveryReceiptsByMessage"
+              :delivery-recovery-available="deliveryRecoveryAvailable"
+              :continuation-repair-available="continuationRepairAvailable"
+              :room-delivery-skip-available="roomDeliverySkipAvailable"
+              :delivery-retry-keys="deliveryRetryKeys"
+              :continuation-repair-keys="continuationRepairKeys"
+              :room-delivery-skip-keys="roomDeliverySkipKeys"
+              :presence="presence"
+              :supervisor-entries="roomSupervisorEntries"
+              @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
+              @restore-conversation="(agentId, sourceMessageId) => emit('restore-conversation', agentId, sourceMessageId)"
+              @skip-delivery="(agentId, sourceMessageId) => emit('skip-delivery', agentId, sourceMessageId)"
+              @close="closeThread"
+              @open-image="openImageViewer"
+              @open-agent="openAgentModal"
+              @open-github-event="emit('open-github-event', $event)"
+              @open-task="emit('open-task', $event)"
+              @jump-message="jumpToMessage"
+              @load-older-replies="loadOlderThreadReplies"
+              @pick-attachments="pickThreadAttachments"
+              @remove-attachment="removeThreadAttachment"
+              @stage-dropped-attachments="stageThreadDroppedAttachments"
+              @send-thread-message="sendThreadMessage"
+            />
+          </template>
+        </RoomMessageViewport>
 
 
         <div
@@ -132,80 +184,7 @@
         />
       </div>
 
-      <button
-        v-if="activeThreadParent"
-        class="room-thread-backdrop"
-        type="button"
-        aria-label="Close thread"
-        @click="closeThread"
-      ></button>
 
-      <div
-        v-if="activeThreadParent"
-        class="room-thread-resize-handle"
-        role="separator"
-        tabindex="0"
-        aria-label="Resize thread pane"
-        aria-orientation="vertical"
-        :aria-valuemin="threadPaneMinWidth"
-        :aria-valuemax="maxThreadPaneWidth()"
-        :aria-valuenow="threadPaneWidth"
-        :data-resizing="isResizingThreadPane"
-        title="Drag to resize thread pane"
-        @pointerdown="startThreadPaneResize"
-        @keydown.left.prevent="adjustThreadPaneWidth(threadResizeStep)"
-        @keydown.right.prevent="adjustThreadPaneWidth(-threadResizeStep)"
-        @keydown.home.prevent="setThreadPaneWidth(threadPaneMinWidth)"
-        @keydown.end.prevent="setThreadPaneWidth(maxThreadPaneWidth())"
-        @dblclick="resetThreadPaneWidth"
-      ></div>
-
-      <RoomThreadPanel
-        v-bind="{ roomAgentWork, roomAgentWorkStatus }"
-        v-if="activeThreadPanelParent"
-        @message-info="openMessageInfo"
-        :parent="activeThreadPanelParent"
-        :message-namespace="messageNamespace"
-        :initial-thread-summary="activeThreadInitialSummary"
-        :replies="activeThreadReplies"
-        :participants="participants"
-        :room-identifier="roomIdentifier"
-        :sending="sending"
-        :send-error="sendError"
-        :attaching="threadAttaching"
-        :attachment-drafts="threadAttachmentDrafts"
-        :attachment-error="threadAttachmentError"
-        :pending-attachment-drafts="threadPendingAttachmentDrafts"
-        :has-older-replies="activeThreadHasOlder"
-        :loading-older-replies="loadingOlderThreadReplies"
-        :reveal-message-id="threadRevealTargetId"
-        :search-query="searchQuery"
-        :active-search-message-id="activeSearchMessageId"
-        :task-reference-ids="taskReferenceIds"
-        :delivery-receipts-by-message="deliveryReceiptsByMessage"
-        :delivery-recovery-available="deliveryRecoveryAvailable"
-        :continuation-repair-available="continuationRepairAvailable"
-        :room-delivery-skip-available="roomDeliverySkipAvailable"
-        :delivery-retry-keys="deliveryRetryKeys"
-        :continuation-repair-keys="continuationRepairKeys"
-        :room-delivery-skip-keys="roomDeliverySkipKeys"
-        :presence="presence"
-        :supervisor-entries="roomSupervisorEntries"
-        @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
-        @restore-conversation="(agentId, sourceMessageId) => emit('restore-conversation', agentId, sourceMessageId)"
-        @skip-delivery="(agentId, sourceMessageId) => emit('skip-delivery', agentId, sourceMessageId)"
-        @close="closeThread"
-        @open-image="openImageViewer"
-        @open-agent="openAgentModal"
-        @open-github-event="emit('open-github-event', $event)"
-        @open-task="emit('open-task', $event)"
-        @jump-message="jumpToMessage"
-        @load-older-replies="loadOlderThreadReplies"
-        @pick-attachments="pickThreadAttachments"
-        @remove-attachment="removeThreadAttachment"
-        @stage-dropped-attachments="stageThreadDroppedAttachments"
-        @send-thread-message="sendThreadMessage"
-      />
     </div>
 
     <RoomMessageInfoSurface
@@ -224,8 +203,7 @@
 <script setup lang="ts">
 import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoomMessageMotion";
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, toRef, watch } from "vue";
-import type { CSSProperties } from "vue";
+import { computed, nextTick, onBeforeUnmount, provide, ref, toRef, watch } from "vue";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import PinnedMessages from "../../../../../../../shared/ui/PinnedMessages.vue";
 import { provideRoomMessagePins, useRoomMessagePins } from "../../../composables/useRoomMessagePins";
@@ -261,13 +239,6 @@ import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vu
 import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import RoomThreadPanel from "./room-chat/RoomThreadPanel.vue";
-import {
-  maxThreadPaneWidthForContainer,
-  shouldOverlayThreadPane,
-  threadPaneDefaultWidth,
-  threadPaneHardMaxWidth,
-  threadPaneMinWidth,
-} from "./room-chat/thread-layout";
 import {
   resolveThreadParent,
   threadParentId,
@@ -379,11 +350,12 @@ const { chips: presenceChips } = useAgentPresenceChips({
   ready: () => !props.roomLoading,
 });
 
-const threadLayoutAnimationMs = 250;
+const threadLayoutAnimationMs = 180;
+const readingThreadLatest = ref(false);
+const threadScrollPositions = new Map<string, number>();
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>
   new Set(props.tasks.map((task) => task.id))
 );
-const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
 const threadRevealTargetId = ref<string | null>(null);
 const { quote: replyTarget } = useDesktopMessageDraft(() => props.messageNamespace);
@@ -391,12 +363,8 @@ provideRoomMessageMotion(() => props.messageNamespace);
 
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
 const roomComposer = ref<InstanceType<typeof RoomComposer> | null>(null);
-const threadLayoutElement = ref<HTMLElement | null>(null);
-const threadLayoutWidth = ref(0);
 const threadReturnFocusElement = ref<HTMLElement | null>(null);
 const transientHighlightMessageId = ref<string | null>(null);
-const threadPaneWidth = ref(threadPaneDefaultWidth);
-const isResizingThreadPane = ref(false);
 const fetchedThreadRootId = ref<string | null>(null);
 const fetchedThreadRoot = ref<DesktopRoomMessage | null>(null);
 const fetchedThreadReplies = ref<DesktopRoomMessage[]>([]);
@@ -406,23 +374,24 @@ const threadSummaryOverrides = ref(new Map<string, DesktopRoomMessageThreadSumma
 const openedThreadSummaries = ref(new Map<string, DesktopRoomMessageThreadSummary>());
 const lastMarkedThreadReadKey = ref<string | null>(null);
 let transientHighlightTimeout: number | null = null;
-let threadPaneResizeState: { startX: number; startWidth: number; cursor: string; userSelect: string } | null = null;
-let threadLayoutResizeObserver: ResizeObserver | null = null;
 // Messages name agents by room display name, never by their routing handle.
 provide(attentionResponseAgentNamesKey, computed(() =>
   attentionResponseAgentNames([...props.participants, ...props.presence])
 ));
 const messagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.messages));
 const threadMessagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.threadMessages));
-const threadLayoutStyle = computed<CSSProperties>(() => ({
-  "--room-thread-pane-width": `${threadPaneWidth.value}px`,
-}));
-const threadPaneOverlay = computed(() => shouldOverlayThreadPane(threadLayoutWidth.value));
 const activeThreadParent = computed(() =>
   fetchedThreadRootId.value === activeThreadParentId.value && fetchedThreadRoot.value
     ? applyThreadSummaryOverride(fetchedThreadRoot.value)
     : resolveThreadParent(threadMessagesWithThreadOverrides.value, activeThreadParentId.value)
 );
+// Search and pinned-message reveals may fetch a root outside the loaded room page.
+const timelineMessagesWithThreadRoot = computed(() => {
+  const root = activeThreadParent.value;
+  return root && !messagesWithThreadOverrides.value.some(message => message.id === root.id)
+    ? mergeThreadMessages(messagesWithThreadOverrides.value, [root])
+    : messagesWithThreadOverrides.value;
+});
 const activeThreadPanelParent = computed(() => activeThreadParent.value);
 const activeThreadInitialSummary = computed(() =>
   activeThreadPanelParent.value
@@ -494,6 +463,11 @@ const { openAgentModal } = useAgentReasoningLauncher({
   openAgentDetail: (target) => emit("open-agent-detail", target),
 });
 
+function toggleThread(messageId: string): void {
+  if (activeThreadParentId.value === messageId) closeThread();
+  else openThread(messageId);
+}
+
 function openThread(messageId: string, refresh = true): void {
   if (document.activeElement instanceof HTMLElement) {
     threadReturnFocusElement.value = document.activeElement;
@@ -553,84 +527,6 @@ function closeThread(): void {
   });
 }
 
-function startThreadPaneResize(event: PointerEvent): void {
-  if (event.button !== 0) return;
-  event.preventDefault();
-  messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
-  threadPaneResizeState = {
-    startX: event.clientX,
-    startWidth: threadPaneWidth.value,
-    cursor: document.body.style.cursor,
-    userSelect: document.body.style.userSelect,
-  };
-  isResizingThreadPane.value = true;
-  document.body.style.cursor = "col-resize";
-  document.body.style.userSelect = "none";
-  window.addEventListener("pointermove", handleThreadPaneResize);
-  window.addEventListener("pointerup", stopThreadPaneResize);
-  window.addEventListener("pointercancel", stopThreadPaneResize);
-}
-
-function handleThreadPaneResize(event: PointerEvent): void {
-  const state = threadPaneResizeState;
-  if (!state) return;
-  event.preventDefault();
-  messageViewport.value?.preserveScrollAnchorOnNextLayout(80);
-  setThreadPaneWidth(state.startWidth + state.startX - event.clientX, false);
-}
-
-function stopThreadPaneResize(): void {
-  const state = threadPaneResizeState;
-  if (state) {
-    document.body.style.cursor = state.cursor;
-    document.body.style.userSelect = state.userSelect;
-  }
-  threadPaneResizeState = null;
-  isResizingThreadPane.value = false;
-  window.removeEventListener("pointermove", handleThreadPaneResize);
-  window.removeEventListener("pointerup", stopThreadPaneResize);
-  window.removeEventListener("pointercancel", stopThreadPaneResize);
-}
-
-function adjustThreadPaneWidth(delta: number): void {
-  setThreadPaneWidth(threadPaneWidth.value + delta);
-}
-
-function resetThreadPaneWidth(): void {
-  setThreadPaneWidth(threadPaneDefaultWidth);
-}
-
-function setThreadPaneWidth(width: number, preserveAnchor = true): void {
-  const nextWidth = clampThreadPaneWidth(width);
-  if (nextWidth === threadPaneWidth.value) return;
-  if (preserveAnchor) {
-    messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
-  }
-  threadPaneWidth.value = nextWidth;
-}
-
-function clampThreadPaneWidth(width: number): number {
-  return Math.round(Math.min(Math.max(width, threadPaneMinWidth), maxThreadPaneWidth()));
-}
-
-function maxThreadPaneWidth(): number {
-  const containerWidth = threadLayoutWidth.value || threadLayoutElement.value?.clientWidth || 0;
-  return containerWidth
-    ? maxThreadPaneWidthForContainer(containerWidth)
-    : threadPaneHardMaxWidth;
-}
-
-function clampThreadPaneToViewport(): void {
-  if (threadPaneOverlay.value) return;
-  threadPaneWidth.value = clampThreadPaneWidth(threadPaneWidth.value);
-}
-
-function syncThreadLayoutWidth(): void {
-  const width = threadLayoutElement.value?.clientWidth || 0;
-  threadLayoutWidth.value = width;
-  if (!shouldOverlayThreadPane(width)) clampThreadPaneToViewport();
-}
-
 function sendThreadMessage(
   text: string,
   threadRootId: string,
@@ -661,8 +557,7 @@ async function loadThread(threadRootId: string): Promise<void> {
     fetchedThreadRoot.value = applyThreadSummaryOverride(page.root);
     fetchedThreadReplies.value = page.replies;
     fetchedThreadHasOlder.value = page.hasOlder;
-    const lastMessageId = page.replies.at(-1)?.id || page.root.id;
-    await markThreadRead(threadRootId, lastMessageId, roomIdentifier, messageNamespace);
+
   } catch {
     // Keep the already loaded room messages usable if the thread endpoint is unavailable.
   }
@@ -792,6 +687,7 @@ function jumpToMessage(messageId: string): void {
     // a refresh RPC must not be allowed to turn a known link into a no-op.
     threadRevealTargetId.value = messageId;
     openThread(destination.threadRootId, false);
+    void nextTick(() => messageViewport.value?.scrollToMessage(destination.threadRootId));
     return;
   }
   if (destination.kind === "history") {
@@ -881,8 +777,9 @@ watch(
     const searchResult = threadMessagesWithThreadOverrides.value.find((message) => message.id === messageId);
     const parentId = searchResult ? threadParentId(searchResult) : null;
     if (parentId) {
-      activeThreadParentId.value = parentId;
-      void loadThread(parentId);
+      threadRevealTargetId.value = messageId;
+      openThread(parentId);
+      void nextTick(() => messageViewport.value?.scrollToMessage(parentId));
     }
   },
 );
@@ -896,34 +793,27 @@ watch(
   },
 );
 
-watch(
-  () => [activeThreadParent.value?.id || null, activeThreadReplies.value.filter(message => !message.outgoing).at(-1)?.id || null] as const,
-  ([threadRootId, latestReplyId]) => {
-    if (!threadRootId || !latestReplyId) return;
-    void markThreadRead(threadRootId, latestReplyId);
-  },
-);
 
-onMounted(() => {
-  syncThreadLayoutWidth();
-  if (typeof ResizeObserver !== "undefined" && threadLayoutElement.value) {
-    threadLayoutResizeObserver = new ResizeObserver(syncThreadLayoutWidth);
-    threadLayoutResizeObserver.observe(threadLayoutElement.value);
-  }
-  window.addEventListener("resize", syncThreadLayoutWidth);
-});
 
 function focusComposerWithMention(mentionText: string): void {
   roomComposer.value?.focusWithMention(mentionText);
 }
 
-defineExpose({ openThread, focusComposerWithMention });
+async function revealThread(messageId: string): Promise<void> {
+  const namespace = props.messageNamespace;
+  openThread(messageId, false);
+  await nextTick();
+  const revealed = messageViewport.value?.scrollToMessage(messageId);
+  await loadThread(messageId);
+  if (!revealed && namespace === props.messageNamespace && activeThreadParentId.value === messageId) {
+    await nextTick();
+    messageViewport.value?.scrollToMessage(messageId);
+  }
+}
+
+defineExpose({ openThread: revealThread, focusComposerWithMention });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("resize", syncThreadLayoutWidth);
-  threadLayoutResizeObserver?.disconnect();
-  threadLayoutResizeObserver = null;
-  stopThreadPaneResize();
   if (transientHighlightTimeout !== null) {
     window.clearTimeout(transientHighlightTimeout);
   }

@@ -8,10 +8,12 @@
       'thinking-message': Boolean(thinkingCard),
       'reply-message': Boolean(message.reply_to),
       'has-thread': hasThread,
+      'is-inline-reply': inlineReply,
+      'is-thread-open': threadOpen,
       'wake-notice': isWakeNotice,
     }"
     :data-msg-id="message.id"
-    @contextmenu="openContextMenu"
+    @contextmenu.stop="openContextMenu"
   >
     <WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" />
     <div v-else class="message-avatar" :style="{ '--sender-color': senderColor }" />
@@ -22,14 +24,14 @@
         <time :datetime="message.timestamp" :title="fullTimestamp">{{ formattedTime }}</time>
       </p>
       <ThreadMarker
-        v-if="hasThread"
-        :latest-id="threadLatestId"
+        v-if="!inlineReply && (hasThread || threadOpen)"
+        :expanded="threadOpen"
+        :controls="`web-thread-${message.id}`"
         :label="threadLabel"
-        :latest-display-name="threadLatestDisplayName"
-        :latest-preview="threadLatestPreview"
         :action-label="threadActionLabel"
-        @scroll-to-reply="emit('scrollToReply', $event)"
+        @toggle="emit('openThread', message.id)"
       />
+      <slot name="thread" />
     </div>
     <div v-else class="message-body">
       <MessageMeta
@@ -49,6 +51,8 @@
         @reply="emit('reply', message)"
         @info="emit('info', message)"
         @react="openReactionPicker"
+        :can-open-thread="!inlineReply"
+        @thread="emit('openThread', message.id)"
       />
       <div
         class="message-bubble"
@@ -59,7 +63,7 @@
         :style="{ '--sender-color': senderColor }"
       >
         <ReplyPreview
-          v-if="message.reply_to"
+          v-if="message.reply_to && (!inlineReply || message.reply_to.id !== message.thread_root_id)"
           :message-id="message.reply_to.id"
           :display-name="replyDisplayName"
           :preview-text="replyPreviewText"
@@ -108,6 +112,15 @@
           :muted="stalePromptMuted"
           @toggle="handleToggleStalePromptMute"
         />
+      <ThreadMarker
+        v-if="!inlineReply && (hasThread || threadOpen)"
+        :expanded="threadOpen"
+        :controls="`web-thread-${message.id}`"
+        :label="threadLabel"
+        :action-label="threadActionLabel"
+        @toggle="emit('openThread', message.id)"
+      />
+        <slot name="thread" />
       </div>
       <MessageReactionBar
         v-if="reactions.length"
@@ -119,15 +132,7 @@
         @toggle="toggleReaction"
         @add="openReactionPicker"
       />
-      <ThreadMarker
-        v-if="hasThread"
-        :latest-id="threadLatestId"
-        :label="threadLabel"
-        :latest-display-name="threadLatestDisplayName"
-        :latest-preview="threadLatestPreview"
-        :action-label="threadActionLabel"
-        @scroll-to-reply="emit('scrollToReply', $event)"
-      />
+
     </div>
     <ReasoningTraceModal
       :open="reasoningOpen"
@@ -225,6 +230,8 @@ const props = defineProps<{
   message: RoomMessage
   roomIdentifier?: string
   thread?: MessageThreadSummary | null
+  threadOpen?: boolean
+  inlineReply?: boolean
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
   reasoningSession?: RoomReasoningSession | null
   taskReferenceIds?: ReadonlySet<string>
@@ -234,6 +241,7 @@ const props = defineProps<{
   agentNames?: ReadonlyMap<string, string>
 }>()
 const emit = defineEmits<{
+  openThread: [messageId: string]
   reply: [message: RoomMessage]
   info: [message: RoomMessage]
   scrollToReply: [messageId: string]
@@ -500,17 +508,7 @@ const threadLabel = computed(() => {
   const count = props.thread?.count || 0
   return count === 1 ? '1 reply' : `${count} replies`
 })
-const threadLatestId = computed(() => props.thread?.latest?.id || props.message.id)
-const threadLatestDisplayName = computed(() => {
-  const sender = props.thread?.latest?.sender
-  if (!sender) return 'Latest'
-  return parseAgentIdentity(sender).displayName || sender
-})
-const threadLatestPreview = computed(() => getReplyPreviewText(props.thread?.latest && {
-  ...props.thread.latest,
-  display_text: messageDisplayText(props.thread.latest, props.agentNames),
-}))
-const threadActionLabel = computed(() => `Open ${threadLabel.value}`)
+const threadActionLabel = computed(() => props.threadOpen ? 'Collapse replies' : `Open ${threadLabel.value}`)
 
 const reasoningTitle = computed(() =>
   props.reasoningSession?.title
@@ -880,4 +878,8 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
   margin: 4px 6px;
   background: var(--border, #27272a);
 }
+</style>
+
+<style scoped>
+.is-thread-open > .message-body > .message-bubble { display: block; width: 100%; max-width: 100%; }
 </style>
