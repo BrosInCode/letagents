@@ -584,7 +584,9 @@ export class SupervisorDaemonClient {
   private approvalSigner: { fingerprint: string; promise: Promise<HostApprovalSigner> } | null = null;
   private readonly approvalPresentations = new Map<string, {
     roomId: string; view: DesktopHostApproval; candidate: HostApprovalCandidate; challenge: HostApprovalChallenge;
-    presentationSha256: string; touchedAt: number; decision: { id: string; choice: HostApprovalSelection } | null;
+    presentationSha256: string; touchedAt: number;
+    /** A recorded choice carries the digest it was made on; a choice minted here is signed against the card. */
+    decision: { id: string; choice: HostApprovalSelection; projectionSha256: string | null } | null;
   }>();
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
@@ -716,9 +718,11 @@ export class SupervisorDaemonClient {
         cached.view.retryDecision = null;
         const recorded = candidate.recordedDecision;
         if (recorded) {
-          cached.decision = { id: recorded.decisionId, choice: recorded.decision };
+          cached.decision = { id: recorded.decisionId, choice: recorded.decision, projectionSha256: recorded.projectionSha256 };
+          // The retry is signed against the digest the choice was made on. The card can differ from it by now
+          // (a saved mode changes the tool scope inside it) while the request does not; the daemon checks the request.
           if (candidate.status === "decision_recorded" && recorded.actorId === `host-${challenge.keyFingerprint}`
-            && recorded.projectionSha256 === presentationSha256) cached.view.retryDecision = recorded.decision;
+            && recorded.projectionSha256 !== null) cached.view.retryDecision = recorded.decision;
           else if (candidate.status === "pending" || candidate.status === "decision_recorded") {
             cached.view.status = "unavailable";
             cached.view.detail = "The recorded decision cannot be retried against this presentation. No new decision will be created.";
@@ -789,10 +793,10 @@ export class SupervisorDaemonClient {
     assertCaller?.();
     assertEligible();
     if (cached.candidate !== presented) throw new Error("The approval was refreshed while deciding. Check it before trying again.");
-    const decision = cached.decision ?? { id: randomUUID(), choice: selection.decision };
+    const decision = cached.decision ?? { id: randomUUID(), choice: selection.decision, projectionSha256: null };
     const envelope = signer.sign(challenge, "decide", { expected,
       decisionId: decision.id, actorId: `host-${challenge.keyFingerprint}`,
-      decision: decision.choice, projectionSha256: cached.presentationSha256 });
+      decision: decision.choice, projectionSha256: decision.projectionSha256 ?? cached.presentationSha256 });
     cached.decision = decision;
     cached.view.status = "uncertain";
     cached.view.retryDecision = null;

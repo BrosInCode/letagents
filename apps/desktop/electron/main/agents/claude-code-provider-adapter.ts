@@ -1050,7 +1050,8 @@ class ClaudeProviderHandle implements ProviderHandle {
   executionTerminalCheckpoint: {
     providerTurnId: string; terminalDiscriminator: string; nativeLifecycle: NativeLifecycleCheckpoint;
   } | null = null;
-  readonly executionTools = new Map<string, { operation: Extract<NativeExecutionFact, { domain: "execution" }>["operation"]; completed: boolean; name: string; input: unknown }>();
+  /** `hostDenied` is set once this adapter has written the host's deny for the tool's permission request. */
+  readonly executionTools = new Map<string, { operation: Extract<NativeExecutionFact, { domain: "execution" }>["operation"]; completed: boolean; name: string; input: unknown; hostDenied?: true }>();
   executionExitObserved = false;
   permissionControlAvailable = true;
   readonly seenPermissionRequestIds = new Set<string>();
@@ -1572,6 +1573,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         response: reply === "once" ? { behavior: "allow", updatedInput: pending.native.request.input }
           : { behavior: "deny", message: "The host rejected this action." },
       } }));
+      // Remember the deny for this exact tool, so its error result can be told from any other failure.
+      if (reply === "reject") {
+        const denied = handle.executionTools.get(pending.native.request.tool_use_id);
+        if (denied) denied.hostDenied = true;
+      }
       return { outcome: "sent", scope: "request" };
     } catch (error) {
       if (dispatched) throw Object.assign(new Error("Claude approval dispatch cannot be confirmed."), { outcome: "uncertain" });
@@ -2307,8 +2313,12 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           for (const [id, pending] of new Map([...handle.permissionClosures, ...handle.permissionRequests])) {
             if (pending.turnId === turnId && pending.native.request.tool_use_id === block.tool_use_id) this.closePermission(handle, id);
           }
+          // The host denied this exact tool and Claude reports it as an error: the tool never ran. Any other
+          // error result stays a generic failure, which cannot say what became of an approval.
+          const denied = tool.hostDenied === true && block.is_error === true;
           emit({ domain: "execution", kind: "completed", executionId: block.tool_use_id, operation: tool.operation,
-            outcome: block.is_error === true ? "failed" : "succeeded", sideEffects: tool.operation === "file_read" ? "none" : "possible", ...turn });
+            outcome: denied ? "denied_before_start" : block.is_error === true ? "failed" : "succeeded",
+            sideEffects: denied || tool.operation === "file_read" ? "none" : "possible", ...turn });
         }
       }
     }

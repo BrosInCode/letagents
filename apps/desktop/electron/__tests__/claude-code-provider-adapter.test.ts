@@ -3144,6 +3144,8 @@ async function approvalHarness(detachSignal?: AbortSignal) {
   const controller = new AbortController();
   let requests: import("../../shared/provider-permissions.js").ClaudeNativePermissionRequest[] = [];
   const closures: import("../../shared/provider-permissions.js").ClaudePermissionObservation[] = [];
+  const facts: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, event => facts.push(event));
   const observing = adapter.observePermissions(handle, event => { if (event.type === "snapshot") requests = [...event.requests]; else if (event.type === "request_closed") closures.push(event); }, controller.signal);
   const running = adapter.runRoomTurn(handle, { inboxItemId: "approval-inbox", actionId: "approval-action", sourceMessage: { text: "Write a file" }, activation: {} }, { detachSignal });
   void running.catch(() => {});
@@ -3155,7 +3157,7 @@ async function approvalHarness(detachSignal?: AbortSignal) {
   const permission = (over: Record<string, unknown> = {}) => child.emit({ type: "control_request", request_id: "native-request",
     request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: "tool-write", input: { file_path: "/tmp/output", content: "private approval content" },
       permission_suggestions: [{ type: "setMode", mode: "bypassPermissions", destination: "session" }] }, ...over });
-  return { harness, adapter, handle, child, streams, turnId, started, tool, permission,
+  return { harness, adapter, handle, child, streams, turnId, started, tool, permission, facts,
     get requests() { return requests; }, closures,
     async close() {
       child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId, result: "Done" });
@@ -3230,6 +3232,44 @@ for (const reply of ["once", "reject"] as const) test(`Claude native ${reply} ap
     await assert.rejects(h.adapter.replyPermission(h.handle, expected, reply, { beforeNativeDispatch: async () => {} }), { outcome: "not_dispatched" });
   } finally { await h.close(); }
 });
+
+// Claude reports a denied tool as a generic error result. Only a deny this adapter wrote for that exact
+// tool, followed by an error result for it, shows that the tool never ran.
+for (const scenario of ["host denied, error result", "host denied, result is not an error", "host allowed, error result",
+  "no host answer, error result", "host denied another tool"] as const) {
+  test(`Claude reports the outcome of a tool after: ${scenario}`, async () => {
+    const h = await approvalHarness();
+    try {
+      h.started(); h.tool(); h.permission(); const expected = h.requests[0]!;
+      if (scenario !== "no host answer, error result") {
+        const other = scenario === "host denied another tool";
+        if (other) {
+          h.child.emit({ type: "assistant", session_id: h.handle.providerContinuationId, parent_tool_use_id: null,
+            message: { content: [{ type: "tool_use", id: "tool-other", name: "Write", input: {} }] } });
+          h.child.emit({ type: "control_request", request_id: "other-request",
+            request: { subtype: "can_use_tool", tool_name: "Write", tool_use_id: "tool-other", input: {} } });
+        }
+        const target = other ? h.requests.find(request => request.id === "other-request")! : expected;
+        await h.adapter.replyPermission(h.handle, target, scenario === "host allowed, error result" ? "once" : "reject", { beforeNativeDispatch: async () => {} });
+      }
+      h.child.emit({ type: "user", session_id: h.handle.providerContinuationId,
+        message: { content: [{ type: "tool_result", tool_use_id: "tool-write", content: "result",
+          is_error: scenario !== "host denied, result is not an error" }] } });
+      const completed = h.facts.map(event => event.fact).filter(fact => fact.domain === "execution" && fact.kind === "completed");
+      assert.equal(completed.length, 1);
+      const fact = completed[0]!;
+      assert.equal(fact.domain === "execution" && fact.executionId, "tool-write");
+      if (scenario === "host denied, error result") {
+        assert.equal(fact.domain === "execution" && fact.kind === "completed" && fact.outcome, "denied_before_start");
+        assert.equal(fact.sideEffects, "none");
+      } else {
+        assert.equal(fact.domain === "execution" && fact.kind === "completed" && fact.outcome,
+          scenario === "host denied, result is not an error" ? "succeeded" : "failed");
+        assert.equal(fact.sideEffects, "possible");
+      }
+    } finally { await h.close(); }
+  });
+}
 
 test("Claude approval correlation excludes pre-start, foreign, subagent, changed and completed tools", async () => {
   const h = await approvalHarness();
