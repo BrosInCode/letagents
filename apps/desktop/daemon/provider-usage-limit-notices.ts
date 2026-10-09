@@ -31,7 +31,7 @@ const DAY_MS = 24 * 60 * 60_000;
  * limit that refuses many messages is announced once.
  */
 export function usageLimitOccurrence(resetsAtMs: number | null, nowMs: number): string {
-  return resetsAtMs !== null ? String(resetsAtMs) : `unknown:${Math.floor(nowMs / DAY_MS)}`;
+  return resetsAtMs !== null && Number.isFinite(resetsAtMs) ? String(Math.trunc(resetsAtMs)) : `unknown:${Math.floor(nowMs / DAY_MS)}`;
 }
 /** Occurrences remembered per process, so a busy retry loop cannot post twice. */
 const REMEMBERED_OCCURRENCES = 512;
@@ -60,7 +60,7 @@ export async function postProviderUsageLimitNotice(input: ProviderUsageLimitNoti
         display_name: input.displayName,
         provider: input.provider,
         phase: input.phase,
-        resets_at: input.resetsAtMs === null ? null : new Date(input.resetsAtMs).toISOString(),
+        resets_at: input.resetsAtMs === null ? null : new Date(Math.trunc(input.resetsAtMs)).toISOString(),
         occurrence: input.occurrence,
       }),
       signal: AbortSignal.any([input.signal, AbortSignal.timeout(NOTICE_TIMEOUT_MS)]),
