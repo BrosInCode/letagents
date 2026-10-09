@@ -119,7 +119,8 @@ export async function createInReviewTaskWithLease(
 
 export function webhookIntegrationTest(
   name: string,
-  fn: (context: WebhookIntegrationContext) => Promise<void>
+  fn: (context: WebhookIntegrationContext) => Promise<void>,
+  options: { serverEnv?: Record<string, string> } = {}
 ): void {
   test(
     name,
@@ -130,7 +131,7 @@ export function webhookIntegrationTest(
     async (t) => {
       await resetDatabase();
 
-      const { child, port } = await startServer();
+      const { child, port } = await startServer(options.serverEnv);
       t.after(async () => {
         await stopServer(child);
       });
@@ -260,7 +261,9 @@ async function waitForServer(
   );
 }
 
-export async function startServer(): Promise<{ child: ChildProcess; port: number }> {
+export async function startServer(
+  serverEnv: Record<string, string> = {}
+): Promise<{ child: ChildProcess; port: number }> {
   if (!testDatabaseUrl) {
     throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
   }
@@ -276,6 +279,7 @@ export async function startServer(): Promise<{ child: ChildProcess; port: number
       cwd: process.cwd(),
       env: {
         ...process.env,
+        ...serverEnv,
         DB_URL: testDatabaseUrl,
         HOST: "127.0.0.1",
         PORT: String(port),

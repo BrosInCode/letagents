@@ -124,4 +124,13 @@ export interface RoomTaskRouteDeps {
     taskId: string;
   }): Promise<EnsureTaskGitRoomResult>;
   emitProjectMessage(projectId: string, sender: string, text: string): Promise<unknown>;
+  /**
+   * Applies the stored merge of a pull request the task now holds the link to.
+   * Resolves to the task when it moved, null when nothing applied.
+   */
+  replayStoredPullRequestMerge?(input: {
+    project: Project;
+    task: Task;
+    actorLabel: string | null;
+  }): Promise<Task | null>;
 }
