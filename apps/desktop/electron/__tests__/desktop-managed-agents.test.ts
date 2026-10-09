@@ -2596,6 +2596,24 @@ test("Cursor desktop event prompts keep top-level messages free of thread contex
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
+test("Cursor sandboxed-write prompts say there is no network and git fails from the sandbox, and no other mode does", () => {
+  const limit = /In this mode there is no network\. git and gh usually fail inside the workspace/;
+  const sandboxed = buildCursorDesktopEventPrompt(
+    cursorLiveSession({ permission_profile_id: "sandboxed_write" }),
+    messageEvent(),
+  );
+  assert.match(sandboxed, limit);
+  assert.match(sandboxed, /This is caused by the sandbox, so do not report it as a problem with the owner's Mac\./);
+  assert.match(sandboxed, /Ask a teammate or the owner to commit, push and open the pull request\./);
+  const fullAccess = buildCursorDesktopEventPrompt(
+    cursorLiveSession({ permission_profile_id: "full_access" }),
+    messageEvent(),
+  );
+  assert.doesNotMatch(fullAccess, limit);
+  const codex = buildDesktopEventPrompt(liveSession({ display_name: "CedarVista" }), messageEvent());
+  assert.doesNotMatch(codex, limit);
+});
+
 test("desktop-delivered event prompts do not claim participation in unrelated threads", () => {
   const prompt = buildDesktopEventPrompt(liveSession({ display_name: "CedarVista" }), {
     type: "message",
