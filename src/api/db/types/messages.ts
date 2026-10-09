@@ -68,6 +68,12 @@ export type MessageAccountAgentRouting =
         agent_session_id: string;
         successor_agent_session_id?: string;
         activation_reason?: string;
+        /** Present only for a sequenced reply turn (see reply-turns.ts). */
+        turn_position?: number;
+        turn_count?: number;
+        /** Agents in earlier positions that already answered, in turn order. */
+        prior_speakers?: string[];
+        hold_release_reason?: string;
       }>;
       control_authorized: boolean;
     }

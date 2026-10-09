@@ -37,10 +37,13 @@ export function getCanonicalRoomMessageCatchUp(input: {
   limit?: number;
   includePromptOnly: boolean;
   waitForRouting?: boolean;
+  /** Per-worker reply-turn frontier; part of the coalescing key. */
+  holdAgentKey?: string | null;
   load: (roomId: string, after?: string, options?: {
     limit?: number;
     include_prompt_only?: boolean;
     wait_for_routing?: boolean;
+    hold_agent_key?: string | null;
   }) => Promise<CanonicalMessageCatchUp>;
 }): Promise<CanonicalMessageCatchUp> {
   const key = JSON.stringify([
@@ -50,6 +53,7 @@ export function getCanonicalRoomMessageCatchUp(input: {
     input.limit ?? null,
     input.includePromptOnly,
     Boolean(input.waitForRouting),
+    input.holdAgentKey ?? null,
   ]);
   const existing = pending.get(key);
   if (existing) return existing;
@@ -57,6 +61,7 @@ export function getCanonicalRoomMessageCatchUp(input: {
     limit: input.limit,
     include_prompt_only: input.includePromptOnly,
     ...(input.waitForRouting ? { wait_for_routing: true } : {}),
+    ...(input.holdAgentKey ? { hold_agent_key: input.holdAgentKey } : {}),
   })).finally(() => {
     if (pending.get(key) === work) pending.delete(key);
   });

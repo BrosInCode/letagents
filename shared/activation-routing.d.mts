@@ -18,13 +18,33 @@ export declare function humanConversationFallback(input: {
  * channel for a managed local worker.
  */
 export declare function isUntrustedExternalActivationSource(source: unknown): boolean;
+export interface AgentMessageReplyTurn {
+    /** 1-based position in the reply order; only positions 2 and later are sent. */
+    position: number;
+    count: number;
+    /** Labels of the agents before this one that answered, in turn order. */
+    prior_speakers: string[];
+}
 export interface AgentMessageActivation {
     for_current_agent: {
         decision: AgentMessageActivationDecision;
         reason: AgentMessageActivationReason;
         addressed: boolean;
+        turn?: AgentMessageReplyTurn;
+        guidance?: string;
     };
 }
+/** A receipt as the activation authority sees it. Turn fields are optional. */
+export type AgentMessageActivationReceipt = {
+    activation_reason: string;
+    turn_position?: number | null;
+    turn_count?: number | null;
+    prior_speakers?: readonly string[] | null;
+    /** Why the held turn was released: "turn", "deadline", "activation" or "skipped". */
+    hold_release_reason?: string | null;
+};
+/** The turn note for an agent that answers a shared message after others. */
+export declare function replyTurnGuidance(position: number, count: number, priorSpeakers?: readonly string[], releaseReason?: string | null): string;
 type MessageLike = {
     id?: unknown;
     sender?: unknown;
@@ -85,9 +105,7 @@ export declare function attachAgentMessageActivation<T extends MessageLike>(mess
  * Only messages that predate routing snapshots keep the lazy per-reader
  * decision, so legacy backlog mentions still activate rotated sessions.
  */
-export declare function attachAgentMessageActivationsFromReceipts<T extends MessageLike>(messages: readonly T[], identity: ActivationIdentity | null, receiptsMap: ReadonlyMap<number | string, {
-    activation_reason: string;
-}>, snapshotNumbers: ReadonlySet<number>, context?: AgentMessageActivationContext): T[] | Array<T & {
+export declare function attachAgentMessageActivationsFromReceipts<T extends MessageLike>(messages: readonly T[], identity: ActivationIdentity | null, receiptsMap: ReadonlyMap<number | string, AgentMessageActivationReceipt>, snapshotNumbers: ReadonlySet<number>, context?: AgentMessageActivationContext): T[] | Array<T & {
     activation: AgentMessageActivation;
 }>;
 export declare function attachAgentMessageActivations<T extends MessageLike>(messages: readonly T[], identity: ActivationIdentity | null, context?: AgentMessageActivationContext): T[] | Array<T & {

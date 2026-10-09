@@ -20,6 +20,7 @@ import type { MessageRecipientAgentTarget } from "../types.js";
 import { MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { chooseAnsweringSession } from "../../rooms/answering-session.js";
 import { getSessionConnections } from "./session-connections.js";
+import { releaseAgentReplyTurnHoldsTx } from "./reply-turns.js";
 
 /** Rooms above this size fall back to deterministic routing rather than ship a huge state. */
 const MAX_JEV_ROUTING_SESSIONS = 200;
@@ -307,6 +308,10 @@ export async function applyDeferredJevReceipts(
     .values(rows)
     .onConflictDoNothing()
     .returning({ agent_key: message_agent_receipts.agent_key, agent_session_id: message_agent_receipts.agent_session_id });
+  // Deferred receipts are parallel, so they end the agents' earlier held
+  // reply turns like any other activation. The caller's message_routed wakes
+  // every worker of the room after commit.
+  await releaseAgentReplyTurnHoldsTx(tx, plan.roomId, inserted.map((receipt) => receipt.agent_key));
   return inserted.map((receipt) => ({
     agent_key: receipt.agent_key,
     agent_session_id: receipt.agent_session_id,

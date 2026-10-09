@@ -183,13 +183,17 @@ test("a storage change in flight keeps the row's text and size still", async () 
 
 test("room-wide settings are offered only where the server can hold them", async () => {
   const cloud = await renderPanel({ room: githubRoom, storage: cloudStorage });
-  for (const testId of ["room-conversation-routing", "room-agent-guidelines", "room-github-event-filter"]) {
+  for (const testId of ["room-conversation-routing", "room-reply-order", "room-agent-guidelines", "room-github-event-filter"]) {
     assert.ok(cloud.includes(`data-testid="${testId}"`), `a cloud room offers ${testId}`);
   }
   assert.ok(cloud.includes('data-testid="desktop-room-settings-nav-conversation"'));
+  // "Answer in turns" sits directly after conversation routing, in the same section.
+  assert.ok(cloud.indexOf('data-testid="room-reply-order"') > cloud.indexOf('data-testid="room-conversation-routing"'));
+  assert.ok(cloud.indexOf('data-testid="room-reply-order"') < cloud.indexOf('data-section="guidelines"'));
+  assert.match(cloud, /Answer in turns/);
 
   const local = await renderPanel();
-  for (const testId of ["room-conversation-routing", "room-agent-guidelines", "room-github-event-filter"]) {
+  for (const testId of ["room-conversation-routing", "room-reply-order", "room-agent-guidelines", "room-github-event-filter"]) {
     assert.ok(!local.includes(`data-testid="${testId}"`), `a local room does not offer ${testId}`);
   }
   assert.ok(!local.includes('data-testid="desktop-room-settings-nav-conversation"'));

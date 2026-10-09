@@ -1759,6 +1759,28 @@ test("room work survives in-place renewal and same-instance successor but refuse
     fence: { grant_id: otherHost.grant.grant_id, generation: 1, token_version: 1 } }), { code: "publisher_conflict" });
 });
 
+test("a sequenced turn that ends without a reply releases the next reply position", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  const now = new Date().toISOString();
+  await client!.pool.query(
+    "UPDATE message_agent_receipts SET turn_position = 1, turn_count = 2, hold_released_at = now() WHERE message_room_id = $1 AND message_number = 1",
+    [f.room.id],
+  );
+  await client!.db.insert(schema!.message_agent_receipts).values({
+    id: randomUUID(), room_id: f.room.id, message_room_id: f.room.id, message_number: 1,
+    agent_session_id: "session_next", agent_key: "owner_route/next-agent", actor_label: "Next Agent",
+    activation_reason: "broadcast", receipt_state: "queued", created_at: now, updated_at: now,
+    turn_position: 2, turn_count: 2, hold_release_after: new Date(Date.now() + 90_000).toISOString(),
+  });
+  const held = async () => (await client!.pool.query(
+    "SELECT hold_released_at IS NOT NULL AS released FROM message_agent_receipts WHERE agent_key = 'owner_route/next-agent'",
+  )).rows[0]!.released;
+  await publishRoomAgentWork(f.input);
+  assert.equal(await held(), false, "an active turn keeps the next position waiting");
+  await publishRoomAgentWork({ ...f.input, revision: 2, summary: { ...workSummary, recorded_state: "completed_no_reply" } });
+  assert.equal(await held(), true, "a turn that ended without a reply releases the next position");
+});
+
 test("room work grant handoff fences stale generation without duplicating the public attempt", { skip: requiresDatabase }, async () => {
   const f = await setupWork();
   const first = await publishRoomAgentWork(f.input);
