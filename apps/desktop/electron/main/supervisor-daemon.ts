@@ -22,6 +22,7 @@ import type {
   DesktopSupervisorManifestEntry,
   DesktopSupervisorRoomDeliveryRetryInput,
   DesktopSupervisorStateSnapshot,
+  DesktopSupervisorServiceSnapshot,
   DesktopSupervisorTurnControlInput,
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
@@ -945,6 +946,20 @@ export class SupervisorDaemonClient {
   onGeneration(listener: (status: DesktopSupervisorDaemonStatus) => void): () => void {
     this.generationListeners.add(listener);
     return () => this.generationListeners.delete(listener);
+  }
+
+  /** Troubleshooting observes the service without taking lifecycle ownership. */
+  async getServiceSnapshot(): Promise<DesktopSupervisorServiceSnapshot> {
+    const status = await this.connectIfRunning();
+    let state: DesktopSupervisorStateSnapshot | null = null;
+    if (status && !status.maintenanceHoldId && status.capabilities.agentStateSubscription
+      && supervisorStateWatchAcceptsStatus(status)) {
+      state = await this.watchState({ afterDaemonGeneration: 0, afterSequence: 0, waitMs: 0 });
+      if (state.daemonGeneration !== status.generation) {
+        throw new Error("The background service restarted during this read. Refresh to see its current state.");
+      }
+    }
+    return { status, state, observedAt: this.now().toISOString() };
   }
 
   private rememberReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {

@@ -112,6 +112,10 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     async (): Promise<DesktopSupervisorDaemonStatus> => supervisorDaemonClient.ensureRunning(),
   );
   targetIpcMain.handle(
+    "desktop:supervisor:get-service-snapshot",
+    async () => supervisorDaemonClient.getServiceSnapshot(),
+  );
+  targetIpcMain.handle(
     "desktop:supervisor:list-agents",
     async (_event, roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> => {
       const entries = isDesktopSmokeCheck()
