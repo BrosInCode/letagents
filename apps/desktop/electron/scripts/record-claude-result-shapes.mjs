@@ -20,7 +20,8 @@ import { fileURLToPath } from "node:url";
 //   - The CLI talks to a stand-in for the Messages API that this script
 //     starts on 127.0.0.1. The stand-in never stores or prints a request
 //     header or a request body. It counts requests by method and path, and
-//     reads four yes/no facts from a body as it passes (see `startStandIn`).
+//     reads five yes/no facts and one count from a body as it passes (see
+//     `startStandIn`).
 //   - The CLI runs under a macOS sandbox profile that denies every network
 //     connection except to this machine's loopback, and the script proves
 //     that the profile works before it starts the CLI.
@@ -31,11 +32,17 @@ import { fileURLToPath } from "node:url";
 //     that tool: it is given that one tool besides the read-only ones. The
 //     sandbox denies the network to what the tool starts too, and nothing
 //     else. Every call is written out in this file: a background shell
-//     command that sleeps and prints a word, a sub-agent whose model is the
-//     stand-in, a bundled skill. In one run the CLI has a Stop hook: a
+//     command that sleeps and prints a word (in one run it then exits with
+//     a code that is not zero), a sub-agent whose model is the stand-in, a
+//     bundled skill. In one run the CLI has a Stop hook: a
 //     script this tool writes into the run's folder, named in a settings
 //     file in the new CLAUDE_CONFIG_DIR. That run reads the "user"
-//     settings, which are that file alone. (See `cli` in STUB_ANSWERS.)
+//     settings, which are that file alone. In some runs the tool writes
+//     more lines to the CLI's stdin after the prompt: an interrupt control
+//     request, a second prompt, or its answer to a permission request. Two
+//     runs start the CLI as an agent that asks before it writes; the command
+//     it asks about writes one empty file in the run's own folder, and is
+//     never allowed. (See `cli` in STUB_ANSWERS.)
 //   - One run has no stand-in: the connection that is refused goes to a
 //     loopback port with no listener, which nothing can hold (see
 //     `unlistenedPort`). A local process that took that port during the run
@@ -58,6 +65,9 @@ import { fileURLToPath } from "node:url";
 //                      Those files hold the ids and paths of this machine's runs.
 //                      They are for --from-raw only: never commit them.
 //   --from-raw <dir>   start no CLI: build the fixture from runs kept with --raw
+//   --merge            keep the captures that the output file already holds, and add
+//                      or replace only the ones of this run. Without it the file is
+//                      written anew, with the captures of this run alone.
 
 const RECORD_ENV = "LETAGENTS_RECORD_CLAUDE_RESULT_SHAPES";
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
@@ -118,8 +128,37 @@ const toolCall = (name, input) => (wantsStream, response) => {
   response.end(sse("message_stop", { type: "message_stop" }));
 };
 
+/** An answer that is one message with several calls of tools. Each call has an id of its own. */
+const toolCalls = (calls) => (wantsStream, response) => {
+  const blocks = calls.map(([name, input], index) => ({ type: "tool_use", id: `toolu_probe_${index + 1}`, name, input }));
+  if (!wantsStream) {
+    response.writeHead(200, { "content-type": "application/json", "request-id": "req_probe" });
+    response.end(JSON.stringify({ id: "msg_probe_tool_call", type: "message", role: "assistant", model: "probe-model",
+      content: blocks, stop_reason: "tool_use", stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } }));
+    return;
+  }
+  response.writeHead(200, { "content-type": "text/event-stream", "request-id": "req_probe" });
+  response.write(messageStart("msg_probe_tool_call"));
+  for (const [index, block] of blocks.entries()) {
+    response.write(sse("content_block_start", { type: "content_block_start", index, content_block: { ...block, input: {} } })
+      + sse("content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input) } })
+      + sse("content_block_stop", { type: "content_block_stop", index }));
+  }
+  response.write(sse("message_delta", { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 3 } }));
+  response.end(sse("message_stop", { type: "message_stop" }));
+};
+/** An answer that is given only after a wait, so that something else can happen while the CLI waits for it. */
+const later = (ms, answer) => (wantsStream, response, request, holds) => {
+  setTimeout(() => { if (!response.destroyed && !request.socket.destroyed) answer(wantsStream, response, request, holds); }, ms).unref();
+};
+
 /** The prompt the stand-in gives a sub-agent. A request that holds its first word and no tool result is the sub-agent's own. */
 const SUBAGENT_PROMPT = "PROBE_SUBAGENT: reply exactly SUBAGENT REPORT.";
+/** The same for the second sub-agent of a run that starts two. Neither prompt's first word is part of the other's. */
+const SECOND_SUBAGENT_PROMPT = "PROBE_SECOND_SUBAGENT: reply exactly SECOND SUBAGENT REPORT.";
+/** The prompt of the second turn, in the run that sends one. */
+const SECOND_PROMPT = "Reply exactly PROBE_SECOND_OK.";
 /**
  * A turn in which the model calls one tool. The first request gets the call.
  * The request that brings the tool's result back gets the turn's answer. When
@@ -131,6 +170,53 @@ const turnWithToolCall = (call, subagent = message("SUBAGENT REPORT", "end_turn"
   holds.taskNotice ? message("ANSWER TO THE TASK NOTICE", "end_turn", "msg_probe_notice_answer")
     : holds.toolResult ? message("ANSWER OF THE TURN", "end_turn", "msg_probe_answer")
       : holds.subagentPrompt ? subagent : call)(wantsStream, response, request);
+/**
+ * The same turn, with what a run changes in it. `notices` answers the requests that hold a task's notice, the
+ * first of them with its first entry and so on (the last entry answers every later one). `secondSubagent`
+ * answers the second sub-agent's own request, and `secondTurn` the request of a second prompt.
+ */
+const turnWithBackgroundWork = (call, { notices = [message("ANSWER TO THE TASK NOTICE", "end_turn", "msg_probe_notice_answer")],
+  subagent = message("SUBAGENT REPORT", "end_turn", "msg_probe_subagent"), secondSubagent = null, secondTurn = null } = {}) => {
+  let noticeRequests = 0;
+  return (wantsStream, response, request, holds) => (
+    holds.taskNotice ? notices[Math.min(noticeRequests++, notices.length - 1)]
+      : secondTurn && holds.secondPrompt ? secondTurn
+        : holds.toolResult ? message("ANSWER OF THE TURN", "end_turn", "msg_probe_answer")
+          : secondSubagent && holds.secondSubagentPrompt ? secondSubagent
+            : holds.subagentPrompt ? subagent : call)(wantsStream, response, request, holds);
+};
+const backgroundCommand = (command, description = "probe") => ["Bash", { command, description, run_in_background: true }];
+/** One line that the tool writes to the CLI's stdin after the prompt. */
+const interruptRequest = () => ({ type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
+const secondPrompt = (ids) => ({ type: "user", uuid: ids.secondTurnId, message: { role: "user", content: [{ type: "text", text: SECOND_PROMPT }] } });
+/** The answer to a permission request that the CLI sent on stdout. */
+const permissionResponse = (event, response) => ({ type: "control_response", response: { subtype: "success", request_id: event.request_id, response } });
+/** The command with which the model answers a task's notice, in the runs that ask for approval. It writes one empty file in the run's own folder. */
+const NOTICE_COMMAND = "touch notice-probe";
+const asksForTheNoticeCommand = (event) => event.request?.subtype === "can_use_tool" && event.request.input?.command === NOTICE_COMMAND;
+/** The recorder allows the background command of the turn, as an owner would, whenever the CLI asks about it. */
+const allowsTheBackgroundCommand = { when: "control_request", every: true, afterMs: 50,
+  match: (event) => event.request?.subtype === "can_use_tool" && !asksForTheNoticeCommand(event),
+  lines: (_ids, event) => [permissionResponse(event, { behavior: "allow", updatedInput: event.request.input })] };
+/**
+ * A turn with one tool call, in the runs that send a second prompt after a task's notice. The request with the
+ * second prompt holds the notice too, so the answers go by what the request holds and by their order: the call,
+ * the turn's answer, and then `notice()` for each request that has no second prompt in it.
+ */
+const afterTheTurn = (call, notice) => {
+  let requests = 0;
+  return (wantsStream, response, request, holds) => {
+    requests += 1;
+    (requests === 1 ? call : requests === 2 ? message("ANSWER OF THE TURN", "end_turn", "msg_probe_answer")
+      : holds.secondPrompt ? message("ANSWER OF THE SECOND TURN", "end_turn", "msg_probe_second_answer") : notice())(wantsStream, response, request, holds);
+  };
+};
+/** The first request with the notice gets a command that needs approval. A later one gets an answer. */
+const noticeAnsweredWithACommand = () => {
+  let asked = 0;
+  return () => (asked++ === 0 ? toolCalls([["Bash", { command: NOTICE_COMMAND, description: "notice probe" }]])
+    : message("ANSWER TO THE TASK NOTICE, AFTER ITS COMMAND", "end_turn", "msg_probe_notice_answer"));
+};
 
 /**
  * What the stand-in answers to POST /v1/messages, by the name the fixture
@@ -139,9 +225,19 @@ const turnWithToolCall = (call, subagent = message("SUBAGENT REPORT", "end_turn"
  * in nine minutes.
  *
  * `cli` is what a run changes in how the CLI is started: `tool` is the one
- * tool it gets besides the read-only ones, `stopHook` gives it a Stop hook
+ * tool it gets besides the read-only ones (two, with a comma between them,
+ * in the run that starts a sub-agent and a command), `stopHook` gives it a Stop hook
  * that refuses the first end of the turn, and `lingerMs` is how long the CLI
  * is left running after the turn's result, for what it writes after a turn.
+ * `alsoWrites` is one more line for the CLI's stdin: `afterMs` after the first
+ * stdout line of the kind `when` names ("result", "control_request", or
+ * "task_notification" for the system event of that name). A run can have a
+ * list of them. `lines` gives several lines that are written together,
+ * `match` limits the rule to the stdout lines it accepts, and `every` writes
+ * for each such line. `askForApproval` starts the CLI as an agent that asks
+ * before it writes: the tool is not allowed beforehand, and the CLI sends a
+ * permission request on stdout. `closeWaitMs` is how long the CLI gets to
+ * end by itself once its stdin is closed, before it is stopped (default 3000).
  */
 const STUB_ANSWERS = {
   completed_answer: { stub: "HTTP 200, a normal streamed answer", answer: message("PROBE_OK", "end_turn") },
@@ -204,6 +300,99 @@ const STUB_ANSWERS = {
   skill_call: { stub: "HTTP 200: a Skill call for a bundled skill, then the turn's answer.",
     cli: { tool: "Skill" },
     answer: turnWithToolCall(toolCall("Skill", { skill: "keybindings-help" })) },
+  two_background_commands: { stub: "HTTP 200: two Bash calls in one message that run in the background, then the turn's answer, then an answer to each task's notice. One command ends two seconds after it starts and the other six.",
+    cli: { tool: "Bash", lingerMs: 12_000 },
+    answer: turnWithBackgroundWork(toolCalls([backgroundCommand("sleep 2; echo FIRST_DONE", "first probe"), backgroundCommand("sleep 6; echo SECOND_DONE", "second probe")]),
+      { notices: [message("ANSWER TO THE FIRST TASK NOTICE", "end_turn", "msg_probe_first_notice_answer"), message("ANSWER TO THE SECOND TASK NOTICE", "end_turn", "msg_probe_second_notice_answer")] }) },
+  two_background_commands_end_together: { stub: "HTTP 200: two Bash calls in one message that run in the background, then the turn's answer, then an answer to each task's notice. Both commands end three seconds after they start.",
+    cli: { tool: "Bash", lingerMs: 10_000 },
+    answer: turnWithBackgroundWork(toolCalls([backgroundCommand("sleep 3; echo FIRST_DONE", "first probe"), backgroundCommand("sleep 3; echo SECOND_DONE", "second probe")]),
+      { notices: [message("ANSWER TO THE FIRST TASK NOTICE", "end_turn", "msg_probe_first_notice_answer"), message("ANSWER TO THE SECOND TASK NOTICE", "end_turn", "msg_probe_second_notice_answer")] }) },
+  two_subagents_in_background: { stub: "HTTP 200: two Task calls in one message, then the turn's answer, then an answer to each task's notice. The first sub-agent gets a normal answer at once and the second after four seconds.",
+    cli: { tool: "Task", lingerMs: 12_000 },
+    answer: turnWithBackgroundWork(toolCalls([["Task", { description: "first probe", prompt: SUBAGENT_PROMPT, subagent_type: "general-purpose" }],
+      ["Task", { description: "second probe", prompt: SECOND_SUBAGENT_PROMPT, subagent_type: "general-purpose" }]]),
+    { notices: [message("ANSWER TO THE FIRST TASK NOTICE", "end_turn", "msg_probe_first_notice_answer"), message("ANSWER TO THE SECOND TASK NOTICE", "end_turn", "msg_probe_second_notice_answer")],
+      secondSubagent: later(4_000, message("SECOND SUBAGENT REPORT", "end_turn", "msg_probe_second_subagent")) }) },
+  background_command_fails: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer, then an answer to the task's notice. The command ends two seconds after it starts, with exit code 3.",
+    cli: { tool: "Bash", lingerMs: 8_000 },
+    answer: turnWithBackgroundWork(toolCall(...backgroundCommand("sleep 2; echo BACKGROUND_FAILED; exit 3"))) },
+  background_command_notice_answer_empty: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer, then an answer with no content to the task's notice, each time it is asked. The command ends two seconds after it starts.",
+    cli: { tool: "Bash", lingerMs: 9_000 },
+    answer: turnWithBackgroundWork(toolCall(...backgroundCommand("sleep 2; echo BACKGROUND_DONE")), { notices: [message("", "end_turn", "msg_probe_notice_answer")] }) },
+  background_command_notice_api_error: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer. The request that holds the task's notice gets HTTP 400 invalid_request_error. The command ends two seconds after it starts.",
+    cli: { tool: "Bash", lingerMs: 9_000 },
+    answer: turnWithBackgroundWork(toolCall(...backgroundCommand("sleep 2; echo BACKGROUND_DONE")),
+      { notices: [httpError(400, "invalid_request_error", "probe says the request with the task's notice is invalid")] }) },
+  background_command_running_at_input_close: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer. A request with the task's notice would get an answer. The command would end eight seconds after it starts. The CLI's stdin is closed one and a half seconds after the turn's result, and the CLI then gets twenty seconds to end by itself.",
+    cli: { tool: "Bash", lingerMs: 1_500, closeWaitMs: 20_000 },
+    answer: turnWithBackgroundWork(toolCall(...backgroundCommand("sleep 8; echo BACKGROUND_DONE"))) },
+  background_command_running_at_interrupt: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer, then an answer to the task's notice. The command ends five seconds after it starts. One second after the turn's result, with no turn running, the CLI is sent an interrupt control request.",
+    cli: { tool: "Bash", lingerMs: 11_000, alsoWrites: { when: "result", afterMs: 1_000, line: interruptRequest } },
+    answer: turnWithBackgroundWork(toolCall(...backgroundCommand("sleep 5; echo BACKGROUND_DONE"))) },
+  interrupt_during_task_notice_answer: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer. The command ends two seconds after it starts. The answer to the task's notice would come only after eight seconds; one and a half seconds after the task's notification the CLI is sent an interrupt control request.",
+    cli: { tool: "Bash", lingerMs: 12_000, alsoWrites: { when: "task_notification", afterMs: 1_500, line: interruptRequest } },
+    answer: turnWithBackgroundWork(toolCall(...backgroundCommand("sleep 2; echo BACKGROUND_DONE")),
+      { notices: [later(8_000, message("ANSWER TO THE TASK NOTICE", "end_turn", "msg_probe_notice_answer"))] }) },
+  background_command_stopped_by_request: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer. A request with the task's notice would get an answer. The command would end six seconds after it starts. One second after the turn's result the CLI is sent a stop_task control request for the task.",
+    cli: { tool: "Bash", lingerMs: 9_000, alsoWrites: { when: "result", afterMs: 1_000,
+      line: (ids) => ({ type: "control_request", request_id: randomUUID(), request: { subtype: "stop_task", task_id: ids.taskId } }) } },
+    answer: turnWithBackgroundWork(toolCall(...backgroundCommand("sleep 6; echo BACKGROUND_DONE"))) },
+  subagent_stopped_by_request: { stub: "HTTP 200: a Task call, then the turn's answer, then an answer to the task's notice. The sub-agent's own request would be answered only after eight seconds. One second after the turn's result the CLI is sent a stop_task control request for the task.",
+    cli: { tool: "Task", lingerMs: 11_000, alsoWrites: { when: "result", afterMs: 1_000,
+      line: (ids) => ({ type: "control_request", request_id: randomUUID(), request: { subtype: "stop_task", task_id: ids.taskId } }) } },
+    answer: turnWithBackgroundWork(toolCall("Task", { description: "probe", prompt: SUBAGENT_PROMPT, subagent_type: "general-purpose" }),
+      { subagent: later(8_000, message("SUBAGENT REPORT", "end_turn", "msg_probe_subagent")) }) },
+  subagent_and_background_command: { stub: "HTTP 200: a Task call and a Bash call that runs in the background, in one message, then the turn's answer, then an answer to each task's notice. The sub-agent's own request is answered after three seconds. The command ends seven seconds after it starts.",
+    cli: { tool: "Task,Bash", lingerMs: 12_000 },
+    answer: turnWithBackgroundWork(toolCalls([["Task", { description: "review probe", prompt: SUBAGENT_PROMPT, subagent_type: "general-purpose" }], backgroundCommand("sleep 7; echo BACKGROUND_DONE", "server probe")]),
+      { notices: [message("ANSWER TO THE FIRST TASK NOTICE", "end_turn", "msg_probe_first_notice_answer"), message("ANSWER TO THE SECOND TASK NOTICE", "end_turn", "msg_probe_second_notice_answer")],
+        subagent: later(3_000, message("SUBAGENT REPORT", "end_turn", "msg_probe_subagent")) }) },
+  interrupt_during_task_notice_answer_then_prompt: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer. The command ends two seconds after it starts. The answer to the task's notice would come only after eight seconds; one and a half seconds after the task's notification the CLI is sent an interrupt control request and, with it, a second prompt (SECOND_TURN_ID), which is answered at once.",
+    cli: { tool: "Bash", lingerMs: 9_000, alsoWrites: { when: "task_notification", afterMs: 1_500, lines: (ids) => [interruptRequest(), secondPrompt(ids)] } },
+    answer: afterTheTurn(toolCall(...backgroundCommand("sleep 2; echo BACKGROUND_DONE")),
+      () => later(8_000, message("ANSWER TO THE TASK NOTICE", "end_turn", "msg_probe_notice_answer"))) },
+  approval_in_task_notice_answer_interrupted: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer. The command ends two seconds after it starts. The task's notice is answered with a Bash call that needs the owner's approval. Nobody answers the permission request; one and a half seconds after it the CLI is sent an interrupt control request and, with it, a second prompt (SECOND_TURN_ID), which is answered at once.",
+    cli: { tool: "Bash", askForApproval: true, lingerMs: 11_000, alsoWrites: [allowsTheBackgroundCommand,
+      { when: "control_request", match: asksForTheNoticeCommand, afterMs: 1_500, lines: (ids) => [interruptRequest(), secondPrompt(ids)] }] },
+    answer: afterTheTurn(toolCall(...backgroundCommand("sleep 2; echo BACKGROUND_DONE")), noticeAnsweredWithACommand()) },
+  approval_in_task_notice_answer_denied_and_interrupted: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer. The command ends two seconds after it starts. The task's notice is answered with a Bash call that needs the owner's approval. One and a half seconds after the permission request the CLI is sent a denial of it, an interrupt control request and a second prompt (SECOND_TURN_ID), which is answered at once.",
+    cli: { tool: "Bash", askForApproval: true, lingerMs: 11_000, alsoWrites: [allowsTheBackgroundCommand,
+      { when: "control_request", match: asksForTheNoticeCommand, afterMs: 1_500,
+        lines: (ids, event) => [permissionResponse(event, { behavior: "deny", message: "The recorder denied this action." }), interruptRequest(), secondPrompt(ids)] }] },
+    answer: afterTheTurn(toolCall(...backgroundCommand("sleep 2; echo BACKGROUND_DONE")), noticeAnsweredWithACommand()) },
+  subagent_running_at_interrupt: { stub: "HTTP 200: a Task call, then the turn's answer, then an answer to the task's notice. The sub-agent's own request would be answered only after eight seconds. One second after the turn's result, with no turn running, the CLI is sent an interrupt control request.",
+    cli: { tool: "Task", lingerMs: 13_000, alsoWrites: { when: "result", afterMs: 1_000, line: interruptRequest } },
+    answer: turnWithBackgroundWork(toolCall("Task", { description: "probe", prompt: SUBAGENT_PROMPT, subagent_type: "general-purpose" }),
+      { subagent: later(8_000, message("SUBAGENT REPORT", "end_turn", "msg_probe_subagent")) }) },
+  task_ends_while_turn_goes_on: { stub: "HTTP 200: a Bash call that runs in the background, then a Bash call that does not, then the turn's answer. A later request would get an answer to the task's notice. The background command ends one second after it starts, while the other command, of three seconds, still runs. The turn's answer says so when the request for it holds the task's notice.",
+    cli: { tool: "Bash", lingerMs: 8_000 },
+    answer: (() => {
+      let requests = 0;
+      return (wantsStream, response, request, holds) => {
+        requests += 1;
+        (requests === 1 ? toolCall(...backgroundCommand("sleep 1; echo BACKGROUND_DONE"))
+          : requests === 2 ? toolCalls([["Bash", { command: "sleep 3; echo FOREGROUND_DONE", description: "foreground probe" }]])
+            : requests === 3 ? message(holds.taskNotice ? "ANSWER OF THE TURN, TO A REQUEST THAT HOLDS THE TASK NOTICE" : "ANSWER OF THE TURN", "end_turn", "msg_probe_answer")
+              : message("ANSWER TO THE TASK NOTICE", "end_turn", "msg_probe_notice_answer"))(wantsStream, response, request);
+      };
+    })() },
+  task_ends_while_notice_is_answered: { stub: "HTTP 200: two Bash calls in one message that run in the background, then the turn's answer. One command ends one second after it starts and the other four. The first notice is answered with a Bash call of five seconds that does not run in the background, so the second command ends while the first notice is being answered. Each later answer says how many task notices its request holds.",
+    cli: { tool: "Bash", lingerMs: 14_000 },
+    answer: (() => {
+      let requests = 0;
+      return (wantsStream, response, request, holds) => {
+        requests += 1;
+        (requests === 1 ? toolCalls([backgroundCommand("sleep 1; echo FIRST_DONE", "first probe"), backgroundCommand("sleep 4; echo SECOND_DONE", "second probe")])
+          : requests === 2 ? message("ANSWER OF THE TURN", "end_turn", "msg_probe_answer")
+            : requests === 3 ? toolCalls([["Bash", { command: "sleep 5; echo FOREGROUND_DONE", description: "foreground probe" }]])
+              : message(`ANSWER NUMBER ${requests - 3} AFTER THE TURN, TO A REQUEST THAT HOLDS ${holds.taskNotices} TASK NOTICES`, "end_turn", `msg_probe_notice_answer_${requests - 3}`))(wantsStream, response, request);
+      };
+    })() },
+  task_ends_during_next_turn: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer. The command ends four seconds after it starts. Half a second after the turn's result the CLI is sent a second prompt (SECOND_TURN_ID), whose answer comes only after seven seconds. Then an answer to the task's notice.",
+    cli: { tool: "Bash", lingerMs: 16_000, alsoWrites: { when: "result", afterMs: 500, line: secondPrompt } },
+    answer: turnWithBackgroundWork(toolCall(...backgroundCommand("sleep 4; echo BACKGROUND_DONE")),
+      { secondTurn: later(7_000, message("ANSWER OF THE SECOND TURN", "end_turn", "msg_probe_second_answer")) }) },
 };
 
 function option(name) {
@@ -213,26 +402,32 @@ function option(name) {
 
 /**
  * The stand-in for the Messages API. It listens on 127.0.0.1 only. A request
- * body is drained chunk by chunk and never kept. Four yes/no facts are read
- * from it as it passes, through a window of a few dozen characters: whether
- * it asks for a streamed answer, whether it holds a tool's result, whether it
- * holds the prompt this tool gives a sub-agent, and whether it holds the
- * notice of a background task. No header is read at all.
+ * body is drained chunk by chunk and never kept. Five yes/no facts and one
+ * count are read from it as it passes, through a window of a few dozen
+ * characters: whether it asks for a streamed answer, whether it holds a
+ * tool's result, whether it holds the prompt this tool gives a sub-agent or
+ * the one it gives a second sub-agent, whether it holds this tool's second
+ * prompt, and how many notices of background tasks it holds. No header is
+ * read at all.
  */
 function startStandIn(answer, counts) {
   const sockets = new Set();
   const server = createServer((request, response) => {
     const path = (request.url ?? "").split("?")[0];
     let wantsStream = false;
-    const holds = { toolResult: false, subagentPrompt: false, taskNotice: false, nth: 0 };
+    const holds = { toolResult: false, subagentPrompt: false, secondSubagentPrompt: false, taskNotice: false, taskNotices: 0, secondPrompt: false, nth: 0 };
     let tail = "";
     request.on("data", (chunk) => {
       const window = tail + chunk.toString("latin1");
       if (/"stream"\s*:\s*true/.test(window)) wantsStream = true;
       if (/"type"\s*:\s*"tool_result"/.test(window)) holds.toolResult = true;
       if (window.includes(SUBAGENT_PROMPT.split(":")[0])) holds.subagentPrompt = true;
+      if (window.includes(SECOND_SUBAGENT_PROMPT.split(":")[0])) holds.secondSubagentPrompt = true;
+      if (window.includes(SECOND_PROMPT.split(" ").at(-1))) holds.secondPrompt = true;
       // As the CLI writes the notice in a message. Its tool descriptions name the tag too, without what follows it here.
-      if (/<task-notification>\\n<task-id>/.test(window)) holds.taskNotice = true;
+      // A notice that ends in this chunk is counted now; one that lies in the kept tail was counted before.
+      for (const notice of window.matchAll(/<task-notification>\\n<task-id>/g)) if (notice.index + notice[0].length > tail.length) holds.taskNotices += 1;
+      holds.taskNotice = holds.taskNotices > 0;
       tail = window.slice(-48);
     });
     request.on("end", () => {
@@ -317,11 +512,15 @@ async function recordOne(name, claudeBin, root, profilePath, timeoutMs) {
   const port = standIn ? standIn.port : await unlistenedPort();
   const sessionId = randomUUID();
   const turnId = randomUUID();
+  const secondTurnId = randomUUID();
   // The flags of claudeCliLaunchArgs() with the read-only profile's policy. A run that has the model call a
   // tool adds that tool, and the run with the Stop hook reads the settings file of its new CLAUDE_CONFIG_DIR.
   const args = ["--print", "--verbose", "--input-format", "stream-json", "--output-format", "stream-json",
-    "--strict-mcp-config", "--mcp-config", mcpConfigPath, "--permission-mode", "dontAsk", "--tools", ["Read,Glob,Grep", cli.tool].filter(Boolean).join(","),
-    "--allowed-tools", ["mcp__letagents__*", cli.tool].filter(Boolean).join(","), "--setting-sources", cli.stopHook ? "user" : "", "--session-id", sessionId];
+    "--strict-mcp-config", "--mcp-config", mcpConfigPath,
+    // An agent that asks before it writes: its permission requests go to stdout, and its tool is not allowed beforehand.
+    ...(cli.askForApproval ? ["--permission-prompt-tool", "stdio", "--permission-mode", "default"] : ["--permission-mode", "dontAsk"]),
+    "--tools", ["Read,Glob,Grep", cli.tool].filter(Boolean).join(","),
+    "--allowed-tools", ["mcp__letagents__*", cli.askForApproval ? null : cli.tool].filter(Boolean).join(","), "--setting-sources", cli.stopHook ? "user" : "", "--session-id", sessionId];
   // Nothing of this process's environment reaches the CLI.
   const env = {
     PATH: [dirname(claudeBin), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(delimiter),
@@ -335,11 +534,18 @@ async function recordOne(name, claudeBin, root, profilePath, timeoutMs) {
   let buffered = "";
   let outcome = "running";
   let resultSeen = false;
+  const alsoWrites = [cli.alsoWrites ?? []].flat();
+  const alsoWritten = new Set();
+  /** The id the CLI gave the task it started last. */
+  let taskId = null;
+  let inputClosedAt = null;
+  let stoppedByTool = false;
   const finish = (why) => {
     if (outcome !== "running") return;
     outcome = why;
+    inputClosedAt = performance.now();
     try { child.stdin.end(); } catch { /* The pipe is already gone. */ }
-    setTimeout(() => { try { process.kill(-child.pid, "SIGTERM"); } catch { /* It has exited. */ } }, 3_000).unref();
+    setTimeout(() => { stoppedByTool = true; try { process.kill(-child.pid, "SIGTERM"); } catch { /* It has exited. */ } }, cli.closeWaitMs ?? 3_000).unref();
   };
   child.stdout.on("data", (chunk) => {
     buffered += chunk.toString("utf8");
@@ -352,11 +558,26 @@ async function recordOne(name, claudeBin, root, profilePath, timeoutMs) {
       lines.push({ atMs: Math.round(performance.now() - started), event });
       // The lifecycle event that follows the result is part of the turn. Some runs wait for what the CLI writes after it.
       if (event.type === "result" && !resultSeen) { resultSeen = true; setTimeout(() => finish("result"), cli.lingerMs ?? 500); }
+      const kind = event.type === "system" ? event.subtype : event.type;
+      if (kind === "task_started" && typeof event.task_id === "string") taskId = event.task_id;
+      for (const rule of alsoWrites) {
+        if (kind !== rule.when || (alsoWritten.has(rule) && !rule.every) || (rule.match && !rule.match(event))) continue;
+        alsoWritten.add(rule);
+        setTimeout(() => {
+          const ids = { secondTurnId, taskId };
+          try {
+            for (const written of rule.lines ? rule.lines(ids, event) : [rule.line(ids, event)]) child.stdin.write(`${JSON.stringify(written)}\n`);
+          } catch { /* The pipe is already gone. */ }
+        }, rule.afterMs);
+      }
     }
   });
   const timer = setTimeout(() => finish("timeout"), timeoutMs);
   child.stdin.write(`${JSON.stringify({ type: "user", uuid: turnId, message: { role: "user", content: [{ type: "text", text: "Reply exactly PROBE_OK." }] } })}\n`);
-  await new Promise((exited) => child.once("exit", exited));
+  const [exitCode, exitSignal] = await new Promise((exited) => child.once("exit", (code, signal) => exited([code, signal])));
+  // How the CLI ended once its stdin was closed: by itself, or stopped by this tool when its time was up.
+  const afterInputClosed = inputClosedAt === null ? null
+    : { ended: stoppedByTool ? "stopped by the recorder" : "by itself", code: exitCode, signal: exitSignal, seconds: Math.round((performance.now() - inputClosedAt) / 100) / 10 };
   clearTimeout(timer);
   await standIn?.close();
   const projects = join(dirs.config, "projects");
@@ -367,7 +588,7 @@ async function recordOne(name, claudeBin, root, profilePath, timeoutMs) {
   // Claude Code keeps the rows of a sub-agent in a file of their own, beside the session's file.
   const subagentRows = existsSync(projects) ? readdirSync(projects, { recursive: true }).map(String).sort()
     .filter((entry) => entry.split(/[\\/]/).includes(sessionId) && entry.split(/[\\/]/).includes("subagents") && entry.endsWith(".jsonl")).flatMap(rowsOf) : [];
-  return { name, outcome, sessionId, turnId, runRoot, requests, lines, sessionRows, subagentRows };
+  return { name, outcome, sessionId, turnId, secondTurnId, runRoot, requests, lines, sessionRows, subagentRows, afterInputClosed };
 }
 
 /** Token and cost accounting. It is large, and nothing that reads a result uses it. */
@@ -386,7 +607,7 @@ function pathsOf(runRoot) {
 function redact(value, ids) {
   if (typeof value === "string") {
     const text = (ids.paths ? value.replace(ids.paths, "/PATH") : value)
-      .replaceAll(ids.sessionId, "SESSION_ID").replaceAll(ids.turnId, "TURN_ID").replace(UUID, "UUID")
+      .replaceAll(ids.sessionId, "SESSION_ID").replaceAll(ids.turnId, "TURN_ID").replaceAll(ids.secondTurnId ?? "SECOND_TURN_ID", "SECOND_TURN_ID").replace(UUID, "UUID")
       .replace(/127\.0\.0\.1:\d+/g, "127.0.0.1:PORT")
       .replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, "2026-01-01T00:00:00.000Z");
     return text.length > LONG_TEXT ? `${text.slice(0, 120)} [${text.length - 120} more characters left out]` : text;
@@ -401,7 +622,7 @@ function redact(value, ids) {
 function fixtureCapture(capture) {
   const result = capture.lines.find((line) => line.event.type === "result");
   if (!result) return null;
-  const ids = { sessionId: capture.sessionId, turnId: capture.turnId, paths: pathsOf(capture.runRoot) };
+  const ids = { sessionId: capture.sessionId, turnId: capture.turnId, secondTurnId: capture.secondTurnId, paths: pathsOf(capture.runRoot) };
   const chat = (rows) => rows.filter((row) => row.type === "user" || row.type === "assistant").map((row) => redact(row, ids));
   return {
     stub: STUB_ANSWERS[capture.name].stub,
@@ -415,20 +636,23 @@ function fixtureCapture(capture) {
     session: chat(capture.sessionRows),
     // The same rows of the file that holds a sub-agent's.
     ...(capture.subagentRows?.length ? { subagent_session: chat(capture.subagentRows) } : {}),
+    // Only for a run that asks how the CLI ends once its stdin is closed.
+    ...(STUB_ANSWERS[capture.name].cli?.closeWaitMs && capture.afterInputClosed ? { after_input_closed: capture.afterInputClosed } : {}),
   };
 }
 
 function fixtureText(captures, version) {
   const line = (value) => JSON.stringify(value);
   const rows = (events) => events.length ? `[\n${events.map((event) => `        ${line(event)}`).join(",\n")}\n      ]` : "[]";
-  const about = `Real stream-json output of Claude Code ${version}, launched with the room adapter's flags against a local stand-in for the Messages API. Recorded with electron/scripts/record-claude-result-shapes.mjs. Ids, times, paths and the stand-in's port are replaced, and the token accounting (usage, modelUsage, subagent_stats) is left out. SESSION_ID and TURN_ID stand for the session and for the user message that started the turn. In the captures from stop_hook_refuses_end_once on, the stand-in answers with a tool call or the CLI has a Stop hook: one more tool is allowed, a text of more than 2000 characters is cut short, the stream and the session go on after the turn when the CLI did, and 'subagent_session' holds the rows of the separate file in which the CLI keeps a sub-agent's.`;
+  const about = `Real stream-json output of Claude Code ${version}, launched with the room adapter's flags against a local stand-in for the Messages API. Recorded with electron/scripts/record-claude-result-shapes.mjs. Ids, times, paths and the stand-in's port are replaced, and the token accounting (usage, modelUsage, subagent_stats) is left out. SESSION_ID and TURN_ID stand for the session and for the user message that started the turn. In the captures from stop_hook_refuses_end_once on, the stand-in answers with a tool call or the CLI has a Stop hook: one more tool is allowed, a text of more than 2000 characters is cut short, the stream and the session go on after the turn when the CLI did, and 'subagent_session' holds the rows of the separate file in which the CLI keeps a sub-agent's. In the captures from two_background_commands on, a turn starts background work in more ways: 'stub' says what the recorder also wrote to the CLI's stdin (an interrupt control request, its answer to a permission request, or a second prompt, whose user message is SECOND_TURN_ID), and 'after_input_closed' says how the CLI ended once its stdin was closed. In the two captures named approval_…, the CLI was started as an agent that asks before it writes.`;
   const body = Object.entries(captures).map(([name, capture]) => [
     `    ${line(name)}: {`,
     `      "stub": ${line(capture.stub)},`,
     `      "seconds_to_result": ${capture.seconds_to_result},`,
     `      "stream": ${rows(capture.stream)},`,
-    `      "session": ${rows(capture.session)}${capture.subagent_session ? "," : ""}`,
-    ...(capture.subagent_session ? [`      "subagent_session": ${rows(capture.subagent_session)}`] : []),
+    `      "session": ${rows(capture.session)}${capture.subagent_session || capture.after_input_closed ? "," : ""}`,
+    ...(capture.subagent_session ? [`      "subagent_session": ${rows(capture.subagent_session)}${capture.after_input_closed ? "," : ""}`] : []),
+    ...(capture.after_input_closed ? [`      "after_input_closed": ${line(capture.after_input_closed)}`] : []),
     "    }",
   ].join("\n")).join(",\n");
   return `{\n  "about": ${line(about)},\n  "claude_code_version": ${line(version)},\n  "captures": {\n${body}\n  }\n}\n`;
@@ -456,6 +680,7 @@ async function main() {
   const names = only ?? Object.keys(STUB_ANSWERS).filter((name) => !STUB_ANSWERS[name].optional);
   const out = resolve(option("--out") ?? DEFAULT_FIXTURE);
   const keepRaw = process.argv.includes("--raw");
+  const merge = process.argv.includes("--merge");
   const fromRaw = option("--from-raw") ? resolve(option("--from-raw")) : null;
   const timeoutMs = Number(option("--timeout-ms") ?? 240_000);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error("--timeout-ms must be a positive number.");
@@ -503,7 +728,9 @@ async function main() {
     }
   }
 
-  const captures = {};
+  // With --merge the captures that the file already holds stay as they are, in their order.
+  const held = merge && existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : null;
+  const captures = { ...held?.captures };
   for (const capture of raw) {
     const built = fixtureCapture(capture);
     if (built) captures[capture.name] = built;
@@ -512,13 +739,16 @@ async function main() {
   if (!Object.keys(captures).length) throw new Error("No run ended with a result. Nothing was written.");
   const versions = [...new Set(raw.flatMap((capture) => capture.sessionRows.map((row) => row.version)).filter((version) => typeof version === "string"))];
   if (versions.length !== 1) throw new Error(`The runs do not name one Claude Code version (${versions.join(", ") || "none"}). Nothing was written.`);
+  if (held && held.claude_code_version !== versions[0]) {
+    throw new Error(`The file holds captures of Claude Code ${held.claude_code_version}, and these runs are of ${versions[0]}. Nothing was written.`);
+  }
   const text = fixtureText(captures, versions[0]);
   JSON.parse(text);
   // A run's folder is also checked in the form the CLI gives it in the name of a project folder.
-  const found = leaks(text, raw.flatMap((capture) => [capture.sessionId, capture.turnId, capture.runRoot, capture.runRoot?.replace(/[^A-Za-z0-9]/g, "-")]));
+  const found = leaks(text, raw.flatMap((capture) => [capture.sessionId, capture.turnId, capture.secondTurnId, capture.runRoot, capture.runRoot?.replace(/[^A-Za-z0-9]/g, "-")]));
   if (found.length) throw new Error(`The fixture still holds ${found.join(", ")}. Nothing was written.`);
   writeFileSync(out, text);
-  console.error(`wrote ${Object.keys(captures).length} captures of Claude Code ${versions[0]} to ${out}`);
+  console.error(`wrote ${Object.keys(captures).length} captures of Claude Code ${versions[0]} to ${out}${held ? ` (${raw.length} of them from this run)` : ""}`);
 }
 
 main().catch((error) => {
