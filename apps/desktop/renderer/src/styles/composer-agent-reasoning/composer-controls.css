@@ -435,6 +435,3 @@
     transform: none;
   }
 }
-
-/* The 7px gap/padding above the row plus 8px textarea padding remain clear. */
-.desktop-composer .desktop-composer-input-row > .room-typing-indicator { top: -5px; left: 48px; right: 94px; }

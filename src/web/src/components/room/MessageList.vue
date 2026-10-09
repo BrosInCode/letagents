@@ -1,5 +1,6 @@
 <template>
   <div class="messages-wrap">
+    <div class="messages-scroll">
     <div class="messages scroll-fade-y" ref="messagesEl" @scrollend="finishMessageReveal">
       <button
         v-if="hasOlderMessages"
@@ -32,15 +33,6 @@
         />
         </template>
 
-      <div v-if="agentWork.length" class="room-local-agent-work-list" role="status" aria-live="polite">
-        <div v-for="work in agentWork.slice(0, 3)" :key="work.id" class="room-local-agent-work"
-          data-motion-work :data-motion-session="work.session" :data-motion-agent="work.key" :data-motion-after="work.after">
-          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
-          <span class="room-local-agent-work-copy"><strong>{{ work.name }}</strong><span>{{ work.summary }}</span></span>
-          <span class="room-local-agent-work-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-        </div>
-        <p v-if="agentWork.length > 3" class="room-local-agent-work-overflow">+{{ agentWork.length - 3 }} more agents working</p>
-      </div>
     </div>
     <button
       v-if="unreadCount > 0 || isScrolledFarUp"
@@ -56,6 +48,21 @@
         <p>Create a room for your agents, copy the join code, and watch messages appear in real time.</p>
       </div>
     </div>
+    </div>
+    <!-- Live strip: who is working or typing right now. It sits outside the
+         scrolling list so it stays in view while the reader is in older history. -->
+    <div ref="liveStripEl" class="room-live-strip">
+      <div v-if="agentWork.length" class="room-local-agent-work-list" role="status" aria-live="polite">
+        <div v-for="work in agentWork.slice(0, 3)" :key="work.id" class="room-local-agent-work"
+          data-motion-work :data-motion-session="work.session" :data-motion-agent="work.key" :data-motion-after="work.after">
+          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+          <span class="room-local-agent-work-copy"><strong>{{ work.name }}</strong><span>{{ work.summary }}</span></span>
+          <span class="room-local-agent-work-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        </div>
+        <p v-if="agentWork.length > 3" class="room-local-agent-work-overflow">+{{ agentWork.length - 3 }} more agents working</p>
+      </div>
+      <TypingIndicator :key="roomIdentifier || ''" :names="typingNames" :color-for="typingColor" />
+    </div>
     <MessageInfoSurface
       :open="infoSurfaceOpen"
       :room-id="roomIdentifier || ''"
@@ -69,6 +76,9 @@
 <script setup lang="ts">
 import "../../../../../shared/ui/room-agent-work.css";
 import { useRoomWorkIndicators } from "./roomWorkIndicators";
+import TypingIndicator from "../../../../../shared/ui/TypingIndicator.vue";
+import { useRoomTypingNames } from "@/composables/roomTyping";
+import { getSenderColor } from "@/composables/room/identity";
 import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../shared/ui/useRoomMessageMotion";
 import { provide, ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomAgentPresence, type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
@@ -122,6 +132,9 @@ const emit = defineEmits<{
 const currentAgentWork = useRoomWorkIndicators(() => props.presence || [], () => props.messages, () => props.roomIdentifier)
 
 const messagesEl = ref<HTMLElement | null>(null)
+const liveStripEl = ref<HTMLElement | null>(null)
+const typingNames = useRoomTypingNames(computed(() => props.roomIdentifier || ''))
+const typingColor = (name: string) => getSenderColor(name, 'browser')
 const unreadRoom = computed(() => props.unreadRoomId)
 const roomUnread = useRoomUnread()
 provide(unreadMenuKey, { client: roomUnread, room: unreadRoom })
@@ -405,6 +418,7 @@ watch(() => agentWork.value.map(work => work.id).join('|'), followLatestAfterLay
 
 const messageMotion = useRoomMessageMotion({
   element: messagesEl,
+  work: liveStripEl,
   scope: () => props.roomIdentifier,
   ready: () => Boolean(props.messagesLoaded),
   following: () => isScrolledToBottom,
@@ -618,13 +632,17 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .explicit-unread::before, .explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
 .room-local-agent-work-list { margin: 6px auto 8px; }
 .room-local-agent-work { cursor: default; }
-.messages-wrap { position: relative; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
+.messages-wrap { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
+/* The list and its floating pill. The live strip sits below it, outside the scroll. */
+.messages-scroll { position: relative; flex: 1 1 0; min-height: 0; }
+/* The strip owns the space under the last message, so its rows grow into that space without moving the list twice. */
+.room-live-strip { min-height: 10px; padding: 0 20px; --room-chat-content-max: 720px; }
 
 .messages {
   height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 16px 20px;
+  padding: 16px 20px 6px;
   --room-chat-content-max: 720px;
   scroll-behavior: smooth;
 }
@@ -650,7 +668,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 
 .new-messages-pill {
   position: absolute;
-  bottom: 12px;
+  bottom: 2px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 10;
@@ -684,8 +702,9 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .empty-state-card p { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
 
 @media (max-width: 768px) {
-  .messages { padding: 12px 18px; }
-  .new-messages-pill { bottom: 8px; font-size: 0.7rem; padding: 5px 12px; }
+  .messages { padding: 12px 18px 6px; }
+  .room-live-strip { min-height: 6px; padding: 0 18px; }
+  .new-messages-pill { bottom: 2px; font-size: 0.7rem; padding: 5px 12px; }
   .empty-state { padding: 24px 16px; }
   .load-older-btn, .new-messages-pill { min-height: 44px; }
 }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
-import { ROOM_TYPING, TYPING, createTypingDisplay, createTypingReceiver, createTypingSender, parseTypingReport, parseTypingSignal, type TypingSignal } from '../../../shared/room-typing.mjs';
+import { ROOM_TYPING, TYPING, createTypingDisplay, createTypingReceiver, createTypingSender, parseTypingReport, parseTypingSignal, typingSentence, type TypingSignal } from '../../../shared/room-typing.mjs';
 import { BridgedEventEmitter } from '../server/bridged-emitter.js';
 import { createRoomTypingService, roomTyping } from '../server/room-typing.js';
 import { registerRoomTypingRoute } from '../routes/rooms/messages/typing.js';
@@ -93,6 +93,34 @@ test('receiver expires a lost stop, deduplicates accounts/devices and rejects re
   receiver.receive({ ...signal(), expires_at: time.now() + TYPING.ttl }, 'bea');
   receiver.clear();
   assert.equal(receiver.label(), '', 'reconnect/account/room changes reset state');
+});
+
+test('receiver and display expose one stable name per account for the live strip', () => {
+  const time = clock(), receiver = createTypingReceiver(time.now), seen: string[][] = [];
+  const display = createTypingDisplay((_label, names) => seen.push(names), time);
+  for (const target of [receiver, display]) {
+    target.receive(signal('cy'), 'bea');
+    target.receive(signal('ada'), 'bea');
+    target.receive({ ...signal('ada'), client_id: 'composer_source_2' }, 'bea');
+    target.receive(signal('bea'), 'bea');
+  }
+  assert.deepEqual(receiver.names(), ['ada', 'cy'], 'sorted by account, self and second devices excluded');
+  assert.deepEqual(seen.at(-1), ['ada', 'cy']);
+  display.receive(signal('cy', 2, false), 'bea');
+  assert.deepEqual(seen.at(-1), ['ada'], 'a stop removes just that person');
+  time.advance(TYPING.ttl);
+  assert.deepEqual(seen.at(-1), []);
+  assert.deepEqual(receiver.names(), []);
+});
+
+test('the sentence emphasises names and counts the rest', () => {
+  const text = (names: string[]) => typingSentence(names).map(part => part.name ? `[${part.text}]` : part.text).join('');
+  assert.equal(text([]), '');
+  assert.equal(text(['Ada']), '[Ada] is typing');
+  assert.equal(text(['Ada', 'Cy']), '[Ada] and [Cy] are typing');
+  assert.equal(text(['Ada', 'Cy', 'Di']), '[Ada], [Cy] and 1 other are typing');
+  assert.equal(text(['Ada', 'Cy', 'Di', 'Eve']), '[Ada], [Cy] and 2 others are typing');
+  assert.equal(text(['<b>x</b>']), '[<b>x</b>] is typing', 'names stay plain text for the view to escape');
 });
 
 test('display schedules just the earliest active expiry, with no timer while idle or cleared', () => {
