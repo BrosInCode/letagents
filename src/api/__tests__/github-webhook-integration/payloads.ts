@@ -40,7 +40,7 @@ export function buildCheckRunPayload(input: {
 }
 
 export function buildPullRequestPayload(input: {
-  action?: "opened" | "closed" | "ready_for_review";
+  action?: "opened" | "closed" | "ready_for_review" | "reopened";
   number: number;
   title: string;
   body: string;
@@ -51,6 +51,8 @@ export function buildPullRequestPayload(input: {
   merged?: boolean;
   mergedBy?: string;
   draft?: boolean;
+  /** Full name of the repository the head branch lives in, as a branch room needs. */
+  headRepository?: string;
 }) {
   return {
     action: input.action ?? "opened",
@@ -64,6 +66,7 @@ export function buildPullRequestPayload(input: {
       head: {
         ref: input.branchRef,
         sha: input.sha,
+        ...(input.headRepository ? { repo: { full_name: input.headRepository } } : {}),
       },
       merged: input.merged ?? false,
       merged_by: input.mergedBy ? { login: input.mergedBy } : undefined,

@@ -181,6 +181,7 @@ import { provisionRentalRoomForProvider } from "../rental/room-projection.js";
 import { publicRentalProviders } from "../rental/provider-hosts.js";
 import { rentalActivityEvents } from "../rental/activity-emitter.js";
 import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
+import { replayStoredPullRequestMergeForTask } from "../github/room-event-projection/stored-merge-replay.js";
 import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
   artifactEvents,
@@ -421,6 +422,7 @@ export function registerApiRoutes(app: Express): void {
     getGitRoomBindingForRoom,
     ensureTaskGitRoomForActiveWorkLease,
     emitProjectMessage,
+    replayStoredPullRequestMerge: replayStoredPullRequestMergeForTask,
   } satisfies RoomTaskRouteDeps;
 
   const roomEventRouteDeps = {
