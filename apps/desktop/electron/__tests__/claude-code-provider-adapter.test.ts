@@ -2907,6 +2907,45 @@ for (const natural of [
   });
 }
 
+for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
+  test(`Claude success-subtype API errors settle and recover without replay (${lifecycleAuthorityMode})`, async () => {
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode }));
+    const child = harness.children[0]!;
+    const observations: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, (event) => observations.push(event));
+    const request = { inboxItemId: "inbox-api-error", actionId: "action-api-error", sourceMessage: {}, activation: {} };
+    // No terminal checkpoint yet: retain evidence for recovery, as after a failed durable write.
+    const running = adapter.runRoomTurn(handle, request);
+    await flush();
+    const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+    child.emit({ type: "result", subtype: "success", is_error: true,
+      session_id: handle.providerContinuationId, user_message_uuid: turnId,
+      result: "API Error: Response stalled mid-stream." });
+    const result = await running;
+    assert.deepEqual(result, { turnId, providerContinuationId: handle.providerContinuationId,
+      outcome: "failed", text: null, evidence: "stream", error: "API Error: Response stalled mid-stream." });
+    assert.ok(observations.some(({ fact }) => fact.domain === "turn"
+      && fact.kind === "state_changed" && fact.state === "terminal" && fact.turnOutcome === "failed"));
+    assert.equal(handle.observedState(), "idle");
+    const writes = child.written.length;
+    const checkpointed: unknown[] = [];
+    assert.deepEqual(await adapter.recoverRoomTurn(handle, { inboxItemId: request.inboxItemId, providerTurnId: turnId }, {
+      checkpointTerminalResult: async (terminal) => { checkpointed.push(terminal); },
+    }), result);
+    assert.deepEqual(checkpointed, [result]);
+    assert.equal(child.written.length, writes, "recovery must not rerun the failed command");
+    const next = adapter.runRoomTurn(handle, { ...request, inboxItemId: "inbox-after-error", actionId: "action-after-error" });
+    await flush();
+    const nextId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+    child.emit({ type: "result", subtype: "success", is_error: false,
+      session_id: handle.providerContinuationId, user_message_uuid: nextId, result: "Next message handled." });
+    assert.equal((await next).text, "Next message handled.");
+    assert.deepEqual(harness.signals, []);
+  });
+}
+
 for (const subtype of ["error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries"]) {
   test(`Claude ${subtype} fails only the exact turn and leaves the continuation reusable`, async () => {
     const harness = createHarness();

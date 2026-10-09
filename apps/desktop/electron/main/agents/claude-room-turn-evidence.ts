@@ -84,14 +84,19 @@ export function exactClaudeStreamTerminal(
     return null;
   }
   if (event.subtype !== "success" || event.is_error !== false) {
+    // SDKResultSuccess also carries terminal API errors: is_error=true and
+    // result contains the error text. The subtype alone does not mean success.
+    const apiError = event.subtype === "success" && event.is_error === true;
     const errors = Array.isArray(event.errors)
       ? event.errors.filter((value): value is string => typeof value === "string")
       : [];
     return {
       turnId,
-      ...(event.is_error === true && typeof event.subtype === "string" && /^(?:error_|interrupted$)/.test(event.subtype)
+      ...(event.is_error === true && typeof event.subtype === "string" && (apiError || /^(?:error_|interrupted$)/.test(event.subtype))
         ? { nativeOutcome: event.subtype === "interrupted" ? "interrupted" as const : "failed" as const } : {}),
-      error: errors.join("; ") || `Claude command ended ${String(event.subtype ?? "without success")}.`,
+      error: errors.join("; ") || (apiError
+        ? (typeof event.result === "string" && event.result.trim()) || "Claude reported an API error without details."
+        : `Claude command ended ${String(event.subtype ?? "without success")}.`),
     };
   }
   return exactTextResult(
