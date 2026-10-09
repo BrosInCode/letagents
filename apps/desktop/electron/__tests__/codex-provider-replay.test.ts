@@ -312,6 +312,35 @@ test("Codex replay: a reply that reports another effort than the agent's is told
   assert.equal(outcome.roomTurn.outcome, "reply");
 });
 
+test("Codex replay: a reply that reports no effort is told to the owner, and a reply with no effort field is not", async () => {
+  const fixture = loadFixture("simple");
+  // What real Codex 0.153.4 answered: the effort as a string, and a value it does not have as an
+  // explicit null. So a null effort is Codex saying that the conversation has none.
+  const real = recorded(fixture).response("thread/start").frame.result as Row;
+  assert.equal(real.reasoningEffort, CODEX_SCENARIO_REASONING_EFFORT);
+  assert.equal(Object.hasOwn(real, "activePermissionProfile") && real.activePermissionProfile, null);
+  // Not a recording: the effort in the recorded reply is changed here.
+  const replied = (change: (result: JsonObject) => JsonObject): ProviderReplayTranscript => ({
+    ...fixture,
+    entries: fixture.entries.map((entry) => entry.type === "emit_inbound" && entry.label === "thread/start" && Object.hasOwn(entry.frame, "result")
+      ? { ...entry, frame: { ...entry.frame, result: change(entry.frame.result as JsonObject) } }
+      : entry),
+  });
+
+  const none = await replayScenario("simple", replied((result) => ({ ...result, reasoningEffort: null })));
+  assert.deepEqual(none.outcome.launchNotices, [
+    `This agent's reasoning effort "${CODEX_SCENARIO_REASONING_EFFORT}" was given to Codex, but Codex reports no effort for the conversation. `
+    + "The agent runs with the effort Codex gives it.",
+  ]);
+  assert.equal(none.outcome.stateAfterSpawn, "idle");
+  assert.equal(none.outcome.roomTurn.outcome, "reply");
+
+  // An app-server that does not report the effort leaves the field out. That says nothing either way.
+  const silent = await replayScenario("simple", replied(({ reasoningEffort: _notReported, ...result }) => result));
+  assert.deepEqual(silent.outcome.launchNotices, []);
+  assert.equal(silent.outcome.roomTurn.outcome, "reply");
+});
+
 test("Codex replay fails when the adapter no longer sends what was recorded", async () => {
   const fixture = loadFixture("simple");
   // Not a recording: one recorded frame is changed here to stand for an adapter that has moved on.
