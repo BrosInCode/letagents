@@ -3,6 +3,7 @@ import type {
 } from "../../../electron/ipc-types";
 import { agentCompactionProgress } from "./managed-agents";
 import { ownerSetupRefusalReason } from "./agent-home-harness";
+import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
@@ -234,6 +235,8 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
         ? safeUserVisibleErrorDetail(entry.lastError, `The ${providerLabel} launch was saved, but ownership transfer did not finish. Cancel it before starting a replacement.`)
         : stopFailed
         ? safeUserVisibleErrorDetail(entry.lastError, `The supervisor couldn't stop the ${providerLabel} agent. Check its status and try again.`)
+        : claudeUsageLimitReached(entry.lastError)
+        ? CLAUDE_USAGE_LIMIT_REASON
         : entry.condition === "coordination_blocked" && hasProviderExecution
         ? `LetAgents can't currently reconnect to the previous ${providerLabel} process. It may still reconnect; you can wait or cancel this launch and start a new agent.`
         : entry.condition === "coordination_blocked"
