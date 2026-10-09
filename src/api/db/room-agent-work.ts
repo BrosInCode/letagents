@@ -6,6 +6,7 @@ import { db } from "./client.js";
 import { message_agent_receipts, messages, room_agent_sessions, room_agent_work, room_agent_work_review_pages, supervisor_host_grants } from "./schema.js";
 import { assertSupervisorGrantFenceTx, SupervisorGrantFenceStaleError, type SupervisorGrantFence } from "./auth/supervisor-grants.js";
 import { visibleMessageCondition } from "./messages/visibility.js";
+import { finishReplyTurnsTx, queueReplyTurnWakes } from "./messages/reply-turns.js";
 
 export class RoomAgentWorkError extends Error {
   constructor(readonly code: "invalid_summary" | "publisher_not_authorized" | "publisher_conflict" | "revision_conflict" | "payload_cleared" | "evidence_not_clearable") {
@@ -57,7 +58,7 @@ export async function publishRoomAgentWork(input: {
     throw new RoomAgentWorkError("invalid_summary");
   }
   const digest = createHash("sha256").update(JSON.stringify(summary)).digest("hex");
-  return db.transaction(async (tx) => {
+  const published = await db.transaction(async (tx): Promise<{ status: "created" | "updated" | "replayed"; work: RoomAgentWork }> => {
     if (!(await assertSupervisorGrantFenceTx(tx, input.fence))) throw new SupervisorGrantFenceStaleError();
     // Reprovisioning can rotate token_version under the installation advisory
     // lock instead. This row lock also fences that path through commit.
@@ -138,7 +139,22 @@ export async function publishRoomAgentWork(input: {
     await saveRoomWorkReviewPage(tx, created, summary, reviewPage);
     return { status: "created", work: publicWork(created) };
   });
+  // A turn that ended without a reply (or failed, or was interrupted) is
+  // still over: the next reply position need not wait out its deadline.
+  // Idempotent, so a replayed report changes nothing; if this step fails the
+  // deadline sweep still releases the next position.
+  if (TERMINAL_TURN_STATES.has(summary.recorded_state)) {
+    const released = await db.transaction((tx) => finishReplyTurnsTx(tx, input.room_id, [{
+      message_number: input.source_message_number,
+      agent_key: published.work.agent_key,
+    }]));
+    queueReplyTurnWakes(released);
+  }
+  return published;
 }
+
+const TERMINAL_TURN_STATES: ReadonlySet<string> = new Set(["completed", "completed_no_reply", "failed", "interrupted"]);
+
 
 /** Independent MCP captures attach only to the worker's own authenticated message.
  * Session locks fence replacement/disconnect; no supervisor custody is inferred. */

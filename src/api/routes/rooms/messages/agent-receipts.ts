@@ -8,6 +8,7 @@ import { parseScopedId } from "../../../db/utils.js";
 import { resolveParticipantRoom, routeParam } from "./helpers.js";
 import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
 import { queueMessageInfoInvalidation } from "../../../server/message-info-events.js";
+import { finishReplyTurnsTx, queueReplyTurnWakes, type ReleasedReplyTurn } from "../../../db/messages/reply-turns.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
 
@@ -112,6 +113,7 @@ export function registerAgentReceiptsRoute(
     // Compare-and-set against the observed state, with the history event in
     // the same transaction: a racing writer loses cleanly instead of silently
     // regressing the receipt or splitting state from its event.
+    const releasedReplyTurns: ReleasedReplyTurn[] = [];
     const applied = await db.transaction(async (tx) => {
       const updated = await tx
         .update(message_agent_receipts)
@@ -137,8 +139,17 @@ export function registerAgentReceiptsRoute(
         actor_session_id: agentSessionId,
         timestamp,
       });
+      // An agent that reports no reply (or cancels) has ended its reply turn;
+      // the next position need not wait out its deadline.
+      if (existingReceipt.turn_position !== null && (requestedState === "no_reply" || requestedState === "cancelled")) {
+        releasedReplyTurns.push(...await finishReplyTurnsTx(tx, project.id, [{
+          message_number: messageNumber,
+          agent_key: existingReceipt.agent_key,
+        }]));
+      }
       return true;
     });
+    queueReplyTurnWakes(releasedReplyTurns);
 
     if (!applied) {
       res.status(409).json({ error: "Receipt state changed concurrently; re-read and retry." });

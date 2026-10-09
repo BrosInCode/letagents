@@ -1,6 +1,7 @@
 import crypto, { randomUUID } from "node:crypto";
 import { isMcpWorkerId, isMcpConnectionToken } from "../../../shared/mcp-worker.js";
 import { getSessionConnections } from "../messages/session-connections.js";
+import { finishReplyTurnsTx, queueReplyTurnWakes, type ReleasedReplyTurn } from "../messages/reply-turns.js";
 import { adoptTaskLeasesFromEndedSessionsTx, relabelTaskWorkTx, type AdoptedTaskLease } from "../coordination/lease-adoption.js";
 import { agentDisplayNameKey } from "../../rooms/agent-display-name-allocation.js";
 import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, not, or, sql } from "drizzle-orm";
@@ -440,6 +441,7 @@ export async function createFencedRoomAgentSession(
 
   const takeover = [...new Set(takeoverSessionIds)].sort();
   const unavailableReceiptTargets: number[] = [];
+  const releasedReplyTurns: ReleasedReplyTurn[] = [];
   const committed = await db.transaction(async (tx) => {
     if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
       throw new Error("Supervisor grant fence is stale.");
@@ -709,7 +711,7 @@ export async function createFencedRoomAgentSession(
     }
     for (const holder of takenOver) {
       unavailableReceiptTargets.push(
-        ...await markUnresolvedReceiptsUnavailableTx(tx, holder, endedAt),
+        ...await markUnresolvedReceiptsUnavailableTx(tx, holder, endedAt, releasedReplyTurns),
       );
     }
     // A supervised worker's leases move only when its supervisor starts it
@@ -738,6 +740,7 @@ export async function createFencedRoomAgentSession(
     };
   });
   emitCommittedCredentialInvalidations(committed.invalidations);
+  queueReplyTurnWakes(releasedReplyTurns);
   if (unavailableReceiptTargets.length > 0) {
     // Dynamic import: the server event module transitively imports this file.
     const { queueMessageInfoInvalidation } = await import("../../server/message-info-events.js");
@@ -1358,6 +1361,7 @@ export async function endRoomAgentSession(input: {
   end_reason?: RoomAgentSessionEndReason | null;
 }): Promise<RoomAgentSession | null> {
   const unavailableReceiptTargets: number[] = [];
+  const releasedReplyTurns: ReleasedReplyTurn[] = [];
   let unavailableReceiptRoom: string | null = null;
   const credentialInvalidations: RoomAgentCredentialInvalidation[] = [];
   const ended = await db.transaction(async (tx) => {
@@ -1446,7 +1450,7 @@ export async function endRoomAgentSession(input: {
     });
     await queueRoomAgentCredentialInvalidationsTx(tx, credentialInvalidations.slice(-1));
     unavailableReceiptTargets.push(
-      ...await markUnresolvedReceiptsUnavailableTx(tx, row as RoomAgentSessionRow, now),
+      ...await markUnresolvedReceiptsUnavailableTx(tx, row as RoomAgentSessionRow, now, releasedReplyTurns),
     );
     unavailableReceiptRoom = (row as RoomAgentSessionRow).room_id;
   }
@@ -1454,6 +1458,7 @@ export async function endRoomAgentSession(input: {
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
   });
   emitCommittedCredentialInvalidations(credentialInvalidations);
+  queueReplyTurnWakes(releasedReplyTurns);
   if (unavailableReceiptRoom && unavailableReceiptTargets.length > 0) {
     // Dynamic import: the server event module transitively imports this file.
     // Room-level so the shared stream never enumerates ids that may be
@@ -1475,6 +1480,7 @@ async function markUnresolvedReceiptsUnavailableTx(
   tx: any,
   endedSession: RoomAgentSessionRow,
   now: string,
+  releasedReplyTurns: ReleasedReplyTurn[],
 ): Promise<number[]> {
   const [successor] = await tx
     .select({ session_id: room_agent_sessions.session_id })
@@ -1488,11 +1494,17 @@ async function markUnresolvedReceiptsUnavailableTx(
     .limit(1);
   if (successor) return [];
 
-  const unresolved: Array<{ id: string; message_number: number; receipt_state: string }> = await tx
+  const unresolved: Array<{
+    id: string;
+    message_number: number;
+    receipt_state: string;
+    turn_position: number | null;
+  }> = await tx
     .select({
       id: message_agent_receipts.id,
       message_number: message_agent_receipts.message_number,
       receipt_state: message_agent_receipts.receipt_state,
+      turn_position: message_agent_receipts.turn_position,
     })
     .from(message_agent_receipts)
     .where(and(
@@ -1517,5 +1529,15 @@ async function markUnresolvedReceiptsUnavailableTx(
     actor_session_id: null,
     timestamp: now,
   })));
+  // An agent that left cannot take its reply turn. Its turn ends (a held
+  // turn is skipped), and the next ready position need not wait out the
+  // deadline. "Ready" still waits for every earlier position.
+  releasedReplyTurns.push(...await finishReplyTurnsTx(
+    tx,
+    endedSession.room_id,
+    unresolved
+      .filter((receipt) => receipt.turn_position !== null)
+      .map((receipt) => ({ message_number: receipt.message_number, agent_key: endedSession.agent_key })),
+  ));
   return unresolved.map((receipt) => receipt.message_number);
 }

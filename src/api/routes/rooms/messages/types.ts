@@ -23,7 +23,12 @@ export interface RoomMessageRouteDeps {
   ): Promise<boolean>;
   getMessageStreamCheckpoint?(
     roomId: string,
-    options: { requestedCursor?: string | null; includePromptOnly?: boolean; waitForRouting?: boolean },
+    options: {
+      requestedCursor?: string | null;
+      includePromptOnly?: boolean;
+      waitForRouting?: boolean;
+      holdAgentKey?: string | null;
+    },
   ): Promise<{ checkpoint: string | null; cursorExists: boolean }>;
   beginRoomAgentDelivery?: typeof import("../../../rooms/agent-delivery.js").beginRoomAgentDelivery;
   attachReceiptAuthorityActivations?: typeof import("./receipt-activation.js").attachReceiptAuthorityActivations;

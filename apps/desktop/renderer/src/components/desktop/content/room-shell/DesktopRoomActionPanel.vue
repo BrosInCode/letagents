@@ -116,6 +116,7 @@
         <h3 id="room-settings-heading-conversation">Conversation</h3>
         <div class="room-settings-list">
           <RoomConversationRouting :room-identifier="room.identifier" @summary="routingSummary = $event" />
+          <RoomReplyOrder :room-identifier="room.identifier" @summary="replyOrderSummary = $event" />
         </div>
       </section>
 
@@ -362,6 +363,7 @@ import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSqua
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
+import RoomReplyOrder from "./RoomReplyOrder.vue";
 import RoomGitHubEventFilter from "./RoomGitHubEventFilter.vue";
 import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
@@ -417,6 +419,7 @@ const { pinnedMessagesHidden, togglePinnedMessages } = usePinnedMessageVisibilit
 const renameDraft = ref(props.room.displayName);
 const renameSaved = ref(false);
 const routingSummary = ref<string | null>(null);
+const replyOrderSummary = ref<string | null>(null);
 const guidelinesSummary = ref<string | null>(null);
 const contentElement = ref<HTMLElement | null>(null);
 
@@ -630,7 +633,12 @@ const sections = computed<SectionLink[]>(() => {
   const all: Array<SectionLink | null> = [
     { id: "general", title: "General", icon: SlidersHorizontal, summary: null },
     cloudRoom.value
-      ? { id: "conversation", title: "Conversation", icon: MessageSquare, summary: routingSummary.value }
+      ? {
+          id: "conversation",
+          title: "Conversation",
+          icon: MessageSquare,
+          summary: [routingSummary.value, replyOrderSummary.value].filter(Boolean).join(" · ") || null,
+        }
       : null,
     { id: "guidelines", title: "Guidelines", icon: FileText, summary: cloudRoom.value ? guidelinesSummary.value : null },
     {

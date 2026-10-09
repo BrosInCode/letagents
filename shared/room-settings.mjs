@@ -106,3 +106,17 @@ export function githubRoomChatEventKind(event) {
       return null;
   }
 }
+
+/**
+ * How agents answer a message that activates several of them at once (a
+ * broadcast, or the small-room fallback). "parallel" — the default when a
+ * room has not chosen — wakes them all together; "sequential", which a room
+ * admin turns on, gives each agent a turn after the one before has answered.
+ */
+export const ROOM_AGENT_REPLY_ORDERS = Object.freeze(["sequential", "parallel"]);
+export const DEFAULT_ROOM_AGENT_REPLY_ORDER = "parallel";
+
+/** A known order, or null when the input is not one. */
+export function normalizeRoomAgentReplyOrder(value) {
+  return ROOM_AGENT_REPLY_ORDERS.includes(value) ? value : null;
+}

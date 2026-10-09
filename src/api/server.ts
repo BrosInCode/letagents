@@ -3,6 +3,7 @@ import { createApiApp } from "./server/app.js";
 import { startRoomEventBridge, stopRoomEventBridge } from "./server/event-bridge.js";
 import { startLivenessSweep, stopLivenessSweep } from "./server/liveness.js";
 import { startJevRoutingWorker } from "./messages/jev-routing-worker.js";
+import { startReplyTurnHoldSweep, stopReplyTurnHoldSweep } from "./server/reply-turn-holds.js";
 import { startDesktopPushWorker } from "./notifications/worker.js";
 import { startWakeRuleScheduler } from "./wake-rules/scheduler.js";
 import { githubRoomEvents, taskEvents, wakeRuleEvents } from "./server/events.js";
@@ -30,6 +31,8 @@ startRoomEventBridge();
 // Announces worker-agent deaths and recoveries into rooms. Started from the
 // server entry point only, so tests and embedders opt in explicitly.
 startLivenessSweep();
+// Releases sequential reply turns whose deadline passed (same opt-in rule).
+startReplyTurnHoldSweep();
 const stopDesktopPushWorker = startDesktopPushWorker();
 const stopJevRoutingWorker = startJevRoutingWorker();
 const stopWakeRuleScheduler = startWakeRuleScheduler({ taskEvents, githubRoomEvents, wakeRuleEvents });
@@ -51,7 +54,7 @@ const stopIntake = () => closeHttpServerIntake(server);
 const shutdown = createGracefulShutdownController({
   stopIntake,
   stopWorkers: async () => {
-    await Promise.all([stopLivenessSweep(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopWakeRuleScheduler()]);
+    await Promise.all([stopLivenessSweep(), stopReplyTurnHoldSweep(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopWakeRuleScheduler()]);
   },
   stopBridge: stopRoomEventBridge,
   closeBroker: async () => {

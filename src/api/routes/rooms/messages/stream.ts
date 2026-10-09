@@ -1,6 +1,7 @@
 import { ROOM_TYPING } from "../../../../../shared/room-typing.mjs";
 import { roomTyping } from "../../../server/room-typing.js";
 import { waitForMessageRouting } from "./wait-for-routing.js";
+import { replyTurnHoldAgentKey } from "./activation-identity.js";
 import type { Express } from "express";
 import {
   ROOM_RESOURCE_INVALIDATION_CAPABILITY,
@@ -154,6 +155,7 @@ export function registerMessageStreamRoute(
           requestedCursor,
           includePromptOnly,
           waitForRouting: liveController.activationIdentity?.session_kind === "worker",
+          holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
         }),
       );
       await writeEvent(roomSyncSseFrame({
@@ -228,6 +230,7 @@ export function registerMessageStreamRoute(
             // reconnect replay without a second delivery acknowledgment.
             if (liveController.activationIdentity?.session_kind === "worker" && !await waitForMessageRouting({
               roomId: projectId, messageId: event.message.id, includePromptOnly,
+              holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
               closed: () => streamClosed, load: deps.getMessageStreamCheckpoint,
             })) return;
             // Let every listener enter the shared per-event overlay batch.

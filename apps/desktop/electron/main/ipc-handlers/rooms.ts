@@ -1,5 +1,6 @@
 import { createDesktopMessageReminder, getDesktopMessageReminders, deleteDesktopMessageReminder } from "../rooms/reminders.js";
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
+import { getDesktopReplyOrder, setDesktopReplyOrder } from "../rooms/reply-order.js";
 import { getDesktopMessageLinkPreviews } from "../rooms/link-previews.js";
 import { getDesktopMessagePins, setDesktopMessagePin } from "../rooms/pins.js";
 import { reportDesktopRoomTyping } from "../rooms/typing.js";
@@ -449,6 +450,8 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle("desktop:room:get-conversation-routing", (_event, roomIdentifier: string) => getDesktopConversationRouting(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
+  targetIpcMain.handle("desktop:room:get-reply-order", (_event, roomIdentifier: string) => getDesktopReplyOrder(roomIdentifier));
+  targetIpcMain.handle("desktop:room:set-reply-order", (_event, roomIdentifier: string, enabled: boolean) => setDesktopReplyOrder(roomIdentifier, enabled));
   targetIpcMain.handle("desktop:room:get-message-link-previews", (_event, roomIdentifier: string, references) => getDesktopMessageLinkPreviews(roomIdentifier, references));
   targetIpcMain.handle("desktop:room:get-message-pins", (_event, roomIdentifier: string) => getDesktopMessagePins(roomIdentifier));
   targetIpcMain.handle("desktop:room:create-message-reminder", (_event, room: string, message: string, dueAt: string) => createDesktopMessageReminder(room, message, dueAt));
