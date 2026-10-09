@@ -328,7 +328,8 @@ const replyFromSession = (text: string) => ({ turnId, outcome: "reply", text, ev
 const endedWith = (id: string, text: string): ClaudeEvidenceRecord =>
   ({ type: "assistant", sessionId, message: { id, role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } });
 /** The texts no reading of the turn may ever return: another turn's answer, a sub-agent's report. */
-const NOT_THE_TURNS_ANSWER = ["ANSWER TO THE TASK NOTICE", "SUBAGENT REPORT"];
+const NOT_THE_TURNS_ANSWER = ["ANSWER TO THE TASK NOTICE", "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE",
+  "ANSWER NUMBER 1 AFTER THE TURN, TO A REQUEST THAT HOLDS 2 TASK NOTICES", "ANSWER OF THE SECOND TURN", "SUBAGENT REPORT", "SECOND SUBAGENT REPORT"];
 
 /**
  * What the real session of each capture proves, whenever the process ended: after each of its rows, the answer
@@ -351,6 +352,29 @@ const REAL_SESSION_ANSWERS: Record<string, Array<string | null>> = {
   subagent_in_foreground: [null, null, null, "ANSWER OF THE TURN"],
   // The request, the Skill call, its result, the skill's text, the turn's answer.
   skill_call: [null, null, null, null, "ANSWER OF THE TURN"],
+  // The request, two tool calls, their results, the turn's answer; then, for each task, its notice and the answer to it.
+  two_background_commands: [null, null, null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
+  two_subagents_in_background: [null, null, null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
+  subagent_and_background_command: [null, null, null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
+  // The same turn; then both notices, and the one answer to them.
+  two_background_commands_end_together: [null, null, null, null, null, ...Array<string>(4).fill("ANSWER OF THE TURN")],
+  // The request, a tool call, its result, the turn's answer; then the task's notice, and what the CLI wrote for it:
+  // an answer, its request for visible output, the provider's error, or the mark of an interrupt.
+  background_command_fails: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
+  background_command_notice_answer_empty: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
+  background_command_notice_api_error: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
+  background_command_running_at_interrupt: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
+  interrupt_during_task_notice_answer: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
+  subagent_stopped_by_request: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
+  // A command that was stopped has no notice: the session ends with the turn.
+  background_command_stopped_by_request: [null, null, null, "ANSWER OF THE TURN"],
+  background_command_running_at_input_close: [null, null, null, "ANSWER OF THE TURN"],
+  // The task ended while the turn still ran. Its notice went to the model with the turn's last request, and is no row of the session.
+  task_ends_while_turn_goes_on: [null, null, null, null, null, "ANSWER OF THE TURN, TO A REQUEST THAT HOLDS THE TASK NOTICE"],
+  // The turn; then the first notice, a tool call and its result, and the answer, whose request held both notices.
+  task_ends_while_notice_is_answered: [null, null, null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
+  // The turn; then a second prompt and its answer; then the task's notice and the answer to it.
+  task_ends_during_next_turn: [null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
 };
 
 test("real Claude Code sessions: wherever the process ended, the answer read is the turn's own or none", () => {

@@ -270,6 +270,14 @@ export interface ClaudeCodeProviderAdapterOptions {
   compactionTimeoutMs?: number;
   /** SIGTERM → SIGKILL escalation window for stop() and the attach-path fence. */
   stopGraceMs?: number;
+  /** How long a room turn stays open for a sub-agent that it started; defaults to thirty minutes. */
+  backgroundSubagentWaitLimitMs?: number;
+  /** How long a room turn stays open for a background command, or other work, that still runs; defaults to two minutes. */
+  backgroundCommandWaitLimitMs?: number;
+  /** How long the answer to a finished task's notice gets to begin; defaults to five minutes. */
+  backgroundNoticeStartLimitMs?: number;
+  /** How often a turn that is held open says so again, with the time it has waited; defaults to one minute. */
+  backgroundWorkNoticeEveryMs?: number;
 }
 
 const BASE_CLAUDE_CAPABILITIES: ProviderAdapterCapabilities = {
@@ -549,6 +557,116 @@ const CLAUDE_DAEMON_BOOTSTRAP_PROMPT = [
 ].join("\n");
 
 type ClaudeRoomTurnTerminal = ClaudeExactTurnResult | ClaudeExactTurnFailure;
+
+/**
+ * A room turn stays open for background work that it started, so the room gets one complete answer.
+ *
+ * The model can start a shell command or a sub-agent that goes on after the tool call that started it. Claude
+ * Code ends the command with the model's interim answer. It tells the model later how the work ended: with the
+ * next request of whatever turn is running, or else in a turn of its own, whose result names no command.
+ * 1. The turn's own result arrives, and work that the turn started has not been reported to the model: the
+ *    turn does not end. Its answer is kept, and its result line is kept back.
+ * 2. Each later result that answers the notice of such work adds its text.
+ * 3. Work that still runs keeps the turn open up to the limit of its kind. Work that has ended keeps it open
+ *    until the model has answered its notice. The turn ends when no work keeps it open. The reply is the
+ *    kept texts in their order, with a blank line between them. Empty texts and repeated texts are left out.
+ * 4. The turn also ends with what it has when an answer to a notice fails, and when all the work that it
+ *    waits for has ended and no answer begins in time. Its owner can end the wait at any time: the reply is
+ *    then posted with what the turn has. A reply that lacks something says so in one plain line.
+ * An answer to a notice that comes after the turn has ended is not posted, and it ends no other turn.
+ */
+/** A sub-agent is finite work, and its report is the answer. No turn stays open longer than this. */
+export const CLAUDE_BACKGROUND_SUBAGENT_WAIT_LIMIT_MS = 30 * 60_000;
+/**
+ * A command that runs in the background is often a server or a watcher that is meant to go on. Any other kind
+ * of background task has not been captured, and gets this limit too.
+ */
+export const CLAUDE_BACKGROUND_COMMAND_WAIT_LIMIT_MS = 2 * 60_000;
+/**
+ * The notice of work that has ended is answered at once: the CLI has nothing else to do. The stream shows no
+ * line for the start of that answer, and a notice that the running turn took with its last request gets no
+ * answer of its own at all. So a turn whose work has all ended waits this long for a first line, and no longer.
+ */
+export const CLAUDE_BACKGROUND_NOTICE_START_LIMIT_MS = 5 * 60_000;
+/** The turn is held open: the owner reads what it waits for, and for how long. The one event of these that Chat shows. */
+export const CLAUDE_BACKGROUND_WORK_METHOD = "letagents/backgroundWork";
+/** The result that answers a task's notice. It ends no turn, and its failure is not the agent's. */
+export const CLAUDE_BACKGROUND_WORK_ANSWER_METHOD = "letagents/backgroundWorkAnswer";
+/** The same result when no room turn runs: the agent is idle after it. */
+export const CLAUDE_BACKGROUND_WORK_FINISHED_METHOD = "letagents/backgroundWorkFinished";
+const wholeMinutes = (ms: number) => Math.max(1, Math.round(ms / 60_000));
+export const CLAUDE_BACKGROUND_WORK_TEXT = {
+  // Added to the room reply, each as a line of its own after the model's texts.
+  /** A command passed its limit. That is the usual end for a server or a watcher, and no fault. */
+  commandStillRuns: "A command that this turn started still runs in the background, as a server or a watcher does. Its later output will not be posted.",
+  /** A sub-agent passed its limit. Its report was the answer, so this is a fault. */
+  subagentTimedOut: (limitMs: number) => `A sub-agent that this turn started did not finish in ${wholeMinutes(limitMs)} minutes. Its report is not in this reply and will not be posted.`,
+  /** A sub-agent still ran when the turn ended for another reason. */
+  stillRunning: "Background work that this turn started was still running when this reply was posted. Its later result will not be posted.",
+  /** The work had ended, and the answer to its notice failed or was not there in time. */
+  notReported: "Background work that this turn started has ended, but Claude's report on it is not in this reply.",
+  /** The owner ended the wait: with Stop, or with "Post answer now". */
+  ownerEnded: "The owner ended the wait for background work that this turn started. A later result will not be posted.",
+  // For the owner, in the agent's activity.
+  limitReached: "The wait for background work reached its time limit. The turn was ended, and a later result will not be posted to the room.",
+  noAnswerBegan: "Background work has ended and Claude gave no further answer about it. The turn was ended with the answer it had.",
+  answerFailed: "Claude could not answer about background work that ended:",
+  notPosted: "Background work ended after its room turn. Claude's answer about it was not posted to the room.",
+} as const;
+
+/**
+ * What the owner reads while a turn is held open: the work that still keeps it open, by kind, in the model's
+ * own short descriptions. The times stand before the descriptions, because Chat cuts a long line at its end.
+ */
+export function claudeBackgroundWorkWaitSummary(
+  waitsFor: ReadonlyArray<{ description: string; subagent: boolean; running: boolean }>,
+  waitedMs: number,
+  commandLimitMs = CLAUDE_BACKGROUND_COMMAND_WAIT_LIMIT_MS,
+): string {
+  const waited = waitedMs < 60_000 ? "under 1 min" : `${Math.floor(waitedMs / 60_000)} min`;
+  const named = (subagent: boolean) => {
+    const all = waitsFor.filter((task) => task.running && task.subagent === subagent).map((task) => `"${task.description}"`);
+    return { count: all.length, list: `${all.slice(0, 3).join(", ")}${all.length > 3 ? ` and ${all.length - 3} more` : ""}` };
+  };
+  const subagents = named(true);
+  const commands = named(false);
+  const forCommands = `up to ${wholeMinutes(commandLimitMs)} min for ${commands.count === 1 ? "a background command" : "background commands"}: ${commands.list}.`;
+  if (subagents.count) {
+    return `Waiting for ${subagents.count === 1 ? "a sub-agent" : "sub-agents"} to finish (${waited}): ${subagents.list}.${commands.count ? ` Also ${forCommands}` : ""}`;
+  }
+  return commands.count ? `Waiting ${forCommands}` : `Waiting for Claude's answer about background work that has ended (${waited}).`;
+}
+
+/** The model's own short description of a task, as one printable line. */
+function shownTaskDescription(value: unknown): string {
+  // eslint-disable-next-line no-control-regex
+  const text = typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f"]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) : "";
+  return text || "a task";
+}
+
+/** The result of the turn that Claude Code runs by itself for the notice of a background task. It names no command. */
+function isClaudeTaskNoticeResult(message: ClaudeStreamMessage, sessionId: string): boolean {
+  const origin = message.origin as { kind?: unknown } | null | undefined;
+  return message.type === "result" && message.user_message_uuid == null && origin?.kind === "task-notification"
+    && sessionIdOf(message) === sessionId;
+}
+
+type ClaudeHeldRoomTurn = {
+  turnId: string;
+  /** The turn's own result line. It is published when the turn ends. */
+  result: ClaudeStreamMessage;
+  /** What the model wrote for the room: the turn's own answer, then each answer to a notice. */
+  answers: string[];
+  sinceMs: number;
+  /** A line of the answer to a notice has been seen, and its result has not. */
+  answering: boolean;
+  /** Since when all the work that the turn waits for has ended, and no line of an answer has been seen. */
+  answerDueSinceMs: number | null;
+  /** Says again, at a fixed pace, what the turn waits for. */
+  notice: ReturnType<typeof setInterval>;
+  /** Looks again when the next limit is reached. */
+  wake: ReturnType<typeof setTimeout> | null;
+};
 
 const CLAUDE_API_ERROR_CATEGORIES = new Set([
   "authentication_failed", "oauth_org_not_allowed", "billing_error", "rate_limit",
@@ -1049,6 +1167,15 @@ class ClaudeProviderHandle implements ProviderHandle {
   /** The turn whose stream reported a usage window of the account that rejected a request. */
   roomTurnUsageLimit: string | null = null;
   activeRoomTurnId: string | null = null;
+  /**
+   * Work the CLI runs in the background, by its task id, until the model has been told how it ended. `turnId`
+   * is the room turn that started it; work that no room turn started has none. `sinceMs` is when it was first seen.
+   */
+  readonly backgroundTasks = new Map<string, { turnId: string | null; description: string; type: unknown; sinceMs: number }>();
+  /** Ended background tasks whose notice the model has still to be given, in the order the CLI reported them. */
+  readonly taskNotices: string[] = [];
+  /** The room turn whose own result has arrived, and which stays open for background work it started. */
+  heldRoomTurn: ClaudeHeldRoomTurn | null = null;
   roomTurnOperationId: string | null = null;
   pendingInterruptTurnId: string | null = null;
   contextualInterruptTerminalTurnId: string | null = null;
@@ -1120,6 +1247,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly compactions = new Map<string, ClaudeCompaction>();
   private readonly handleCompactions = new WeakMap<ClaudeProviderHandle, ClaudeCompaction>();
   private readonly stopGraceMs: number;
+  private readonly backgroundSubagentWaitLimitMs: number;
+  private readonly backgroundCommandWaitLimitMs: number;
+  private readonly backgroundNoticeStartLimitMs: number;
+  private readonly backgroundWorkNoticeEveryMs: number;
   private readonly handles = new Map<string, ClaudeProviderHandle>();
   private readonly processCustody: ProviderProcessCustody;
   private readonly pendingAttaches = new Map<string, {
@@ -1138,6 +1269,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     this.resumeInitTimeoutMs = options.resumeInitTimeoutMs ?? options.initTimeoutMs ?? RESUME_INIT_TIMEOUT_MS;
     this.compactionTimeoutMs = options.compactionTimeoutMs ?? 300_000;
     this.stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+    this.backgroundSubagentWaitLimitMs = options.backgroundSubagentWaitLimitMs ?? CLAUDE_BACKGROUND_SUBAGENT_WAIT_LIMIT_MS;
+    this.backgroundCommandWaitLimitMs = options.backgroundCommandWaitLimitMs ?? CLAUDE_BACKGROUND_COMMAND_WAIT_LIMIT_MS;
+    this.backgroundNoticeStartLimitMs = options.backgroundNoticeStartLimitMs ?? CLAUDE_BACKGROUND_NOTICE_START_LIMIT_MS;
+    this.backgroundWorkNoticeEveryMs = options.backgroundWorkNoticeEveryMs ?? 60_000;
   }
 
   runtimeCustody(workAttemptId: string, providerHandle?: ProviderHandle): "absent" | "owned" | "unknown" {
@@ -1249,6 +1384,18 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           `Claude returned ${streamMethod(result)} before the interrupt was dispatched.`,
           "not_applied",
         );
+      }
+      const held = handle.heldRoomTurn;
+      if (held?.turnId === activeTurnId) {
+        // The command has ended with its answer, and the turn only waits for background work. The owner ends
+        // that wait: the turn ends now, with the texts it has. Nothing was interrupted, so the reply stands
+        // and is posted. The work goes on in the CLI. The interrupt stops the answer to a task's notice
+        // when one is running, and does nothing otherwise.
+        this.settleHeldRoomTurn(handle, held, "owner");
+        try {
+          handle.child.writeLine(JSON.stringify({ type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } }));
+        } catch { /* The CLI is gone; its exit is observed separately. */ }
+        return { capability: "native_interrupt", interrupted: false, resumed: false, state: "idle" };
       }
       handle.pendingInterruptTurnId = activeTurnId!;
       try {
@@ -2114,6 +2261,18 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       ? null
       : this.contextualInterruptReplayTurnId(handle, message);
     if (contextualInterruptTurnId) handle.contextualInterruptResults.add(message);
+    let backgroundWork: "same" | "changed" | "tell" = "same";
+    if (handle.state !== "failed") {
+      backgroundWork = this.observeBackgroundWork(handle, message);
+      if (isClaudeTaskNoticeResult(message, handle.providerContinuationId)) {
+        const startedBy = this.takeTaskNotice(handle);
+        // An interrupt that the owner sent for the running turn can end this one instead. That stays as it was.
+        if (!contextualInterruptTurnId && !contextualInterruptReplayTurnId) {
+          this.consumeTaskNoticeResult(handle, message, startedBy);
+          return;
+        }
+      } else if (this.holdRoomTurn(handle, message)) return;
+    }
     const nativeLifecycle = this.observeNativeExecution(
       handle,
       message,
@@ -2122,6 +2281,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     );
     this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message),
       nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
+    // The line is published first: what it means for a turn that is held open comes after it.
+    if (backgroundWork !== "same") this.heldRoomTurnChanged(handle, backgroundWork === "tell");
     if (nativeLifecycle?.phase === "turn_terminal") this.handleCompactions.get(handle)?.clear();
     const typedAuthority = handle.lifecycleAuthorityMode === "typed";
     if (typedAuthority && nativeLifecycle?.phase === "turn_active") handle.state = "working";
@@ -2217,6 +2378,215 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         next_action: "",
       });
     }
+  }
+
+  /** The room turn that the CLI is running, once it has reported the command as started. */
+  private runningRoomTurn(handle: ClaudeProviderHandle): string | null {
+    const turnId = handle.activeRoomTurnId;
+    return turnId && !handle.heldRoomTurn && handle.executionTurnStarted && handle.executionTurnId === turnId ? turnId : null;
+  }
+
+  /**
+   * Follow the background work of the CLI: what started, what ended, and what the model has been told. Says
+   * whether this changed what a turn that is held open waits for, and whether its owner is to be told again.
+   */
+  private observeBackgroundWork(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): "same" | "changed" | "tell" {
+    if (sessionIdOf(message) !== handle.providerContinuationId || message.parent_tool_use_id != null) return "same";
+    const held = handle.heldRoomTurn;
+    let added = false;
+    const remember = (task: Record<string, unknown>) => {
+      if (typeof task.task_id !== "string" || !task.task_id || task.task_id.length > 128 || handle.backgroundTasks.has(task.task_id)) return;
+      if (handle.backgroundTasks.size >= 256) handle.backgroundTasks.delete(handle.backgroundTasks.keys().next().value!);
+      // Work that the answer to a notice starts belongs to the turn that is held open for that notice.
+      handle.backgroundTasks.set(task.task_id, { turnId: held?.turnId ?? this.runningRoomTurn(handle),
+        description: shownTaskDescription(task.description), type: task.task_type, sinceMs: Date.parse(this.deps.now()) });
+      added = true;
+    };
+    if (message.type === "assistant" || message.type === "user") {
+      if (message.type === "user") {
+        // The turn that is running goes on, and its next request to the model takes every notice that waits
+        // (captured for a tool's result; taken to hold for each row that the CLI adds to a turn, because a
+        // notice that is wrongly waited for holds its turn open). The answer to a notice is such a turn too,
+        // and its own notice stays the first in line until its result.
+        for (const taskId of handle.taskNotices.splice(this.runningRoomTurn(handle) ? 0 : 1)) this.taskReported(handle, taskId);
+      }
+      // While a turn is held open, only the answer to a notice writes these rows: it has begun.
+      if (held) held.answering = true;
+      return held ? "changed" : "same";
+    }
+    if (message.type !== "system") return "same";
+    if (message.subtype === "background_tasks_changed" && Array.isArray(message.tasks)) {
+      for (const task of message.tasks) if (task && typeof task === "object") remember(task as Record<string, unknown>);
+    } else if (message.subtype === "task_started" && message.is_backgrounded === true) {
+      remember(message);
+    } else if (message.subtype === "task_notification" && typeof message.task_id === "string") {
+      const task = handle.backgroundTasks.get(message.task_id);
+      // A task that ran inside its tool call reported to the model there, and is not known here.
+      if (!task) return "same";
+      // The model is not told of a command that was stopped. It is told of a sub-agent that was (both captured).
+      if (message.status === "stopped" && task.type === "local_bash") handle.backgroundTasks.delete(message.task_id);
+      else if (handle.taskNotices.push(message.task_id) > 256) handle.taskNotices.shift();
+      return held && task.turnId === held.turnId ? "tell" : "changed";
+    }
+    return added && held ? "tell" : "same";
+  }
+
+  /** The model has been told how this task ended, so nothing waits for the task any more. Returns the turn that started it. */
+  private taskReported(handle: ClaudeProviderHandle, taskId: string): string | null {
+    const startedBy = handle.backgroundTasks.get(taskId)?.turnId ?? null;
+    handle.backgroundTasks.delete(taskId);
+    return startedBy;
+  }
+
+  /** The room turn that started the work whose notice the CLI has just answered: the first in line. */
+  private takeTaskNotice(handle: ClaudeProviderHandle): string | null {
+    const taskId = handle.taskNotices.shift();
+    return taskId === undefined ? null : this.taskReported(handle, taskId);
+  }
+
+  /**
+   * The work of the held turn that the model has not been told about. Work that still runs keeps the turn open
+   * until `waitsUntilMs`: the limit of its kind, counted from the turn's own result, or from the start of work
+   * that began later.
+   */
+  private heldRoomTurnWork(handle: ClaudeProviderHandle, held: ClaudeHeldRoomTurn): Array<{ description: string; subagent: boolean; running: boolean; waitsUntilMs: number }> {
+    return [...handle.backgroundTasks].filter(([, task]) => task.turnId === held.turnId).map(([taskId, task]) => {
+      const subagent = task.type === "local_agent";
+      return { description: task.description, subagent, running: !handle.taskNotices.includes(taskId),
+        waitsUntilMs: Math.max(held.sinceMs, task.sinceMs) + (subagent ? this.backgroundSubagentWaitLimitMs : this.backgroundCommandWaitLimitMs) };
+    });
+  }
+
+  /** The turn's own result has arrived. Keep the turn open when work that it started has not been reported to the model. */
+  private holdRoomTurn(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): boolean {
+    const turnId = handle.activeRoomTurnId;
+    // A turn that the owner is stopping ends as it did before.
+    if (!turnId || handle.heldRoomTurn || message.type !== "result" || message.user_message_uuid !== turnId
+      || handle.pendingInterruptTurnId === turnId
+      || ![...handle.backgroundTasks.values()].some((task) => task.turnId === turnId)) return false;
+    const own = exactClaudeStreamTerminal(message, turnId, handle.providerContinuationId);
+    // Only an answer is held, or the model's word that it has none. A turn that failed ends as it did before.
+    if (!own || "error" in own || own.outcome === "unreadable") return false;
+    const held: ClaudeHeldRoomTurn = {
+      turnId, result: message, answers: own.outcome === "reply" ? [own.text] : [], sinceMs: Date.parse(this.deps.now()),
+      answering: false, answerDueSinceMs: null, wake: null,
+      notice: setInterval(() => this.heldRoomTurnChanged(handle, true), this.backgroundWorkNoticeEveryMs),
+    };
+    // A wait must not keep a process alive that has nothing else to do.
+    held.notice.unref?.();
+    handle.heldRoomTurn = held;
+    if (handle.lifecycleAuthorityMode !== "typed") handle.state = "working";
+    this.heldRoomTurnChanged(handle, true);
+    return true;
+  }
+
+  /**
+   * Look at the held turn again: after its work changed, when a limit is reached, and at a fixed pace. The
+   * turn ends when no work keeps it open. With `tell`, a turn that stays open says again what it waits for.
+   */
+  private heldRoomTurnChanged(handle: ClaudeProviderHandle, tell = false): void {
+    const held = handle.heldRoomTurn;
+    if (!held) return;
+    const now = Date.parse(this.deps.now());
+    const work = this.heldRoomTurnWork(handle, held);
+    // Work that still runs keeps the turn open up to its limit. Work that has ended keeps it open for the answer.
+    const waitsFor = work.filter((task) => !task.running || now < task.waitsUntilMs);
+    const lastMs = held.sinceMs + this.backgroundSubagentWaitLimitMs;
+    if (!waitsFor.length || now >= lastMs) {
+      this.settleHeldRoomTurn(handle, held, work.length ? "limit" : "answered");
+      return;
+    }
+    // All of it has ended: the CLI has only its answer to give, and it gives that at once.
+    held.answerDueSinceMs = held.answering || waitsFor.some((task) => task.running) ? null : held.answerDueSinceMs ?? now;
+    const answerDueMs = held.answerDueSinceMs === null ? Infinity : held.answerDueSinceMs + this.backgroundNoticeStartLimitMs;
+    if (now >= answerDueMs) {
+      this.settleHeldRoomTurn(handle, held, "no_answer");
+      return;
+    }
+    const nextMs = Math.min(lastMs, answerDueMs, ...waitsFor.filter((task) => task.running).map((task) => task.waitsUntilMs));
+    if (held.wake) clearTimeout(held.wake);
+    held.wake = setTimeout(() => this.heldRoomTurnChanged(handle), Math.max(1, nextMs - now));
+    held.wake.unref?.();
+    if (!tell) return;
+    // Say that the turn is held open, for what, and for how long. The daemon builds an agent's activity from its stream.
+    const summary = claudeBackgroundWorkWaitSummary(waitsFor, now - held.sinceMs, this.backgroundCommandWaitLimitMs);
+    this.publishStream(handle, CLAUDE_BACKGROUND_WORK_METHOD,
+      { waiting_for: waitsFor.filter((task) => task.running).map((task) => task.description), waited_ms: now - held.sinceMs }, "provider_event", null, null, summary);
+    this.publishActivity(handle, { source: "native_harness", method: CLAUDE_BACKGROUND_WORK_METHOD, summary, status: "working", checking: "", next_action: "" });
+  }
+
+  /** A result that answers the notice of a background task. `startedBy` is the room turn that started the task. */
+  private consumeTaskNoticeResult(handle: ClaudeProviderHandle, message: ClaudeStreamMessage, startedBy: string | null): void {
+    const held = handle.heldRoomTurn;
+    // The answer that was running has ended, whichever turn's work it was for.
+    if (held) held.answering = false;
+    if (!held || held.turnId !== startedBy) {
+      // Its turn has ended, or it never had one. Nothing is posted, and no turn ends on it.
+      this.publishStream(handle, handle.activeRoomTurnId ? CLAUDE_BACKGROUND_WORK_ANSWER_METHOD : CLAUDE_BACKGROUND_WORK_FINISHED_METHOD,
+        message, "provider_event", null, null, CLAUDE_BACKGROUND_WORK_TEXT.notPosted);
+      this.heldRoomTurnChanged(handle);
+      return;
+    }
+    // Read as the result of the held turn: the same shapes are an answer, no answer, or a failure with its text.
+    const answer = exactClaudeStreamTerminal({ ...message, user_message_uuid: held.turnId }, held.turnId, handle.providerContinuationId);
+    if (!answer || "error" in answer) {
+      this.publishStream(handle, CLAUDE_BACKGROUND_WORK_ANSWER_METHOD, message, "provider_event", null, null,
+        `${CLAUDE_BACKGROUND_WORK_TEXT.answerFailed} ${String(safeStreamPayload(answer?.error ?? "").payload).slice(0, 300)}`);
+      this.settleHeldRoomTurn(handle, held, "answer_failed");
+      return;
+    }
+    this.publishStream(handle, CLAUDE_BACKGROUND_WORK_ANSWER_METHOD, message, "provider_event");
+    if (answer.outcome === "reply") held.answers.push(answer.text);
+    this.heldRoomTurnChanged(handle, true);
+  }
+
+  /** End the turn that was held open: now its own result line is published, and its waiters get what it has. */
+  private settleHeldRoomTurn(
+    handle: ClaudeProviderHandle,
+    held: ClaudeHeldRoomTurn,
+    ended: "answered" | "answer_failed" | "limit" | "no_answer" | "owner",
+  ): void {
+    if (handle.heldRoomTurn !== held) return;
+    const left = this.heldRoomTurnWork(handle, held);
+    handle.heldRoomTurn = null;
+    clearInterval(held.notice);
+    if (held.wake) clearTimeout(held.wake);
+    const { turnId } = held;
+    const said = held.answers.map((text) => text.trim()).filter((text, index, all) => text && all.indexOf(text) === index);
+    // One plain line says what the reply lacks, and why. A command that still runs is the usual case, and no fault.
+    const lacks = ended === "owner" ? [CLAUDE_BACKGROUND_WORK_TEXT.ownerEnded] : [
+      ...(ended === "answer_failed" || (ended === "limit" && left.some((task) => !task.running)) ? [CLAUDE_BACKGROUND_WORK_TEXT.notReported] : []),
+      ...(!left.some((task) => task.running && task.subagent) ? []
+        : [ended === "limit" ? CLAUDE_BACKGROUND_WORK_TEXT.subagentTimedOut(this.backgroundSubagentWaitLimitMs) : CLAUDE_BACKGROUND_WORK_TEXT.stillRunning]),
+      ...(left.some((task) => task.running && !task.subagent) ? [CLAUDE_BACKGROUND_WORK_TEXT.commandStillRuns] : []),
+    ];
+    // A turn in which the model wrote nothing for the room posts nothing.
+    const terminal: ClaudeRoomTurnTerminal = said.length
+      ? { turnId, outcome: "reply", text: [...said, ...(lacks.length ? [lacks.join(" ")] : [])].join("\n\n"), evidence: "stream" }
+      : { turnId, outcome: "no_reply", text: null, evidence: "stream" };
+    try {
+      // A command that passed its limit is no news for the owner. Any other limit is.
+      if (ended === "no_answer" || (ended === "limit" && left.some((task) => !task.running || task.subagent))) {
+        this.publishStream(handle, CLAUDE_BACKGROUND_WORK_ANSWER_METHOD, {}, "provider_event", null, null,
+          ended === "limit" ? CLAUDE_BACKGROUND_WORK_TEXT.limitReached : CLAUDE_BACKGROUND_WORK_TEXT.noAnswerBegan);
+      }
+      const nativeLifecycle = this.observeNativeExecution(handle, held.result);
+      this.publishStream(handle, streamMethod(held.result), held.result, claudeStreamKind(held.result),
+        nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
+      if (nativeLifecycle?.phase === "turn_terminal") this.handleCompactions.get(handle)?.clear();
+    } finally {
+      // Whatever a listener does with those lines, the turn is over: nothing may wait for it any longer.
+      handle.roomTurnResults.set(turnId, terminal);
+      if (handle.activeRoomTurnId === turnId) handle.activeRoomTurnId = null;
+      for (const waiter of [...(handle.roomTurnWaiters.get(turnId) ?? [])]) waiter.resolve(terminal);
+      // A Stop that was on its way when the turn ended reads this as the result that came first.
+      const boundaries = [...handle.turnResultWaiters];
+      handle.turnResultWaiters.clear();
+      for (const resolve of boundaries) resolve(held.result);
+      if (handle.state === "working") handle.state = "idle";
+    }
+    this.publishActivity(handle, { source: "native_harness", method: streamMethod(held.result),
+      summary: "Turn completed", status: "idle", checking: "", next_action: "awaiting next room work" });
   }
 
   private contextualInterruptTurnId(
@@ -2526,6 +2896,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     handle.contextualInterruptTerminalTurnId = null;
     handle.permissionControlAvailable = false;
     handle.clearPermissions();
+    // A turn that was held open ends like any turn the process ended under: its waiters are told below, and
+    // the session, which holds the turn's own answer, is read for it.
+    const held = handle.heldRoomTurn;
+    if (held) {
+      handle.heldRoomTurn = null;
+      clearInterval(held.notice);
+      if (held.wake) clearTimeout(held.wake);
+    }
     if (exit.type === "exit") {
       handle.executionExitObserved = true;
       const identity = handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined;

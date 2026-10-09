@@ -126,30 +126,40 @@
         class="room-local-agent-work-list"
         data-testid="room-local-agent-work-list"
       >
-        <button
-          v-for="work in collapsedAgentWork.visible"
-          :key="work.id"
-          data-motion-work
-          :data-motion-session="work.agentSessionId"
-          :data-motion-agent="work.agentKey"
-          :data-motion-after="work.sourceMessageId"
-          type="button"
-          class="room-local-agent-work"
-          :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"
-          data-testid="room-local-agent-work"
-          @click="$emit('open-agent', workIndicatorAgentTarget(work))"
-        >
-          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
-          <span class="room-local-agent-work-copy">
-            <strong>{{ work.displayName }}</strong>
-            <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
-          </span>
-          <span class="room-local-agent-work-dots" aria-hidden="true">
-            <i></i>
-            <i></i>
-            <i></i>
-          </span>
-        </button>
+        <template v-for="work in collapsedAgentWork.visible" :key="work.id">
+          <button
+            data-motion-work
+            :data-motion-session="work.agentSessionId"
+            :data-motion-agent="work.agentKey"
+            :data-motion-after="work.sourceMessageId"
+            type="button"
+            class="room-local-agent-work"
+            :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"
+            data-testid="room-local-agent-work"
+            @click="$emit('open-agent', workIndicatorAgentTarget(work))"
+          >
+            <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+            <span class="room-local-agent-work-copy">
+              <strong>{{ work.displayName }}</strong>
+              <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
+            </span>
+            <span class="room-local-agent-work-dots" aria-hidden="true">
+              <i></i>
+              <i></i>
+              <i></i>
+            </span>
+          </button>
+          <button
+            v-if="work.waitsForBackgroundWork"
+            type="button"
+            class="room-local-agent-work-action"
+            title="Post the answer that the agent has now. The background work keeps running, and its later result will not be posted."
+            data-testid="room-local-agent-work-post-now"
+            @click="$emit('post-agent-answer-now', work.id)"
+          >
+            Post answer now
+          </button>
+        </template>
         <p
           v-if="collapsedAgentWork.hiddenCount > 0"
           class="room-local-agent-work-overflow"
@@ -256,6 +266,7 @@ const emit = defineEmits<{
   "load-older": [];
   "open-workspace": [work: DesktopRoomAgentWork];
   "open-agent": [target: AgentModalTarget];
+  "post-agent-answer-now": [agentId: string];
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
   "reveal-thread": [messageId: string];
