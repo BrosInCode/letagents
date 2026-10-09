@@ -134,8 +134,8 @@ async function refresh(): Promise<void> {
     if (latestState && next.status && latestState.daemonGeneration > next.status.generation) {
       return;
     }
-    if (latestState && next.status?.generation === latestState.daemonGeneration
-      && (!next.state || next.state.sequence < latestState.sequence)) next.state = latestState;
+    if (latestState && next.state && next.status?.generation === latestState.daemonGeneration
+      && next.state.sequence < latestState.sequence) next.state = latestState;
     accept(next);
     restarting.value = false;
     if (next.state) latestState = next.state;
@@ -162,7 +162,9 @@ onMounted(() => {
       || (state.daemonGeneration === latestState.daemonGeneration && state.sequence <= latestState.sequence)))) return;
     latestState = state;
     if (snapshot.value?.status?.generation === state.daemonGeneration) {
-      accept({ ...snapshot.value, state, observedAt: new Date().toISOString() });
+      // Null fleet state is an explicit unavailable result. Only a fresh
+      // supported read can restore it, including after maintenance ends.
+      if (snapshot.value.state) accept({ ...snapshot.value, state, observedAt: new Date().toISOString() });
     } else {
       restarting.value = Boolean(snapshot.value?.status);
       approvals.value = [];

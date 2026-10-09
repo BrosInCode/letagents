@@ -145,6 +145,43 @@ test("stream updates cannot be rolled back by an older read; restart triggers a 
   push(snapshot([], 3).state!); await flush(); assert.equal(reads, 2);
 });
 
+test("maintenance and unavailable fleet reads stay unknown through stream pushes until a supported read", async () => {
+  for (const maintenance of [true, false]) {
+    let push!: (value: DesktopSupervisorStateSnapshot) => void;
+    let current = snapshot();
+    const mounted = await mount({
+      getServiceSnapshot: async () => current,
+      onState: callback => { push = callback; return () => {}; },
+    });
+    try {
+      await flush();
+      assert.ok(find(mounted.root, "service-counts"));
+      assert.match(text(mounted.root), /Maple/);
+      current = snapshot();
+      current.state = null;
+      if (maintenance) current.status!.maintenanceHoldId = "test-maintenance";
+      else current.status!.capabilities.agentStateSubscription = false;
+      await mounted.vm.refresh(); await flush();
+      const assertUnavailable = () => {
+        assert.ok(find(mounted.root, "service-agents-unavailable"));
+        assert.equal(find(mounted.root, "service-counts"), undefined);
+        assert.equal(find(mounted.root, "service-agents-empty"), undefined);
+        assert.equal(find(mounted.root, "service-recovery"), undefined);
+        assert.doesNotMatch(text(mounted.root), /Maple|During hold/);
+      };
+      assertUnavailable();
+      push(snapshot([agent({ displayName: "During hold" })], 1, 2).state!);
+      await flush(); assertUnavailable();
+      current = snapshot([agent({ displayName: "After supported read" })], 1, 3);
+      await mounted.vm.refresh(); await flush();
+      assert.ok(find(mounted.root, "service-counts"));
+      assert.match(text(mounted.root), /After supported read/);
+      push(snapshot([agent({ displayName: "Live update" })], 1, 4).state!);
+      await flush(); assert.match(text(mounted.root), /Live update/);
+    } finally { mounted.app.unmount(); }
+  }
+});
+
 test("a restart that overtakes the initial read schedules a fresh read immediately", async () => {
   let push!: (value: DesktopSupervisorStateSnapshot) => void;
   const resolvers: ((value: DesktopSupervisorServiceSnapshot) => void)[] = [];
