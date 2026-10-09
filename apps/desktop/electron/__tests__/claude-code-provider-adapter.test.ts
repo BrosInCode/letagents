@@ -2661,6 +2661,20 @@ test("a Claude room turn refused at the account's usage limit fails with usage-l
     { type: "result", subtype: "success", is_error: false, session_id: sessionId, user_message_uuid: turnId, result: "Answered on overage." },
   ]);
   assert.equal(answered.result.outcome, "reply", "a turn that still answered is only an answer");
+
+  // An API key's ordinary 429, after Claude's own retries, rejects no usage window.
+  const plainRateLimit = await run(6, (turnId) => [
+    { type: "assistant", session_id: sessionId, error: "rate_limit", message: { content: [{ type: "text", text: "API Error: 429 rate_limit_error" }] } },
+    apiError(turnId, "API Error: 429 rate_limit_error"),
+  ]);
+  assert.equal("usageLimit" in plainRateLimit.result, false);
+  // A rejected window before a failure of another kind is not a usage limit either.
+  const otherFailure = await run(7, (turnId) => [
+    { type: "rate_limit_event", session_id: sessionId, rate_limit_info: { status: "rejected", resetsAt: 1_790_000_000 } },
+    { type: "assistant", session_id: sessionId, error: "invalid_request", message: { content: [{ type: "text", text: "API Error: 400" }] } },
+    apiError(turnId, "API Error: 400 invalid_request_error"),
+  ]);
+  assert.equal("usageLimit" in otherFailure.result, false);
 });
 
 test("a Claude turn recovered from its session marks a usage-limit failure", () => {
@@ -2675,6 +2689,8 @@ test("a Claude turn recovered from its session marks a usage-limit failure", () 
   assert.deepEqual(recoverExactClaudeTurnFailureFromSession(rows("t2", "unknown", "Claude AI usage limit reached|1790000000"), "t2", sessionId)?.usageLimit,
     { resetsAtMs: 1_790_000_000_000 });
   assert.equal(recoverExactClaudeTurnFailureFromSession(rows("t3", "overloaded", "API Error: 529 Overloaded"), "t3", sessionId)?.usageLimit, undefined);
+  assert.equal(recoverExactClaudeTurnFailureFromSession(rows("t4", "rate_limit", "API Error: 429 rate_limit_error"), "t4", sessionId)?.usageLimit, undefined,
+    "a bare rate_limit in the session file may be a short 429");
 });
 
 test("Claude clears exact-turn observation and fails the continuation when stdin dispatch throws", async () => {

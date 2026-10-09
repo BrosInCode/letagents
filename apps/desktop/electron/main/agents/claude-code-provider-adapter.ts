@@ -72,7 +72,6 @@ import {
 } from "./provider-evidence.js";
 import {
   CLAUDE_NO_ROOM_REPLY_SENTINEL,
-  CLAUDE_USAGE_LIMIT_API_ERRORS,
   claudeUsageLimitEvidence,
   claudeUsageLimitTextResetMs,
   exactClaudeStreamTerminal,
@@ -1049,7 +1048,7 @@ class ClaudeProviderHandle implements ProviderHandle {
    * whether Claude refused a request at the account's limit, and the latest
    * reset time of a rejected usage window (epoch ms). Reset per room turn.
    */
-  roomTurnUsageLimit: { turnId: string; limited: boolean; resetsAtMs: number | null } | null = null;
+  roomTurnUsageLimit: { turnId: string; rateLimited: boolean; rejected: boolean; billing: boolean; resetsAtMs: number | null } | null = null;
   roomTurnOperationId: string | null = null;
   pendingInterruptTurnId: string | null = null;
   contextualInterruptTerminalTurnId: string | null = null;
@@ -1321,7 +1320,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       await options.checkpointTurnStarted?.(turnId);
       terminalPromise = this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
       handle.activeRoomTurnId = turnId;
-      handle.roomTurnUsageLimit = { turnId, limited: false, resetsAtMs: null };
+      handle.roomTurnUsageLimit = { turnId, rateLimited: false, rejected: false, billing: false, resetsAtMs: null };
       if (handle.lifecycleAuthorityMode !== "typed") handle.state = "working";
       handle.executionTurnId = turnId;
       handle.executionTurnStarted = false;
@@ -2088,11 +2087,12 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (!tracking || handle.activeRoomTurnId !== tracking.turnId) return;
     if (sessionIdOf(message) !== handle.providerContinuationId) return;
     if (message.type === "assistant" && typeof message.error === "string") {
-      if (CLAUDE_USAGE_LIMIT_API_ERRORS.has(message.error)) tracking.limited = true;
+      if (message.error === "rate_limit") tracking.rateLimited = true;
+      if (message.error === "billing_error") tracking.billing = true;
     } else if (message.type === "rate_limit_event") {
       const info = message.rate_limit_info as { status?: unknown; resetsAt?: unknown } | null | undefined;
       if (info?.status !== "rejected") return;
-      tracking.limited = true;
+      tracking.rejected = true;
       if (typeof info.resetsAt === "number" && Number.isSafeInteger(info.resetsAt)
         && info.resetsAt > 0 && info.resetsAt <= CLAUDE_MAX_RESET_EPOCH_SECONDS) {
         tracking.resetsAtMs = Math.max(tracking.resetsAtMs ?? 0, info.resetsAt * 1000);
@@ -2111,7 +2111,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (!terminal || !("error" in terminal) || terminal.nativeOutcome !== "failed") return terminal;
     const tracking = handle.roomTurnUsageLimit?.turnId === terminal.turnId ? handle.roomTurnUsageLimit : null;
     if (tracking) handle.roomTurnUsageLimit = null;
-    if (!tracking?.limited && !looksLikeProviderUsageLimit(terminal.error)) return terminal;
+    // A plain rate limit (an API key's 429 after Claude's own retries) is
+    // not a used-up limit: only a request refused while a usage window was
+    // rejected, a billing refusal, or the limit's own words count.
+    const limited = Boolean(tracking && (tracking.billing || (tracking.rateLimited && tracking.rejected)));
+    if (!limited && !looksLikeProviderUsageLimit(terminal.error)) return terminal;
     return { ...terminal, usageLimit: claudeUsageLimitEvidence(tracking?.resetsAtMs ?? claudeUsageLimitTextResetMs(terminal.error)) };
   }
 

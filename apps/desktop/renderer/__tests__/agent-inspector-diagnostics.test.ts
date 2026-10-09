@@ -430,6 +430,12 @@ test("a message held at the usage limit says it is delivered by itself and keeps
   assert.match(check.nextStep, /^LetAgents delivers the message by itself at .+\. To continue sooner, change the provider account, then use Retry delivery\./);
   assert.equal(check.action?.kind, "retry_delivery", "Retry delivery stays available");
 
+  // A block for another reason that kept an earlier retry time still asks for attention.
+  fixture.resource.detail.receipt = { state: "blocked", next_attempt_at_ms: Date.parse("2026-09-14T15:00:00Z"),
+    last_error: "Room delivery restarted during publishing; acknowledgement is unsafe." };
+  assert.equal(fixture.assess().checks[3]!.state, "attention");
+  fixture.resource.detail.receipt = { state: "blocked", next_attempt_at_ms: Date.parse("2026-09-14T15:00:00Z"), last_error: reason };
+
   // A blocked receipt for another message keeps the ordinary wording.
   fixture.resource.detail.requested_source_message_id = "msg_0";
   const other = fixture.assess().checks[3]!;

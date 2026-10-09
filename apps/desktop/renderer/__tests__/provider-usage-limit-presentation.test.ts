@@ -27,7 +27,7 @@ function notice(input: { phase: 'start' | 'turn'; resetsAt: string | null; provi
 test('a stopped agent leads with what happened, then when it continues, in the viewer\'s time', () => {
   const view = usageLimitNoticePresentation(notice({ phase: 'turn', resetsAt: '2026-10-09T15:00:00.000Z' }), NOW, US)
   assert.equal(view?.title, "CalmLake stopped: Claude's usage limit was reached")
-  assert.equal(plain(view?.detail), 'Continues after the limit resets at 3:00 PM')
+  assert.equal(plain(view?.detail), 'Its messages wait until the limit resets at 3:00 PM')
 })
 
 test('an agent that could not start says when it starts; another day names the day', () => {
@@ -52,7 +52,7 @@ test('a reset already past says the limit reset', () => {
 
 test('without a reset time the notice says what ends the wait', () => {
   assert.equal(usageLimitNoticePresentation(notice({ phase: 'turn', resetsAt: null, provider: 'open-model' }), NOW, US)?.detail,
-    'Continues when the limit allows, or after the owner changes the account')
+    'Its messages wait until the limit allows, or until the owner changes the account')
   const start = usageLimitNoticePresentation(notice({ phase: 'start', resetsAt: null, provider: 'open-model' }), NOW, US)
   assert.equal(start?.title, "CalmLake couldn't start: The model provider's usage limit was reached")
   assert.equal(start?.detail, 'Starts when the limit allows, or after the owner changes the account')

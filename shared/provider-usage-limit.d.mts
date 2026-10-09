@@ -24,3 +24,5 @@ export function normalizeUsageLimitResetMs(value: unknown): number | null;
 export function providerUsageLimitNoticeText(input: ProviderUsageLimitNoticeInput): string;
 export function parseProviderUsageLimitNotice(text: string | null | undefined): ParsedProviderUsageLimitNotice | null;
 export function looksLikeProviderUsageLimit(text: string | null | undefined): boolean;
+/** Whether a blocked delivery's reason is a usage-limit hold the daemon wrote. */
+export function isUsageLimitPauseDetail(text: string | null | undefined): boolean;

@@ -114,9 +114,9 @@ test("a launch refused at the usage limit tells the room, once for each reset th
   await coordinator.record("agent-1", quotaError(reset), "test");
   await coordinator.record("agent-1", quotaError(), "test");
   assert.deepEqual(reports, [
-    { entryId: "agent-1", resetsAtMs: reset, occurrence: `start:${reset}` },
-    { entryId: "agent-1", resetsAtMs: reset, occurrence: `start:${reset}` },
-    { entryId: "agent-1", resetsAtMs: null, occurrence: `start:unknown:${Math.floor(clock.now / (24 * HOUR))}` },
+    { entryId: "agent-1", resetsAtMs: reset, occurrence: String(reset) },
+    { entryId: "agent-1", resetsAtMs: reset, occurrence: String(reset) },
+    { entryId: "agent-1", resetsAtMs: null, occurrence: `unknown:${Math.floor(clock.now / (24 * HOUR))}` },
   ], "the occurrence repeats for the same reset, so the room posts it once");
   await coordinator.record("agent-1", new Error("some other launch failure"), "test");
   assert.equal(reports.length, 3, "only a usage limit is reported");

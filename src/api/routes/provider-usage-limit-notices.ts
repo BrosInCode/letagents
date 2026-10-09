@@ -20,10 +20,22 @@ export type ProviderUsageLimitNoticeRouteDeps = RoomResolverDeps & {
   emitProjectMessage: typeof emitProjectMessage;
   requireCurrentSupervisorGrant?: typeof requireCurrentSupervisorGrant;
   getAgentIdentityByCanonicalKey?: typeof getAgentIdentityByCanonicalKey;
+  nowMs?: () => number;
 };
 
 const PROVIDERS = new Set(["claude-code", "claude", "codex", "cursor", "open-model", "open_model", "antigravity"]);
-const OCCURRENCE_PATTERN = /^[A-Za-z0-9:_.-]{1,128}$/;
+/** The reset the provider named (epoch ms), or a day number when it named none. */
+const OCCURRENCE_PATTERN = /^(?:(\d{12,14})|unknown:(\d{5}))$/;
+const DAY_MS = 24 * 60 * 60_000;
+/** One agent's notices are at least this far apart, whatever a desktop asks. */
+export const USAGE_LIMIT_NOTICE_MIN_INTERVAL_MS = 10 * 60_000;
+const lastNoticeAt = new Map<string, number>();
+
+/** Agent names are shown, never read as instructions or mentions. */
+function noticeAgentName(value: unknown, fallback: string): string {
+  const name = typeof value === "string" ? value.replace(/[@\p{Cc}\p{Cf}]/gu, "").replace(/\s+/g, " ").trim().slice(0, 64) : "";
+  return name || fallback;
+}
 
 /**
  * A desktop tells its agent's room that the agent reached its model
@@ -49,8 +61,15 @@ export function registerProviderUsageLimitNoticeRoutes(app: Express, deps: Provi
       const phase = body.phase === "start" || body.phase === "turn" ? body.phase : null;
       const occurrence = typeof body.occurrence === "string" ? body.occurrence.trim() : "";
       const resetsAtMs = body.resets_at === null || body.resets_at === undefined ? null : normalizeUsageLimitResetMs(body.resets_at);
+      // The occurrence must be the reset itself, or today when there is none,
+      // so a desktop cannot invent new occurrences to post more notices.
+      const occurrenceMatch = OCCURRENCE_PATTERN.exec(occurrence);
+      const today = Math.floor((deps.nowMs?.() ?? Date.now()) / DAY_MS);
+      const occurrenceFits = occurrenceMatch !== null && (resetsAtMs !== null
+        ? occurrenceMatch[1] === String(resetsAtMs)
+        : occurrenceMatch[2] !== undefined && Math.abs(Number(occurrenceMatch[2]) - today) <= 1);
       if (!requestedRoom || requestedRoom.length > 512 || !agentKey || !PROVIDERS.has(provider) || !phase
-        || !OCCURRENCE_PATTERN.test(occurrence)
+        || !occurrenceFits
         || (body.resets_at !== null && body.resets_at !== undefined && (typeof body.resets_at !== "string" || resetsAtMs === null))) {
         res.status(400).json({ error: "Invalid usage-limit notice." });
         return;
@@ -74,13 +93,22 @@ export function registerProviderUsageLimitNoticeRoutes(app: Express, deps: Provi
         }
         const project = await deps.resolveRoomOrReply(roomId, res);
         if (!project) return;
-        const displayName = typeof body.display_name === "string" && body.display_name.trim()
-          ? body.display_name.trim().slice(0, 64) : agent.display_name;
+        const throttleKey = `${project.id}\u0000${agent.canonical_key}`;
+        const nowMs = deps.nowMs?.() ?? Date.now();
+        const last = lastNoticeAt.get(throttleKey);
+        if (last !== undefined && nowMs - last < USAGE_LIMIT_NOTICE_MIN_INTERVAL_MS) {
+          res.setHeader("Retry-After", String(Math.ceil((USAGE_LIMIT_NOTICE_MIN_INTERVAL_MS - (nowMs - last)) / 1000)));
+          res.status(429).json({ error: "This agent's usage-limit notice was posted moments ago." });
+          return;
+        }
+        const displayName = noticeAgentName(body.display_name, noticeAgentName(agent.display_name, "An agent"));
         const text = providerUsageLimitNoticeText({ agentName: displayName, provider, resetsAt: resetsAtMs, phase });
         const message = await deps.emitProjectMessage(project.id, "letagents", text, {
           source: PROVIDER_USAGE_LIMIT_SOURCE,
           client_message_id: `${PROVIDER_USAGE_LIMIT_SOURCE}:${agent.canonical_key}:${phase}:${occurrence}`,
         });
+        lastNoticeAt.set(throttleKey, nowMs);
+        if (lastNoticeAt.size > 10_000) lastNoticeAt.delete(lastNoticeAt.keys().next().value!);
         res.setHeader("Cache-Control", "no-store");
         res.status(201).json({ status: "created", message_id: message.id, room_id: project.id });
       } catch (error) {

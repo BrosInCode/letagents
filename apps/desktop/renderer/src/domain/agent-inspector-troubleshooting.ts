@@ -2,6 +2,7 @@ import type { DesktopSupervisorDaemonStatus } from "../../../electron/ipc-types"
 import type { AgentInspectorActionAvailability, AgentInspectorProjection } from "./agent-inspector";
 import { sanitizeAgentInspectorDiagnosticsValue } from "./agent-inspector-diagnostics";
 import { formatUsageLimitResetTime } from "./provider-usage-limit-presentation";
+import { isUsageLimitPauseDetail } from "../../../../../shared/provider-usage-limit.mjs";
 import { agentInspectorRuntimeControlMatchesFence, describeAgentInspectorRuntimeControl, type AgentInspectorWorkResource } from "./agent-inspector-work";
 
 export type DiagnosticCheckId = "service" | "provider" | "room" | "delivery";
@@ -176,11 +177,13 @@ export function projectAgentTroubleshooting(
     const attention = entry.deliveryAttention ?? null;
     const rereads = blocked && attention?.retry === "reread_saved_turn";
     const posts = blocked && attention?.retry === "publish_saved_reply";
-    // A message held at the provider's usage limit is the only blocked receipt with a resume time:
-    // it is delivered by itself then, and Retry delivery stays available to continue sooner.
+    // A message held at the provider's usage limit: the daemon gave it a resume time and its own
+    // reason. It is delivered by itself then, and Retry delivery stays available to continue sooner.
     const resumeAtMs = fresh && blocked && !uncertain && !missing && resource.status === "ready" && detail?.receipt?.state === "blocked"
       && (detail.source_message?.id ?? detail.requested_source_message_id) === (attention?.sourceMessageId ?? room.inbox.blockedByMessageId)
-      && typeof detail.receipt.next_attempt_at_ms === "number" && Number.isSafeInteger(detail.receipt.next_attempt_at_ms) && detail.receipt.next_attempt_at_ms > 0
+      && isUsageLimitPauseDetail(detail.receipt.last_error)
+      && typeof detail.receipt.next_attempt_at_ms === "number" && Number.isSafeInteger(detail.receipt.next_attempt_at_ms)
+      && detail.receipt.next_attempt_at_ms > 0
       ? detail.receipt.next_attempt_at_ms : null;
     const resumeAt = resumeAtMs === null ? null : formatUsageLimitResetTime(resumeAtMs);
     const skipNote = !attention ? ""
