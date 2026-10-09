@@ -33,8 +33,6 @@ export type ClaudeExactTurnFailure = {
   usageLimit?: ProviderUsageLimitEvidence;
 };
 
-/** API error categories Claude gives a request refused at the account's usage limit or credit. */
-export const CLAUDE_USAGE_LIMIT_API_ERRORS: ReadonlySet<string> = new Set(["rate_limit", "billing_error"]);
 
 /**
  * The reset time an older Claude Code writes into its usage-limit text,
@@ -184,8 +182,9 @@ export function recoverExactClaudeTurnFailureFromSession(
   if (!failure) return null;
   const text = assistantText(failure).join("").trim();
   const status = typeof failure.apiErrorStatus === "number" ? ` (HTTP ${failure.apiErrorStatus})` : "";
-  const usageLimit = (typeof failure.error === "string" && CLAUDE_USAGE_LIMIT_API_ERRORS.has(failure.error))
-    || looksLikeProviderUsageLimit(text);
+  // The session file keeps no usage window, so a bare `rate_limit` could be
+  // a short 429: only a billing refusal or the limit's own words count.
+  const usageLimit = failure.error === "billing_error" || looksLikeProviderUsageLimit(text);
   return { turnId, nativeOutcome: "failed", error: text || `The model provider refused the request${status}.`,
     ...(usageLimit ? { usageLimit: claudeUsageLimitEvidence(claudeUsageLimitTextResetMs(text)) } : {}) };
 }

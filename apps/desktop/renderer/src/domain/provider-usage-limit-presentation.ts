@@ -49,13 +49,12 @@ export function usageLimitNoticePresentation(
   if (!notice) return null;
   const starting = notice.phase === "start";
   const title = `${notice.agentName} ${starting ? "couldn't start" : "stopped"}: ${notice.owner}'s usage limit was reached`;
-  const next = starting ? "Starts" : "Continues";
   if (notice.resetsAtMs === null) {
-    return { title, detail: `${next} when the limit allows, or after the owner changes the account` };
+    return { title, detail: starting
+      ? "Starts when the limit allows, or after the owner changes the account"
+      : "Its messages wait until the limit allows, or until the owner changes the account" };
   }
   const time = formatUsageLimitResetTime(notice.resetsAtMs, nowMs, options);
-  return {
-    title,
-    detail: notice.resetsAtMs <= nowMs ? `The limit reset at ${time}` : `${next} after the limit resets at ${time}`,
-  };
+  if (notice.resetsAtMs <= nowMs) return { title, detail: `The limit reset at ${time}` };
+  return { title, detail: starting ? `Starts after the limit resets at ${time}` : `Its messages wait until the limit resets at ${time}` };
 }

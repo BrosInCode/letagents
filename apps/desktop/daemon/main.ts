@@ -77,7 +77,7 @@ import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIn
 import { SupervisedDeliveryLifecycleCoordinator } from "./supervised-delivery-lifecycle-coordinator.js";
 import { supervisedToolRuntime, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 import { TurnControlCoordinator } from "./turn-control-coordinator.js";
-import { ProviderUsageLimitNotices } from "./provider-usage-limit-notices.js";
+import { ProviderUsageLimitNotices, usageLimitOccurrence } from "./provider-usage-limit-notices.js";
 
 export {
   productionSupervisedDeliveryHttp,
@@ -642,7 +642,7 @@ export class SupervisorDaemon {
         (agentId) => this.requestConvergence(agentId),
         (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),
         async (agentId) => { await this.providerExecution?.archiveEndedRuntimes(agentId); },
-        ({ agent, sourceInboxItemId, resetsAtMs }) => this.usageLimitNotices.report({ entryId: agent.agentId, phase: "turn", resetsAtMs, occurrence: sourceInboxItemId }),
+        ({ agent, resetsAtMs }) => this.usageLimitNotices.report({ entryId: agent.agentId, phase: "turn", resetsAtMs, occurrence: usageLimitOccurrence(resetsAtMs, this.nowMs()) }),
       ) : null;
     this.readModel = new DaemonReadModel({
       compactionProgress: (entry) => entry.work_attempt_id

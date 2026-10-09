@@ -23,6 +23,16 @@ export type ProviderUsageLimitNoticeRequest = {
 };
 
 const NOTICE_TIMEOUT_MS = 10_000;
+const DAY_MS = 24 * 60 * 60_000;
+
+/**
+ * Names one usage-limit period: the reset the provider named, or, with no
+ * reset, the day. The room posts one notice per agent, phase and period, so a
+ * limit that refuses many messages is announced once.
+ */
+export function usageLimitOccurrence(resetsAtMs: number | null, nowMs: number): string {
+  return resetsAtMs !== null ? String(resetsAtMs) : `unknown:${Math.floor(nowMs / DAY_MS)}`;
+}
 /** Occurrences remembered per process, so a busy retry loop cannot post twice. */
 const REMEMBERED_OCCURRENCES = 512;
 
@@ -64,7 +74,7 @@ export type ProviderUsageLimitReport = {
   entryId: string;
   phase: ProviderUsageLimitPhase;
   resetsAtMs: number | null;
-  /** The failed turn's inbox item, or a stable name for a failed start. */
+  /** From `usageLimitOccurrence`. */
   occurrence: string;
 };
 

@@ -1,3 +1,4 @@
+import { isUsageLimitPauseDetail } from "../../../shared/provider-usage-limit.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { SUPERVISED_READ_ONLY_TOOLS } from "../../../shared/supervised-read-tools.mjs";
 import { PreparedReadStatements } from "./prepared-reads.js";
@@ -583,19 +584,28 @@ export class SupervisedAgentInboxStore {
   }
 
   /**
-   * The usage limit the agent's most recent turn ended on, if it did. Only the
-   * latest terminal result counts: any later turn, failed or not, proves the
-   * provider accepted work again or failed for another reason.
+   * The usage limit the agent's most recent turn in this work attempt ended
+   * on, if it did. Only the latest terminal result counts: any later turn,
+   * failed or not, proves the provider accepted work again or failed for
+   * another reason. `consecutive` counts the latest turns in a row that ended
+   * on a usage limit (at most 4), so an unknown reset can be waited out longer.
    */
-  async latestUsageLimit(agentId: string): Promise<{ sourceInboxItemId: string; observedAtMs: number; resetsAtMs: number | null } | null> {
+  async latestUsageLimit(agentId: string, workAttemptId: string): Promise<{ sourceInboxItemId: string; observedAtMs: number; resetsAtMs: number | null; consecutive: number } | null> {
     return this.read(async (database) => {
-      const row = database.prepare(`SELECT inbox_item_id,outcome,terminal_evidence_json,observed_at FROM supervised_agent_terminal_results
-        WHERE agent_id=? ORDER BY observed_at DESC, rowid DESC LIMIT 1`).get(agentId) as Row | undefined;
-      if (!row || String(row.outcome) !== "failed") return null;
-      const limit = terminalUsageLimit(row);
-      const observedAtMs = Date.parse(String(row.observed_at));
-      if (!limit || !Number.isFinite(observedAtMs)) return null;
-      return { sourceInboxItemId: String(row.inbox_item_id), observedAtMs, resetsAtMs: limit.resetsAtMs };
+      const rows = database.prepare(`SELECT t.inbox_item_id,t.outcome,t.terminal_evidence_json,t.observed_at
+        FROM supervised_agent_terminal_results t
+        JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=t.inbox_item_id
+        WHERE t.agent_id=? AND b.work_attempt_id=? ORDER BY t.observed_at DESC, t.rowid DESC LIMIT 4`).all(agentId, workAttemptId) as Row[];
+      const limits: Array<{ resetsAtMs: number | null }> = [];
+      for (const row of rows) {
+        const limit = String(row.outcome) === "failed" ? terminalUsageLimit(row) : null;
+        if (!limit) break;
+        limits.push(limit);
+      }
+      const latest = rows[0];
+      const observedAtMs = latest ? Date.parse(String(latest.observed_at)) : Number.NaN;
+      if (!latest || !limits.length || !Number.isFinite(observedAtMs)) return null;
+      return { sourceInboxItemId: String(latest.inbox_item_id), observedAtMs, resetsAtMs: limits[0]!.resetsAtMs, consecutive: limits.length };
     });
   }
 
@@ -607,20 +617,23 @@ export class SupervisedAgentInboxStore {
   /**
    * Hold the pending FIFO head until the usage limit resets. The row is
    * blocked like any other stalled delivery, so it shows why and offers Retry
-   * delivery, and `next_attempt_at_ms` records when delivery resumes by
-   * itself. No other blocked row carries a resume time.
+   * delivery. Its reason opens with the words `isUsageLimitPauseDetail`
+   * recognises and `next_attempt_at_ms` records when delivery resumes by
+   * itself; both together mark the hold.
    */
   async pauseForUsageLimit(inboxItemId: string, detail: string, resumeAtMs: number): Promise<SupervisedInboxItem | null> {
-    if (!Number.isSafeInteger(resumeAtMs) || resumeAtMs <= 0 || !detail.trim()) throw new Error("A usage-limit pause needs a reason and a resume time.");
+    if (!Number.isSafeInteger(resumeAtMs) || resumeAtMs <= 0 || !isUsageLimitPauseDetail(detail)) {
+      throw new Error("A usage-limit pause needs its reason and a resume time.");
+    }
     const item = await this.get(inboxItemId);
     if (!item || item.state !== "pending" || item.provider_turn_id || item.outcome) return null;
     return this.transition(inboxItemId, "blocked", { last_error: detail.trim().slice(0, 2_000), next_attempt_at_ms: resumeAtMs });
   }
 
-  /** Resume a usage-limit pause, only if it is still the same pause. */
+  /** Resume a usage-limit hold, only if it is still the same hold. */
   async resumeUsageLimitPause(inboxItemId: string, resumeAtMs: number): Promise<boolean> {
     const item = await this.get(inboxItemId);
-    if (!item || item.state !== "blocked" || item.next_attempt_at_ms !== resumeAtMs) return false;
+    if (!item || !isUsageLimitPause(item) || item.next_attempt_at_ms !== resumeAtMs) return false;
     await this.retryBlocked(inboxItemId);
     return true;
   }
@@ -2704,6 +2717,11 @@ function isNewerCursor(candidate: string, current: string | null): boolean {
   const numeric = (value: string) => value.startsWith("msg_") ? value.slice(4) : value;
   const candidateNumber = BigInt(numeric(candidate)); const currentNumber = BigInt(numeric(current));
   return candidateNumber > currentNumber;
+}
+
+/** A delivery the daemon holds until its agent's usage limit resets. */
+export function isUsageLimitPause(item: Pick<SupervisedInboxItem, "state" | "next_attempt_at_ms" | "last_error">): boolean {
+  return item.state === "blocked" && item.next_attempt_at_ms !== null && isUsageLimitPauseDetail(item.last_error);
 }
 
 /** The usage limit recorded with a failed turn's terminal evidence, if any. */

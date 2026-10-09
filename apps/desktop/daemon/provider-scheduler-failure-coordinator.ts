@@ -7,6 +7,7 @@ import {
   transientProviderStartFailure,
 } from "./daemon-error-policy.js";
 import { advanceReconciliationState } from "./reconciler-state.js";
+import { usageLimitOccurrence } from "./provider-usage-limit-notices.js";
 import type {
   DaemonManifestEntry,
   ExecutionTerminalPayload,
@@ -70,8 +71,6 @@ export type ProviderSchedulerFailurePorts = {
   /** Tell the agent's room that it could not start because of its usage limit. Never awaited. */
   reportUsageLimit?(input: { entryId: string; resetsAtMs: number | null; occurrence: string }): void;
 };
-
-const DAY_MS = 24 * 60 * 60_000;
 
 /** Owns bounded retry accounting and durable projection of scheduler failures. */
 export class ProviderSchedulerFailureCoordinator {
@@ -164,7 +163,7 @@ export class ProviderSchedulerFailureCoordinator {
       // One notice per reset the provider named; with no reset, one a day.
       try {
         this.ports.reportUsageLimit?.({ entryId, resetsAtMs,
-          occurrence: resetsAtMs !== null ? `start:${resetsAtMs}` : `start:unknown:${Math.floor(now / DAY_MS)}` });
+          occurrence: usageLimitOccurrence(resetsAtMs, now) });
       } catch { /* A room notice is optional. */ }
       if (resetsAtMs !== null && resetsAtMs > now + PROVIDER_QUOTA_FIRST_RETRY_MS) {
         this.ports.scheduleRecovery(entryId, Math.min(resetsAtMs - now + PROVIDER_QUOTA_RESET_MARGIN_MS, PROVIDER_QUOTA_RETRY_MAX_MS));

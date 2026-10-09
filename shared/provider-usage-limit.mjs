@@ -52,20 +52,26 @@ function cleanAgentName(value) {
 
 /**
  * The room notice text. `phase` is "start" when the agent could not start and
- * "turn" when it stopped during work.
+ * "turn" when the provider refused it during work. A refused turn is not run
+ * again; the agent's later messages wait for the reset.
  */
 export function providerUsageLimitNoticeText(input) {
   const name = cleanAgentName(input?.agentName);
   const subject = providerUsageLimitSubject(input?.provider);
   const resetMs = normalizeUsageLimitResetMs(input?.resetsAt ?? null);
-  const what = input?.phase === "start" ? `${name} couldn't start` : `${name} stopped`;
-  const next = input?.phase === "start" ? "LetAgents starts it" : "LetAgents continues its work";
-  return resetMs === null
-    ? `${what}: ${subject} was reached. ${next} when the limit allows, or after the owner changes the account.`
-    : `${what}: ${subject} was reached. ${next} after the limit resets at ${new Date(resetMs).toISOString()}.`;
+  const reset = resetMs === null ? null : new Date(resetMs).toISOString();
+  if (input?.phase === "start") {
+    return reset === null
+      ? `${name} couldn't start: ${subject} was reached. LetAgents starts it when the limit allows, or after the owner changes the account.`
+      : `${name} couldn't start: ${subject} was reached. LetAgents starts it after the limit resets at ${reset}.`;
+  }
+  return reset === null
+    ? `${name} stopped: ${subject} was reached. Its messages wait until the limit allows, or until the owner changes the account.`
+    : `${name} stopped: ${subject} was reached. Its messages wait until the limit resets at ${reset}.`;
 }
 
-const NOTICE_PATTERN = /^(.{1,64}?) (couldn't start|stopped): (.+?)'s usage limit was reached\. LetAgents (?:starts it|continues its work) (?:after the limit resets at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z)|when the limit allows, or after the owner changes the account)\.$/;
+const ISO = "(\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z)";
+const NOTICE_PATTERN = new RegExp(`^(.{1,64}?) (couldn't start|stopped): (.+?)'s usage limit was reached\\. (?:LetAgents starts it after the limit resets at ${ISO}|Its messages wait until the limit resets at ${ISO}|LetAgents starts it when the limit allows, or after the owner changes the account|Its messages wait until the limit allows, or until the owner changes the account)\\.$`);
 
 /**
  * Read a usage-limit notice back. Returns null for any other text, so a
@@ -75,13 +81,25 @@ const NOTICE_PATTERN = /^(.{1,64}?) (couldn't start|stopped): (.+?)'s usage limi
 export function parseProviderUsageLimitNotice(text) {
   const match = NOTICE_PATTERN.exec(String(text ?? "").trim());
   if (!match) return null;
-  const resetsAtMs = match[4] ? normalizeUsageLimitResetMs(match[4]) : null;
+  const phase = match[2] === "couldn't start" ? "start" : "turn";
+  const iso = match[4] ?? match[5];
+  // A start notice must read as a start, a turn notice as a turn.
+  if ((phase === "start") !== /\. LetAgents starts it /.test(match[0])) return null;
   return {
     agentName: match[1],
-    phase: match[2] === "couldn't start" ? "start" : "turn",
+    phase,
     owner: match[3],
-    resetsAtMs,
+    resetsAtMs: iso ? normalizeUsageLimitResetMs(iso) : null,
   };
+}
+
+/**
+ * The words that open a delivery held for a usage limit. The desktop daemon
+ * writes them, and only a blocked delivery whose reason starts with them and
+ * that has a resume time is such a hold.
+ */
+export function isUsageLimitPauseDetail(text) {
+  return /^.+?'s usage limit was reached\. This message waits /.test(String(text ?? ""));
 }
 
 /**
@@ -92,5 +110,7 @@ export function parseProviderUsageLimitNotice(text) {
 export function looksLikeProviderUsageLimit(text) {
   const value = String(text ?? "");
   if (!value.trim()) return false;
+  // A per-minute or per-second quota is a short rate limit, not a used-up one.
+  if (/per[ _-]?(?:minute|second)|\b(?:rpm|tpm|rps)\b|requests? per min/i.test(value)) return false;
   return /usage[ _-]?limit|\b(?:\d+-hour|weekly|daily|monthly|session|opus|sonnet) limit reached|requires more credits|hit your (?:usage )?limit|you've reached your limit|quota[ _-]?(?:exhausted|exceeded|reached)|insufficient[ _-]?quota|exceeded your (?:current )?quota|out of (?:credits|quota)|insufficient (?:credit|credits|balance)|credit balance is too low|HTTP 402|\b402 payment required|payment required|spend(?:ing)? limit|billing[ _-]?(?:error|limit|hard limit)/i.test(value);
 }

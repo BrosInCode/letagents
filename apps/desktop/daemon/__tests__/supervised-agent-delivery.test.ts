@@ -1754,86 +1754,106 @@ test("only the provider's own result marks a turn refused: a message that arrive
 
 /**
  * An agent whose first turn the provider refuses at its usage limit. Later
- * room messages wait for the reset; `wait` decides what waiting does.
+ * room messages are held; `afterPause` runs while they are held, and then the
+ * hold's timer fires unless `afterPause` says it already resumed delivery.
  */
-async function runUsageLimit(options: { resetsAtMs: number | null; ids: readonly string[];
-  wait: (clock: { nowMs: number }, delayMs: number, signal: AbortSignal) => Promise<void>;
-  during?: (delivery: SupervisedAgentDelivery, store: SupervisedAgentInboxStore) => Promise<void> }) {
+async function runUsageLimit(options: { resetsAtMs: number | null; ids: readonly string[]; failures?: number;
+  afterPause?: (delivery: SupervisedAgentDelivery, store: SupervisedAgentInboxStore) => Promise<"resumed" | void> }) {
   const root = await mkdtemp(join(tmpdir(), "usage-limit-"));
   const clock = { nowMs: Date.parse("2026-10-09T12:00:00.000Z") };
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"), () => new Date(clock.nowMs).toISOString());
-  const sources: string[] = []; const waits: number[] = []; const reports: unknown[] = []; const paused: unknown[] = [];
+  const sources: string[] = []; const reports: unknown[] = []; const holds: Array<{ id: string; error: string | null; resumeAtMs: number | null }> = [];
+  const timers: Array<{ delayMs: number; wake: () => void; cancelled: boolean }> = [];
+  const failures = options.failures ?? 1;
   const delivery: SupervisedAgentDelivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, turnOptions) => {
     await turnOptions?.beforeNativeDispatch?.();
     sources.push(String((request.sourceMessage as { id?: string }).id));
     const turnId = `turn-${sources.length}`;
     await turnOptions?.checkpointTurnStarted?.(turnId);
     clock.nowMs += 1_000;
-    return sources.length === 1
+    return sources.length <= failures
       ? { turnId, providerContinuationId: "thread", outcome: "failed", text: null, evidence: "stream",
         error: "Claude AI usage limit reached", usageLimit: options.resetsAtMs === null ? {} : { resetsAtMs: options.resetsAtMs } }
       : { turnId, outcome: "no_reply", text: null };
   }), { poll: async () => ({}), publish: async () => {} }, currentAuthority, 0, async () => {},
-  async (delayMs, signal) => {
-    waits.push(delayMs);
-    const head = await store.head(agent.agentId);
-    if (head?.state === "blocked") paused.push({ id: head.source_message_id, error: head.last_error, resumeAtMs: head.next_attempt_at_ms });
-    await options.wait(clock, delayMs, signal);
-  },
+  async () => { throw new Error("a usage-limit hold never waits inside the pump"); },
   undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-  (report) => { reports.push({ agentId: report.agent.agentId, sourceInboxItemId: report.sourceInboxItemId, resetsAtMs: report.resetsAtMs }); });
+  (report) => { reports.push({ agentId: report.agent.agentId, sourceInboxItemId: report.sourceInboxItemId, resetsAtMs: report.resetsAtMs }); },
+  (delayMs, wake) => { const timer = { delayMs, wake, cancelled: false }; timers.push(timer); return () => { timer.cancelled = true; }; });
+  const recordHold = async () => {
+    const head = await store.head(agent.agentId);
+    if (head?.state === "blocked") holds.push({ id: head.source_message_id, error: head.last_error, resumeAtMs: head.next_attempt_at_ms });
+  };
   try {
     for (const id of options.ids) await ingest(store, id);
-    const pumping = delivery.pump(agent);
-    await options.during?.(delivery, store);
-    await pumping;
     await delivery.pump(agent);
+    for (let round = 0; round < 5; round += 1) {
+      await recordHold();
+      const timer = timers.at(-1);
+      if (!timer || timer.cancelled) break;
+      if (await options.afterPause?.(delivery, store) === "resumed") { await delivery.drainAdmittedTurns([agent.agentId]); continue; }
+      clock.nowMs += timer.delayMs;
+      timer.cancelled = true;
+      timer.wake();
+      await delivery.drainAdmittedTurns([agent.agentId]);
+    }
     const receipts = await store.receipts(agent.agentId);
-    return { sources, waits, reports, paused, receipts, clock };
+    return { sources, reports, holds, timers, receipts, clock };
   } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 }
 
 test("a turn refused at the usage limit stops the agent, tells the room once, and later messages wait for the reset", async () => {
   const resetsAtMs = Date.parse("2026-10-09T14:00:00.000Z");
-  const { sources, waits, reports, paused, receipts } = await runUsageLimit({ resetsAtMs, ids: ["1", "2", "3"],
-    wait: async (clock, delayMs) => { clock.nowMs += delayMs; } });
+  const { sources, reports, holds, timers, receipts } = await runUsageLimit({ resetsAtMs, ids: ["1", "2", "3"] });
   assert.deepEqual(sources, ["1", "2", "3"], "the refused turn is not replayed, and nothing else ran before the reset");
   assert.deepEqual(reports, [{ agentId: agent.agentId, sourceInboxItemId: receipts[0]!.inbox_item_id, resetsAtMs }]);
-  assert.equal(paused.length, 1, "the next message waited once");
-  const pause = paused[0] as { id: string; error: string; resumeAtMs: number };
-  assert.equal(pause.id, "2");
-  assert.equal(pause.resumeAtMs, resetsAtMs + 30_000, "delivery resumes just after the reset the provider named");
-  assert.match(pause.error, /^Codex's usage limit was reached\. This message waits until the limit resets and is delivered at .+\. To continue sooner, change the account and use Retry delivery\.$/);
-  assert.ok(waits.some((delay) => delay > 2 * 60 * 60_000 - 60_000 && delay <= 2 * 60 * 60_000 + 30_000), JSON.stringify(waits));
+  assert.equal(holds.length, 1, "the next message was held once");
+  assert.equal(holds[0]!.id, "2");
+  assert.equal(holds[0]!.resumeAtMs, resetsAtMs + 30_000, "delivery resumes just after the reset the provider named");
+  assert.match(holds[0]!.error ?? "", /^Codex's usage limit was reached\. This message waits until the limit resets and is delivered at .+\. To continue sooner, change the account and use Retry delivery\.$/);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0]!.delayMs, resetsAtMs + 30_000 - Date.parse("2026-10-09T12:00:01.000Z"), "the pump returned and a timer wakes it");
   assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply", "acknowledged_no_reply"]);
 });
 
-test("with no reset time, the next message is tried an hour later", async () => {
-  const { sources, reports, paused } = await runUsageLimit({ resetsAtMs: null, ids: ["1", "2"],
-    wait: async (clock, delayMs) => { clock.nowMs += delayMs; } });
-  assert.deepEqual(sources, ["1", "2"]);
-  assert.deepEqual((reports[0] as { resetsAtMs: unknown }).resetsAtMs, null);
-  const pause = paused[0] as { error: string; resumeAtMs: number };
-  assert.equal(pause.resumeAtMs, Date.parse("2026-10-09T12:00:01.000Z") + 60 * 60_000);
-  assert.match(pause.error, /This message waits and is tried again at .+\. To continue sooner, change the account and use Retry delivery\./);
+test("with no reset time, the next message is tried after an hour, then after longer waits while the limit lasts", async () => {
+  const { sources, reports, holds } = await runUsageLimit({ resetsAtMs: null, ids: ["1", "2", "3", "4"], failures: 3 });
+  assert.deepEqual(sources, ["1", "2", "3", "4"]);
+  assert.equal((reports[0] as { resetsAtMs: unknown }).resetsAtMs, null);
+  assert.equal(reports.length, 3, "delivery reports each refused turn; the notice service posts one per period");
+  const waits = holds.map((hold, index) => hold.resumeAtMs! - (index === 0 ? Date.parse("2026-10-09T12:00:01.000Z") : 0));
+  assert.equal(waits[0], 60 * 60_000);
+  assert.equal(holds[1]!.resumeAtMs! - holds[0]!.resumeAtMs!, 3 * 60 * 60_000 + 1_000, "the second refusal in a row waits three hours");
+  assert.equal(holds[2]!.resumeAtMs! - holds[1]!.resumeAtMs!, 6 * 60 * 60_000 + 1_000, "and never more than six");
+  assert.match(holds[0]!.error ?? "", /This message waits and is tried again at .+\. To continue sooner, change the account and use Retry delivery\./);
 });
 
-test("Retry delivery ends a usage-limit wait at once, for example after the owner changes the account", async () => {
+test("Retry delivery ends a usage-limit hold at once, for example after the owner changes the account", async () => {
   const resetsAtMs = Date.parse("2026-10-09T18:00:00.000Z");
-  const { sources, paused, receipts, clock } = await runUsageLimit({ resetsAtMs, ids: ["1", "2"],
-    // Waiting never ends by itself here: only Retry delivery can end it.
-    wait: (_clock, _delayMs, signal) => new Promise((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })),
-    during: async (delivery, store) => {
-      for (let tries = 0; (await store.head(agent.agentId))?.state !== "blocked"; tries += 1) {
-        assert.ok(tries < 200, "the message was paused");
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-      await delivery.retry(agent, "2");
-    } });
-  assert.equal(paused.length, 1);
+  const { sources, holds, timers, receipts, clock } = await runUsageLimit({ resetsAtMs, ids: ["1", "2"],
+    afterPause: async (delivery) => { await delivery.retry(agent, "2"); return "resumed"; } });
+  assert.equal(holds.length, 1);
   assert.deepEqual(sources, ["1", "2"], "the retried message ran before the reset");
   assert.ok(clock.nowMs < resetsAtMs);
+  assert.equal(timers[0]!.cancelled, true, "the hold's timer was cancelled");
   assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
+});
+
+test("only a usage-limit hold resumes by itself: another block that kept a retry time waits for the owner", async () => {
+  const root = await mkdtemp(join(tmpdir(), "usage-limit-other-block-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  let runs = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => { runs += 1; throw new Error("not delivered"); }),
+    { poll: async () => ({}), publish: async () => {} }, currentAuthority, 0, async () => {});
+  try {
+    await ingest(store, "1");
+    const head = (await store.head(agent.agentId))!;
+    await store.transition(head.inbox_item_id, "blocked", { last_error: "Room delivery restarted during publishing; acknowledgement is unsafe.", next_attempt_at_ms: 1 });
+    await delivery.pump(agent);
+    assert.equal(runs, 0);
+    assert.equal((await store.head(agent.agentId))?.state, "blocked");
+    await assert.rejects(store.pauseForUsageLimit(head.inbox_item_id, "A different reason", Date.now() + 1_000), /needs its reason/);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("a usage limit on a lease holder's turn continues the task after the reset instead of waiting for the owner", () => {
