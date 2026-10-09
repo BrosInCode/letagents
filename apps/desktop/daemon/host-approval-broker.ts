@@ -91,7 +91,7 @@ export type DelegatableApprovalAdmission = {
   sourceMessageId: string;
 };
 type Options = {
-  store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "closeExecutionApprovalRequest" | "validateExecutionApprovalAuthority" | "readHostToolContext" | "listHostToolRules" | "findHostToolRule" | "selectHostToolApproval" | "revokeHostToolRule" | "withdrawHostToolApproval">;
+  store: Pick<ManifestStore, "getEntry" | "getAgentConfiguration" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "closeExecutionApprovalRequest" | "validateExecutionApprovalAuthority" | "readHostToolContext" | "listHostToolRules" | "findHostToolRule" | "selectHostToolApproval" | "revokeHostToolRule" | "withdrawHostToolApproval">;
   inbox: Pick<SupervisedAgentInboxStore, "head">;
   provider: ProviderActionPort | undefined;
   currentHandle(agentId: string): ProviderActionHandle | undefined;
@@ -482,7 +482,12 @@ export class HostApprovalBroker {
     if (!this.current(lane) || lane.state !== "pending" || !lane.connectionId || !lane.requests.includes(native)) throw new ApprovalPreparationUnavailableError("Approval unavailable.");
     if (Buffer.byteLength(literal(native.native)) > MAX_PRESENTATION_BYTES) throw new ApprovalPreparationUnavailableError("Approval presentation exceeds its limit.");
     const entry = await this.options.store.getEntry(lane.agentId);
-    if (!entry) throw new ApprovalPreparationUnavailableError("Approval authority changed.");
+    // The flat manifest entry never carries the applied revision, so it cannot
+    // name one. The revision this runtime started with is in its saved
+    // configuration; the journal still refuses a request while a newer saved
+    // configuration has not been applied.
+    const configuration = await this.options.store.getAgentConfiguration(lane.agentId);
+    if (!entry || !configuration) throw new ApprovalPreparationUnavailableError("Approval authority changed.");
     await assertAuthority(entry);
     // OpenCode answers its own compaction messages inside a turn. The head's
     // turn lets correlation prove such a step belongs to it; the head is
@@ -503,7 +508,7 @@ export class HostApprovalBroker {
     const owned: ApprovalAuthority = { inboxItemId: head.inbox_item_id, workAttemptId: lane.handle.workAttemptId,
       executionGenerationId: lane.generation, provider: native.provider,
       providerConnection: lane.connection as ApprovalAuthority["providerConnection"],
-      configurationRevision: entry.runtime_configuration_revision ?? 1 };
+      configurationRevision: configuration.runtime_configuration_revision };
     const requestId = approvalRequestId(lane.agentId, lane.connectionId, native.native.id);
     const requestSha256 = digest(inspected);
     let prior = await this.options.store.readLatestExecutionApproval(requestId);
