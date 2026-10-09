@@ -149,17 +149,21 @@ function inside(root: string, candidate: string): boolean {
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
+/** A repository that is reached over the network, not a path or a file: URL on this machine. */
+export function isNetworkRemote(value: string): boolean {
+  const trimmed = value.trim();
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed)?.[1]?.toLowerCase();
+  if (scheme != null) return scheme !== "file";
+  // Git's scp-like syntax (git@host:owner/repo) is a network identity too.
+  return /^(?:[^/@:\s]+@)?[^/:\s]+:.+$/.test(trimmed) && !/^[A-Za-z]:[\\/]/.test(trimmed);
+}
+
 export function normalizeRemote(value: string): string {
   const trimmed = value.trim().replace(/\/+$/, "");
-  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed)?.[1]?.toLowerCase();
-  const networkUrl = scheme != null && scheme !== "file";
-  // Git's scp-like syntax (git@host:owner/repo) is a network identity too.
-  // Everything else is a filesystem path, where `repo.git` and `repo` may be
-  // two different repositories and must never share daemon storage.
-  const scpLike = scheme == null
-    && /^(?:[^/@:\s]+@)?[^/:\s]+:.+$/.test(trimmed)
-    && !/^[A-Za-z]:[\\/]/.test(trimmed);
-  return (networkUrl || scpLike) && trimmed.endsWith(".git")
+  // Everything that is not a network identity is a filesystem path, where
+  // `repo.git` and `repo` may be two different repositories and must never
+  // share daemon storage.
+  return isNetworkRemote(trimmed) && trimmed.endsWith(".git")
     ? trimmed.slice(0, -4)
     : trimmed;
 }

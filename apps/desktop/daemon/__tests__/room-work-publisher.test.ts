@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { once } from "node:events";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +13,7 @@ import { parseExecutionFact } from "../execution-protocol.js";
 import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
 import { RoomWorkPublisher } from "../room-work-publisher.js";
 import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "../cloud-http.js";
+import { captureRecordedRemoteTips } from "../../../../shared/workspace-turn-capture.mjs";
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 
@@ -688,6 +691,311 @@ for (const change of ['binary', 'rename', 'mode', 'empty deletion'] as const) {
     assert.ok(f.sent.at(-1)?.reviewPage);
   });
 }
+
+/** A bare remote with a `staging` branch, a teammate who lands files on it, and clones for the agent. */
+async function remoteFixture(t: TestContext) {
+  const root = await mkdtemp(join(tmpdir(), 'publisher-base-update-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.com',
+    GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.com' };
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const remote = join(root, 'remote.git'), team = join(root, 'team');
+  git(root, 'init', '-q', '--bare', '-b', 'staging', remote);
+  git(root, 'clone', '-q', remote, team); git(team, 'checkout', '-q', '-B', 'staging');
+  const land = async (name: string, clone = team) => { await writeFile(join(clone, name), `${name}\n`); git(clone, 'add', '-A'); git(clone, 'commit', '-qm', name); git(clone, 'push', '-q', 'origin', 'HEAD:staging'); };
+  await land('app.ts');
+  const revision = git(team, 'rev-parse', 'HEAD');
+  const clone = (name: string, from = remote) => { git(root, 'clone', '-q', from, join(root, name)); return join(root, name); };
+  return { root, git, remote, team, land, revision, clone };
+}
+
+test('a base branch update during a turn is not published as the agent\'s contribution', async t => {
+  const f = await fixture(t);
+  const { git, remote, team, land, revision, clone } = await remoteFixture(t);
+  const workspace = clone('agent');
+  git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
+  // The daemon recorded `remote` when it provisioned the workspace.
+  f.options.workspaceLocation = async () => ({ path: workspace, revision, remote });
+  // Each turn here begins ten minutes after the one before, so each asks the remote anew.
+  let clock = Date.parse('2026-08-31T00:00:00Z');
+  f.options.now = () => clock;
+  const settled = (id: number) => JSON.parse(String(f.db.prepare('SELECT settled_json FROM room_workspace_captures WHERE source_message_id=?').get(`msg_${id}`)!.settled_json));
+  const paths = (changes: { files: Array<{ path: string }> }) => changes.files.map(file => file.path).sort();
+
+  // Another session lands on staging. Turn 1 only merges it.
+  await land('theirs-1.ts'); await land('theirs-2.ts');
+  f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+  const first = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.ok(first);
+  git(workspace, 'fetch', '-q', 'origin'); git(workspace, 'merge', '-q', '--no-edit', 'origin/staging');
+  f.captureMessage(1); f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, first);
+  await f.publisher.flush();
+  assert.equal(settled(1).contribution.changes.state, 'ready');
+  assert.deepEqual(settled(1).contribution.changes.files, []);
+  assert.deepEqual(paths(settled(1).workspace), ['theirs-1.ts', 'theirs-2.ts'], 'changes since the workspace started stay the plain comparison');
+  assert.equal(f.row(1).summary?.version, 1, 'a base update alone has no workspace artifact');
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM room_workspace_reviews').get()!.n, 0);
+
+  // Turn 2 takes in what landed before it, commits its own change, pushes, and then moves
+  // its own remote-tracking refs. A teammate lands during the turn; that work is counted.
+  await land('theirs-3.ts');
+  clock += 10 * 60_000;
+  f.publisher.observeNewSources(f.agent)?.(['msg_2']);
+  const second = await f.publisher.beginWorkspace(f.agent, 'msg_2', 'inbox-2');
+  assert.ok(second);
+  git(workspace, 'fetch', '-q', 'origin'); git(workspace, 'merge', '-q', '--no-edit', 'origin/staging');
+  await land('during.ts');
+  git(workspace, 'fetch', '-q', 'origin'); git(workspace, 'merge', '-q', '--no-edit', 'origin/staging');
+  await writeFile(join(workspace, 'app.ts'), 'app.ts\nown line\n');
+  git(workspace, 'add', '-A'); git(workspace, 'commit', '-qm', 'own'); git(workspace, 'push', '-q', '-u', 'origin', 'fix/own');
+  git(workspace, 'update-ref', 'refs/remotes/origin/staging', 'HEAD');
+  f.captureMessage(2); f.fact(2, { state: 'terminal', turnOutcome: 'completed' });
+  await f.publisher.captureWorkspace(f.agent, 'msg_2', 'inbox-2', 'Added a line', second);
+  await f.publisher.flush();
+  const published = f.sent.filter(sent => sent.sourceMessageId === 'msg_2').at(-1)!;
+  assert.equal(published.summary.version, 3);
+  assert.deepEqual(published.summary.contribution!.changes.files.map(file => [file.path, file.additions, file.deletions]), [['app.ts', 1, 0], ['during.ts', 1, 0]]);
+  assert.doesNotMatch(published.summary.contribution!.changes.patch, /theirs/);
+  assert.deepEqual(paths(published.summary.workspace!), ['app.ts', 'during.ts', 'theirs-1.ts', 'theirs-2.ts', 'theirs-3.ts']);
+  assert.ok(published.reviewPage);
+
+  // After a daemon restart nothing is known about the start of an open turn: the plain comparison.
+  await land('theirs-4.ts');
+  clock += 10 * 60_000;
+  f.publisher.observeNewSources(f.agent)?.(['msg_3']);
+  const third = await f.publisher.beginWorkspace(f.agent, 'msg_3', 'inbox-3');
+  f.restart();
+  git(workspace, 'fetch', '-q', 'origin'); git(workspace, 'merge', '-q', '--no-edit', 'origin/staging');
+  f.captureMessage(3); f.fact(3, { state: 'terminal', turnOutcome: 'completed' });
+  await f.publisher.captureWorkspace(f.agent, 'msg_3', 'inbox-3', null, third);
+  assert.deepEqual(paths(settled(3).contribution.changes), ['theirs-4.ts']);
+
+  // A workspace without a recorded remote is compared plainly, whatever its repository configures.
+  await land('theirs-5.ts');
+  f.options.workspaceLocation = async () => ({ path: workspace, revision });
+  f.publisher.observeNewSources(f.agent)?.(['msg_4']);
+  const fourth = await f.publisher.beginWorkspace(f.agent, 'msg_4', 'inbox-4');
+  git(workspace, 'fetch', '-q', 'origin'); git(workspace, 'merge', '-q', '--no-edit', 'origin/staging');
+  f.captureMessage(4); f.fact(4, { state: 'terminal', turnOutcome: 'completed' });
+  await f.publisher.captureWorkspace(f.agent, 'msg_4', 'inbox-4', null, fourth);
+  assert.deepEqual(paths(settled(4).contribution.changes), ['theirs-5.ts']);
+});
+
+test('the daemon asks the remote it recorded, not a repository that the workspace\'s configuration leads to', async t => {
+  const f = await fixture(t);
+  const { root, git, remote, land, revision, clone } = await remoteFixture(t);
+  await land('theirs.ts');
+  // The agent needs no push rights for this: a repository of its own on this machine,
+  // with staging and one commit of the agent on top of it.
+  const own = join(root, 'own.git');
+  git(root, 'clone', '-q', '--bare', remote, own);
+  await land('smuggled.ts', clone('builder', own));
+  const redirects: Array<[string, (workspace: string) => string]> = [
+    ['second-remote', workspace => { git(workspace, 'remote', 'add', 'mine', own); return 'mine'; }],
+    ['origin-moved', workspace => { git(workspace, 'remote', 'set-url', 'origin', own); return 'origin'; }],
+    ['rewrite', workspace => { git(workspace, 'config', `url.${own}.insteadOf`, remote); return 'origin'; }],
+  ];
+  for (const [index, [name, redirect]] of redirects.entries()) {
+    const workspace = clone(name);
+    git(workspace, 'reset', '-q', '--hard', revision);
+    const from = redirect(workspace);
+    f.options.workspaceLocation = async () => ({ path: workspace, revision, remote });
+    const id = index + 1;
+    f.publisher.observeNewSources(f.agent)?.([`msg_${id}`]);
+    const baseline = await f.publisher.beginWorkspace(f.agent, `msg_${id}`, `inbox-${id}`);
+    assert.ok(baseline);
+    git(workspace, 'fetch', '-q', from); git(workspace, 'merge', '-q', '--no-edit', `${from}/staging`);
+    f.captureMessage(id); f.fact(id, { state: 'terminal', turnOutcome: 'completed' });
+    await f.publisher.captureWorkspace(f.agent, `msg_${id}`, `inbox-${id}`, null, baseline);
+    const changes = JSON.parse(String(f.db.prepare('SELECT settled_json FROM room_workspace_captures WHERE source_message_id=?').get(`msg_${id}`)!.settled_json)).contribution.changes;
+    assert.deepEqual(changes.files.map((file: { path: string }) => file.path), ['smuggled.ts'], `${name}: what landed on the real remote is the base; the agent's commit is on the card`);
+  }
+});
+
+test('an answer serves the turns of the next minute only: a base that landed after it is counted, and a later turn asks anew', async t => {
+  const f = await fixture(t);
+  const { git, remote, land, revision, clone } = await remoteFixture(t);
+  let clock = Date.parse('2026-08-31T12:00:00Z');
+  f.options.now = () => clock;
+  const asked: Array<Promise<string[] | null>> = [];
+  f.options.askRemote = (address) => { assert.equal(address, remote); asked.push(captureRecordedRemoteTips(address)); return asked.at(-1)!; };
+  const early = clone('early'), late = clone('late');
+  let workspace = early;
+  f.options.workspaceLocation = async () => ({ path: workspace, revision, remote });
+  const begin = async (id: number) => { f.publisher.observeNewSources(f.agent)?.([`msg_${id}`]); return f.publisher.beginWorkspace(f.agent, `msg_${id}`, `inbox-${id}`); };
+  const settle = async (id: number, baseline: string | null | undefined) => {
+    f.captureMessage(id); f.fact(id, { state: 'terminal', turnOutcome: 'completed' });
+    await f.publisher.captureWorkspace(f.agent, `msg_${id}`, `inbox-${id}`, null, baseline);
+    const changes = JSON.parse(String(f.db.prepare('SELECT settled_json FROM room_workspace_captures WHERE source_message_id=?').get(`msg_${id}`)!.settled_json)).contribution.changes;
+    return changes.files.map((file: { path: string }) => file.path).sort();
+  };
+  const merge = () => { git(workspace, 'fetch', '-q', 'origin'); git(workspace, 'merge', '-q', '--no-edit', 'origin/staging'); };
+
+  // 12:00:00. A turn has no answer yet: it asks, and uses the answer in flight.
+  await land('theirs-1.ts');
+  const first = await begin(1);
+  merge();
+  assert.deepEqual(await settle(1, first), []);
+  assert.equal(asked.length, 1);
+
+  // 12:00:20. A teammate lands on staging.
+  clock += 20_000;
+  await land('theirs-2.ts');
+
+  // 12:00:40. A turn merges staging. The answer of 12:00:00 serves it, and that answer does not know the
+  // teammate's commit: the file is on the card. This is what reusing an answer costs.
+  clock += 20_000;
+  const second = await begin(2);
+  merge();
+  assert.deepEqual(await settle(2, second), ['theirs-2.ts']);
+  assert.equal(asked.length, 1);
+
+  // 12:01:10. Another agent's turn merges staging. The answer is older than a minute, so the turn asks
+  // again and knows the commit: no card.
+  clock += 30_000;
+  workspace = late;
+  const third = await begin(3);
+  merge();
+  assert.deepEqual(await settle(3, third), []);
+  assert.equal(asked.length, 2);
+
+  // Two turns that begin together, when the answer is too old again, share one question.
+  clock += 2 * 60_000;
+  await Promise.all([begin(4), begin(5)]);
+  assert.equal(asked.length, 3);
+});
+
+test('a turn is compared with the answer it had when it began, not with what the remote says when it settles', async t => {
+  const f = await fixture(t);
+  const { git, remote, revision, clone } = await remoteFixture(t);
+  let clock = Date.parse('2026-08-31T12:00:00Z');
+  f.options.now = () => clock;
+  const asked: Array<Promise<string[] | null>> = [];
+  f.options.askRemote = (address) => { asked.push(captureRecordedRemoteTips(address)); return asked.at(-1)!; };
+  const working = clone('working'), other = clone('other');
+  let workspace = working;
+  f.options.workspaceLocation = async () => ({ path: workspace, revision, remote });
+
+  // Turn B begins and has its answer. Then it commits and pushes.
+  f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+  const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.ok(baseline);
+  git(working, 'checkout', '-q', '-b', 'fix/own');
+  await writeFile(join(working, 'b-own.ts'), 'own\n');
+  git(working, 'add', '-A'); git(working, 'commit', '-qm', 'own'); git(working, 'push', '-q', '-u', 'origin', 'fix/own');
+  const pushed = git(working, 'rev-parse', 'HEAD');
+
+  // Ninety seconds later another agent's turn begins. The remote answers it with B's pushed commit.
+  clock += 90_000;
+  workspace = other;
+  f.publisher.observeNewSources(f.agent)?.(['msg_2']);
+  await f.publisher.beginWorkspace(f.agent, 'msg_2', 'inbox-2');
+  assert.equal(asked.length, 2);
+  assert.ok(!(await asked[0])?.includes(pushed));
+  assert.ok((await asked[1])?.includes(pushed), 'the newest answer holds the commit of the turn that is still open');
+
+  // B settles. Its own commit must be on its card.
+  clock += 10_000;
+  workspace = working;
+  f.captureMessage(1); f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, baseline);
+  const changes = JSON.parse(String(f.db.prepare("SELECT settled_json FROM room_workspace_captures WHERE source_message_id='msg_1'").get()!.settled_json)).contribution.changes;
+  assert.deepEqual(changes.files.map((file: { path: string }) => file.path), ['b-own.ts']);
+  assert.equal(asked.length, 2, 'settling a turn asks the remote nothing');
+});
+
+test('a remote that failed is not asked again for five minutes, and a restarted daemon remembers no answer', async t => {
+  const f = await fixture(t);
+  const { root, git, land, revision, clone } = await remoteFixture(t);
+  let clock = Date.parse('2026-08-31T00:00:00Z');
+  f.options.now = () => clock;
+  const asked: string[] = [];
+  f.options.askRemote = (address) => { asked.push(address); return captureRecordedRemoteTips(address); };
+  const workspace = clone('agent');
+  git(workspace, 'reset', '-q', '--hard', revision);
+  // The daemon's record names a remote that does not answer. The workspace's own `origin` works.
+  f.options.workspaceLocation = async () => ({ path: workspace, revision, remote: join(root, 'missing.git') });
+  const turn = async (id: number, name: string) => {
+    await land(name);
+    f.publisher.observeNewSources(f.agent)?.([`msg_${id}`]);
+    const baseline = await f.publisher.beginWorkspace(f.agent, `msg_${id}`, `inbox-${id}`);
+    git(workspace, 'pull', '-q', '--ff-only', 'origin', 'staging');
+    f.captureMessage(id); f.fact(id, { state: 'terminal', turnOutcome: 'completed' });
+    await f.publisher.captureWorkspace(f.agent, `msg_${id}`, `inbox-${id}`, null, baseline);
+    return JSON.parse(String(f.db.prepare('SELECT settled_json FROM room_workspace_captures WHERE source_message_id=?').get(`msg_${id}`)!.settled_json)).contribution.changes.files.map((file: { path: string }) => file.path);
+  };
+  assert.deepEqual(await turn(1, 'theirs-1.ts'), ['theirs-1.ts'], 'no answer: the plain card');
+  assert.equal(asked.length, 1);
+  clock += 4 * 60_000;
+  assert.deepEqual(await turn(2, 'theirs-2.ts'), ['theirs-2.ts']);
+  assert.equal(asked.length, 1, 'the remote is left alone');
+  clock += 60_000;
+  assert.deepEqual(await turn(3, 'theirs-3.ts'), ['theirs-3.ts']);
+  assert.equal(asked.length, 2, 'asked again after five minutes');
+  f.restart();
+  assert.deepEqual(await turn(4, 'theirs-4.ts'), ['theirs-4.ts']);
+  assert.equal(asked.length, 3, 'a new daemon has neither the answers nor the pause of the old one');
+});
+
+test('releasing a turn forgets what was kept for it', async t => {
+  const f = await fixture(t);
+  const { git, remote, land, revision, clone } = await remoteFixture(t);
+  const workspace = clone('agent');
+  await land('theirs.ts');
+  f.options.workspaceLocation = async () => ({ path: workspace, revision, remote });
+  f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+  const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.ok(baseline);
+  await f.publisher.releaseWorkspace(f.agent, 'msg_1', 'inbox-1');
+  git(workspace, 'pull', '-q', '--ff-only', 'origin', 'staging');
+  f.captureMessage(1); f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, baseline);
+  const changes = JSON.parse(String(f.db.prepare('SELECT settled_json FROM room_workspace_captures').get()!.settled_json)).contribution.changes;
+  assert.deepEqual(changes.files.map((file: { path: string }) => file.path), ['theirs.ts'], 'nothing is left of the turn\'s start but the saved snapshot: the plain comparison');
+});
+
+test('only a recorded remote that is reached over the network is asked', async () => {
+  const { recordedRemote } = await import('../room-work-publisher.js');
+  const identity = (remote_url: string, resolved_revision = 'a'.repeat(40)) => ({ remote_url, resolved_revision, bare_path: '/daemon/repos/project.git' });
+  for (const remote of ['https://git.example.invalid/team/project', 'ssh://git.example.invalid/team/project', 'git@git.example.invalid:team/project']) {
+    assert.equal(recordedRemote(identity(remote)), remote);
+  }
+  // Places on this machine, which any agent can commit to, and a room-only workspace.
+  for (const local of ['/projects/checkout', 'file:///projects/bare.git', 'C:\\projects\\checkout', '../sibling']) assert.equal(recordedRemote(identity(local)), null, local);
+  // A server on this machine itself is such a place too.
+  for (const loopback of ['git@localhost:team/project', 'ssh://git@localhost:2222/team/project', 'http://127.0.0.1:8080/team/project',
+    'git://[::1]/team/project', 'https://git.localhost/team/project', 'ssh://0.0.0.0/team/project',
+    // The same machine, written in other ways.
+    'ssh://127.1/team/project', 'http://0x7f.1/team/project', 'https://2130706433/team/project', 'http://0177.0.0.1/team/project',
+    'git@127.200.3.4:team/project', 'ssh://localhost./team/project', 'git@LocalHost.:team/project', 'http://[::ffff:127.0.0.1]/team/project',
+    'git://[0:0:0:0:0:0:0:1]/team/project', 'git://[::]/team/project', 'ssh://0/team/project', 'git@[::1]:team/project']) assert.equal(recordedRemote(identity(loopback)), null, loopback);
+  for (const elsewhere of ['https://localhost.example.invalid/team/project', 'https://192.0.2.10/team/project', 'ssh://git@[2001:db8::1]/team/project',
+    'git@198.51.100.7:team/project', 'https://[::ffff:192.0.2.10]/team/project']) assert.equal(recordedRemote(identity(elsewhere)), elsewhere);
+  assert.equal(recordedRemote(identity('letagents-ephemeral:room', '0'.repeat(40))), null);
+});
+
+test('a remote that does not answer delays neither the start of a turn nor its capture for long', async t => {
+  const f = await fixture(t);
+  // The recorded remote accepts the connection and never says anything.
+  const sockets: Socket[] = [];
+  const silent = createServer(socket => { sockets.push(socket); }).listen(0, '127.0.0.1');
+  await once(silent, 'listening');
+  t.after(() => { for (const socket of sockets) socket.destroy(); silent.close(); });
+  f.options.workspaceLocation = async () => ({ ...f.location, remote: `git://127.0.0.1:${(silent.address() as AddressInfo).port}/repository` });
+  f.publisher.observeNewSources(f.agent)?.(['msg_1']);
+  const started = Date.now();
+  const baseline = await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
+  assert.ok(baseline);
+  assert.ok(Date.now() - started < 3_000, 'the turn starts while the remote is still silent');
+  await writeFile(join(f.location.path, 'app.ts'), 'new work\n');
+  f.captureMessage(); f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
+  await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, baseline);
+  assert.equal(sockets.length, 1, 'the recorded remote was asked');
+  assert.ok(Date.now() - started < 8_000, 'the capture waits for the remote for five seconds at most');
+  await f.publisher.flush();
+  assert.match(f.row().summary!.contribution!.changes.patch, /-original\n\+new work/);
+});
 
 test('unavailable baseline still offers meaningful cumulative work without inventing turn attribution', async t => {
   const f = await fixture(t);

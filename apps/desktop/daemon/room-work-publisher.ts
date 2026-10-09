@@ -1,7 +1,7 @@
 import { readableContributionText } from "../../../shared/contribution-text.mjs";
 import { hasReviewableRoomContribution } from "../../../shared/room-agent-work.mjs";
 import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
-import { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
+import { captureRecordedRemoteTips, captureWorkspaceHead, captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
 import type { DatabaseSync } from "node:sqlite";
 import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
@@ -10,6 +10,9 @@ import { RoomWorkPublicationStore, type RoomWorkOrigin, type RoomWorkPublication
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { currentWorkerPublicationAuthority, sameWorkerPublicationOrigin } from "./worker-publication-authority.js";
+import { isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
+import { isNetworkRemote, type WorkspaceMarker } from "./workspace-provisioner.js";
+import { RecordedRemoteAnswers } from "./recorded-remote-answers.js";
 
 type Options = {
   custody: Pick<WorkerRuntimeCustody, "hostGrant" | "workerAuthorization">;
@@ -19,7 +22,9 @@ type Options = {
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict"): void;
   now?(): number;
-  workspaceLocation?(workAttemptId: string): Promise<{ path: string; revision: string | null }>;
+  /** `remote` is the remote to ask what upstream held (recordedRemote); without it a turn is compared plainly. */
+  workspaceLocation?(workAttemptId: string): Promise<{ path: string; revision: string | null; remote?: string | null }>;
+  askRemote?(remote: string): Promise<string[] | null>;
 };
 type Row = Record<string, string | number | null>;
 const COALESCE_MS = 1_000;
@@ -30,6 +35,39 @@ const canonicalSource = (id: string) => /^msg_[1-9]\d{0,9}$/.test(id) && Number(
 const key = (record: Pick<RoomWorkPublication, "agentId" | "roomId" | "sourceMessageId">) =>
   JSON.stringify([record.agentId, record.roomId, record.sourceMessageId]);
 
+/**
+ * The remote to ask what a workspace's upstream held: the one the daemon recorded when it
+ * provisioned the workspace, never one that the repository's own configuration names. An agent
+ * can add a remote or point `origin` at a repository of its own; it cannot change this record.
+ * Null when the record is not a repository reached over the network. A room-only workspace has
+ * none. A project folder without an origin, a local path, a file: URL and a server on this
+ * machine itself are places that any agent here can commit to.
+ */
+export function recordedRemote(identity: Pick<WorkspaceMarker, "remote_url" | "resolved_revision" | "bare_path">): string | null {
+  const url = identity.remote_url;
+  if (isEphemeralWorkspaceMarker(identity) || !isNetworkRemote(url)) return null;
+  // scheme://[user@]host[:port]/path, or Git's scp-like [user@]host:path.
+  const host = (/^[a-z][a-z0-9+.-]*:\/\/(?:[^/@]*@)?(\[[^\]]*\]|[^/:]*)/i.exec(url) ?? /^(?:[^/@:\s]+@)?(\[[^\]]*\]|[^/:\s]+):/.exec(url))?.[1] ?? "";
+  return isThisMachine(host) ? null : url;
+}
+
+/**
+ * A host that is this machine itself: localhost, an address in 127.0.0.0/8, ::1, the same
+ * as IPv4 addresses inside IPv6, and the unspecified addresses, in any way of writing them
+ * (127.1, 0x7f.1, 2130706433). An ssh alias or a name that only resolves to this machine
+ * cannot be known without resolving it, and is not.
+ */
+function isThisMachine(host: string): boolean {
+  let name: string;
+  // The URL parser gives each address one form: 127.0.0.1, [::1], [::ffff:7f00:1].
+  try { name = new URL(`http://${host}/`).hostname.replace(/\.$/, ""); } catch { return true; }
+  if (name === "localhost" || name.endsWith(".localhost")) return true;
+  const inside = /^\[::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/.exec(name)?.slice(1).map((part) => parseInt(part, 16));
+  const address = inside ? [inside[0] >> 8, inside[0] & 255, inside[1] >> 8, inside[1] & 255]
+    : /^\d+\.\d+\.\d+\.\d+$/.test(name) ? name.split(".").map(Number) : null;
+  return address ? address[0] === 127 || address.every((part) => part === 0) : name === "[::1]" || name === "[::]";
+}
+
 /** Optional, bounded evidence upload. Owns no provider, delivery or credential-recovery port. */
 export class RoomWorkPublisher {
   private readonly store: RoomWorkPublicationStore;
@@ -38,6 +76,11 @@ export class RoomWorkPublisher {
   private readonly stamps = new Map<string, Map<string, string>>();
   private readonly attemptedAt = new Map<string, number>();
   private readonly stagingAttemptedAt = new Map<string, number>();
+  /** The commit each open turn started on, and what the remotes held then. Like the delivery's own baseline, neither outlives this process. */
+  private readonly turnStarts = new Map<string, { head: string; remoteTips: Promise<string[] | null> }>();
+  /** One set of answers for all agents and turns of this daemon. It does not outlive this process either. */
+  private readonly remoteAnswers = new RecordedRemoteAnswers(
+    (remote) => (this.options.askRemote ?? captureRecordedRemoteTips)(remote), () => this.now());
   private readonly cancellation = new AbortController();
   private scheduled: NodeJS.Timeout | null = null;
   private scheduledFor = Infinity;
@@ -96,11 +139,16 @@ export class RoomWorkPublisher {
     try {
       if (!this.workspaces.begin(identity)) return null;
       const location = await this.options.workspaceLocation(agent.workAttemptId);
-      const tree = await captureWorkspaceTree(location.path, JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]));
+      const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
+      // Decided now, before the agent runs, and not awaited: a slow remote must not delay the turn.
+      const remoteTips = location.remote ? this.remoteAnswers.forTurn(location.remote) : Promise.resolve(null);
+      const tree = await captureWorkspaceTree(location.path, ref);
+      const head = tree ? await captureWorkspaceHead(location.path) : null;
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
       if (current?.authority.worker !== context.authority.worker || current?.authority.grant !== context.authority.grant) return null;
       this.workspaces.setBaseline(identity, tree);
+      if (head) this.turnStarts.set(ref, { head, remoteTips });
       return tree;
     } catch { this.report("storage_unavailable"); return null; }
   }
@@ -114,7 +162,8 @@ export class RoomWorkPublisher {
     try {
       const location = await this.options.workspaceLocation(agent.workAttemptId);
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
-      const pair = await captureWorkspacePair(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref);
+      const start = this.turnStarts.get(ref);
+      const pair = await captureWorkspacePair(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref, start?.head, start?.remoteTips);
       pair.contribution.summary = readableContributionText(summaryText);
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
@@ -140,10 +189,11 @@ export class RoomWorkPublisher {
 
   /** Release only our private retention refs, including Stop, recovery and fencing exits. */
   async releaseWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string): Promise<void> {
+    const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
+    this.turnStarts.delete(ref);
     if (!this.options.workspaceLocation) return;
     try {
       const location = await this.options.workspaceLocation(agent.workAttemptId);
-      const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
       await releaseWorkspaceTree(location.path, ref);
       await releaseWorkspaceTree(location.path, `${ref}:settled`);
     } catch { /* Optional retention cleanup cannot change delivery outcomes. */ }
@@ -163,7 +213,7 @@ export class RoomWorkPublisher {
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduled = null;
     this.scheduledFor = Infinity;
-    this.stamps.clear(); this.attemptedAt.clear(); this.stagingAttemptedAt.clear();
+    this.stamps.clear(); this.attemptedAt.clear(); this.stagingAttemptedAt.clear(); this.turnStarts.clear(); this.remoteAnswers.clear();
     // Never drain capture or upload a shutdown tail. Late responses are fenced.
     try { this.database.close(); } catch { this.report("storage_unavailable"); }
   }
