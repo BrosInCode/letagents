@@ -167,3 +167,140 @@ export function realClaudeCapture(capture: RealClaudeCapture, sessionId: string,
     .replaceAll("\"SESSION_ID\"", JSON.stringify(sessionId))
     .replaceAll("\"TURN_ID\"", JSON.stringify(turnId))) as RealClaudeCapture;
 }
+
+/** What happens next for an agent that holds a task, after a turn that failed. */
+export type ClaudeFailureFollowUp =
+  /** A follow-up turn for the task is queued and, after its delay, dispatched. Later messages run after it. */
+  | "follow_up"
+  /** A follow-up for the task is queued blocked, with the reason, until the owner uses Retry delivery. Later messages wait behind it. */
+  | "blocked"
+  /** Nothing is queued. The reason stays on the failed message, and later messages go ahead. */
+  | "settled";
+
+const RETRY_DELIVERY = "Resolve this issue, then use Retry delivery to continue the existing task.";
+const NOT_CONTINUED = "The unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.";
+/** What the owner reads on the follow-up item of each kind of failure. */
+export const CLAUDE_FAILURE_TEXT = {
+  temporary: "The provider failed temporarily. Continuing the unfinished task after a short delay.",
+  authentication: `The model provider needs authentication or account access. ${RETRY_DELIVERY}`,
+  billing: `The model provider has insufficient credit or quota. ${RETRY_DELIVERY}`,
+  model: `The model provider cannot find the selected model, or this account cannot use it. ${RETRY_DELIVERY}`,
+  /** Added to Claude's own text on the follow-up item: what the failure means for the conversation, and what Start fresh costs. */
+  conversation: "The request does not fit the model's context, so each turn in this conversation fails the same way. Start fresh opens a new conversation and discards the context of this one. After it, use Retry delivery, then send a message to continue the task. If the size comes from attachments or tools, a new conversation may not help.",
+  unknown: `The provider failed and safe automatic recovery could not be established. ${RETRY_DELIVERY}`,
+  noReply: "The model stopped before writing a reply. Continuing the unfinished task after a short delay.",
+  /** Added to Claude's own text on the failed message, when nothing is queued. */
+  cannotSucceed: `Sending it again unchanged cannot help, so the unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.`,
+  refused: NOT_CONTINUED,
+} as const;
+
+/**
+ * For each real API failure in the fixture: what Claude Code says about it in
+ * its structured fields, the kind of failure that makes it, and what then
+ * happens for an agent that holds a task. This is the table the owner
+ * approved, written out for the captures. `before` is what the failure text
+ * alone gave, which is what every failure got before the fields were read.
+ */
+export const CLAUDE_API_FAILURE_POLICY: Record<string, {
+  facts: { status: number | null; terminalReason: string | null; category: string | null; promptTooLong?: true };
+  /** The kind the fields make. Null: they do not say, and the text is read as for any provider. */
+  kind: "short_fault" | "authentication" | "billing" | "model" | "conversation" | "request" | "output_limit" | null;
+  /** The provider declined the content; that decides before the kind does. */
+  refusal?: true;
+  then: ClaudeFailureFollowUp;
+  before: ClaudeFailureFollowUp;
+  /**
+   * What the owner reads on the follow-up item, or what is added to Claude's text on the message when there is
+   * none. For the kind `conversation` it is added to Claude's text on the follow-up item (see `claudeFollowUpText`).
+   */
+  reads: string;
+}> = {
+  http_401_authentication: { facts: { status: 401, terminalReason: "api_error", category: "authentication_failed" }, kind: "authentication",
+    then: "blocked", before: "blocked", reads: CLAUDE_FAILURE_TEXT.authentication },
+  http_403_permission: { facts: { status: 403, terminalReason: "api_error", category: "authentication_failed" }, kind: "authentication",
+    then: "blocked", before: "blocked", reads: CLAUDE_FAILURE_TEXT.authentication },
+  http_404_not_found: { facts: { status: 404, terminalReason: "api_error", category: "model_not_found" }, kind: "model",
+    then: "blocked", before: "blocked", reads: CLAUDE_FAILURE_TEXT.model },
+  // Claude Code gave this 400 no name of its own. The provider's status says the request was not accepted.
+  http_400_invalid_request: { facts: { status: 400, terminalReason: "api_error", category: "unknown" }, kind: "request",
+    then: "settled", before: "blocked", reads: CLAUDE_FAILURE_TEXT.cannotSucceed },
+  // The request does not fit the model's context, so every later turn in the conversation fails the same way: only
+  // the owner can clear that. Claude Code's name for it is its name for many other failures. The terminal reason
+  // says which it is, and so does the start of its text, which is all a session keeps.
+  http_400_prompt_too_long: { facts: { status: 400, terminalReason: "prompt_too_long", category: "invalid_request", promptTooLong: true }, kind: "conversation",
+    then: "blocked", before: "blocked", reads: CLAUDE_FAILURE_TEXT.conversation },
+  // The same status as a malformed request. Only Claude Code's name for it says that the account has no credit.
+  http_400_credit_balance: { facts: { status: 400, terminalReason: "api_error", category: "billing_error" }, kind: "billing",
+    then: "blocked", before: "blocked", reads: CLAUDE_FAILURE_TEXT.billing },
+  http_413_request_too_large: { facts: { status: 413, terminalReason: "image_error", category: "invalid_request" }, kind: "request",
+    then: "settled", before: "blocked", reads: CLAUDE_FAILURE_TEXT.cannotSucceed },
+  http_429_rate_limit: { facts: { status: 429, terminalReason: "api_error", category: "rate_limit" }, kind: "short_fault",
+    then: "follow_up", before: "follow_up", reads: CLAUDE_FAILURE_TEXT.temporary },
+  http_500_server_error: { facts: { status: 500, terminalReason: "api_error", category: "server_error" }, kind: "short_fault",
+    then: "follow_up", before: "follow_up", reads: CLAUDE_FAILURE_TEXT.temporary },
+  http_529_overloaded: { facts: { status: 529, terminalReason: "api_error", category: "server_error" }, kind: "short_fault",
+    then: "follow_up", before: "follow_up", reads: CLAUDE_FAILURE_TEXT.temporary },
+  // A connection fault has no status. The two differ in their text alone, and only one text read as temporary.
+  connection_closed_mid_stream: { facts: { status: null, terminalReason: "api_error", category: "server_error" }, kind: "short_fault",
+    then: "follow_up", before: "follow_up", reads: CLAUDE_FAILURE_TEXT.temporary },
+  connection_refused: { facts: { status: null, terminalReason: "api_error", category: "server_error" }, kind: "short_fault",
+    then: "follow_up", before: "blocked", reads: CLAUDE_FAILURE_TEXT.temporary },
+  // No status and no name: the fields say nothing, so the text is read as before.
+  stream_error_event: { facts: { status: null, terminalReason: "api_error", category: "unknown" }, kind: null,
+    then: "blocked", before: "blocked", reads: CLAUDE_FAILURE_TEXT.unknown },
+  stop_reason_max_tokens: { facts: { status: null, terminalReason: "api_error", category: "max_output_tokens" }, kind: "output_limit",
+    then: "follow_up", before: "blocked", reads: CLAUDE_FAILURE_TEXT.noReply },
+  stop_reason_refusal: { facts: { status: null, terminalReason: "api_error", category: "invalid_request" }, kind: "request", refusal: true,
+    then: "settled", before: "blocked", reads: CLAUDE_FAILURE_TEXT.refused },
+};
+
+/** What the owner reads on the follow-up item of a captured failure, given Claude's own text for it. */
+export function claudeFollowUpText(name: string, claudeText: string): string {
+  const expected = CLAUDE_API_FAILURE_POLICY[name]!;
+  return expected.kind === "conversation" ? `${claudeText} ${expected.reads}` : expected.reads;
+}
+
+/**
+ * Failures that Claude Code 2.1.278 names `invalid_request`, in the words it has for them (read in its binary).
+ * No capture holds these: each stands here as the captured rows of the prompt that is too long, with the text,
+ * the status and the terminal reason of the failure (see `claudeInvalidRequestRows`). The status and the terminal
+ * reason are set by hand. `kind` is what Claude's account of the failure makes, in the stream and in the session.
+ */
+export const CLAUDE_INVALID_REQUESTS: Record<string, { text: string; status: number | null; terminalReason: string; kind: "request" | "authentication" | "conversation" }> = {
+  tool_history_mismatch: { status: 400, terminalReason: "api_error", kind: "request", text: "API Error: 400 due to tool use concurrency issues." },
+  pdf_too_large: { status: 400, terminalReason: "api_error", kind: "request",
+    text: "PDF too large (max 100 pages, 20MB). Try reading the file a different way (e.g., extract text with pdftotext)." },
+  pdf_password_protected: { status: 400, terminalReason: "api_error", kind: "request", text: "PDF is password protected. Try using a CLI tool to extract or convert the PDF." },
+  image_dimension: { status: 400, terminalReason: "api_error", kind: "request",
+    text: "An image in the conversation exceeds the dimension limit for many-image requests (2000px). Run /compact to remove old images from context, or start a new session." },
+  model_not_in_plan: { status: 400, terminalReason: "api_error", kind: "request",
+    text: "Claude Opus is not available with the Claude Pro plan. If you have updated your subscription plan recently, run /logout and /login for the plan to take effect." },
+  disabled_organization_key: { status: 400, terminalReason: "api_error", kind: "request",
+    text: "Your ANTHROPIC_API_KEY belongs to a disabled organization · Update or unset the environment variable" },
+  // A key or an access that the owner can put right: the status of a refused credential says so, whatever the name.
+  api_key_authentication_disabled: { status: 403, terminalReason: "api_error", kind: "authentication",
+    text: "Your organization has disabled API key authentication · Unset ANTHROPIC_API_KEY and run /login to sign in with your claude.ai account" },
+  api_key_helper_failing: { status: 401, terminalReason: "api_error", kind: "authentication",
+    text: "Your apiKeyHelper script is failing · This usually means you need to re-authenticate with your provider · Run /status to see the script's error output" },
+  // The context is full and Claude Code could not compact it: it sends no request, so there is no status.
+  context_blocking_limit: { status: null, terminalReason: "blocking_limit", kind: "conversation",
+    text: "Prompt is too long · automatic compaction failed: the summary request was rejected" },
+};
+
+/** One of `CLAUDE_INVALID_REQUESTS` as the CLI would write it for this session and this turn: its stream lines and its session rows. */
+export function claudeInvalidRequestRows(name: string, sessionId: string, turnId: string): RealClaudeCapture {
+  const failure = CLAUDE_INVALID_REQUESTS[name]!;
+  const captured = realClaudeCapture(CLAUDE_REAL_CAPTURES.http_400_prompt_too_long!, sessionId, turnId);
+  const inJson = (text: string) => JSON.stringify(text).slice(1, -1);
+  const rows = JSON.parse(JSON.stringify(captured).replaceAll(inJson(realClaudeResult(captured).result as string), inJson(failure.text))) as RealClaudeCapture;
+  for (const event of rows.stream) {
+    if (event.type === "result") Object.assign(event, { api_error_status: failure.status, terminal_reason: failure.terminalReason });
+  }
+  for (const row of rows.session) {
+    if (row.isApiErrorMessage !== true) continue;
+    // The provider's own message is not the CLI's, and is not what these rows are about.
+    delete row.errorDetails;
+    if (failure.status === null) delete row.apiErrorStatus; else row.apiErrorStatus = failure.status;
+  }
+  return rows;
+}

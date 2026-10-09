@@ -1310,8 +1310,12 @@ export class SupervisedAgentDelivery {
             if (binding?.work_attempt_id !== agent.workAttemptId || binding.provider_continuation_id !== agent.providerContinuationId) return;
             const prior = await this.inbox.taskContinuation(failed.inbox_item_id);
             const attempt = (prior?.attempt ?? 0) + 1;
+            // Claude's structured fields, and Claude Code's own words, decide for a Claude failure. Any other
+            // provider's failure is read as before.
+            const claudeCode = agent.provider === "claude-code";
             const policy = taskFailurePolicy(failed.last_error, attempt, await this.inbox.providerRefusedTurn(failed.inbox_item_id),
-              await this.inbox.providerResultUnrecognized(failed.inbox_item_id));
+              await this.inbox.providerResultUnrecognized(failed.inbox_item_id),
+              claudeCode ? await this.inbox.claudeApiFailure(failed.inbox_item_id) : null, claudeCode);
             let tasks: ContinuityTask[] = [];
             let lookupError: string | null = null;
             try { tasks = await this.ownedTasks(agent, { taskIds: prior?.tasks?.map((task) => task.id), heldBefore: prior?.heldBefore ?? String(failed.activation.task_continuity_failed_at), signal: controller.signal }); }

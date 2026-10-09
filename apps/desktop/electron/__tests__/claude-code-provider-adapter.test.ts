@@ -36,7 +36,8 @@ import type {
 } from "../main/agents/provider-adapter.js";
 import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
 import {
-  CLAUDE_API_ERROR_CAPTURES, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT, claudeResultEvent, realClaudeCapture, realClaudeResult,
+  CLAUDE_API_ERROR_CAPTURES, CLAUDE_API_FAILURE_POLICY, CLAUDE_FAILURE_TEXT, CLAUDE_INVALID_REQUESTS, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT,
+  claudeFollowUpText, claudeInvalidRequestRows, claudeResultEvent, realClaudeCapture, realClaudeResult,
 } from "./claude-result-shapes.js";
 import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
@@ -2168,6 +2169,8 @@ for (const recordEnding of [true, false] as const) {
   });
 }
 
+type ClaudeFixtureTasks = Array<{ id: string; title: string; leaseId: string; epoch: number }>;
+
 /**
  * A real daemon supervising one Claude Code agent: the real adapter, action
  * router, delivery, execution capture and stores, over the fake CLI. Only the
@@ -2175,7 +2178,12 @@ for (const recordEnding of [true, false] as const) {
  */
 async function claudeDaemonFixture(options: {
   /** The tasks the agent holds a work lease for. Without it the daemon has no way to ask, as before. */
-  ownedTasks?: () => Array<{ id: string; title: string; leaseId: string; epoch: number }>;
+  ownedTasks?: (input: { signal: AbortSignal }) => ClaudeFixtureTasks | Promise<ClaudeFixtureTasks>;
+  /**
+   * A follow-up turn for a task is dispatched without the wait it was scheduled with (ten seconds and
+   * more). The waits that were asked for are kept, for a test to read.
+   */
+  skipFollowUpDelay?: boolean;
 } = {}) {
   const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
   const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
@@ -2269,7 +2277,29 @@ async function claudeDaemonFixture(options: {
   const roomMessages: Array<Record<string, unknown>> = [];
   const published: string[] = [];
   let mints = 0;
-  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ "claude-code": async () => adapter }), true,
+  /** The waits that follow-up turns were scheduled with, when a test has them skipped. */
+  const followUpWaits: number[] = [];
+  const skipFollowUpDelay = <Daemon>(made: Daemon): Daemon => {
+    if (!options.skipFollowUpDelay) return made;
+    // Delivery waits for its polls and for a follow-up's delay with the same function. The polls of this
+    // fixture wait a fraction of a second; only a follow-up is scheduled seconds ahead. The inbox hands a
+    // follow-up out when its own clock has reached the scheduled time, so that clock is moved ahead by
+    // the wait that was asked for: for the daemon the time has passed.
+    const internals = made as unknown as {
+      supervisedDelivery: { waitForPollDelay: (delayMs: number, signal: AbortSignal) => Promise<void> };
+      supervisedInbox: { now: () => string };
+    };
+    const wait = internals.supervisedDelivery.waitForPollDelay;
+    let ahead = 0;
+    internals.supervisedInbox.now = () => new Date(Date.now() + ahead).toISOString();
+    internals.supervisedDelivery.waitForPollDelay = async (delayMs, signal) => {
+      if (delayMs < 5_000) return wait(delayMs, signal);
+      followUpWaits.push(delayMs);
+      ahead += delayMs;
+    };
+    return made;
+  };
+  const makeDaemon = () => skipFollowUpDelay(new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ "claude-code": async () => adapter }), true,
     50, undefined, {}, {
       poll: async ({ afterMessageId, signal }: { afterMessageId: string | null; signal: AbortSignal }) => {
         const from = afterMessageId ? roomMessages.findIndex((message) => message.id === afterMessageId) + 1 : 0;
@@ -2284,7 +2314,7 @@ async function claudeDaemonFixture(options: {
         published.push(input.text);
         return { messageId: `msg_${900 + published.length}`, roomId: input.roomId };
       },
-      ...(options.ownedTasks ? { ownedTasks: async () => options.ownedTasks!() } : {}),
+      ...(options.ownedTasks ? { ownedTasks: async (input: { signal: AbortSignal }) => options.ownedTasks!(input) } : {}),
     }, {
       listWorkLeases: async () => [], readWorkLease: async () => null,
       attestWorkLease: async () => { throw new Error("unused"); },
@@ -2294,7 +2324,7 @@ async function claudeDaemonFixture(options: {
         return { sessionId: `${id}-session`, bearer: `${id}-bearer-${mints}`, bearerId: `${id}-bearer-id-${mints}`,
           expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
       },
-    });
+    }));
   let daemon = makeDaemon();
   const read = <T>(sql: string): T[] => {
     const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
@@ -2347,6 +2377,7 @@ async function claudeDaemonFixture(options: {
       return turns[ordinal - 1]!;
     };
     return { id, harness, request, eventually, view, read, published, roomMessages, turns, sessionRows, sessionId, receipt, begin, cleanup, recovery, transcript,
+      followUpWaits,
       receipts: () => inbox().receipts(id),
       /** The CLI reports that the turn has started. */
       reportStarted: (turn: { id: string; child: FakeClaudeChild }) =>
@@ -3091,8 +3122,10 @@ for (const lifecycleAuthorityMode of ["typed", "typed_shadow"] as const) {
 
     for (const name of Object.keys(CLAUDE_API_ERROR_CAPTURES)) {
       const played = await play(name);
+      // The failure carries what Claude Code said about it in its own fields, with the name the row before the result gave it.
       assert.deepEqual(played.result, { turnId: played.turnId, providerContinuationId: session_id, outcome: "failed", text: null,
-        evidence: "stream", error: realClaudeResult(played.capture).result }, name);
+        evidence: "stream", error: realClaudeResult(played.capture).result, claudeApiFailure: CLAUDE_API_FAILURE_POLICY[name]!.facts,
+        ...(CLAUDE_API_FAILURE_POLICY[name]!.refusal ? { refusal: true } : {}) }, name);
       assert.deepEqual(played.saved, [played.result], name);
       assert.equal(handle.observedState(), "idle", `${name}: the same process takes the next message`);
     }
@@ -3236,8 +3269,8 @@ function shownToOwner(error: unknown): string {
   return redactCredentialText(String(error).replace(/[\t\n\r ]+/g, " ").trim(), 1_024).value;
 }
 
-test("a Claude agent whose turns end on real API errors settles each as failed with Claude's text, posts none of them, and keeps answering", async () => {
-  const agent = await claudeDaemonFixture();
+for (const [tasks, ownedTasks] of [["cannot be asked about its tasks", undefined], ["holds no task", () => []]] as const) test(`a Claude agent that ${tasks}, whose turns end on real API errors, settles each as failed with Claude's text, posts none of them, and keeps answering`, async () => {
+  const agent = await claudeDaemonFixture(ownedTasks ? { ownedTasks: () => [...ownedTasks()] } : {});
   try {
     const names = Object.keys(CLAUDE_API_ERROR_CAPTURES);
     for (const [index, name] of names.entries()) {
@@ -3271,6 +3304,340 @@ test("a Claude agent whose turns end on real API errors settles each as failed w
   } finally {
     await agent.cleanup();
   }
+});
+
+const HELD_TASK = { id: "task_1", title: "Existing work", leaseId: "lease-1", epoch: 2 };
+
+for (const [name, expected] of Object.entries(CLAUDE_API_FAILURE_POLICY)) {
+  const outcome = { follow_up: "is sent a follow-up turn", blocked: "has a follow-up blocked for its owner", settled: "has nothing queued" }[expected.then];
+  test(`a Claude agent that holds a task ${outcome} after the real failure ${name}${expected.before === expected.then ? "" : ` (the failure text alone gave: ${expected.before.replace("_", "-")})`}`, async () => {
+    const { claudeApiFailureClass, taskFailurePolicy } = await import(new URL("../../daemon/task-continuity.ts", import.meta.url).href);
+    const agent = await claudeDaemonFixture({ ownedTasks: () => [HELD_TASK], skipFollowUpDelay: true });
+    try {
+      const turn = await agent.begin(1);
+      // Every line the real CLI wrote for this failure, in its order.
+      const capture = realClaudeCapture(CLAUDE_API_ERROR_CAPTURES[name]!, agent.sessionId, turn.id);
+      for (const event of capture.stream) turn.child.emit(event);
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles as failed");
+      const claudeText = shownToOwner(realClaudeResult(capture).result);
+
+      // What the daemon saved of the turn holds Claude's own account of the failure, and that account makes the kind.
+      const saved = agent.read<{ evidence: string }>("SELECT terminal_evidence_json AS evidence FROM supervised_agent_terminal_results WHERE agent_id=?");
+      assert.equal(saved.length, 1);
+      const evidence = JSON.parse(saved[0]!.evidence) as { claudeApiFailure?: unknown; refusal?: unknown; unrecognizedResult?: unknown };
+      assert.deepEqual(evidence.claudeApiFailure, expected.facts);
+      assert.equal(evidence.refusal, expected.refusal, "only a turn the provider declined is saved as refused");
+      assert.equal(evidence.unrecognizedResult, undefined, "a real API error is a known shape");
+      assert.equal(claudeApiFailureClass(evidence.claudeApiFailure), expected.kind);
+      // The table says what the text alone gave. That is still what a failure without this account gets.
+      const fromText = taskFailurePolicy(claudeText, 1) as { automatic: boolean; settle?: true };
+      assert.equal(fromText.automatic ? "follow_up" : fromText.settle ? "settled" : "blocked", expected.before);
+
+      // Task continuity decides when the inbox is empty. It has decided when it has queued a follow-up, or left its reason on the message.
+      await agent.eventually(async () => (await agent.receipts()).length > 1
+        || /not continued automatically/.test((await agent.receipt("msg_1"))?.last_error ?? ""), "task continuity has decided");
+      type Row = { source_message_id: string; state: string; last_error: string | null; timeline: Array<{ phase: string; detail: string | null }> };
+      const rows = async () => await agent.receipts() as unknown as Row[];
+      const phases = async (phase: string) => (await rows()).flatMap((row) => row.timeline).filter((event) => event.phase === phase);
+      const sayMessage2 = async () => {
+        agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+        await agent.eventually(async () => Boolean(await agent.receipt("msg_2")), "msg_2 is in the agent's inbox");
+      };
+
+      if (expected.then === "settled") {
+        assert.deepEqual((await rows()).map((row) => row.source_message_id), ["msg_1"], "no follow-up is queued");
+        assert.equal((await agent.receipt("msg_1"))!.last_error, `${claudeText} ${expected.reads}`, "the owner reads Claude's text and what was done about it");
+        const next = await agent.begin(2);
+        agent.reportStarted(next);
+        agent.answer(next, "Answer 2.");
+        await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
+        assert.deepEqual(agent.published, ["Answer 2."]);
+        assert.equal(agent.turns.length, 2, "one turn for each room message, and no follow-up turn");
+        assert.deepEqual([...await phases("blocked"), ...await phases("retry_scheduled")], []);
+      } else if (expected.then === "blocked") {
+        const [failed, followUp] = await rows();
+        assert.equal((await rows()).length, 2);
+        assert.equal(failed!.last_error, claudeText, "the failed message keeps Claude's own text");
+        assert.match(followUp!.source_message_id, /^task-continuation:/);
+        assert.equal(followUp!.state, "blocked");
+        assert.equal(followUp!.last_error, claudeFollowUpText(name, claudeText), "the follow-up says what the owner has to do");
+        await sayMessage2();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        assert.equal((await agent.receipt("msg_2"))!.state, "pending", "msg_2 waits behind the blocked follow-up, as before");
+        assert.equal(agent.turns.length, 1, "Claude is sent no follow-up turn, and not msg_2");
+        assert.deepEqual(agent.published, []);
+        assert.deepEqual(await phases("retry_scheduled"), []);
+      } else {
+        await agent.eventually(() => agent.turns.length === 2, "the follow-up turn is dispatched to Claude");
+        const followUpTurn = agent.turns[1]!;
+        const prompt = followUpTurn.child.written.at(-1)!;
+        assert.match(prompt, /Continue the unfinished task after a provider failure/);
+        assert.match(prompt, /task_1/);
+        assert.equal(/hit the model's output limit/.test(prompt), expected.kind === "output_limit", "only a turn that hit the output limit is told so");
+        const [failed, followUp] = await rows();
+        assert.equal(failed!.last_error, claudeText, "the failed message keeps Claude's own text");
+        assert.match(followUp!.source_message_id, /^task-continuation:/);
+        assert.deepEqual((await phases("retry_scheduled")).map((event) => event.detail), [expected.reads], "the follow-up says why it runs");
+        assert.deepEqual(await phases("blocked"), []);
+        assert.equal(agent.followUpWaits.length, 1);
+        assert.ok(agent.followUpWaits[0]! > 9_000 && agent.followUpWaits[0]! <= 10_000, `the follow-up was scheduled ten seconds ahead (${agent.followUpWaits[0]} ms)`);
+        agent.reportStarted(followUpTurn);
+        agent.answer(followUpTurn, "Continued the task.");
+        await agent.eventually(async () => (await rows())[1]?.state === "acknowledged", "the follow-up turn is answered");
+        await sayMessage2();
+        await agent.eventually(() => agent.turns.length === 3, "msg_2 starts its turn after the follow-up");
+        agent.reportStarted(agent.turns[2]!);
+        agent.answer(agent.turns[2]!, "Answer 2.");
+        await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 is answered");
+        assert.deepEqual(agent.published, ["Continued the task.", "Answer 2."], "no error text is posted");
+      }
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+/** What a task holder gets after each of these failures that Claude Code names `invalid_request`, whichever way the daemon learns of it. */
+const CLAUDE_INVALID_REQUEST_OUTCOMES = {
+  // The request cannot succeed as it was sent: nothing is queued, and Claude's own text stays on the message.
+  tool_history_mismatch: { then: "settled", reads: CLAUDE_FAILURE_TEXT.cannotSucceed },
+  // The owner can put the key right, and Retry delivery then continues the task.
+  api_key_authentication_disabled: { then: "blocked", reads: CLAUDE_FAILURE_TEXT.authentication },
+  // The context is full: the follow-up shows Claude's text and what a new conversation costs.
+  context_blocking_limit: { then: "blocked", reads: CLAUDE_FAILURE_TEXT.conversation },
+} as const;
+
+for (const [name, outcome] of Object.entries(CLAUDE_INVALID_REQUEST_OUTCOMES)) {
+  for (const path of ["in the stream", "read back from the session"] as const) {
+    test(`a Claude agent that holds a task ${outcome.then === "settled" ? "has nothing queued" : "has a follow-up blocked for its owner"} after ${name}, a failure Claude names invalid_request, ${path}`, async () => {
+      const { claudeApiFailureClass } = await import(new URL("../../daemon/task-continuity.ts", import.meta.url).href);
+      const failure = CLAUDE_INVALID_REQUESTS[name]!;
+      const agent = await claudeDaemonFixture({ ownedTasks: () => [HELD_TASK], skipFollowUpDelay: true });
+      try {
+        const turn = await agent.begin(1);
+        const rows = claudeInvalidRequestRows(name, agent.sessionId, turn.id);
+        if (path === "in the stream") {
+          for (const event of rows.stream) turn.child.emit(event);
+        } else {
+          // The process ends before it reports the result. The session is all there is.
+          agent.reportStarted(turn);
+          await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
+          agent.sessionRows.push(...rows.session);
+          agent.exitProcess();
+        }
+        await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles as failed");
+        const saved = agent.read<{ evidence: string }>("SELECT terminal_evidence_json AS evidence FROM supervised_agent_terminal_results WHERE agent_id=?");
+        const facts = (JSON.parse(saved[0]!.evidence) as { claudeApiFailure?: { category: string | null; status: number | null; terminalReason: string | null } }).claudeApiFailure!;
+        assert.deepEqual([facts.category, facts.status], ["invalid_request", failure.status]);
+        assert.equal(facts.terminalReason, path === "in the stream" ? failure.terminalReason : null, "only the stream has the terminal reason");
+        assert.equal(claudeApiFailureClass(facts), failure.kind, "and the kind is the same without it");
+
+        await agent.eventually(async () => (await agent.receipts()).length > 1
+          || /not continued automatically/.test((await agent.receipt("msg_1"))?.last_error ?? ""), "task continuity has decided");
+        const receipts = await agent.receipts() as unknown as Array<{ source_message_id: string; state: string; last_error: string | null }>;
+        if (outcome.then === "settled") {
+          assert.deepEqual(receipts.map((row) => row.source_message_id), ["msg_1"], "no follow-up is queued");
+          assert.equal(receipts[0]!.last_error, `${failure.text} ${outcome.reads}`);
+        } else {
+          assert.deepEqual(receipts.map((row) => row.state), ["acknowledged_failed", "blocked"]);
+          assert.match(receipts[1]!.source_message_id, /^task-continuation:/);
+          assert.equal(receipts[0]!.last_error, failure.text, "the failed message keeps Claude's own text");
+          assert.equal(receipts[1]!.last_error, failure.kind === "conversation" ? `${failure.text} ${outcome.reads}` : outcome.reads);
+        }
+        assert.equal(agent.turns.length, 1, "Claude is sent no follow-up turn");
+        assert.deepEqual(agent.published, []);
+      } finally {
+        await agent.cleanup();
+      }
+    });
+  }
+}
+
+test("Claude's account of a failure is read from what the daemon saved: a daemon that never saw the failure decides on it the same way", async () => {
+  const { taskFailurePolicy } = await import(new URL("../../daemon/task-continuity.ts", import.meta.url).href);
+  let answerTheLookup!: () => void;
+  const lookupAnswered = new Promise<void>((resolve) => { answerTheLookup = resolve; });
+  let lookups = 0;
+  const agent = await claudeDaemonFixture({ skipFollowUpDelay: true, ownedTasks: async ({ signal }) => {
+    lookups += 1;
+    // The daemon that saw the failure never learns which tasks the agent holds: it ends while it waits, with nothing decided.
+    await Promise.race([lookupAnswered, new Promise<never>((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("the lookup was abandoned")), { once: true });
+    })]);
+    return [HELD_TASK];
+  } });
+  try {
+    const turn = await agent.begin(1);
+    // "Connection refused": the text reads like no temporary fault. Only Claude's fields say that it is one.
+    const capture = realClaudeCapture(CLAUDE_API_ERROR_CAPTURES.connection_refused!, agent.sessionId, turn.id);
+    const claudeText = shownToOwner(realClaudeResult(capture).result);
+    assert.equal(taskFailurePolicy(claudeText, 1).automatic, false);
+    for (const event of capture.stream) turn.child.emit(event);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles as failed");
+    await agent.eventually(() => lookups > 0, "task continuity is at its decision, and waits for the agent's tasks");
+    assert.deepEqual((await agent.receipts()).map((receipt) => `${receipt.source_message_id} ${receipt.last_error}`), [`msg_1 ${claudeText}`], "nothing is decided yet");
+
+    // The daemon and the process end. The next daemon has a new adapter, which never saw the stream.
+    await agent.restartDaemon(() => agent.exitProcess());
+    answerTheLookup();
+
+    await agent.eventually(() => agent.turns.length === 2, "the new daemon sends the follow-up turn").catch(async (error) => {
+      throw new Error(`${(error as Error).message}: ${JSON.stringify((await agent.receipts()).map((receipt) => [receipt.source_message_id, receipt.state, receipt.last_error]))}`);
+    });
+    const receipts = await agent.receipts() as unknown as Array<{ source_message_id: string; state: string; timeline: Array<{ phase: string; detail: string | null }> }>;
+    assert.equal(receipts.length, 2);
+    assert.match(receipts[1]!.source_message_id, /^task-continuation:/);
+    assert.deepEqual(receipts.flatMap((receipt) => receipt.timeline).filter((event) => event.phase === "retry_scheduled").map((event) => event.detail),
+      [CLAUDE_FAILURE_TEXT.temporary], "it decided on the saved account, not on the text");
+    assert.deepEqual(receipts.flatMap((receipt) => receipt.timeline).filter((event) => event.phase === "blocked"), []);
+  } finally {
+    answerTheLookup();
+    await agent.cleanup();
+  }
+});
+
+for (const name of ["connection_refused", "http_400_credit_balance", "http_400_prompt_too_long"] as const) {
+  const expected = CLAUDE_API_FAILURE_POLICY[name]!;
+  test(`Claude's account of the real failure ${name} is read from the session too: a task holder whose process ended before the result was seen ${expected.then === "follow_up" ? "is sent a follow-up turn" : "has a follow-up blocked for its owner"}`, async () => {
+    const agent = await claudeDaemonFixture({ ownedTasks: () => [HELD_TASK], skipFollowUpDelay: true });
+    try {
+      const turn = await agent.begin(1);
+      agent.reportStarted(turn);
+      await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
+      // The process ends before it reports the result. The session rows are those the real CLI wrote for this failure.
+      const capture = realClaudeCapture(CLAUDE_API_ERROR_CAPTURES[name]!, agent.sessionId, turn.id);
+      agent.sessionRows.push(...capture.session);
+      agent.exitProcess();
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles as failed");
+      const claudeText = shownToOwner(realClaudeResult(capture).result);
+      assert.equal((await agent.receipt("msg_1"))!.last_error, claudeText);
+      // The session keeps the status and Claude's name for the error, and not the result's terminal reason.
+      const saved = agent.read<{ evidence: string }>("SELECT terminal_evidence_json AS evidence FROM supervised_agent_terminal_results WHERE agent_id=?");
+      assert.deepEqual((JSON.parse(saved[0]!.evidence) as { claudeApiFailure?: unknown }).claudeApiFailure, { ...expected.facts, terminalReason: null });
+
+      await agent.eventually(async () => (await agent.receipts()).length > 1, "task continuity has queued its follow-up");
+      const followUp = (await agent.receipts() as unknown as Array<{ source_message_id: string; state: string; last_error: string | null; timeline: Array<{ phase: string; detail: string | null }> }>)[1]!;
+      assert.match(followUp.source_message_id, /^task-continuation:/);
+      if (expected.then === "follow_up") {
+        await agent.eventually(() => agent.turns.length === 2, "the follow-up turn is dispatched to the new process");
+        assert.deepEqual(followUp.timeline.filter((event) => event.phase === "retry_scheduled").map((event) => event.detail), [expected.reads]);
+      } else {
+        assert.equal(followUp.state, "blocked");
+        assert.equal(followUp.last_error, claudeFollowUpText(name, claudeText));
+        assert.equal(agent.turns.length, 1, "Claude is sent no follow-up turn");
+      }
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+test("a Claude agent that holds a task and reaches the account's usage limit in a room turn is sent no follow-up turn: its follow-up waits for the owner", async () => {
+  const agent = await claudeDaemonFixture({ ownedTasks: () => [HELD_TASK], skipFollowUpDelay: true });
+  try {
+    const turn = await agent.begin(1);
+    // The real stream of a rate limit, with the line Claude writes for a usage window that rejected the request
+    // put in before the error. That line is written by hand (SDKRateLimitEvent): no capture holds one.
+    const capture = realClaudeCapture(CLAUDE_API_ERROR_CAPTURES.http_429_rate_limit!, agent.sessionId, turn.id);
+    const errorRow = capture.stream.findIndex((event) => event.is_api_error_message === true);
+    for (const event of [...capture.stream.slice(0, errorRow),
+      { type: "rate_limit_event", session_id: agent.sessionId, rate_limit_info: { status: "rejected", resetsAt: 1_790_000_000, rateLimitType: "seven_day" } },
+      ...capture.stream.slice(errorRow)]) turn.child.emit(event);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles as failed");
+    const saved = agent.read<{ evidence: string }>("SELECT terminal_evidence_json AS evidence FROM supervised_agent_terminal_results WHERE agent_id=?");
+    assert.deepEqual((JSON.parse(saved[0]!.evidence) as { claudeApiFailure?: unknown }).claudeApiFailure,
+      { ...CLAUDE_API_FAILURE_POLICY.http_429_rate_limit!.facts, usageLimit: true });
+
+    await agent.eventually(async () => (await agent.receipts()).length > 1, "task continuity has queued its follow-up");
+    const followUp = (await agent.receipts())[1]!;
+    assert.match(followUp.source_message_id, /^task-continuation:/);
+    assert.equal(followUp.state, "blocked", "a usage limit does not pass in seconds: it is not retried as a short fault");
+    assert.equal(followUp.last_error, CLAUDE_FAILURE_TEXT.billing);
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => Boolean(await agent.receipt("msg_2")), "msg_2 is in the agent's inbox");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(agent.turns.length, 1, "Claude is sent no follow-up turn");
+    assert.deepEqual(agent.followUpWaits, [], "and none is scheduled");
+    assert.equal((await agent.receipt("msg_2"))!.state, "pending");
+  } finally {
+    await agent.cleanup();
+  }
+});
+
+test("Claude's name for an API error belongs to the turn whose stream carried it, and to no other turn", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const child = harness.children[0]!;
+  const session_id = handle.providerContinuationId!;
+  const start = async () => {
+    const writtenBefore = child.written.length;
+    const running = adapter.runRoomTurn(handle, { inboxItemId: "inbox", actionId: "action", sourceMessage: {}, activation: {} },
+      { checkpointTerminalResult: async () => {} });
+    return { running, turnId: await nextClaudeTurnId(child, writtenBefore) };
+  };
+  const named = (category: string, turnId?: string) => ({ type: "assistant", session_id, is_api_error_message: true, error: category,
+    ...(turnId ? { user_message_uuid: turnId } : {}), message: { model: "<synthetic>", content: [{ type: "text", text: "API Error" }] } });
+  const apiError = (turnId: string, status: number | null) => ({ type: "result", subtype: "success", is_error: true, session_id, user_message_uuid: turnId,
+    api_error_status: status, terminal_reason: "api_error", result: "API Error" });
+  const facts = async (running: Promise<ProviderRoomTurnResult>) => (await running as { claudeApiFailure?: unknown }).claudeApiFailure;
+
+  // A row that names its command, and a row that names none, as Claude Code writes both.
+  const first = await start();
+  child.emit(named("authentication_failed", first.turnId));
+  child.emit(apiError(first.turnId, 401));
+  assert.deepEqual(await facts(first.running), { status: 401, terminalReason: "api_error", category: "authentication_failed" });
+  const second = await start();
+  child.emit(named("max_output_tokens"));
+  child.emit(apiError(second.turnId, null));
+  assert.deepEqual(await facts(second.running), { status: null, terminalReason: "api_error", category: "max_output_tokens" });
+
+  // A turn whose stream named no error has no name: not the one of the turn before it.
+  const third = await start();
+  child.emit(apiError(third.turnId, 500));
+  assert.deepEqual(await facts(third.running), { status: 500, terminalReason: "api_error", category: null });
+
+  // A row of another command, or of another session, that arrives while a turn runs names nothing for that turn.
+  const fourth = await start();
+  child.emit(named("billing_error", first.turnId));
+  child.emit({ ...named("billing_error", fourth.turnId), session_id: "another-session" });
+  child.emit(apiError(fourth.turnId, 500));
+  assert.deepEqual(await facts(fourth.running), { status: 500, terminalReason: "api_error", category: null });
+
+  // An assistant row that is not marked as an API error names none, whatever it carries.
+  const fifth = await start();
+  child.emit({ ...named("billing_error", fifth.turnId), is_api_error_message: false });
+  child.emit(apiError(fifth.turnId, 529));
+  assert.deepEqual(await facts(fifth.running), { status: 529, terminalReason: "api_error", category: null });
+
+  // A sub-agent's API error (the real row) arrives in the stream of the turn that started it, with the turn's
+  // session and no command. It names nothing for the turn: `parent_tool_use_id` says it is the sub-agent's.
+  const withSubAgent = await start();
+  const subAgentError = realClaudeCapture(CLAUDE_REAL_CAPTURES.subagent_api_error!, session_id, withSubAgent.turnId).stream
+    .find((event) => event.is_api_error_message === true)!;
+  assert.deepEqual([subAgentError.error, subAgentError.user_message_uuid, typeof subAgentError.parent_tool_use_id], ["unknown", undefined, "string"]);
+  child.emit(subAgentError);
+  child.emit(apiError(withSubAgent.turnId, 500));
+  assert.deepEqual(await facts(withSubAgent.running), { status: 500, terminalReason: "api_error", category: null });
+
+  // The CLI reports each usage window of the account it reads (SDKRateLimitEvent). One that rejected the request,
+  // in the stream of the running turn, is part of that turn's account. These lines are written by hand, as in the
+  // start-up tests: no capture holds one.
+  const window = (status: string, session = session_id) => ({ type: "rate_limit_event", session_id: session, rate_limit_info: { status, resetsAt: 1_790_000_000, rateLimitType: "five_hour" } });
+  const sixth = await start();
+  child.emit(window("allowed_warning"));
+  child.emit(window("rejected"));
+  child.emit(named("rate_limit", sixth.turnId));
+  child.emit(apiError(sixth.turnId, 429));
+  assert.deepEqual(await facts(sixth.running), { status: 429, terminalReason: "api_error", category: "rate_limit", usageLimit: true });
+  // A window that is allowed, or one of another session, rejects nothing. Nor does the window of the turn before.
+  const seventh = await start();
+  child.emit(window("allowed"));
+  child.emit(window("allowed_warning"));
+  child.emit(window("rejected", "another-session"));
+  child.emit(named("rate_limit", seventh.turnId));
+  child.emit(apiError(seventh.turnId, 429));
+  assert.deepEqual(await facts(seventh.running), { status: 429, terminalReason: "api_error", category: "rate_limit" });
 });
 
 test("a Claude agent whose turn ends on a result of a shape nobody expected settles it as failed once, and no later message waits behind it", async () => {
