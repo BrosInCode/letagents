@@ -11,6 +11,8 @@ import type {
 import {
   CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION,
   CodexProviderAdapter,
+  CODEX_READ_ONLY_CONFIG_OVERRIDES,
+  CODEX_READ_ONLY_ROOM_TOOLS,
   COMMAND_OUTPUT_WINDOW_MS,
   codexMcpWorkplaceConfigOverrides,
   type CodexPermissionObservation,
@@ -142,6 +144,36 @@ class FakeRpc implements CodexAdapterRpc {
     return this.reviewerFromOwnSettings ?? (typeof requested === "string" ? requested : "user");
   }
 
+  /** Set when the app-server keeps a sandbox of its own instead of the one a thread was asked to have. */
+  sandboxFromOwnSettings: unknown = undefined;
+  /** Set when the app-server keeps an approval policy of its own. */
+  approvalPolicyFromOwnSettings: unknown = undefined;
+  /** An older app-server: its thread replies say nothing about the sandbox or the approval policy. */
+  omitsThreadPolicy = false;
+
+  /** The policy each conversation of this app-server has, shared by every connection to it. */
+  threadPolicies = new Map<string, { approvalPolicy?: unknown; sandbox?: unknown }>();
+
+  /**
+   * What a thread reply says the thread got. The sandbox is reported in its full form, not by the name it was asked for.
+   * A request that names no policy, as a subscription to a loaded conversation does, is told the one the conversation has.
+   */
+  private appliedThreadPolicy(params: unknown, threadId: string): Record<string, unknown> {
+    const requested = (params ?? {}) as { approvalPolicy?: unknown; sandbox?: unknown };
+    if (requested.approvalPolicy !== undefined || requested.sandbox !== undefined) {
+      this.threadPolicies.set(threadId, { approvalPolicy: requested.approvalPolicy, sandbox: ({
+        "read-only": { type: "readOnly", networkAccess: false },
+        "workspace-write": { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false },
+        "danger-full-access": { type: "dangerFullAccess" },
+      } as Record<string, unknown>)[String(requested.sandbox)] });
+    }
+    if (this.omitsThreadPolicy) return {};
+    const held = this.threadPolicies.get(threadId) ?? {};
+    const sandbox = this.sandboxFromOwnSettings ?? held.sandbox;
+    const approvalPolicy = this.approvalPolicyFromOwnSettings ?? held.approvalPolicy;
+    return { ...(approvalPolicy === undefined ? {} : { approvalPolicy }), ...(sandbox === undefined ? {} : { sandbox }) };
+  }
+
   async connect(): Promise<void> {
     this.connected = true;
   }
@@ -177,14 +209,12 @@ class FakeRpc implements CodexAdapterRpc {
     }
     if (method === "thread/start") {
       this.threadStartCount += 1;
+      const startedThreadId = this.threadStartCount === 1 ? this.threadId : `${this.threadId}-replacement-${this.threadStartCount - 1}`;
       return {
-        thread: {
-          id: this.threadStartCount === 1
-            ? this.threadId
-            : `${this.threadId}-replacement-${this.threadStartCount - 1}`,
-        },
+        thread: { id: startedThreadId },
         approvalsReviewer: this.appliedReviewer(params),
         ...this.reportedEffort(params),
+        ...this.appliedThreadPolicy(params, startedThreadId),
         ...(this.options.threadDirectory === null ? {} : { cwd: this.options.threadDirectory }),
       } as T;
     }
@@ -203,7 +233,7 @@ class FakeRpc implements CodexAdapterRpc {
         if (Number.isFinite(missingResumes)) this.missingThreadResumes.set(threadId, missingResumes - 1);
         throw new Error(`thread not found: ${threadId}`);
       }
-      return { thread: { id: threadId }, approvalsReviewer: this.appliedReviewer(params), ...this.reportedEffort(params) } as T;
+      return { thread: { id: threadId }, approvalsReviewer: this.appliedReviewer(params), ...this.reportedEffort(params), ...this.appliedThreadPolicy(params, threadId) } as T;
     }
     if (method === "turn/start") {
       const threadId = (params as { threadId?: string } | undefined)?.threadId ?? this.threadId;
@@ -361,6 +391,8 @@ function createHarness(harnessOptions: {
 } = {}) {
   const options = harnessOptions;
   const reported = { codexHome: options.reportedCodexHome };
+  /** One app-server's conversations keep their policy across the connections of a test. */
+  const threadPolicies = new Map<string, { approvalPolicy?: unknown; sandbox?: unknown }>();
   /** Each time a running process was asked whether a conversation it loaded now would read a command rule, and the answer. */
   const ruleLoadChecks: Array<{ cwd: string; codexHome: string | null }> = [];
   const ruleLoad: { refusal: string | null } = { refusal: null };
@@ -429,6 +461,7 @@ function createHarness(harnessOptions: {
         effortReportedAsNull: options.effortReportedAsNull ?? false,
       });
       if (reported.codexHome !== undefined) client.reportedCodexHome = () => reported.codexHome!;
+      client.threadPolicies = threadPolicies;
       clients.push(client);
       return client;
     },
@@ -1513,6 +1546,647 @@ test("Codex ask-before-write remains read-only at turn dispatch after reattachme
   assert.equal(recoveredTurn.approvalPolicy, "on-request");
   assert.deepEqual(recoveredTurn.sandboxPolicy, { type: "readOnly", networkAccess: false },
     "the first verified contract remains immutable across subsequent attaches");
+});
+
+const CODEX_READ_ONLY_POLICY = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } } as const;
+
+test("Codex Read-only names a read-only sandbox, no network and nobody to ask on every thread and turn", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const launchPolicy = structuredClone(CODEX_READ_ONLY_POLICY) as { approvalPolicy: string; sandboxPolicy: { type: string; networkAccess: boolean } };
+  const request = spawnRequest({ deliveryMode: "daemon_inbox", permissionProfileId: "read_only", configurationRevision: 1, launchPolicy });
+  const first = await adapter.spawn(request);
+
+  // A new thread: the thread form of the sandbox, the approval policy, and the host as the reviewer of record.
+  const started = requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>;
+  assert.equal(started.approvalPolicy, "never");
+  assert.equal(started.sandbox, "read-only");
+  assert.equal(started.approvalsReviewer, "user");
+  assert.equal(Object.hasOwn(started, "sandboxPolicy"), false, "thread/start takes the sandbox by name");
+
+  const attachedAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await attachedAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection, launchPolicy });
+  assertProviderHandle(attached);
+  // A later change by the caller cannot widen what the launch captured.
+  launchPolicy.sandboxPolicy.type = "dangerFullAccess";
+  launchPolicy.sandboxPolicy.networkAccess = true;
+  launchPolicy.approvalPolicy = "on-request";
+  for (const [runtime, handle, client] of [[adapter, first, harness.clients[0]!], [attachedAdapter, attached, harness.clients[1]!]] as const) {
+    await runtime.runRoomTurn(handle, { inboxItemId: "read-only-turn", actionId: "read-only-turn", sourceMessage: {}, activation: {} }, {
+      checkpointTurnStarted: async (turnId) => {
+        client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } });
+      },
+    });
+    // Every turn restates the whole policy, in the turn form of the sandbox.
+    const turn = requestByMethod(client, "turn/start").params as Record<string, unknown>;
+    assert.equal(turn.approvalPolicy, "never");
+    assert.deepEqual(turn.sandboxPolicy, { type: "readOnly", networkAccess: false });
+    assert.equal(turn.approvalsReviewer, "user");
+    assert.equal(Object.hasOwn(turn, "sandbox"), false, "turn/start uses its native sandboxPolicy shape");
+  }
+
+  // A thread resumed after its process ended is given the same policy again.
+  harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await flush();
+  await new CodexProviderAdapter({ dependencies: harness.dependencies }).resume({
+    workAttemptId: request.workAttemptId, providerContinuationId: first.providerContinuationId!,
+  }, { ...request, launchPolicy: structuredClone(CODEX_READ_ONLY_POLICY) });
+  const resumed = requestByMethod(harness.clients.at(-1)!, "thread/resume").params as Record<string, unknown>;
+  assert.equal(resumed.threadId, first.providerContinuationId);
+  assert.equal(resumed.approvalPolicy, "never");
+  assert.equal(resumed.sandbox, "read-only");
+  assert.equal(resumed.approvalsReviewer, "user");
+  assert.equal(Object.hasOwn(resumed, "sandboxPolicy"), false);
+});
+
+test("Codex Read-only starts nothing under another level's policy, or with a reviewer other than the host", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  for (const [launchPolicy, reason] of [
+    [{ approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }, /authority at 'sandboxPolicy'/],
+    [{ approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }, /authority at 'approvalPolicy'/],
+    [{ approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: true } }, /authority at 'sandboxPolicy'/],
+    [{ ...CODEX_READ_ONLY_POLICY, approvalsReviewer: "auto_review" }, /authority at 'approvalsReviewer'/],
+    [{}, /authority at 'approvalPolicy'/],
+  ] as const) {
+    await assert.rejects(adapter.spawn(spawnRequest({
+      deliveryMode: "daemon_inbox", permissionProfileId: "read_only", configurationRevision: 1, launchPolicy,
+    })), reason, JSON.stringify(launchPolicy));
+  }
+  assert.equal(harness.launches.length, 0, "no app-server is started for a refused launch");
+
+  // The owner's own Codex settings name a reviewer and the app-server keeps it: the launch stops before any turn.
+  const owned = createHarness({ reviewerFromOwnSettings: "auto_review" });
+  await assert.rejects(new CodexProviderAdapter({ dependencies: owned.dependencies }).spawn(spawnRequest({
+    deliveryMode: "daemon_inbox", permissionProfileId: "read_only", configurationRevision: 1, launchPolicy: CODEX_READ_ONLY_POLICY,
+  })), /would review approvals itself instead of asking you/);
+  assert.equal(owned.clients[0]!.requests.some(request => request.method === "turn/start"), false);
+});
+
+const READ_ONLY_REPLY = { type: "readOnly", networkAccess: false };
+/**
+ * What a Read-only thread must not be left with: another sandbox, another approval policy, no word on either,
+ * or a read-only sandbox with a part that widens it. Such a part is one whose name speaks of writing, of the
+ * network or of an exception to the sandbox, and whose value is anything but off, absent or empty.
+ */
+const NOT_READ_ONLY_REPLIES: ReadonlyArray<[string, (client: FakeRpc) => void]> = [
+  ["a full-access sandbox", (client) => { client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; }],
+  ["a sandbox that allows writes", (client) => { client.sandboxFromOwnSettings = { type: "workspaceWrite", writableRoots: [], networkAccess: false }; }],
+  ["a read-only sandbox with network access", (client) => { client.sandboxFromOwnSettings = { type: "readOnly", networkAccess: true }; }],
+  ["a read-only sandbox that does not say its network access", (client) => { client.sandboxFromOwnSettings = { type: "readOnly" }; }],
+  ["a read-only sandbox with a writable folder", (client) => { client.sandboxFromOwnSettings = { ...READ_ONLY_REPLY, writableRoots: ["/tmp"] }; }],
+  ["a read-only sandbox with a network flag that is on", (client) => { client.sandboxFromOwnSettings = { ...READ_ONLY_REPLY, allowLocalNetwork: true }; }],
+  ["a read-only sandbox with allowed domains", (client) => { client.sandboxFromOwnSettings = { ...READ_ONLY_REPLY, allowedDomains: ["example.invalid"] }; }],
+  ["a read-only sandbox with an exclusion list that is not empty", (client) => { client.sandboxFromOwnSettings = { ...READ_ONLY_REPLY, excludedPaths: ["/tmp"] }; }],
+  ["a read-only sandbox with a writable folder inside a part this build does not know", (client) => { client.sandboxFromOwnSettings = { ...READ_ONLY_REPLY, access: { type: "restricted", writableRoots: ["/tmp"] } }; }],
+  ["an approval policy that asks", (client) => { client.approvalPolicyFromOwnSettings = "on-request"; }],
+  ["no word on the sandbox or the approval policy", (client) => { client.omitsThreadPolicy = true; }],
+];
+/** Replies a newer Codex could send for a thread that is Read-only all the same: parts this build does not know, none of which widens the sandbox. */
+const STILL_READ_ONLY_REPLIES: ReadonlyArray<[string, Record<string, unknown>]> = [
+  ["the exact reply of Codex 0.153.4", { ...READ_ONLY_REPLY }],
+  ["a part about reading", { ...READ_ONLY_REPLY, access: { type: "fullAccess" }, readableRoots: ["/"] }],
+  ["an unknown flag and an unknown value", { ...READ_ONLY_REPLY, includePlatformDefaults: true, profile: "read-only", version: 2 }],
+  ["writing and network parts that are off, absent or empty", { ...READ_ONLY_REPLY, writableRoots: [], allowedDomains: [], networkProxy: null, excludeSlashTmp: false, excludedPaths: [], escalation: {} }],
+];
+
+test("Codex Read-only starts no turn unless the new or resumed thread reports the read-only sandbox and nobody to ask", { timeout: 30_000 }, async () => {
+  const request = () => spawnRequest({ deliveryMode: "daemon_inbox", permissionProfileId: "read_only", configurationRevision: 1,
+    launchPolicy: structuredClone(CODEX_READ_ONLY_POLICY) });
+  for (const [what, misreport] of NOT_READ_ONLY_REPLIES) {
+    // A new thread.
+    const fresh = createHarness();
+    const createRpcClient = fresh.dependencies.createRpcClient;
+    fresh.dependencies.createRpcClient = (...args) => { const client = createRpcClient(...args) as FakeRpc; misreport(client); return client; };
+    await assert.rejects(new CodexProviderAdapter({ dependencies: fresh.dependencies }).spawn(request()), /did not confirm Read-only access/, `thread/start: ${what}`);
+    assert.equal(requestByMethod(fresh.clients[0]!, "thread/start").method, "thread/start", "the thread was asked for, and its reply was refused");
+    assert.equal(fresh.clients[0]!.requests.some((call) => call.method === "turn/start"), false, `thread/start: ${what}`);
+    assert.deepEqual(fresh.signals.map((signal) => signal.pid), [fresh.launches[0]!.pid], `the app-server started for it is stopped: ${what}`);
+
+    // A thread resumed in a new process, after the first one ran as Read-only and ended.
+    const resumed = createHarness();
+    const first = await new CodexProviderAdapter({ dependencies: resumed.dependencies }).spawn(request());
+    resumed.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+    await flush();
+    const resumeRpcClient = resumed.dependencies.createRpcClient;
+    resumed.dependencies.createRpcClient = (...args) => { const client = resumeRpcClient(...args) as FakeRpc; misreport(client); return client; };
+    await assert.rejects(new CodexProviderAdapter({ dependencies: resumed.dependencies }).resume({
+      workAttemptId: request().workAttemptId, providerContinuationId: first.providerContinuationId!,
+    }, request()), /did not confirm Read-only access/, `thread/resume: ${what}`);
+    assert.equal(requestByMethod(resumed.clients[1]!, "thread/resume").method, "thread/resume");
+    assert.equal(resumed.clients[1]!.requests.some((call) => call.method === "turn/start"), false, `thread/resume: ${what}`);
+    assert.deepEqual(resumed.signals.map((signal) => signal.pid), [resumed.launches[1]!.pid], `the app-server started for the resume is stopped: ${what}`);
+
+    // A conversation repaired inside a running process: the same thread again (thread/resume) or a new one (thread/start).
+    for (const forceReplacement of [false, true]) {
+      const repaired = createHarness();
+      const adapter = new CodexProviderAdapter({ dependencies: repaired.dependencies });
+      const handle = await adapter.spawn(request());
+      misreport(repaired.clients[0]!);
+      let checkpointed = false;
+      await assert.rejects(adapter.repairContinuation!(handle, {
+        workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+        forceReplacement, cwd: spawnRequest().cwd, launchPolicy: {}, model: null, reasoningEffort: null,
+      }, { checkpointReplacement: async () => { checkpointed = true; } }), /did not confirm Read-only access/, `repair ${forceReplacement}: ${what}`);
+      assert.equal(checkpointed, false, "a refused thread never becomes the agent's conversation");
+      assert.equal(repaired.clients[0]!.requests.some((call) => call.method === "turn/start"), false, `repair ${forceReplacement}: ${what}`);
+    }
+  }
+});
+
+test("only Read-only is held to the reported sandbox and approval policy: every other access level starts as it did", { timeout: 30_000 }, async () => {
+  for (const [permissionProfileId, launchPolicy] of [
+    ["full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }],
+    ["auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" }],
+  ] as const) {
+    for (const [what, misreport] of NOT_READ_ONLY_REPLIES) {
+      const harness = createHarness();
+      const createRpcClient = harness.dependencies.createRpcClient;
+      harness.dependencies.createRpcClient = (...args) => { const client = createRpcClient(...args) as FakeRpc; misreport(client); return client; };
+      const handle = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest({
+        deliveryMode: "daemon_inbox", permissionProfileId, configurationRevision: 1, launchPolicy }));
+      assert.equal(handle.observedState(), "idle", `${permissionProfileId}: ${what}`);
+    }
+  }
+});
+
+test("a newer Codex that adds parts to its read-only reply does not lock Read-only out, and a part that widens the sandbox still refuses", { timeout: 30_000 }, async () => {
+  const request = () => spawnRequest({ deliveryMode: "daemon_inbox", permissionProfileId: "read_only", configurationRevision: 1,
+    launchPolicy: structuredClone(CODEX_READ_ONLY_POLICY) });
+  const turnOfName = (name: string) => ({ inboxItemId: name, actionId: name, sourceMessage: {}, activation: {} });
+  for (const [what, sandbox] of STILL_READ_ONLY_REPLIES) {
+    const harness = createHarness();
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (...args) => { const client = createRpcClient(...args) as FakeRpc; client.sandboxFromOwnSettings = sandbox; return client; };
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    // The agent starts, takes a turn, and its conversation can be repaired and resumed: no step says "Update Codex".
+    const handle = await adapter.spawn(request());
+    assert.equal(handle.observedState(), "idle", what);
+    assert.deepEqual(harness.signals, [], what);
+    await adapter.runRoomTurn(handle, turnOfName("harmless"), {
+      checkpointTurnStarted: async (turnId) => { harness.clients[0]!.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } }); },
+    });
+    assert.equal(harness.clients[0]!.requests.filter((call) => call.method === "turn/start").length, 1, what);
+    assert.equal((await adapter.repairContinuation!(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+      forceReplacement: true, cwd: spawnRequest().cwd, launchPolicy: {}, model: null, reasoningEffort: null,
+    }, { checkpointReplacement: async () => {} })).outcome, "replaced", what);
+    harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+    await flush();
+    const resumed = await new CodexProviderAdapter({ dependencies: harness.dependencies }).resume(
+      { workAttemptId: request().workAttemptId, providerContinuationId: handle.providerContinuationId! }, request());
+    assert.equal(resumed.observedState(), "idle", what);
+  }
+  // The same parts with a value that grants something are refused, each for itself: see NOT_READ_ONLY_REPLIES,
+  // which the test above runs at a start, a resume and a repair. Here: one of each kind refuses a start.
+  for (const sandbox of [
+    { ...READ_ONLY_REPLY, writableRoots: ["/tmp"] }, { ...READ_ONLY_REPLY, allowedDomains: ["example.invalid"] },
+    { ...READ_ONLY_REPLY, networkProxy: { port: 8080 } }, { ...READ_ONLY_REPLY, excludeSlashTmp: true }, { ...READ_ONLY_REPLY, escalation: { allowed: true } },
+  ]) {
+    const harness = createHarness();
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (...args) => { const client = createRpcClient(...args) as FakeRpc; client.sandboxFromOwnSettings = sandbox; return client; };
+    await assert.rejects(new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request()), /did not confirm Read-only access/, JSON.stringify(sandbox));
+    assert.equal(harness.clients[0]!.requests.some((call) => call.method === "turn/start"), false);
+  }
+});
+
+test("Codex Read-only starts with web search off, at launch and for every conversation, whatever a stored policy holds, and no other level changes", { timeout: 30_000 }, async () => {
+  assert.deepEqual([...CODEX_READ_ONLY_CONFIG_OVERRIDES], ['web_search="disabled"']);
+  const sent = (client: FakeRpc, method: string) => client.requests.filter((entry) => entry.method === method).map((entry) => entry.params as Record<string, unknown>);
+  // A stored policy that tries to turn web search on for the conversation, in the new key and in the old one.
+  const stored = { config: { web_search: "live", tools: { web_search: true }, model_provider: "elsewhere" } };
+  const readOnly = (overrides: Partial<ProviderSpawnRequest> = {}) => spawnRequest({ deliveryMode: "daemon_inbox", permissionProfileId: "read_only", configurationRevision: 1,
+    launchPolicy: { ...structuredClone(CODEX_READ_ONLY_POLICY), ...structuredClone(stored) }, ...overrides });
+
+  // The launch: Codex is started with web search off, after every other override, so the owner's linked config cannot say otherwise.
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(readOnly());
+  assert.deepEqual(harness.launchOptions[0]!.options.configOverrides.slice(-1), ['web_search="disabled"']);
+  // The conversation: its config is the Read-only one whole. Nothing the stored policy holds is in it.
+  assert.deepEqual(sent(harness.clients[0]!, "thread/start")[0]!.config, { web_search: "disabled" });
+
+  // A repair on the same process: the probes of the conversation, and the one that replaces it.
+  harness.clients[0]!.markThreadMissing(handle.providerContinuationId!);
+  await adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+    cwd: spawnRequest().cwd, launchPolicy: readOnly().launchPolicy, model: "gpt-5.6-sol", reasoningEffort: "high",
+  }, { checkpointReplacement: async () => {} });
+  const probes = sent(harness.clients[0]!, "thread/resume");
+  assert.equal(probes.length > 0, true);
+  for (const probe of probes) assert.deepEqual(probe.config, { model_reasoning_effort: "high", web_search: "disabled" });
+  assert.deepEqual(sent(harness.clients[0]!, "thread/start")[1]!.config, { model_reasoning_effort: "high", web_search: "disabled" });
+
+  // A resume in another process: the launch override again, and the conversation's config again.
+  harness.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await flush();
+  await new CodexProviderAdapter({ dependencies: harness.dependencies }).resume(
+    { workAttemptId: readOnly().workAttemptId, providerContinuationId: handle.providerContinuationId! }, readOnly());
+  assert.deepEqual(harness.launchOptions[1]!.options.configOverrides.slice(-1), ['web_search="disabled"']);
+  assert.deepEqual(sent(harness.clients[1]!, "thread/resume")[0]!.config, { web_search: "disabled" });
+
+  // A process found running, whose level is not named to the adapter: a conversation it starts in a repair gets the config too.
+  const found = createHarness();
+  const first = await new CodexProviderAdapter({ dependencies: found.dependencies }).spawn(readOnly());
+  const restarted = new CodexProviderAdapter({ dependencies: found.dependencies });
+  const attached = await restarted.attach({ workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection, launchPolicy: CODEX_READ_ONLY_POLICY });
+  assertProviderHandle(attached);
+  await restarted.repairContinuation!(attached, {
+    workAttemptId: attached.workAttemptId, expectedProviderContinuationId: attached.providerContinuationId!,
+    forceReplacement: true, cwd: spawnRequest().cwd, launchPolicy: readOnly().launchPolicy, model: null, reasoningEffort: null,
+  }, { checkpointReplacement: async () => {} });
+  assert.deepEqual(sent(found.clients[1]!, "thread/start")[0]!.config, { web_search: "disabled" });
+
+  // The polling kind of launch is Read-only by the same name, so its Codex has web search off as well.
+  const polling = createHarness();
+  await new CodexProviderAdapter({ dependencies: polling.dependencies }).spawn(readOnly({
+    pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling", supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact", supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" } }));
+  assert.deepEqual(polling.launchOptions[0]!.options.configOverrides.slice(-1), ['web_search="disabled"']);
+
+  // No other access level changes: no override, and a stored config reaches the conversation as it always did.
+  for (const [permissionProfileId, launchPolicy] of [
+    ["full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }],
+    ["auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" }],
+    // A launch that names no level, with Read-only's own policy: it is not the level, and it is sent what it was before.
+    [undefined, CODEX_READ_ONLY_POLICY],
+  ] as const) {
+    for (const withStoredConfig of [false, true]) {
+      const other = createHarness();
+      await new CodexProviderAdapter({ dependencies: other.dependencies }).spawn(spawnRequest({ deliveryMode: "daemon_inbox",
+        ...(permissionProfileId ? { permissionProfileId, configurationRevision: 1 } : {}),
+        launchPolicy: { ...structuredClone(launchPolicy), ...(withStoredConfig ? structuredClone(stored) : {}) } }));
+      assert.equal(other.launchOptions[0]!.options.configOverrides.some((override) => /web_search/.test(override)), false, String(permissionProfileId));
+      const started = sent(other.clients[0]!, "thread/start")[0]!;
+      if (withStoredConfig) assert.deepEqual(started.config, stored.config, String(permissionProfileId));
+      else assert.equal(Object.hasOwn(started, "config"), false, String(permissionProfileId));
+    }
+  }
+});
+
+/** A launch at an access level, as the daemon makes it. */
+const levelLaunch = (permissionProfileId: string, launchPolicy: Record<string, unknown>) =>
+  ({ deliveryMode: "daemon_inbox" as const, permissionProfileId, configurationRevision: 1, launchPolicy });
+const foundAsReadOnly = () => levelLaunch("read_only", structuredClone(CODEX_READ_ONLY_POLICY));
+const foundAtOtherLevels = () => [
+  levelLaunch("full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }),
+  levelLaunch("ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }),
+  levelLaunch("auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" }),
+];
+
+/**
+ * A process that an earlier adapter started at a level, and another adapter that finds it running.
+ * `misreport` changes what the found conversation reports, until `tellTheTruth` is called.
+ */
+async function foundRunning(level: ReturnType<typeof levelLaunch>, misreport: ((client: FakeRpc) => void) | null, policyKnown = true) {
+  // The process ends when it is signalled, as a real one does.
+  const harness = createHarness({ exitOnSignal: true });
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest(level));
+  let misreporting = true;
+  const createRpcClient = harness.dependencies.createRpcClient;
+  harness.dependencies.createRpcClient = (...args) => { const client = createRpcClient(...args) as FakeRpc; if (misreporting) misreport?.(client); return client; };
+  const restarted = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const ref = { workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection };
+  return { harness, restarted, first, ref, level, tellTheTruth: () => { misreporting = false; },
+    attach: (withPolicy = policyKnown) => restarted.attach({ ...ref, ...(withPolicy ? { launchPolicy: level.launchPolicy } : {}) }) };
+}
+
+/** What an attach answers when the adapter stopped the runtime it found: the proof, and the line for the owner. */
+function assertStoppedNotReadOnly(answer: unknown, scene: Awaited<ReturnType<typeof foundRunning>>, what: string): string {
+  const stopped = answer as { state?: unknown; terminal?: Record<string, unknown>; notices?: string[] };
+  assert.equal(stopped.state, "terminal", what);
+  const pid = scene.harness.launches[0]!.pid;
+  // The process was told to stop, it is gone, and the answer is the proof of that.
+  assert.deepEqual(scene.harness.signals, [{ pid, signal: "SIGTERM" }], what);
+  assert.equal(scene.harness.launches[0]!.alive, false, what);
+  assert.equal(stopped.terminal!.terminalCause, "stopped", what);
+  assert.equal(stopped.terminal!.providerContinuationId, scene.ref.providerContinuationId, what);
+  assert.deepEqual(stopped.terminal!.nativeRuntimeDeath, { kind: "codex_app_server", pid, processIdentity: scene.harness.launches[0]!.processIdentity }, what);
+  // One line for the owner: what Codex reported, that the agent was stopped, and what happens next.
+  assert.equal(stopped.notices?.length, 1, what);
+  assert.match(stopped.notices![0]!, /^Codex reported approval policy (?:"[a-z-]+"|none) and sandbox (?:"[A-Za-z]+"|none)(?: with [a-z ]+)? for this agent's conversation\. That is not Read-only access, so LetAgents stopped the agent\. It starts again by itself\.$/, what);
+  // No turn was started on it.
+  assert.equal(scene.harness.clients.slice(1).some((client) => client.requests.some((call) => call.method === "turn/start")), false, what);
+  return stopped.notices![0]!;
+}
+
+test("a healthy Read-only Codex found running is attached as before, and so is every other level whatever its conversation reports", { timeout: 30_000 }, async () => {
+  // The subscription names no policy, and the reply names the one the conversation has: a Read-only one is attached and takes a turn.
+  const healthy = await foundRunning(foundAsReadOnly(), null);
+  const attached = await healthy.attach();
+  assertProviderHandle(attached);
+  const subscribed = healthy.harness.clients[1]!.requests.find((call) => call.method === "thread/resume")!.params as Record<string, unknown>;
+  assert.deepEqual(Object.keys(subscribed), ["threadId"], "the subscription asks for nothing but the conversation");
+  assert.equal(healthy.harness.clients[1]!.requests.filter((call) => call.method === "thread/read").length, 2, "the snapshot is read again after the subscription, as before");
+  await healthy.restarted.runRoomTurn(attached, { inboxItemId: "found", actionId: "found", sourceMessage: {}, activation: {} }, {
+    checkpointTurnStarted: async (turnId) => { healthy.harness.clients[1]!.emit({ method: "turn/completed", params: { threadId: attached.providerContinuationId, turnId } }); },
+  });
+  assert.equal(healthy.harness.clients[1]!.requests.filter((call) => call.method === "turn/start").length, 1);
+  assert.deepEqual(healthy.harness.signals, [], "a healthy process is not signalled");
+  assert.equal(healthy.harness.launches.length, 1);
+  assert.equal(await healthy.attach(), attached, "and it stays the one runtime of its agent");
+  // A newer Codex's harmless extra part does not stop it either.
+  const newer = await foundRunning(foundAsReadOnly(), (client) => { client.sandboxFromOwnSettings = { ...READ_ONLY_REPLY, readableRoots: ["/"] }; });
+  assertProviderHandle(await newer.attach());
+  assert.deepEqual(newer.harness.signals, []);
+
+  // Every other level is attached whatever the reply says, as before, and so is a process whose policy is not known.
+  for (const level of foundAtOtherLevels()) {
+    for (const [what, misreport] of NOT_READ_ONLY_REPLIES) {
+      const other = await foundRunning(level, misreport);
+      assertProviderHandle(await other.attach());
+      assert.deepEqual(other.harness.signals, [], `${level.permissionProfileId}: ${what}`);
+    }
+  }
+  const unknown = await foundRunning(foundAsReadOnly(), (client) => { client.omitsThreadPolicy = true; }, false);
+  assertProviderHandle(await unknown.attach());
+  assert.deepEqual(unknown.harness.signals, []);
+});
+
+test("a Read-only Codex found running with a conversation that reports another policy is stopped, its owner is told, and the next launch is a fresh Read-only start", { timeout: 30_000 }, async () => {
+  const lines = new Map<string, string>();
+  for (const [what, misreport] of NOT_READ_ONLY_REPLIES) {
+    const scene = await foundRunning(foundAsReadOnly(), misreport);
+    // The attach does not fail and does not leave the process running: it answers with the proof that the process is gone.
+    lines.set(what, assertStoppedNotReadOnly(await scene.attach(), scene, what));
+    assert.equal(scene.harness.clients[1]!.requests.filter((call) => call.method === "thread/read").length, 1, `${what}: a runtime about to be stopped is asked nothing more`);
+
+    // Nothing of it is kept: the daemon's next launch is a new process, and its conversation is asked for with the Read-only policy.
+    scene.tellTheTruth();
+    const next = await scene.restarted.resume({ workAttemptId: scene.ref.workAttemptId, providerContinuationId: scene.ref.providerContinuationId }, spawnRequest(scene.level));
+    assert.equal(scene.harness.launches.length, 2, what);
+    assert.notEqual(next.pid, scene.harness.launches[0]!.pid, what);
+    assert.deepEqual(scene.harness.launchOptions[1]!.options.configOverrides.slice(-1), ['web_search="disabled"'], what);
+    const resumed = requestByMethod(scene.harness.clients.at(-1)!, "thread/resume").params as Record<string, unknown>;
+    assert.deepEqual({ approvalPolicy: resumed.approvalPolicy, sandbox: resumed.sandbox, approvalsReviewer: resumed.approvalsReviewer, config: resumed.config },
+      { approvalPolicy: "never", sandbox: "read-only", approvalsReviewer: "user", config: { web_search: "disabled" } }, what);
+    assert.equal(next.observedState(), "idle", what);
+    assert.deepEqual(scene.harness.signals.map((signal) => signal.pid), [scene.harness.launches[0]!.pid], `${what}: the new process is not signalled`);
+  }
+  // The line says what Codex reported, in Codex's own names.
+  const said = (what: string) => lines.get(what)!.replace(/ for this agent's conversation\..*$/, "");
+  assert.equal(said("a full-access sandbox"), 'Codex reported approval policy "never" and sandbox "dangerFullAccess"');
+  assert.equal(said("a sandbox that allows writes"), 'Codex reported approval policy "never" and sandbox "workspaceWrite"');
+  assert.equal(said("a read-only sandbox with network access"), 'Codex reported approval policy "never" and sandbox "readOnly" with network access');
+  assert.equal(said("a read-only sandbox that does not say its network access"), 'Codex reported approval policy "never" and sandbox "readOnly" with no word on its network access');
+  assert.equal(said("a read-only sandbox with a writable folder"), 'Codex reported approval policy "never" and sandbox "readOnly" with a part that widens it');
+  assert.equal(said("an approval policy that asks"), 'Codex reported approval policy "on-request" and sandbox "readOnly"');
+  assert.equal(said("no word on the sandbox or the approval policy"), "Codex reported approval policy none and sandbox none");
+
+  // A process that cannot be proved gone is the one case that still fails the attach: a second writer must not start.
+  const stuck = await foundRunning(foundAsReadOnly(), (client) => { client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; });
+  const getProcessIdentity = stuck.harness.dependencies.getProcessIdentity;
+  // Its birth can be read until the conversation has answered, and not after.
+  stuck.harness.dependencies.getProcessIdentity = (pid) =>
+    stuck.harness.clients[1]?.requests.some((call) => call.method === "thread/resume") ? undefined : getProcessIdentity(pid);
+  await assert.rejects(new CodexProviderAdapter({ dependencies: stuck.harness.dependencies }).attach({ ...stuck.ref, launchPolicy: stuck.level.launchPolicy }),
+    /attach is ambiguous; refusing to launch a second writer: Codex reported approval policy "never" and sandbox "dangerFullAccess" for this agent's conversation\. That is not Read-only access, and LetAgents could not stop the agent: /);
+  assert.deepEqual(stuck.harness.signals, [], "a process whose birth cannot be verified is not signalled");
+  assert.equal(stuck.harness.launches[0]!.alive, true);
+
+  // So is a stop that ends on a lost connection and not on the process's own exit: that is no proof that it is gone.
+  const lost = await foundRunning(foundAsReadOnly(), (client) => { client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; });
+  lost.harness.dependencies.signalProcess = (pid, signal) => {
+    lost.harness.signals.push({ pid, signal });
+    lost.harness.launches[0]!.resolveExit({ type: "error", error: new Error("connection lost") });
+    lost.harness.launches[0]!.alive = true;
+  };
+  await assert.rejects(new CodexProviderAdapter({ dependencies: lost.harness.dependencies }).attach({ ...lost.ref, launchPolicy: lost.level.launchPolicy }),
+    /attach is ambiguous; refusing to launch a second writer: Codex reported .* That is not Read-only access, and LetAgents could not stop the agent: its process could not be proved gone$/);
+  assert.equal(lost.harness.launches.length, 1);
+});
+
+test("a Read-only Codex found before the daemon supplied its policy is held to it when the policy is bound", { timeout: 30_000 }, async () => {
+  const sent = (client: FakeRpc, method: string) => client.requests.filter((entry) => entry.method === method).map((entry) => entry.params as Record<string, unknown>);
+  // A stored policy that tries to turn web search on for the conversation.
+  const stored = { config: { web_search: "live" } };
+
+  // Found without a policy: it is attached, with nothing to hold its conversation to yet. It takes no turn.
+  const healthy = await foundRunning(foundAsReadOnly(), null, false);
+  const found = await healthy.attach();
+  assertProviderHandle(found);
+  await assert.rejects(healthy.restarted.runRoomTurn(found, { inboxItemId: "early", actionId: "early", sourceMessage: {}, activation: {} }, { checkpointTurnStarted: async () => {} }),
+    /cannot start a turn without its exact applied permission policy/);
+  // The policy is bound by a later attach. The same runtime is the answer, and it is Read-only's from then on:
+  assert.equal(await healthy.attach(true), found);
+  assert.deepEqual(healthy.harness.signals, []);
+  // a repair gives the conversation the Read-only config, whole, whatever a stored policy holds,
+  healthy.harness.clients[1]!.markThreadMissing(found.providerContinuationId!);
+  await healthy.restarted.repairContinuation!(found, {
+    workAttemptId: found.workAttemptId, expectedProviderContinuationId: found.providerContinuationId!,
+    cwd: spawnRequest().cwd, launchPolicy: { ...foundAsReadOnly().launchPolicy, ...stored }, model: null, reasoningEffort: null,
+  }, { checkpointReplacement: async () => {} });
+  const probes = sent(healthy.harness.clients[1]!, "thread/resume").filter((params) => Object.hasOwn(params, "approvalPolicy"));
+  assert.equal(probes.length > 0, true);
+  for (const probe of probes) assert.deepEqual(probe.config, { web_search: "disabled" });
+  assert.deepEqual(sent(healthy.harness.clients[1]!, "thread/start")[0]!.config, { web_search: "disabled" });
+  // and the reply of the repair is held to Read-only.
+  healthy.harness.clients[1]!.sandboxFromOwnSettings = { type: "dangerFullAccess" };
+  await assert.rejects(healthy.restarted.repairContinuation!(found, {
+    workAttemptId: found.workAttemptId, expectedProviderContinuationId: found.providerContinuationId!,
+    forceReplacement: true, cwd: spawnRequest().cwd, launchPolicy: {}, model: null, reasoningEffort: null,
+  }, { checkpointReplacement: async () => {} }), /did not confirm Read-only access/);
+
+  // The check that an attach with the policy makes runs when the policy is bound: what the conversation
+  // reported when it was found is held to it then. One that reported another policy is stopped.
+  for (const [what, misreport] of NOT_READ_ONLY_REPLIES) {
+    const scene = await foundRunning(foundAsReadOnly(), misreport, false);
+    const early = await scene.attach();
+    assertProviderHandle(early);
+    assert.deepEqual(scene.harness.signals, [], `${what}: nothing is stopped while no policy says what the conversation must be`);
+    // Two callers bind at once: both get the one answer, and the process is signalled once.
+    const [answer, again] = await Promise.all([scene.attach(true), scene.attach(true)]);
+    assertStoppedNotReadOnly(answer, scene, what);
+    assert.equal(again, answer, what);
+    assert.equal(early.observedState(), "stopped", what);
+    await assert.rejects(scene.restarted.runRoomTurn(early, { inboxItemId: "late", actionId: "late", sourceMessage: {}, activation: {} }, { checkpointTurnStarted: async () => {} }), /./, what);
+  }
+
+  // A runtime whose stop fails is not handed out as a healthy one: the bind fails for every caller, and the runtime takes no turn.
+  const stuck = await foundRunning(foundAsReadOnly(), (client) => { client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; }, false);
+  let unreadable = false;
+  const getProcessIdentity = stuck.harness.dependencies.getProcessIdentity;
+  stuck.harness.dependencies.getProcessIdentity = (pid) => unreadable ? undefined : getProcessIdentity(pid);
+  const holding = new CodexProviderAdapter({ dependencies: stuck.harness.dependencies });
+  const kept = await holding.attach(stuck.ref);
+  assertProviderHandle(kept);
+  unreadable = true;
+  const couldNotStop = /That is not Read-only access, and LetAgents could not stop the agent: Cannot stop the Codex app-server because its exact process birth cannot be verified\.$/;
+  await assert.rejects(holding.attach({ ...stuck.ref, launchPolicy: stuck.level.launchPolicy }), couldNotStop);
+  await assert.rejects(holding.attach({ ...stuck.ref, launchPolicy: stuck.level.launchPolicy }), couldNotStop);
+  unreadable = false;
+  await assert.rejects(holding.runRoomTurn(kept, { inboxItemId: "kept", actionId: "kept", sourceMessage: {}, activation: {} }, { checkpointTurnStarted: async () => {} }),
+    /^Error: Codex reported approval policy "never" and sandbox "dangerFullAccess" for this agent's conversation\. That is not Read-only access\. Restart the agent\.$/);
+  assert.equal(stuck.harness.clients[1]!.requests.some((call) => call.method === "turn/start"), false);
+  assert.deepEqual(stuck.harness.signals, []);
+
+  // Every other level bound later is the same runtime as before, whatever its conversation reported.
+  for (const level of foundAtOtherLevels()) {
+    const other = await foundRunning(level, (client) => { client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; }, false);
+    const early = await other.attach();
+    assert.equal(await other.attach(true), early, level.permissionProfileId);
+    assert.deepEqual(other.harness.signals, [], level.permissionProfileId);
+    // Its repair sends what it sent before: no Read-only config.
+    await other.restarted.repairContinuation!(early as ProviderHandle, {
+      workAttemptId: other.ref.workAttemptId, expectedProviderContinuationId: other.ref.providerContinuationId,
+      forceReplacement: true, cwd: spawnRequest().cwd, launchPolicy: { ...level.launchPolicy, ...stored }, model: null, reasoningEffort: null,
+    }, { checkpointReplacement: async () => {} });
+    assert.deepEqual(sent(other.harness.clients[1]!, "thread/start")[0]!.config, stored.config, level.permissionProfileId);
+  }
+});
+
+/**
+ * Every room tool a supervised Codex agent is offered, and whether a Read-only agent may use it.
+ * The names come from the room server's own registration, so a tool added there fails the test
+ * below until it has a line here. "refused" is the answer unless the tool only reads what the room
+ * says or says something in it.
+ */
+const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused"> = {
+  // Reads of what the room says: one request to the room's own server, nothing written anywhere.
+  read_messages: "approved",          // the room's recent messages
+  get_current_room: "approved",       // which room the agent is in, and as whom
+  get_room_guidelines: "approved",    // the conventions the room's admins wrote
+  get_room_memory: "approved",        // the room's saved goals, decisions and terms
+  get_human_requests: "approved",     // questions put to a person, and their answers
+  get_board: "approved",              // the task board
+  get_board_settings: "approved",     // whether the board has a manager, and who
+  list_board_intents: "approved",     // requests waiting for the board's manager
+  list_wake_rules: "approved",        // what agents in the room are waiting for
+  get_room_artifacts: "approved",     // branches, pull requests and checks shared with the room
+  get_room_events: "approved",        // GitHub events the room already holds
+  // Saying something in the room.
+  send_message: "approved",
+  send_thread_message: "approved",
+  post_status: "approved",
+  post_reasoning: "approved",
+  request_human_input: "approved",    // a question in a person's "Needs you" inbox
+  set_reply_thread: "approved",       // where the final answer goes; approved at every access level
+  // Runs git in a folder the caller names, on this Mac and outside Codex's sandbox.
+  check_repo: "refused",
+  // Runs git, then asks GitHub, GitLab or Bitbucket about the repository: another machine.
+  check_repo_visibility: "refused",
+  // Runs git and writes .letagents.json into the repository.
+  initialize_repo: "refused",
+  // Joining or creating rooms.
+  join_room: "refused", join_code: "refused", join_project: "refused", create_room: "refused", create_project: "refused",
+  // Changing the task board, its leases and its reviews.
+  add_task: "refused", claim_task: "refused", update_task: "refused", complete_task: "refused",
+  claim_task_review: "refused", release_task_review: "refused", handoff_task_lease: "refused", release_task_lease: "refused",
+  // Submits a review on GitHub.
+  submit_review_verdict: "refused",
+  // Board-manager authority and its requests.
+  assign_board_manager: "refused", release_board_manager: "refused", set_board_manager_mode: "refused",
+  approve_board_intent: "refused", deny_board_intent: "refused", register_board_intent: "refused",
+  register_task_claim_intent: "refused", register_task_close_intent: "refused", register_task_create_intent: "refused",
+  register_task_lease_action_intent: "refused",
+  // Things that outlast the conversation or act later.
+  publish_room_artifact: "refused", remember_room_fact: "refused", add_wake_rule: "refused", cancel_wake_rule: "refused",
+};
+
+test("a Read-only Codex agent's room tools are an exact named list, and every other room tool is refused", { timeout: 30_000 }, async () => {
+  const { letAgentsRuntimeContract } = await import(new URL("../../../../src/mcp/server/runtime-contract.ts", import.meta.url).href);
+  const { SUPERVISED_READ_ONLY_TOOLS } = await import(new URL("../../../../shared/supervised-read-tools.mjs", import.meta.url).href);
+  const hosted = "https://letagents.chat", local = "letagents-local://rooms";
+  const offered = (apiUrl: string): string[] => letAgentsRuntimeContract(apiUrl).profiles.cursor_supervised_room_turn.tools
+    .filter((name: string) => name !== "complete_room_turn");
+  const decided = Object.keys(READ_ONLY_ROOM_TOOL_DECISIONS).sort();
+  const approved = decided.filter((name) => READ_ONLY_ROOM_TOOL_DECISIONS[name] === "approved");
+
+  // Every tool the room server registers has a decision, and no decision is for a tool that is gone.
+  assert.deepEqual([...offered(hosted)].sort(), decided,
+    "a room tool was added or removed: decide whether a Read-only agent may use it, in READ_ONLY_ROOM_TOOL_DECISIONS");
+  assert.deepEqual(offered(local).filter((name) => !decided.includes(name)), [], "a local room offers no tool a hosted room does not");
+  // The adapter's list is exactly the approved decisions.
+  assert.deepEqual([...CODEX_READ_ONLY_ROOM_TOOLS].sort(), approved);
+  assert.deepEqual(approved, [
+    "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events",
+    "get_room_guidelines", "get_room_memory", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
+    "read_messages", "request_human_input", "send_message", "send_thread_message", "set_reply_thread",
+  ]);
+  // An approved tool that is not chat or status is one the room server itself classes as a read,
+  // and none of the three that touch this Mac's repository or another service is approved.
+  const speaks = ["send_message", "send_thread_message", "post_status", "post_reasoning", "request_human_input", "set_reply_thread"];
+  assert.deepEqual(approved.filter((name) => !speaks.includes(name) && !SUPERVISED_READ_ONLY_TOOLS.has(name)), []);
+  for (const name of ["check_repo", "check_repo_visibility", "initialize_repo"]) assert.equal(READ_ONLY_ROOM_TOOL_DECISIONS[name], "refused", name);
+
+  const supervised = { supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact", configurationRevision: 1 };
+  const launchOf = async (request: Partial<ProviderSpawnRequest>, apiUrl = hosted) => {
+    const harness = createHarness();
+    harness.dependencies.readMcpRuntimeContract = async (_entryPath, route) => letAgentsRuntimeContract(route ?? apiUrl);
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", ...supervised,
+      supervisorWorkerSession: { agentSessionId: "agent_session_exact", apiUrl, roomCursor: null }, ...request,
+    })) as ProviderHandle & { managedLaunchContract?: string };
+    const [override = "", ...otherOverrides] = harness.launchOptions[0]!.options.configOverrides;
+    assert.equal(override.startsWith("mcp_servers.letagents={ "), true, "the first override configures the room's server");
+    const tools: string[] = JSON.parse(/enabled_tools = (\[[^\]]*\]), disabled_tools = \[\]/.exec(override)?.[1] ?? "[]");
+    return {
+      override, otherOverrides, tools,
+      // Each listed tool's own approval mode, read from the override Codex is given.
+      modes: Object.fromEntries(tools.map((name) => [name, override.split(`${JSON.stringify(name)} = { approval_mode = "`)[1]?.split('"')[0] ?? "missing"])),
+      defaultMode: override.split('default_tools_approval_mode = "')[1]?.split('"')[0] ?? "missing",
+      contract: handle.managedLaunchContract,
+      described: await adapter.describeManagedLaunchContract({ apiUrl }),
+    };
+  };
+  const readOnlyLevel = { permissionProfileId: "read_only", launchPolicy: CODEX_READ_ONLY_POLICY };
+
+  // A Read-only launch: the named tools run without asking, and every other one needs an approval that nobody can give.
+  for (const apiUrl of [hosted, local]) {
+    const readOnly = await launchOf(readOnlyLevel, apiUrl);
+    assert.deepEqual(readOnly.tools, offered(apiUrl), "the tools offered do not change with the access level");
+    assert.deepEqual(readOnly.modes, Object.fromEntries(offered(apiUrl).map((name) => [name, approved.includes(name) ? "approve" : "prompt"])), apiUrl);
+    assert.equal(readOnly.defaultMode, "prompt", "a tool with no line of its own is refused too");
+    assert.deepEqual(readOnly.otherOverrides, [...CODEX_READ_ONLY_CONFIG_OVERRIDES]);
+  }
+  const readOnly = await launchOf(readOnlyLevel);
+  // The same with the owner's own setup on: the room's server is still the sealed one.
+  assert.deepEqual((await launchOf({ ...readOnlyLevel, homeHarness: true })).modes, readOnly.modes);
+
+  // Every other level keeps the room tools it had: only reply routing is approved in advance.
+  const unchanged = Object.fromEntries(offered(hosted).map((name) => [name, name === "set_reply_thread" ? "approve" : "writes"]));
+  const others = [
+    await launchOf({ permissionProfileId: "full_access", launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } }),
+    await launchOf({ permissionProfileId: "ask_before_write", launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } }),
+    await launchOf({ permissionProfileId: "auto_review", launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" } }),
+  ];
+  for (const other of others) {
+    assert.deepEqual(other.modes, unchanged);
+    assert.equal(other.defaultMode, "writes");
+    assert.deepEqual(other.otherOverrides, [], "no other access level's launch gains an override");
+    assert.equal(other.override === others[0]!.override, true, "the room server's configuration does not depend on these levels");
+  }
+  // Apart from the approval modes, a Read-only launch configures the room's server exactly as the others do.
+  const withoutModes = (override: string) => override.replace(/approval_mode = "[a-z]+"/g, "approval_mode = *");
+  assert.equal(withoutModes(readOnly.override) === withoutModes(others[0]!.override), true, "only approval modes differ for Read-only");
+
+  // The level decides, not the shape of a policy: a launch that names no access level gets no tool approved in advance.
+  const unnamed = await launchOf({ launchPolicy: CODEX_READ_ONLY_POLICY });
+  assert.deepEqual(unnamed.modes, unchanged);
+  assert.equal(unnamed.defaultMode, "writes");
+  assert.deepEqual(unnamed.otherOverrides, []);
+
+  // Only an agent the daemon delivers room messages to. One that collects its own messages runs room tools in the
+  // room server with the caller's folder, so a Read-only launch of that kind has no tool approved in advance.
+  const polling = { pollingContract: "custodial_polling_v1" as const, deliveryMode: "mcp_polling" as const };
+  const pollingReadOnly = await launchOf({ ...polling, ...readOnlyLevel });
+  const pollingFullAccess = await launchOf({ ...polling, permissionProfileId: "full_access", launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } });
+  assert.equal(pollingReadOnly.tools.includes("wait_for_messages"), true, "this is the launch that collects its own messages");
+  assert.deepEqual(pollingReadOnly.modes, Object.fromEntries(pollingReadOnly.tools.map((name) => [name, "writes"])));
+  assert.equal(pollingReadOnly.defaultMode, "writes");
+  assert.equal(pollingReadOnly.override === pollingFullAccess.override, true, "Read-only changes nothing about a polling launch's room server");
+
+  // The daemon compares one launch contract for a room server: a Read-only agent records the one it expects,
+  // so it is not replaced again and again as out of date.
+  assert.match(readOnly.contract ?? "", /^[a-f0-9]{64}$/);
+  assert.equal(readOnly.contract, readOnly.described);
+  assert.equal(readOnly.contract, others[0]!.contract);
 });
 
 test("Codex fresh spawn does not let a fatal placeholder resume probe block thread/start", async () => {
@@ -8648,4 +9322,145 @@ test("a sandboxed Codex takes no turn and loads no conversation in a project tha
   await run(fullAccess, fullAccessAdapter, unsandboxed, 0, "full-access");
   assert.equal((await repair(fullAccessAdapter, unsandboxed, spawnRequest().launchPolicy)).outcome, "replaced");
   assert.deepEqual(fullAccess.signals, []);
+});
+
+/** A Read-only launch as the daemon makes it: the level by name, with the policy the daemon derives for it. */
+const READ_ONLY_LAUNCH = {
+  deliveryMode: "daemon_inbox" as const, permissionProfileId: "read_only" as const, configurationRevision: 1,
+  launchPolicy: CODEX_READ_ONLY_POLICY,
+};
+
+test("Codex Read-only counts as a sandboxed access level wherever a saved command rule is looked for: the home at launch, each turn, and each conversation load", { timeout: 60_000 }, async (t) => {
+  const run = (harness: ReturnType<typeof createHarness>, adapter: CodexProviderAdapter, handle: ProviderHandle, client: number, name: string) => adapter.runRoomTurn(handle, turnOf(name), {
+    checkpointTurnStarted: async (turnId) => { harness.clients[client]!.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } }); },
+  });
+  const turnStarts = (harness: ReturnType<typeof createHarness>, client: number) => harness.clients[client]!.requests.filter((request) => request.method === "turn/start").length;
+  const repair = (adapter: CodexProviderAdapter, handle: ProviderHandle, cwd = spawnRequest().cwd) => adapter.repairContinuation(handle, {
+    workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+    cwd, launchPolicy: CODEX_READ_ONLY_POLICY, forceReplacement: true,
+  }, { checkpointReplacement: async () => {} });
+  const conversationCalls = (harness: ReturnType<typeof createHarness>, from: number) => harness.clients[0]!.requests.slice(from)
+    .map((request) => request.method).filter((method) => /^thread\/(start|resume)$/.test(method));
+
+  // The launch: Read-only asks the launcher for the agents' home, the one without the owner's saved rules. Full access does not.
+  const given = await scratchCodexHome(t, false);
+  const harness = createHarness({ exitOnSignal: true, reportedCodexHome: given, launchCodexHome: given });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest(READ_ONLY_LAUNCH));
+  // What the launcher is asked: `sandboxed` is its word for "give this Codex the agents' home".
+  const launchAsked = (launched: ReturnType<typeof createHarness>) => launched.launchOptions[0]!.options as { sandboxed?: boolean };
+  assert.equal(launchAsked(harness).sandboxed, true, "a Read-only launch is given the agents' home");
+  assert.equal((handle as unknown as { sandboxed(): boolean }).sandboxed(), true, "and its runtime is held to the rule checks");
+  const fullAccess = createHarness();
+  await new CodexProviderAdapter({ dependencies: fullAccess.dependencies }).spawn(spawnRequest({
+    deliveryMode: "daemon_inbox", permissionProfileId: "full_access", configurationRevision: 1 }));
+  assert.equal(Object.hasOwn(launchAsked(fullAccess), "sandboxed"), false, "Full access is the one level that is not");
+
+  // It is refused under the same conditions as every sandboxed level: Codex must say that it runs with the home it was given.
+  const other = await scratchCodexHome(t, false);
+  for (const [name, options, reason] of [
+    ["says nothing", { reportedCodexHome: null, launchCodexHome: given }, /^Error: Codex did not say which home folder it runs with/],
+    ["says nothing, started with the owner's home", { reportedCodexHome: null }, /^Error: Codex did not say which home folder it runs with/],
+    ["says another home", { reportedCodexHome: other, launchCodexHome: given }, /^Error: Codex did not start with the home folder LetAgents gave it for this access level/],
+  ] as const) {
+    const refused = createHarness({ exitOnSignal: true, ...options });
+    await assert.rejects(new CodexProviderAdapter({ dependencies: refused.dependencies }).spawn(spawnRequest(READ_ONLY_LAUNCH)), reason, name);
+    assert.deepEqual(refused.signals.map((signal) => signal.signal), ["SIGTERM"], name);
+    assert.equal(refused.clients[0]!.requests.some((request) => request.method === "thread/start"), false, `${name}: no conversation was opened`);
+  }
+
+  // The turn gate: a home that gains a saved rule gives the agent no turn, started here or found running.
+  await run(harness, adapter, handle, 0, "no-rule");
+  assert.equal(turnStarts(harness, 0), 1);
+  await mkdir(join(given, "rules"));
+  await writeFile(join(given, "rules", "default.rules"), "saved\n");
+  const HOLDS_RULES = /^Error: This agent's Codex runs with a home folder that holds saved command rules/;
+  await assert.rejects(run(harness, adapter, handle, 0, "rule-saved"), HOLDS_RULES);
+  assert.equal(turnStarts(harness, 0), 1, "Codex was sent no turn");
+  const restarted = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await restarted.attach({ workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection, launchPolicy: CODEX_READ_ONLY_POLICY });
+  assertProviderHandle(attached);
+  await assert.rejects(run(harness, restarted, attached, 1, "found-running"), HOLDS_RULES);
+  assert.equal(turnStarts(harness, 1), 0);
+  await rm(join(given, "rules"), { recursive: true });
+  await run(harness, adapter, handle, 0, "rule-removed");
+  assert.equal(turnStarts(harness, 0), 2, "with the rule gone the same process works again");
+
+  // The conversation-load check: before a conversation is started or loaded again Codex is asked, with the home it runs with.
+  assert.equal((await repair(adapter, handle)).outcome, "replaced");
+  assert.deepEqual(harness.ruleLoadChecks, [{ cwd: spawnRequest().cwd, codexHome: given }]);
+  const REFUSAL = "Codex also reads command rules from /etc/codex/rules, a folder of this computer's own Codex settings.";
+  harness.refuseRuleLoad(REFUSAL);
+  const before = harness.clients[0]!.requests.length;
+  await assert.rejects(repair(adapter, handle), (error: Error) => error.message === REFUSAL);
+  assert.deepEqual(conversationCalls(harness, before), [], "no conversation is started or loaded");
+  assert.deepEqual(harness.signals.map((signal) => signal.signal), ["SIGTERM"], "and the agent is stopped");
+
+  // A project with command rules of its own: no turn, and no conversation load, in that folder.
+  const project = await mkdtemp(join(tmpdir(), "letagents-codex-adapter-read-only-project-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const cwd = await realpath(project);
+  await mkdir(join(cwd, ".git"));
+  const inProject = createHarness({ exitOnSignal: true, reportedCodexHome: given });
+  const projectAdapter = new CodexProviderAdapter({ dependencies: inProject.dependencies });
+  const projectHandle = await projectAdapter.spawn(spawnRequest({ ...READ_ONLY_LAUNCH, cwd }));
+  await run(inProject, projectAdapter, projectHandle, 0, "before");
+  await mkdir(join(cwd, ".codex", "rules"), { recursive: true });
+  await writeFile(join(cwd, ".codex", "rules", "allow.rules"), "saved\n");
+  const PROJECT_RULES = /^Error: This project has command rules for Codex in \.codex\/rules \(allow\.rules\)/;
+  await assert.rejects(run(inProject, projectAdapter, projectHandle, 0, "turn"), PROJECT_RULES);
+  assert.equal(turnStarts(inProject, 0), 1, "Codex was sent no turn");
+  const beforeRepair = inProject.clients[0]!.requests.length;
+  await assert.rejects(repair(projectAdapter, projectHandle, cwd), PROJECT_RULES);
+  assert.deepEqual(conversationCalls(inProject, beforeRepair), []);
+  assert.deepEqual(inProject.ruleLoadChecks, [], "the folder is enough: Codex is not asked whether it trusts the project");
+});
+
+test("a Read-only conversation's reply is held to its policy and compared with its reasoning effort, and only the policy can refuse it", { timeout: 30_000 }, async () => {
+  const request = () => spawnRequest({ ...READ_ONLY_LAUNCH, model: "gpt-5.6-sol", reasoningEffort: "high" });
+  const misreporting = (options: Parameters<typeof createHarness>[0], misreport: (client: FakeRpc) => void) => {
+    const harness = createHarness(options);
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (...args) => { const client = createRpcClient(...args) as FakeRpc; misreport(client); return client; };
+    return harness;
+  };
+
+  // One request names the policy and the effort; a reply that agrees with both starts the agent and says nothing.
+  const agreeing = createHarness();
+  const handle = await new CodexProviderAdapter({ dependencies: agreeing.dependencies }).spawn(request());
+  const started = requestByMethod(agreeing.clients[0]!, "thread/start").params as Record<string, unknown>;
+  assert.deepEqual({ approvalPolicy: started.approvalPolicy, sandbox: started.sandbox, approvalsReviewer: started.approvalsReviewer, config: started.config },
+    { approvalPolicy: "never", sandbox: "read-only", approvalsReviewer: "user", config: { model_reasoning_effort: "high", web_search: "disabled" } });
+  assert.deepEqual(handle.launchNotices, []);
+  assert.equal(handle.observedState(), "idle");
+
+  // Another effort than the one given is told to the owner and stops nothing, as at every level: the policy is still the one asked for.
+  const otherEffort = createHarness({ effortFromOwnSettings: "low" });
+  const told = await new CodexProviderAdapter({ dependencies: otherEffort.dependencies }).spawn(request());
+  assert.equal(told.observedState(), "idle");
+  assert.deepEqual(told.launchNotices, [effortNotReported("high", "low")]);
+
+  // Another sandbox is refused, whether the effort agrees or not. The effort line is no substitute for the policy check.
+  for (const effortFromOwnSettings of [undefined, "low"] as const) {
+    const refused = misreporting(effortFromOwnSettings ? { effortFromOwnSettings } : {}, (client) => { client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; });
+    await assert.rejects(new CodexProviderAdapter({ dependencies: refused.dependencies }).spawn(request()), /did not confirm Read-only access/, String(effortFromOwnSettings));
+    assert.equal(refused.clients[0]!.requests.some((call) => call.method === "turn/start"), false);
+  }
+
+  // The same at a resume in another process: the reply names the effort the resume gave, and is refused for its policy alone.
+  agreeing.launches[0]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await flush();
+  const resumed = await new CodexProviderAdapter({ dependencies: agreeing.dependencies }).resume(
+    { workAttemptId: request().workAttemptId, providerContinuationId: handle.providerContinuationId! }, { ...request(), reasoningEffort: "low" });
+  const resume = requestByMethod(agreeing.clients[1]!, "thread/resume").params as Record<string, unknown>;
+  assert.deepEqual({ approvalPolicy: resume.approvalPolicy, sandbox: resume.sandbox, config: resume.config },
+    { approvalPolicy: "never", sandbox: "read-only", config: { model_reasoning_effort: "low", web_search: "disabled" } });
+  assert.deepEqual(resumed.launchNotices, []);
+  agreeing.launches[1]!.resolveExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await flush();
+  const createRpcClient = agreeing.dependencies.createRpcClient;
+  agreeing.dependencies.createRpcClient = (...args) => { const client = createRpcClient(...args) as FakeRpc; client.approvalPolicyFromOwnSettings = "on-request"; return client; };
+  await assert.rejects(new CodexProviderAdapter({ dependencies: agreeing.dependencies }).resume(
+    { workAttemptId: request().workAttemptId, providerContinuationId: handle.providerContinuationId! }, request()), /did not confirm Read-only access/);
 });

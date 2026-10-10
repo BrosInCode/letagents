@@ -1019,6 +1019,9 @@ export class ProviderExecutionCoordinator {
           "Provider attach terminal evidence belongs to a different durable continuation.",
         );
       }
+      // The adapter stopped the runtime it found, and says why. The owner reads it in the agent's activity.
+      // Telling the owner never keeps the proof of the exit from being recorded.
+      if (attachment.notices?.length) await this.recordLaunchNotices(entry.id, attachment.notices).catch(() => undefined);
       await this.options.durability.recordTerminal(
         ref.work_attempt_id,
         execution.execution_generation_id,

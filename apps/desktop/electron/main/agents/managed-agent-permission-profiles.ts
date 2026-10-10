@@ -255,6 +255,11 @@ export function assertManagedAgentPermissionProfileAvailable(
       description: "Requires approval before Claude can change files or run write-capable commands.",
       detail: "Commands that only read the project, its history, or its pull requests run without asking. Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available." };
   }
+  if (launchMode === "supervised" && providerId === "codex" && profile.id === "read_only") {
+    return { ...profile, status: "available", risk: "medium",
+      description: "Can read files on this Mac, also outside your project, and read and post in the room.",
+      detail: "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews." };
+  }
   if (
     launchMode === "supervised"
     && (providerId === "codex" || providerId === "open-model")

@@ -1248,6 +1248,11 @@ export function supervisedPermissionProfilePresentation(
       description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
       detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project." };
   }
+  if (profile.id === "read_only" && providerId === "codex") {
+    return { ...profile, status: "available", risk: "medium",
+      description: "Can read files on this Mac, also outside your project, and read and post in the room.",
+      detail: "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews." };
+  }
   if (profile.id !== "ask_before_write"
     || (providerId !== "codex" && providerId !== "open-model" && providerId !== "claude-code")) return profile;
   if (providerId === "claude-code") {
@@ -1288,6 +1293,7 @@ const SUPERVISED_PERMISSION_PROFILE_LIMITS: Partial<Record<
     full_access: NOTHING_BLOCKED,
     ask_before_write: "Without your approval: no file changes, no write commands and no network access.",
     auto_review: "No network access and no changes outside its working folder, unless Codex approves more.",
+    read_only: "Can't change files. Its commands can't use the network, and web search is off. Can't change the task board, join rooms or submit reviews. It asks for no approval.",
   },
   "claude-code": {
     read_only: "Can't change files, run commands or browse the web.",
@@ -1320,6 +1326,7 @@ const OWNER_SETUP_PERMISSION_PROFILE_LIMITS: Partial<Record<
   codex: {
     ask_before_write: "Without your approval, Codex's own commands change no files and have no network access. Your own MCP tools, hooks and plugins are not held to this.",
     auto_review: "Codex's own commands have no network access and change nothing outside its working folder, unless Codex approves more. Your own MCP tools, hooks and plugins are not held to this.",
+    read_only: "Codex's own commands change no files and have no network access, web search is off, and it asks for no approval. Your own MCP tools, hooks and plugins are not held to this.",
   },
   "claude-code": {
     read_only: "Its own tools can't change files, run commands or browse the web. Your MCP tools and hooks can, where your own Claude Code settings allow them.",

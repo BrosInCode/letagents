@@ -75,6 +75,37 @@ test("managed provider spawn attestation preserves the resolved native authority
   });
 });
 
+test("a Codex Read-only launch attests a read-only sandbox with no network and nobody to ask", () => {
+  const readOnly = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const base = { ...request, permissionProfileId: "read_only" };
+  assert.deepEqual(attestProviderSpawnPolicy("codex", { ...base, launchPolicy: readOnly }), readOnly);
+  // The host stays the reviewer of record, named or not.
+  assert.deepEqual(attestProviderSpawnPolicy("codex", { ...base, launchPolicy: { ...readOnly, approvalsReviewer: "user" } }),
+    { ...readOnly, approvalsReviewer: "user" });
+
+  // Every other access level's policy is refused under this name, and so is a policy that is missing a part.
+  for (const [launchPolicy, reason] of [
+    [{ approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }, /authority at 'sandboxPolicy'/],
+    [{ approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }, /authority at 'approvalPolicy'/],
+    [{ approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" }, /authority at 'approvalsReviewer'/],
+    [{ approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: true } }, /authority at 'sandboxPolicy'/],
+    [{ ...readOnly, approvalsReviewer: "auto_review" }, /authority at 'approvalsReviewer'/],
+    [{ approvalPolicy: "never" }, /authority at 'sandboxPolicy'/],
+    [{ sandboxPolicy: { type: "readOnly", networkAccess: false } }, /authority at 'approvalPolicy'/],
+    [{}, /authority at 'approvalPolicy'/],
+  ] as const) {
+    assert.throws(() => attestProviderSpawnPolicy("codex", { ...base, launchPolicy }), reason, JSON.stringify(launchPolicy));
+  }
+  // The read-only policy does not pass as another level either.
+  for (const permissionProfileId of ["full_access", "ask_before_write", "auto_review"]) {
+    assert.throws(() => attestProviderSpawnPolicy("codex", { ...request, permissionProfileId, launchPolicy: readOnly }),
+      /does not attest permission-profile authority/, permissionProfileId);
+  }
+  // Open Model still has no Read-only to attest.
+  assert.throws(() => attestProviderSpawnPolicy("open-model", { ...base, launchPolicy: { permission: { "*": "allow" } } }),
+    /Read-only is not available for open-model/);
+});
+
 test("managed provider spawn attestation binds Auto to the provider's own review", () => {
   const codexAuto = { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" };
   assert.deepEqual(attestProviderSpawnPolicy("codex", { ...request, permissionProfileId: "auto_review", launchPolicy: codexAuto }), codexAuto);
@@ -303,6 +334,7 @@ test("a launch with the owner's own setup is given the access level's own option
     ["full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
     ["ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }],
     ["auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" }],
+    ["read_only", { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } }],
   ];
   for (const [permissionProfileId, level] of codexLevels) {
     for (const extra of hostile(HOSTILE_CODEX_OPTIONS)) {

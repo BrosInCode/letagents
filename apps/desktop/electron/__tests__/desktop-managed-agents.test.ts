@@ -556,6 +556,26 @@ test("managed agent permission profiles map provider-specific available and gate
     assertManagedAgentPermissionProfileAvailable("open-model", "ask_before_write", "supervised").status,
     "available",
   );
+  // Read-only is a supervised Codex level only: the catalog and a legacy start still refuse it.
+  assert.equal(codexProfiles.find((profile) => profile.id === "read_only")?.status, "gated");
+  assert.throws(
+    () => assertManagedAgentPermissionProfileAvailable("codex", "read_only"),
+    /Read-only is not available for codex/,
+  );
+  const supervisedCodexReadOnly = assertManagedAgentPermissionProfileAvailable("codex", "read_only", "supervised");
+  assert.equal(supervisedCodexReadOnly.status, "available");
+  assert.equal(supervisedCodexReadOnly.risk, "medium");
+  assert.equal(supervisedCodexReadOnly.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
+  assert.equal(supervisedCodexReadOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
+  assert.equal(codexProfiles.find((profile) => profile.isDefault)?.id, "full_access");
+  assert.throws(
+    () => assertManagedAgentPermissionProfileAvailable("codex", "sandboxed_write", "supervised"),
+    /Sandboxed writes is not available for codex/,
+  );
+  assert.throws(
+    () => assertManagedAgentPermissionProfileAvailable("open-model", "read_only", "supervised"),
+    /Read-only is not available for open-model/,
+  );
 
   for (const provider of ["claude-code", "codex", "open-model"] as const) {
     assert.equal(listManagedAgentPermissionProfiles(provider).find((profile) => profile.id === "auto_review")?.status, "gated");
