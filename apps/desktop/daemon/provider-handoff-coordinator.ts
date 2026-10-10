@@ -9,7 +9,7 @@ import type { DaemonManifestEntry } from "./types.js";
 type ProviderHandoffCoordinatorOptions = {
   provider?: Pick<ProviderActionPort, "capabilities" | "runtimeCustody">;
   manifest: Pick<ManifestStore, "load" | "getEntry">;
-  inbox: Pick<SupervisedAgentInboxStore, "head" | "providerTurnBinding" | "detail">;
+  inbox: Pick<SupervisedAgentInboxStore, "head" | "providerTurnBinding" | "detail" | "isUntouchedBlockedFollowUp">;
   execution: Pick<ProviderExecutionCoordinator, "drainDispatches"> | null;
   delivery(): Pick<SupervisedAgentDelivery, "pauseDispatch" | "drainAdmittedTurns" | "resumeDispatch"> | null;
   currentHandle(entryId: string): ProviderActionHandle | undefined;
@@ -163,6 +163,9 @@ export class ProviderHandoffCoordinator {
       if (!head) continue;
       if (!head.provider_turn_id) {
         if (head.state === "pending" || head.state === "retryable") continue;
+        // A follow-up that was made blocked, after the last automatic attempt, waits for its owner with nothing sent to
+        // any provider for it. It holds no work to lose, so it must not hold the update for as long as its owner is away.
+        if (head.state === "blocked" && await this.options.inbox.isUntouchedBlockedFollowUp(head.inbox_item_id)) continue;
         // A lost native acknowledgement can leave a blocked turn without an
         // ID or counted attempt. Neither is proof that dispatch never happened.
         throw new Error(`Update deferred: ${agent}'s current turn has no confirmed completion (no native turn ID). Resolve its blocked work before updating.`);

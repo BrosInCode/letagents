@@ -2,11 +2,19 @@ import { NO_REPLY_FAILURE, noReplyFailureKind } from "../../../shared/room-turn-
 
 /** A snapshot of work already owned by the exact worker, never a new claim. */
 export type ContinuityTask = { id: string; title: string; leaseId: string; epoch: number };
+/**
+ * What a follow-up is for. A short provider fault gets up to three automatic attempts. A turn that ended without
+ * a reply gets one. The owner is told which it is, so the daemon saves it with the follow-up: nothing reads it back
+ * from the follow-up's text.
+ */
+export type FollowUpKind = "provider_fault" | "no_reply";
 export type TaskContinuation = {
   parentId: string; attempt: number;
   workAttemptId: string; providerContinuationId: string; agentSessionId: string;
   heldBefore: string;
   tasks: ContinuityTask[] | null;
+  /** Absent on a follow-up that an earlier daemon made. */
+  kind?: FollowUpKind;
 };
 
 export type TaskFailurePolicy = {
@@ -18,6 +26,8 @@ export type TaskFailurePolicy = {
   note?: string;
   /** How long an automatic follow-up waits before it starts. Without it, `defaultFollowUpDelayMs` says. */
   delayMs?: number;
+  /** What an automatic follow-up is for. */
+  kind?: FollowUpKind;
 };
 
 /** How many follow-ups a failed task turn gets by itself. After the last of them the follow-up waits for the owner. */
@@ -29,13 +39,63 @@ export const MAX_AUTOMATIC_FOLLOW_UPS = 3;
 export const NO_REPLY_FOLLOW_UP_DETAIL = "The model stopped before writing a reply. The agent will try again once, after a short wait.";
 /** What the follow-up says that waits for the owner after the last automatic attempt failed. */
 export const AUTOMATIC_ATTEMPTS_FAILED_DETAIL = "All three automatic attempts failed. The agent now waits for you: check the provider, then use Retry delivery to try again. Existing work is preserved.";
-/** Why a follow-up that waited for its time ended with nothing started. The owner reads these on the room message. */
+/** What a follow-up says when its owner cannot be sure of the task: its tasks could not be read, at the start or just before it was to run. */
+export const OWNERSHIP_UNVERIFIED_DETAIL = "Task ownership could not be verified. Check the room connection before continuing work.";
+export const OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL = "Task ownership could not be verified. Check the room connection and use Retry delivery.";
+/**
+ * Why a follow-up ended with nothing started. The owner reads these on the room message.
+ * `stoppedByOwner` is for an attempt that still waited for its time. `skippedByOwner` is for a follow-up that was
+ * blocked, whatever blocked it: no attempt waited, so it says only what Skip did and what Skip leaves as it is.
+ */
 export const FOLLOW_UP_ENDED = {
   stoppedByOwner: "You stopped the automatic attempts. The task is still assigned to this agent. Send it a message to continue.",
+  skippedByOwner: "You skipped the next attempt, and the task and its work lease are left as they are.",
   agentChanged: "The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task.",
   taskNotHeld: "The agent did not try again: the task is finished, or is no longer this agent's.",
-  uncertainEffects: "The agent did not try again: an earlier action has an uncertain result. Check that result, then send an instruction to continue only the verified unfinished work.",
+  uncertainEffects: "The agent did not try again: an earlier action has an uncertain result. Check what it did (the inspector shows its actions), then tell it to continue only the verified work.",
 } as const;
+/**
+ * What the daemon wrote before for these, on a follow-up that an earlier version made. They are read, and not written.
+ * The old text of Skip said that the agent did not try again, which is not always known.
+ */
+const LEGACY_ENDED_TEXTS: ReadonlyArray<readonly [string, "uncertain_action" | "skipped"]> = [
+  ["The agent did not try again: an earlier action has an uncertain result. The agent's inspector lists it. Check it, then send an instruction to continue only the verified work.", "uncertain_action"],
+  ["The agent did not try again: an earlier action has an uncertain result. Check that result, then send an instruction to continue only the verified unfinished work.", "uncertain_action"],
+  ["You skipped the next attempt, so the agent did not try again. The task and its work lease are left as they are.", "skipped"],
+];
+/**
+ * What the receipt of a follow-up says when it ended because of an uncertain result that the daemon's record no longer
+ * has as uncertain: every action of that turn has since completed or failed. It asks the owner nothing.
+ */
+export const FOLLOW_UP_UNCERTAIN_RESOLVED_DETAIL = "The agent did not try again: an earlier action had an uncertain result, and that result is now known.";
+/**
+ * The reasons of an ended follow-up whose note asks its owner to send a message. Such a note goes when the owner has done it: when
+ * the agent has run a turn for a message of a person that came after the follow-up. A turn for any other message does not show it.
+ */
+export const FOLLOW_UP_REASONS_THAT_ASK_THE_OWNER = new Set<string>(["stopped_by_owner", "agent_changed"]);
+/**
+ * Why a follow-up that does not wait for its time stands as it does: a small closed set, which the receipt carries so
+ * that nothing has to read it back from the text. A follow-up that ended with nothing started has one of the first
+ * six. One that waits for its owner has one of the last three. `other` is any block that has no reason of its own:
+ * the follow-up's text says what it is. `uncertain_action` is sent only while an action of the failed turn is still
+ * uncertain in the daemon's record; the daemon has no control for the owner to resolve it, and it leaves that state
+ * only when the action's own completion is recorded, which then makes the reason `uncertain_resolved`.
+ */
+export const FOLLOW_UP_REASONS = ["stopped_by_owner", "skipped", "agent_changed", "task_not_held", "uncertain_action", "uncertain_resolved", "attempts_failed", "ownership_unverified", "other"] as const;
+export type FollowUpReason = (typeof FOLLOW_UP_REASONS)[number];
+const ENDED_REASON_OF_TEXT: ReadonlyMap<string, FollowUpReason> = new Map<string, FollowUpReason>([
+  [FOLLOW_UP_ENDED.stoppedByOwner, "stopped_by_owner"], [FOLLOW_UP_ENDED.skippedByOwner, "skipped"], [FOLLOW_UP_ENDED.agentChanged, "agent_changed"],
+  [FOLLOW_UP_ENDED.taskNotHeld, "task_not_held"], [FOLLOW_UP_ENDED.uncertainEffects, "uncertain_action"], ...LEGACY_ENDED_TEXTS,
+]);
+/** The reason that a follow-up ended with nothing started, from the text that the daemon wrote for it. Null for any other text. */
+export function endedFollowUpReason(text: string | null): FollowUpReason | null {
+  return ENDED_REASON_OF_TEXT.get(text ?? "") ?? null;
+}
+/** The reason that a follow-up waits for its owner. */
+export function blockedFollowUpReason(text: string | null): FollowUpReason {
+  return text === AUTOMATIC_ATTEMPTS_FAILED_DETAIL ? "attempts_failed"
+    : text === OWNERSHIP_UNVERIFIED_DETAIL || text === OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL ? "ownership_unverified" : "other";
+}
 /**
  * How long each follow-up waits after a short provider fault: a rate limit, a
  * server error, an overloaded provider, a lost connection. Such a fault often
@@ -203,7 +263,7 @@ export function taskFailurePolicy(error: string | null, attempt: number, refusal
     if (attempt > 1) {
       return { automatic: false, settle: true, detail: `${NO_REPLY_FAILURE[noReply]} It happened again, so the unfinished task was not continued automatically. Existing work is preserved; send a message to continue it.` };
     }
-    return { automatic: true, detail: NO_REPLY_FOLLOW_UP_DETAIL,
+    return { automatic: true, detail: NO_REPLY_FOLLOW_UP_DETAIL, kind: "no_reply",
       note: noReply === "outputLimit"
         ? "Your previous turn hit the model's output limit before it wrote a reply. Keep replies short and split large tool calls."
         : noReply === "deniedTool"
@@ -213,7 +273,7 @@ export function taskFailurePolicy(error: string | null, attempt: number, refusal
   if (attempt > MAX_AUTOMATIC_FOLLOW_UPS) return { automatic: false, detail: AUTOMATIC_ATTEMPTS_FAILED_DETAIL };
   if (kind === "short_fault" || (!kind && /\b(?:429|500|502|503|504|529)\b|rate.?limit|temporar(?:y|ily)|overloaded|service unavailable|connection reset|ECONNRESET|ETIMEDOUT|socket closed|network error/i.test(error ?? ""))) {
     // The same for every provider: a short fault is the same thing whoever reports it.
-    return { automatic: true, detail: "The provider failed temporarily. The agent will try again by itself.",
+    return { automatic: true, detail: "The provider failed temporarily. The agent will try again by itself.", kind: "provider_fault",
       delayMs: SHORT_FAULT_FOLLOW_UP_DELAYS_MS[attempt - 1] ?? SHORT_FAULT_FOLLOW_UP_DELAYS_MS.at(-1)! };
   }
   return { automatic: false, detail: `The provider failed and safe automatic recovery could not be established. ${retry}` };
@@ -234,5 +294,31 @@ export function parseTaskContinuation(value: unknown): TaskContinuation | null {
     return typeof t.id === "string" && !!t.id && typeof t.title === "string"
       && typeof t.leaseId === "string" && !!t.leaseId && Number.isSafeInteger(t.epoch) && Number(t.epoch) >= 0;
   })) return null;
-  return row as unknown as TaskContinuation;
+  // A kind that this daemon does not know, as after a downgrade, is read as none. The follow-up is still valid, and
+  // still can be stopped and retried: one value must not make the whole record invalid.
+  if (row.kind === undefined || row.kind === "provider_fault" || row.kind === "no_reply") return row as unknown as TaskContinuation;
+  const { kind: _unknown, ...withoutKind } = row;
+  return withoutKind as unknown as TaskContinuation;
+}
+
+/** What a follow-up's id begins with. */
+export const FOLLOW_UP_SOURCE_PREFIX = "task-continuation:";
+/**
+ * The item that a series of follow-ups began with: a room message, or the earliest follow-up that is kept. Each
+ * follow-up names the item before it, so the walk ends, however many follow-ups lie between after its owner used
+ * Retry. An item that is named twice is not followed again.
+ */
+export function followUpOrigin<Item extends { inbox_item_id: string; source_message_id: string; activation: Record<string, unknown> }>(
+  start: Item, load: (inboxItemId: string) => Item | undefined,
+): Item {
+  let origin = start;
+  const seen = new Set([origin.inbox_item_id]);
+  while (origin.source_message_id.startsWith(FOLLOW_UP_SOURCE_PREFIX)) {
+    const parentId = parseTaskContinuation(origin.activation.task_continuity)?.parentId;
+    const parent = parentId && !seen.has(parentId) ? load(parentId) : undefined;
+    if (!parent) break;
+    origin = parent;
+    seen.add(origin.inbox_item_id);
+  }
+  return origin;
 }

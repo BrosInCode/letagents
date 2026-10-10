@@ -1,11 +1,13 @@
-import type { DesktopRoomAgentDeliveryAttention, DesktopSupervisorManifestEntry } from "../../../electron/ipc-types";
+import type { DesktopRoomAgentDeliveryAttention, DesktopRoomAgentFollowUpReason, DesktopSupervisorManifestEntry } from "../../../electron/ipc-types";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { agentScheduledRetry, waitsBehindScheduledRetry, type AgentScheduledRetry } from "./scheduled-retry";
 
 /**
  * What became of the agent's follow-up of this message's failed work, when
  * it does not wait for its time. `waiting_for_owner`: it is blocked, and
- * Retry starts it. `ended`: it ended with nothing started.
+ * Retry starts it. `ended`: it ended with nothing started. A note that asks
+ * nothing of its owner goes once the agent has run a turn for a later message.
+ * Any other note stays, and so does one with no reason.
  */
 export interface RoomMessageFollowUpNote {
   state: "waiting_for_owner" | "ended";
@@ -15,7 +17,27 @@ export interface RoomMessageFollowUpNote {
   text: string | null;
   /** Retry starts the turn of a follow-up that waits for its owner. The other ways to recover one are in the agent's inspector. */
   canRetry: boolean;
+  /** Why it waits for its owner or ended. Absent from a daemon that does not say. */
+  reason: DesktopRoomAgentFollowUpReason | null;
 }
+
+/**
+ * When a note of an ended follow-up may go. A note that asks nothing of its owner goes once the agent has run a turn for a later
+ * message. A note that asks the owner to send a message goes when the owner has (below). A note that asks the owner to check
+ * something stays. A note of any other reason stays too, as does one with no reason (an older daemon) or one that this version
+ * does not know.
+ * - `skipped`: says what Skip did, and asks nothing. It goes.
+ * - `task_not_held`: the task is finished or no longer this agent's. Nothing is asked. It goes.
+ * - `uncertain_resolved`: the result of the earlier action is now known. Nothing is asked. It goes.
+ * - `uncertain_action`: an action has a result that the owner must check. No later turn checks it, and this one stays.
+ */
+const GOES_AFTER_A_LATER_TURN: ReadonlySet<DesktopRoomAgentFollowUpReason> = new Set(["skipped", "task_not_held", "uncertain_resolved"]);
+/**
+ * A note that asks the owner to send a message goes when the owner has: when the agent has run a turn for a message of a person that came
+ * after the follow-up. The daemon says so (`laterPersonTurn`), from the kind of that message, which the desktop cannot tell from a receipt.
+ * A turn for another agent's message does not count. A daemon that does not say keeps the note.
+ */
+const GOES_AFTER_THE_OWNER_SENT_A_MESSAGE: ReadonlySet<DesktopRoomAgentFollowUpReason> = new Set(["stopped_by_owner", "agent_changed"]);
 
 /** One agent's delivery of a room message, as that message shows it. */
 export interface RoomMessageDeliveryReceipt {
@@ -64,6 +86,14 @@ export function roomMessageDeliveryReceipts(
       originOf.set(receipt.sourceMessageId, origin);
       if ((followUpOf.get(origin)?.fifoSequence ?? -1) < receipt.fifoSequence) followUpOf.set(origin, receipt);
     }
+    // A note of an ended follow-up goes when the agent has run a turn for a message after it, but only for a reason that
+    // says so. A follow-up that waits for its owner cannot be passed: it holds every later message.
+    const goneByLaterTurn = (followUp: (typeof receipts)[number]) => {
+      const reason = followUp.followUp?.reason;
+      if (!reason) return false;
+      if (GOES_AFTER_THE_OWNER_SENT_A_MESSAGE.has(reason)) return followUp.followUp?.laterPersonTurn === true;
+      return GOES_AFTER_A_LATER_TURN.has(reason) && receipts.some((later) => later.fifoSequence > followUp.fifoSequence && Boolean(later.providerTurnId));
+    };
     for (const receipt of receipts) {
       const behindRetry = waitsBehindScheduledRetry(receipt, scheduledRetry);
       const followUp = followUpOf.get(receipt.sourceMessageId);
@@ -82,11 +112,12 @@ export function roomMessageDeliveryReceipts(
         providerTurnId: receipt.providerTurnId,
         retry: receipt.state === "blocked" && attention?.sourceMessageId === receipt.sourceMessageId ? attention.retry : null,
         scheduledRetry: scheduledRetry?.forMessageId === receipt.sourceMessageId ? scheduledRetry : null,
-        followUpNote: followUp && (waitsForOwner || followUp.followUp?.state === "ended") ? {
+        followUpNote: followUp && (waitsForOwner || (followUp.followUp?.state === "ended" && !goneByLaterTurn(followUp))) ? {
           state: waitsForOwner ? "waiting_for_owner" : "ended",
           sourceMessageId: followUp.sourceMessageId,
           text: followUp.error,
           canRetry: waitsForOwner && followUp.failureCode !== "provider_continuation_missing" && followUpRetry === "start_turn",
+          reason: followUp.followUp?.reason ?? null,
         } : null,
       });
     }

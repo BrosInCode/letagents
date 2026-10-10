@@ -1706,6 +1706,44 @@ test("a started message can be skipped once its turn is finished or belongs to a
   } finally { await env.cleanup(); }
 });
 
+test("Skip on a follow-up says that it was skipped only when no turn started for it; a follow-up that started keeps the text of a started turn", async () => {
+  const SKIPPED = "You skipped the next attempt, and the task and its work lease are left as they are.";
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const ingest = (agent: string, id: string) => store.ingestPoll({ agent_id: agent, room_id: "room", last_observed_message_id: "9",
+      messages: [{ source_message_id: id, source_message: {}, activation: {} }] });
+    // A follow-up that was blocked and never started, and a room message that was blocked and never started.
+    const [unstarted] = await ingest("unstarted", "task-continuation:parent");
+    await store.transition(unstarted!.inbox_item_id, "blocked", { last_error: "The model provider needs authentication or account access." });
+    assert.equal((await store.skipBlocked(unstarted!.inbox_item_id)).last_error, SKIPPED);
+    const [message] = await ingest("message", "msg_1");
+    await store.transition(message!.inbox_item_id, "blocked", { last_error: "safe pre-turn failure" });
+    assert.equal((await store.skipBlocked(message!.inbox_item_id)).last_error, null, "a room message that never started has no text, as before");
+
+    // A follow-up whose turn finished, and whose answer is dropped by Skip. It runs as an ordinary item, and has the id of a follow-up
+    // by the time that it is skipped: a follow-up cannot be claimed without the record of the failure that it follows.
+    await ingest("started", "1");
+    await seedActiveAgent(env, { agentId: "started", roomId: "room", workAttemptId: TEST_PROVIDER_TURN_AUTHORITY.work_attempt_id,
+      executionGenerationId: "generation-2", providerContinuationId: TEST_PROVIDER_TURN_AUTHORITY.provider_continuation_id });
+    const item = (await store.claimHead("started"))!;
+    await store.checkpointTurnStarted(item.inbox_item_id, "turn-started", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: "started",
+      execution_generation_id: TEST_PROVIDER_TURN_AUTHORITY.origin_execution_generation_id, provider_turn_id: "turn-started",
+      outcome: "unreadable", text: null, evidence: "none", terminal_evidence: {} });
+    await store.transition(item.inbox_item_id, "awaiting_result");
+    await store.transition(item.inbox_item_id, "result_recovery");
+    await store.transition(item.inbox_item_id, "blocked", { last_error: "The same turn was re-read and was not rerun." });
+    const raw = new DatabaseSync(env.database);
+    raw.prepare("UPDATE supervised_agent_inbox SET source_message_id='task-continuation:parent' WHERE inbox_item_id=?").run(item.inbox_item_id);
+    raw.close();
+    const skipped = await store.skipBlocked(item.inbox_item_id);
+    assert.equal(skipped.source_message_id, "task-continuation:parent");
+    assert.match(skipped.last_error ?? "", /not rerun and its answer was dropped/);
+    assert.notEqual(skipped.last_error, SKIPPED, "a turn started, so \"the agent did not try again\" would be untrue");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("repeated pre-turn skips retain exactly bounded physical history", async () => {
   const env = await fixture();
   const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T13:00:00.000Z");

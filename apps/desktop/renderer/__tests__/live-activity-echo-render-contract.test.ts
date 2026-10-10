@@ -17,6 +17,8 @@ test("the work indicator renders the live activity echo and collapses many agent
   assert.match(viewportSource, /data-testid="room-local-agent-work-echo"/);
   assert.match(viewportSource, /data-testid="room-local-agent-work-overflow"/);
   assert.match(viewportSource, /collapsedAgentWork\.hiddenCount/);
+  // What the strip says of the rows that it does not show names them for what they are: working, or waiting to try again.
+  assert.match(viewportSource, /\{\{ workIndicatorOverflowLabel\(collapsedAgentWork\) \}\}/);
 });
 
 test("the echo update is rate-limited with a trailing flush and cleaned up on unmount", () => {

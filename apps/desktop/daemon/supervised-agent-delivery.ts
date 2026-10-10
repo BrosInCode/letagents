@@ -1,7 +1,7 @@
 import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
-import { defaultFollowUpDelayMs, FOLLOW_UP_ENDED, taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
+import { defaultFollowUpDelayMs, FOLLOW_UP_ENDED, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL, OWNERSHIP_UNVERIFIED_DETAIL, taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
 
 function providerFailureDisplayText(message: string): string {
   const normalized = message
@@ -1343,14 +1343,14 @@ export class SupervisedAgentDelivery {
             let tasks: ContinuityTask[] = [];
             let lookupError: string | null = null;
             try { tasks = await this.ownedTasks(agent, { taskIds: prior?.tasks?.map((task) => task.id), heldBefore: prior?.heldBefore ?? String(failed.activation.task_continuity_failed_at), signal: controller.signal }); }
-            catch { lookupError = "Task ownership could not be verified. Check the room connection before continuing work."; }
+            catch { lookupError = OWNERSHIP_UNVERIFIED_DETAIL; }
             if (!await this.hasExecutionAuthority(agent, controller)) return;
             const queued = await this.inbox.enqueueTaskContinuation({ parentId: failed.inbox_item_id,
               agentId: agent.agentId, roomId: agent.roomId, workAttemptId: agent.workAttemptId,
               providerContinuationId: binding.provider_continuation_id, agentSessionId: agent.agentSessionId,
               tasks: lookupError ? null : prior?.tasks ? tasks.filter((task) => prior.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)) : tasks,
               blockReason: lookupError ?? (policy.automatic ? null : policy.detail), detail: policy.detail,
-              settleReason: policy.settle ? policy.detail : null, note: policy.note ?? null,
+              settleReason: policy.settle ? policy.detail : null, note: policy.note ?? null, kind: policy.kind ?? null,
               delayMs: this.retryDelayMs === 0 ? 0 : policy.delayMs ?? defaultFollowUpDelayMs(attempt),
             });
             if (queued) continue;
@@ -1393,7 +1393,7 @@ export class SupervisedAgentDelivery {
             try {
               tasks = await this.ownedTasks(agent, { taskIds: continuation.tasks?.map((task) => task.id), heldBefore: continuation.heldBefore, signal: controller.signal });
             } catch {
-              if (await this.hasExecutionAuthority(agent, controller)) await this.inbox.transition(head.inbox_item_id, "blocked", { last_error: "Task ownership could not be verified. Check the room connection and use Retry delivery." });
+              if (await this.hasExecutionAuthority(agent, controller)) await this.inbox.transition(head.inbox_item_id, "blocked", { last_error: OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL });
               return;
             }
             if (!await this.hasExecutionAuthority(agent, controller)) return;
