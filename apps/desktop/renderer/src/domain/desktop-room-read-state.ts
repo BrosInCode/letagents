@@ -1,5 +1,6 @@
 import type {
   DesktopAccountRoomEntry,
+  DesktopRoomMessage,
   DesktopRoomLatestMessage,
 } from "../../../electron/ipc-types";
 import { normalizeRoomIdentifier } from "./sidebar-rooms";
@@ -27,14 +28,16 @@ export function roomReadKey(roomIdentifier: string | null | undefined): string |
 export function deriveSidebarLatestMessages(input: {
   accountRooms: readonly DesktopAccountRoomEntry[];
   sidebarRoomIdentifiers: readonly string[];
+  localRoomIdentifiers?: readonly string[];
 }): {
   latestMessages: Record<string, DesktopRoomLatestMessage>;
   uncoveredRoomIdentifiers: string[];
 } {
+  const localRooms = new Set(input.localRoomIdentifiers?.map(roomReadKey));
   const accountRoomLatestByKey = new Map<string, DesktopRoomLatestMessage>();
   for (const accountRoom of input.accountRooms) {
     for (const room of [accountRoom, ...accountRoom.focusRooms]) {
-      if (room.source === "local") continue;
+      if (room.source === "local" || localRooms.has(roomReadKey(room.roomIdentifier))) continue;
       const key = roomReadKey(room.roomIdentifier);
       if (!key) continue;
       accountRoomLatestByKey.set(key, {
@@ -61,17 +64,20 @@ export function deriveSidebarLatestMessages(input: {
   return { latestMessages, uncoveredRoomIdentifiers };
 }
 
-export function hasUnreadRoomActivity(options: {
+export function roomReadMarkerKey(roomIdentifier: string | null | undefined, mode: "cloud" | "local"): string | null {
+  const key = roomReadKey(roomIdentifier);
+  return key && mode === "local" ? `${key}::local-history` : key;
+}
+
+export function isRoomBeingRead(input: {
+  hidden: boolean;
+  focused: boolean;
   activeRoomIdentifier: string | null | undefined;
-  latestMessageId: string | null | undefined;
-  readMarkers: RoomReadMarkers;
-  roomIdentifier: string | null | undefined;
+  snapshotRoomIdentifier: string | null | undefined;
 }): boolean {
-  const key = roomReadKey(options.roomIdentifier);
-  if (!key || !options.latestMessageId) return false;
-  if (key === roomReadKey(options.activeRoomIdentifier)) return false;
-  if (!hasReadMarker(options.readMarkers, key)) return false;
-  return options.readMarkers[key] !== options.latestMessageId;
+  const active = roomReadKey(input.activeRoomIdentifier);
+  return !input.hidden && input.focused && Boolean(active)
+    && active === roomReadKey(input.snapshotRoomIdentifier);
 }
 
 export function seedRoomReadMarker(
@@ -99,7 +105,7 @@ export function markRoomRead(
 ): { changed: boolean; readMarkers: RoomReadMarkers } {
   const key = roomReadKey(roomIdentifier);
   const marker = latestMessageId || noRoomMessageId;
-  if (!key || readMarkers[key] === marker) {
+  if (!key || readMarkers[key] === marker || messageNumber(readMarkers[key]) > messageNumber(marker)) {
     return { changed: false, readMarkers };
   }
   return {
@@ -137,4 +143,60 @@ export function readStoredRoomMessageIds(
 
 function hasReadMarker(readMarkers: RoomReadMarkers, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(readMarkers, key);
+}
+
+export interface RoomUnreadSnapshot {
+  readMessageId: string;
+  latestMessageId: string;
+  count: number;
+}
+
+function messageNumber(id: string | null | undefined): number {
+  if (id === noRoomMessageId) return 0;
+  if (!id || !/^msg_[1-9]\d*$/.test(id)) return -1;
+  const value = Number(id.slice(4));
+  return Number.isSafeInteger(value) ? value : -1;
+}
+
+/** Count visible records, never ID differences (prompt-only messages leave gaps). */
+export async function countUnreadRoomMessages(input: {
+  readMessageId: string;
+  latestMessageId: string;
+  previous?: RoomUnreadSnapshot;
+  ownSenderNames: readonly string[];
+  loadPage(afterMessageId: string | null): Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
+  isCurrent(): boolean;
+}): Promise<RoomUnreadSnapshot | null> {
+  const readNumber = messageNumber(input.readMessageId);
+  const latestNumber = messageNumber(input.latestMessageId);
+  if (readNumber < 0 || latestNumber < 0) return null;
+  const result = { readMessageId: input.readMessageId, latestMessageId: input.latestMessageId, count: 0 };
+  if (latestNumber <= readNumber) return result;
+  const previous = input.previous?.readMessageId === input.readMessageId
+    && messageNumber(input.previous.latestMessageId) <= latestNumber ? input.previous : undefined;
+  let cursor = previous?.latestMessageId || input.readMessageId;
+  let cursorNumber = messageNumber(cursor);
+  result.count = previous?.count || 0;
+  const ownNames = new Set(input.ownSenderNames.map((name) => name.trim().toLowerCase()).filter(Boolean));
+  while (cursorNumber < latestNumber) {
+    if (!input.isCurrent()) return null;
+    const page = await input.loadPage(cursor === noRoomMessageId ? null : cursor);
+    if (!input.isCurrent()) return null;
+    let nextNumber = cursorNumber;
+    const seen = new Set<string>();
+    for (const message of page.messages) {
+      const number = messageNumber(message.id);
+      if (number <= cursorNumber || number > latestNumber || seen.has(message.id)) continue;
+      seen.add(message.id);
+      nextNumber = Math.max(nextNumber, number);
+      const ownMessage = message.source === "browser" && ownNames.has(message.sender.trim().toLowerCase());
+      const promptOnly = message.agentPromptKind === "auto" && !message.text.trim();
+      if (!ownMessage && !promptOnly) result.count += 1;
+    }
+    if (!page.hasMore || page.messages.some((message) => messageNumber(message.id) >= latestNumber)) break;
+    if (nextNumber <= cursorNumber) throw new Error("Unread message history did not advance.");
+    cursorNumber = nextNumber;
+    cursor = `msg_${cursorNumber}`;
+  }
+  return result;
 }

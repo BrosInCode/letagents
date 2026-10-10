@@ -23,6 +23,7 @@ import {
   getLocalChatMessageByClientId,
   claimUnsyncedLocalChatMessages,
   getLatestLocalChatMessages,
+  getLocalChatMessages,
   getLocalChatMessagesBefore,
   getLocalChatMessagesAround,
   getLocalMessageThread,
@@ -401,6 +402,28 @@ export async function markDesktopRoomThreadRead(
   return { thread: mapped };
 }
 
+/** Forward pagination for unread counting, including threaded replies. */
+export async function getDesktopRoomMessagesAfter(
+  roomIdentifier: string,
+  afterMessageId: string | null,
+): Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }> {
+  if (!roomIdentifier.trim() || (afterMessageId && !parsePositivePgIntegerScopedId(afterMessageId, "msg"))) {
+    throw new Error("Invalid unread message cursor.");
+  }
+  if (isDesktopSmokeCheck()) return { messages: [], hasMore: false };
+  const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
+  const page = storage.effectiveMode === "local"
+    ? await getLocalChatMessages(localRoomIdentifierForStorage(storage, roomIdentifier), {
+        after: afterMessageId || undefined,
+        limit: 100,
+        readerKey: await resolveLocalThreadReaderKey(),
+      })
+    : await apiFetch<{ messages: RoomMessagePayload[]; has_more: boolean }>(
+        `/rooms/${encodeURIComponent(cloudRoomIdentifierForStorage(storage, roomIdentifier))}/messages?limit=100${afterMessageId ? `&after=${encodeURIComponent(afterMessageId)}` : ""}`,
+      );
+  return { messages: page.messages.map(mapRoomMessagePayload), hasMore: page.has_more };
+}
+
 export async function getDesktopRoomMessagesBefore(
   roomIdentifier: string,
   beforeMessageId: string,
@@ -544,6 +567,7 @@ export async function getDesktopRoomLatestMessages(
         const latest = page.messages?.at(-1) || null;
         return {
           roomIdentifier,
+          storageMode: storage.effectiveMode,
           latestMessageId: latest?.id || null,
           latestMessageAt: latest?.timestamp || null,
         };

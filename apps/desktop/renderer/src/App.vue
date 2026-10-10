@@ -454,6 +454,7 @@ import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { recentProjectFoldersFromRooms, useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
+import { useDesktopUnreadCounts } from "./composables/useDesktopUnreadCounts";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
 import { invalidateRentalProviderDashboard, loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
@@ -462,10 +463,11 @@ import { safeUserVisibleErrorDetail } from "./domain/user-visible-error";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
   deriveSidebarLatestMessages,
-  hasUnreadRoomActivity,
+  isRoomBeingRead,
   markRoomRead,
   readStoredRoomMessageIds,
   roomReadKey,
+  roomReadMarkerKey,
   seedRoomReadMarker,
 } from "./domain/desktop-room-read-state";
 import {
@@ -495,7 +497,6 @@ import {
   appAgentRefreshTargets,
 } from "./domain/app-agent";
 import { openManagedAgentWorktree } from "./domain/managed-agent-worktrees";
-import { shouldSkipPollTick } from "./domain/visibility-polling";
 import { useAccountActivity } from "./composables/useAccountActivity";
 import {
   ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS,
@@ -560,7 +561,10 @@ const legacyRepositoryRootBindings = readRepositoryRootBindings(
   recentRootRooms.value,
 );
 const projectBindings = ref<DesktopProjectBinding[]>([]);
-const readRoomMessageIds = ref(readStoredRoomMessageIds(window.localStorage, readRoomMessagesStorageKey));
+const windowFocused = ref(document.hasFocus());
+const windowHidden = ref(document.hidden);
+const readRoomMessageIds = ref<Record<string, string>>({});
+let accountReadStorageKey: string | null = null;
 const sidebarWidth = ref(readStoredSidebarWidth());
 const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
 const isSidebarResizing = ref(false);
@@ -695,6 +699,7 @@ let unsubscribeRoomStream: (() => void) | null = null;
 let unsubscribeOpenSettings: (() => void) | null = null;
 let unsubscribeOpenUpdates: (() => void) | null = null;
 let unsubscribeUpdateStatus: (() => void) | null = null;
+let unsubscribeNotificationReceived: (() => void) | null = null;
 let unsubscribeNotificationActivation: (() => void) | null = null;
 let unsubscribeRepoStatusChanged: (() => void) | null = null;
 let accountRoomsRefreshInterval: number | null = null;
@@ -794,6 +799,42 @@ function gitRoomsShareRepo(
   const rightRepo = right.repository.id || `${right.host}:${right.repository.fullName}`.toLowerCase();
   return left.provider === right.provider && left.host === right.host && leftRepo === rightRepo;
 }
+watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id : null, (accountId) => {
+  accountReadStorageKey = accountId ? `${readRoomMessagesStorageKey}:${encodeURIComponent(accountId)}` : null;
+  sidebarLatestMessages.value = {};
+  if (!accountReadStorageKey || !accountId) {
+    readRoomMessageIds.value = {};
+    return;
+  }
+  // Adopt the previous installation-wide markers once, for the first signed-in account.
+  const legacyOwnerKey = `${readRoomMessagesStorageKey}:owner`;
+  try {
+    const owner = window.localStorage.getItem(legacyOwnerKey);
+    if (!owner) window.localStorage.setItem(legacyOwnerKey, accountId);
+    if ((!owner || owner === accountId) && !window.localStorage.getItem(accountReadStorageKey)) {
+      const legacy = window.localStorage.getItem(readRoomMessagesStorageKey);
+      if (legacy) window.localStorage.setItem(accountReadStorageKey, legacy);
+    }
+  } catch { /* Storage failures must not prevent sign-in. */ }
+  readRoomMessageIds.value = readStoredRoomMessageIds(window.localStorage, accountReadStorageKey);
+}, { immediate: true, flush: "sync" });
+
+const { roomCounts: unreadRoomCounts, refresh: refreshUnreadCounts } = useDesktopUnreadCounts({
+  account: computed(() => authStatus.value?.authenticated ? authStatus.value.account : null),
+  rooms: computed(() => flattenSidebarRoomEntries(projectEntries.value).flatMap((entry) =>
+    entry.roomIdentifier ? [{
+      roomIdentifier: entry.roomIdentifier,
+      latestMessageId: latestMessageIdForEntry(entry),
+      latestMessageAt: latestMessageAtForEntry(entry),
+    }] : [])),
+  readMarkers: computed(() => Object.fromEntries(sidebarRoomIdentifiers().flatMap((identifier) => {
+    const key = roomReadKey(identifier)!;
+    const marker = readRoomMessageIds.value[roomReadMarkerKey(identifier, roomHistoryMode(identifier))!];
+    return marker ? [[key, marker]] : [];
+  }))),
+  storageMode: computed(() => JSON.stringify([chatStorageSettings.value, sidebarRoomIdentifiers().map((id) => [id, roomHistoryMode(id)])])),
+});
+
 const sidebarProjectEntries = computed(() =>
   applySidebarRoomOrder(projectEntries.value.map((project) => ({
     ...project,
@@ -1116,18 +1157,29 @@ async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean>
 }
 
 function handleVisibilityChange(): void {
+  windowHidden.value = document.hidden;
+  windowFocused.value = document.hasFocus();
+  markActiveRoomRead();
   if (document.visibilityState !== "visible") return;
   refreshForegroundData();
 }
 
 function handleWindowFocus(): void {
+  windowFocused.value = true;
+  windowHidden.value = document.hidden;
+  markActiveRoomRead();
   refreshForegroundData();
   void roomNotificationPreferences.refreshAll();
   if (selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(selectedRoomIdentifier.value);
 }
 
+function handleWindowBlur(): void {
+  windowFocused.value = false;
+}
+
 async function refreshSidebarLatestMessages(): Promise<void> {
   const generation = sessionGeneration.value;
+  const storageSettings = JSON.stringify(chatStorageSettings.value);
   const roomIdentifiers = sidebarRoomIdentifiers();
   if (!roomIdentifiers.length) {
     sidebarLatestMessages.value = {};
@@ -1145,6 +1197,7 @@ async function refreshSidebarLatestMessages(): Promise<void> {
   const { latestMessages, uncoveredRoomIdentifiers } = deriveSidebarLatestMessages({
     accountRooms: accountRooms.value,
     sidebarRoomIdentifiers: roomIdentifiers,
+    localRoomIdentifiers: roomIdentifiers.filter(roomUsesLocalHistory),
   });
   const nextLatestMessages: Record<string, DesktopRoomLatestMessage> = { ...latestMessages };
 
@@ -1160,10 +1213,31 @@ async function refreshSidebarLatestMessages(): Promise<void> {
   }
 
   if (generation !== sessionGeneration.value || !authStatus.value?.authenticated) return;
+  if (storageSettings !== JSON.stringify(chatStorageSettings.value)) return;
   sidebarLatestMessages.value = nextLatestMessages;
   seedReadMarkersForKnownRooms();
   markActiveRoomRead();
+  void refreshUnreadCounts();
 }
+
+function roomUsesLocalHistory(identifier: string): boolean {
+  const override = chatStorageSettings.value?.roomOverrides[identifier];
+  return /^local[_-]|^git-room:local:/i.test(identifier)
+    || accountRooms.value.some((room) => [room, ...room.focusRooms].some((entry) =>
+      roomReadKey(entry.roomIdentifier) === roomReadKey(identifier) && entry.source === "local"))
+    || (override && override !== "inherit" ? override : chatStorageSettings.value?.mode) === "local";
+}
+
+function roomHistoryMode(identifier: string | null | undefined): "cloud" | "local" {
+  if (!identifier) return "cloud";
+  return sidebarLatestMessages.value[roomReadKey(identifier)!]?.storageMode
+    || (roomUsesLocalHistory(identifier) ? "local" : "cloud");
+}
+
+watch(() => JSON.stringify(chatStorageSettings.value), () => {
+  sidebarLatestMessages.value = {};
+  void refreshSidebarLatestMessages();
+});
 
 function sidebarRoomIdentifiers(): string[] {
   const identifiers = new Set<string>();
@@ -1186,35 +1260,35 @@ function withRoomUnreadState(entry: RoomEntry): RoomEntry {
     activity: sidebarActivityFor(accountActivity.index.value, entry.roomIdentifier),
     latestMessageId,
     latestMessageAt: latestMessageAtForEntry(entry),
-    hasUnread: Boolean(roomUnread.get(entry.roomIdentifier)) || hasUnreadRoomActivity({
-      activeRoomIdentifier: selectedRoomIdentifier.value,
-      latestMessageId,
-      readMarkers: readRoomMessageIds.value,
-      roomIdentifier: entry.roomIdentifier,
-    }),
+    unreadCount: unreadRoomCounts.value[roomReadKey(entry.roomIdentifier) || ""] || 0,
+    hasUnread: Boolean(roomUnread.get(entry.roomIdentifier)) || (unreadRoomCounts.value[roomReadKey(entry.roomIdentifier) || ""] || 0) > 0,
   };
 }
 
 function latestMessageIdForEntry(entry: RoomEntry): string | null {
-  if (selectedSnapshotMatchesEntry(entry)) {
-    return selectedSnapshot.value?.messages.at(-1)?.id || entry.latestMessageId;
-  }
-  return latestMessageForEntry(entry)?.latestMessageId || entry.latestMessageId;
+  return latestKnownMessageForEntry(entry)?.latestMessageId || (roomHistoryMode(entry.roomIdentifier) === "cloud" ? entry.latestMessageId : null);
 }
 
 function latestMessageAtForEntry(entry: RoomEntry): string | null {
-  if (selectedSnapshotMatchesEntry(entry)) {
-    return selectedSnapshot.value?.messages.at(-1)?.timestamp || entry.latestMessageAt;
-  }
-  return latestMessageForEntry(entry)?.latestMessageAt || entry.latestMessageAt;
+  return latestKnownMessageForEntry(entry)?.latestMessageAt || (roomHistoryMode(entry.roomIdentifier) === "cloud" ? entry.latestMessageAt : null);
+}
+
+function latestKnownMessageForEntry(entry: RoomEntry): DesktopRoomLatestMessage | null {
+  const message = selectedSnapshotMatchesEntry(entry)
+    && (selectedSnapshot.value?.storage?.effectiveMode || "cloud") === roomHistoryMode(entry.roomIdentifier)
+    ? selectedSnapshot.value?.messages.at(-1) : null;
+  return newerLatestMessage(latestMessageForEntry(entry), message ? {
+    roomIdentifier: entry.roomIdentifier || "",
+    latestMessageId: message.id,
+    latestMessageAt: message.timestamp,
+  } : null);
 }
 
 function latestMessageForEntry(entry: RoomEntry): DesktopRoomLatestMessage | null {
   const key = roomReadKey(entry.roomIdentifier);
-  return newerLatestMessage(
-    key ? sidebarLatestMessages.value[key] : null,
-    streamedLatestMessage(accountActivity.index.value, entry.roomIdentifier),
-  );
+  const stored = key ? sidebarLatestMessages.value[key] : null;
+  if (roomHistoryMode(entry.roomIdentifier) === "local") return stored?.storageMode === "local" ? stored : null;
+  return newerLatestMessage(stored, streamedLatestMessage(accountActivity.index.value, entry.roomIdentifier));
 }
 
 function selectedSnapshotMatchesEntry(entry: RoomEntry): boolean {
@@ -1227,9 +1301,6 @@ function selectedSnapshotMatchesEntry(entry: RoomEntry): boolean {
 
 function handleSidebarEntrySelected(entry: SidebarEntry): void {
   if (sidebarSelectionActive.value) cancelSidebarRoomSelection();
-  if (entry.type === "room") {
-    markRoomEntryRead(entry);
-  }
   selectSidebarEntry(entry);
 }
 
@@ -1335,7 +1406,9 @@ function seedReadMarkersForKnownRooms(): void {
   let changed = false;
   for (const project of projectEntries.value) {
     for (const entry of [project.parent, ...projectChildRooms(project)]) {
-      const result = seedRoomReadMarker(nextMarkers, entry.roomIdentifier, latestMessageIdForEntry(entry));
+      // Wait for the local lookup before baselining its independent msg_N namespace.
+      if (roomHistoryMode(entry.roomIdentifier) === "local" && !latestKnownMessageForEntry(entry)) continue;
+      const result = seedRoomReadMarker(nextMarkers, roomReadMarkerKey(entry.roomIdentifier, roomHistoryMode(entry.roomIdentifier)), latestMessageIdForEntry(entry));
       nextMarkers = result.readMarkers;
       changed = changed || result.changed;
     }
@@ -1350,17 +1423,28 @@ function projectChildRooms(project: ProjectGroup): RoomEntry[] {
   return orderedSidebarChildRooms(project);
 }
 
-function markActiveRoomRead(): void {
-  if (activeEntry.value.type !== "room") return;
-  markRoomEntryRead(activeEntry.value);
+function activeRoomIsBeingRead(): boolean {
+  return !selectedSnapshotLoading.value
+    && (selectedSnapshot.value?.storage?.effectiveMode || "cloud") === roomHistoryMode(selectedRoomIdentifier.value)
+    && isRoomBeingRead({
+    hidden: windowHidden.value,
+    focused: windowFocused.value,
+    activeRoomIdentifier: activeEntry.value.type === "room" ? activeEntry.value.roomIdentifier : null,
+    snapshotRoomIdentifier: selectedSnapshot.value?.room?.identifier || selectedSnapshot.value?.roomIdentifier,
+  });
 }
 
-function markRoomEntryRead(entry: RoomEntry, explicit = false): void {
+function markActiveRoomRead(): void {
+  if (activeEntry.value.type !== "room" || !activeRoomIsBeingRead()) return;
+  markRoomEntryRead(activeEntry.value, false, selectedSnapshot.value?.messages.at(-1)?.id || null);
+}
+
+function markRoomEntryRead(entry: RoomEntry, explicit = false, latestMessageId = latestMessageIdForEntry(entry)): void {
   if (explicit) {
     const bookmark = roomUnread.get(entry.roomIdentifier);
     if (bookmark) roomUnread.clear(entry.roomIdentifier, bookmark.revision);
   }
-  const result = markRoomRead(readRoomMessageIds.value, entry.roomIdentifier, latestMessageIdForEntry(entry));
+  const result = markRoomRead(readRoomMessageIds.value, roomReadMarkerKey(entry.roomIdentifier, roomHistoryMode(entry.roomIdentifier)), latestMessageId);
   if (!result.changed) return;
   readRoomMessageIds.value = result.readMarkers;
   rememberRoomMessageIds();
@@ -1388,7 +1472,7 @@ function handleSidebarChildRoomReorder(input: SidebarChildRoomReorder): void {
 
 function rememberRoomMessageIds(): void {
   try {
-    window.localStorage.setItem(readRoomMessagesStorageKey, JSON.stringify(readRoomMessageIds.value));
+    if (accountReadStorageKey) window.localStorage.setItem(accountReadStorageKey, JSON.stringify(readRoomMessageIds.value));
   } catch {
     // Local persistence should never block message navigation.
   }
@@ -1993,8 +2077,10 @@ function getChatStorageBridge(): typeof desktopIpc.chatStorage | null {
 async function loadChatStorageSettings(): Promise<void> {
   const bridge = getChatStorageBridge();
   if (!bridge) return;
+  const generation = sessionGeneration.value;
   try {
-    chatStorageSettings.value = await bridge.getSettings();
+    const settings = await bridge.getSettings();
+    if (generation === sessionGeneration.value) chatStorageSettings.value = settings;
   } catch (error) {
     chatStorageFeedback.value = {
       state: "error",
@@ -2410,10 +2496,19 @@ function handleOwnMessageSent(message: Parameters<typeof handleMessageSent>[0]):
   markActiveRoomRead();
 }
 
-function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): void {
+async function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): Promise<void> {
+  const storageChanged = snapshot?.storage
+    && snapshot.storage.effectiveMode !== roomHistoryMode(snapshot.roomIdentifier);
+  if (storageChanged) {
+    const generation = sessionGeneration.value;
+    await loadChatStorageSettings();
+    if (generation !== sessionGeneration.value) return;
+    sidebarLatestMessages.value = {};
+  }
   handleRefreshRoom(snapshot);
   if (!snapshot?.roomIdentifier) return;
   void syncSelectedRoomStream(snapshot.roomIdentifier);
+  if (storageChanged) await refreshSidebarLatestMessages();
 }
 
 function handleRoomMessageRevealUnavailable(_messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"): void {
@@ -2607,6 +2702,9 @@ onMounted(() => {
   unsubscribeUpdateStatus = desktopIpc.updates?.onStatusChanged?.((status) => {
     updateStatus.value = status;
   }) || null;
+  unsubscribeNotificationReceived = desktopIpc.notifications?.onReceived?.(() => {
+    void refreshSidebarRoomMetadata();
+  }) || null;
   unsubscribeNotificationActivation = desktopIpc.notifications?.onActivated?.((target) => {
     void handleNotificationActivation(target);
   }) || null;
@@ -2614,16 +2712,23 @@ onMounted(() => {
     if (target) void handleNotificationActivation(target);
   });
   unsubscribeRepoStatusChanged = desktopIpc.repos?.onStatusChanged?.(handleRepoStatusChanged) || null;
+  // Keep the fallback room-list refresh alive while hidden for badges.
+  // A connected account activity stream still avoids routine room-list polling.
   accountRoomsRefreshInterval = window.setInterval(() => {
-    if (shouldSkipPollTick({ hidden: document.hidden })) return;
+    void refreshUnreadCounts();
     // While the activity stream is open it pushes messages and work as they
     // happen; the room list is then refreshed only rarely, to pick up rooms
     // that were renamed or created elsewhere.
     if (accountActivity.connected.value
-      && Date.now() - lastSidebarMetadataRefreshAt < ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS) return;
+      && Date.now() - lastSidebarMetadataRefreshAt < ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS) {
+      // Local workers do not appear in the cloud activity stream.
+      if (sidebarRoomIdentifiers().some((id) => roomHistoryMode(id) === "local")) void refreshSidebarLatestMessages();
+      return;
+    }
     void refreshSidebarRoomMetadata();
   }, SIDEBAR_METADATA_REFRESH_INTERVAL_MS);
   window.addEventListener("focus", handleWindowFocus);
+  window.addEventListener("blur", handleWindowBlur);
   document.addEventListener("visibilitychange", handleVisibilityChange);
   void loadChatStorageSettings();
   void loadAppAgentSettingsStatus();
@@ -2643,6 +2748,7 @@ onBeforeUnmount(() => {
     accountRoomsRefreshInterval = null;
   }
   window.removeEventListener("focus", handleWindowFocus);
+  window.removeEventListener("blur", handleWindowBlur);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
   unsubscribeRoomStream?.();
   unsubscribeRoomStream = null;
@@ -2652,6 +2758,8 @@ onBeforeUnmount(() => {
   unsubscribeOpenUpdates = null;
   unsubscribeUpdateStatus?.();
   unsubscribeUpdateStatus = null;
+  unsubscribeNotificationReceived?.();
+  unsubscribeNotificationReceived = null;
   unsubscribeNotificationActivation?.();
   unsubscribeNotificationActivation = null;
   unsubscribeRepoStatusChanged?.();

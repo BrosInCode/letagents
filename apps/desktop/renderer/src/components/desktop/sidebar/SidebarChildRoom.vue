@@ -27,12 +27,7 @@
       <RoomMutedIcon :room-identifier="entry.roomIdentifier" />
       <span v-if="entry.currentWorkspace" class="room-workspace-pill">Current</span>
       <SidebarRoomActivity :activity="entry.activity" />
-      <span
-        v-if="entry.hasUnread"
-        class="room-unread-dot"
-        aria-label="Unread messages"
-        title="Unread messages"
-      ></span>
+      <RoomUnreadBadge :count="entry.unreadCount || 0" :marked-unread="entry.hasUnread" />
     </span>
     <small
       v-if="entry.suggestedAction && !entry.currentWorkspace"
@@ -44,6 +39,7 @@
 </template>
 
 <script setup lang="ts">
+import RoomUnreadBadge from "./RoomUnreadBadge.vue";
 import { Check } from "@lucide/vue";
 import { sidebarRoomTitle } from "../../../domain/sidebar-room-display";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";

@@ -141,6 +141,23 @@
   background: var(--sidebar-selection);
 }
 
+.room-unread-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--sidebar-selection);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
 /* Child rooms hang from a hairline under their parent's icon. */
 .project-room-list {
   position: relative;
