@@ -2,11 +2,12 @@ import { execFile } from "node:child_process";
 import { realpathSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { homedir, hostname, tmpdir, userInfo } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { LETAGENTS_MCP_SERVER_NAME, listCodexMcpServers } from "../../../../shared/codex-owner-isolation.mjs";
+import { codexAgentHomeDirectory } from "../main/agents/codex-agent-home.js";
 import {
   launchManagedCodexAppServer,
   sensitiveCodexAppServerEnvValues,
@@ -204,13 +205,22 @@ class CodexCapture {
   }
 }
 
-async function commandOutput(command: string, args: string[]): Promise<string | null> {
+async function commandOutput(command: string, args: string[], env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(command, args, { encoding: "utf8", timeout: 5_000 });
+    const { stdout } = await execFileAsync(command, args, { encoding: "utf8", timeout: 5_000, env });
     return stdout.trim() || null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The digest in the name of the agents' Codex home, or null when the name has none. The agents' home of an owner
+ * home that is not the usual one is named with a digest of that home's path, and the path holds the user name.
+ * Codex reports the folder it runs with, so a recording keeps the digest out.
+ */
+export function agentHomeDigest(env: NodeJS.ProcessEnv): string | null {
+  return /^codex-agent-home-([0-9a-f]{8,})$/.exec(basename(codexAgentHomeDirectory(env)))?.[1] ?? null;
 }
 
 function withoutPrivatePrefix(path: string): string[] {
@@ -220,8 +230,11 @@ function withoutPrivatePrefix(path: string): string[] {
 /** What must not reach a public repository from this machine. Values are collected, never printed. */
 async function redactionContext(codexBin: string, workspace: string): Promise<ReplayRedactionContext> {
   const fullName = await commandOutput("id", ["-F"]);
-  const gitName = await commandOutput("git", ["config", "--global", "user.name"]);
-  const gitEmail = await commandOutput("git", ["config", "--global", "user.email"]);
+  // Git is asked in the account's own home. A recording may run with HOME on an empty folder (see the guide),
+  // and the names to keep out of a transcript are the same ones then.
+  const accountHome = { ...process.env, HOME: userInfo().homedir };
+  const gitName = await commandOutput("git", ["config", "--global", "user.name"], accountHome);
+  const gitEmail = await commandOutput("git", ["config", "--global", "user.email"], accountHome);
   const names = [fullName, gitName, gitEmail?.split("@")[0]].filter((value): value is string => Boolean(value));
   const host = hostname();
   const hostnames = [
@@ -240,6 +253,7 @@ async function redactionContext(codexBin: string, workspace: string): Promise<Re
     return [transport.env, transport.http_headers, transport.env_http_headers].flatMap((bag) =>
       bag && typeof bag === "object" ? sensitiveCodexAppServerEnvValues(bag as NodeJS.ProcessEnv) : []);
   });
+  const digest = agentHomeDigest(process.env);
   return {
     workspacePaths: withoutPrivatePrefix(workspace),
     tempDirectories: [...withoutPrivatePrefix(await realpath(tmpdir())), tmpdir()],
@@ -248,7 +262,7 @@ async function redactionContext(codexBin: string, workspace: string): Promise<Re
     username: userInfo().username,
     personalNames: [...names, ...names.flatMap((name) => name.split(/[^\p{L}\p{N}]+/u)).filter((word) => word.length >= 4)],
     hostnames,
-    secrets: [...sensitiveCodexAppServerEnvValues(process.env), ...serverSecrets].filter((value) => value.length >= 8),
+    secrets: [...sensitiveCodexAppServerEnvValues(process.env), ...serverSecrets, ...(digest ? [digest] : [])].filter((value) => value.length >= 8),
     ownerSetupNames: servers.map((server) => server.name).filter((name) => name !== LETAGENTS_MCP_SERVER_NAME),
     accountMethods: [/^account\//],
   };

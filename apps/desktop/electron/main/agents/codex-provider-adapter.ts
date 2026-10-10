@@ -283,10 +283,8 @@ const SIGN_IN_PROTECTION_NOT_CONFIRMED = "This version of Codex did not confirm 
  * one of a Read-only agent's work attempt. It is null for a launch that names
  * no access level and has this policy all the same. The product's launch
  * refuses to start Codex for such a caller (see `readOnlySandbox`), so only a
- * stand-in for the launch gets this far: a test's, or the replay of a
- * transcript that was recorded before the level named a profile. It names the
- * sandbox as before, and its reply is held to the sandbox and the approval
- * policy alone.
+ * test's stand-in for the launch gets this far. It names the sandbox as
+ * before, and its reply is held to the sandbox and the approval policy alone.
  *
  * What a reply cannot show is that the `deny` is in force: Codex 0.153.4
  * reports the same after it has dropped one. So this is one of two checks.

@@ -10043,9 +10043,9 @@ test("when Codex says that a Read-only conversation's settings changed, they are
   }
 });
 
-test("a launch that has the Read-only policy and names no access level is told to the launch as such, which starts nothing for it; a stand-in for the launch, as a recorded transcript's replay is, names the sandbox as it was recorded", async () => {
+test("a launch that has the Read-only policy and names no access level is told to the launch as such, which starts nothing for it; behind a stand-in for the launch that refuses nothing, it names the sandbox as before", async () => {
   // The product's launch refuses this caller: see the launch's own tests. The stand-in launch of this file refuses
-  // nothing, as the replay of a recorded transcript does not, so what the adapter does past the launch is seen here.
+  // nothing, so what the adapter does past the launch is seen here.
   const harness = createHarness({ exitOnSignal: true });
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox", launchPolicy: structuredClone(CODEX_READ_ONLY_POLICY) }));
