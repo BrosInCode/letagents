@@ -351,17 +351,6 @@
   color: color-mix(in srgb, var(--accent, #7dd3fc) 78%, var(--text-secondary));
 }
 
-.room-workspace-pill {
-  flex: 0 0 auto;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--sidebar-selection) 14%, transparent);
-  color: color-mix(in srgb, var(--sidebar-selection) 72%, white);
-  font-size: 0.57rem;
-  font-weight: 760;
-  line-height: 1.45;
-}
-
 .room-empty {
   margin: 6px 10px 0;
   color: var(--text-tertiary);
