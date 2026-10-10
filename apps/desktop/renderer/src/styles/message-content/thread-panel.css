@@ -1,5 +1,5 @@
 /* The owner and its replies share one bubble; the room remains scrollable. */
-.room-chat-message.is-active-thread-root > .room-chat-message-content > .room-message-bubble {
+.room-message-bubble:has(> .room-thread-marker) {
   display: block;
   width: 100%;
   max-width: 100%;
@@ -11,8 +11,9 @@
   flex-wrap: wrap;
   gap: 8px;
   max-width: 100%;
-  margin-top: 12px;
-  padding: 6px 0 0;
+  margin-top: 8px;
+  min-height: 28px;
+  padding: 3px 0;
   border: 0;
   border-radius: 4px;
   background: transparent;
@@ -22,20 +23,22 @@
 .room-message-bubble > .room-thread-marker .room-thread-marker-preview { display: none; }
 .room-message-bubble > .room-thread-marker::after { content: '⌄'; margin-left: 3px; }
 .room-message-bubble > .room-thread-marker[aria-expanded="true"]::after { transform: rotate(180deg); }
-.room-thread-participant-avatar { font-size: 0; width: 7px; height: 7px; border: 0; }
+.room-message-bubble > .room-thread-marker strong { font-weight: 600; }
+.room-message-bubble > .room-thread-marker .room-thread-participants { align-items: center; gap: 4px; height: auto; min-width: 0; }
+.room-thread-participant-avatar { font-size: 0; width: 6px; height: 6px; margin: 0; border: 0; }
 
 .room-inline-thread { min-width: 0; }
-.room-thread-panel { position: relative; min-width: 0; outline: none; }
+.room-thread-panel { display: flow-root; position: relative; min-width: 0; outline: none; }
 .room-thread-body {
-  height: clamp(230px, 34dvh, 360px);
+  max-height: clamp(240px, 42dvh, 440px);
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   overflow-anchor: none;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--text-tertiary) 40%, transparent) transparent;
-  margin-top: 12px;
-  padding: 16px 6px 16px 0;
+  margin-top: 6px;
+  padding: 14px 8px 14px 0;
   border-top: 1px solid var(--border, rgba(127, 127, 127, 0.18));
   outline-offset: -2px;
 }
@@ -47,7 +50,7 @@
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 8px 0 22px;
+  padding: 0 0 22px;
   border: 0;
   background: transparent;
   box-shadow: none;
@@ -63,11 +66,11 @@
 }
 .room-thread-panel .room-message-owner { font-size: 0.7rem; }
 .room-thread-panel .room-chat-message.is-thread-context .room-message-bubble {
-  display: block; width: 100%; max-width: 100%; margin-top: 8px; padding: 0;
+  display: block; width: 100%; max-width: 100%; margin-top: 6px; padding: 0;
   border: 0; border-radius: 0; background: transparent; box-shadow: none;
 }
 .room-thread-panel .room-chat-message.is-thread-context .desktop-long-message-html {
-  font-size: 0.875rem; line-height: 1.65;
+  max-width: 68ch; font-size: 0.875rem; line-height: 1.6;
 }
 .room-thread-panel .room-chat-message.is-thread-context .room-message-reply {
   display: flex; align-items: baseline; gap: 6px; min-width: 0; width: 100%;
@@ -86,9 +89,9 @@
 .room-thread-new-divider { display: flex; align-items: center; gap: 10px; margin: 4px 0 16px; color: var(--text-tertiary); font-size: 0.72rem; }
 .room-thread-new-divider::after { content: ''; flex: 1; height: 1px; background: var(--border, rgba(127,127,127,.18)); }
 .room-thread-latest {
-  position: absolute; right: 12px; bottom: 66px; z-index: 2;
-  padding: 5px 10px; border: 1px solid var(--border, rgba(127,127,127,.25));
-  border-radius: 999px; background: var(--bg-elevated, #181818); color: var(--text-secondary);
+  flex: 0 0 auto; align-self: center; margin-right: 8px;
+  padding: 6px 0; border: 0;
+  background: transparent; color: var(--text-secondary);
   font-size: 0.72rem; cursor: pointer;
 }
 .room-thread-composer {
@@ -120,9 +123,29 @@
 .room-thread-composer-error { color: #f87171; font-size: .72rem; max-width: 24ch; }
 .room-thread-mention-panel { right: 0; left: 0; bottom: 100%; width: auto; }
 @media (max-width: 600px) {
-  .room-thread-body { height: clamp(220px, 31dvh, 280px); }
+  .room-thread-body { max-height: clamp(220px, 40dvh, 360px); }
 }
 .room-thread-panel .room-message-bubble::before { display: none; }
-.room-inline-thread { animation: inline-replies-enter 180ms cubic-bezier(.23, 1, .32, 1); transform-origin: top; }
-@keyframes inline-replies-enter { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) { .room-inline-thread { animation: none; } }
+/* Quote context stays subordinate to the conversation. */
+.room-message-bubble:has(> .room-thread-marker) > .room-message-reply {
+  gap: 2px; margin: 0 0 10px; padding: 0 0 0 10px;
+  border: 0; border-left: 2px solid var(--border-strong); border-radius: 0; background: transparent;
+}
+.room-message-bubble:has(> .room-thread-marker) > .room-message-reply .room-message-reply-label {
+  font-size: .68rem; font-weight: 500;
+}
+.room-message-bubble:has(> .room-thread-marker) > .room-message-reply .room-message-reply-text {
+  font-size: .8rem; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.room-thread-panel .room-chat-message.is-thread-context:last-child { padding-bottom: 0; }
+.room-message-actions { display: contents; }
+.room-thread-panel .room-message-meta { position: relative; gap: 6px 10px; min-height: 22px; }
+.room-thread-panel .room-message-author-block { gap: 6px; flex-wrap: wrap; }
+@media (hover: hover) and (pointer: fine) {
+  .room-thread-panel .room-message-actions {
+    position: absolute; right: 0; top: -6px; z-index: 2; display: flex; gap: 2px;
+    padding: 3px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-subtle);
+    opacity: 0; pointer-events: none; transition: opacity 120ms ease;
+  }
+  .room-thread-panel .room-chat-message:is(:hover, :focus-within, .is-reacting) .room-message-actions { opacity: 1; pointer-events: auto; }
+}
