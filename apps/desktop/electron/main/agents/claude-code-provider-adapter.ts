@@ -870,6 +870,37 @@ class ClaudeBootstrapDiagnostics {
   }
 }
 
+/**
+ * What the owner reads when Claude Code ended the prompt that starts an agent
+ * with no call to the model. It repeats nothing of the CLI's text, which can
+ * hold a hook's words, a path of the owner's machine, and the prompt.
+ *
+ * `namesSettingSources`: the launch told Claude Code which settings to read.
+ * An access level that does so reads the owner's settings alone with the
+ * owner's setup on, and no settings at all with it off: only then is turning
+ * the setup off a way out. A launch that names none reads the owner's
+ * settings, the project's and the folder's local ones.
+ */
+export function claudeStartWithoutModelText(input: {
+  modelNotCalled: "hook_stopped_prompt" | "unknown"; ownerSetup: boolean; namesSettingSources: boolean;
+}): string {
+  if (input.modelNotCalled !== "hook_stopped_prompt") {
+    return "Claude Code ended the prompt that LetAgents sends to start this agent without a call to the model, so the agent did not start.";
+  }
+  const stopped = "A UserPromptSubmit hook stopped the prompt that LetAgents sends to start this agent";
+  const change = "Change the hook so that it lets this prompt through, then try again.";
+  if (input.ownerSetup) {
+    // "with your own setup": the desktop shows a start that was refused over the owner's setup in the launch's own words.
+    return `${stopped}, so the agent cannot start with your own setup while the hook stops that prompt. `
+      + `With your own setup on, Claude Code runs the hooks of your own Claude Code settings and plugins. ${change}`
+      + (input.namesSettingSources
+        ? " Or turn off \"Use your own Claude Code setup\" for this agent: it then reads none of your Claude Code settings, so their hooks do not run."
+        : "");
+  }
+  return `${stopped}, so the agent cannot start while the hook stops that prompt. `
+    + `${input.namesSettingSources ? "" : "This agent runs the hooks of your Claude Code settings and of the project's settings. "}${change}`;
+}
+
 class ClaudeBootstrapError extends Error {
   readonly name = "ClaudeBootstrapError";
   readonly reason: ClaudeStartupDeadline | "native_exit" | "transport_error" | "failed_response";
@@ -888,6 +919,8 @@ class ClaudeBootstrapError extends Error {
     observations: string,
     apiError: string | null = null,
     limitResetsAtMs: number | null = null,
+    /** Plain words for the owner, in place of the boundary that was observed. */
+    said: string | null = null,
   ) {
     const reason = failure.type === "exit" ? "native_exit"
       : failure.type === "error" ? "transport_error" : failure.type;
@@ -895,7 +928,8 @@ class ClaudeBootstrapError extends Error {
       : "Claude CLI did not complete its daemon-safe bootstrap turn";
     // Preserve the observed boundary without copying native error/result text
     // into supervisor diagnostics. Transport loss is not a physical death proof.
-    super(`${prefix} (${reason}${failure.type === "exit" ? `; exit code ${failure.code ?? "unknown"}; signal ${failure.signal ?? "none"}` : ""}). ${observations}`);
+    super(said !== null ? [said, observations].filter(Boolean).join(" ")
+      : `${prefix} (${reason}${failure.type === "exit" ? `; exit code ${failure.code ?? "unknown"}; signal ${failure.signal ?? "none"}` : ""}). ${observations}`);
     this.reason = reason;
     if (failure.type === "exit") {
       this.exitCode = failure.code;
@@ -2155,6 +2189,16 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         throw new ClaudeBootstrapError("bootstrap_turn", { type: compaction.failure }, diagnostics.summary(child, compaction.diagnosticFields()));
       }
       if ("error" in bootstrapTerminal) {
+        // Claude Code ended the prompt that starts the agent with no call to the model. The owner reads what
+        // happened, and nothing of the CLI's text. A hook that stopped the prompt stops it at each start, so
+        // the failure is given no mark of one that passes: no start is tried again by itself, and the agent
+        // waits for its owner. A hook's stop needs no list of observations; a cause that is not known does.
+        if (bootstrapTerminal.modelNotCalled) {
+          throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" },
+            bootstrapTerminal.modelNotCalled === "hook_stopped_prompt" ? "" : diagnostics.summary(child, compaction.diagnosticFields()), null, null,
+            claudeStartWithoutModelText({ modelNotCalled: bootstrapTerminal.modelNotCalled, ownerSetup: homeHarness,
+              namesSettingSources: policyArgs.includes("--setting-sources") }));
+        }
         throw new ClaudeBootstrapError("bootstrap_turn", { type: "failed_response" },
           diagnostics.summary(child, compaction.diagnosticFields()), diagnostics.apiError, diagnostics.usageLimitResetsAtMs);
       }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CLAUDE_TURN_WITHOUT_MODEL_TEXT,
   claudeApiErrorCategory,
   exactClaudeCommandLifecycleState,
   exactClaudeStreamTerminal,
@@ -332,8 +333,11 @@ const isMessage = (row: ClaudeEvidenceRecord) => row.type === "user" || row.type
 const replyFromSession = (text: string) => ({ turnId, outcome: "reply", text, evidence: "transcript" });
 const endedWith = (id: string, text: string): ClaudeEvidenceRecord =>
   ({ type: "assistant", sessionId, message: { id, role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } });
-/** What the cuts of the property test come to, over all captures. */
-const [PROPERTY_CUTS, PROPERTY_REPLIES, PROPERTY_MARKED] = [870, 153, 94];
+/**
+ * What the cuts of the property test come to, over all captures: the cuts, the readings (each cut is read for
+ * each turn of its session), the replies among the readings, and the replies that say that something is missing.
+ */
+const [PROPERTY_CUTS, PROPERTY_READINGS, PROPERTY_REPLIES, PROPERTY_MARKED] = [870, 1000, 163, 94];
 /** The texts no reading of the turn may ever hold: another room turn's answer, a sub-agent's report. */
 const NOT_THE_TURNS = ["ANSWER OF THE SECOND TURN", "SUBAGENT REPORT", "SECOND SUBAGENT REPORT", "SUMMARY OF THE CONVERSATION"];
 
@@ -472,6 +476,74 @@ test("real Claude Code sessions: wherever the process ended, what is read is the
   assert.deepEqual(blocked.map((row) => [row.type, row.subtype]), [["system", "informational"]]);
   assert.equal(recoverExactClaudeTurnFromSession(blocked, turnId, sessionId), null);
   assert.equal(recoverExactClaudeTurnFailureFromSession(blocked, turnId, sessionId), null);
+});
+
+test("a result with no call to the model and a text is the CLI's own words: a prompt that a hook stopped is a failed turn, and nothing of the hook or of the prompt is kept", () => {
+  // Real lines: a UserPromptSubmit hook stopped the prompt. Claude Code made no request, and ended the command
+  // with a `success` result whose text is its own.
+  const result = realRows("hook_blocks_prompt").stream.find((event) => event.type === "result")!;
+  assert.deepEqual([result.subtype, result.is_error, result.num_turns, result.stop_reason, result.user_message_uuid], ["success", false, 0, null, turnId]);
+  assert.equal(result.result, "UserPromptSubmit operation blocked by hook:\n[/PATH]: PROMPT_HOOK_BLOCKS_THE_PROMPT\n\n\nOriginal prompt: Reply exactly PROBE_OK.");
+  const stopped = { turnId, nativeOutcome: "failed", unrecognizedResult: true, modelNotCalled: "hook_stopped_prompt",
+    error: "A Claude Code UserPromptSubmit hook stopped this message before the model saw it, so the agent wrote no answer and nothing was posted." };
+  assert.deepEqual(exactClaudeStreamTerminal(result, turnId, sessionId), stopped);
+  assert.equal(stopped.error, CLAUDE_TURN_WITHOUT_MODEL_TEXT.hookStoppedPrompt);
+  // The path of the hook's script, the hook's words and the prompt are in the CLI's text, and in nothing that is kept.
+  for (const kept of ["PROMPT_HOOK_BLOCKS_THE_PROMPT", "/PATH", "Reply exactly", "Original prompt", "PROBE_OK", "blocked by hook"]) {
+    assert.ok(String(result.result).includes(kept), kept);
+    assert.ok(!JSON.stringify(stopped).includes(kept), kept);
+  }
+
+  // The rule is the count of calls to the model. With a call, or with a count that is no number, a text is an answer as before.
+  for (const numTurns of [1, 2, undefined, null, "0"]) {
+    assert.deepEqual(exactClaudeStreamTerminal({ ...result, num_turns: numTurns }, turnId, sessionId), { turnId, outcome: "reply", text: result.result, evidence: "stream" }, String(numTurns));
+  }
+  // Any other text with no call to the model is the CLI's too. So is the word with which only the model says that it has no reply.
+  const noCall = { turnId, nativeOutcome: "failed", unrecognizedResult: true, modelNotCalled: "unknown",
+    error: "Claude Code ended this turn without a call to the model, so the text of its result is not the agent's answer and nothing was posted." };
+  assert.equal(noCall.error, CLAUDE_TURN_WITHOUT_MODEL_TEXT.noCallToTheModel);
+  assert.deepEqual(exactClaudeStreamTerminal({ ...result, result: "A text that the CLI wrote by itself." }, turnId, sessionId), noCall);
+  assert.deepEqual(exactClaudeStreamTerminal({ ...result, result: "Note: UserPromptSubmit operation blocked by hook: no" }, turnId, sessionId), noCall, "the CLI's words for a hook are its first words");
+  assert.deepEqual(exactClaudeStreamTerminal({ ...result, result: "LETAGENTS_NO_ROOM_REPLY" }, turnId, sessionId), noCall);
+  assert.deepEqual(exactClaudeStreamTerminal({ ...result, result: `\n  ${String(result.result)}` }, turnId, sessionId), stopped, "space before the CLI's words changes nothing");
+  // A result with no call and no text is read as it was: it holds no answer, and it is no failure.
+  for (const empty of ["", "  \n", undefined, 7]) {
+    assert.deepEqual(exactClaudeStreamTerminal({ ...result, result: empty }, turnId, sessionId), { turnId, outcome: "unreadable", text: null, evidence: "none" }, JSON.stringify(empty));
+  }
+  // A result that says it is an error is read as that error, with a call or without one.
+  for (const numTurns of [0, 1]) {
+    assert.deepEqual(exactClaudeStreamTerminal({ ...result, is_error: true, num_turns: numTurns, result: "API Error: Overloaded" }, turnId, sessionId),
+      { turnId, nativeOutcome: "failed", error: "API Error: Overloaded" }, String(numTurns));
+  }
+
+  // Every result of every capture. Three hold no call to the model. Two of them are empty, and are read as before.
+  const results = Object.entries(CLAUDE_REAL_CAPTURES).flatMap(([name, capture]) =>
+    [...capture.stream, ...(capture.stream_after_resume ?? [])].filter((event) => event.type === "result").map((event) => ({ name, event })));
+  assert.deepEqual(results.filter(({ event }) => event.num_turns === 0)
+    .map(({ name, event }) => [name, event.result === "" ? "no text" : "a text", event.user_message_uuid ?? null, (event.origin as { kind?: string } | undefined)?.kind ?? null]), [
+    // The first of two notices that went to the model with one request. It names no command, and the adapter reads on.
+    ["two_background_commands_end_together", "no text", null, "task-notification"],
+    // The result of the CLI's own command for a compaction. It names no command, and ends no room turn.
+    ["compaction_by_command", "no text", null, null],
+    ["hook_blocks_prompt", "a text", "TURN_ID", null],
+  ]);
+  let answers = 0;
+  for (const { name, event } of results) {
+    assert.equal(typeof event.num_turns, "number", name);
+    // Each is read with the id of a turn, as the adapter reads a turn's own result and the result for a notice.
+    const before = event.subtype === "success" && event.is_error === false
+      ? String(event.result ?? "").trim() ? { turnId, outcome: "reply", text: String(event.result).trim(), evidence: "stream" } : { turnId, outcome: "unreadable", text: null, evidence: "none" }
+      : null;
+    const read = exactClaudeStreamTerminal({ ...event, user_message_uuid: turnId, session_id: sessionId }, turnId, sessionId);
+    if (name === "hook_blocks_prompt") { assert.deepEqual(read, stopped); continue; }
+    if (before) assert.deepEqual(read, before, `${name}: read as before`);
+    else assert.ok(read && "error" in read && !/without a call to the model|UserPromptSubmit/.test(read.error), `${name}: a failure, with the words it had before`);
+    if (before?.outcome === "reply") {
+      answers += 1;
+      assert.ok(Number(event.num_turns) >= 1, `${name}: an answer has a call to the model`);
+    }
+  }
+  assert.deepEqual([results.length, answers], [85, 60]);
 });
 
 test("a sub-agent's rows are never the turn's: its message that ended is not the turn's answer, and its error is not the turn's failure", () => {
@@ -940,46 +1012,64 @@ test("two tasks of one message whose notices come in the other order than they s
  * the turn's and what is not is read from the rows themselves, by the chain of parents: a message answers the
  * first prompt, or notice of a task, on its chain.
  */
-test("no cut of any real session gives a text of another turn or of a sub-agent, or a partial reply that does not say so", () => {
+test("no cut of any real session gives, for any turn in it, a text of another turn or of a sub-agent, or a partial reply that does not say so", () => {
   let cuts = 0;
+  let readings = 0;
   let replies = 0;
   let marked = 0;
-  for (const [name, capture] of Object.entries(CLAUDE_REAL_CAPTURES)) {
+  /** The replies that are not the whole reply, and that do not say so: capture, turn, cut. */
+  const unsaid: Array<[string, number, number]> = [];
+  for (const name of Object.keys(CLAUDE_REAL_CAPTURES)) {
     const { file, subagent } = realRows(name);
     const textOf = (row: ClaudeEvidenceRecord) => ((row.message as { content?: unknown } | undefined)?.content as Array<{ type: string; text?: string }> | undefined ?? [])
       .flatMap((part) => part.type === "text" && part.text ? [part.text] : []).join("");
-    // The request of a message: the first prompt, or notice of a task, on its chain of parents.
-    const requestOf = (row: ClaudeEvidenceRecord) => claudeParentChain(capture.session_file, capture.session_file.find((other) => other.uuid === row.uuid)!)
-      .find((other) => other.type === "user" && typeof other.promptSource === "string");
+    // The request of a row: the first prompt, or notice of a task, on its chain of parents.
+    const requestOf = (row: ClaudeEvidenceRecord) => claudeParentChain(file, row).find((other) => other.type === "user" && typeof other.promptSource === "string");
+    const startsWork = (row: ClaudeEvidenceRecord) => { const result = row.toolUseResult as { backgroundTaskId?: unknown; isAsync?: unknown } | undefined; return result?.backgroundTaskId !== undefined || result?.isAsync === true; };
     const answers = file.filter((row) => row.type === "assistant" && textOf(row));
-    const forbidden = [...new Set([...subagent.filter((row) => row.type === "assistant").map(textOf),
-      ...answers.filter((row) => { const request = requestOf(row); return request !== undefined && request.uuid !== "TURN_ID" && (request.origin as { kind?: string } | undefined)?.kind !== "task-notification"; }).map(textOf),
-      // What the CLI itself wrote in a result or a summary is never the model's answer.
-      "SUMMARY OF THE CONVERSATION", "UserPromptSubmit operation blocked"].filter(Boolean))];
-    const whole = recoverExactClaudeTurnFromSession(file, turnId, sessionId);
-    const startsBackgroundWork = file.some((row) => { const result = row.toolUseResult as { backgroundTaskId?: unknown; isAsync?: unknown } | undefined; return result?.backgroundTaskId !== undefined || result?.isAsync === true; });
+    // Each prompt of the session starts a turn, and each turn is read. The session of a prompt that a hook
+    // stopped holds no prompt: it is read for the id that the prompt had.
+    const prompts = file.filter((row) => row.type === "user" && row.promptSource === "sdk").map((row) => String(row.uuid));
+    const turns = prompts.length ? prompts : [turnId];
+    assert.deepEqual(turns, [turnId, "SECOND_TURN_ID"].slice(0, turns.length), name);
     const firstCall = file.findIndex((row) => row.type === "assistant");
     const withSubagent = subagent.length ? [...file.slice(0, firstCall + 1), ...subagent, ...file.slice(firstCall + 1)] : null;
-    for (const rows of [file, ...(withSubagent ? [withSubagent] : [])]) {
-      for (let length = 1; length <= rows.length; length += 1) {
-        cuts += 1;
-        const read = recoverExactClaudeTurnFromSession(rows.slice(0, length), turnId, sessionId);
-        if (read?.outcome !== "reply") continue;
-        replies += 1;
-        const where = `${name}${rows === file ? "" : " with the sub-agent's rows"}, cut after row ${length}`;
-        for (const text of forbidden) assert.ok(!read.text.includes(text), `${where}: ${JSON.stringify(text)} is not this turn's`);
-        // Each part of the reply is a whole text of a message that the session holds.
-        for (const part of read.text.split("\n\n")) assert.ok(answers.some((row) => textOf(row).trim() === part), `${where}: ${JSON.stringify(part)} is a message of the session`);
-        if (read.backgroundWork) { marked += 1; continue; }
-        // A reply with no word that something is missing is the whole reply: the one that the whole session gives,
-        // or the answer of a turn that started nothing in the background, or of a turn that stopped what it started.
-        assert.ok(!startsBackgroundWork || name === "background_command_stopped_by_the_turn" || (whole?.outcome === "reply" && whole.backgroundWork === undefined && whole.text === read.text),
-          `${where}: a reply that is not the whole one says so`);
+    for (const [turn, id] of turns.entries()) {
+      // Background work is the work of the turn on whose request its start stands. In every capture that is the first turn.
+      const startedWork = file.some((row) => startsWork(row) && requestOf(row)?.uuid === id);
+      assert.equal(startedWork, turn === 0 && file.some(startsWork), `${name}, turn ${turn + 1}`);
+      const forbidden = [...new Set([...subagent.filter((row) => row.type === "assistant").map(textOf),
+        // The answer to another prompt, and the answer to the notice of work that this turn did not start.
+        ...answers.filter((row) => { const request = requestOf(row); return request !== undefined && request.uuid !== id && (!startedWork || (request.origin as { kind?: string } | undefined)?.kind !== "task-notification"); }).map(textOf),
+        // What the CLI itself wrote in a result or a summary is never the model's answer.
+        "SUMMARY OF THE CONVERSATION", "UserPromptSubmit operation blocked"].filter(Boolean))];
+      const whole = recoverExactClaudeTurnFromSession(file, id, sessionId);
+      for (const rows of [file, ...(withSubagent ? [withSubagent] : [])]) {
+        for (let length = 1; length <= rows.length; length += 1) {
+          if (turn === 0) cuts += 1;
+          readings += 1;
+          const read = recoverExactClaudeTurnFromSession(rows.slice(0, length), id, sessionId);
+          if (read?.outcome !== "reply") continue;
+          replies += 1;
+          const where = `${name}, turn ${turn + 1}${rows === file ? "" : " with the sub-agent's rows"}, cut after row ${length}`;
+          for (const text of forbidden) assert.ok(!read.text.includes(text), `${where}: ${JSON.stringify(text)} is not this turn's`);
+          // Each part of the reply is a whole text of a message that the session holds.
+          for (const part of read.text.split("\n\n")) assert.ok(answers.some((row) => textOf(row).trim() === part), `${where}: ${JSON.stringify(part)} is a message of the session`);
+          if (read.backgroundWork) { marked += 1; continue; }
+          // A reply with no word that something is missing is the whole reply: the one that the whole session gives.
+          if (!(whole?.outcome === "reply" && whole.backgroundWork === undefined && whole.text === read.text)) unsaid.push([name, turn + 1, length]);
+        }
       }
     }
   }
+  // One window is known. The model's answer has ended, and the Stop hook's refusal of it is not written yet: the
+  // file does not say that the turn goes on. The two cuts end after the answer, and before the hook's row.
+  const stopHook = realRows("stop_hook_refuses_end_once").file;
+  assert.deepEqual([stopHook[7]!.type, stopHook[8]!.type, stopHook[9]!.type, stopHook[9]!.isMeta], ["assistant", "attachment", "user", true]);
+  assert.deepEqual(unsaid, [["stop_hook_refuses_end_once", 1, 8], ["stop_hook_refuses_end_once", 1, 9]]);
   // The numbers are written out, so that a change of the fixture or of the cuts is seen.
-  assert.deepEqual({ captures: Object.keys(CLAUDE_REAL_CAPTURES).length, cuts, replies, marked }, { captures: 52, cuts: PROPERTY_CUTS, replies: PROPERTY_REPLIES, marked: PROPERTY_MARKED });
+  assert.deepEqual({ captures: Object.keys(CLAUDE_REAL_CAPTURES).length, cuts, readings, replies, marked },
+    { captures: 52, cuts: PROPERTY_CUTS, readings: PROPERTY_READINGS, replies: PROPERTY_REPLIES, marked: PROPERTY_MARKED });
 });
 
 test("in a capture each id has a placeholder of its own, so a row names its parent, and an answer is bound to its request by that chain", () => {

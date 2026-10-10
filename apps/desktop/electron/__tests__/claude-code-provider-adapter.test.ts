@@ -27,6 +27,7 @@ import {
   claudeLaunchPolicyArgs,
   claudeOwnerSetupReadsProjectInstructionsOnly,
   claudeOwnerSetupStartEnvironment,
+  claudeStartWithoutModelText,
   createEphemeralClaudeMcpConfig,
   createManagedClaudeMcpConfig,
   ownerMcpServerNotices,
@@ -44,6 +45,7 @@ import type {
   NativeExecutionObservation,
 } from "../main/agents/provider-adapter.js";
 import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
+import { CLAUDE_TURN_WITHOUT_MODEL_TEXT } from "../main/agents/claude-room-turn-evidence.js";
 import {
   CLAUDE_API_ERROR_CAPTURES, CLAUDE_API_FAILURE_POLICY, CLAUDE_FAILURE_TEXT, CLAUDE_INVALID_REQUESTS, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT,
   claudeCapturedTask, claudeFollowUpText, claudeInvalidRequestRows, claudeResultEvent, realClaudeCapture, realClaudeResult,
@@ -2244,7 +2246,9 @@ async function claudeDaemonFixture(options: {
 
   /** The session file every process of this agent appends to and resumes from. */
   const sessionRows: Array<Record<string, unknown>> = [];
-  const harness = createHarness({ sessionRows });
+  /** How the fake CLI behaves. What a test changes here holds for each process that starts afterwards. */
+  const cli: HarnessOptions = { sessionRows };
+  const harness = createHarness(cli);
   /** Whether the session file is found where the CLI keeps it, and where the adapter looked for it. */
   const transcript = { found: true, readFrom: [] as Array<string | undefined> };
   harness.dependencies.readSessionRows = async (_sessionId, transcriptsRoot) => {
@@ -2396,7 +2400,7 @@ async function claudeDaemonFixture(options: {
       });
       return turns[ordinal - 1]!;
     };
-    return { id, harness, request, eventually, view, read, published, roomMessages, turns, sessionRows, sessionId, receipt, send, begin, cleanup, recovery, transcript,
+    return { id, harness, cli, request, eventually, view, read, published, roomMessages, turns, sessionRows, sessionId, receipt, send, begin, cleanup, recovery, transcript,
       followUpWaits,
       /** The owner stops the turn of a room message, as the desktop asks the daemon to. */
       stopTurn: async (messageId: string, turn: { id: string }) => {
@@ -3761,6 +3765,66 @@ for (const [words, text] of [
       assert.deepEqual(receipts.flatMap((receipt) => receipt.timeline.map((event) => event.phase)).filter((phase) => phase === "blocked" || phase === "retry_scheduled"), [],
         "nothing was scheduled, and nothing waited for a person");
       assert.equal((await agent.view()).room_agent_state.inbox.state, "empty");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
+
+for (const [tasks, ownedTasks] of [["holds no task", undefined], ["holds a task", () => [HELD_TASK]]] as const) {
+  test(`a Claude agent that ${tasks}, and whose prompt a UserPromptSubmit hook stops, posts nothing: the message fails once with a reason that holds no word of the hook or of the prompt, and the next message goes ahead`, async () => {
+    const agent = await claudeDaemonFixture(ownedTasks ? { ownedTasks } : {});
+    try {
+      const turn = await agent.begin(1);
+      // Every line that the CLI really wrote for a prompt that a hook stopped. No request went to the model, and
+      // the result is a `success` whose text is the CLI's: the path of the hook's script, the hook's words, the prompt.
+      const capture = realClaudeCapture(CLAUDE_REAL_CAPTURES.hook_blocks_prompt!, agent.sessionId, turn.id);
+      const clisText = String(realClaudeResult(capture).result);
+      const clisWords = ["PROMPT_HOOK_BLOCKS_THE_PROMPT", "/PATH", "Original prompt", "PROBE_OK", "blocked by hook"];
+      assert.ok(clisWords.every((words) => clisText.includes(words)));
+      for (const event of capture.stream) turn.child.emit(event);
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "msg_1 settles as failed").catch(async (error) => {
+        const row = await agent.receipt("msg_1");
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); posted ${JSON.stringify(agent.published)}`);
+      });
+      // Task continuity looks at a failed turn of a lease holder when the inbox is empty, and leaves its decision on the message.
+      if (ownedTasks) await agent.eventually(async () => /not continued automatically/.test((await agent.receipt("msg_1"))?.last_error ?? ""), "task continuity has looked at the failed turn");
+      else await pause(200);
+      const afterFailure = await agent.receipts();
+      assert.deepEqual(afterFailure.map((receipt) => `${receipt.source_message_id} ${receipt.state}`), ["msg_1 acknowledged_failed"],
+        "no follow-up is queued: none that runs by itself, and none that waits blocked. The hook would stop it too");
+      assert.equal(afterFailure[0]!.last_error, shownToOwner(ownedTasks ? `${CLAUDE_TURN_WITHOUT_MODEL_TEXT.hookStoppedPrompt} ${CLAUDE_FAILURE_TEXT.refused}` : CLAUDE_TURN_WITHOUT_MODEL_TEXT.hookStoppedPrompt));
+      assert.deepEqual(agent.followUpWaits, []);
+      assert.deepEqual(agent.published, [], "the CLI's text is not posted");
+      assert.deepEqual(agent.recovery.requests, [], "the turn ended on its result: it is not read back");
+      assert.equal(agent.turns.length, 1, "Claude is not sent the prompt a second time");
+      // Neither what the daemon keeps of the message, nor what it says of the agent, holds the CLI's text.
+      for (const words of clisWords) {
+        assert.ok(!JSON.stringify(afterFailure).includes(words), `the message's record holds ${words}`);
+        assert.ok(!JSON.stringify([(await agent.view()).last_error, (await agent.view()).room_agent_state]).includes(words), `the agent's state holds ${words}`);
+      }
+
+      const stopped = await agent.view();
+      assert.deepEqual([stopped.observed_state, stopped.condition, stopped.last_error, stopped.room_agent_state.inbox.state], ["idle", "none", null, "empty"],
+        "the agent is not blocked, and waits for no person");
+      const next = await agent.begin(2);
+      agent.reportStarted(next);
+      agent.answer(next, "Answer 2.");
+      await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
+      assert.deepEqual(agent.published, ["Answer 2."]);
+      assert.equal(agent.turns.length, 2, "one turn for each room message, and no other");
+      const receipts = await agent.receipts() as unknown as Array<{ source_message_id: string; timeline: Array<{ phase: string }> }>;
+      assert.deepEqual(receipts.map((receipt) => receipt.source_message_id), ["msg_1", "msg_2"]);
+      assert.deepEqual(receipts.flatMap((receipt) => receipt.timeline.map((event) => event.phase)).filter((phase) => phase === "blocked" || phase === "retry_scheduled"), [],
+        "nothing was scheduled, and nothing waited for a person");
+      await agent.eventually(() => agent.recorded().turns.every((recorded) => recorded.state === "terminal"), "both turns are closed in the record");
+      assert.deepEqual(agent.recorded().endings.map((ending) => [ending.n, ending.outcome]), [[1, "completed"], [1, "completed"]],
+        "one ending each; the CLI's command did complete, as the CLI says, and its message is what failed");
+      assert.equal(agent.recorded().gaps, 0);
+      const current = await agent.view();
+      assert.equal(current.condition, "none", current.last_error ?? "");
+      assert.equal(current.room_agent_state.inbox.state, "empty", "nothing waits behind the message that the hook stopped");
+      assert.equal(agent.harness.children.length, 1, "the agent's process is the same");
     } finally {
       await agent.cleanup();
     }
@@ -5256,6 +5320,120 @@ test("a start that ran out of time after Claude came up names the owner's server
   });
 });
 
+test("a UserPromptSubmit hook that stops the prompt that starts a Claude agent fails the start in plain words, with what the owner can do and no word of the hook or of the prompt, and the start waits for the owner", async () => {
+  const { ownerSetupRefusalReason } = await import(new URL("../../renderer/src/domain/agent-home-harness.ts", import.meta.url).href);
+  const fullAccess = { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true };
+  const stopped = "A UserPromptSubmit hook stopped the prompt that LetAgents sends to start this agent";
+  const change = "Change the hook so that it lets this prompt through, then try again.";
+  const withOwnSetup = `${stopped}, so the agent cannot start with your own setup while the hook stops that prompt. With your own setup on, Claude Code runs the hooks of your own Claude Code settings and plugins. ${change}`;
+  // Real lines: what the CLI wrote for a prompt that a hook stopped. Here it is the prompt that starts the agent.
+  const hookStops = (sessionId: string, turnId: string) => realClaudeCapture(CLAUDE_REAL_CAPTURES.hook_blocks_prompt!, sessionId, turnId).stream;
+  const clisWords = ["PROMPT_HOOK_BLOCKS_THE_PROMPT", "/PATH", "Original prompt", "PROBE_OK", "blocked by hook"];
+  assert.ok(clisWords.every((words) => JSON.stringify(hookStops("s", "t")).includes(words)));
+  const launches: Array<{ name: string; over: Partial<ProviderSpawnRequest>; mode: string; lines?: typeof hookStops; reads: string }> = [
+    // With the owner's setup, an access level that names its settings reads the owner's alone, and none with the setup off.
+    { name: "the owner's setup, Ask before writes", over: { permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(true), ...OWN_SETUP }, mode: "default",
+      reads: `${withOwnSetup} Or turn off "Use your own Claude Code setup" for this agent: it then reads none of your Claude Code settings, so their hooks do not run.` },
+    // Full access names no settings: with the setup off it reads the owner's settings too, so that is no way out.
+    { name: "the owner's setup, Full access", over: { permissionProfileId: "full_access", launchPolicy: fullAccess, ...OWN_SETUP }, mode: "bypassPermissions", reads: withOwnSetup },
+    { name: "no owner's setup, Full access", over: { permissionProfileId: "full_access", launchPolicy: fullAccess, ...SUPERVISED }, mode: "bypassPermissions",
+      reads: `${stopped}, so the agent cannot start while the hook stops that prompt. This agent runs the hooks of your Claude Code settings and of the project's settings. ${change}` },
+    { name: "no owner's setup, Ask before writes", over: { permissionProfileId: "ask_before_write", launchPolicy: ownSetupAskPolicy(false), ...SUPERVISED }, mode: "default",
+      reads: `${stopped}, so the agent cannot start while the hook stops that prompt. ${change}` },
+    // A line of the stream that names a failure of the provider's that passes: the hook's stop is still no such failure.
+    { name: "the owner's setup, after a line that names an overloaded provider", over: { permissionProfileId: "full_access", launchPolicy: fullAccess, ...OWN_SETUP }, mode: "bypassPermissions", reads: withOwnSetup,
+      lines: (sessionId, turnId) => [{ type: "assistant", session_id: sessionId, error: "overloaded", message: { content: [{ type: "text", text: "busy" }] } }, ...hookStops(sessionId, turnId)] },
+  ];
+  for (const { name, over, mode, lines, reads } of launches) {
+    const harness = createHarness({ versionOutput: "2.1.278 (Claude Code)", mcpServers: [OWNER_SERVER, ROOM_SERVER], initPermissionMode: mode,
+      omitBootstrapResult: true, bootstrapMessages: lines ?? hookStops });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 2_000 });
+    const request = spawnRequest({ configurationRevision: 4, ...over });
+    let rejected!: Error & { phase?: string; reason?: string; transientProviderStart?: true; providerQuotaExhausted?: true };
+    await assert.rejects(withLoopAlive(adapter.spawn(request)), (error: Error) => { rejected = error; return true; });
+    assert.equal(rejected.message, reads, name);
+    assert.deepEqual([rejected.name, rejected.phase, rejected.reason], ["ClaudeBootstrapError", "bootstrap_turn", "failed_response"], name);
+    for (const words of [...clisWords, "Startup observations", "result=", "failed_response", "bootstrap"]) assert.ok(!rejected.message.includes(words), `${name}: ${words}`);
+    assert.equal(harness.children[0]!.alive, false, `${name}: the process that could not start is ended`);
+    assert.equal(harness.launches.length, 1, name);
+
+    // The hook stops the prompt at each start: nothing marks the failure as one that passes, so the daemon
+    // tries no start again by itself. It saves the reason, and the agent waits for its owner.
+    assert.deepEqual([rejected.transientProviderStart, rejected.providerQuotaExhausted], [undefined, undefined], name);
+    const saved: Array<{ condition: string; message: string }> = [];
+    const entry = { id: "entry-hook", desired_state: "running", observed_state: "recovering", condition: "none", work_attempt_id: request.workAttemptId };
+    await new ProviderSchedulerFailureCoordinator({
+      nativeHeartbeatIntervalMs: 1000, currentDaemonGeneration: () => 1, nowMs: () => 0,
+      serializeEntry: async (_id: string, operation: () => Promise<unknown>) => operation(),
+      serializeManifest: async (operation: () => Promise<unknown>) => operation(),
+      manifest: { load: async () => ({ entries: [entry] }), updateEntry: async () => { throw new Error("the saved conversation is kept"); } },
+      transitionOnce: async (_id: string, _state: string, condition: string, message: string) => { saved.push({ condition, message }); },
+      audit: { append: async () => {} },
+      scheduleRecovery: () => { throw new Error("no start is tried again by itself"); },
+    }).record(entry.id, rejected, "test");
+    assert.deepEqual(saved, [{ condition: "coordination_blocked", message: `convergence scheduler failure: ${reads}` }], name);
+    // With the owner's setup the desktop shows the launch's own words, and nothing before them.
+    assert.equal(ownerSetupRefusalReason(saved[0]!.message), over.homeHarness ? reads : null, name);
+  }
+
+  // A text of the CLI's own that is not its words for a hook: the cause is not known. The owner reads that the
+  // model was not called, and the observations of the start, and nothing of the CLI's text.
+  const harness = createHarness({ omitBootstrapResult: true, bootstrapMessages: (sessionId, turnId) =>
+    [{ type: "result", subtype: "success", is_error: false, num_turns: 0, session_id: sessionId, user_message_uuid: turnId, result: "A text that the CLI wrote by itself." }] });
+  await assert.rejects(withLoopAlive(new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, initTimeoutMs: 2_000 }).spawn(spawnRequest())), (error: Error & { transientProviderStart?: true; providerQuotaExhausted?: true }) => {
+    assert.match(error.message, /^Claude Code ended the prompt that LetAgents sends to start this agent without a call to the model, so the agent did not start\. Startup observations: .*result=success/);
+    assert.ok(!error.message.includes("A text that the CLI wrote"));
+    assert.deepEqual([error.transientProviderStart, error.providerQuotaExhausted], [undefined, undefined]);
+    return true;
+  });
+
+  // With a call to the model the same text is an answer, and the agent starts as before. So does it on a result with no text.
+  for (const result of [{ num_turns: 1, result: String(realClaudeResult(CLAUDE_REAL_CAPTURES.hook_blocks_prompt!).result) }, { num_turns: 0, result: "" }]) {
+    const started = createHarness({ omitBootstrapResult: true, bootstrapMessages: (sessionId, turnId) =>
+      [{ type: "result", subtype: "success", is_error: false, session_id: sessionId, user_message_uuid: turnId, ...result }] });
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: started.dependencies, initTimeoutMs: 2_000 });
+    const handle = await adapter.spawn(spawnRequest());
+    assert.equal(handle.observedState(), "idle", JSON.stringify(result));
+    await adapter.stop(handle);
+  }
+});
+
+test("a Claude agent whose start a UserPromptSubmit hook stops is not started again by itself: the daemon saves the reason and the agent waits for its owner, where a start that the provider's load failed is tried again", async () => {
+  const launchesAfter = async (cli: Pick<HarnessOptions, "bootstrapMessages" | "bootstrapResultSubtype" | "omitBootstrapResult">, triedAgain = 0) => {
+    const agent = await claudeDaemonFixture();
+    try {
+      // From here on a process of this agent starts as `cli` says. Its process ends, and the daemon starts another.
+      Object.assign(agent.cli, cli);
+      agent.exitProcess();
+      await agent.eventually(async () => (await agent.view()).condition === "coordination_blocked", "the start that failed is saved").catch(async (error) => {
+        const current = await agent.view();
+        throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); ${agent.harness.children.length} processes`);
+      });
+      // The daemon of this fixture looks at its agents every 50 ms: a start that it tries again is tried long before this.
+      await agent.eventually(() => agent.harness.children.length === 2 + triedAgain, `the start is tried again ${triedAgain} times`);
+      await pause(1_500);
+      const current = await agent.view();
+      return { processes: agent.harness.children.length, alive: agent.harness.children.filter((child) => child.alive).length, condition: current.condition, reads: current.last_error,
+        namesSettingSources: agent.harness.launches[0]!.args.includes("--setting-sources"), resumed: agent.harness.launches.slice(1).every((launch) => launch.args.includes("--resume")) };
+    } finally {
+      await agent.cleanup();
+    }
+  };
+  // Real lines: what the CLI wrote for a prompt that a hook stopped. Here it is the prompt that starts the agent's next process.
+  const stopped = await launchesAfter({ omitBootstrapResult: true,
+    bootstrapMessages: (sessionId, turnId) => realClaudeCapture(CLAUDE_REAL_CAPTURES.hook_blocks_prompt!, sessionId, turnId).stream });
+  assert.deepEqual([stopped.processes, stopped.alive, stopped.condition, stopped.resumed], [2, 0, "coordination_blocked", true],
+    "one process was started in place of the one that ended. The hook stopped its prompt, and no other was started");
+  assert.equal(stopped.reads, `convergence scheduler failure: ${claudeStartWithoutModelText({ modelNotCalled: "hook_stopped_prompt", ownerSetup: false, namesSettingSources: stopped.namesSettingSources })}`);
+  assert.match(stopped.reads ?? "", /^convergence scheduler failure: A UserPromptSubmit hook stopped the prompt that LetAgents sends to start this agent, so the agent cannot start while the hook stops that prompt\. .*Change the hook so that it lets this prompt through, then try again\.$/);
+  for (const words of ["PROMPT_HOOK_BLOCKS_THE_PROMPT", "/PATH", "Original prompt", "PROBE_OK", "blocked by hook"]) assert.ok(!stopped.reads!.includes(words), words);
+
+  // The provider was overloaded: such a start is tried again, three times.
+  const overloaded = await launchesAfter({ bootstrapResultSubtype: "success",
+    bootstrapMessages: (sessionId) => [{ type: "assistant", session_id: sessionId, error: "overloaded", message: { content: [{ type: "text", text: "busy" }] } }] }, 3);
+  assert.deepEqual([overloaded.processes, overloaded.alive, overloaded.condition], [5, 0, "coordination_blocked"], "the same fixture does start an agent again by itself, when the failure can pass");
+});
+
 test("the Claude launch arguments differ only in what the owner's setup needs", () => {
   // An access level that names its setting sources, as Read-only, Ask before writes and Auto do.
   const input = { approvalProfileLabel: "Ask before writes", mcpConfigPath: "/tmp/mcp.json", policyArgs: ["--permission-mode", "default", "--setting-sources", "user"], model: "opus" };
@@ -6478,4 +6656,37 @@ test("an empty result of Claude's that is the only result for a task's notice en
   assert.equal(turn.settled(), true, "no other notice is in line, so no other result follows: the turn does not wait five minutes for one");
   assert.deepEqual(await turn.running, reply(turn.turnId, TURNS_ANSWER));
   await agent.adapter.stop(agent.handle);
+});
+
+test("a result for a task's notice with no call to the model and a text is not the model's answer: the turn ends with what it has, and the CLI's text is in no reply", async () => {
+  // Real line: the result that the CLI writes first when two notices went to the model with one request. It
+  // names no command, and has no turn of the model in it. No capture holds one with a text.
+  const noCall = (agent: Awaited<ReturnType<typeof claudeBackgroundHarness>>, turnId: string) =>
+    splitAtOwnResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.two_background_commands_end_together!, agent.sessionId, turnId).stream, turnId).after.find((event) => event.type === "result")!;
+  // Real text: what the CLI wrote as the result of a prompt that a hook stopped.
+  const clisText = String(realClaudeResult(CLAUDE_REAL_CAPTURES.hook_blocks_prompt!).result);
+  assert.match(clisText, /^UserPromptSubmit operation blocked by hook:[^]*PROMPT_HOOK_BLOCKS_THE_PROMPT[^]*Original prompt: /);
+  for (const [text, reason] of [[clisText, CLAUDE_TURN_WITHOUT_MODEL_TEXT.hookStoppedPrompt], ["A text that the CLI wrote by itself.", CLAUDE_TURN_WITHOUT_MODEL_TEXT.noCallToTheModel]] as const) {
+    const agent = await claudeBackgroundHarness();
+    const turn = await agent.start("background_command");
+    agent.emit(turn.own);
+    const result: Record<string, unknown> = { ...noCall(agent, turn.turnId), result: text };
+    assert.deepEqual([result.num_turns, result.subtype, result.is_error, result.user_message_uuid ?? null, (result.origin as { kind: string }).kind], [0, "success", false, null, "task-notification"]);
+    const notification = turn.after.findIndex((event) => event.subtype === "task_notification");
+    agent.emit([...turn.after.slice(0, notification + 1), result]);
+    await flush();
+    assert.equal(turn.settled(), true, "the answer has ended: the turn does not wait for another");
+    // The model's own answer is posted, with the line that says what the reply lacks. The CLI's text is not.
+    assert.deepEqual(await turn.running, reply(turn.turnId, TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported));
+    assert.deepEqual(turn.saved.map((saved) => saved.text), [`${TURNS_ANSWER}\n\n${CLAUDE_BACKGROUND_WORK_TEXT.notReported}`]);
+    // What the owner reads of the answer that failed is the reason, and no word of the CLI's text.
+    const said = agent.stream.slice(turn.publishedBefore).filter((event) => event.method === CLAUDE_BACKGROUND_WORK_ANSWER_METHOD).map((event) => event.summary);
+    assert.deepEqual(said.filter((summary) => summary?.startsWith(CLAUDE_BACKGROUND_WORK_TEXT.answerFailed)), [`${CLAUDE_BACKGROUND_WORK_TEXT.answerFailed} ${reason}`]);
+    assert.ok([...said, ...agent.activity.map((event) => event.summary)].every((summary) => !String(summary).includes(text.slice(0, 30))));
+    // The agent is free: the next turn runs, and gets its own reply.
+    const next = await agent.start("background_command");
+    agent.emit(next.lines);
+    assert.deepEqual(await next.running, reply(next.turnId, TURNS_ANSWER, NOTICE_ANSWER));
+    await agent.adapter.stop(agent.handle);
+  }
 });
