@@ -139,7 +139,7 @@
 }
 .room-thread-panel .room-chat-message.is-thread-context:last-child { padding-bottom: 0; }
 .room-message-actions { display: contents; }
-.room-thread-panel .room-message-meta { position: relative; gap: 6px 10px; min-height: 22px; }
+.room-thread-panel .room-message-meta { position: relative; width: 100%; gap: 6px 10px; min-height: 22px; }
 .room-thread-panel .room-message-author-block { gap: 6px; flex-wrap: wrap; }
 @media (hover: hover) and (pointer: fine) {
   .room-thread-panel .room-message-actions {
