@@ -55,6 +55,7 @@
           />
         </div>
         <div class="room-message-meta-tail">
+          <div class="room-message-actions">
           <button
             v-if="reactable"
             class="room-message-reply-action room-message-react-action"
@@ -108,6 +109,7 @@
             :disabled="Boolean(pinContext?.state.value.pending)"
             @click="pinContext?.toggle(message.id)"
           ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></button>
+          </div>
           <span v-if="provenanceLabel" class="room-message-provenance" :data-kind="ownerKind">
             {{ provenanceLabel }}
           </span>
@@ -197,7 +199,9 @@
           {{ threadMarkerPreview }}
         </span>
       </button>
-        <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread" /></div>
+        <ThreadTransition>
+          <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread" /></div>
+        </ThreadTransition>
       </div>
 
       <MessageReactionBar
@@ -439,6 +443,7 @@ import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 import MessageReactionBar from "../../../../../../../shared/ui/MessageReactionBar.vue";
 import MessageReactionPicker, { type MessageReactionPickerAnchor } from "../../../../../../../shared/ui/MessageReactionPicker.vue";
+import ThreadTransition from "../../../../../../../shared/ui/ThreadTransition.vue";
 import WakeGlyph from "../../../../../../../shared/ui/WakeGlyph.vue";
 import { isPinMessageId } from "../../../../../../../shared/message-pins.mjs";
 import { injectRoomMessageLinkPreviews } from "../../../composables/useRoomMessageLinkPreviews";

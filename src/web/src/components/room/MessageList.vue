@@ -35,7 +35,9 @@
           @openTask="emit('openTask', $event)"
         >
           <template #thread>
-            <InlineThread v-if="openedThreads.has(msg.id)" v-show="activeThreadId === msg.id"
+            <ThreadTransition>
+            <div v-if="openedThreads.has(msg.id)" v-show="activeThreadId === msg.id" class="web-thread-disclosure">
+            <InlineThread
               :id="`web-thread-${msg.id}`" :parent="msg" :messages="messages" :room-identifier="roomIdentifier || ''"
               :reasoning-by-anchor-message="reasoningByAnchorMessage" :stale-prompt-task-states="stalePromptTaskStates"
               @toggle-stale-prompt-mute="emit('toggleStalePromptMute', $event)"
@@ -46,6 +48,8 @@
               @summary="loadedThreadSummaries.set(msg.id, $event)" @messages="rememberThreadMessages(msg.id, $event)">
               <template #composer="context"><slot name="thread-composer" v-bind="context" /></template>
             </InlineThread>
+            </div>
+            </ThreadTransition>
           </template>
         </ChatMessage>
         </template>
@@ -100,6 +104,7 @@ import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../shared/
 import { provide, ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomAgentPresence, type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
+import ThreadTransition from '../../../../../shared/ui/ThreadTransition.vue'
 import InlineThread from './InlineThread.vue'
 import { apiFetch, roomPath } from '@/composables/room/api'
 import { messageMatchesSearch } from './chat-message/formatting'

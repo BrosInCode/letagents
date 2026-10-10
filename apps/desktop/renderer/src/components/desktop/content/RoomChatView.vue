@@ -352,7 +352,7 @@ const { chips: presenceChips } = useAgentPresenceChips({
   ready: () => !props.roomLoading,
 });
 
-const threadLayoutAnimationMs = 180;
+const threadLayoutAnimationMs = 260;
 const readingThreadLatest = ref(false);
 const threadScrollPositions = new Map<string, number>();
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>

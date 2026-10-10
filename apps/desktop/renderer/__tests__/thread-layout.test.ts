@@ -16,7 +16,7 @@ describe("inline room thread layout", () => {
   });
   it("contains wheel chaining within a bounded, focusable reply scroller", () => {
     const body = styles.match(/\.room-thread-body\s*\{([^}]*)\}/)?.[1] || "";
-    assert.match(body, /height:\s*clamp\(/);
+    assert.match(body, /max-height:\s*clamp\(/);
     assert.match(body, /overflow-y:\s*auto/);
     assert.match(body, /overscroll-behavior:\s*contain/);
     assert.match(body, /overflow-anchor:\s*none/);
@@ -24,9 +24,16 @@ describe("inline room thread layout", () => {
     assert.match(panel, /class="room-thread-body" tabindex="0" aria-label="Thread replies"/);
     assert.doesNotMatch(panel, /context="thread-root"/);
   });
+  it("keeps the latest-replies control outside the reading area", () => {
+    const panel = readFileSync(new URL("../src/components/desktop/content/room-chat/RoomThreadPanel.vue", import.meta.url), "utf8");
+    assert.ok(panel.indexOf('class="room-thread-latest"') > panel.indexOf('class="room-thread-composer-footer"'));
+    const latest = styles.match(/\.room-thread-latest\s*\{([^}]*)\}/)?.[1] || "";
+    assert.doesNotMatch(latest, /position:\s*(absolute|fixed)/);
+  });
   it("leaves horizontal code scrolling available and honors reduced motion", () => {
     assert.doesNotMatch(styles, /overflow-x:\s*(?:hidden|clip)/);
-    assert.match(styles, /prefers-reduced-motion: reduce/);
+    const transition = readFileSync(new URL("../../../../shared/ui/ThreadTransition.vue", import.meta.url), "utf8");
+    assert.match(transition, /prefers-reduced-motion: reduce/);
     const reader = readFileSync(new URL("../src/styles/message-content/long-message-reader.css", import.meta.url), "utf8");
     assert.match(reader, /overflow-x:\s*auto/);
   });
