@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -30,10 +30,18 @@ export type ElectronTestEnvOptions = {
   extraCleanupEnvKeys?: string[];
   /** Register `test.after(cleanup)` automatically. Defaults to true. */
   autoCleanup?: boolean;
+  /**
+   * Point HOME at a folder inside the temp directory, so nothing the suite
+   * reads or writes through `os.homedir()` can touch the real home folder.
+   * Defaults to true. See `pointHomeAt`.
+   */
+  isolateHome?: boolean;
 };
 
 export type ElectronTestEnv = {
   tempDir: string;
+  /** The HOME this suite runs with; null when `isolateHome` is false. */
+  homeDir: string | null;
   statePath: string | null;
   chatStorageSettingsPath: string | null;
   localChatDbPath: string | null;
@@ -129,6 +137,43 @@ export function installNoProdNetworkGuard(
   };
 }
 
+/**
+ * Point HOME (USERPROFILE on Windows) at a folder the test run owns. Node's
+ * `os.homedir()` reads that variable on every call, so modules that build a
+ * path such as `~/.letagents/local-files` while they load also land in the
+ * folder, as long as this runs before they are imported.
+ *
+ * HOME is not restored afterwards. A late write from a stray timer then goes
+ * to the removed scratch folder, never to the real home. Each test file runs in
+ * its own process, so nothing outside this process sees the change.
+ *
+ * Static imports run before any code in the test file. A file that imports
+ * production modules statically, above its `createElectronTestEnv` call, must
+ * also start with `import "./isolated-home.js"`, or those modules compute their
+ * paths from the real home while they load.
+ */
+export function pointHomeAt(homeDir: string): void {
+  mkdirSync(homeDir, { recursive: true });
+  process.env.HOME = homeDir;
+  process.env.USERPROFILE = homeDir;
+}
+
+/**
+ * Isolate HOME for a test file that does not need `createElectronTestEnv`.
+ * Prefer `import "./isolated-home.js"` as the first import of the file, so the
+ * change lands before the modules under test are evaluated.
+ */
+export function installIsolatedTestHome(prefix = "letagents-test-home-"): {
+  homeDir: string;
+  cleanup: () => void;
+} {
+  const homeDir = mkdtempSync(join(tmpdir(), prefix));
+  pointHomeAt(homeDir);
+  const cleanup = (): void => rmSync(homeDir, { recursive: true, force: true });
+  test.after(cleanup);
+  return { homeDir, cleanup };
+}
+
 const PATH_ENV: Record<ElectronTestEnvPathKind, { envKey: string; fileName: string }> = {
   state: { envKey: "LETAGENTS_STATE_PATH", fileName: "mcp-state.json" },
   chatStorage: { envKey: "LETAGENTS_CHAT_STORAGE_SETTINGS_PATH", fileName: "chat-storage.json" },
@@ -146,6 +191,8 @@ export function createElectronTestEnv(options: ElectronTestEnvOptions): Electron
   const pathKinds = options.paths ?? ["state"];
   const tempDir = mkdtempSync(join(tmpdir(), options.prefix));
   const installedEnvKeys = new Set<string>();
+  const homeDir = options.isolateHome === false ? null : join(tempDir, "home");
+  if (homeDir) pointHomeAt(homeDir);
 
   let statePath: string | null = null;
   let chatStorageSettingsPath: string | null = null;
@@ -192,6 +239,7 @@ export function createElectronTestEnv(options: ElectronTestEnvOptions): Electron
 
   return {
     tempDir,
+    homeDir,
     statePath,
     chatStorageSettingsPath,
     localChatDbPath,

@@ -1,3 +1,4 @@
+import "./isolated-home.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";

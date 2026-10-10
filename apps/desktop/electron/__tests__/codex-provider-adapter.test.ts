@@ -1,3 +1,4 @@
+import "./isolated-home.js";
 import assert from "node:assert/strict";
 import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

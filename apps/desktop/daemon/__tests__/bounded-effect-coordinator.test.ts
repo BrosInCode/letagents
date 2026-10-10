@@ -1,3 +1,4 @@
+import "../../electron/__tests__/isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 

@@ -1,3 +1,4 @@
+import "./isolated-home.js";
 import { ClaudeCompaction } from "../main/agents/claude-compaction.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
