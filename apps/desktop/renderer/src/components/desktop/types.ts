@@ -25,6 +25,7 @@ export type RoomEntry = {
   hasUnread: boolean;
   /** Agents working in this room right now, as the activity stream reports. */
   activity?: SidebarRoomActivity | null;
+  unreadCount?: number;
   pinned: boolean;
   source: "current" | "account" | "recent";
 };

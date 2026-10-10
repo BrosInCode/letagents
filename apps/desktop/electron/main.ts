@@ -1,4 +1,4 @@
-import { app, protocol } from "electron";
+import { app, autoUpdater, protocol } from "electron";
 import { join } from "node:path";
 
 import {
@@ -12,6 +12,7 @@ import {
   initializeDesktopNotifications,
   prepareDesktopNotificationLaunch,
   prepareDesktopNotifications,
+  setDesktopNotificationBadgeCount,
 } from "./main/notifications.js";
 import { attachmentProtocolScheme, workspaceRoot } from "./main/paths.js";
 import {
@@ -19,7 +20,7 @@ import {
   stopDesktopRoomStream,
 } from "./main/room-stream.js";
 import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
-import { createWindow, hasOpenWindows } from "./main/window.js";
+import { allowMainWindowQuit, createWindow, focusMainWindow, hasOpenWindows } from "./main/window.js";
 import { supervisorDaemonClient } from "./main/supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./main/supervisor-grant-coordinator.js";
 import { initializeDesktopUpdates, stopDesktopUpdates } from "./main/updates.js";
@@ -98,13 +99,16 @@ app.once("ready", async (_event, launchInfo) => {
   });
 
   app.on("activate", () => {
-    if (!hasOpenWindows()) {
-      createWindow();
-    }
+    if (!hasOpenWindows()) createWindow();
+    focusMainWindow();
   });
 });
 
+autoUpdater.on("before-quit-for-update", allowMainWindowQuit);
+
 app.on("before-quit", () => {
+  allowMainWindowQuit();
+  setDesktopNotificationBadgeCount(0);
   stopDesktopUpdates();
   void stopDesktopRoomStream();
   void stopActiveRentalProviderHostManager();

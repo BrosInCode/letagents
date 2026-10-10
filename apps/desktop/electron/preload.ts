@@ -30,6 +30,12 @@ const api: DesktopApi = {
   },
   notifications: {
     getStatus: () => ipcRenderer.invoke("desktop:notifications:get-status"),
+    setBadgeCount: (count) => ipcRenderer.invoke("desktop:notifications:set-badge-count", count),
+    onReceived: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, target: Parameters<typeof callback>[0]) => callback(target);
+      ipcRenderer.on("desktop:notifications:received", listener);
+      return () => ipcRenderer.off("desktop:notifications:received", listener);
+    },
     setEnabled: (enabled) => ipcRenderer.invoke("desktop:notifications:set-enabled", enabled),
     takePendingActivation: () => ipcRenderer.invoke("desktop:notifications:take-pending-activation"),
     onActivated: (callback) => {
@@ -112,6 +118,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-message", roomIdentifier, messageId),
     getMessageInfo: (roomIdentifier: string, messageId: string) =>
       ipcRenderer.invoke("desktop:room:get-message-info", roomIdentifier, messageId),
+    getMessagesAfter: (roomIdentifier, afterMessageId) => ipcRenderer.invoke("desktop:room:get-messages-after", roomIdentifier, afterMessageId),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
     getThreads: (roomIdentifier: string, filter = "all", beforeMessageId?: string | null, limit?: number) =>

@@ -155,6 +155,8 @@ export interface DesktopApi {
   };
   notifications: {
     getStatus: () => Promise<DesktopNotificationStatus>;
+    setBadgeCount?: (count: number) => Promise<void>;
+    onReceived?: (callback: (target: DesktopNotificationTarget) => void) => () => void;
     setEnabled: (enabled: boolean) => Promise<DesktopNotificationStatus>;
     takePendingActivation: () => Promise<DesktopNotificationTarget | null>;
     onActivated: (callback: (target: DesktopNotificationTarget) => void) => () => void;
@@ -225,6 +227,7 @@ export interface DesktopApi {
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessage: (roomIdentifier: string, messageId: string) => Promise<DesktopRoomMessage | null>;
     getMessageInfo: (roomIdentifier: string, messageId: string) => Promise<DesktopMessageInfo | null>;
+    getMessagesAfter?: (roomIdentifier: string, afterMessageId: string | null) => Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;
     getThread: (roomIdentifier: string, threadRootId: string, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadPage>;

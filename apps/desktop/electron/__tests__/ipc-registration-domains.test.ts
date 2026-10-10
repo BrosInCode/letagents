@@ -54,6 +54,7 @@ const expectedDirectChannels = [
   "desktop:maintenance:restart",
   "desktop:maintenance:status",
   "desktop:notifications:get-status",
+  "desktop:notifications:set-badge-count",
   "desktop:notifications:set-enabled",
   "desktop:notifications:take-pending-activation",
   "desktop:open-model:get-settings-status",
@@ -96,6 +97,7 @@ const expectedDirectChannels = [
   "desktop:room:get-message-pins",
   "desktop:room:get-message-reactions",
   "desktop:room:get-message-reminders",
+  "desktop:room:get-messages-after",
   "desktop:room:get-messages-before",
   "desktop:room:get-notification-preference",
   "desktop:room:get-pull-request-diff",
@@ -300,6 +302,7 @@ test("rental registration defers recovery and host startup to one explicit appli
 
 test("application registers startup preparation before rental recovery without delaying the window", async () => {
   const calls: string[] = [];
+  let beforeUpdateQuit: (() => void) | undefined;
   let ready!: () => Promise<void>;
   let releasePreparation!: () => void;
   const preparation = new Promise<void>((resolve) => { releasePreparation = resolve; });
@@ -312,7 +315,7 @@ test("application registers startup preparation before rental recovery without d
   const previousSmoke = process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE;
   delete process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE;
   const mocks = [
-    mock.module("electron", { namedExports: { app: mockApp,
+    mock.module("electron", { namedExports: { app: mockApp, autoUpdater: { on(event: string, handler: () => void) { if (event === "before-quit-for-update") beforeUpdateQuit = handler; } },
       protocol: { registerSchemesAsPrivileged() {}, handle() {} } } }),
     mock.module("../main/ipc.js", { namedExports: { registerDesktopIpcHandlers: () => {
       calls.push("register");
@@ -338,7 +341,7 @@ test("application registers startup preparation before rental recovery without d
       async reconcileDesiredRunning() { calls.push("grants"); backgroundDone(); },
     } } }),
     mock.module("../main/notifications.js", { namedExports: {
-      initializeDesktopNotifications: async () => {}, prepareDesktopNotificationLaunch() {}, prepareDesktopNotifications() {},
+      initializeDesktopNotifications: async () => {}, prepareDesktopNotificationLaunch() {}, prepareDesktopNotifications() {}, setDesktopNotificationBadgeCount() {},
     } }),
     mock.module("../main/attachments.js", { namedExports: { handleAttachmentProtocolRequest() {} } }),
     mock.module("../main/menu.js", { namedExports: { configureApplicationMenu() {} } }),
@@ -348,7 +351,7 @@ test("application registers startup preparation before rental recovery without d
     } }),
     mock.module("../main/smoke.js", { namedExports: { configureDesktopSmokeEnvironment() {}, seedDesktopSmokeState() {} } }),
     mock.module("../main/window.js", { namedExports: {
-      createWindow: () => { calls.push("window"); }, hasOpenWindows: () => true,
+      createWindow: () => { calls.push("window"); }, hasOpenWindows: () => true, allowMainWindowQuit() { calls.push("allow-quit"); }, focusMainWindow() {},
     } }),
     mock.module("../main/updates.js", { namedExports: { initializeDesktopUpdates() {}, stopDesktopUpdates() {} } }),
     mock.module("../rental/provider-host-manager.js", { namedExports: { stopActiveRentalProviderHostManager: async () => {} } }),
@@ -356,6 +359,9 @@ test("application registers startup preparation before rental recovery without d
   ];
   try {
     await import("../main.js");
+    assert.ok(beforeUpdateQuit, "native updater must release the close guard before window close");
+    beforeUpdateQuit();
+    assert.equal(calls.pop(), "allow-quit");
     assert.deepEqual(calls, ["register"]);
     await ready();
     assert.deepEqual(calls, process.platform === "darwin"
@@ -412,6 +418,8 @@ test("desktop IPC channel prefixes stay in their owning domains", () => {
 
 test("host approval sender accepts only the live trusted main frame", async () => {
   let destroyed = false;
+  let closeWindow: ((event: { preventDefault(): void }) => void) | undefined;
+  let hidden = false;
   let contentsDestroyed = false;
   const frame = { url: "http://127.0.0.1:4310/room" };
   const contents = { mainFrame: frame, isDestroyed: () => contentsDestroyed,
@@ -421,16 +429,26 @@ test("host approval sender accepts only the live trusted main frame", async () =
       webContents = contents;
       isDestroyed() { return destroyed; }
       async loadURL() {}
+      on(event: string, listener: typeof closeWindow) { if (event === "close") closeWindow = listener; }
+      hide() { hidden = true; }
     } } }),
     mock.module("../main/paths.js", { namedExports: { devServerUrl: "http://127.0.0.1:4310",
       electronMainDir: "/test", rendererDistPath: "/test/index.html" } }),
     mock.module("../main/external-url.js", { namedExports: { openExternalWebUrl: async () => {} } }),
   ];
   try {
-    const { assertHostApprovalSender, createWindow } = await import("../main/window.js");
+    const { assertHostApprovalSender, createWindow, allowMainWindowQuit } = await import("../main/window.js");
     const event = { sender: contents, senderFrame: frame } as never;
     assert.throws(() => assertHostApprovalSender(event), /main application window/);
     createWindow();
+    let prevented = false;
+    closeWindow?.({ preventDefault: () => { prevented = true; } });
+    assert.equal(hidden, process.platform === "darwin");
+    assert.equal(prevented, process.platform === "darwin");
+    allowMainWindowQuit();
+    prevented = false;
+    closeWindow?.({ preventDefault: () => { prevented = true; } });
+    assert.equal(prevented, false, "explicit quit must still close the window");
     assert.doesNotThrow(() => assertHostApprovalSender(event));
     assert.throws(() => assertHostApprovalSender({ sender: {}, senderFrame: frame } as never), /main application window/);
     assert.throws(() => assertHostApprovalSender({ sender: contents, senderFrame: { ...frame } } as never), /main application window/);

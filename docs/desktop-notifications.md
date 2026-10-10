@@ -49,6 +49,16 @@ Automated tests cover real message creation and outbox filtering, account/room i
 
 Independent live review remains required: sidebar and personal controls in both themes; keyboard open/close/focus and disabled local-only controls; two desktop windows picking changes up on focus/open; fallback alert and sound; signed quit-state APNs delivery for All/Mentions and suppression for mute/snooze; expiry restoring the prior level. Fable owns that review and merge.
 
+## Unread badges while the desktop is running
+
+The sidebar shows unread **message** counts (displaying `99+` above 99, with the exact count in the accessible label and tooltip). The macOS Dock badge shows their combined count; reading a room or using **Mark as read** clears that room. Explicit **Mark unread** bookmarks retain their dot indicator. Badges track read state independently of the native alert switch. macOS still needs notification/badge permission to display the Dock badge.
+
+Only a loaded room in a visible, focused window is automatically marked read. Background messages remain unread. The account activity stream keeps counts current while hidden; when disconnected, the lightweight account-room refresh continues every 15 seconds. Incoming APNs alerts request an immediate refresh. On macOS, closing the window hides it and keeps unread tracking running; **Quit LetAgents** stops tracking and clears the Dock badge.
+
+Read markers are stored per account on this desktop and restored after restart. Newly discovered rooms start from their current latest message, so opening an installation does not badge the entire historical backlog. Counts use actual visible message records, including threaded replies, rather than subtracting message IDs; hidden prompt-only messages and browser messages matching the signed-in sender are excluded. Changed rooms fetch forward history in bounded pages, with at most four concurrent room lookups; unchanged rooms reuse their count.
+
+This does not add badges while the app is fully quit or synchronize room read markers across devices. Existing APNs alert delivery while quit is unchanged.
+
 ## Server configuration
 
 Apply migration `0077_desktop_push_notifications` before enabling the worker.
