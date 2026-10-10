@@ -20,6 +20,8 @@ import {
 } from "./codex-app-server.js";
 import { sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal } from "./codex-agent-home.js";
 import {
+  STARTS_AGAIN_BY_ITSELF,
+  assertLiveCodexIsolationUnchanged,
   assertLiveCodexProjectUnchanged,
   codexProcessKeepsOwnerSetup,
   readCodexCommandLine,
@@ -414,7 +416,7 @@ export interface CodexProviderAdapterDependencies {
   launchServer(
     serverUrl: string,
     codexBin: string,
-    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean; sandboxed?: boolean },
+    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean; sandboxed?: boolean; writableSandbox?: boolean },
   ): CodexAppServerLaunch | Promise<CodexAppServerLaunch>;
   waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
   createRpcClient(
@@ -440,7 +442,21 @@ export interface CodexProviderAdapterDependencies {
    * load a conversation: a command rule it would read with its home, in its
    * project or from the machine. Null when it may.
    */
-  sandboxedLoadRefusal(codexBin: string, live: { cwd: string; codexHome: string | null }): Promise<string | null>;
+  sandboxedLoadRefusal(
+    codexBin: string,
+    live: { cwd: string; codexHome: string | null; writableSandbox: boolean },
+    /** Given the folders the Codex config lets a command write, as they are named now: asked again before each turn. */
+    keepWritableFoldersCheck?: (check: () => string | null) => void,
+  ): Promise<string | null>;
+  /**
+   * Throws when a running app-server that was started without its owner's
+   * setup would now start an MCP server, or load a skill, that it was not
+   * started with turned off, or when the project changes the room's own
+   * server. `codexHome` is the home the process runs with, and
+   * `launchOverrides` are its launch's own overrides: null for a process that
+   * was found running, whose launch is not known.
+   */
+  assertLiveIsolationUnchanged(codexBin: string, live: CodexLiveProcess & { codexHome: string | null; launchOverrides: readonly string[] | null }): Promise<void>;
   writeSupervisorBridgeContext(
     cwd: string,
     context: {
@@ -1057,7 +1073,12 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   // The owner's own config is found as the launch found it: through the launch's environment.
   assertLiveProjectUnchanged: (codexBin, live) =>
     assertLiveCodexProjectUnchanged(codexBin, live, codexAppServerEnvironment({ homeHarness: true }).env),
-  sandboxedLoadRefusal: (codexBin, live) => sandboxedCodexLoadRefusal(codexBin, { ...live, env: codexAppServerEnvironment().env }),
+  sandboxedLoadRefusal: (codexBin, live, keepWritableFoldersCheck) =>
+    sandboxedCodexLoadRefusal(codexBin, { ...live, env: codexAppServerEnvironment().env, keepWritableFoldersCheck }),
+  // Asked as the process reads its settings: with the home it runs with.
+  assertLiveIsolationUnchanged: (codexBin, live) => assertLiveCodexIsolationUnchanged(codexBin, live, {
+    ...codexAppServerEnvironment().env, ...(live.codexHome ? { CODEX_HOME: live.codexHome } : {}),
+  }),
   writeSupervisorBridgeContext: writeCodexSupervisorBridgeContext,
   now: () => new Date().toISOString(),
   sleep: delay,
@@ -1087,7 +1108,7 @@ class CodexProviderHandle implements ProviderHandle {
    */
   reportedWhenFound: CodexReportedAccess | null = null;
   /** Set when that report was not Read-only for a Read-only runtime: the stop that followed, and what was reported. */
-  foundNotReadOnly: { reported: string; stopped: Promise<ProviderAttachTerminal> } | null = null;
+  foundNotReadOnly: { reported: string; stopped: Promise<ProviderAttachTerminal> | null } | null = null;
   /**
    * The Codex home the app-server said it runs with: null when it did not
    * say. Undefined only for a client that cannot be asked, which is never the
@@ -1096,6 +1117,15 @@ class CodexProviderHandle implements ProviderHandle {
   codexHome: string | null | undefined = undefined;
   /** The folder this agent works in: from its launch, from a repair, or as the conversation of a process found running says. Null when none said. */
   cwd: string | null = null;
+  /** The overrides this adapter's own launch gave Codex, the room's server among them. Null for a process that was found running. */
+  launchOverrides: readonly string[] | null = null;
+  /**
+   * Why a folder the Codex config lets a sandboxed command write may not be
+   * written now, as the folders were named at the launch or the last load.
+   * Null for a sandbox that writes nowhere, and for a process that was found
+   * running, until its next load names them.
+   */
+  writableFoldersCheck: (() => string | null) | null = null;
   /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
   launchNotices: readonly string[] = [];
   /** What this runtime's launch, or its last repair that the daemon recorded, found about its reasoning effort. A repair does not say it again. */
@@ -1178,10 +1208,21 @@ class CodexProviderHandle implements ProviderHandle {
       // are read and the next load would take it.
       const refusal = (this.codexHome !== undefined ? sandboxedCodexHomeRefusal(this.codexHome) : null)
         // A stand-in client, which cannot be asked its home, is not asked for a folder it never said either.
-        ?? (this.cwd !== null || this.codexHome !== undefined ? sandboxedCodexProjectRefusal(this.cwd) : null);
+        ?? (this.cwd !== null || this.codexHome !== undefined ? sandboxedCodexProjectRefusal(this.cwd) : null)
+        // A folder the Codex config lets a command write, that has become a way into a home since it was last looked at.
+        ?? this.writableFoldersRefusal();
       if (refusal) throw new Error(refusal);
     }
     return this.turnPolicy;
+  }
+
+  private writableFoldersRefusal(): string | null {
+    try {
+      return this.writableFoldersCheck?.() ?? null;
+    } catch (error) {
+      // A folder that cannot be looked at is not taken as safe.
+      return `LetAgents could not look at the folders your Codex config lets a sandboxed command write (${errorMessage(error).split("\n")[0]}), so it gives this agent no work. Pause the agent and resume it.`;
+    }
   }
 
   /** Whether this runtime's access level has a sandbox. False while its policy is not known: it takes no turn then. */
@@ -2378,6 +2419,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const attestedPolicy = attestProviderSpawnPolicy("codex", req);
     const policy = normalizeLaunchPolicy(attestedPolicy);
     const turnPolicy = codexTurnPolicy(attestedPolicy);
+    // Read-only limits the room tools to a named list, and the background service holds that list
+    // only for an agent it delivers room messages to. An agent that collects its own messages calls
+    // the room server itself, so only Codex would hold the list there. No agent ran that way before:
+    // Read-only for Codex came with the list. So every launch of another kind is refused, and a
+    // launch that does not say its kind is taken as one, as the rest of this start takes it.
+    if (req.permissionProfileId?.trim() === "read_only" && req.deliveryMode !== "daemon_inbox") {
+      throw new Error(
+        "Read-only access is for a Codex agent that LetAgents delivers room messages to. This agent collects its own room messages, "
+        + "so LetAgents cannot hold it to the room tools that Read-only allows, and did not start it. Choose another access level for this agent.",
+      );
+    }
     const supervisorCoordinates = [
       req.supervisorEntryId,
       req.supervisorSocketPath,
@@ -2472,23 +2524,25 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // in the room server with the caller's `cwd`, so none of its tools is.
     const readOnlyRoomTools = boundedMcp && readOnlyLevel;
     const serverUrl = await this.deps.resolveServerUrl();
+    // The launch's own overrides, the room's server among them. Kept with the handle: a later check lists Codex's servers as this launch does.
+    const launchOverrides = [
+      ...(custodialRuntime
+        ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, {
+            ...supervisorEnvironment!,
+            ...(boundedMcp ? { LETAGENTS_API_URL: req.supervisorWorkerSession?.apiUrl || desktopApiUrl,
+              LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "" } : {}),
+          }, custodialTools, readOnlyRoomTools)]
+        : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides]),
+      // Read-only only: no other access level's launch changes.
+      ...(readOnlyLevel ? CODEX_READ_ONLY_CONFIG_OVERRIDES : []),
+    ];
     const launch = await this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
-      configOverrides: [
-        ...(custodialRuntime
-          ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, {
-              ...supervisorEnvironment!,
-              ...(boundedMcp ? { LETAGENTS_API_URL: req.supervisorWorkerSession?.apiUrl || desktopApiUrl,
-                LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "" } : {}),
-            }, custodialTools, readOnlyRoomTools)]
-          : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides]),
-        // Read-only only: no other access level's launch changes.
-        ...(readOnlyLevel ? CODEX_READ_ONLY_CONFIG_OVERRIDES : []),
-      ],
+      configOverrides: launchOverrides,
       ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
       // The owner's own Codex setup stays on for this agent's app-server.
       ...(homeHarness ? { homeHarness: true } : {}),
-      ...(codexPolicyIsSandboxed(turnPolicy) ? { sandboxed: true } : {}),
+      ...(codexPolicyIsSandboxed(turnPolicy) ? { sandboxed: true, ...(policy.sandbox === "workspace-write" ? { writableSandbox: true } : {}) } : {}),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {
@@ -2602,6 +2656,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.readOnlyLevel = readOnlyLevel;
       handle.codexHome = reportedHome;
       handle.cwd = req.cwd;
+      handle.launchOverrides = launchOverrides;
+      handle.writableFoldersCheck = launch.writableFoldersCheck ?? null;
       // A start with the owner's setup asks Codex nothing more that can fail it, so a line given here reaches the owner.
       const unused = homeHarness
         ? ownerSetupUnusedOptionsSaidOnce.whenChanged(req.supervisorEntryId, ownerSetupUnusedOptionsNotice("Codex", req.launchPolicy, attestedPolicy))
@@ -3357,6 +3413,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const subscribed = await handle.client.request<CodexThreadResult>("thread/resume", { threadId });
     if (subscribed.thread?.id !== threadId) throw new Error("Codex subscription resolved a different materialized thread.");
     handle.subscriptionAfterMaterialization = false;
+    // A runtime that was found with no loaded conversation had no reply to hold to its level then.
+    // This reply is the first word on what the conversation got, so it is held to Read-only as every other is.
+    const notReadOnly = codexFoundNotReadOnly(handle.appliedTurnPolicy(), subscribed);
+    if (notReadOnly) {
+      handle.foundNotReadOnly ??= { reported: notReadOnly, stopped: null };
+      // Its turn must not go on with what the level does not allow. The stop is not waited for here; the daemon sees the process end.
+      this.stopNotReadOnly(handle)?.catch(() => undefined);
+      throw new Error(`${notReadOnly}, so LetAgents stopped the agent. ${STARTS_AGAIN_BY_ITSELF}`);
+    }
     return true;
   }
 
@@ -3551,8 +3616,26 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private bindFoundPolicy(handle: CodexProviderHandle, policy: unknown): CodexProviderHandle | Promise<ProviderAttachTerminal> {
     const reported = handle.bindTurnPolicy(policy);
     const notReadOnly = reported && codexFoundNotReadOnly(handle.appliedTurnPolicy(), reported);
-    if (notReadOnly) handle.foundNotReadOnly = { reported: notReadOnly, stopped: this.stopFoundNotReadOnly(notReadOnly, () => this.stop(handle)) };
-    return handle.foundNotReadOnly?.stopped ?? handle;
+    if (notReadOnly) handle.foundNotReadOnly = { reported: notReadOnly, stopped: null };
+    return this.stopNotReadOnly(handle) ?? handle;
+  }
+
+  /**
+   * The stop of a runtime that was found not to be Read-only. One stop serves
+   * every caller while it runs and once it has ended the process. A stop that
+   * failed is not kept: the runtime takes no turn meanwhile, and the next
+   * attach, or the next call here, tries again, so its process does not stay
+   * until the owner restarts the agent.
+   */
+  private stopNotReadOnly(handle: CodexProviderHandle): Promise<ProviderAttachTerminal> | null {
+    const found = handle.foundNotReadOnly;
+    if (!found) return null;
+    if (!found.stopped) {
+      const stopping = this.stopFoundNotReadOnly(found.reported, () => this.stop(handle));
+      found.stopped = stopping;
+      stopping.catch(() => { if (found.stopped === stopping) found.stopped = null; });
+    }
+    return found.stopped;
   }
 
   /**
@@ -3572,7 +3655,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     } catch (error) {
       throw new Error(`${reported}, and LetAgents could not stop the agent: ${errorMessage(error)}`);
     }
-    return { state: "terminal", terminal, notices: [`${reported}, so LetAgents stopped the agent. It starts again by itself.`] };
+    return { state: "terminal", terminal, notices: [`${reported}, so LetAgents stopped the agent. ${STARTS_AGAIN_BY_ITSELF}`] };
   }
 
   /**
@@ -3602,13 +3685,35 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // The project's own rule folders are looked in by name, for every client. The rest is asked of
     // Codex with the home the process runs with, which a stand-in client cannot say.
     const reason = sandboxedCodexProjectRefusal(cwd) ?? (handle.codexHome === undefined ? null
-      : await this.deps.sandboxedLoadRefusal(this.codexBin, { cwd, codexHome: handle.codexHome })
+      : await this.deps.sandboxedLoadRefusal(this.codexBin, { cwd, codexHome: handle.codexHome, writableSandbox: recordValue(policy.sandboxPolicy)?.type === "workspaceWrite" },
+        (check) => { handle.writableFoldersCheck = check; })
         .catch((error: unknown) => `LetAgents could not check which command rules Codex would read (${errorMessage(error).split("\n")[0]}), `
-          + "so it stopped the agent before Codex could load them. It starts again by itself."));
+          + `so it stopped the agent before Codex could load them. ${STARTS_AGAIN_BY_ITSELF}`))
+      // A process with its owner's setup was checked against its project just before this.
+      ?? (handle.codexHome === undefined || handle.ownerSetup ? null : await this.isolationChanged(handle, cwd));
     if (!reason) return;
     this.publishStream(handle, "sandboxRules/stopped", {}, "provider_event", `Stopped this agent. ${reason}`);
     await this.stop(handle).catch(() => undefined);
     throw new Error(reason);
+  }
+
+  /**
+   * Why a process without its owner's setup may not start or load a
+   * conversation now: an MCP server or a skill it was not started with turned
+   * off, or a project that changes the room's own server. Null when it may.
+   */
+  private async isolationChanged(handle: CodexProviderHandle, cwd: string): Promise<string | null> {
+    const commandLine = handle.pid === null ? null : await this.deps.readCommandLine(handle.pid);
+    if (!commandLine) {
+      return "LetAgents could not read how this agent's Codex was started, so it stopped the agent "
+        + `before Codex could load a project's MCP servers. ${STARTS_AGAIN_BY_ITSELF}`;
+    }
+    try {
+      await this.deps.assertLiveIsolationUnchanged(this.codexBin, { commandLine, cwd, codexHome: handle.codexHome ?? null, launchOverrides: handle.launchOverrides });
+      return null;
+    } catch (error) {
+      return errorMessage(error);
+    }
   }
 
   /** Why a process with its owner's setup may not load the project's config again. Null when it may. */
@@ -3616,12 +3721,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const commandLine = handle.pid === null ? null : await this.deps.readCommandLine(handle.pid);
     if (!commandLine) {
       return "LetAgents could not read how this agent's Codex was started, so it stopped the agent "
-        + "before Codex could load the project's configuration with your own setup. It starts again by itself.";
+        + `before Codex could load the project's configuration with your own setup. ${STARTS_AGAIN_BY_ITSELF}`;
     }
     // LetAgents started this process with the owner's setup. A command line that says otherwise is not believed.
     if (!codexProcessKeepsOwnerSetup(commandLine)) {
       return "This agent's Codex is not running the way LetAgents started it, so LetAgents stopped the agent "
-        + "before Codex could load the project's configuration with your own setup. It starts again by itself.";
+        + `before Codex could load the project's configuration with your own setup. ${STARTS_AGAIN_BY_ITSELF}`;
     }
     try {
       await this.deps.assertLiveProjectUnchanged(this.codexBin, { commandLine, cwd });

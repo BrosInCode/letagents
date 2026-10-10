@@ -1005,6 +1005,48 @@ test("an agent that collects its own room messages cannot be given the owner's o
   }
 });
 
+test("a Codex agent that collects its own room messages cannot be saved as Read-only: the level is listed as unavailable with the reason, and the save says it", async () => {
+  const NEEDS_DELIVERY = "Read-only access is for a Codex agent that LetAgents delivers room messages to. "
+    + "This agent collects its own room messages, so LetAgents cannot hold it to the room tools that Read-only allows. Choose another access level for this agent.";
+  type Listed = { id: string; status: string; detail: string | null };
+  const save = (state: ReturnType<typeof harness>, profile: string) => state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3,
+    configuration: { model: null, reasoning_effort: null, charter: "Help the room, carefully", permission_profile_id: profile },
+  });
+  const usual = supervisedPermissionProfilesForProvider("codex") as Listed[];
+  for (const deliveryMode of ["mcp_polling", undefined] as const) {
+    const state = harness([entry({ provider: "codex" })]);
+    const stored = storedConfiguration({ model: null, reasoning_effort: null });
+    if (deliveryMode) stored.delivery_mode = deliveryMode; else delete stored.delivery_mode;
+    state.setConfiguration(stored);
+    // Where the access levels are offered: Read-only cannot be chosen, and says why. Every other level is as it was.
+    const listed = (await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).supervised_permission_profiles as Listed[];
+    assert.deepEqual(listed.map((profile) => (profile.id === "read_only" ? [profile.status, profile.detail] : profile)),
+      usual.map((profile) => (profile.id === "read_only" ? ["gated", NEEDS_DELIVERY] : profile)), String(deliveryMode));
+    // Where it is saved: refused in the same words, and nothing is written.
+    state.events.length = 0;
+    const refused = await save(state, "read_only");
+    assert.deepEqual([refused.outcome, (refused as { error?: string }).error], ["invalid", NEEDS_DELIVERY], String(deliveryMode));
+    assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false, "nothing is written");
+    assert.equal(state.configuration!.permission_profile_id, "full_access");
+    // Another level is saved as before.
+    assert.equal((await save(state, "ask_before_write")).outcome, "updated");
+    assert.equal(state.configuration!.permission_profile_id, "ask_before_write");
+  }
+  // An agent the background service delivers room messages to: Read-only is offered and saved.
+  const delivered = harness([entry({ provider: "codex" })]);
+  delivered.setConfiguration(storedConfiguration({ model: null, reasoning_effort: null }));
+  assert.deepEqual((await delivered.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).supervised_permission_profiles, usual);
+  assert.equal((await save(delivered, "read_only")).outcome, "updated");
+  assert.equal(delivered.configuration!.permission_profile_id, "read_only");
+  // Read-only for another provider is another thing, and is not touched.
+  const claude = harness([entry({ provider: "claude-code" })]);
+  claude.setConfiguration(storedConfiguration({ provider: "claude-code", model: null, reasoning_effort: null, permission_profile_id: "ask_before_write",
+    provider_launch_policy: { permissionMode: "default", dangerouslySkipPermissions: false }, delivery_mode: "mcp_polling" }));
+  assert.deepEqual((await claude.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).supervised_permission_profiles, supervisedPermissionProfilesForProvider("claude-code"));
+  assert.equal((await save(claude, "read_only")).outcome, "updated");
+});
+
 test("a new agent cannot be created with the owner's own setup already on", async () => {
   const state = harness();
   for (const value of [false, true, "false", null]) {

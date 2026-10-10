@@ -2323,16 +2323,17 @@ test("attach terminal evidence is durable before the execution fence is released
   assert.equal(runtime.installed.length, 0);
 });
 
-test("a runtime that its adapter stopped when it found it is closed, its owner reads why, and the agent starts again", async () => {
+test("a runtime that its adapter stopped when it found it is closed, its owner reads why, and the agent starts again unless its owner paused it", async () => {
   const line = "Codex reported approval policy \"never\" and sandbox \"dangerFullAccess\" for this agent's conversation. "
-    + "That is not Read-only access, so LetAgents stopped the agent. It starts again by itself.";
+    + "That is not Read-only access, so LetAgents stopped the agent. It starts again by itself, unless you paused it.";
   const stopped: ProviderActionTerminal = {
     endedAt: "2026-08-26T00:00:03.000Z", exitCode: null, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: "continuation-1",
     nativeRuntimeDeath: { kind: "codex_app_server", pid: 4242, processIdentity: "birth-4242" },
   };
-  for (const noticeWriteFails of [false, true]) {
+  for (const [noticeWriteFails, paused] of [[false, false], [true, false], [false, true]]) {
     const current = baseEntry();
     current.permission_profile_id = "read_only";
+    if (paused) current.desired_state = "paused";
     current.provider_ref = { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
       provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection };
     const launches: string[] = [];
@@ -2361,7 +2362,8 @@ test("a runtime that its adapter stopped when it found it is closed, its owner r
     assert.equal(runtime.terminalWrites.length, 1, "the proof is recorded whether or not the line could be written");
     assert.equal(runtime.terminalWrites[0]?.executionGenerationId, "generation-1");
     assert.equal(runtime.terminalWrites[0]?.terminal.terminal_cause, "stopped");
-    assert.equal(launches.length, 1, "the agent starts again by itself");
+    // The line's last words: an agent that is set to run starts again by itself, and one its owner paused does not.
+    assert.equal(launches.length, paused ? 0 : 1, paused ? "a paused agent stays stopped" : "the agent starts again by itself");
     // The owner reads the adapter's own line in the agent's activity.
     assert.deepEqual((runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice").map((event) => event.summary),
       noticeWriteFails ? [] : [line]);
