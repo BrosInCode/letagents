@@ -31,6 +31,7 @@ import type {
 const OWNER_SETUP_END_ATTENTION_AFTER_MS = 30_000;
 
 export type DaemonReadModelPorts = {
+  readUsage?(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(entry: DaemonManifestEntry): DaemonManifestEntryView["provider_progress"];
   currentDaemonGeneration(): number;
   nowMs(): number;
@@ -125,7 +126,21 @@ export class DaemonReadModel {
       runtimeFence = { executionGenerationId: entry.provider_ref.execution_generation_id,
         runtimeGenerationId, daemonGenerationId: String(this.ports.currentDaemonGeneration()) };
     }
-    return this.ports.inbox.detail(entryId, roomId, sourceMessageId, runtimeFence);
+    const handle = this.ports.liveHandles.get(entryId);
+    const generation = this.ports.currentDaemonGeneration();
+    const continuation = entry.provider_ref?.provider_continuation_id;
+    const execution = entry.provider_ref?.execution_generation_id;
+    const [detail, usage] = await Promise.all([
+      this.ports.inbox.detail(entryId, roomId, sourceMessageId, runtimeFence),
+      handle && handle.workAttemptId === entry.work_attempt_id && handle.providerContinuationId === continuation
+        ? this.ports.readUsage?.(handle).catch(() => null) ?? null : null,
+    ]);
+    const current = await this.ports.manifest.getEntry(entryId);
+    const valid = current?.room_id === roomId && current.provider_ref?.execution_generation_id === execution
+      && current.provider_ref?.provider_continuation_id === continuation && this.ports.liveHandles.get(entryId) === handle
+      && this.ports.currentDaemonGeneration() === generation && usage?.providerContinuationId === continuation;
+    return { ...detail, usage: valid && usage && execution
+      ? { ...usage, executionGenerationId: execution, daemonGeneration: generation } : null };
   }
 
   private runtimeGenerationId(entry: DaemonManifestEntry): string | null {

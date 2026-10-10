@@ -639,6 +639,7 @@ export class SupervisorDaemon {
         async (agentId) => { await this.providerExecution?.archiveEndedRuntimes(agentId); },
       ) : null;
     this.readModel = new DaemonReadModel({
+      readUsage: (handle) => this.providerPort?.readUsage?.(handle) ?? Promise.resolve(null),
       compactionProgress: (entry) => entry.work_attempt_id
         ? this.providerPort?.compactionProgress?.(entry.work_attempt_id, entry.provider) ?? null : null,
       deliveryAdmission: (entry) => this.providerStreams.deliveryAdmission(entry),

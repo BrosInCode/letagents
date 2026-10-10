@@ -22,15 +22,7 @@
       @resolve="emit('resolve-turn-control', $event)"
     />
     </details>
-    <section class="agent-inspector-overview-section agent-inspector-usage" aria-labelledby="agent-inspector-usage-title">
-      <div class="agent-inspector-section-heading"><p id="agent-inspector-usage-title">Usage</p></div>
-      <p class="agent-inspector-work-empty">Account limits aren’t reported by this connection.</p>
-      <div class="agent-inspector-context-heading"><span>Context window</span><span>Not reported</span></div>
-      <div class="agent-inspector-context-meter" :data-compacting="compacting" aria-hidden="true">
-        <span v-for="bar in 48" :key="bar" :style="{ '--bar': bar }"></span>
-      </div>
-      <p v-if="compacting" class="agent-inspector-context-note">Compacting context…</p>
-    </section>
+    <AgentInspectorUsage :usage="usage ?? null" :loading="runtimeControlPending && !usage" :stale="usageStale || projection.resourceFreshness !== 'fresh'" :compacting="compacting" />
 
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-context-title">
       <div class="agent-inspector-section-heading">
@@ -65,6 +57,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
+import AgentInspectorUsage from "./AgentInspectorUsage.vue";
 import { friendlyRoomLabel } from "../../../../domain/git-rooms";
 import type { DesktopSupervisorAgentInspectorDetail } from "../../../../../../electron/ipc-types";
 import type { AgentInspectorCorrectionRequest, AgentInspectorProjection } from "../../../../domain/agent-inspector";
@@ -78,6 +71,8 @@ import AgentInspectorTurnControl from "./AgentInspectorTurnControl.vue";
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
+  usage?: DesktopSupervisorAgentInspectorDetail["usage"];
+  usageStale?: boolean;
   roomName?: string;
   busy: boolean;
   runtimeControl: DesktopSupervisorAgentInspectorDetail["runtime_control"] | null;

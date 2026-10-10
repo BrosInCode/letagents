@@ -39,6 +39,7 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
+  readUsage?(handle: NativeHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   runtimeCustody?(workAttemptId: string, handle?: NativeHandle): "absent" | "owned" | "unknown";
   observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; connectionId?: string; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | Extract<ClaudePermissionObservation, { type: "request_closed" }> | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
@@ -566,6 +567,19 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const adapter = await this.adapter(remembered.provider);
     if (!adapter.onExecution) throw new Error(`Provider '${remembered.provider}' does not expose native execution observations.`);
     return adapter.onExecution(remembered.handle, listener);
+  }
+
+  async readUsage(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null> {
+    const remembered = this.required(handle);
+    const continuation = handle.providerContinuationId;
+    const connection = structuredClone(handle.providerConnection);
+    if (!sameProviderActionConnectionIdentity(remembered.handle.providerConnection, connection)
+      || this.exits.get(remembered.handle)?.exited) return null;
+    const usage = await remembered.adapter.readUsage?.(remembered.handle) ?? null;
+    const current = this.handles.get(handle.workAttemptId);
+    return current === remembered && current.handle?.providerContinuationId === continuation
+      && sameProviderActionConnectionIdentity(current.handle.providerConnection, connection)
+      && !this.exits.get(remembered.handle)?.exited && usage?.providerContinuationId === continuation ? usage : null;
   }
 
   async probeControl(handle: ProviderActionHandle): Promise<ControlProbeResult> {
