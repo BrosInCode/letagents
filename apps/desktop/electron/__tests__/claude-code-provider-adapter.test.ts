@@ -46,7 +46,7 @@ import type {
 import { PROCESS_ENDED_DURING_TURN } from "../main/agents/provider-adapter.js";
 import {
   CLAUDE_API_ERROR_CAPTURES, CLAUDE_API_FAILURE_POLICY, CLAUDE_FAILURE_TEXT, CLAUDE_INVALID_REQUESTS, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT,
-  claudeFollowUpText, claudeInvalidRequestRows, claudeResultEvent, realClaudeCapture, realClaudeResult,
+  claudeCapturedTask, claudeFollowUpText, claudeInvalidRequestRows, claudeResultEvent, realClaudeCapture, realClaudeResult,
 } from "./claude-result-shapes.js";
 import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 import { mapEntry } from "../main/supervisor-daemon.js";
@@ -3826,20 +3826,44 @@ for (const ended of ["after the model answered", "before the model answered", "b
   });
 }
 
-/** The session rows of a real capture, or the first of them, for this session and this turn. */
+/** The messages of a real capture's session, or the first of them, for this session and this turn. */
 const realClaudeSession = (name: string, first?: number) => (sessionId: string, turnId: string) =>
   realClaudeCapture(CLAUDE_REAL_CAPTURES[name]!, sessionId, turnId).session.slice(0, first);
+/** Every row of a real capture's session file that has an id, as the daemon reads the file. */
+const realClaudeSessionFile = (name: string) => (sessionId: string, turnId: string) =>
+  realClaudeCapture(CLAUDE_REAL_CAPTURES[name]!, sessionId, turnId).session_file;
 
 /**
  * What must reach the room for a Claude turn whose process ended under it, by what its session holds. The rows
- * are those Claude Code 2.1.278 really wrote, but where a line says otherwise. `posted` is the turn's own answer;
- * null is a turn that was cut off, for which nothing is posted.
+ * are those Claude Code 2.1.278 really wrote, but where a line says otherwise. `posted` is the turn's reply: its
+ * own answer and, for a turn that started background work, the answers to the notices of that work. Null is a
+ * turn for which no answer is proven: it was cut off, and nothing is posted.
  */
 const CLAUDE_SESSION_READ_BACK: Record<string, { rows: (sessionId: string, turnId: string) => Array<Record<string, unknown>>; posted: string | null }> = {
   "a Stop hook's refusal of an answer, and the answer after it": { posted: "ANSWER AFTER THE HOOK", rows: realClaudeSession("stop_hook_refuses_end_once") },
   "an answer and a Stop hook's refusal of it": { posted: null, rows: realClaudeSession("stop_hook_refuses_end_once", 3) },
-  "its answer, then a background command's notice and the CLI's answer to the notice": { posted: "ANSWER OF THE TURN", rows: realClaudeSession("background_command") },
-  "its answer, then a sub-agent's notice and the CLI's answer to the notice": { posted: "ANSWER OF THE TURN", rows: realClaudeSession("subagent_in_background") },
+  "its answer, then a background command's notice and the CLI's answer to the notice": { posted: "ANSWER OF THE TURN\n\nANSWER TO THE TASK NOTICE", rows: realClaudeSession("background_command") },
+  "its answer, then a sub-agent's notice and the CLI's answer to the notice": { posted: "ANSWER OF THE TURN\n\nANSWER TO THE TASK NOTICE", rows: realClaudeSession("subagent_in_background") },
+  // The flow in which the session is read: the process ended, and the one that replaced it has written its first
+  // prompt before the turn is read. Real rows of a session that the CLI was started for a second time.
+  "its answer, then the first prompt of the process that resumed the session, and that prompt's answer": { posted: "ANSWER OF THE TURN", rows: realClaudeSessionFile("resumed_session") },
+  // The same rows as a CLI writes them that does not mark its prompts: every captured row is of Claude Code 2.1.278,
+  // and the app allows older ones. The turn's own request row has no mark, so the earlier rule reads the session.
+  "its answer, then the first prompt of the process that resumed the session, in a session whose prompts carry no mark": { posted: "ANSWER OF THE TURN",
+    rows: (sessionId, turnId) => realClaudeSessionFile("resumed_session")(sessionId, turnId).map(({ promptSource: _source, turnOrigin: _turn, ...row }) => row) },
+  "its answer, then a prompt and that prompt's answer, in the simplest session whose prompts carry no mark": { posted: "PROBE_OK",
+    rows: (sessionId, turnId) => [...realClaudeSession("completed_answer")(sessionId, turnId), ...realClaudeSession("resumed_session")(sessionId, turnId).slice(2)].map(({ promptSource: _source, turnOrigin: _turn, ...row }) => row) },
+  // A compaction that no command made, after the turn's answer: the real boundary and summary rows, with the boundary
+  // saying that it was automatic. No capture holds one, so it is read as it was before: the answer before the summary.
+  "its answer, then an automatic compaction's boundary and summary": { posted: "ANSWER OF THE TURN",
+    rows: (sessionId, turnId) => realClaudeSessionFile("compaction_by_command")(sessionId, turnId).slice(0, 11)
+      .map((row) => row.subtype === "compact_boundary" ? { ...row, compactMetadata: { trigger: "auto" } } : row) },
+  // Rows that start another command end the turn: its answer is proven.
+  "its answer, then a second prompt and that prompt's answer": { posted: "ANSWER OF THE TURN",
+    rows: (sessionId, turnId) => realClaudeSessionFile("compaction_by_command")(sessionId, turnId).filter((row) => row.type === "assistant" || row.promptSource === "sdk") },
+  "its answer, then the rows of the CLI's own command /compact, and a second prompt": { posted: "ANSWER OF THE TURN", rows: realClaudeSessionFile("compaction_by_command") },
+  "a hook's denial of a tool call as that call's result, and the answer after it": { posted: "ANSWER OF THE TURN", rows: realClaudeSessionFile("hook_denies_tool_call") },
+  "a hook's words after a tool call, and the answer after them": { posted: "ANSWER OF THE TURN", rows: realClaudeSessionFile("hook_feedback_after_tool_call") },
   "a skill's text, and the answer after it": { posted: "ANSWER OF THE TURN", rows: realClaudeSession("skill_call") },
   // Claude Code 2.1.278 keeps a sub-agent's rows in a file of their own. In these two they stand in the session file, after the call that started it.
   "a sub-agent's report after its tool call, and no answer of its own": { posted: null,
@@ -3852,8 +3876,9 @@ const CLAUDE_SESSION_READ_BACK: Record<string, { rows: (sessionId: string, turnI
       const { session, subagent_session } = realClaudeCapture(CLAUDE_REAL_CAPTURES.subagent_in_foreground!, sessionId, turnId);
       return [...session.slice(0, 2), ...subagent_session!, ...session.slice(2)];
     } },
-  // The last rows of these two are written by hand: no capture holds a user row that is neither the turn going on nor the start of another turn.
-  "its answer, then a row that is not known": { posted: "PROBE_OK",
+  // The last rows of these two are written by hand: no capture holds, in a room turn, a user row that is neither the turn going on nor the start of another command.
+  // Such a row can be the turn going on: then the message that ended before it is an interim one, and is not posted as the answer.
+  "a message that ended, then a row that is not known": { posted: null,
     rows: (sessionId, turnId) => [...realClaudeSession("completed_answer")(sessionId, turnId),
       { type: "user", uuid: "another-row", isMeta: true, sessionId, message: { role: "user", content: "A note the CLI wrote." } }] },
   "a row that is not known, and a message that ended after it": { posted: null,
@@ -3863,7 +3888,7 @@ const CLAUDE_SESSION_READ_BACK: Record<string, { rows: (sessionId: string, turnI
 };
 
 for (const [left, { rows, posted }] of Object.entries(CLAUDE_SESSION_READ_BACK)) {
-  test(`a Claude turn whose process ended, with ${left} in the session, ${posted ? `has "${posted}" posted once` : "is settled as cut off, and nothing is posted for it"}`, async () => {
+  test(`a Claude turn whose process ended, with ${left} in the session, ${posted ? `has ${JSON.stringify(posted)} posted once` : "is settled as cut off, and nothing is posted for it"}`, async () => {
     const agent = await claudeDaemonFixture();
     try {
       const turn = await agent.begin(1);
@@ -3884,7 +3909,7 @@ for (const [left, { rows, posted }] of Object.entries(CLAUDE_SESSION_READ_BACK))
       agent.answer(next, "Answer 2.");
       await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
       assert.deepEqual(agent.published, posted ? [posted, "Answer 2."] : ["Answer 2."],
-        "the turn's own answer or nothing: never the answer to a task's notice, a sub-agent's report, or a message a hook refused");
+        "the turn's own reply or nothing: never another turn's answer, a sub-agent's report, or a message a hook refused");
       assert.equal(agent.turns.length, 2, "one turn for each room message");
       assert.equal((await agent.view()).room_agent_state.inbox.state, "empty");
     } finally {
@@ -3933,19 +3958,110 @@ const CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER: Record<string, readonly string[]>
   subagent_stopped_by_request: [TURNS_ANSWER, NOTICE_ANSWER],
   // A sub-agent and a command in one turn. Both end, each in its time, and each notice is answered.
   subagent_and_background_command: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"],
+  // A hook of another kind than Stop: it adds a line to the prompt, denies the tool call, or has words for the model after the call.
+  hook_adds_context_to_prompt: [TURNS_ANSWER],
+  hook_denies_tool_call: [TURNS_ANSWER],
+  hook_feedback_after_tool_call: [TURNS_ANSWER],
+  // The tool wrote in the run's folder, and the recorder's sandbox denied its write beside it.
+  write_outside_run_folder_denied: [TURNS_ANSWER],
+  // Two commands of one message. The task that started first ended last: each answer is added in the order of the notices.
+  two_background_commands_end_in_the_other_order: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"],
+  // The turn stopped its own background command. The model is told of no end of it, and the turn is not held open.
+  background_command_stopped_by_the_turn: [TURNS_ANSWER],
+};
+
+/**
+ * What is posted for each real turn that started background work when its process ended before the adapter saw
+ * the turn's result, and the session file holds all that the CLI wrote: the model's texts, and after them the
+ * one line of the adapter's when the file does not prove the reply complete. Where it does, the reply is the
+ * one that the room gets from the stream (`CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER`).
+ */
+const CLAUDE_BACKGROUND_WORK_READ_BACK: Record<string, readonly string[]> = {
+  background_command: [TURNS_ANSWER, NOTICE_ANSWER],
+  subagent_in_background: [TURNS_ANSWER, NOTICE_ANSWER],
+  subagent_api_error: [TURNS_ANSWER, NOTICE_ANSWER],
+  two_background_commands: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"],
+  two_subagents_in_background: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"],
+  two_background_commands_end_together: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE"],
+  background_command_fails: [TURNS_ANSWER, NOTICE_ANSWER],
+  background_command_running_at_interrupt: [TURNS_ANSWER, NOTICE_ANSWER],
+  subagent_stopped_by_request: [TURNS_ANSWER, NOTICE_ANSWER],
+  subagent_and_background_command: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"],
+  // The notice went to the model with a request that was running. The file holds that, so the reply is proven complete.
+  task_ends_while_turn_goes_on: ["ANSWER OF THE TURN, TO A REQUEST THAT HOLDS THE TASK NOTICE"],
+  task_ends_while_notice_is_answered: [TURNS_ANSWER, "ANSWER NUMBER 1 AFTER THE TURN, TO A REQUEST THAT HOLDS 2 TASK NOTICES"],
+  // The CLI kept a second prompt until the answer to the notice had ended: that answer is the turn's.
+  prompt_during_task_notice_answer: [TURNS_ANSWER, NOTICE_ANSWER],
+  // The file holds the notice, and no answer to it that ended: an empty answer, the provider's error, an interrupt.
+  background_command_notice_answer_empty: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported],
+  background_command_notice_api_error: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported],
+  interrupt_during_task_notice_answer: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported],
+  interrupt_during_task_notice_answer_then_prompt: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported],
+  approval_in_task_notice_answer_interrupted: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported],
+  approval_in_task_notice_answer_denied_and_interrupted: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.notReported],
+  two_background_commands_end_in_the_other_order: [TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"],
+  // The turn itself stopped its command: no report on it is due, so nothing is missing, and the reply does not say that something is.
+  background_command_stopped_by_the_turn: [TURNS_ANSWER],
+  // The file holds no notice of the work: a request from outside stopped it, it still ran when the CLI ended, or a prompt came first.
+  background_command_stopped_by_request: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.noReportInSession],
+  background_command_running_at_input_close: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.noReportInSession],
+  subagent_running_at_interrupt: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.noReportInSession],
+  task_ends_during_next_turn: [TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.noReportInSession],
 };
 
 test("every real capture of a turn with a tool call, a hook or a sub-agent is replayed against the daemon", () => {
   // The turn that ends on an API error, and the one that completes without an answer, have replays of their own.
   const replayed = [...Object.keys(CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER), "task_ends_during_next_turn", "completed_without_answer", ...Object.keys(CLAUDE_API_ERROR_CAPTURES),
     // In these the recorder wrote more to the CLI than a prompt: each has a replay in which the adapter writes it.
-    "interrupt_during_task_notice_answer_then_prompt", "approval_in_task_notice_answer_interrupted", "approval_in_task_notice_answer_denied_and_interrupted", "subagent_running_at_interrupt"];
+    "interrupt_during_task_notice_answer_then_prompt", "approval_in_task_notice_answer_interrupted", "approval_in_task_notice_answer_denied_and_interrupted", "subagent_running_at_interrupt",
+    // In these the recorder wrote what the adapter never writes to one process: a prompt while the notice of a task is
+    // answered, the CLI's own command, and a prompt to a second process for the same session. Their sessions are read
+    // back (`CLAUDE_BACKGROUND_WORK_READ_BACK`, `CLAUDE_SESSION_READ_BACK`).
+    "prompt_during_task_notice_answer", "compaction_by_command", "resumed_session"];
   for (const [name, capture] of Object.entries(CLAUDE_REAL_CAPTURES)) {
     if (capture.session.some((row) => row.type === "user" && row.uuid !== "TURN_ID")) assert.ok(replayed.includes(name), `${name} has a replay`);
+  }
+  // Every real turn that started background work is read back from its session too.
+  for (const [name, capture] of Object.entries(CLAUDE_REAL_CAPTURES)) {
+    assert.equal(capture.session.some((row) => (row.toolUseResult as { backgroundTaskId?: unknown } | undefined)?.backgroundTaskId !== undefined
+      || (row.toolUseResult as { isAsync?: unknown } | undefined)?.isAsync === true), name in CLAUDE_BACKGROUND_WORK_READ_BACK, `${name} is read back, or started nothing in the background`);
+  }
+  assert.equal(CLAUDE_BACKGROUND_WORK_TEXT.noReportInSession, "This reply was read from Claude's saved session. A report on background work that this turn started is missing from it.");
+  // Where the session proves the reply complete, it is the reply that the stream gives. Elsewhere it holds the
+  // same texts of the model's, and one line of the adapter's.
+  const lines: readonly string[] = Object.values(CLAUDE_BACKGROUND_WORK_TEXT);
+  for (const [name, readBack] of Object.entries(CLAUDE_BACKGROUND_WORK_READ_BACK)) {
+    const fromStream = CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER[name];
+    const lacks = readBack.filter((text) => lines.includes(text));
+    assert.ok(lacks.length <= 1 && (!lacks.length || readBack.at(-1) === lacks[0]), name);
+    if (!fromStream) continue;
+    if (!lacks.length) assert.deepEqual(readBack, fromStream, `${name}: the reply that is read back is the reply from the stream`);
+    else assert.deepEqual(readBack.filter((text) => !lines.includes(text)), fromStream.filter((text) => !lines.includes(text)), `${name}: the model's texts are the same`);
   }
   // No reply ever holds a sub-agent's own words.
   assert.ok(Object.values(CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER).flat().every((text) => !text.includes("SUBAGENT REPORT")));
 });
+
+for (const [name, texts] of Object.entries(CLAUDE_BACKGROUND_WORK_READ_BACK)) {
+  test(`a Claude turn that started background work, whose process ended before its result was seen, is read back from the real session of ${name}: ${JSON.stringify(texts.at(-1))} ends its reply`, async () => {
+    const agent = await claudeDaemonFixture();
+    try {
+      const turn = await agent.begin(1);
+      agent.reportStarted(turn);
+      await agent.eventually(() => agent.recorded().turns[0]?.state === "active", "the turn is recorded as started");
+      // The process ends before it reports the turn's result. The session file, with all that the CLI wrote, is all there is.
+      agent.sessionRows.push(...realClaudeSessionFile(name)(agent.sessionId, turn.id));
+      agent.exitProcess();
+      await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered").catch(async (error) => {
+        const row = await agent.receipt("msg_1");
+        throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); posted ${JSON.stringify(agent.published)}`);
+      });
+      assert.deepEqual(agent.published, [texts.join("\n\n")], "one reply, with one blank line between its texts");
+    } finally {
+      await agent.cleanup();
+    }
+  });
+}
 
 for (const [name, texts] of Object.entries(CLAUDE_STREAMS_WITH_MORE_THAN_AN_ANSWER)) {
   const answer = texts.join("\n\n");
@@ -5342,6 +5458,17 @@ const withText = (events: Array<Record<string, unknown>>, from: string, to: stri
   JSON.parse(JSON.stringify(events).replaceAll(JSON.stringify(from), JSON.stringify(to))) as Array<Record<string, unknown>>;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const MINUTE = 60_000;
+// The background tasks of the captures, each by the tool call that started it. A new recording gives them new ids.
+const COMMAND_TASK = claudeCapturedTask("background_command");
+const FAILING_COMMAND_TASK = claudeCapturedTask("background_command_fails");
+const FAILED_ANSWER_COMMAND_TASK = claudeCapturedTask("background_command_notice_api_error");
+const APPROVAL_COMMAND_TASK = claudeCapturedTask("approval_in_task_notice_answer_denied_and_interrupted");
+const INTERRUPTED_SUBAGENT_TASK = claudeCapturedTask("subagent_running_at_interrupt");
+/** One message that starts a sub-agent with its first call, and a command with its second. */
+const SUBAGENT_TASK = claudeCapturedTask("subagent_and_background_command", "toolu_probe_1");
+const COMMAND_BESIDE_SUBAGENT_TASK = claudeCapturedTask("subagent_and_background_command", "toolu_probe_2");
+/** Two commands of one message: the first call's ends first, and the second call's while the notice of the first is answered. */
+const ONE_AFTER_THE_OTHER_TASKS = [claudeCapturedTask("task_ends_while_notice_is_answered", "toolu_probe_1"), claudeCapturedTask("task_ends_while_notice_is_answered", "toolu_probe_2")];
 const WAITS_FOR_COMMAND = 'Waiting up to 2 min for a background command: "probe".';
 const WAITS_FOR_ANSWER = "Waiting for Claude's answer about background work that ended under 1 min ago.";
 
@@ -5479,8 +5606,8 @@ test("the owner's Stop on a Claude turn that waits for background work posts the
   }
 });
 
-for (const ended of ["Claude process", "Claude process and daemon"] as const) {
-  test(`a Claude turn that waits for background work when its ${ended} ends gets its own answer posted once, read from the session`, async () => {
+for (const ended of ["Claude process", "Claude process and daemon"] as const) for (const left of ["the turn alone", "the turn and the task's notice", "the turn, the task's notice and the answer to it"] as const) {
+  test(`a Claude turn that waits for background work when its ${ended} ends, with ${left} in the session, gets the reply that the session holds posted once, and never its interim answer as if that were all`, async () => {
     const agent = await claudeDaemonFixture();
     try {
       const turn = await agent.begin(1);
@@ -5488,8 +5615,11 @@ for (const ended of ["Claude process", "Claude process and daemon"] as const) {
       for (const event of splitAtOwnResult(capture.stream, turn.id).own) turn.child.emit(event);
       await agent.eventually(async () => (await agent.view()).activity.some((event) => event.method === CLAUDE_BACKGROUND_WORK_METHOD), "the turn waits");
       assert.deepEqual(agent.published, []);
-      // The session as the CLI kept it: the turn, and after it the task's notice with the answer to it.
-      agent.sessionRows.push(...capture.session);
+      // The session as the CLI kept it when the process ended: the turn alone, the task's notice too, or also the answer to it.
+      const [messages, expected] = left === "the turn alone" ? [4, `${TURNS_ANSWER}\n\n${CLAUDE_BACKGROUND_WORK_TEXT.noReportInSession}`]
+        : left === "the turn and the task's notice" ? [5, `${TURNS_ANSWER}\n\n${CLAUDE_BACKGROUND_WORK_TEXT.notReported}`] : [6, `${TURNS_ANSWER}\n\n${NOTICE_ANSWER}`];
+      const lastMessage = capture.session[messages - 1]!;
+      agent.sessionRows.push(...capture.session_file.slice(0, capture.session_file.indexOf(capture.session_file.find((row) => row.uuid === lastMessage.uuid)!) + 1));
       if (ended === "Claude process") agent.exitProcess();
       else await agent.restartDaemon(() => agent.exitProcess());
       await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered").catch(async (error) => {
@@ -5500,7 +5630,8 @@ for (const ended of ["Claude process", "Claude process and daemon"] as const) {
       agent.reportStarted(next);
       agent.answer(next, "Answer 2.");
       await agent.eventually(async () => (await agent.receipt("msg_2"))?.state === "acknowledged", "msg_2 goes ahead and is answered");
-      assert.deepEqual(agent.published, [TURNS_ANSWER, "Answer 2."], "the turn's own answer, once. The answer to the notice is another turn's in the session, and is not read");
+      assert.deepEqual(agent.published, [expected, "Answer 2."],
+        "one reply: the answers that the session proves, as the adapter would have posted them, and one line when the session does not prove them complete");
       assert.equal(agent.turns.length, 2, "the turn is not run again");
       assert.equal((await agent.view()).room_agent_state.inbox.state, "empty");
     } finally {
@@ -5785,13 +5916,13 @@ test("a Claude turn with a sub-agent and a long-running command waits for the su
 
   // A command that ends within its two minutes is answered in the same reply, whenever the sub-agent ends.
   const both = await agent.start("subagent_and_background_command");
-  const another = (events: Array<Record<string, unknown>>) => JSON.parse(JSON.stringify(events).replaceAll("af5ebe5d209b7a59d", "a0there5ubagent").replaceAll("b0hd77560", "b0therta5k")) as Array<Record<string, unknown>>;
+  const another = (events: Array<Record<string, unknown>>) => JSON.parse(JSON.stringify(events).replaceAll(SUBAGENT_TASK, "a0there5ubagent").replaceAll(COMMAND_BESIDE_SUBAGENT_TASK, "b0therta5k")) as Array<Record<string, unknown>>;
   agent.emit(another(both.lines));
   assert.deepEqual(await both.running, reply(both.turnId, TURNS_ANSWER, "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE"));
 
   // A sub-agent that does not finish in thirty minutes is a fault, and the reply says so. The command is still no fault.
   const slow = await agent.start("subagent_and_background_command");
-  const slower = (events: Array<Record<string, unknown>>) => JSON.parse(JSON.stringify(events).replaceAll("af5ebe5d209b7a59d", "a510w5ubagent").replaceAll("b0hd77560", "b510wta5k")) as Array<Record<string, unknown>>;
+  const slower = (events: Array<Record<string, unknown>>) => JSON.parse(JSON.stringify(events).replaceAll(SUBAGENT_TASK, "a510w5ubagent").replaceAll(COMMAND_BESIDE_SUBAGENT_TASK, "b510wta5k")) as Array<Record<string, unknown>>;
   agent.emit(slower(slow.own));
   await agent.after(30 * MINUTE - 1);
   assert.equal(slow.settled(), false);
@@ -5905,7 +6036,7 @@ test("a Claude turn whose background work has all ended does not wait long for a
   // A first line of the answer shows that it has begun. From then on the turn waits for its result.
   const second = await agent.start("background_command");
   // Another command: the CLI gives each task an id of its own.
-  const another = (events: Array<Record<string, unknown>>) => JSON.parse(JSON.stringify(events).replaceAll("bvn6jsv90", "b0therta5k")) as Array<Record<string, unknown>>;
+  const another = (events: Array<Record<string, unknown>>) => JSON.parse(JSON.stringify(events).replaceAll(COMMAND_TASK, "b0therta5k")) as Array<Record<string, unknown>>;
   agent.emit(another(second.own));
   agent.emit(another(second.after.slice(0, -1)));
   await agent.after(20 * MINUTE);
@@ -6111,7 +6242,7 @@ test("one answer of Claude's that is about the notices of two turns is the answe
   /** An earlier turn: its command, with this task id, passes its limit and still runs when the turn has ended. */
   const earlierTurn = async (taskId: string) => {
     const turn = await agent.start("background_command");
-    agent.emit(withTasks(turn.own, { bvn6jsv90: taskId }));
+    agent.emit(withTasks(turn.own, { [COMMAND_TASK]: taskId }));
     await agent.after(2 * MINUTE);
     assert.deepEqual(await turn.running, reply(turn.turnId, TURNS_ANSWER, CLAUDE_BACKGROUND_WORK_TEXT.commandStillRuns));
     return turn;
@@ -6122,12 +6253,14 @@ test("one answer of Claude's that is about the notices of two turns is the answe
   for (const [first, earlierTask, heldTask] of [["the held turn's", "bearlier0", "bheld0"], ["the earlier turn's", "bearlier1", "bheld1"]] as const) {
     await earlierTurn(earlierTask);
     const held = await agent.start("background_command_fails");
-    agent.emit(withTasks(held.own, { blz75qpi1: heldTask }));
+    agent.emit(withTasks(held.own, { [FAILING_COMMAND_TASK]: heldTask }));
     const together = splitAtOwnResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.two_background_commands_end_together!, agent.sessionId, held.turnId).stream, held.turnId).after;
     const [empty, answer] = together.filter((event) => event.type === "result");
     assert.deepEqual([empty!.num_turns, empty!.result, answer!.result], [0, "", "ANSWER TO THE FIRST TASK NOTICE"]);
-    // The same lines, for these two tasks.
-    const lines = withTasks(together, first === "the held turn's" ? { b6zzoahkq: heldTask, b5duetjsb: earlierTask } : { b6zzoahkq: earlierTask, b5duetjsb: heldTask });
+    // The same lines, for these two tasks. Which of the capture's two notices the CLI wrote first is read from its lines.
+    const [firstNoticed, secondNoticed] = together.filter((event) => event.subtype === "task_notification").map((event) => event.task_id as string);
+    assert.deepEqual([firstNoticed, secondNoticed].sort(), [claudeCapturedTask("two_background_commands_end_together", "toolu_probe_1"), claudeCapturedTask("two_background_commands_end_together", "toolu_probe_2")].sort());
+    const lines = withTasks(together, first === "the held turn's" ? { [firstNoticed!]: heldTask, [secondNoticed!]: earlierTask } : { [firstNoticed!]: earlierTask, [secondNoticed!]: heldTask });
     const emptyResult = lines.findIndex((event) => event.type === "result");
     agent.emit(lines.slice(0, emptyResult + 1));
     await flush();
@@ -6140,9 +6273,9 @@ test("one answer of Claude's that is about the notices of two turns is the answe
   // while that tool runs. Real lines: the request after the tool takes both notices, and one result follows.
   await earlierTurn("bearlier2");
   const held = await agent.start("background_command_fails");
-  agent.emit(withTasks(held.own, { blz75qpi1: "bheld2" }));
+  agent.emit(withTasks(held.own, { [FAILING_COMMAND_TASK]: "bheld2" }));
   const during = withTasks(splitAtOwnResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.task_ends_while_notice_is_answered!, agent.sessionId, held.turnId).stream, held.turnId).after,
-    { bd02th53j: "bearlier2", beww3pert: "bheld2" });
+    { [ONE_AFTER_THE_OTHER_TASKS[0]!]: "bearlier2", [ONE_AFTER_THE_OTHER_TASKS[1]!]: "bheld2" });
   const toolResult = during.findIndex((event) => event.type === "user");
   agent.emit(during.slice(0, toolResult + 1));
   await flush();
@@ -6159,10 +6292,10 @@ test("one answer of Claude's that is about the notices of two turns is the answe
   // Two notices that are answered one after the other. Each answer is about the notice that was first in line.
   const earlier = await earlierTurn("bearlier3");
   const last = await agent.start("background_command_fails");
-  agent.emit(withTasks(last.own, { blz75qpi1: "bheld3" }));
+  agent.emit(withTasks(last.own, { [FAILING_COMMAND_TASK]: "bheld3" }));
   // Real lines of each task's end and answer, in the order of a second task that ends while the first notice is answered.
-  const earlierAnswer = withText(withTasks(earlier.after, { bvn6jsv90: "bearlier3" }), NOTICE_ANSWER, "ANSWER ABOUT THE EARLIER TURN'S TASK");
-  const heldAnswer = withTasks(last.after, { blz75qpi1: "bheld3" });
+  const earlierAnswer = withText(withTasks(earlier.after, { [COMMAND_TASK]: "bearlier3" }), NOTICE_ANSWER, "ANSWER ABOUT THE EARLIER TURN'S TASK");
+  const heldAnswer = withTasks(last.after, { [FAILING_COMMAND_TASK]: "bheld3" });
   const answerStarts = (events: Array<Record<string, unknown>>) => events.findIndex((event) => event.type === "assistant");
   const notPosted = () => agent.stream.filter((event) => event.summary === CLAUDE_BACKGROUND_WORK_TEXT.notPosted).map((event) => (event.payload as { result?: unknown }).result);
   const before = notPosted().length;
@@ -6178,9 +6311,9 @@ test("one answer of Claude's that is about the notices of two turns is the answe
   // The other order: the held turn's notice is answered while the notice of the earlier turn's task waits in line.
   const before4 = await earlierTurn("bearlier4");
   const answered = await agent.start("background_command_fails");
-  agent.emit(withTasks(answered.own, { blz75qpi1: "bheld4" }));
-  const ownAnswer = withTasks(answered.after, { blz75qpi1: "bheld4" });
-  const otherEnds = withTasks(before4.after, { bvn6jsv90: "bearlier4" });
+  agent.emit(withTasks(answered.own, { [FAILING_COMMAND_TASK]: "bheld4" }));
+  const ownAnswer = withTasks(answered.after, { [FAILING_COMMAND_TASK]: "bheld4" });
+  const otherEnds = withTasks(before4.after, { [COMMAND_TASK]: "bearlier4" });
   const written = agent.child.written.length;
   agent.emit(ownAnswer.slice(0, answerStarts(ownAnswer) + 1));
   agent.emit(otherEnds.slice(0, answerStarts(otherEnds)));
@@ -6254,7 +6387,7 @@ test("an approval that Claude asks for when no room turn has started is denied a
    */
   const outlivesItsTurn = async (taskId: string, requestId: string) => {
     const turn = await agent.start("approval_in_task_notice_answer_denied_and_interrupted");
-    const { own, after } = splitAtOwnResult(withTasks(turn.lines, { bkkfnox07: taskId }), turn.turnId);
+    const { own, after } = splitAtOwnResult(withTasks(turn.lines, { [APPROVAL_COMMAND_TASK]: taskId }), turn.turnId);
     agent.emit(own);
     const written = agent.child.written.length;
     await agent.after(2 * MINUTE);
@@ -6310,7 +6443,7 @@ test("a Claude turn that ends while a sub-agent it started still runs stops the 
   agent.emit(turn.own);
   // The command ends first here, and the answer to its notice fails. Real lines of such an answer, for this command.
   const failedAnswer = withTasks(splitAtOwnResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.background_command_notice_api_error!, agent.sessionId, turn.turnId).stream, turn.turnId).after,
-    { b5rferras: "b0hd77560" });
+    { [FAILED_ANSWER_COMMAND_TASK]: COMMAND_BESIDE_SUBAGENT_TASK });
   const written = agent.child.written.length;
   agent.emit(failedAnswer);
   // The turn ends with what it has. The sub-agent still runs, and nothing waits for its report: it is stopped.
@@ -6320,8 +6453,8 @@ test("a Claude turn that ends while a sub-agent it started still runs stops the 
 
   // Real lines of a sub-agent that an interrupt stopped, for this sub-agent: the model is not told, and answers nothing.
   const stopped = withTasks(splitAtOwnResult(realClaudeCapture(CLAUDE_REAL_CAPTURES.subagent_running_at_interrupt!, agent.sessionId, turn.turnId).stream, turn.turnId).after,
-    { a7ec36392c090b198: "af5ebe5d209b7a59d" });
-  assert.deepEqual(stopped.filter((event) => event.subtype === "task_notification").map((event) => [event.task_id, event.status]), [["af5ebe5d209b7a59d", "stopped"]]);
+    { [INTERRUPTED_SUBAGENT_TASK]: SUBAGENT_TASK });
+  assert.deepEqual(stopped.filter((event) => event.subtype === "task_notification").map((event) => [event.task_id, event.status]), [[SUBAGENT_TASK, "stopped"]]);
   agent.emit(stopped);
   // The next turn's own answer about its own command is not taken for an answer about the sub-agent.
   const next = await agent.start("background_command");
