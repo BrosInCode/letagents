@@ -59,8 +59,16 @@ function attemptLabel(retry: RetryTime): string {
  * turn starts and the agent shows as working.
  */
 export function scheduledRetryLabel(retry: RetryTime, nowMs: number): string {
+  return scheduledRetryLabelParts(retry, nowMs).join(" ");
+}
+
+/**
+ * The same label in its two parts: "Trying again in 1 min 40 s" and "(attempt 2 of 3)". A narrow receipt may wrap
+ * the label between them, and nowhere else: a number stays with its unit.
+ */
+export function scheduledRetryLabelParts(retry: RetryTime, nowMs: number): [string, string] {
   const left = retryWaitLabel(retry.atMs - nowMs);
-  return `${left ? `Trying again in ${left}` : "About to try again"} (${attemptLabel(retry)})`;
+  return [left ? `Trying again in ${left}` : "About to try again", `(${attemptLabel(retry)})`];
 }
 
 /** The same for a place that does not count down, with a clock time: "Trying again at 14:32 (attempt 2 of 3)". */

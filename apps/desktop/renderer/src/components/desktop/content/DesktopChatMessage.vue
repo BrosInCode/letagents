@@ -234,7 +234,7 @@
           <strong>{{ receipt.agentName }}</strong>
           <small v-if="receiptStateLabel(receipt)">{{ receiptStateLabel(receipt) }}</small>
           <template v-if="receipt.scheduledRetry">
-            <small aria-hidden="true">{{ scheduledRetryText(receipt) }}</small>
+            <small class="room-message-delivery-countdown" aria-hidden="true"><span>{{ scheduledRetryParts(receipt)[0] }}</span> <span>{{ scheduledRetryParts(receipt)[1] }}</span></small>
             <button
               type="button"
               :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId)"
@@ -249,7 +249,7 @@
               title="No more automatic attempts. Later messages go ahead. The task stays assigned to the agent: send it a message to continue."
               @click="stopRetrying(receipt)"
             >{{ skippingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId) ? "Stopping…" : "Stop trying" }}</button>
-            <small>{{ scheduledRetryOutcome(receipt.scheduledRetry) }}</small>
+            <small class="room-message-delivery-outcome">{{ scheduledRetryOutcome(receipt.scheduledRetry) }}</small>
           </template>
           <template v-else-if="receipt.followUpNote">
             <small>{{ followUpNoteLabel(receipt.followUpNote) }}</small>
@@ -399,7 +399,7 @@ import { desktopIpc } from "../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { useSecondClock } from "../../../composables/useSecondClock";
-import { scheduledRetryClockLabel, scheduledRetryLabel, scheduledRetryOutcome, type AgentScheduledRetry } from "../../../domain/scheduled-retry";
+import { scheduledRetryClockLabel, scheduledRetryLabelParts, scheduledRetryOutcome, type AgentScheduledRetry } from "../../../domain/scheduled-retry";
 import type { RoomMessageFollowUpNote } from "../../../domain/room-message-receipts";
 
 /** What this message needs of an automatic attempt: its time, its attempt, what it follows, and the id its two controls name. */
@@ -528,9 +528,12 @@ function retryFollowUp(receipt: { agentId: string; followUpNote?: RoomMessageFol
   if (note?.canRetry && props.deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId, note.sourceMessageId)) emit("retry-delivery", receipt.agentId, note.sourceMessageId);
 }
 
-/** The countdown as this message shows it: the saved time minus the clock, so it is right however long the app slept. */
-function scheduledRetryText(receipt: { scheduledRetry?: AgentScheduledRetryView | null }): string {
-  return receipt.scheduledRetry ? scheduledRetryLabel(receipt.scheduledRetry, retryClock.value) : "";
+/**
+ * The countdown as this message shows it: the saved time minus the clock, so it is right however long the app slept.
+ * It has two parts, which the receipt may wrap between: the wait, and the attempt.
+ */
+function scheduledRetryParts(receipt: { scheduledRetry?: AgentScheduledRetryView | null }): [string, string] {
+  return receipt.scheduledRetry ? scheduledRetryLabelParts(receipt.scheduledRetry, retryClock.value) : ["", ""];
 }
 
 /** Why the follow-up of this message's work waits for its owner, or why it ended with nothing started. */

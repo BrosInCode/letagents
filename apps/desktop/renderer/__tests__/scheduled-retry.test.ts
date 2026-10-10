@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { DesktopRoomAgentDeliveryReceipt, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
+import type { DesktopRoomAgentDeliveryReceipt, DesktopRoomAgentFollowUpReason, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
 import { AGENT_ATTENTION_GRACE_MS, agentNeedsAttention, buildAgentAttentionItems, trackAgentAttention } from "../src/components/desktop/content/room-inbox/agent-attention";
 import { agentInspectorOverallState, projectAgentInspector } from "../src/domain/agent-inspector";
 import { agentInspectorSignal } from "../src/domain/agent-inspector-presentation";
 import { roomMessageDeliveryReceipts } from "../src/domain/room-message-receipts";
 import {
-  agentScheduledRetry, retryWaitLabel, scheduledRetryCause, scheduledRetryClockLabel, scheduledRetryDetail, scheduledRetryDueLabel, scheduledRetryLabel,
+  agentScheduledRetry, retryWaitLabel, scheduledRetryCause, scheduledRetryClockLabel, scheduledRetryDetail, scheduledRetryDueLabel, scheduledRetryLabel, scheduledRetryLabelParts,
   scheduledRetryOutcome, waitingAgentIndicators, waitsBehindScheduledRetry,
 } from "../src/domain/scheduled-retry";
 import { collapseWorkIndicators, supervisedAgentWorkIndicators, workIndicatorSupersededByAgentMessage } from "../src/domain/managed-agents";
@@ -76,16 +76,17 @@ function stoppedAgent(): DesktopSupervisorManifestEntry {
     deliveryReceipts: [
       receipt("msg_1", "acknowledged_failed", 1, { error: FAILED }),
       receipt("task-continuation:inbox_4", "blocked", 5, { error: detail, updatedAt: at(AGENT_ATTENTION_GRACE_MS + 60_000),
-        followUp: { forMessageId: "msg_1", state: "waiting_for_owner", scheduled: null } }),
+        followUp: { forMessageId: "msg_1", state: "waiting_for_owner", reason: "attempts_failed", scheduled: null } }),
     ],
   });
 }
 
-/** The same agent after its follow-up ended with nothing started, for `reason`. */
-function endedAgent(reason: string, state: "cancelled_by_user" | "acknowledged_no_reply" = "cancelled_by_user"): DesktopSupervisorManifestEntry {
+/** The same agent after its follow-up ended with nothing started, for `reason`, which the daemon names `code`. A daemon that names none sends no code. */
+function endedAgent(reason: string, state: "cancelled_by_user" | "acknowledged_no_reply" = "cancelled_by_user",
+  code: DesktopRoomAgentFollowUpReason | null = "stopped_by_owner", laterPersonTurn?: boolean): DesktopSupervisorManifestEntry {
   return agent({ deliveryReceipts: [
     receipt("msg_1", "acknowledged_failed", 1, { error: FAILED }),
-    receipt("task-continuation:inbox_1", state, 2, { error: reason, followUp: { forMessageId: "msg_1", state: "ended", scheduled: null } }),
+    receipt("task-continuation:inbox_1", state, 2, { error: reason, followUp: { forMessageId: "msg_1", state: "ended", ...(code ? { reason: code } : {}), ...(laterPersonTurn === undefined ? {} : { laterPersonTurn }), scheduled: null } }),
   ] });
 }
 
@@ -106,6 +107,10 @@ test("the time left is in whole seconds and minutes, rounded up, and nothing is 
 test("the label counts down to the saved time, and at that time says only what is true before the turn has started", () => {
   const retry = { atMs: NOW + 100_000, attempt: 2, attempts: 3 };
   assert.equal(scheduledRetryLabel(retry, NOW), "Trying again in 1 min 40 s (attempt 2 of 3)");
+  // The label is two parts, so that a narrow receipt can wrap between them and nowhere else: the number stays with its unit.
+  assert.deepEqual(scheduledRetryLabelParts(retry, NOW), ["Trying again in 1 min 40 s", "(attempt 2 of 3)"]);
+  assert.deepEqual(scheduledRetryLabelParts(retry, NOW + 100_000), ["About to try again", "(attempt 2 of 3)"]);
+  assert.deepEqual(scheduledRetryLabelParts({ ...retry, attempts: 1 }, NOW), ["Trying again in 1 min 40 s", "(the only automatic attempt)"]);
   assert.equal(scheduledRetryLabel(retry, NOW + 1_000), "Trying again in 1 min 39 s (attempt 2 of 3)");
   // The app was closed for 70 seconds, or the machine slept: the label is read from the saved time again, not counted on.
   assert.equal(scheduledRetryLabel(retry, NOW + 70_000), "Trying again in 30 s (attempt 2 of 3)");
@@ -254,7 +259,7 @@ test("after the last automatic attempt the failed message says that the agent wa
     receipt("msg_2", "queued_behind_blocked", 6, { blockedByMessageId: "task-continuation:inbox_4" })] }]);
   // The failed message keeps the provider's own words, and has the follow-up's text and its id for Retry.
   assert.deepEqual(grouped.msg_1!.map((item) => [item.state, item.error, item.scheduledRetry, item.followUpNote]), [["acknowledged_failed", FAILED, null,
-    { state: "waiting_for_owner", sourceMessageId: "task-continuation:inbox_4", text: ATTEMPTS_FAILED, canRetry: true }]]);
+    { state: "waiting_for_owner", sourceMessageId: "task-continuation:inbox_4", text: ATTEMPTS_FAILED, canRetry: true, reason: "attempts_failed" }]]);
   // The follow-up's own receipt is as it was, and a later message links to the failed message, which the room can show.
   assert.deepEqual(grouped["task-continuation:inbox_4"]!.map((item) => [item.state, item.retry, item.scheduledRetry, item.followUpNote]), [["blocked", "start_turn", null, null]]);
   assert.deepEqual(grouped.msg_2!.map((item) => [item.state, item.blockedByMessageId]), [["queued_behind_blocked", "msg_1"]]);
@@ -273,22 +278,77 @@ test("after the last automatic attempt the failed message says that the agent wa
   assert.equal(note({ deliveryAttention: { ...stopped.deliveryAttention!, sourceMessageId: "msg_9", retry: "reread_saved_turn" } })!.canRetry, true, "attention for another message says nothing of this one");
   // A follow-up whose first message is no longer kept shows on no message. Needs you still has it.
   assert.equal(note({}, { followUp: { forMessageId: null, state: "waiting_for_owner", scheduled: null } }), null);
+  // Its reason crosses to the note, and a daemon that names none gives none.
+  assert.equal(note({})!.reason, "attempts_failed");
+  assert.equal(note({}, { followUp: { forMessageId: "msg_1", state: "waiting_for_owner", scheduled: null } })!.reason, null);
+  // Whatever a later turn does, the note of a follow-up that waits for its owner stays: it holds every later message, and Retry is still the way on.
+  const withLaterTurn = { ...stopped, deliveryReceipts: [...stopped.deliveryReceipts!, receipt("msg_2", "acknowledged", 6, { providerTurnId: "turn_9" })] };
+  assert.equal(roomMessageDeliveryReceipts([withLaterTurn]).msg_1![0]!.followUpNote?.state, "waiting_for_owner");
 });
 
-test("a follow-up that ended with nothing started says why on the failed message, and stays there", () => {
-  for (const [reason, state] of [[STOPPED_BY_OWNER, "cancelled_by_user"],
-    ["The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task.", "acknowledged_no_reply"],
-    ["The agent did not try again: the task is finished, or is no longer this agent's.", "acknowledged_no_reply"]] as const) {
-    const ended = endedAgent(reason, state);
-    // Later messages were answered since; the note is still on the failed message.
+test("a follow-up that ended with nothing started says why on the failed message, and stays there; one that asks nothing of its owner goes when the agent has run for a later message", () => {
+  const UNCERTAIN = "The agent did not try again: an earlier action has an uncertain result. Check what it did (the inspector shows its actions), then tell it to continue only the verified work.";
+  const cases: ReadonlyArray<readonly [string, "cancelled_by_user" | "acknowledged_no_reply", DesktopRoomAgentFollowUpReason, boolean]> = [
+    // A note that asks the owner to act stays: a turn for a later message, which can be one of another agent that was queued, does not
+    // show that they did. "Send it a message to continue" is such an ask, whether the owner stopped the attempts or the agent changed.
+    [STOPPED_BY_OWNER, "cancelled_by_user", "stopped_by_owner", false],
+    ["The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task.", "acknowledged_no_reply", "agent_changed", false],
+    // An earlier action has a result that the owner must check, in the agent's inspector. No turn for another message checks it.
+    [UNCERTAIN, "acknowledged_no_reply", "uncertain_action", false],
+    // A note that asks nothing goes once the agent has run for a later message.
+    ["You skipped the next attempt, and the task and its work lease are left as they are.", "cancelled_by_user", "skipped", true],
+    ["The agent did not try again: the task is finished, or is no longer this agent's.", "acknowledged_no_reply", "task_not_held", true],
+    ["The agent did not try again: an earlier action had an uncertain result, and that result is now known.", "acknowledged_no_reply", "uncertain_resolved", true],
+  ];
+  for (const [reason, state, code, goes] of cases) {
+    const ended = endedAgent(reason, state, code);
+    // Later messages were answered, or read, with no turn of the agent's own: the note is still on the failed message.
     ended.deliveryReceipts!.push(receipt("msg_2", "acknowledged", 3), receipt("msg_3", "acknowledged_no_reply", 4));
     const grouped = roomMessageDeliveryReceipts([ended]);
     assert.deepEqual(grouped.msg_1!.map((item) => [item.state, item.error, item.scheduledRetry, item.followUpNote]), [["acknowledged_failed", FAILED, null,
-      { state: "ended", sourceMessageId: "task-continuation:inbox_1", text: reason, canRetry: false }]], reason);
+      { state: "ended", sourceMessageId: "task-continuation:inbox_1", text: reason, canRetry: false, reason: code }]], reason);
     assert.deepEqual([grouped.msg_2![0]!.followUpNote, grouped.msg_3![0]!.followUpNote], [null, null]);
+    // A turn started for a later message, for example a message of another agent that was queued. What failed stays, with its error.
+    const later = (turn: string | null, fifoSequence = 3, entry = ended) => roomMessageDeliveryReceipts([{ ...entry, deliveryReceipts: [...entry.deliveryReceipts!.slice(0, 2),
+      receipt("msg_2", "acknowledged", fifoSequence, { providerTurnId: turn })] }]).msg_1![0]!;
+    assert.equal(later(null).followUpNote?.state, "ended", reason);
+    assert.equal(later("turn_2").followUpNote?.state ?? null, goes ? null : "ended", `${code}: ${goes ? "goes" : "stays"} when the agent has run for a later message`);
+    assert.deepEqual([later("turn_2").state, later("turn_2").error], ["acknowledged_failed", FAILED]);
+    // A turn that started before the follow-up does not count: it is the failed turn itself.
+    assert.equal(later("turn_2", 0).followUpNote?.state, "ended", reason);
+    // A daemon that names no reason, and one that names a reason that this version does not know: the note stays, as it is safe to keep.
+    for (const unnamed of [endedAgent(reason, state, null), endedAgent(reason, state, "a_reason_of_a_later_version" as DesktopRoomAgentFollowUpReason)]) {
+      assert.equal(later("turn_2", 3, unnamed).followUpNote?.state, "ended", `${reason}: no reason that it can rely on`);
+    }
     // It shows whether the agent runs or not: it is over, and it is not a wait.
     assert.deepEqual(roomMessageDeliveryReceipts([{ ...ended, desiredState: "stopped" }]).msg_1![0]!.followUpNote, grouped.msg_1![0]!.followUpNote);
   }
+  // A note that asks the owner to send a message goes when the owner has: the daemon says that a turn started for a message of a person that
+  // came after the follow-up. A turn for another agent's message does not: the daemon says false, and the note stays whatever turns ran. A
+  // daemon that does not say keeps the note.
+  const AGENT_CHANGED = "The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task.";
+  for (const [text, state, code] of [[STOPPED_BY_OWNER, "cancelled_by_user", "stopped_by_owner"], [AGENT_CHANGED, "acknowledged_no_reply", "agent_changed"]] as const) {
+    const note = (laterPersonTurn: boolean | undefined, turns = true) => {
+      const entry = endedAgent(text, state, code, laterPersonTurn);
+      if (turns) entry.deliveryReceipts!.push(receipt("msg_2", "acknowledged", 3, { providerTurnId: "turn_2" }));
+      return roomMessageDeliveryReceipts([entry]).msg_1![0]!.followUpNote;
+    };
+    assert.equal(note(true), null, `${code}: the owner sent a message and the agent ran for it`);
+    assert.equal(note(true, false), null, `${code}: the daemon's word is enough`);
+    assert.equal(note(false)?.state, "ended", `${code}: a turn ran, but not for a person's message`);
+    assert.equal(note(false, false)?.state, "ended", code);
+    assert.equal(note(undefined)?.state, "ended", `${code}: a daemon that does not say keeps the note, whatever turns ran`);
+    assert.equal(note(undefined, false)?.state, "ended", code);
+    assert.equal(note(true)?.reason ?? null, null);
+  }
+  // The uncertain-result note never goes this way. A note that asks nothing goes by any later turn, whatever the daemon says of a person.
+  assert.equal(roomMessageDeliveryReceipts([endedAgent(UNCERTAIN, "acknowledged_no_reply", "uncertain_action", true)]).msg_1![0]!.followUpNote?.state, "ended");
+  const skippedNote = (laterPersonTurn?: boolean) => {
+    const entry = endedAgent("You skipped the next attempt, and the task and its work lease are left as they are.", "cancelled_by_user", "skipped", laterPersonTurn);
+    entry.deliveryReceipts!.push(receipt("msg_2", "acknowledged", 3, { providerTurnId: "turn_2" }));
+    return roomMessageDeliveryReceipts([entry]).msg_1![0]!.followUpNote;
+  };
+  assert.deepEqual([skippedNote(false), skippedNote(undefined), skippedNote(true)], [null, null, null]);
   // Each message has the follow-up of its own work, and each agent its own.
   const two = agent({ deliveryReceipts: [
     receipt("msg_1", "acknowledged_failed", 1, { error: FAILED }),
@@ -329,10 +389,13 @@ test("an agent that waits to try again has a row in the room's live strip, with 
   assert.deepEqual(waitingAgentIndicators([running], "room-a", clock), []);
 
   // The agent is not working, so it has no working row: the two never show together. No room message retires the row
-  // that waits, and it stays among the rows that the strip shows when many agents work.
+  // that waits, and it has a place among the rows that the strip shows when few agents work.
   assert.deepEqual(supervisedAgentWorkIndicators([retrying], [], "room-a"), []);
   const [row] = waitingAgentIndicators([retrying], "room-a", clock);
   assert.equal(workIndicatorSupersededByAgentMessage(row!, [{ id: "msg_1", agentIdentity: null }, { id: "msg_2", agentIdentity: { agentSessionId: "session_1" } as never }]), false);
   const working = Array.from({ length: 6 }, (_, index) => ({ id: `w${index}`, displayName: `W${index}`, summary: "Working", startedAt: new Date(NOW - index * 1_000).toISOString() }));
-  assert.ok(collapseWorkIndicators([...working, row!]).visible.some((item) => item.id === "supervised_copper:waiting"));
+  // It stays among the rows that the strip shows, as long as it does not take the place of a row of work.
+  assert.ok(collapseWorkIndicators([...working.slice(0, 2), row!]).visible.some((item) => item.id === "supervised_copper:waiting"));
+  assert.ok(!collapseWorkIndicators([...working, row!]).visible.some((item) => item.id === "supervised_copper:waiting"), "a row of work is never hidden by it");
+  assert.deepEqual(collapseWorkIndicators([...working, row!]).visible.map((item) => item.id), ["w0", "w1", "w2"]);
 });
