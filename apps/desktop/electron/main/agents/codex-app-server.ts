@@ -69,6 +69,21 @@ interface CodexAppServerLaunchOptions {
   sandboxed?: boolean;
   /** That sandbox lets a command write the project, so the folders the Codex config adds to it are checked. */
   writableSandbox?: boolean;
+  /**
+   * The agent's access level is Read-only, and this is the name of the
+   * permission profile its conversations are started with. A managed launch
+   * then defines that profile, with a `deny` for the owner's sign-in file, or
+   * does not start.
+   */
+  hideSignInProfile?: string;
+  /**
+   * The agent's policy is the Read-only level's own: Codex's read-only
+   * sandbox, and nobody to ask. That sandbox alone keeps no file from a
+   * command, so a managed launch with this policy starts only together with
+   * the level's permission profile (`hideSignInProfile`). A caller that has
+   * the policy and did not name the level has none, and is refused.
+   */
+  readOnlySandbox?: boolean;
   /** The Codex home for this launch, in place of the owner's. A managed launch sets it. */
   codexHome?: string;
 }
@@ -553,6 +568,17 @@ export function launchCodexAppServer(
 }
 
 /**
+ * Why a launch that has the Read-only policy and does not name the Read-only access level is not started. No launch
+ * of the product is put together that way, so this is an error in LetAgents, and the owner is told what still helps.
+ */
+export const READ_ONLY_POLICY_WITHOUT_LEVEL = "This Codex agent was to be started with the Read-only policy and without the name of the Read-only access level, "
+  + "so nothing would keep your Codex sign-in file from its commands. LetAgents starts no agent that way. "
+  + "Choose the agent's access level again in its settings and start it. If this comes back, it is an error in LetAgents: please report it.";
+/** Why a Read-only launch is not started when the launch was given no permission profile for it. */
+export const READ_ONLY_PROFILE_NOT_GIVEN = "LetAgents did not get the permission profile that keeps your Codex sign-in file from a Read-only agent's commands, "
+  + "so it will not start Codex at this access level. Start the agent again. If it happens again, choose another access level.";
+
+/**
  * Launch a managed agent's app-server without the owner's Codex extensions:
  * no plugins, app connectors, computer or browser use, hooks, memories,
  * notifier or personal skills, and no MCP server but the room's own, like
@@ -564,19 +590,33 @@ export function launchCodexAppServer(
  * GitHub noreply identity instead. When the owner has turned their own setup
  * on for this agent, only the extensions are left alone; the rest holds.
  * At a sandboxed access level, with or without that setup, Codex gets a home
- * without the owner's saved command rules.
+ * without the owner's saved command rules. A Read-only launch also defines
+ * the permission profile that keeps the owner's sign-in file from the agent's
+ * commands.
  */
 export async function launchManagedCodexAppServer(
   serverUrl: string,
   codexBin: string,
   options: CodexAppServerLaunchOptions = {},
+  /** How the home of a sandboxed launch is decided. Only a test gives another. */
+  dependencies: { homeForSandboxedLaunch?: typeof codexHomeForSandboxedLaunch } = {},
 ): Promise<CodexAppServerLaunch> {
   const { env: ownerHomeEnv, rental } = codexAppServerEnvironment({ ...options, codexHome: undefined });
   const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
+  const hideSignInProfile = options.hideSignInProfile?.trim() || undefined;
+  // The profile belongs to a sandbox. A launch that names one without a sandbox was put together wrongly, and is not started.
+  if (hideSignInProfile && options.sandboxed !== true) throw new Error("A Codex launch that names a Read-only permission profile must be a sandboxed one.");
+  // The Read-only policy without the level's name has no profile, and Codex's read-only sandbox alone keeps no file
+  // from a command. Refused before anything is asked of Codex: nothing is started this way.
+  if (options.readOnlySandbox === true && !hideSignInProfile) throw new Error(READ_ONLY_POLICY_WITHOUT_LEVEL);
   // Decided before anything else is asked of Codex, so every listing below reads the home the launch will.
   const home = options.sandboxed === true
-    ? await codexHomeForSandboxedLaunch(codexBin, { cwd: trustedProjectPath, env: ownerHomeEnv, writableSandbox: options.writableSandbox === true })
+    ? await (dependencies.homeForSandboxedLaunch ?? codexHomeForSandboxedLaunch)(codexBin, {
+        cwd: trustedProjectPath, env: ownerHomeEnv, writableSandbox: options.writableSandbox === true, ...(hideSignInProfile ? { hideSignInProfile } : {}),
+      })
     : null;
+  // A Read-only launch is never started without its profile, whatever answered above.
+  if (hideSignInProfile && !home?.configOverrides?.length) throw new Error(READ_ONLY_PROFILE_NOT_GIVEN);
   const codexHome = home?.codexHome ?? undefined;
   const env = codexHome ? { ...ownerHomeEnv, CODEX_HOME: codexHome } : ownerHomeEnv;
   // The launch's own directory and overrides, so the server list matches.
@@ -591,7 +631,8 @@ export async function launchManagedCodexAppServer(
   const launch = launchCodexAppServer(serverUrl, codexBin, {
     ...options,
     commitEnvironment,
-    configOverrides: [...isolation, ...(options.configOverrides ?? [])],
+    // The profile's overrides last: nothing a caller passes can name the same profile after them.
+    configOverrides: [...isolation, ...(options.configOverrides ?? []), ...(home?.configOverrides ?? [])],
     codexHome,
   });
   return { ...launch, ...(home?.notices.length ? { notices: home.notices } : {}), ...(home?.writableFoldersCheck ? { writableFoldersCheck: home.writableFoldersCheck } : {}) };
