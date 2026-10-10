@@ -881,5 +881,12 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 </style>
 
 <style scoped>
-.is-thread-open > .message-body > .message-bubble { display: block; width: 100%; max-width: 100%; }
+.message:is(.has-thread, .is-thread-open) > .message-body > .message-bubble { display: block; width: 100%; max-width: 100%; }
+.message:is(.has-thread, .is-thread-open) > .message-body > .message-bubble > :deep(.reply-preview) {
+  gap: 2px; margin: 0 0 10px; padding: 0 0 0 10px; border-color: var(--line); border-radius: 0; background: transparent;
+}
+.message:is(.has-thread, .is-thread-open) > .message-body > .message-bubble > :deep(.reply-preview .reply-preview-label) { font-weight: 500; }
+.message:is(.has-thread, .is-thread-open) > .message-body > .message-bubble > :deep(.reply-preview .reply-preview-text) {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 </style>

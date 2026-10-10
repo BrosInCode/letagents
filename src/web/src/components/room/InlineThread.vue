@@ -14,8 +14,10 @@
         @open-image-viewer="emit('openImageViewer', $event)" @open-task="emit('openTask', $event)" />
       <p v-if="!loading && !replies.length" class="inline-thread-empty">No replies yet.</p>
     </div>
-    <button v-if="scrolledUp" type="button" class="inline-thread-latest" @click="latest">Latest replies ↓</button>
-    <slot name="composer" :parent="parent" :quote="quote" :clear-quote="clearQuote" :sent="sent" />
+    <div class="inline-thread-footer">
+      <slot name="composer" :parent="parent" :quote="quote" :clear-quote="clearQuote" :sent="sent" />
+      <button v-if="scrolledUp" type="button" class="inline-thread-latest" aria-label="Latest replies" @click="latest">Latest ↓</button>
+    </div>
   </section>
 </template>
 <script setup lang="ts">
@@ -56,6 +58,7 @@ const loading = ref(false)
 const error = ref('')
 const quote = ref<RoomMessage | null>(null)
 const scrolledUp = ref(false)
+let sizeObserver: ResizeObserver | null = null
 let disposed = false
 let revision = 0
 let totalCount = 0
@@ -73,11 +76,11 @@ const replies = computed(() => {
     .map(message => [message.id, message]))
   return [...merged.values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || Number(a.id.slice(4)) - Number(b.id.slice(4)))
 })
-function onScroll() {
-  revision++
+function updateScrollState() {
   const el = body.value
   scrolledUp.value = Boolean(el && el.scrollHeight - el.clientHeight - el.scrollTop > 80)
 }
+function onScroll() { revision++; updateScrollState() }
 function latest() {
   const el = body.value
   if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'instant' })
@@ -129,19 +132,27 @@ watch(replies, async (next, previous) => {
     if (prepended) el.scrollTop = top + el.scrollHeight - height
     else if (atLatest) latest()
   }
+  updateScrollState()
   emit('rowsChanged')
 })
 watch([() => props.revealMessageId, () => props.active, () => Boolean(props.revealMessageId && replies.value.some(message => message.id === props.revealMessageId))], async ([id, active, found]) => {
   if (id && active && found) { await nextTick(); reveal(id) }
 })
 watch(() => props.active, async () => { await nextTick(); emit('rowsChanged') })
-onMounted(() => { latest(); void loadReplies() })
-onBeforeUnmount(() => { disposed = true; if (highlightTimer) clearTimeout(highlightTimer) })
+onMounted(() => {
+  latest()
+  if (typeof ResizeObserver !== 'undefined' && body.value) {
+    sizeObserver = new ResizeObserver(updateScrollState)
+    sizeObserver.observe(body.value)
+  }
+  void loadReplies()
+})
+onBeforeUnmount(() => { sizeObserver?.disconnect(); disposed = true; if (highlightTimer) clearTimeout(highlightTimer) })
 </script>
 <style scoped>
-.web-inline-thread { position: relative; min-width: 0; margin-top: 12px; }
+.web-inline-thread { position: relative; min-width: 0; margin-top: 6px; }
 .inline-replies-scroll {
-  height: clamp(230px, 34dvh, 360px); padding: 16px 6px 16px 0;
+  max-height: clamp(240px, 42dvh, 440px); padding: 14px 8px 14px 0;
   overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none;
   border-top: 1px solid var(--line, #27272a); scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--muted, #a1a1aa) 40%, transparent) transparent;
@@ -150,16 +161,29 @@ onBeforeUnmount(() => { disposed = true; if (highlightTimer) clearTimeout(highli
 .inline-thread-history { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0 12px; color: var(--muted); font-size: .78rem; }
 .inline-thread-history button { background: transparent; border: 0; color: var(--text); cursor: pointer; }
 .inline-thread-empty { color: var(--muted); font-size: .85rem; padding: 16px 0; }
-.inline-thread-latest { position: absolute; right: 10px; bottom: 66px; z-index: 2; padding: 5px 10px; border: 1px solid var(--line, #27272a); border-radius: 999px; background: var(--bg-1, #181818); color: var(--muted, #a1a1aa); font: inherit; font-size: .72rem; cursor: pointer; }
-.web-inline-thread :deep(.message.is-inline-reply) { width: 100%; max-width: none; padding: 8px 0 22px; gap: 9px; }
+.inline-thread-footer { display: flex; align-items: flex-end; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line, #27272a); }
+.web-inline-thread .inline-thread-footer :deep(.composer.inline-thread-composer) { flex: 1; min-width: 0; padding: 0; border: 0; }
+.inline-thread-latest { flex: 0 0 auto; padding: 8px 0; border: 0; background: transparent; color: var(--muted, #a1a1aa); font: inherit; font-size: .72rem; cursor: pointer; }
+.inline-thread-latest:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+.web-inline-thread :deep(.message.is-inline-reply:last-child) { padding-bottom: 0; }
+.web-inline-thread :deep(.message-meta) { position: relative; min-height: 22px; }
+@media (hover: hover) and (pointer: fine) {
+  .web-inline-thread :deep(.message-actions) {
+    position: absolute; right: 0; top: -6px; z-index: 2; display: flex; gap: 2px;
+    padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-subtle, #111);
+    opacity: 0; pointer-events: none; transition: opacity 120ms ease;
+  }
+  .web-inline-thread :deep(.is-inline-reply:is(:hover, :focus-within) .message-actions) { opacity: 1; pointer-events: auto; }
+}
+.web-inline-thread :deep(.message.is-inline-reply) { width: 100%; max-width: none; padding: 0 0 22px; gap: 9px; }
 .web-inline-thread :deep(.is-inline-reply > .message-avatar) { width: 10px; flex-basis: 10px; padding-top: 6px; }
 .web-inline-thread :deep(.is-inline-reply > .message-avatar::before) { width: 6px; height: 6px; box-shadow: none; }
 .web-inline-thread :deep(.is-inline-reply > .message-body) { width: 100%; max-width: 100%; min-width: 0; flex: 1; }
 .web-inline-thread :deep(.is-inline-reply .message-bubble) { display: block; width: 100%; max-width: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .web-inline-thread :deep(.is-inline-reply .message-bubble::before) { display: none; }
-.web-inline-thread :deep(.is-inline-reply .md-content) { font-size: .875rem; line-height: 1.65; }
+.web-inline-thread :deep(.is-inline-reply .md-content) { max-width: 68ch; font-size: .875rem; line-height: 1.6; }
 .web-inline-thread :deep(.reply-preview) { display: flex; flex-direction: row; align-items: baseline; gap: 6px; padding: 0; margin-bottom: 8px; border: 0; background: transparent; }
 .web-inline-thread :deep(.reply-preview-label) { flex: 0 0 auto; font-weight: 500; }
 .web-inline-thread :deep(.reply-preview-text) { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: .72rem; }
-@media (max-width: 600px) { .inline-replies-scroll { height: clamp(220px, 31dvh, 280px); } }
+@media (max-width: 600px) { .inline-replies-scroll { max-height: clamp(220px, 40dvh, 360px); } }
 </style>

@@ -10,6 +10,7 @@
       </span>
     </div>
     <div class="message-meta-tail">
+      <div class="message-actions">
       <button
         v-if="canReact"
         class="reply-action react-action"
@@ -48,6 +49,7 @@
           <path d="M8 7v4M8 5h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
         </svg>
       </button>
+      </div>
       <span v-if="provenanceBadge" class="provenance-badge" :class="provenanceBadge.className">
         {{ provenanceBadge.label }}
       </span>
@@ -95,6 +97,7 @@ const emit = defineEmits<{
 </script>
 
 <style scoped>
+.message-actions { display: contents; }
 .message-meta {
   display: flex;
   align-items: baseline;
