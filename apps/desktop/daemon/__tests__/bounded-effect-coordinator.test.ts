@@ -827,3 +827,26 @@ test("the Read-only room tool limit changes nothing for any other access level o
   await move.subject.prepare(prepareInput(roomToolCall("join_room")));
   assert.notEqual(move.capturedRoomMove, null);
 });
+
+test("a room tool call that was prepared before its owner saved Read-only is not run: the level is asked again when the entry is loaded before the tool runs", { timeout: 30_000 }, async () => {
+  // The agent's level is Full access when the call is prepared, and Read-only when the entry is loaded again before any I/O.
+  const savedSince = (state: ReturnType<typeof harness>) => (state.contextCalls >= 1 ? "read_only" : "full_access");
+  let state!: ReturnType<typeof harness>;
+  state = harness({ assertContext: () => { state.context.entry.permission_profile_id = savedSince(state); } });
+  await assert.rejects(state.subject.execute(executeInput(roomToolCall("update_task"))), READ_ONLY_REFUSAL("update_task"));
+  assert.equal(state.events.includes("journal:prepare"), true, "the call was prepared under the level it was made at");
+  assert.equal(state.events.includes("runtime:execute"), false, "the tool was not run");
+  assert.equal(state.capturedExecution, null);
+  // Its effect is closed as failed with the same words, so the same request is never run later.
+  assert.match(String(state.capturedCompletion?.error), /^Read-only access does not allow the room tool "update_task"\./);
+  await state.subject.drainJournalReservations();
+  await state.subject.drainExternalExecutions();
+
+  // A tool Read-only allows runs all the same, and nothing changes when the level did not.
+  let allowed!: ReturnType<typeof harness>;
+  allowed = harness({ assertContext: () => { allowed.context.entry.permission_profile_id = savedSince(allowed); } });
+  assert.equal((await allowed.subject.execute(executeInput(roomToolCall("send_message")))).state, "completed");
+  assert.equal(allowed.events.includes("runtime:execute"), true);
+  const unchanged = harness();
+  assert.equal((await unchanged.subject.execute(executeInput(roomToolCall("update_task")))).state, "completed");
+});

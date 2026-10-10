@@ -1168,11 +1168,14 @@ async function verifyNativeApproval(scenario: "command" | "command_restored_befo
     const adapter = new CodexProviderAdapter({ codexBin: "unused-offline-fixture", dependencies: {
       launchServer: () => assert.fail("approval attachment must not launch a provider"),
       signalProcess: () => assert.fail("approval payload must not signal a process"),
-      // The stand-in is this test's own process, whose command line carries no isolation override at all.
-      readCommandLine: () => assert.fail("nothing is read off the process of an agent that never had its owner's setup"),
+      // The stand-in is this test's own process. Its command line is read only before a sandboxed
+      // agent's conversation is loaded again, to compare it with what a launch would turn off now.
+      readCommandLine: async () => "codex app-server --listen stand-in",
       assertLiveProjectUnchanged: () => assert.fail("an agent without its owner's setup is never inspected"),
       // Before a sandboxed agent's conversation is loaded again, Codex is asked about command rules with the home it runs with.
-      sandboxedLoadRefusal: async (_codexBin, live) => { assert.deepEqual(live, { cwd: f.workspace, codexHome: f.workspace }); return null; },
+      sandboxedLoadRefusal: async (_codexBin, live) => { assert.deepEqual(live, { cwd: f.workspace, codexHome: f.workspace, writableSandbox: false }); return null; },
+      // And what a launch would turn off now is compared with what the process was started with.
+      assertLiveIsolationUnchanged: async (_codexBin, live) => { assert.equal(live.cwd, f.workspace); },
       observeProcessExit: () => new Promise(() => {}),
       createRpcClient: (url, notify) => {
         rpc = new CodexRpcClient(url, notify, 1_000);

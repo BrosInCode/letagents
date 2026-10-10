@@ -1255,7 +1255,7 @@ test("a running Codex is known to have its owner's setup by what it was started 
   // A project that cannot be inspected, or a folder that is not known, is never treated as unchanged.
   // That Codex could not be asked is said as that, and not as something the project did.
   await assert.rejects(check(started, { fails: true }),
-    /^Error: LetAgents could not check what this project adds to your own setup \(Codex could not be asked\), so it stopped the agent before Codex could load the project's configuration\. It starts again by itself\.$/);
+    /^Error: LetAgents could not check what this project adds to your own setup \(Codex could not be asked\), so it stopped the agent before Codex could load the project's configuration\. It starts again by itself, unless you paused it\.$/);
   await assert.rejects(check(started, { cwd: null }), /could not tell which folder this Codex agent runs in/);
   const unanswered = (which: "listServers" | "inspect") => assertLiveCodexProjectUnchanged("codex", { commandLine: started, cwd: "/work/attempt" }, {}, {
     listServers: async () => { if (which === "listServers") throw new Error("Codex could not list its MCP servers: Codex did not answer in time"); return [] as never[]; },

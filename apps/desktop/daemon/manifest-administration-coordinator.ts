@@ -14,7 +14,7 @@ import {
   type ProviderConfigurationSnapshot,
   type ProviderReasoningEffort,
 } from "./provider-configuration.js";
-import { describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
+import { CODEX_READ_ONLY_NEEDS_DELIVERY, codexReadOnlyNeedsDelivery, describeProfilesForAgent, describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
 import type {
   DaemonActivityEvent,
   DaemonAgentConfiguration,
@@ -467,7 +467,8 @@ export class ManifestAdministrationCoordinator {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
       ...configuration,
-      supervised_permission_profiles: homeHarness ? describeProfilesWithOwnerSetup(configuration.provider, profiles) : profiles,
+      supervised_permission_profiles: describeProfilesForAgent(configuration.provider, configuration.delivery_mode,
+        homeHarness ? describeProfilesWithOwnerSetup(configuration.provider, profiles) : profiles),
       home_harness: homeHarness,
       // A running process started before the last change still runs the way it started.
       home_harness_pending: availability === "available"
@@ -599,6 +600,10 @@ export class ManifestAdministrationCoordinator {
         permissionProfileId: profile === null ? null : (profile as string).trim(),
         configurationRevision: input.expectedRevision + 1,
       }, trustedPolicy);
+      // Refused where it is saved, with the reason: the launch would refuse it too, and its owner would learn it only then.
+      if (normalized.permissionProfileId === "read_only" && codexReadOnlyNeedsDelivery(currentConfiguration.provider, currentConfiguration.delivery_mode)) {
+        return { outcome: "invalid" as const, error: CODEX_READ_ONLY_NEEDS_DELIVERY };
+      }
       // The access level the running process may have: what was saved before, as the next start would read it.
       let before: string | null = null;
       try {
