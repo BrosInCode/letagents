@@ -379,10 +379,13 @@ test("a supervised Codex agent may be set to Read-only, and nothing else about C
   // The whole card, word for word: what the agent can read, what it cannot do, that it asks for no approval,
   // and that the owner's saved command rules stay away from it.
   assert.equal(readOnly.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
-  assert.equal(readOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
+  assert.equal(readOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
   const card = `${readOnly.description} ${readOnly.detail}`;
   // Reads are not limited to the project, and the card says so instead of leaving it out.
   assert.match(card, /read files on this Mac, also outside your project/);
+  // One file is kept from the agent's commands, and the card names that file and no more than it.
+  assert.match(card, /Its commands cannot read your Codex sign-in file\./);
+  assert.doesNotMatch(card, /\bsafe\b|\bprivate\b|\bsecure\b/i, "the rest of the Mac is still readable, so the card promises nothing wider");
   // The limit on the network is stated for what is enforced: the agent's own commands, and Codex's web search.
   assert.match(card, /Its commands cannot use the network, and web search is off\./);
   // It can put a question to a person in the room, so the card speaks of approvals, not of asking.

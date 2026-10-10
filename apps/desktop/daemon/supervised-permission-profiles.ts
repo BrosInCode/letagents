@@ -46,8 +46,9 @@ const codexProfiles: readonly SupervisedPermissionProfile[] = [
     id: "read_only", label: "Read-only",
     description: "Can read files on this Mac, also outside your project, and read and post in the room.",
     // Not "low": the Codex sandbox denies no read, so the agent can read every file this account can, and it can post in the room.
+    // The one file kept from its commands is the owner's Codex sign-in file, which its permission profile denies.
     status: "available", risk: "medium",
-    detail: "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.", isDefault: false,
+    detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.", isDefault: false,
   },
 ];
 
@@ -176,7 +177,7 @@ const OWNER_SETUP_DESCRIPTIONS: Readonly<Record<string, Readonly<Record<string, 
   codex: {
     read_only: {
       // Only what was seen: how Codex treats an MCP server of the owner's at this level. Hooks and plugins were not tried.
-      detail: "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews. These limits cover Codex's own commands and the room's tools only. Your own MCP tools can run without asking when your own Codex settings already approve them or their own server labels them read-only, which nothing checks. This level puts no limit of its own on your hooks and plugins.",
+      detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews. These limits cover Codex's own commands and the room's tools only. Your own MCP tools can run without asking when your own Codex settings already approve them or their own server labels them read-only, which nothing checks. This level puts no limit of its own on your hooks and plugins.",
     },
     ask_before_write: {
       detail: "Starts with read-only file access and no network access. Requests approval when it needs more access. Your own MCP tools, hooks and plugins are not held to these limits: they run as you, and some run without asking.",

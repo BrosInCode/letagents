@@ -30,7 +30,8 @@ writeFileSync(process.env.LETAGENTS_AGENT_COMMIT_IDENTITY_PATH!, JSON.stringify(
 }));
 
 const {
-  CODEX_TOKEN_SERVICE_OVERRIDES, CodexAgentHomeError, CodexAgentHomeSignInError, checkCodexKeepsLinkedSignIn, codexAgentHomeDirectory, codexHomeForSandboxedLaunch,
+  CODEX_TOKEN_SERVICE_OVERRIDES, CodexAgentHomeError, CodexAgentHomeSignInError, SIGN_IN_NOT_HIDDEN, checkCodexHonoursDeny, checkCodexKeepsLinkedSignIn,
+  codexAgentHomeDirectory, codexHomeForSandboxedLaunch, codexReadOnlyProfileId, codexReadOnlyProfileOverrides, codexSignInPaths,
   folderHolds, linkCodexAgentHome, sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal,
 } = await import("../main/agents/codex-agent-home.js");
 const {
@@ -38,7 +39,9 @@ const {
   projectCommandRulesRefusal, projectKeysRefusal, projectRuleFolders,
 } = await import("../main/agents/codex-home-harness.js");
 const { codexOwnerIsolationOverrides } = await import("../../../../shared/codex-owner-isolation.mjs");
-const { codexAppServerEnvironment, launchManagedCodexAppServer, terminateSpawnedProcess, waitForLaunchedCodexAppServer } = await import("../main/agents/codex-app-server.js");
+const {
+  READ_ONLY_POLICY_WITHOUT_LEVEL, READ_ONLY_PROFILE_NOT_GIVEN, codexAppServerEnvironment, launchManagedCodexAppServer, terminateSpawnedProcess, waitForLaunchedCodexAppServer,
+} = await import("../main/agents/codex-app-server.js");
 const { CodexProviderAdapter } = await import("../main/agents/codex-provider-adapter.js");
 const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
 const { resolveCodexExecutable } = await import("../main/agents/codex-executable.js");
@@ -323,6 +326,15 @@ test("a sandboxed launch does not start when Codex cannot be asked, when the age
  * the questions a launch asks a short-lived app-server, and refreshes a
  * sign-in file the way its `signIn` setting says: `in-place` rewrites the
  * file, `replace` writes a new file over the name, `none` leaves it.
+ *
+ * It runs a command that reads a file, as its `deny` setting says: `honoured`
+ * refuses a file its launch's permission profile denies, by any path that
+ * leads to it; `ignored` prints every file; `not-through-a-link` refuses the
+ * denied path and prints the file through a link; `no-commands` runs nothing;
+ * `quiet` ends every read of a denied file well and prints nothing;
+ * `no-field` does not know the option that names a profile. Like Codex, it
+ * takes that option only from a client that asked for the experimental part
+ * of its protocol.
  */
 function fakeCodex(settings: {
   signIn?: "in-place" | "replace" | "none"; store?: string; layers?: unknown[];
@@ -333,6 +345,7 @@ function fakeCodex(settings: {
   servers?: string[]; projectChangesRoomServer?: boolean; projectSetsRoomServerKeys?: boolean; listFails?: boolean;
   /** What it says it is when it is asked for its settings, and the folders its config lets a sandboxed command write. */
   userAgent?: string; writableRoots?: string[];
+  deny?: "honoured" | "ignored" | "not-through-a-link" | "no-commands" | "quiet" | "no-field";
 } = {}): {
   bin: string; calls: () => Array<{ args: string[]; cwd: string; codexHome: string | null; refreshUrl: string | null; revokeUrl: string | null; room: string | null }>;
 } {
@@ -359,9 +372,21 @@ function fakeCodex(settings: {
     "}",
     "if (args[0] === 'app-server' && args.includes('stdio://')) {",
     "  const send = (m) => process.stdout.write(JSON.stringify(m) + '\\n');",
+    "  let experimental = false;",
+    "  const denied = args.filter((arg) => arg.startsWith('permissions.')).flatMap((arg) => [...arg.matchAll(/\"([^\"]+)\" = \"deny\"/g)].map((match) => match[1]));",
     "  require('node:readline').createInterface({ input: process.stdin }).on('line', async (line) => {",
     "    const m = JSON.parse(line);",
-    "    if (m.method === 'initialize') send({ id: m.id, result: settings.userAgent ? { userAgent: settings.userAgent } : {} });",
+    "    if (m.method === 'initialize') { experimental = m.params?.capabilities?.experimentalApi === true; send({ id: m.id, result: settings.userAgent ? { userAgent: settings.userAgent } : {} }); }",
+    "    if (m.method === 'command/exec') {",
+    "      const how = settings.deny ?? 'honoured';",
+    "      if (how === 'no-field' || !experimental || typeof m.params.permissionProfile !== 'string') { send({ id: m.id, error: { message: 'unknown field' } }); return; }",
+    "      const file = m.params.command.at(-1);",
+    "      const real = (name) => { try { return fs.realpathSync(name); } catch { return name; } };",
+    "      const refused = how === 'no-commands' || (how === 'honoured' && denied.some((name) => real(name) === real(file)))",
+    "        || (how === 'not-through-a-link' && denied.includes(file) && !fs.lstatSync(file).isSymbolicLink());",
+    "      const quiet = how === 'quiet' && denied.some((name) => real(name) === real(file));",
+    "      send({ id: m.id, result: quiet ? { exitCode: 0, stdout: '', stderr: '' } : refused ? { exitCode: 1, stdout: '', stderr: 'Operation not permitted' } : { exitCode: 0, stdout: fs.readFileSync(file, 'utf8'), stderr: '' } });",
+    "    }",
     "    if (m.method === 'config/read') send({ id: m.id, result: { config: { cli_auth_credentials_store: settings.store, sandbox_workspace_write: { writable_roots: settings.writableRoots ?? [] } }, layers: settings.layers ?? [] } });",
     "    if (m.method === 'hooks/list') send({ id: m.id, result: { data: m.params.cwds.map((cwd) => ({ cwd, hooks: [] })) } });",
     "    if (m.method === 'account/read') {",
@@ -2011,4 +2036,236 @@ test("before a running Codex without its owner's setup loads a conversation, wha
   for (const process of [live, found]) await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, process, env), /Codex could not list its MCP servers/);
   settle({ servers: ["owner_browser"] });
   await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, { ...live, cwd: null }, env), /could not tell which folder this Codex agent runs in/);
+});
+
+// ---- The permission profile that keeps the sign-in file from a Read-only agent's commands ----
+
+const READ_ONLY_ATTEMPT = "0f8fad5b-d9cb-469f-a165-70867728950e";
+
+test("a Read-only agent's permission profile is Codex's read-only one with the sign-in file denied at every path that names it, under a name of its own work attempt", () => {
+  const owner = ownerHome();
+  linkCodexAgentHome(owner.codexHome, owner.agentHome);
+  const signIn = join(owner.codexHome, "auth.json");
+  const link = join(owner.agentHome, "auth.json");
+
+  // The name is the work attempt's, so no config file can hold a profile of that name before the attempt exists.
+  const profile = codexReadOnlyProfileId(READ_ONLY_ATTEMPT);
+  assert.match(profile, /^letagents_read_only_[0-9a-f]{24}$/);
+  assert.equal(codexReadOnlyProfileId(READ_ONLY_ATTEMPT), profile);
+  assert.notEqual(codexReadOnlyProfileId("another-work-attempt"), profile);
+  assert.equal(profile.includes(READ_ONLY_ATTEMPT), false, "the name does not hold the id it is made from");
+
+  // With the agents' home: the owner's file, which the sandbox holds a command to, and the link, so that the deny rests on neither alone.
+  assert.deepEqual(codexSignInPaths(owner.env, owner.agentHome), [signIn, link]);
+  assert.deepEqual(codexReadOnlyProfileOverrides(profile, [signIn, link]), [
+    `permissions.${profile}={ extends = ":read-only", filesystem = { ${JSON.stringify(signIn)} = "deny", ${JSON.stringify(link)} = "deny" } }`,
+    `default_permissions=${JSON.stringify(profile)}`,
+  ]);
+  // With the owner's own home there is no link to name.
+  assert.deepEqual(codexSignInPaths(owner.env, null), [signIn]);
+
+  // A home that is reached through a link is named by where it is, and so is an agents' home.
+  const through = fixture("through-a-link");
+  symlinkSync(owner.codexHome, join(through, "codex"));
+  symlinkSync(join(owner.home, ".letagents"), join(through, "agents"));
+  assert.deepEqual(codexSignInPaths({ ...owner.env, CODEX_HOME: join(through, "codex") }, join(through, "agents", "codex-agent-home")),
+    [signIn, join(through, "agents", "codex-agent-home", "auth.json"), link]);
+  // A sign-in file that is a link itself: the file it leads to is named too.
+  const kept = join(fixture("kept-elsewhere"), "sign-in.json");
+  writeFileSync(kept, '{"pretend":"owner sign-in"}\n');
+  execFileSync("rm", [signIn]);
+  symlinkSync(kept, signIn);
+  assert.deepEqual(codexSignInPaths(owner.env, null), [signIn, kept]);
+  // No sign-in file yet: its path is named all the same, and a deny for it holds once the file is there.
+  execFileSync("rm", [signIn]);
+  assert.deepEqual(codexSignInPaths(owner.env, null), [signIn]);
+});
+
+test("the deny check passes only for a Codex that keeps the denied file from a command, at its path and through a link, and still runs a command", async (t) => {
+  const temp = fixture("the-temp-folder");
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = temp;
+  t.after(() => { if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous; });
+  const env = { PATH: process.env.PATH, CODEX_REFRESH_TOKEN_URL_OVERRIDE: "http://127.0.0.1:9/stray" };
+
+  const parent = fixture("beside-the-agents-home");
+  const honest = fakeCodex();
+  assert.equal(await checkCodexHonoursDeny(honest.bin, env, parent), true);
+  assert.deepEqual(readdirSync(parent), [], "the check's folder is removed");
+  assert.deepEqual(readdirSync(temp), [], "nothing was made in the temp folder");
+  // One short-lived Codex, in a home of the check's own beside the agents' home, with the profile given as a launch gives it.
+  const [asked] = honest.calls();
+  assert.equal(honest.calls().length, 1);
+  assert.equal(join(asked!.cwd, ".."), parent);
+  assert.equal(asked!.codexHome, join(asked!.cwd, "home"));
+  assert.equal(asked!.refreshUrl, null, "the check gives Codex no token service");
+  const overrides = asked!.args.filter((arg, index) => asked!.args[index - 1] === "-c");
+  assert.deepEqual(overrides.slice(-2), codexReadOnlyProfileOverrides("letagents_read_only_check", [join(asked!.cwd, "denied.txt"), join(asked!.cwd, "home", "linked.txt")]));
+  assert.ok(overrides.includes("features.plugins=false") && overrides.includes("notify=[]"), "none of an owner's extensions is on");
+  assert.equal(overrides.filter((override) => /base_url=/.test(override)).every((override) => override.includes("http://127.0.0.1:9")), true, "every address leads nowhere");
+
+  // A Codex that prints the denied file, that prints it through the link, that runs no command, or that does not know the option, does not pass.
+  // Nor does one whose command ends well and prints nothing: a read that is refused ends badly, and only that is taken as a refusal.
+  for (const deny of ["ignored", "not-through-a-link", "no-commands", "quiet", "no-field"] as const) {
+    const beside = fixture("beside");
+    assert.equal(await checkCodexHonoursDeny(fakeCodex({ deny }).bin, env, beside), false, deny);
+    assert.deepEqual(readdirSync(beside), [], `${deny}: the folder is removed all the same`);
+  }
+  // Nor does a command that is not Codex at all.
+  assert.equal(await checkCodexHonoursDeny("/usr/bin/false", env, fixture("beside")), false);
+
+  // Something appears in the check's folder after it is made and before Codex starts: Codex is not started, and the answer is no.
+  for (const planted of ["home/config.toml", "home/rules", "config.toml", "anything-else"]) {
+    const beside = fixture("beside");
+    const planting = fakeCodex();
+    const watched = Object.defineProperty({} as NodeJS.ProcessEnv, "PATH", { enumerable: true, get: () => {
+      const path = join(beside, readdirSync(beside)[0]!, planted);
+      if (!existsSync(path)) writeFileSync(path, "planted\n");
+      return process.env.PATH;
+    } });
+    assert.equal(await checkCodexHonoursDeny(planting.bin, watched, beside), false, planted);
+    assert.deepEqual(planting.calls(), [], `${planted}: Codex was never started`);
+    assert.deepEqual(readdirSync(beside), [], `${planted}: the folder is removed all the same`);
+  }
+});
+
+test("a Read-only launch is given its profile only when this Codex has shown that it honours a deny, and is refused otherwise: it is never started without the profile", async () => {
+  const profile = codexReadOnlyProfileId(READ_ONLY_ATTEMPT);
+  const asked: Array<string | null> = [];
+  const launch = (owner: ReturnType<typeof ownerHome>, honours: boolean, options: { store?: string; readOnly?: boolean } = {}) => codexHomeForSandboxedLaunch("codex", {
+    env: owner.env, ...(options.readOnly === false ? {} : { hideSignInProfile: profile }),
+  }, {
+    inspect: async () => ({ ...noProject, credentialStore: options.store ?? "file" }), keepsLinkedSignIn: async () => true,
+    honoursDeny: async (_bin, _env, version) => { asked.push(version); return honours; },
+  });
+
+  // With the agents' home: the owner's sign-in file and the link to it are denied.
+  const owner = ownerHome({ rules: false });
+  assert.deepEqual(await launch(owner, true), {
+    codexHome: owner.agentHome, notices: [],
+    configOverrides: codexReadOnlyProfileOverrides(profile, [join(owner.codexHome, "auth.json"), join(owner.agentHome, "auth.json")]),
+  });
+  // The check is asked for the Codex that answered for its settings.
+  assert.deepEqual(asked, ["codex-stand-in/1.0"]);
+  // With the owner's own home, as when Codex keeps its sign-in elsewhere: the file's path is denied all the same.
+  const keyring = ownerHome({ rules: false });
+  assert.deepEqual(await launch(keyring, true, { store: "keyring" }), {
+    codexHome: null, notices: [], configOverrides: codexReadOnlyProfileOverrides(profile, [join(keyring.codexHome, "auth.json")]),
+  });
+
+  // A Codex that has not shown it: the launch is refused in words that are true and name a way out, with either home.
+  // True for a Codex that is too old and for one that is newer than LetAgents knows: the check cannot tell which.
+  assert.equal(SIGN_IN_NOT_HIDDEN, "Read-only access keeps your Codex sign-in file from the agent's commands, and LetAgents could not confirm that this version of Codex does that: "
+    + "it asked Codex to keep a made-up file from a command, and Codex did not show that it does. So LetAgents will not start Codex at this access level. "
+    + "If Codex is not up to date, update it and start the agent again. If it is, update LetAgents, or choose another access level: at every other level the agent's commands can read that file.");
+  const refusal = (error: unknown) => (error as Error).message === SIGN_IN_NOT_HIDDEN;
+  await assert.rejects(launch(ownerHome({ rules: false }), false), refusal);
+  await assert.rejects(launch(ownerHome({ rules: false }), false, { store: "keyring" }), refusal);
+
+  // No other sandboxed launch is asked, changed or refused.
+  asked.length = 0;
+  const other = ownerHome({ rules: false });
+  assert.deepEqual(await launch(other, false, { readOnly: false }), { codexHome: other.agentHome, notices: [] });
+  assert.deepEqual(asked, []);
+});
+
+test("a managed Read-only launch starts Codex with the profile's overrides last, starts nothing when the deny is not honoured, and checks each Codex once", async () => {
+  const profile = codexReadOnlyProfileId(READ_ONLY_ATTEMPT);
+  const project = fixture("project");
+  execFileSync("git", ["init", "-q"], { cwd: project });
+  const kind = (call: { args: string[] }) => call.args[0] === "mcp" ? "list" : call.args.includes("stdio://") ? "ask" : "launch";
+  const given = (call: { args: string[] }) => call.args.filter((arg, index) => call.args[index - 1] === "-c");
+  const readOnly = (owner: ReturnType<typeof ownerHome>, codex: ReturnType<typeof fakeCodex>) => launchManagedCodexAppServer("ws://127.0.0.1:1", codex.bin, {
+    trustedProjectPath: project, configOverrides: ['web_search="disabled"'], env: owner.env, sandboxed: true, hideSignInProfile: profile });
+
+  const owner = ownerHome();
+  const honest = fakeCodex({ userAgent: "codex-stand-in/1.0" });
+  const launch = await readOnly(owner, honest);
+  await waitForExit(launch);
+  // Asked for its settings, checked for the sign-in and for the deny, each in a scratch home, then listed and started with the agents' home.
+  assert.deepEqual(honest.calls().map(kind), ["ask", "ask", "ask", "list", "list", "launch"]);
+  const started = honest.calls().at(-1)!;
+  assert.equal(started.codexHome, owner.agentHome);
+  assert.deepEqual(given(started).slice(-3), ['web_search="disabled"',
+    ...codexReadOnlyProfileOverrides(profile, [join(owner.codexHome, "auth.json"), join(owner.agentHome, "auth.json")])]);
+  // The listings that decide which servers are turned off are not given the profile: it changes none of them.
+  assert.equal(honest.calls().filter((call) => kind(call) === "list").some((call) => call.args.some((arg) => arg.startsWith("permissions."))), false);
+  assert.deepEqual(readdirSync(join(owner.home, ".letagents")), ["codex-agent-home"], "both checks' folders are removed");
+  // A second Read-only launch with the same Codex checks neither again.
+  await waitForExit(await readOnly(ownerHome(), honest));
+  assert.deepEqual(honest.calls().slice(6).map(kind), ["ask", "list", "list", "launch"]);
+
+  // A Codex that does not honour the deny: nothing is started, with the owner's home or the agents', and the next launch checks again.
+  const careless = fakeCodex({ userAgent: "codex-stand-in/1.0", deny: "ignored" });
+  for (const attempt of [1, 2]) {
+    await assert.rejects(readOnly(ownerHome(), careless), (error: unknown) => (error as Error).message === SIGN_IN_NOT_HIDDEN, String(attempt));
+  }
+  assert.deepEqual(careless.calls().map(kind), ["ask", "ask", "ask", "ask", "ask"], "its settings, the sign-in check once, and the deny check at each launch: never a launch");
+  // Once it honours it, the launch starts, and the pass is remembered.
+  writeFileSync(join(careless.bin, "..", "settings.json"), JSON.stringify({ signIn: "in-place", store: "file", userAgent: "codex-stand-in/1.0", deny: "honoured" }));
+  await waitForExit(await readOnly(ownerHome(), careless));
+  await waitForExit(await readOnly(ownerHome(), careless));
+  assert.deepEqual(careless.calls().slice(5).map(kind), ["ask", "ask", "list", "list", "launch", "ask", "list", "list", "launch"]);
+
+  // A profile belongs to a sandboxed launch, and every other sandboxed launch is as it was: no profile, and no check for one.
+  await assert.rejects(launchManagedCodexAppServer("ws://127.0.0.1:1", honest.bin, { trustedProjectPath: project, configOverrides: [], env: ownerHome().env, hideSignInProfile: profile }),
+    /^Error: A Codex launch that names a Read-only permission profile must be a sandboxed one\.$/);
+  const plain = fakeCodex({ userAgent: "codex-stand-in/1.0" });
+  await waitForExit(await launchManagedCodexAppServer("ws://127.0.0.1:1", plain.bin, { trustedProjectPath: project, configOverrides: [], env: ownerHome().env, sandboxed: true }));
+  assert.deepEqual(plain.calls().map(kind), ["ask", "ask", "list", "list", "launch"]);
+  assert.equal(plain.calls().some((call) => call.args.some((arg) => /^(?:permissions\.|default_permissions=)/.test(arg))), false);
+});
+
+test("the launch starts no Codex for the Read-only policy without the level's profile, whoever asks, and none for a Read-only launch that was given no profile", async () => {
+  const project = fixture("project");
+  execFileSync("git", ["init", "-q"], { cwd: project });
+  const readOnlyPolicy = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const exactly = (text: string) => (error: unknown) => (error as Error).message === text;
+  assert.equal(READ_ONLY_POLICY_WITHOUT_LEVEL, "This Codex agent was to be started with the Read-only policy and without the name of the Read-only access level, "
+    + "so nothing would keep your Codex sign-in file from its commands. LetAgents starts no agent that way. "
+    + "Choose the agent's access level again in its settings and start it. If this comes back, it is an error in LetAgents: please report it.");
+
+  // Asked directly: refused before Codex is asked anything.
+  const direct = fakeCodex({ userAgent: "codex-stand-in/1.0" });
+  await assert.rejects(launchManagedCodexAppServer("ws://127.0.0.1:1", direct.bin, { trustedProjectPath: project, configOverrides: [], env: ownerHome().env, sandboxed: true, readOnlySandbox: true }),
+    exactly(READ_ONLY_POLICY_WITHOUT_LEVEL));
+  assert.deepEqual(direct.calls(), [], "Codex was not asked and not started");
+
+  // Asked by the adapter, for a caller that has the Read-only policy and leaves the level's name out: the same.
+  const throughAdapter = async (codex: ReturnType<typeof fakeCodex>, request: Record<string, unknown>) => {
+    const owner = ownerHome();
+    const adapter = new CodexProviderAdapter({ codexBin: codex.bin, dependencies: {
+      resolveServerUrl: async () => "ws://127.0.0.1:1",
+      launchServer: (url, bin, options) => launchManagedCodexAppServer(url, bin, { ...options, env: owner.env }),
+      // The stand-in writes down how it was started and ends: it never answers on its address.
+      waitForServer: async (_url, launch) => { await waitForExit(launch); return false; },
+      signalProcess: () => {},
+    } });
+    return adapter.spawn({ ...spawnRequest, cwd: project, deliveryMode: "daemon_inbox", ...request } as never);
+  };
+  const unnamed = fakeCodex({ userAgent: "codex-stand-in/1.0" });
+  await assert.rejects(throughAdapter(unnamed, { launchPolicy: readOnlyPolicy }), exactly(READ_ONLY_POLICY_WITHOUT_LEVEL));
+  assert.deepEqual(unnamed.calls(), [], "Codex was not asked and not started");
+  // The same caller with the level's name gets as far as a started Codex, with the profile.
+  const named = fakeCodex({ userAgent: "codex-stand-in/1.0" });
+  await assert.rejects(throughAdapter(named, { permissionProfileId: "read_only", configurationRevision: 1, launchPolicy: readOnlyPolicy }), /Timed out waiting for Codex app-server/);
+  const started = named.calls().at(-1)!;
+  assert.equal(started.args.includes("stdio://"), false, "the last call is the launch itself");
+  assert.equal(started.args.some((arg) => arg.startsWith(`permissions.${codexReadOnlyProfileId(spawnRequest.workAttemptId)}=`)), true);
+  // Another level that has the read-only sandbox and asks its owner is not the Read-only policy, and starts as before.
+  const asking = fakeCodex({ userAgent: "codex-stand-in/1.0" });
+  await assert.rejects(throughAdapter(asking, { permissionProfileId: "ask_before_write", configurationRevision: 1,
+    launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } }), /Timed out waiting for Codex app-server/);
+  assert.equal(asking.calls().some((call) => call.args.some((arg) => arg.startsWith("permissions."))), false);
+
+  // A Read-only launch that names its profile and is given no overrides for it, whatever decided its home: nothing is started either.
+  const notGiven = fakeCodex({ userAgent: "codex-stand-in/1.0" });
+  for (const home of [{ codexHome: null, notices: [] }, { codexHome: null, notices: [], configOverrides: [] }]) {
+    await assert.rejects(launchManagedCodexAppServer("ws://127.0.0.1:1", notGiven.bin, {
+      trustedProjectPath: project, configOverrides: [], env: ownerHome().env, sandboxed: true, readOnlySandbox: true, hideSignInProfile: codexReadOnlyProfileId(READ_ONLY_ATTEMPT),
+    }, { homeForSandboxedLaunch: async () => home }), exactly(READ_ONLY_PROFILE_NOT_GIVEN));
+  }
+  assert.deepEqual(notGiven.calls(), [], "Codex was not asked and not started");
+  assert.equal(READ_ONLY_PROFILE_NOT_GIVEN, "LetAgents did not get the permission profile that keeps your Codex sign-in file from a Read-only agent's commands, "
+    + "so it will not start Codex at this access level. Start the agent again. If it happens again, choose another access level.");
 });

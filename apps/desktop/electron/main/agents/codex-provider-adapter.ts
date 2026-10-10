@@ -18,7 +18,9 @@ import {
   type CodexAppServerExit,
   type CodexAppServerLaunch,
 } from "./codex-app-server.js";
-import { sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal } from "./codex-agent-home.js";
+import {
+  CODEX_BUILT_IN_READ_ONLY_PROFILE, codexReadOnlyProfileId, sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal,
+} from "./codex-agent-home.js";
 import {
   STARTS_AGAIN_BY_ITSELF,
   assertLiveCodexIsolationUnchanged,
@@ -106,7 +108,9 @@ import {
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
-type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown; approvalPolicy?: unknown; sandbox?: unknown; cwd?: unknown; reasoningEffort?: unknown };
+type CodexThreadResult = {
+  thread?: { id?: string }; approvalsReviewer?: unknown; approvalPolicy?: unknown; sandbox?: unknown; activePermissionProfile?: unknown; cwd?: unknown; reasoningEffort?: unknown;
+};
 
 /** How long a start waits for Codex to list its models before it leaves the reasoning effort out. */
 const CODEX_MODEL_LIST_TIMEOUT_MS = 5_000;
@@ -256,28 +260,75 @@ function codexReadOnlySandboxWidened(sandbox: unknown, depth = 0): boolean {
 }
 
 /**
- * A thread asked for Read-only must report it: the read-only sandbox with no
- * network, and nobody to ask. The owner's own Codex settings or an older
- * app-server could leave the thread another sandbox or approval policy, and
- * the reply to thread/start and thread/resume is the only word on what the
- * thread got. The reply is held to the three things the level promises: the
- * sandbox is the read-only one, its network access is off, and the approval
- * policy is `never`. A missing one starts no turn, and so does a part that
- * widens the sandbox (see above). No other access level is checked here.
+ * Said when a reply has the read-only sandbox and does not name the permission profile. LetAgents cannot tell an
+ * older Codex, which does not report a profile, from a newer one that reports it another way. So the line claims
+ * neither, and names what helps in each case.
  */
-function assertCodexReadOnlyApplied(policy: Record<string, unknown>, result: CodexThreadResult): void {
-  if (!codexThreadIsReadOnly(policy) || codexReplyIsReadOnly(result)) return;
+const SIGN_IN_PROTECTION_NOT_CONFIRMED = "This version of Codex did not confirm that it keeps your Codex sign-in file from this agent's commands, so the agent was not started. "
+  + "If Codex is not up to date, update it. If it is, update LetAgents, or choose another access level: at every other level the agent's commands can read that file.";
+
+/**
+ * A thread asked for Read-only must report it: the read-only sandbox with no
+ * network, nobody to ask, and the permission profile of this work attempt.
+ * The owner's own Codex settings or an older app-server could leave the
+ * thread another sandbox or approval policy, and the reply to thread/start
+ * and thread/resume is the only word on what the thread got. The reply is
+ * held to the four things the level promises: the sandbox is the read-only
+ * one, its network access is off, the approval policy is `never`, and the
+ * profile is the one that keeps the owner's sign-in file from a command. A
+ * missing one starts no turn, and so does a part that widens the sandbox (see
+ * above). No other access level is checked here.
+ *
+ * `profile` is the permission profile the runtime names in its requests: the
+ * one of a Read-only agent's work attempt. It is null for a launch that names
+ * no access level and has this policy all the same. The product's launch
+ * refuses to start Codex for such a caller (see `readOnlySandbox`), so only a
+ * stand-in for the launch gets this far: a test's, or the replay of a
+ * transcript that was recorded before the level named a profile. It names the
+ * sandbox as before, and its reply is held to the sandbox and the approval
+ * policy alone.
+ *
+ * What a reply cannot show is that the `deny` is in force: Codex 0.153.4
+ * reports the same after it has dropped one. So this is one of two checks.
+ * The other is made at the launch, with a made-up file, and every request of
+ * a Read-only runtime names the profile, so that Codex is never left to keep
+ * or drop it by itself.
+ */
+function assertCodexReadOnlyApplied(policy: Record<string, unknown>, result: CodexThreadResult, profile: string | null): void {
+  if (!codexThreadIsReadOnly(policy) || codexReplyIsReadOnly(result, profile)) return;
+  if (codexReplyHasReadOnlySandbox(result)) throw new Error(SIGN_IN_PROTECTION_NOT_CONFIRMED);
   throw new Error("Codex did not confirm Read-only access for this agent, so the agent was not started. Update Codex, or choose another access level.");
 }
 
-/** What a conversation's reply says of its approval policy and sandbox. */
-type CodexReportedAccess = Pick<CodexThreadResult, "approvalPolicy" | "sandbox">;
+/** What a conversation's reply says of its approval policy, its sandbox and its permission profile. */
+type CodexReportedAccess = Pick<CodexThreadResult, "approvalPolicy" | "sandbox" | "activePermissionProfile">;
 
-/** Whether a reply reports the three things Read-only promises, and no part that widens the sandbox. */
-function codexReplyIsReadOnly(result: CodexReportedAccess): boolean {
+/** Whether a reply reports the sandbox and the approval policy Read-only promises, and no part that widens the sandbox. */
+function codexReplyHasReadOnlySandbox(result: CodexReportedAccess): boolean {
   const sandbox = recordValue(result.sandbox);
   return result.approvalPolicy === "never" && sandbox?.type === "readOnly" && sandbox.networkAccess === false
     && !codexReadOnlySandboxWidened(sandbox);
+}
+
+/** Whether a reply names this permission profile, as one that extends Codex's own read-only profile. */
+function codexReplyNamesProfile(result: CodexReportedAccess, profile: string): boolean {
+  const active = recordValue(result.activePermissionProfile);
+  return active?.id === profile && active.extends === CODEX_BUILT_IN_READ_ONLY_PROFILE;
+}
+
+/** Whether a reply reports everything Read-only promises: the sandbox, the approval policy, and the permission profile of a runtime that names one. */
+function codexReplyIsReadOnly(result: CodexReportedAccess, profile: string | null): boolean {
+  return codexReplyHasReadOnlySandbox(result) && (profile === null || codexReplyNamesProfile(result, profile));
+}
+
+/**
+ * The permission profile a runtime with this policy names when it was found
+ * running: the one of its work attempt for the Read-only policy, and none
+ * otherwise. A process found running names no access level, so its policy
+ * says it. A launch goes by the level's own name.
+ */
+function codexFoundProfile(turnPolicy: Readonly<Record<string, unknown>> | null, workAttemptId: string): string | null {
+  return codexTurnPolicyIsReadOnly(turnPolicy) ? codexReadOnlyProfileId(workAttemptId) : null;
 }
 
 /** Whether a runtime's own policy is Read-only's. A process found running names no access level, so its policy says it. */
@@ -286,13 +337,46 @@ function codexTurnPolicyIsReadOnly(turnPolicy: Readonly<Record<string, unknown>>
 }
 
 /**
+ * What a conversation is started or loaded with. A Read-only runtime names
+ * its permission profile in place of the read-only sandbox: Codex takes one
+ * or the other, never both, and only the profile keeps the owner's sign-in
+ * file from a command. A runtime that names no profile is as it was.
+ */
+function codexThreadAccess(policy: Record<string, unknown>, profile: string | null): Record<string, unknown> {
+  if (profile === null) return policy;
+  // The profile stands in for the read-only sandbox and for no other.
+  if (!codexThreadIsReadOnly(policy)) throw new Error("A Codex permission profile was named for a conversation whose policy is not Read-only's.");
+  const { sandbox: _namedSandbox, ...named } = policy;
+  return { ...named, permissions: profile };
+}
+
+/**
+ * What a turn is started with: the same, for a turn's policy. A turn that
+ * named the sandbox instead would take the profile's name off the
+ * conversation, and Codex would be left to keep its `deny` or to drop it.
+ */
+function codexTurnAccess(turnPolicy: Readonly<Record<string, unknown>>, profile: string | null): Readonly<Record<string, unknown>> {
+  if (profile === null) return turnPolicy;
+  if (!codexTurnPolicyIsReadOnly(turnPolicy)) throw new Error("A Codex permission profile was named for a turn whose policy is not Read-only's.");
+  const { sandboxPolicy: _namedSandbox, ...named } = turnPolicy;
+  return Object.freeze({ ...named, permissions: profile });
+}
+
+/**
  * For a Read-only runtime found running: what its loaded conversation reports
  * when that is not Read-only, as a line for its owner. Null when it reports
  * Read-only, and for every other access level. Only the names Codex gives its
- * policy and its sandbox are repeated, short and in quotes.
+ * policy and its sandbox are repeated, short and in quotes. A conversation
+ * that has the sandbox and not the profile is said so: a process that was
+ * started before Read-only agents were given a profile is found this way.
  */
-function codexFoundNotReadOnly(turnPolicy: Readonly<Record<string, unknown>> | null, result: CodexReportedAccess): string | null {
-  if (!codexTurnPolicyIsReadOnly(turnPolicy) || codexReplyIsReadOnly(result)) return null;
+function codexFoundNotReadOnly(turnPolicy: Readonly<Record<string, unknown>> | null, result: CodexReportedAccess, profile: string | null): string | null {
+  if (!codexTurnPolicyIsReadOnly(turnPolicy) || codexReplyIsReadOnly(result, profile)) return null;
+  if (codexReplyHasReadOnlySandbox(result)) {
+    const reported = recordValue(result.activePermissionProfile) ? "another permission profile than the one LetAgents gave it" : "no permission profile";
+    return `Codex reported ${reported} for this agent's conversation, so nothing says that your Codex sign-in file is kept from its commands. `
+      + "That is not Read-only access";
+  }
   const named = (value: unknown) => typeof value === "string" && value ? shownInNotice(value)
     : value === undefined || value === null ? "none" : "one this build does not know";
   const sandbox = recordValue(result.sandbox);
@@ -416,7 +500,13 @@ export interface CodexProviderAdapterDependencies {
   launchServer(
     serverUrl: string,
     codexBin: string,
-    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean; sandboxed?: boolean; writableSandbox?: boolean },
+    options: {
+      trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean; sandboxed?: boolean; writableSandbox?: boolean;
+      /** A Read-only launch: the name of the permission profile the launch must define, with the sign-in file denied. */
+      hideSignInProfile?: string;
+      /** The policy is the Read-only level's own. The launch starts nothing for it without that profile. */
+      readOnlySandbox?: boolean;
+    },
   ): CodexAppServerLaunch | Promise<CodexAppServerLaunch>;
   waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
   createRpcClient(
@@ -638,10 +728,12 @@ const boundedMcpEnvironment = {
 
 /**
  * Version 2: a sandboxed agent runs with a Codex home that has no saved
- * command rules. A process started under version 1 is replaced when it is
- * idle, so this number never goes back.
+ * command rules. Version 3: a Read-only agent's conversations name a
+ * permission profile that keeps the owner's sign-in file from its commands.
+ * A process started under an earlier version is replaced when it is idle, so
+ * this number never goes back.
  */
-export const CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION = 2;
+export const CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION = 3;
 
 // The room tools a Read-only agent may use: Codex is told to run these without
 // asking and to refuse every other one. Codex 0.153.4 was seen to refuse a
@@ -1096,7 +1188,8 @@ class CodexProviderHandle implements ProviderHandle {
   ownerSetup = false;
   /**
    * This runtime is a Read-only agent's: every conversation it starts or loads
-   * again is given the Read-only config. From its launch, the level by name.
+   * again is given the Read-only config, and names the Read-only permission
+   * profile in place of a sandbox. From its launch, the level by name.
    * For a process found running, whose level is not named, its policy says it:
    * when it is found with its policy, and when the policy is bound later.
    */
@@ -1193,6 +1286,7 @@ class CodexProviderHandle implements ProviderHandle {
     });
   }
 
+  /** The access every turn of this runtime is started with, once nothing stands against a turn. */
   requireTurnPolicy(): Readonly<Record<string, unknown>> {
     if (!this.turnPolicy) throw new Error("Codex cannot start a turn without its exact applied permission policy; restart the agent to apply its configuration.");
     // Its process is being stopped. Should the stop fail, it still takes no turn.
@@ -1213,7 +1307,16 @@ class CodexProviderHandle implements ProviderHandle {
         ?? this.writableFoldersRefusal();
       if (refusal) throw new Error(refusal);
     }
-    return this.turnPolicy;
+    // What the turn is started with: for a Read-only runtime its permission profile, never a sandbox by name.
+    return codexTurnAccess(this.turnPolicy, this.readOnlyProfile());
+  }
+
+  /**
+   * The permission profile this runtime names in every request and holds every reply to: the one of
+   * its work attempt when it is a Read-only agent's (see `readOnlyLevel`), and none otherwise.
+   */
+  readOnlyProfile(): string | null {
+    return this.readOnlyLevel ? codexReadOnlyProfileId(this.workAttemptId) : null;
   }
 
   private writableFoldersRefusal(): string | null {
@@ -2121,13 +2224,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
           const resumed = await handle.client.request<CodexThreadResult>("thread/resume", {
             threadId,
             cwd: request.cwd,
-            ...policy,
+            ...codexThreadAccess(policy, handle.readOnlyProfile()),
             ...(request.model ? { model: request.model } : {}),
             ...codexThreadConfig(handle.readOnlyLevel, effort),
           });
           assertAttached();
           assertCodexReviewerApplied(policy, resumed);
-          assertCodexReadOnlyApplied(policy, resumed);
+          assertCodexReadOnlyApplied(policy, resumed, handle.readOnlyProfile());
           readEffort(resumed);
           if (resumed.thread?.id === threadId) return true;
           throw new Error("Codex continuation repair resolved a different thread.");
@@ -2174,13 +2277,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
     assertAttached();
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
-      ...policy,
+      ...codexThreadAccess(policy, handle.readOnlyProfile()),
       historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
       ...codexThreadConfig(handle.readOnlyLevel, effort),
     });
     assertCodexReviewerApplied(policy, started);
-    assertCodexReadOnlyApplied(policy, started);
+    assertCodexReadOnlyApplied(policy, started, handle.readOnlyProfile());
     assertCodexThreadDirectory(request.cwd, started);
     readEffort(started);
     const replacement = started.thread?.id?.trim();
@@ -2518,6 +2621,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // The access level itself decides what follows, not the shape of a policy:
     // the attestation above has tied the level to its policy.
     const readOnlyLevel = req.permissionProfileId?.trim() === "read_only";
+    // A Read-only agent's conversations name this permission profile in place of a sandbox. The launch defines it.
+    const readOnlyProfile = readOnlyLevel ? codexReadOnlyProfileId(req.workAttemptId) : null;
     // Room tools are approved in advance only for an agent the daemon delivers
     // room messages to. Such an agent's room tools run in the daemon, on its
     // own room and workspace. An agent that collects its own messages runs them
@@ -2543,6 +2648,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // The owner's own Codex setup stays on for this agent's app-server.
       ...(homeHarness ? { homeHarness: true } : {}),
       ...(codexPolicyIsSandboxed(turnPolicy) ? { sandboxed: true, ...(policy.sandbox === "workspace-write" ? { writableSandbox: true } : {}) } : {}),
+      // A Read-only conversation names this profile, so the launch must define it: with the owner's sign-in file denied to every command.
+      ...(readOnlyProfile ? { hideSignInProfile: readOnlyProfile } : {}),
+      // The launch is told the policy too, whatever level was named. With this policy and no profile it starts nothing:
+      // a caller that left the level's name out would otherwise get Codex's read-only sandbox alone.
+      ...(codexThreadIsReadOnly(policy) ? { readOnlySandbox: true } : {}),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {
@@ -2610,7 +2720,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           threadResult = await client.request<CodexThreadResult>("thread/resume", {
             threadId: resumeRef.providerContinuationId,
             cwd: req.cwd,
-            ...policy,
+            ...codexThreadAccess(policy, readOnlyProfile),
             ...(req.model ? { model: req.model } : {}),
             ...codexThreadConfig(readOnlyLevel, effort),
           });
@@ -2623,7 +2733,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         }
       } else {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
-          ...policy,
+          ...codexThreadAccess(policy, readOnlyProfile),
           historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
           ...codexThreadConfig(readOnlyLevel, effort),
@@ -2631,7 +2741,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         assertCodexThreadDirectory(req.cwd, threadResult);
       }
       assertCodexReviewerApplied(policy, threadResult);
-      assertCodexReadOnlyApplied(policy, threadResult);
+      assertCodexReadOnlyApplied(policy, threadResult, readOnlyProfile);
       const threadId = threadResult.thread?.id;
       if (!threadId) {
         throw new Error("Codex app-server did not return a thread id.");
@@ -2840,7 +2950,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (!continuationMissing && !exactEmptyFallback && loadedThread) {
         // thread/read verifies identity but does not subscribe this connection
         // to turn items or approval requests. Resume the exact existing thread
-        // without configuration overrides or starting/replaying a turn.
+        // without configuration overrides or starting/replaying a turn. It names
+        // no access either, a Read-only runtime's profile included: the reply is
+        // then what the conversation has, not what this request asked for.
         const subscribed = await client.request<CodexThreadResult>("thread/resume", {
           threadId: ref.providerContinuationId,
         });
@@ -2849,8 +2961,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
         }
         // The reply names the policy the loaded conversation has. For Read-only it is held to the same check as at a
         // start. Without a policy there is nothing to hold it to yet: it is kept for the call that binds one.
-        notReadOnly = codexFoundNotReadOnly(turnPolicy, subscribed);
-        if (!turnPolicy) reportedWhenFound = { approvalPolicy: subscribed.approvalPolicy, sandbox: subscribed.sandbox };
+        notReadOnly = codexFoundNotReadOnly(turnPolicy, subscribed, codexFoundProfile(turnPolicy, ref.workAttemptId));
+        if (!turnPolicy) reportedWhenFound = { approvalPolicy: subscribed.approvalPolicy, sandbox: subscribed.sandbox, activePermissionProfile: subscribed.activePermissionProfile };
         // A turn can finish between the first read and subscription without
         // sending this connection a notification. Reconstruct from a fresh
         // snapshot after subscribing so that gap cannot retain a stale turn.
@@ -3146,6 +3258,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
         : terminalMatch[1]!.toLowerCase();
       this.noteExactTurnTerminal(handle, exactTurnKey(exactThreadId, exactTurnId), terminalStatus);
     }
+    if (notification.method === "thread/settings/updated" && exactThreadId === handle.providerContinuationId) {
+      this.holdSettingsToReadOnly(handle, notification.params);
+    }
     const threadStatus = recordValue(recordValue(notification.params)?.status)?.type
       ?? recordValue(notification.params)?.status;
     if (notification.method === "thread/status/changed" && exactThreadId === handle.providerContinuationId) {
@@ -3415,7 +3530,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle.subscriptionAfterMaterialization = false;
     // A runtime that was found with no loaded conversation had no reply to hold to its level then.
     // This reply is the first word on what the conversation got, so it is held to Read-only as every other is.
-    const notReadOnly = codexFoundNotReadOnly(handle.appliedTurnPolicy(), subscribed);
+    const notReadOnly = codexFoundNotReadOnly(handle.appliedTurnPolicy(), subscribed, handle.readOnlyProfile());
     if (notReadOnly) {
       handle.foundNotReadOnly ??= { reported: notReadOnly, stopped: null };
       // Its turn must not go on with what the level does not allow. The stop is not waited for here; the daemon sees the process end.
@@ -3615,9 +3730,35 @@ export class CodexProviderAdapter implements ProviderAdapter {
    */
   private bindFoundPolicy(handle: CodexProviderHandle, policy: unknown): CodexProviderHandle | Promise<ProviderAttachTerminal> {
     const reported = handle.bindTurnPolicy(policy);
-    const notReadOnly = reported && codexFoundNotReadOnly(handle.appliedTurnPolicy(), reported);
+    const notReadOnly = reported && codexFoundNotReadOnly(handle.appliedTurnPolicy(), reported, handle.readOnlyProfile());
     if (notReadOnly) handle.foundNotReadOnly = { reported: notReadOnly, stopped: null };
     return this.stopNotReadOnly(handle) ?? handle;
+  }
+
+  /**
+   * Codex says so when the settings of a conversation change. For a Read-only
+   * runtime the new settings are held to the level as a reply is: a sandbox,
+   * an approval policy or a permission profile other than Read-only's stops
+   * the runtime, its owner is told, and the daemon starts the agent again.
+   * Nothing LetAgents sends changes them, so a change is Codex's own or some
+   * other client's. A notice that holds no settings says nothing either way.
+   *
+   * This catches a profile that Codex stops reporting. It does not show that
+   * the `deny` is in force while the profile is reported: see
+   * assertCodexReadOnlyApplied.
+   */
+  private holdSettingsToReadOnly(handle: CodexProviderHandle, params: unknown): void {
+    const settings = recordValue(recordValue(params)?.threadSettings);
+    if (!settings || handle.foundNotReadOnly) return;
+    const notReadOnly = codexFoundNotReadOnly(handle.appliedTurnPolicy(), {
+      approvalPolicy: settings.approvalPolicy, sandbox: settings.sandboxPolicy, activePermissionProfile: settings.activePermissionProfile,
+    }, handle.readOnlyProfile());
+    if (!notReadOnly) return;
+    handle.foundNotReadOnly = { reported: notReadOnly, stopped: null };
+    // The daemon keeps an agent's activity from its stream, so this is said there before the process goes.
+    this.publishStream(handle, "readOnly/stopped", {}, "provider_event", `Stopped this agent. ${notReadOnly}. ${STARTS_AGAIN_BY_ITSELF}`);
+    // The stop is not waited for here; the daemon sees the process end. One that fails is tried again at the next attach.
+    this.stopNotReadOnly(handle)?.catch(() => undefined);
   }
 
   /**
