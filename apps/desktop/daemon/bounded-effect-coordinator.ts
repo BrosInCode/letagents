@@ -148,6 +148,11 @@ export type BoundedEffectCoordinatorOptions = {
   };
 };
 
+/** Whether an agent is a Codex agent whose saved access level is Read-only. */
+export function codexAgentIsReadOnly(entry: Pick<DaemonManifestEntry, "provider" | "permission_profile_id">): boolean {
+  return entry.provider.trim().toLowerCase() === "codex" && entry.permission_profile_id?.trim() === "read_only";
+}
+
 /**
  * Why a room tool is refused for a Codex agent whose access level is
  * Read-only. Null for a tool it may use, and for every other agent.
@@ -165,7 +170,7 @@ export function readOnlyRoomToolRefusal(
   entry: Pick<DaemonManifestEntry, "provider" | "permission_profile_id">,
   toolName: string,
 ): string | null {
-  if (entry.provider.trim().toLowerCase() !== "codex" || entry.permission_profile_id?.trim() !== "read_only") return null;
+  if (!codexAgentIsReadOnly(entry)) return null;
   if (CODEX_READ_ONLY_ROOM_TOOLS.has(toolName)) return null;
   const shown = JSON.stringify(toolName.replace(/[^\x20-\x7e]/g, "?").slice(0, 64));
   return `Read-only access does not allow the room tool ${shown}. This agent can read the room and post in it. `
@@ -257,6 +262,21 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
 
     // Re-resolve exact authority after journal preparation and before any I/O.
     const context = await this.options.context.exactActive(input);
+    // The entry was loaded again: its owner may have saved Read-only since this call was prepared.
+    // The level holds from the moment it is saved, so the tool is not run, and its effect is closed as failed.
+    const refusedNow = readOnlyRoomToolRefusal(context.entry, input.toolName);
+    if (refusedNow) {
+      try {
+        await this.reserveJournal(() => this.options.executionCompletion.complete({
+          ...input,
+          effectId: prepared.effect_id as string,
+          error: refusedNow,
+        }, true));
+      } catch {
+        // The refusal stands. An effect that could not be closed is never run again by the same request id.
+      }
+      throw new Error(refusedNow);
+    }
     const authorization = this.options.authorizations.get(context.entry.id);
     const session = authorization?.agentSession;
     if (!authorization || !session
