@@ -8,6 +8,7 @@
 
 .room-message-bubble > .room-thread-marker {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   max-width: 100%;
@@ -21,8 +22,8 @@
   font-size: 0.72rem;
 }
 .room-message-bubble > .room-thread-marker .room-thread-marker-preview { display: none; }
-.room-message-bubble > .room-thread-marker::after { content: '⌄'; margin-left: 3px; }
-.room-message-bubble > .room-thread-marker[aria-expanded="true"]::after { transform: rotate(180deg); }
+.room-thread-marker-chevron { display: block; flex: 0 0 14px; width: 14px; height: 14px; margin-left: 3px; }
+.room-thread-marker[aria-expanded="true"] > .room-thread-marker-chevron { transform: rotate(180deg); }
 .room-message-bubble > .room-thread-marker strong { font-weight: 600; }
 .room-message-bubble > .room-thread-marker .room-thread-participants { align-items: center; gap: 4px; height: auto; min-width: 0; }
 .room-thread-participant-avatar { font-size: 0; width: 6px; height: 6px; margin: 0; border: 0; }
