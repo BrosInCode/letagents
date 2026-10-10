@@ -27,6 +27,7 @@ import {
 } from "../provider-configuration.js";
 import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
 import {
+  assertSupervisedPermissionProfileAvailable,
   assertSupervisedRentalPermissionProfileAvailable,
   describeProfilesWithOwnerSetup,
   supervisedPermissionProfilesForProvider,
@@ -271,7 +272,7 @@ test("provider configuration rejects unsupported and conflicting native settings
     provider: "codex",
     model: null,
     reasoningEffort: null,
-    permissionProfileId: "read_only",
+    permissionProfileId: "sandboxed_write",
     launchPolicy: {},
     configurationRevision: 1,
   }), /unavailable for provider/);
@@ -325,6 +326,92 @@ test("supervised profile contract exposes Claude prompt approval while retaining
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.isDefault, false);
   assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.isDefault, true);
   assert.equal(cursor.find((profile) => profile.id === "full_access")?.status, "available");
+});
+
+test("Codex Read-only maps to a read-only sandbox with no network and nobody to ask", () => {
+  const readOnly = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const codex = { provider: "codex", model: null, reasoningEffort: null, configurationRevision: 4 } as const;
+
+  // An agent created in Add Agent stores an empty policy; the daemon supplies the whole authority.
+  assert.deepEqual(resolveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "read_only", launchPolicy: {} }), {
+    provider: "codex", model: null, reasoningEffort: null, permissionProfileId: "read_only",
+    launchPolicy: readOnly, configurationRevision: 4,
+  });
+  // Nothing in the mapping names a reviewer: the host stays the one an approval would go to.
+  assert.equal(Object.hasOwn(resolveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "read_only", launchPolicy: {} }).launchPolicy, "approvalsReviewer"), false);
+
+  // A stored policy that would widen it, ask, or hand approvals to Codex is refused.
+  for (const [launchPolicy, reason] of [
+    [{ sandboxPolicy: { type: "dangerFullAccess" } }, /conflicts with permission-profile authority at 'sandboxPolicy'/],
+    [{ sandboxPolicy: { type: "workspaceWrite", networkAccess: false } }, /conflicts with permission-profile authority at 'sandboxPolicy'/],
+    [{ sandboxPolicy: { type: "readOnly", networkAccess: true } }, /conflicts with permission-profile authority at 'sandboxPolicy'/],
+    [{ approvalPolicy: "on-request" }, /conflicts with permission-profile authority at 'approvalPolicy'/],
+    [{ approvalsReviewer: "auto_review" }, /conflicts with permission-profile authority at 'approvalsReviewer'/],
+    [{ sandbox: "danger-full-access" }, /cannot override 'sandbox'/],
+  ] as const) {
+    assert.throws(() => resolveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "read_only", launchPolicy }), reason, JSON.stringify(launchPolicy));
+  }
+
+  // Choosing it replaces the access level's own options and nothing else, from every other level and back.
+  const authorities = {
+    full_access: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
+    ask_before_write: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } },
+    auto_review: { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" },
+  } as const;
+  for (const [other, authority] of Object.entries(authorities)) {
+    const from = deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: other }, { experimental: true });
+    assert.deepEqual(from.launchPolicy, { experimental: true, ...authority }, other);
+    const to = deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "read_only" }, from.launchPolicy);
+    assert.equal(to.permissionProfileId, "read_only");
+    assert.deepEqual(to.launchPolicy, { experimental: true, ...readOnly }, `${other} to read_only`);
+    assert.deepEqual(deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: other }, to.launchPolicy).launchPolicy,
+      { experimental: true, ...authority }, `read_only to ${other}`);
+  }
+});
+
+test("a supervised Codex agent may be set to Read-only, and nothing else about Codex's access levels moves", () => {
+  const codex = supervisedPermissionProfilesForProvider("codex");
+  const readOnly = codex.find((profile) => profile.id === "read_only")!;
+  assert.equal(readOnly.status, "available");
+  // Not "low": Codex's sandbox denies no read, so the agent can read every file this account can, and it can post in the room.
+  assert.equal(readOnly.risk, "medium");
+  assert.equal(readOnly.isDefault, false);
+  // The whole card, word for word: what the agent can read, what it cannot do, that it asks for no approval,
+  // and that the owner's saved command rules stay away from it.
+  assert.equal(readOnly.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
+  assert.equal(readOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
+  const card = `${readOnly.description} ${readOnly.detail}`;
+  // Reads are not limited to the project, and the card says so instead of leaving it out.
+  assert.match(card, /read files on this Mac, also outside your project/);
+  // The limit on the network is stated for what is enforced: the agent's own commands, and Codex's web search.
+  assert.match(card, /Its commands cannot use the network, and web search is off\./);
+  // It can put a question to a person in the room, so the card speaks of approvals, not of asking.
+  assert.match(card, /It asks for no approval: a command that needs more is refused\./);
+  assert.doesNotMatch(card, /asks for nothing|asks you for nothing/);
+  assert.doesNotMatch(card, /always allowed|except/, "saved rules no longer reach the agent, so the card names no exception");
+  assert.doesNotMatch(card, /use LetAgents room tools/, "it does not get every room tool");
+  assert.doesNotMatch(card, /\bsafe|secure|unavailable|sandbox|approvalPolicy|MCP/i);
+
+  // Launch validation accepts it by name, and an agent that names no level still gets Full access.
+  assert.equal(assertSupervisedPermissionProfileAvailable("codex", "read_only"), "read_only");
+  assert.equal(assertSupervisedPermissionProfileAvailable("codex", " read_only "), "read_only");
+  assert.equal(assertSupervisedPermissionProfileAvailable("codex", null), "full_access");
+  assert.deepEqual(codex.filter((profile) => profile.isDefault).map((profile) => profile.id), ["full_access"]);
+  assert.equal(deriveProviderConfigurationSnapshot({
+    provider: "codex", model: null, reasoningEffort: null, permissionProfileId: null, configurationRevision: 1,
+  }, {}).permissionProfileId, "full_access");
+  assert.deepEqual(codex.filter((profile) => profile.status === "available").map((profile) => profile.id).sort(),
+    ["ask_before_write", "auto_review", "full_access", "read_only"]);
+
+  // What stays unavailable stays refused: Codex's restricted editing, and Read-only for Open Model.
+  assert.throws(() => assertSupervisedPermissionProfileAvailable("codex", "sandboxed_write"), /Sandboxed writes is unavailable for supervised codex/);
+  assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "read_only")?.status, "gated");
+  assert.throws(() => assertSupervisedPermissionProfileAvailable("open-model", "read_only"), /Read-only is unavailable for supervised open-model/);
+  assert.throws(() => deriveProviderConfigurationSnapshot({
+    provider: "open-model", model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 1,
+  }, {}), /Read-only is unavailable for supervised open-model/);
+  // A rented agent is never a Codex agent, whatever level it names.
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "read_only"), /verified workspace-rooted permission profile/);
 });
 
 test("rental admission rejects trusted-local profiles at the daemon launch boundary", () => {
@@ -840,6 +927,12 @@ test("Claude's access levels are described truthfully for an agent that uses its
     assert.match(text(codexDescribed, id), /Your own MCP tools, hooks and plugins are not held to these limits: they run as you/, id);
     assert.equal(text(codexDescribed, id).startsWith(text(codex, id).slice(0, 60)), true, `${id}: what Codex's own commands may do is unchanged`);
   }
+  // Read-only keeps everything its own card says, then says what the limits do not cover.
+  assert.equal(text(codexDescribed, "read_only").startsWith(text(codex, "read_only")), true);
+  const ownerSetup = text(codexDescribed, "read_only").slice(text(codex, "read_only").length);
+  // What was seen of the owner's MCP tools is stated; hooks and plugins were not tried, so nothing is said about what they do.
+  assert.equal(ownerSetup, " These limits cover Codex's own commands and the room's tools only. Your own MCP tools can run without asking when your own Codex settings already approve them or their own server labels them read-only, which nothing checks. This level puts no limit of its own on your hooks and plugins.");
+  assert.doesNotMatch(ownerSetup, /[Oo]nly two kinds|they run as you/);
   assert.deepEqual(codexDescribed.find((profile) => profile.id === "full_access"), codex.find((profile) => profile.id === "full_access"));
   assert.deepEqual(codexDescribed.filter((profile) => profile.status !== "available"), codex.filter((profile) => profile.status !== "available"));
   // Agent apps that never get the owner's setup are never redescribed, and neither is anything unreadable.
@@ -852,7 +945,7 @@ test("Claude's access levels are described truthfully for an agent that uses its
 
 test("the daemon's policy for each access level is the one the adapters attest, with and without the owner's own setup", () => {
   for (const [provider, profiles] of [
-    ["codex", ["full_access", "ask_before_write", "auto_review"]],
+    ["codex", ["full_access", "ask_before_write", "auto_review", "read_only"]],
     ["claude-code", ["read_only", "ask_before_write", "auto_review", "full_access"]],
   ] as const) {
     for (const profile of profiles) {

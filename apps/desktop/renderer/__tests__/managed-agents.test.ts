@@ -1643,6 +1643,41 @@ test("supervised Codex presents ask-before-write without changing the legacy cat
   assert.match(supervised.detail ?? "", /read-only file access and no network access/);
 });
 
+test("supervised Codex presents Read-only as usable, in the daemon's own words, without changing the legacy catalog", () => {
+  const legacy = {
+    id: "read_only" as const,
+    label: "Read-only",
+    description: "Read-only access is unavailable for Codex here.",
+    status: "gated" as const,
+    risk: "low" as const,
+    detail: "Choose another available access level.",
+    isDefault: false,
+  };
+  const supervised = supervisedPermissionProfilePresentation("codex", legacy);
+  assert.equal(legacy.status, "gated");
+  assert.equal(supervised.status, "available");
+  assert.equal(supervised.isDefault, false);
+  // Add Agent and the agent's settings describe the level with the same words.
+  const daemon = supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "read_only")!;
+  assert.equal(supervised.description, daemon.description);
+  assert.equal(supervised.detail, daemon.detail);
+  assert.equal(supervised.risk, daemon.risk);
+  assert.equal(supervised.risk, "medium");
+  assert.equal(supervised.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
+  assert.equal(supervised.detail, "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
+  // Its card says what it withholds, and that it asks for no approval.
+  assert.equal(supervisedPermissionProfileLimits("codex", supervised),
+    "Can't change files. Its commands can't use the network, and web search is off. Can't change the task board, join rooms or submit reviews. It asks for no approval.");
+  // With the owner's own setup the line promises nothing that setup can undo.
+  assert.equal(supervisedPermissionProfileLimits("codex", supervised, true),
+    "Codex's own commands change no files and have no network access, web search is off, and it asks for no approval. Your own MCP tools, hooks and plugins are not held to this.");
+  assert.equal(supervisedPermissionProfileLimits("codex", legacy), null, "a level that cannot be used has no limits line");
+  // Open Model has no Read-only, and Codex's restricted editing stays unavailable.
+  assert.equal(supervisedPermissionProfilePresentation("open-model", legacy).status, "gated");
+  assert.equal(supervisedPermissionProfilePresentation("codex", { ...legacy, id: "sandboxed_write" }).status, "gated");
+  assert.equal(supervisedProviderLaunchPolicy("codex", "read_only"), undefined, "the daemon, not the renderer, supplies Codex's native policy");
+});
+
 test("supervised Open Model presents its native approval bridge without changing the legacy catalog", () => {
   const legacy = {
     id: "ask_before_write" as const,

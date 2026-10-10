@@ -43,7 +43,7 @@ const {
 const {
   assertLiveCodexProjectUnchanged, codexHomeHarnessOverrides, codexHookDisableOverride, codexProcessKeepsOwnerSetup, inspectCodexProject, readCodexCommandLine,
 } = await import("../main/agents/codex-home-harness.js");
-const { CodexProviderAdapter } = await import("../main/agents/codex-provider-adapter.js");
+const { CodexProviderAdapter, CODEX_READ_ONLY_CONFIG_OVERRIDES } = await import("../main/agents/codex-provider-adapter.js");
 const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
 const { resolveCodexExecutable } = await import("../main/agents/codex-executable.js");
 
@@ -2168,4 +2168,84 @@ test("with the owner's own setup the installed Codex is given nothing a stored p
   const off = await started(false);
   assert.deepEqual(Object.keys(off.threadStart.config as Record<string, unknown>), ["mcp_servers"]);
   assert.deepEqual(off.notices, []);
+});
+
+test("the installed Codex gives a Read-only conversation no web search once it is started the Read-only way, and a conversation's own config is what decides", {
+  skip: realCodex ? false : "Codex is not installed",
+  timeout: 600_000,
+}, async (t) => {
+  const codexBin = realCodex!;
+  // A stand-in model that keeps what Codex sends it: the tools of a request are what the model may use in that turn.
+  const requests: Array<{ tools?: Array<Record<string, unknown>> }> = [];
+  const model = createHttpServer((request, response) => {
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk: string) => { body += chunk; });
+    request.on("end", () => {
+      if (!request.url?.includes("/responses")) { response.writeHead(404).end("{}"); return; }
+      requests.push(JSON.parse(body));
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      const usage = { input_tokens: 1, input_tokens_details: null, output_tokens: 1, output_tokens_details: null, total_tokens: 2 };
+      for (const event of [
+        { type: "response.created", response: { id: "resp_1" } },
+        { type: "response.output_item.done", output_index: 0, item: { type: "message", id: "msg_1", role: "assistant", content: [{ type: "output_text", text: "done" }] } },
+        { type: "response.completed", response: { id: "resp_1", usage } },
+      ]) response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      response.end();
+    });
+  });
+  await new Promise<void>((resolve) => model.listen(0, "127.0.0.1", resolve));
+  t.after(() => { model.closeAllConnections(); model.close(); });
+  const modelUrl = `http://127.0.0.1:${(model.address() as { port: number }).port}/v1`;
+
+  /** One Read-only turn of the installed Codex in its own scratch home: the web search tool the model was offered, and what Codex's config reports. */
+  const turn = async (name: string, options: { ownerConfig?: string[]; overrides?: readonly string[]; threadConfig?: Record<string, unknown> }) => {
+    const base = fixture(`web-search-${name}`);
+    const home = join(base, "home");
+    const codexHome = join(home, ".codex");
+    const project = join(base, "project");
+    mkdirSync(codexHome, { recursive: true });
+    mkdirSync(project, { recursive: true });
+    writeFileSync(join(codexHome, "config.toml"), [
+      'model = "stand-in"', 'model_provider = "stand-in"', ...(options.ownerConfig ?? []), "",
+      "[model_providers.stand-in]", 'name = "stand-in"', `base_url = ${JSON.stringify(modelUrl)}`, 'wire_api = "responses"', "",
+    ].join("\n"));
+    const opened = await unguardedCodex(t, codexBin, { cwd: project, env: { HOME: home, CODEX_HOME: codexHome },
+      configOverrides: [...CODEX_OWNER_FEATURE_OVERRIDES, ...(options.overrides ?? [])] });
+    const reported = (await opened.client.request<{ config: { web_search?: unknown } }>("config/read", { cwd: project })).config.web_search ?? null;
+    const thread = await opened.client.request<{ thread: { id: string }; approvalPolicy: unknown; sandbox: unknown }>("thread/start", {
+      approvalPolicy: "never", sandbox: "read-only", approvalsReviewer: "user", ephemeral: true,
+      ...(options.threadConfig ? { config: options.threadConfig } : {}),
+    });
+    assert.deepEqual({ approvalPolicy: thread.approvalPolicy, sandbox: thread.sandbox }, { approvalPolicy: "never", sandbox: { type: "readOnly", networkAccess: false } });
+    const before = requests.length;
+    await opened.client.request("turn/start", {
+      threadId: thread.thread.id, approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false }, approvalsReviewer: "user",
+      input: [{ type: "text", text: "hello", text_elements: [] }],
+    });
+    for (let attempt = 0; attempt < 400 && requests.length === before; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(requests.length > before, true, `${name}: Codex sent the turn to the stand-in model`);
+    const webSearch = (requests[before]!.tools ?? []).filter((tool) => tool.type === "web_search");
+    await opened.stop();
+    assert.deepEqual(opened.approvals, [], `${name}: nobody was asked`);
+    return { reported, webSearch: webSearch.length === 0 ? "none" : webSearch[0]!.external_web_access === true ? "live" : "cached" };
+  };
+  const readOnlyThread = { web_search: "disabled" };
+
+  // What a Read-only agent would get without this: the owner's linked config decides, and "live" opens pages for it.
+  assert.deepEqual(await turn("owner-default", {}), { reported: null, webSearch: "cached" });
+  assert.deepEqual(await turn("owner-live", { ownerConfig: ['web_search = "live"'] }), { reported: "live", webSearch: "live" });
+
+  // Started the Read-only way: the launch override and the conversation's own config. No web search, whatever the owner's config says.
+  for (const ownerConfig of [[], ['web_search = "live"'], ['web_search = "cached"']]) {
+    assert.deepEqual(await turn(`read-only-${ownerConfig.length}`, { ownerConfig, overrides: CODEX_READ_ONLY_CONFIG_OVERRIDES, threadConfig: readOnlyThread }),
+      { reported: "disabled", webSearch: "none" }, ownerConfig.join());
+  }
+
+  // Why the conversation is given its own config: Codex takes it over the launch's. A stored policy's config that
+  // reached the conversation would turn web search back on, and the conversation's own setting alone turns it off.
+  assert.deepEqual(await turn("thread-over-launch", { overrides: CODEX_READ_ONLY_CONFIG_OVERRIDES, threadConfig: { web_search: "live" } }),
+    { reported: "disabled", webSearch: "live" });
+  assert.deepEqual(await turn("thread-alone", { ownerConfig: ['web_search = "live"'], threadConfig: readOnlyThread }),
+    { reported: "live", webSearch: "none" });
 });

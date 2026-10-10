@@ -44,6 +44,11 @@ export function attestProviderSpawnPolicy(
         approvalPolicy: "on-request",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
       }
+      : profile === "read_only"
+      ? {
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }
       : {
         approvalPolicy: "never",
         sandboxPolicy: { type: "dangerFullAccess" },

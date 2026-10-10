@@ -55,6 +55,10 @@ test("the approval note says what each access level was seen to do with the owne
   assert.match(homeHarnessApprovalNote("codex", "auto_review"), /Codex decides .* You are not asked\./);
   assert.match(homeHarnessApprovalNote("codex", "full_access"), /run without asking you/);
   assert.match(homeHarnessApprovalNote("codex", null), /run without asking you/, "Codex's default is full access");
+  // Codex Read-only asks nobody. What was seen of the owner's MCP tools is stated; nothing is claimed about what hooks and plugins do.
+  assert.equal(homeHarnessApprovalNote("codex", "read_only"),
+    "With Read-only, nothing asks you for an approval. Your MCP tools run only when your own Codex settings already approve them or their own server labels them read-only, which nothing checks. Codex refuses your other MCP tools. This level puts no limit of its own on your hooks, plugins and other tools.");
+  assert.doesNotMatch(homeHarnessApprovalNote("codex", "read_only"), /Full access|run without asking you|only read|[Oo]nly two kinds of those tools/);
   // Claude: the owner's own rules apply first.
   assert.match(homeHarnessApprovalNote("claude-code", "ask_before_write"), /you approve each of those tools before it runs, unless your own Claude Code rules already allow it/);
   assert.match(homeHarnessApprovalNote("claude-code", "auto_review"), /Claude decides .* asks you only when it will not decide/);
@@ -62,7 +66,7 @@ test("the approval note says what each access level was seen to do with the owne
   assert.match(homeHarnessApprovalNote("claude-code", "read_only"), /only where your own Claude Code rules allow them\. Nothing asks you\./);
   assert.match(homeHarnessApprovalNote("claude-code", null), /Nothing asks you\./, "Claude's default is read-only");
   // No note ever promises an approval that does not come.
-  for (const profile of ["auto_review", "full_access"]) {
+  for (const profile of ["auto_review", "full_access", "read_only"]) {
     assert.doesNotMatch(homeHarnessApprovalNote("codex", profile), /you approve/);
   }
   assert.doesNotMatch(homeHarnessApprovalNote("claude-code", "full_access"), /you approve/);
@@ -190,11 +194,11 @@ test("an access level's limits are described truthfully for an agent that uses i
   assert.equal(limits("claude", "ask_before_write", true), limits("claude-code", "ask_before_write", true));
   assert.match(limits("claude-code", "read_only", true)!, /^Its own tools can't change files, run commands or browse the web\. Your MCP tools and hooks can, where your own Claude Code settings allow them\.$/);
   assert.match(limits("claude-code", "auto_review", true)!, /after your own Claude Code rules have allowed what they allow/);
-  for (const id of ["ask_before_write", "auto_review"]) {
+  for (const id of ["ask_before_write", "auto_review", "read_only"]) {
     assert.match(limits("codex", id, true)!, /Your own MCP tools, hooks and plugins are not held to this\.$/, id);
     assert.doesNotMatch(limits("codex", id, false)!, /Your own/, id);
   }
-  for (const [provider, id] of [["claude-code", "ask_before_write"], ["claude-code", "read_only"], ["codex", "ask_before_write"]] as const) {
+  for (const [provider, id] of [["claude-code", "ask_before_write"], ["claude-code", "read_only"], ["codex", "ask_before_write"], ["codex", "read_only"]] as const) {
     assert.doesNotMatch(limits(provider, id, true)!, /^(Can't|Without your approval: no)/, `${provider}/${id}: nothing is promised that the owner's setup can undo`);
   }
   // Where nothing is withheld, or the agent app never gets the owner's setup, the line is the same.

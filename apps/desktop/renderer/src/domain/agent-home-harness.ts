@@ -110,6 +110,10 @@ export function homeHarnessApprovalNote(provider: string, permissionProfileId: s
     if (permissionProfileId === "auto_review") {
       return "With Auto, Codex decides whether each of those tools runs. You are not asked.";
     }
+    if (permissionProfileId === "read_only") {
+      // Nobody can be asked, so Codex refuses the MCP tools it would otherwise ask about. Only MCP tools were tried at this level.
+      return "With Read-only, nothing asks you for an approval. Your MCP tools run only when your own Codex settings already approve them or their own server labels them read-only, which nothing checks. Codex refuses your other MCP tools. This level puts no limit of its own on your hooks, plugins and other tools.";
+    }
     return "With Full access, those tools run without asking you.";
   }
   if (kind === "claude-code") {

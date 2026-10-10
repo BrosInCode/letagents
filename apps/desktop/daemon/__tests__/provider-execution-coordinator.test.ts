@@ -2323,6 +2323,51 @@ test("attach terminal evidence is durable before the execution fence is released
   assert.equal(runtime.installed.length, 0);
 });
 
+test("a runtime that its adapter stopped when it found it is closed, its owner reads why, and the agent starts again", async () => {
+  const line = "Codex reported approval policy \"never\" and sandbox \"dangerFullAccess\" for this agent's conversation. "
+    + "That is not Read-only access, so LetAgents stopped the agent. It starts again by itself.";
+  const stopped: ProviderActionTerminal = {
+    endedAt: "2026-08-26T00:00:03.000Z", exitCode: null, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: "continuation-1",
+    nativeRuntimeDeath: { kind: "codex_app_server", pid: 4242, processIdentity: "birth-4242" },
+  };
+  for (const noticeWriteFails of [false, true]) {
+    const current = baseEntry();
+    current.permission_profile_id = "read_only";
+    current.provider_ref = { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+      provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection };
+    const launches: string[] = [];
+    let attaches = 0;
+    const runtime = harness({ entry: current, provider: provider({
+      attach: async () => { attaches++; return { state: "terminal", terminal: stopped, notices: [line] }; },
+      resume: async (ref) => { launches.push(`resume:${ref.providerContinuationId}`); return returnedHandle; },
+      spawn: async () => { launches.push("spawn"); return returnedHandle; },
+    }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
+    if (noticeWriteFails) {
+      const updateManifestEntry = runtime.options.updateManifestEntry;
+      // Only the write of the owner's line fails.
+      runtime.options.updateManifestEntry = async (entryId, update) => updateManifestEntry(entryId, (entry) => {
+        const next = update(entry);
+        if (next.activity?.some((event) => event.kind === "launch_notice" && event.summary === line)) throw new Error("manifest write failed");
+        return next;
+      });
+    }
+
+    // One pass: the attach answers with the proof that the process is gone, the exit is recorded,
+    // nothing is attached, and the same pass starts the agent again. The old process is asked nothing more.
+    await runtime.coordinator.converge(current.id);
+    assert.equal(attaches, 1);
+    assert.equal(runtime.terminalWrites.length, 1, "the proof is recorded whether or not the line could be written");
+    assert.equal(runtime.terminalWrites[0]?.executionGenerationId, "generation-1");
+    assert.equal(runtime.terminalWrites[0]?.terminal.terminal_cause, "stopped");
+    assert.equal(launches.length, 1, "the agent starts again by itself");
+    // The owner reads the adapter's own line in the agent's activity.
+    assert.deepEqual((runtime.entry().activity ?? []).filter((event) => event.kind === "launch_notice").map((event) => event.summary),
+      noticeWriteFails ? [] : [line]);
+  }
+});
+
 test("Codex reattachment carries only the exact applied permission configuration", async () => {
   for (const pendingEdit of [false, true]) {
     const current = baseEntry();
@@ -2547,6 +2592,46 @@ test("a launch carries the owner's own setup only for the owner's own agent, and
   assert.ok(rental, "the rental still launches");
   assert.equal(Object.hasOwn(rental, "homeHarness"), false);
   assert.deepEqual(rental.launchPolicy, { force: true, sandbox: "enabled" });
+});
+
+test("a Codex agent set to Read-only launches and reattaches with a read-only sandbox and nobody to ask", async () => {
+  const readOnly = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const launch = async (entry: DaemonManifestEntry) => {
+    let request: ProviderActionSpawn | null = null;
+    const runtime = harness({ entry, provider: provider({ spawn: async (input) => { request = input; return returnedHandle; } }) });
+    await runtime.coordinator.converge(entry.id);
+    return { request: request as ProviderActionSpawn | null, entry: runtime.entry() };
+  };
+  // Launch validation accepts the level, and the provider is handed the level by name with its exact native policy.
+  // An agent created in Add Agent stores an empty policy; one switched from another level stores that level's.
+  for (const stored of [
+    {},
+    { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
+    { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } },
+    { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" },
+  ]) {
+    const { request, entry } = await launch({ ...baseEntry(), delivery_mode: "daemon_inbox", permission_profile_id: "read_only", provider_launch_policy: stored });
+    assert.ok(request, `it launches: ${JSON.stringify(stored)}`);
+    assert.equal(request.permissionProfileId, "read_only");
+    assert.deepEqual(request.launchPolicy, readOnly, JSON.stringify(stored));
+    assert.notEqual(entry.observed_state, "failed");
+  }
+
+  // Full access is still what an agent that names no level launches with.
+  const unnamed = await launch({ ...baseEntry(), delivery_mode: "daemon_inbox", permission_profile_id: null });
+  assert.equal(unnamed.request?.permissionProfileId, "full_access");
+  assert.deepEqual(unnamed.request?.launchPolicy, { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } });
+
+  // A runtime that survived a daemon restart is attached with the same policy, so its next turn restates it.
+  const current = { ...baseEntry(), delivery_mode: "daemon_inbox" as const, permission_profile_id: "read_only" };
+  current.provider_ref = { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+    provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection };
+  let attachedPolicy: unknown = "not called";
+  const runtime = harness({ entry: current, provider: provider({ attach: async (ref) => { attachedPolicy = ref.launchPolicy; return null; } }) });
+  runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
+  await runtime.coordinator.attachLiveProvider(current);
+  assert.deepEqual(attachedPolicy, readOnly);
 });
 
 const OWNER_SETUP_NATIVE = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } };
