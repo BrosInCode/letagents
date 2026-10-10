@@ -1738,6 +1738,24 @@ test("a follow-up crosses to the desktop only when every part of it is what the 
   // One that waits for its owner, and one that ended with nothing started, hold no time.
   assert.deepEqual(followUp({ for_message_id: "msg_1", state: "waiting_for_owner", scheduled: null }), { forMessageId: "msg_1", state: "waiting_for_owner", scheduled: null });
   assert.deepEqual(followUp({ for_message_id: null, state: "ended", scheduled: null }), { forMessageId: null, state: "ended", scheduled: null });
+  // Why it waits for its owner or ended crosses with it, for each reason that the daemon writes.
+  for (const reason of ["stopped_by_owner", "skipped", "agent_changed", "task_not_held", "uncertain_action", "uncertain_resolved", "attempts_failed", "ownership_unverified", "other"]) {
+    const state = ["attempts_failed", "ownership_unverified", "other"].includes(reason) ? "waiting_for_owner" : "ended";
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state, reason, scheduled: null }), { forMessageId: "msg_1", state, reason, scheduled: null }, reason);
+  }
+  // Whether the owner has sent a message since crosses with it, when it is a boolean, and is dropped otherwise: the note then stays.
+  for (const later_person_turn of [true, false]) {
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state: "ended", reason: "stopped_by_owner", later_person_turn, scheduled: null }),
+      { forMessageId: "msg_1", state: "ended", reason: "stopped_by_owner", laterPersonTurn: later_person_turn, scheduled: null });
+  }
+  for (const later_person_turn of ["true", 1, null]) {
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state: "ended", reason: "stopped_by_owner", later_person_turn, scheduled: null }),
+      { forMessageId: "msg_1", state: "ended", reason: "stopped_by_owner", scheduled: null }, JSON.stringify(later_person_turn));
+  }
+  // A reason that this version does not know, or one that is not a text, reads as none: the follow-up is still shown, and its note stays.
+  for (const reason of ["resolved_elsewhere", "", 3, null, ["skipped"]]) {
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state: "ended", reason, scheduled: null }), { forMessageId: "msg_1", state: "ended", scheduled: null }, JSON.stringify(reason));
+  }
   // A daemon that sends none, or anything that is not what it writes, shows no follow-up.
   for (const malformed of [undefined, null, "soon", [], {}, scheduled({ at_ms: "1790000030000" }), scheduled({ at_ms: 0 }), scheduled({ at_ms: 1.5 }),
     scheduled({ attempt: 0 }), scheduled({ attempt: 4 }), scheduled({ attempts: "3" }), scheduled({ kind: "other" }), scheduled({ kind: undefined }),
@@ -3214,7 +3232,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.220");
+    assert.equal(status.implementationVersion, "2.0.221");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

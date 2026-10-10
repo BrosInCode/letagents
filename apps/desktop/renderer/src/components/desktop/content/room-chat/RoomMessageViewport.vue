@@ -167,7 +167,7 @@
           data-testid="room-local-agent-work-overflow"
           aria-live="polite"
         >
-          +{{ collapsedAgentWork.hiddenCount }} more {{ collapsedAgentWork.hiddenCount === 1 ? "agent" : "agents" }} working
+          {{ workIndicatorOverflowLabel(collapsedAgentWork) }}
         </p>
       </div>
       <TypingIndicator :key="roomIdentifier ?? ''" :names="roomLoading ? [] : typingNames ?? []" :color-for="typingColor" />
@@ -197,6 +197,7 @@ import {
   WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   coalesceWorkIndicatorEchoes,
   collapseWorkIndicators,
+  workIndicatorOverflowLabel,
   workIndicatorSupersededByAgentMessage,
   type ManagedAgentWorkIndicator,
   type WorkIndicatorEchoState,

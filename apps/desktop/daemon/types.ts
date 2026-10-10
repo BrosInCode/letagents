@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.220";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.221";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -413,6 +413,16 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
     follow_up?: {
       for_message_id: string | null;
       state: "scheduled" | "waiting_for_owner" | "ended";
+      /**
+       * Why it waits for its owner or ended, from a closed set (`FOLLOW_UP_REASONS` in task-continuity.ts). Absent while
+       * it waits for its time. Anything that reads this must tolerate a reason that it does not know.
+       */
+      reason?: "stopped_by_owner" | "skipped" | "agent_changed" | "task_not_held" | "uncertain_action" | "uncertain_resolved" | "attempts_failed" | "ownership_unverified" | "other";
+      /**
+       * Only for an ended follow-up whose note asks its owner to send a message (`stopped_by_owner`, `agent_changed`): whether a turn has
+       * started for a message of a person that came after it. Absent from a daemon that does not say, and then the note stays.
+       */
+      later_person_turn?: boolean;
       scheduled: { at_ms: number; attempt: number; attempts: number; kind: "provider_fault" | "no_reply" } | null;
     };
     timeline: Array<{ event_sequence: number; phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled"; observed_at: string; detail: string | null }>;

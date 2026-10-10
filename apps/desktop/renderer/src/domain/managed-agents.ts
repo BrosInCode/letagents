@@ -694,28 +694,55 @@ export function workIndicatorSupersededByAgentMessage(
 export interface CollapsedWorkIndicators {
   visible: ManagedAgentWorkIndicator[];
   hiddenCount: number;
+  /** How many of the hidden rows are agents that wait to try again. The rest work. */
+  hiddenWaitingCount: number;
 }
 
 /**
  * Keep the work-indicator area unobtrusive when many agents are active at once
  * (EmmyMay's ten-agent noise constraint): show the most recent `maxVisible` and
  * report the rest as an overflow count instead of an unbounded list.
+ *
+ * The rows go in three kinds, in this order, whether or not any is hidden: a row of
+ * work that carries a control (a turn held open for background work, with "Post
+ * answer now"), because it is the oldest row of work and, hidden, its control
+ * could not be used; the other rows of work; and the rows at rest, the agents that
+ * wait to try again. A row at rest never hides a row of work.
+ *
+ * Inside a kind the rows keep the order that they were given, so a row never jumps
+ * because a time ticked. Time decides only when a kind does not fit and a row would
+ * be hidden: that kind is ordered by time, the most recent rows of work first and
+ * the rows at rest that try first first, and the places go to the first of them.
+ * The time of a row at rest is the future time of its attempt, which is not a time
+ * to rank by when nothing is hidden.
  */
 export function collapseWorkIndicators(
   indicators: readonly ManagedAgentWorkIndicator[],
   maxVisible: number = WORK_INDICATOR_VISIBLE_LIMIT,
 ): CollapsedWorkIndicators {
-  if (maxVisible <= 0 || indicators.length <= maxVisible) {
-    return { visible: [...indicators], hiddenCount: 0 };
+  if (maxVisible <= 0) return { visible: [...indicators], hiddenCount: 0, hiddenWaitingCount: 0 };
+  const visible: ManagedAgentWorkIndicator[] = [];
+  let room = maxVisible;
+  let hiddenCount = 0;
+  let hiddenWaitingCount = 0;
+  for (const kind of ["control", "work", "waiting"] as const) {
+    const rows = indicators.filter((work) => (work.waiting ? "waiting" : work.waitsForBackgroundWork ? "control" : "work") === kind);
+    // When every row of this kind fits, they stay as given. When some do not, the places go by time.
+    const shown = rows.length <= room ? rows
+      : [...rows].sort((left, right) => kind === "waiting" ? left.startedAt.localeCompare(right.startedAt) : right.startedAt.localeCompare(left.startedAt)).slice(0, room);
+    visible.push(...shown);
+    room -= shown.length;
+    hiddenCount += rows.length - shown.length;
+    if (kind === "waiting") hiddenWaitingCount += rows.length - shown.length;
   }
-  // Show the MOST RECENT maxVisible (newest first). The upstream list may be
-  // sorted oldest-first, so select by startedAt descending rather than taking
-  // the head, which would surface the stalest agents.
-  const byRecency = [...indicators].sort((left, right) => right.startedAt.localeCompare(left.startedAt));
-  return {
-    visible: byRecency.slice(0, maxVisible),
-    hiddenCount: indicators.length - maxVisible,
-  };
+  return { visible, hiddenCount, hiddenWaitingCount };
+}
+
+/** What the strip says of the rows that it does not show: "+2 more agents working", "+1 more agent waiting to try again". */
+export function workIndicatorOverflowLabel(collapsed: Pick<CollapsedWorkIndicators, "hiddenCount" | "hiddenWaitingCount">): string {
+  const { hiddenCount, hiddenWaitingCount } = collapsed;
+  const what = hiddenWaitingCount === 0 ? "working" : hiddenWaitingCount === hiddenCount ? "waiting to try again" : "working or waiting to try again";
+  return `+${hiddenCount} more ${hiddenCount === 1 ? "agent" : "agents"} ${what}`;
 }
 
 /** Minimum time an entry's echo text is held before it may change again. */

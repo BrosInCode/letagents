@@ -247,6 +247,8 @@ const renderReceipts = (id: string, deliveryReceipts: unknown[], props: Record<s
   render: () => h(DesktopChatMessage as object, { message: retryMessage(id), threadSummary: retryThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
     deliveryRecoveryAvailable: true, roomDeliverySkipAvailable: true, deliveryReceipts, ...props }),
 }));
+/** The markup of the countdown: not read aloud, in two parts that a narrow receipt may wrap between. A pattern for the text of each part. */
+const countdown = (wait: string, attempt: string) => `<small class="room-message-delivery-countdown" aria-hidden="true"><span>${wait}</span> <span>${attempt}</span></small>`;
 const failedReceipt = { agentId: "ash", agentName: "Ash", state: "acknowledged_failed", blockedByMessageId: null, failureCode: null, terminalReason: null, attemptCount: 1, providerTurnId: "turn_1",
   error: "API Error: Repeated 529 Overloaded errors." };
 
@@ -260,8 +262,8 @@ test("a failed message shows its agent's automatic attempt with the time, the at
   assert.ok(receipt);
   // What failed, in the provider's words; when the agent tries again, and which attempt; what happens if it keeps failing.
   assert.match(receipt, /API Error: Repeated 529 Overloaded errors\.<\/small>/);
-  assert.match(receipt, /<small aria-hidden="true">Trying again in 1 min (?:39|40) s \(attempt 2 of 3\)<\/small>/);
-  assert.match(receipt, /<small>If all 3 attempts fail, the agent stops and waits for you\.<\/small>/);
+  assert.match(receipt, new RegExp(countdown("Trying again in 1 min (?:39|40) s", "\\(attempt 2 of 3\\)")));
+  assert.match(receipt, /<small class="room-message-delivery-outcome">If all 3 attempts fail, the agent stops and waits for you\.<\/small>/);
   // Read aloud, the time is a clock time: the list is a live region, and a count would be read out each second.
   assert.match(receipt, /aria-label="Ash: API Error: Repeated 529 Overloaded errors\. Trying again at [^"(]+ \(attempt 2 of 3\)\. If all 3 attempts fail, the agent stops and waits for you\."/);
   assert.doesNotMatch(receipt.match(/aria-label="Ash:[^"]*"/)![0], / in \d/);
@@ -282,9 +284,9 @@ test("a failed message shows its agent's automatic attempt with the time, the at
   assert.equal(unavailable.match(/<button type="button" disabled/g)?.length, 2);
   // The last automatic attempt, and a time that has passed. The turn may not have started: the message does not say that it has.
   const last = await render("msg_1", [{ ...failed, scheduledRetry: { ...retry, atMs: Date.now() - 5_000, attempt: 3 } }]);
-  assert.match(last, /<small aria-hidden="true">About to try again \(attempt 3 of 3\)<\/small>/);
+  assert.match(last, new RegExp(countdown("About to try again", "\\(attempt 3 of 3\\)")));
   assert.match(last, /aria-label="Ash: API Error: Repeated 529 Overloaded errors\. About to try again \(attempt 3 of 3\)\. This is the last automatic attempt\./);
-  assert.match(last, /<small>This is the last automatic attempt\. If it fails, the agent stops and waits for you\.<\/small>/);
+  assert.match(last, /<small class="room-message-delivery-outcome">This is the last automatic attempt\. If it fails, the agent stops and waits for you\.<\/small>/);
   assert.doesNotMatch(last, /Trying again now|Trying again in/);
   // A failed message with no follow-up has no controls and no note, as before.
   const plain = (await render("msg_1", [{ ...failed, scheduledRetry: null, followUpNote: null }])).match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
@@ -309,8 +311,8 @@ test("after a turn that ended without a reply the message says one attempt, and 
   const html = await renderReceipts("msg_1", [{ ...failedReceipt, error: "The model returned no reply.", scheduledRetry: noReply }]);
   const receipt = html.match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
   assert.ok(receipt);
-  assert.match(receipt, /<small aria-hidden="true">Trying again in (?:9|10) s \(the only automatic attempt\)<\/small>/);
-  assert.match(receipt, /<small>If it ends without a reply again, the agent stops\. Send it a message to continue\.<\/small>/);
+  assert.match(receipt, new RegExp(countdown("Trying again in (?:9|10) s", "\\(the only automatic attempt\\)")));
+  assert.match(receipt, /<small class="room-message-delivery-outcome">If it ends without a reply again, the agent stops\. Send it a message to continue\.<\/small>/);
   assert.match(receipt, /aria-label="Ash: The model returned no reply\. Trying again at [^"(]+ \(the only automatic attempt\)\. If it ends without a reply again, the agent stops\. Send it a message to continue\."/);
   assert.doesNotMatch(receipt, /of 3|all 3|waits for you|provider/);
   assert.equal(receipt.match(/<button/g)?.length, 2, "Try now and Stop trying are the same");
@@ -344,7 +346,7 @@ test("after the last automatic attempt the failed message says that the agent wa
   for (const reason of [STOPPED_BY_OWNER,
     "The agent did not try again: its session, conversation or workspace changed after the failure. Send it a message to continue the task.",
     "The agent did not try again: the task is finished, or is no longer this agent's.",
-    "The agent did not try again: an earlier action has an uncertain result. Check that result, then send an instruction to continue only the verified unfinished work."]) {
+    "The agent did not try again: an earlier action has an uncertain result. Check what it did (the inspector shows its actions), then tell it to continue only the verified work."]) {
     const ended = (await renderReceipts("msg_1", [{ ...failedReceipt, followUpNote: { state: "ended", sourceMessageId: "task-continuation:inbox_1", text: reason, canRetry: false } }]))
       .match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
     assert.ok(ended);
@@ -377,22 +379,43 @@ test("a receipt wraps inside its message's column with its controls on one line,
   // The list of receipts does not make the message wider, and a receipt wraps inside the list. A fixed radius: a capsule for one line, corners for more.
   has(".room-message-delivery-receipts", "min-width: 0", "max-width: min(720px, 100%)");
   has(".room-message-delivery-receipts li", "flex-wrap: wrap", "min-width: 0", "max-width: 100%", "border-radius: 15px");
-  // A text wraps in the room that is left, and a word that is longer than the receipt breaks. A control and the agent's name do not shrink.
+  // A text wraps in the room that is left, and a word that is longer than the receipt breaks. A control and the agent's name do not shrink,
+  // and a name that is longer than the receipt breaks too.
   has(".room-message-delivery-receipts small", "flex: 1 1 0%", "max-width: 100%", "overflow-wrap: break-word");
-  has(".room-message-delivery-receipts strong", "flex: none", "max-width: 100%");
+  has(".room-message-delivery-receipts strong", "flex: none", "max-width: 100%", "overflow-wrap: anywhere");
   has(".room-message-delivery-receipts button", "flex: none", "white-space: nowrap");
-  // The countdown is the one text that is not read aloud. It keeps its number with its unit, on a line of its own, so the controls stay where they are.
-  const source = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopChatMessage.vue", import.meta.url)), "utf8");
-  assert.equal(source.match(/<small aria-hidden="true">/g)?.length, 1);
-  has('.room-message-delivery-receipts li > small[aria-hidden="true"]', "flex: none", "width: 100%", "white-space: nowrap", "font-variant-numeric: tabular-nums");
+  // Try now and Stop trying keep their width while their word changes, so the other does not move.
+  has('.room-message-delivery-receipts li[data-follow-up="scheduled"] > button', "min-width: 7.5em");
+  // The last text of a receipt with no follow-up is a short column, as before, and it can shrink.
+  has(".room-message-delivery-receipts li:not([data-follow-up]) > small:last-child", "flex: 0 1 auto", "min-width: 0", "max-width: 260px");
+  // What follows the failure has a line of its own: a note after the failure's text, and the sentence after the two controls, which
+  // follows a button, so that it is not reached by the first rule. Without it the sentence is a tall narrow column in a narrow receipt.
   has(".room-message-delivery-receipts li > small + small", "flex-basis: 100%");
-  // A wait that ends by itself has the colour of a recovery. A wait for the owner has the colour of a blocked message.
-  const recovers = '.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-follow-up="scheduled"])';
+  has(".room-message-delivery-receipts li > small.room-message-delivery-outcome", "flex-basis: 100%");
+  // The countdown is the one text that is not read aloud. It has a line of its own, so the controls stay where they are. It wraps between
+  // its two parts and nowhere else: each part does not wrap, so a number stays with its unit. Narrower than a part, it is cut.
+  const source = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopChatMessage.vue", import.meta.url)), "utf8");
+  assert.equal(source.match(/<small[^>]*aria-hidden="true"/g)?.length, 1, "no other text of a receipt is hidden from a screen reader");
+  assert.equal(source.match(/class="room-message-delivery-countdown"/g)?.length, 1);
+  assert.equal(source.match(/class="room-message-delivery-outcome"/g)?.length, 1);
+  has(".room-message-delivery-receipts li > small.room-message-delivery-countdown", "flex: none", "width: 100%", "overflow: hidden", "text-overflow: ellipsis", "font-variant-numeric: tabular-nums");
+  assert.ok(!rule(".room-message-delivery-receipts li > small.room-message-delivery-countdown").includes("white-space"), "the countdown wraps between its parts");
+  has(".room-message-delivery-countdown > span", "white-space: nowrap");
+
+  // A wait that ends by itself has the colour of a recovery, and so has a message that waits for it. A wait for the owner has the colour of a blocked message.
+  const recovers = '.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-state="queued_behind_retry"], [data-follow-up="scheduled"])';
   const waitsForOwner = '.room-message-delivery-receipts li:is([data-state="blocked"], [data-state="queued_behind_blocked"], [data-follow-up="waiting_for_owner"])';
   has(recovers, "border-color: rgba(251, 191, 36, 0.18)", "background: rgba(251, 191, 36, 0.045)");
   has(`${recovers} > .room-message-delivery-indicator`, "color: #fcd34d");
   has(waitsForOwner, "border-color: rgba(248, 113, 113, 0.2)", "background: rgba(248, 113, 113, 0.055)");
   has(`${waitsForOwner} > .room-message-delivery-indicator`, "color: #fca5a5");
+  // The two have the same weight, so the later one wins for a receipt that is both. A wait for the owner is never painted as a recovery.
+  assert.ok(css.indexOf(`\n${waitsForOwner} {`) > css.indexOf(`\n${recovers} {`), "the colour of a wait for the owner comes after that of a recovery");
+  assert.ok(css.indexOf(`\n${waitsForOwner} > .room-message-delivery-indicator {`) > css.indexOf(`\n${recovers} > .room-message-delivery-indicator {`), "and so does its indicator");
+  // The agent that a queued message waits for does not work, so its dots rest, as the live strip's do. The label keeps its own width.
+  has('.room-message-delivery-receipts li[data-state="queued_behind_retry"] .room-message-delivery-dots i', "animation: none", "opacity: 0.72");
+  has('.room-message-delivery-receipts li[data-state="queued_behind_retry"] > small', "flex: 1 1 auto");
+  assert.ok(!rule(".room-message-delivery-dots i").includes("animation: none"), "the dots of other receipts still move");
 });
 
 /** A mounted message whose script is live: its clock runs, and its controls can be used. */
@@ -475,7 +498,7 @@ test("the countdown that the message shows follows the saved time as the clock g
   const mounted = mountedMessage({ deliveryReceipts: [receipt] });
   const second = (passedMs = 1_000) => { now += passedMs; t.mock.timers.tick(1_000); };
   try {
-    const shown = () => mounted.vm.scheduledRetryText(receipt);
+    const shown = () => mounted.vm.scheduledRetryParts(receipt).join(" ");
     assert.equal(shown(), "Trying again in 1 min 40 s (attempt 2 of 3)");
     second();
     assert.equal(shown(), "Trying again in 1 min 39 s (attempt 2 of 3)");
@@ -494,15 +517,15 @@ test("the countdown that the message shows follows the saved time as the clock g
     // The spoken label has the clock time, and follows the same clock.
     assert.match(mounted.vm.receiptLabel({ ...receipt, error: "It failed.", blockedByMessageId: null, terminalReason: null }), /^Ash: It failed\. About to try again \(attempt 2 of 3\)\. /);
     // A receipt with nothing scheduled shows no count.
-    assert.equal(mounted.vm.scheduledRetryText({ agentId: "ash" }), "");
+    assert.deepEqual(mounted.vm.scheduledRetryParts({ agentId: "ash" }), ["", ""]);
   } finally {
     mounted.unmount();
     Object.assign(globalThis, { window: originalWindow });
   }
   // The message's own markup shows that text, and nothing else counts.
   const source = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopChatMessage.vue", import.meta.url)), "utf8");
-  assert.match(source, /<small aria-hidden="true">\{\{ scheduledRetryText\(receipt\) \}\}<\/small>/);
-  assert.equal(source.match(/scheduledRetryLabel\(/g)?.length, 1, "the count is made in one place");
+  assert.match(source, /<small class="room-message-delivery-countdown" aria-hidden="true"><span>\{\{ scheduledRetryParts\(receipt\)\[0\] \}\}<\/span> <span>\{\{ scheduledRetryParts\(receipt\)\[1\] \}\}<\/span><\/small>/);
+  assert.equal(source.match(/scheduledRetryLabelParts\(/g)?.length, 1, "the count is made in one place");
 });
 
 test("the second clock is off while nothing counts down, and stops with its owner", (t) => {
