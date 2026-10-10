@@ -20,23 +20,26 @@ import { fileURLToPath } from "node:url";
 //   - The CLI talks to a stand-in for the Messages API that this script
 //     starts on 127.0.0.1. The stand-in never stores or prints a request
 //     header or a request body. It counts requests by method and path, and
-//     reads five yes/no facts and one count from a body as it passes (see
-//     `startStandIn`).
+//     reads a few yes/no facts, one count and one id of a background task
+//     from a body as it passes (see `startStandIn`).
 //   - The CLI runs under a macOS sandbox profile that denies every network
-//     connection except to this machine's loopback, and the script proves
-//     that the profile works before it starts the CLI.
+//     connection except to this machine's loopback, and every file write
+//     outside the run's own folder. The script proves both before it starts
+//     the CLI, and one run proves the second again from inside: its tool
+//     tries to write beside the run's folder, and the run is refused unless
+//     that was denied.
 //   - The CLI gets a clean environment: a new HOME, a new CLAUDE_CONFIG_DIR,
 //     its temporary files in the run's own folder, and a dummy API key. It
 //     does not read or write the owner's Claude settings, sessions or login.
 //   - In some runs the stand-in answers with a tool call, and the CLI runs
 //     that tool: it is given that one tool besides the read-only ones. The
-//     sandbox denies the network to what the tool starts too, and nothing
-//     else. Every call is written out in this file: a background shell
+//     sandbox holds for what the tool starts too. Every call is written out
+//     in this file: a background shell
 //     command that sleeps and prints a word (in one run it then exits with
 //     a code that is not zero), a sub-agent whose model is the stand-in, a
-//     bundled skill. In one run the CLI has a Stop hook: a
+//     bundled skill. In some runs the CLI has a hook: a
 //     script this tool writes into the run's folder, named in a settings
-//     file in the new CLAUDE_CONFIG_DIR. That run reads the "user"
+//     file in the new CLAUDE_CONFIG_DIR. Such a run reads the "user"
 //     settings, which are that file alone. In some runs the tool writes
 //     more lines to the CLI's stdin after the prompt: an interrupt control
 //     request, a second prompt, or its answer to a permission request. Two
@@ -51,7 +54,11 @@ import { fileURLToPath } from "node:url";
 //   - The fixture is redacted, then checked for the user name, the host
 //     name, the home and temporary directories and any UUID before it is
 //     written. A path of the recording machine inside a text is replaced,
-//     and a text of more than 2000 characters is cut short.
+//     and a text of more than 2000 characters is cut short. Each id of a
+//     run gets a placeholder of its own (UUID_1, UUID_2, ...), the same
+//     wherever that id stands in the capture, so a row still names its
+//     parent. Of a session row that is no message, only its type, its ids
+//     and the kind of its attachment are kept.
 //
 //   LETAGENTS_RECORD_CLAUDE_RESULT_SHAPES=1 node \
 //     electron/scripts/record-claude-result-shapes.mjs [options]
@@ -71,8 +78,17 @@ import { fileURLToPath } from "node:url";
 
 const RECORD_ENV = "LETAGENTS_RECORD_CLAUDE_RESULT_SHAPES";
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
-/** Every network connection is denied except to this machine's loopback. */
-const SANDBOX_PROFILE = "(version 1)\n(allow default)\n(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n";
+/**
+ * Every network connection is denied except to this machine's loopback, and every file write except in
+ * `writable` and to the null devices. The later rule wins.
+ */
+const sandboxProfile = (writable) => [
+  "(version 1)", "(allow default)",
+  "(deny network-outbound)", "(allow network-outbound (remote ip \"localhost:*\"))",
+  "(deny file-write*)", `(allow file-write* (subpath ${JSON.stringify(writable)}) (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper"))`,
+].join("\n") + "\n";
+/** A folder beside the runs' folders, in the recorder's own temporary folder. No run may write in it. */
+const OUTSIDE_FOLDER = "outside-every-run";
 /** TEST-NET-1: an address that is never routed, so the proof that it is denied reaches no one. */
 const UNROUTED_ADDRESS = "192.0.2.1";
 const DEFAULT_FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "__fixtures__", "claude-code-result-shapes.json");
@@ -109,9 +125,9 @@ const message = (text, stopReason, id = "msg_probe") => (wantsStream, response) 
   response.write(sse("message_delta", { type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: 3 } }));
   response.end(sse("message_stop", { type: "message_stop" }));
 };
-/** An answer that is one call of a tool. */
-const toolCall = (name, input) => (wantsStream, response) => {
-  const call = { type: "tool_use", id: "toolu_probe", name };
+/** An answer that is one call of a tool. A turn with a second such answer gives that call an id of its own. */
+const toolCall = (name, input, id = "toolu_probe") => (wantsStream, response) => {
+  const call = { type: "tool_use", id, name };
   if (!wantsStream) {
     response.writeHead(200, { "content-type": "application/json", "request-id": "req_probe" });
     response.end(JSON.stringify({ id: "msg_probe_tool_call", type: "message", role: "assistant", model: "probe-model",
@@ -159,6 +175,8 @@ const SUBAGENT_PROMPT = "PROBE_SUBAGENT: reply exactly SUBAGENT REPORT.";
 const SECOND_SUBAGENT_PROMPT = "PROBE_SECOND_SUBAGENT: reply exactly SECOND SUBAGENT REPORT.";
 /** The prompt of the second turn, in the run that sends one. */
 const SECOND_PROMPT = "Reply exactly PROBE_SECOND_OK.";
+/** Words of the request with which the CLI has the model summarize a conversation that it compacts. */
+const SUMMARY_REQUEST = "create a detailed summary";
 /**
  * A turn in which the model calls one tool. The first request gets the call.
  * The request that brings the tool's result back gets the turn's answer. When
@@ -189,6 +207,8 @@ const backgroundCommand = (command, description = "probe") => ["Bash", { command
 /** One line that the tool writes to the CLI's stdin after the prompt. */
 const interruptRequest = () => ({ type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } });
 const secondPrompt = (ids) => ({ type: "user", uuid: ids.secondTurnId, message: { role: "user", content: [{ type: "text", text: SECOND_PROMPT }] } });
+/** A command of the CLI's own, sent as a prompt. The CLI gives its row an id. */
+const cliCommand = (text) => ({ type: "user", message: { role: "user", content: [{ type: "text", text }] } });
 /** The answer to a permission request that the CLI sent on stdout. */
 const permissionResponse = (event, response) => ({ type: "control_response", response: { subtype: "success", request_id: event.request_id, response } });
 /** The command with which the model answers a task's notice, in the runs that ask for approval. It writes one empty file in the run's own folder. */
@@ -393,6 +413,43 @@ const STUB_ANSWERS = {
     cli: { tool: "Bash", lingerMs: 16_000, alsoWrites: { when: "result", afterMs: 500, line: secondPrompt } },
     answer: turnWithBackgroundWork(toolCall(...backgroundCommand("sleep 4; echo BACKGROUND_DONE")),
       { secondTurn: later(7_000, message("ANSWER OF THE SECOND TURN", "end_turn", "msg_probe_second_answer")) }) },
+  prompt_during_task_notice_answer: { stub: "HTTP 200: a Bash call that runs in the background, then the turn's answer. The command ends two seconds after it starts. The answer to the task's notice comes only after six seconds; one and a half seconds after the task's notification, with no interrupt, the CLI is sent a second prompt (SECOND_TURN_ID).",
+    cli: { tool: "Bash", lingerMs: 14_000, alsoWrites: { when: "task_notification", afterMs: 1_500, line: secondPrompt } },
+    answer: afterTheTurn(toolCall(...backgroundCommand("sleep 2; echo BACKGROUND_DONE")),
+      () => later(6_000, message("ANSWER TO THE TASK NOTICE", "end_turn", "msg_probe_notice_answer"))) },
+  compaction_by_command: { stub: "HTTP 200: the turn's answer. Then the CLI is sent its own command /compact, whose request for a summary gets one, and then a second prompt (SECOND_TURN_ID).",
+    cli: { lingerMs: 9_000, alsoWrites: { when: "result", afterMs: 300, lines: (ids) => [cliCommand("/compact"), secondPrompt(ids)] } },
+    answer: (wantsStream, response, _request, holds) => (holds.summaryRequest ? message("SUMMARY OF THE CONVERSATION", "end_turn", "msg_probe_summary")
+      : holds.secondPrompt ? message("ANSWER OF THE SECOND TURN", "end_turn", "msg_probe_second_answer")
+        : message("ANSWER OF THE TURN", "end_turn", "msg_probe_answer"))(wantsStream, response) },
+  hook_adds_context_to_prompt: { stub: "HTTP 200, a normal answer. A UserPromptSubmit hook adds a line of context to the prompt.",
+    cli: { hooks: [{ event: "UserPromptSubmit", script: "echo PROMPT_HOOK_ADDS_THIS_CONTEXT" }] },
+    answer: message("ANSWER OF THE TURN", "end_turn", "msg_probe_answer") },
+  hook_blocks_prompt: { stub: "No request is answered: a UserPromptSubmit hook blocks the prompt.",
+    cli: { hooks: [{ event: "UserPromptSubmit", script: "echo PROMPT_HOOK_BLOCKS_THE_PROMPT 1>&2\nexit 2" }] },
+    answer: message("ANSWER OF THE TURN", "end_turn", "msg_probe_answer") },
+  hook_denies_tool_call: { stub: "HTTP 200: a Bash call, then the turn's answer. A PreToolUse hook denies the call.",
+    cli: { tool: "Bash", hooks: [{ event: "PreToolUse", matcher: "Bash", script: "echo TOOL_HOOK_DENIES_THE_CALL 1>&2\nexit 2" }] },
+    answer: turnWithToolCall(toolCall("Bash", { command: "echo TOOL_DONE", description: "probe" })) },
+  hook_feedback_after_tool_call: { stub: "HTTP 200: a Bash call, then the turn's answer. A PostToolUse hook gives the model its words after the call.",
+    cli: { tool: "Bash", hooks: [{ event: "PostToolUse", matcher: "Bash", script: "echo TOOL_HOOK_SAYS_THIS_AFTER_THE_CALL 1>&2\nexit 2" }] },
+    answer: turnWithToolCall(toolCall("Bash", { command: "echo TOOL_DONE", description: "probe" })) },
+  two_background_commands_end_in_the_other_order: { stub: "HTTP 200: two Bash calls in one message that run in the background, then the turn's answer, then an answer to each task's notice. The command of the first call ends six seconds after it starts, and that of the second call two: the notices come in the other order than the tasks started.",
+    cli: { tool: "Bash", lingerMs: 12_000 }, crossesOrder: true,
+    answer: turnWithBackgroundWork(toolCalls([backgroundCommand("sleep 6; echo FIRST_DONE", "first probe"), backgroundCommand("sleep 2; echo SECOND_DONE", "second probe")]),
+      { notices: [message("ANSWER TO THE FIRST TASK NOTICE", "end_turn", "msg_probe_first_notice_answer"), message("ANSWER TO THE SECOND TASK NOTICE", "end_turn", "msg_probe_second_notice_answer")] }) },
+  background_command_stopped_by_the_turn: { stub: "HTTP 200: a Bash call that runs in the background, then a TaskStop call for that task, then the turn's answer. The command would end thirty seconds after it starts.",
+    cli: { tool: "Bash,TaskStop", lingerMs: 6_000 },
+    answer: (wantsStream, response, _request, holds) => (holds.nth === 1 ? toolCall(...backgroundCommand("sleep 30; echo BACKGROUND_DONE"))
+      : holds.nth === 2 ? toolCall("TaskStop", { task_id: holds.backgroundTask }, "toolu_probe_stop")
+        : message("ANSWER OF THE TURN", "end_turn", "msg_probe_answer"))(wantsStream, response) },
+  resumed_session: { stub: "HTTP 200, normal answers. The CLI ends after the turn. It is started again for the same session with --resume, as the adapter starts the process that replaces one that ended, and is sent a second prompt (SECOND_TURN_ID). 'stream_after_resume' holds what that second process wrote.",
+    cli: { resume: true },
+    answer: (wantsStream, response, _request, holds) => (holds.secondPrompt ? message("ANSWER OF THE SECOND TURN", "end_turn", "msg_probe_second_answer")
+      : message("ANSWER OF THE TURN", "end_turn", "msg_probe_answer"))(wantsStream, response) },
+  write_outside_run_folder_denied: { stub: "HTTP 200: a Bash call that writes one file in the run's own folder and tries to write one beside that folder, then the turn's answer. The recorder's sandbox denies the second write.",
+    cli: { tool: "Bash" }, provesWriteDenied: true,
+    answer: turnWithToolCall(toolCall("Bash", { command: `sh -c 'echo x > inside-the-run && echo INSIDE_WRITTEN; echo x > ../../${OUTSIDE_FOLDER}/written-by-a-run; echo OUTSIDE_EXIT_$?'`, description: "write probe" })) },
 };
 
 function option(name) {
@@ -407,15 +464,18 @@ function option(name) {
  * characters: whether it asks for a streamed answer, whether it holds a
  * tool's result, whether it holds the prompt this tool gives a sub-agent or
  * the one it gives a second sub-agent, whether it holds this tool's second
- * prompt, and how many notices of background tasks it holds. No header is
- * read at all.
+ * prompt, whether it asks for a summary of the conversation, and how many
+ * notices of background tasks it holds. One id is read too: the one that
+ * the CLI gave a background command, where a tool's result names it. No
+ * header is read at all.
  */
 function startStandIn(answer, counts) {
   const sockets = new Set();
   const server = createServer((request, response) => {
     const path = (request.url ?? "").split("?")[0];
     let wantsStream = false;
-    const holds = { toolResult: false, subagentPrompt: false, secondSubagentPrompt: false, taskNotice: false, taskNotices: 0, secondPrompt: false, nth: 0 };
+    const holds = { toolResult: false, subagentPrompt: false, secondSubagentPrompt: false, taskNotice: false, taskNotices: 0, secondPrompt: false, summaryRequest: false,
+      backgroundTask: null, nth: 0 };
     let tail = "";
     request.on("data", (chunk) => {
       const window = tail + chunk.toString("latin1");
@@ -424,6 +484,11 @@ function startStandIn(answer, counts) {
       if (window.includes(SUBAGENT_PROMPT.split(":")[0])) holds.subagentPrompt = true;
       if (window.includes(SECOND_SUBAGENT_PROMPT.split(":")[0])) holds.secondSubagentPrompt = true;
       if (window.includes(SECOND_PROMPT.split(" ").at(-1))) holds.secondPrompt = true;
+      if (window.includes(SUMMARY_REQUEST)) holds.summaryRequest = true;
+      // As the CLI writes it in the result of a call that it runs in the background. A match that the end of a
+      // chunk cut short is read again, whole, with the next chunk.
+      const startedTask = /running in background with ID: ([a-z0-9]+)/.exec(window);
+      if (startedTask) holds.backgroundTask = startedTask[1];
       // As the CLI writes the notice in a message. Its tool descriptions name the tag too, without what follows it here.
       // A notice that ends in this chunk is counted now; one that lies in the kept tail was counted before.
       for (const notice of window.matchAll(/<task-notification>\\n<task-id>/g)) if (notice.index + notice[0].length > tail.length) holds.taskNotices += 1;
@@ -475,39 +540,61 @@ function refusedNothingElse(capture) {
     && (!result || (result.is_error === true && result.api_error_status === null && /refused/i.test(String(result.result))));
 }
 
-/** Refuse to go on unless the sandbox profile denies a connection that leaves this machine and allows one that does not. */
-async function proveSandbox(profilePath) {
-  const connect = (host, port) => spawnSync(SANDBOX_EXEC, ["-f", profilePath, process.execPath, "-e",
+/**
+ * Refuse to go on unless a run's sandbox profile denies a connection that leaves this machine and allows one that
+ * does not, and denies a file write outside the run's folder and allows one inside it.
+ */
+async function proveSandbox(root) {
+  const inside = join(root, "sandbox-proof");
+  const outside = join(root, OUTSIDE_FOLDER);
+  for (const dir of [inside, outside]) mkdirSync(dir, { recursive: true });
+  const profilePath = join(root, "sandbox-proof.sb");
+  writeFileSync(profilePath, sandboxProfile(inside));
+  const run = (script) => spawnSync(SANDBOX_EXEC, ["-f", profilePath, process.execPath, "-e", script], { encoding: "utf8", timeout: 10_000 }).stdout.trim();
+  const connect = (host, port) => run(
     `const socket = require("node:net").connect({ host: ${JSON.stringify(host)}, port: ${port} });
      socket.on("connect", () => { console.log("CONNECTED"); process.exit(0); });
      socket.on("error", (error) => { console.log(error.code); process.exit(0); });
-     setTimeout(() => { console.log("NO_ANSWER"); process.exit(0); }, 4000);`], { encoding: "utf8", timeout: 10_000 }).stdout.trim();
-  const outside = connect(UNROUTED_ADDRESS, 9);
-  if (outside !== "EPERM") throw new Error(`The sandbox did not deny a connection that leaves this machine (${outside || "no output"}). Nothing was started.`);
+     setTimeout(() => { console.log("NO_ANSWER"); process.exit(0); }, 4000);`);
+  const write = (file) => run(`try { require("node:fs").writeFileSync(${JSON.stringify(file)}, "x"); console.log("WRITTEN"); } catch (error) { console.log(error.code); }`);
+  const reached = connect(UNROUTED_ADDRESS, 9);
+  if (reached !== "EPERM") throw new Error(`The sandbox did not deny a connection that leaves this machine (${reached || "no output"}). Nothing was started.`);
   const counts = {};
   const local = await startStandIn((_wantsStream, response) => response.end(), counts);
-  const inside = connect("127.0.0.1", local.port);
+  const loopback = connect("127.0.0.1", local.port);
   await local.close();
-  if (inside !== "CONNECTED") throw new Error(`The sandbox did not allow a loopback connection (${inside || "no output"}). Nothing was started.`);
+  if (loopback !== "CONNECTED") throw new Error(`The sandbox did not allow a loopback connection (${loopback || "no output"}). Nothing was started.`);
+  const wroteOutside = write(join(outside, "proof"));
+  if (wroteOutside !== "EPERM" || existsSync(join(outside, "proof"))) {
+    throw new Error(`The sandbox did not deny a file write outside the run's folder (${wroteOutside || "no output"}). Nothing was started.`);
+  }
+  const wroteInside = write(join(inside, "proof"));
+  if (wroteInside !== "WRITTEN") throw new Error(`The sandbox did not allow a file write in the run's folder (${wroteInside || "no output"}). Nothing was started.`);
 }
 
 /** Run the CLI once, as the room adapter launches it, against one stand-in answer. */
-async function recordOne(name, claudeBin, root, profilePath, timeoutMs) {
+async function recordOne(name, claudeBin, root, timeoutMs) {
   const runRoot = join(root, name);
   const dirs = { home: join(runRoot, "home"), config: join(runRoot, "config"), work: join(runRoot, "work"), tmp: join(runRoot, "tmp") };
   for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
+  // The run may write in its own folder, and nowhere else.
+  const profilePath = join(runRoot, "sandbox.sb");
+  writeFileSync(profilePath, sandboxProfile(runRoot));
   const mcpConfigPath = join(runRoot, "mcp.json");
   writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers: {} }));
   const requests = {};
   const { answer, cli = {} } = STUB_ANSWERS[name];
-  if (cli.stopHook) {
-    // The hook refuses the end of the turn once, with words for the model, and allows it from then on.
-    const hookPath = join(runRoot, "stop-hook.sh");
-    const ranOnce = join(dirs.tmp, "stop-hook-ran");
-    writeFileSync(hookPath, `#!/bin/sh\nif [ -e "${ranOnce}" ]; then exit 0; fi\ntouch "${ranOnce}"\necho STOP_HOOK_SAYS_GO_ON 1>&2\nexit 2\n`);
+  // A hook is a script in the run's folder. `once` makes it act the first time it runs, and allow from then on.
+  const hooks = [...(cli.stopHook ? [{ event: "Stop", once: true, script: "echo STOP_HOOK_SAYS_GO_ON 1>&2\nexit 2" }] : []), ...(cli.hooks ?? [])];
+  const hookSettings = {};
+  for (const [index, hook] of hooks.entries()) {
+    const hookPath = join(runRoot, `hook-${index + 1}.sh`);
+    const ranOnce = join(dirs.tmp, `hook-${index + 1}-ran`);
+    writeFileSync(hookPath, `#!/bin/sh\n${hook.once ? `if [ -e "${ranOnce}" ]; then exit 0; fi\ntouch "${ranOnce}"\n` : ""}${hook.script}\n`);
     chmodSync(hookPath, 0o755);
-    writeFileSync(join(dirs.config, "settings.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: hookPath }] }] } }));
+    (hookSettings[hook.event] ??= []).push({ ...(hook.matcher ? { matcher: hook.matcher } : {}), hooks: [{ type: "command", command: hookPath }] });
   }
+  if (hooks.length) writeFileSync(join(dirs.config, "settings.json"), JSON.stringify({ hooks: hookSettings }));
   const standIn = answer ? await startStandIn(answer, requests) : null;
   const port = standIn ? standIn.port : await unlistenedPort();
   const sessionId = randomUUID();
@@ -520,7 +607,7 @@ async function recordOne(name, claudeBin, root, profilePath, timeoutMs) {
     // An agent that asks before it writes: its permission requests go to stdout, and its tool is not allowed beforehand.
     ...(cli.askForApproval ? ["--permission-prompt-tool", "stdio", "--permission-mode", "default"] : ["--permission-mode", "dontAsk"]),
     "--tools", ["Read,Glob,Grep", cli.tool].filter(Boolean).join(","),
-    "--allowed-tools", ["mcp__letagents__*", cli.askForApproval ? null : cli.tool].filter(Boolean).join(","), "--setting-sources", cli.stopHook ? "user" : "", "--session-id", sessionId];
+    "--allowed-tools", ["mcp__letagents__*", cli.askForApproval ? null : cli.tool].filter(Boolean).join(","), "--setting-sources", hooks.length ? "user" : "", "--session-id", sessionId];
   // Nothing of this process's environment reaches the CLI.
   const env = {
     PATH: [dirname(claudeBin), "/usr/bin", "/bin", "/usr/sbin", "/sbin"].join(delimiter),
@@ -579,6 +666,32 @@ async function recordOne(name, claudeBin, root, profilePath, timeoutMs) {
   const afterInputClosed = inputClosedAt === null ? null
     : { ended: stoppedByTool ? "stopped by the recorder" : "by itself", code: exitCode, signal: exitSignal, seconds: Math.round((performance.now() - inputClosedAt) / 100) / 10 };
   clearTimeout(timer);
+  // One run starts the CLI a second time for the same session, as the adapter starts the process that replaces
+  // one that ended: the same flags, with --resume in place of --session-id. That process is sent the second
+  // prompt, and its stdin is closed half a second after its result.
+  const resumedLines = !cli.resume ? null : await new Promise((ended) => {
+    const second = spawn(SANDBOX_EXEC, ["-f", profilePath, claudeBin, ...args.slice(0, -2), "--resume", sessionId], { cwd: dirs.work, env, stdio: ["pipe", "pipe", "ignore"], detached: true });
+    const written = [];
+    let rest = "";
+    const close = () => {
+      try { second.stdin.end(); } catch { /* The pipe is already gone. */ }
+      setTimeout(() => { try { process.kill(-second.pid, "SIGTERM"); } catch { /* It has exited. */ } }, 3_000).unref();
+    };
+    const limit = setTimeout(close, timeoutMs);
+    second.stdout.on("data", (chunk) => {
+      rest += chunk.toString("utf8");
+      for (let end = rest.indexOf("\n"); end >= 0; end = rest.indexOf("\n")) {
+        let event = null;
+        try { event = JSON.parse(rest.slice(0, end)); } catch { /* Not a stream-json line. */ }
+        rest = rest.slice(end + 1);
+        if (!event || typeof event !== "object") continue;
+        written.push({ atMs: Math.round(performance.now() - started), event });
+        if (event.type === "result") setTimeout(close, 500);
+      }
+    });
+    second.stdin.write(`${JSON.stringify(secondPrompt({ secondTurnId }))}\n`);
+    second.once("exit", () => { clearTimeout(limit); ended(written); });
+  });
   await standIn?.close();
   const projects = join(dirs.config, "projects");
   const transcript = existsSync(projects)
@@ -588,7 +701,7 @@ async function recordOne(name, claudeBin, root, profilePath, timeoutMs) {
   // Claude Code keeps the rows of a sub-agent in a file of their own, beside the session's file.
   const subagentRows = existsSync(projects) ? readdirSync(projects, { recursive: true }).map(String).sort()
     .filter((entry) => entry.split(/[\\/]/).includes(sessionId) && entry.split(/[\\/]/).includes("subagents") && entry.endsWith(".jsonl")).flatMap(rowsOf) : [];
-  return { name, outcome, sessionId, turnId, secondTurnId, runRoot, requests, lines, sessionRows, subagentRows, afterInputClosed };
+  return { name, outcome, sessionId, turnId, secondTurnId, runRoot, requests, lines, sessionRows, subagentRows, afterInputClosed, ...(resumedLines ? { resumedLines } : {}) };
 }
 
 /** Token and cost accounting. It is large, and nothing that reads a result uses it. */
@@ -604,10 +717,23 @@ function pathsOf(runRoot) {
   return new RegExp(`(?:/private)?${escaped}[^\\s"'<>\\]\\\\]*`, "g");
 }
 
+/**
+ * The placeholders of one capture's ids: UUID_1, UUID_2 and so on, in the order in which the ids are first met.
+ * The same id gets the same placeholder wherever it stands, so `parentUuid` still names a row of the capture.
+ */
+function placeholders() {
+  const given = new Map();
+  return (id) => {
+    const key = id.toLowerCase();
+    if (!given.has(key)) given.set(key, `UUID_${given.size + 1}`);
+    return given.get(key);
+  };
+}
+
 function redact(value, ids) {
   if (typeof value === "string") {
     const text = (ids.paths ? value.replace(ids.paths, "/PATH") : value)
-      .replaceAll(ids.sessionId, "SESSION_ID").replaceAll(ids.turnId, "TURN_ID").replaceAll(ids.secondTurnId ?? "SECOND_TURN_ID", "SECOND_TURN_ID").replace(UUID, "UUID")
+      .replaceAll(ids.sessionId, "SESSION_ID").replaceAll(ids.turnId, "TURN_ID").replaceAll(ids.secondTurnId ?? "SECOND_TURN_ID", "SECOND_TURN_ID").replace(UUID, ids.placeholder)
       .replace(/127\.0\.0\.1:\d+/g, "127.0.0.1:PORT")
       .replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, "2026-01-01T00:00:00.000Z");
     return text.length > LONG_TEXT ? `${text.slice(0, 120)} [${text.length - 120} more characters left out]` : text;
@@ -622,8 +748,19 @@ function redact(value, ids) {
 function fixtureCapture(capture) {
   const result = capture.lines.find((line) => line.event.type === "result");
   if (!result) return null;
-  const ids = { sessionId: capture.sessionId, turnId: capture.turnId, secondTurnId: capture.secondTurnId, paths: pathsOf(capture.runRoot) };
-  const chat = (rows) => rows.filter((row) => row.type === "user" || row.type === "assistant").map((row) => redact(row, ids));
+  const ids = { sessionId: capture.sessionId, turnId: capture.turnId, secondTurnId: capture.secondTurnId, paths: pathsOf(capture.runRoot), placeholder: placeholders() };
+  const isMessage = (row) => row.type === "user" || row.type === "assistant";
+  const chat = (rows) => rows.filter(isMessage).map((row) => redact(row, ids));
+  // A row that is no message holds much that is of the recording machine: its settings, its folders, the system
+  // prompt. What is kept is its place in the chain of rows, and what kind of row it is. A command that the CLI
+  // gave to a running request (the notice of a task, a prompt) is kept with its words: they are the CLI's own.
+  const link = (row) => ({ type: row.type, ...(typeof row.subtype === "string" ? { subtype: row.subtype } : {}),
+    uuid: row.uuid, parentUuid: row.parentUuid ?? null, ...(typeof row.logicalParentUuid === "string" ? { logicalParentUuid: row.logicalParentUuid } : {}),
+    ...(typeof row.isSidechain === "boolean" ? { isSidechain: row.isSidechain } : {}), sessionId: row.sessionId,
+    ...(row.compactMetadata && typeof row.compactMetadata === "object" ? { compactMetadata: { trigger: row.compactMetadata.trigger } } : {}),
+    ...(row.type === "attachment" ? { attachment: row.attachment?.type === "queued_command"
+      ? { type: "queued_command", commandMode: row.attachment.commandMode, prompt: row.attachment.prompt, source_uuid: row.attachment.source_uuid }
+      : { type: row.attachment?.type } } : {}) });
   return {
     stub: STUB_ANSWERS[capture.name].stub,
     seconds_to_result: Math.round(result.atMs / 100) / 10,
@@ -632,29 +769,32 @@ function fixtureCapture(capture) {
     // launch supplies it.
     stream: capture.lines.map((line) => line.event).filter((event) => !(event.type === "system" && event.subtype === "init"))
       .map((event) => redact(event, ids)),
-    // The user and assistant rows of the session file, in order. They go on after the turn when the CLI did.
-    session: chat(capture.sessionRows),
+    // The rows of the session file that have an id, in order. They go on after the turn when the CLI did. The
+    // user and assistant rows are whole.
+    session: capture.sessionRows.filter((row) => typeof row.uuid === "string").map((row) => redact(isMessage(row) ? row : link(row), ids)),
     // The same rows of the file that holds a sub-agent's.
     ...(capture.subagentRows?.length ? { subagent_session: chat(capture.subagentRows) } : {}),
     // Only for a run that asks how the CLI ends once its stdin is closed.
     ...(STUB_ANSWERS[capture.name].cli?.closeWaitMs && capture.afterInputClosed ? { after_input_closed: capture.afterInputClosed } : {}),
+    // Only for the run that starts the CLI a second time: every line of that process, but for its `system/init` line.
+    ...(capture.resumedLines ? { stream_after_resume: capture.resumedLines.map((line) => line.event).filter((event) => !(event.type === "system" && event.subtype === "init"))
+      .map((event) => redact(event, ids)) } : {}),
   };
 }
 
 function fixtureText(captures, version) {
   const line = (value) => JSON.stringify(value);
   const rows = (events) => events.length ? `[\n${events.map((event) => `        ${line(event)}`).join(",\n")}\n      ]` : "[]";
-  const about = `Real stream-json output of Claude Code ${version}, launched with the room adapter's flags against a local stand-in for the Messages API. Recorded with electron/scripts/record-claude-result-shapes.mjs. Ids, times, paths and the stand-in's port are replaced, and the token accounting (usage, modelUsage, subagent_stats) is left out. SESSION_ID and TURN_ID stand for the session and for the user message that started the turn. In the captures from stop_hook_refuses_end_once on, the stand-in answers with a tool call or the CLI has a Stop hook: one more tool is allowed, a text of more than 2000 characters is cut short, the stream and the session go on after the turn when the CLI did, and 'subagent_session' holds the rows of the separate file in which the CLI keeps a sub-agent's. In the captures from two_background_commands on, a turn starts background work in more ways: 'stub' says what the recorder also wrote to the CLI's stdin (an interrupt control request, its answer to a permission request, or a second prompt, whose user message is SECOND_TURN_ID), and 'after_input_closed' says how the CLI ended once its stdin was closed. In the two captures named approval_…, the CLI was started as an agent that asks before it writes.`;
-  const body = Object.entries(captures).map(([name, capture]) => [
-    `    ${line(name)}: {`,
-    `      "stub": ${line(capture.stub)},`,
-    `      "seconds_to_result": ${capture.seconds_to_result},`,
-    `      "stream": ${rows(capture.stream)},`,
-    `      "session": ${rows(capture.session)}${capture.subagent_session || capture.after_input_closed ? "," : ""}`,
-    ...(capture.subagent_session ? [`      "subagent_session": ${rows(capture.subagent_session)}${capture.after_input_closed ? "," : ""}`] : []),
+  const about = `Real stream-json output of Claude Code ${version}, launched with the room adapter's flags against a local stand-in for the Messages API. Recorded with electron/scripts/record-claude-result-shapes.mjs. Ids, times, paths and the stand-in's port are replaced, and the token accounting (usage, modelUsage, subagent_stats) is left out. SESSION_ID and TURN_ID stand for the session and for the user message that started the turn. In the captures from stop_hook_refuses_end_once on, the stand-in answers with a tool call or the CLI has a Stop hook: one more tool is allowed, a text of more than 2000 characters is cut short, the stream and the session go on after the turn when the CLI did, and 'subagent_session' holds the rows of the separate file in which the CLI keeps a sub-agent's. In the captures from two_background_commands on, a turn starts background work in more ways: 'stub' says what the recorder also wrote to the CLI's stdin (an interrupt control request, its answer to a permission request, or a second prompt, whose user message is SECOND_TURN_ID), and 'after_input_closed' says how the CLI ended once its stdin was closed. In the two captures named approval_…, the CLI was started as an agent that asks before it writes. Each id of a run has a placeholder of its own (UUID_1, UUID_2 and so on), the same wherever that id stands in the capture, so 'parentUuid' names a row. 'session' holds every row of the session file that has an id, in order: the user and assistant rows whole, and of any other row its type, its ids and the kind of its attachment (of a command that the CLI gave to a running request, also its mode and its words). In the captures from prompt_during_task_notice_answer on: a second prompt is sent while the notice of a task is answered; the CLI is sent its own command /compact; the CLI has a hook of another kind than Stop (the stub says which, and what it does); one run's tool tries to write a file beside the run's own folder, which the recorder's sandbox denies; two commands of one message end in the other order than they started; a turn stops its own background command; and the CLI is started a second time for the same session ('stream_after_resume' holds what that process wrote).`;
+  const body = Object.entries(captures).map(([name, capture]) => `    ${line(name)}: {\n${[
+    `      "stub": ${line(capture.stub)}`,
+    `      "seconds_to_result": ${capture.seconds_to_result}`,
+    `      "stream": ${rows(capture.stream)}`,
+    `      "session": ${rows(capture.session)}`,
+    ...(capture.subagent_session ? [`      "subagent_session": ${rows(capture.subagent_session)}`] : []),
     ...(capture.after_input_closed ? [`      "after_input_closed": ${line(capture.after_input_closed)}`] : []),
-    "    }",
-  ].join("\n")).join(",\n");
+    ...(capture.stream_after_resume ? [`      "stream_after_resume": ${rows(capture.stream_after_resume)}`] : []),
+  ].join(",\n")}\n    }`).join(",\n");
   return `{\n  "about": ${line(about)},\n  "claude_code_version": ${line(version)},\n  "captures": {\n${body}\n  }\n}\n`;
 }
 
@@ -702,11 +842,30 @@ async function main() {
     const claudeBin = realpathSync(located);
     const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-claude-result-shapes-")));
     try {
-      const profilePath = join(root, "loopback-only.sb");
-      writeFileSync(profilePath, SANDBOX_PROFILE);
-      await proveSandbox(profilePath);
+      await proveSandbox(root);
       // Each run is its own process, stand-in and directories, so they do not have to wait for each other.
-      raw.push(...await Promise.all(names.map((name) => recordOne(name, claudeBin, root, profilePath, timeoutMs))));
+      raw.push(...await Promise.all(names.map((name) => recordOne(name, claudeBin, root, timeoutMs))));
+      // No run may have written beside its own folder. One run tried to: its tool's result must say that the
+      // write in the folder was made, and that the write beside it was denied.
+      const strays = readdirSync(join(root, OUTSIDE_FOLDER));
+      if (strays.length) throw new Error(`A run wrote outside its own folder (${strays.join(", ")}). Nothing was written.`);
+      // One run is kept only when its two tasks ended in the other order than they started: the CLI starts the
+      // calls of one message in an order of its own. Run it again when it did not.
+      for (const capture of raw) {
+        if (!STUB_ANSWERS[capture.name].crossesOrder) continue;
+        const tasksOf = (subtype) => capture.lines.map((line) => line.event).filter((event) => event.type === "system" && event.subtype === subtype).map((event) => event.task_id);
+        const [startedTasks, endedTasks] = [tasksOf("task_started"), tasksOf("task_notification")];
+        if (startedTasks.length !== 2 || endedTasks.length !== 2 || startedTasks[0] !== endedTasks[1] || startedTasks[1] !== endedTasks[0]) {
+          throw new Error(`${capture.name}: the tasks did not end in the other order than they started. Run it again. Nothing was written.`);
+        }
+      }
+      for (const capture of raw) {
+        if (!STUB_ANSWERS[capture.name].provesWriteDenied) continue;
+        const results = JSON.stringify(capture.sessionRows.filter((row) => row.type === "user"));
+        if (!["INSIDE_WRITTEN", "Operation not permitted", "OUTSIDE_EXIT_1"].every((word) => results.includes(word))) {
+          throw new Error(`${capture.name}: the run did not show that the sandbox denies a file write outside its folder. Nothing was written.`);
+        }
+      }
       for (const capture of raw) {
         if (!STUB_ANSWERS[capture.name].answer && !refusedNothingElse(capture)) {
           throw new Error(`${capture.name}: something answered on the port that was to refuse the connection. Another local process took that port, and was sent the dummy key and the probe prompt. Nothing was written.`);

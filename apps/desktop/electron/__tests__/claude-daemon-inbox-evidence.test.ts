@@ -10,8 +10,8 @@ import {
   type ClaudeEvidenceRecord,
 } from "../main/agents/claude-room-turn-evidence.js";
 import {
-  CLAUDE_API_ERROR_CAPTURES, CLAUDE_API_FAILURE_POLICY, CLAUDE_INVALID_REQUESTS, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT, claudeInvalidRequestRows,
-  claudeResultEvent, realClaudeCapture, realClaudeResult,
+  CLAUDE_API_ERROR_CAPTURES, CLAUDE_API_FAILURE_POLICY, CLAUDE_INVALID_REQUESTS, CLAUDE_REAL_CAPTURES, CLAUDE_RESULT_CELLS, CLAUDE_RESULT_TEXT, claudeCapturedTask,
+  claudeInvalidRequestRows, claudeParentChain, claudeResultEvent, realClaudeCapture, realClaudeResult,
 } from "./claude-result-shapes.js";
 
 const sessionId = "5cf962f0-f6b6-4eca-b0d7-348ae59bfeb8";
@@ -302,7 +302,10 @@ test("a Claude turn's answer in its session is in the last message that ended, a
     { turnId, outcome: "reply", text: "Last.", evidence: "transcript" });
 
   // The last message that ended is looked for in this turn's rows alone. A later command's answer is not this turn's.
-  const later: ClaudeEvidenceRecord = { type: "user", uuid: "later-turn", sessionId, message: { role: "user", content: [{ type: "text", text: "later request" }] } };
+  // The later command's row is the real row of a second prompt: the CLI marks a prompt with where it came from.
+  const later = realClaudeCapture(CLAUDE_REAL_CAPTURES.task_ends_during_next_turn!, sessionId, turnId).session.find((row) => row.uuid === "SECOND_TURN_ID") as ClaudeEvidenceRecord;
+  assert.deepEqual([later.type, later.promptSource, later.isMeta], ["user", "sdk", undefined]);
+  later.uuid = "later-turn";
   const laterAnswer = ended("message-3", [{ type: "text", text: "ANSWER OF THE LATER TURN" }]);
   assert.deepEqual(recoverExactClaudeTurnFromSession([request, thinkingOnly, later, laterAnswer], turnId, sessionId), unreadable);
   assert.equal(recoverExactClaudeTurnFromSession([request, thinkingOnly, askForOutput, later, laterAnswer], turnId, sessionId), null);
@@ -319,24 +322,47 @@ test("a Claude turn's answer in its session is in the last message that ended, a
     { turnId, nativeOutcome: "failed", error: "API Error: Overloaded", apiFailure: { status: 529, terminalReason: null, category: "server_error" } });
 });
 
-/** The real rows of one capture, for this session and this turn. */
+/** The real rows of one capture, for this session and this turn: its messages, and every row of its session file that has an id. */
 const realRows = (name: string) => {
   const capture = realClaudeCapture(CLAUDE_REAL_CAPTURES[name]!, sessionId, turnId);
-  return { stream: capture.stream, session: capture.session as ClaudeEvidenceRecord[], subagent: (capture.subagent_session ?? []) as ClaudeEvidenceRecord[] };
+  return { stream: capture.stream, session: capture.session as ClaudeEvidenceRecord[], file: capture.session_file as ClaudeEvidenceRecord[],
+    subagent: (capture.subagent_session ?? []) as ClaudeEvidenceRecord[] };
 };
+const isMessage = (row: ClaudeEvidenceRecord) => row.type === "user" || row.type === "assistant";
 const replyFromSession = (text: string) => ({ turnId, outcome: "reply", text, evidence: "transcript" });
 const endedWith = (id: string, text: string): ClaudeEvidenceRecord =>
   ({ type: "assistant", sessionId, message: { id, role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] } });
-/** The texts no reading of the turn may ever return: another turn's answer, a sub-agent's report. */
-const NOT_THE_TURNS_ANSWER = ["ANSWER TO THE TASK NOTICE", "ANSWER TO THE FIRST TASK NOTICE", "ANSWER TO THE SECOND TASK NOTICE",
-  "ANSWER NUMBER 1 AFTER THE TURN, TO A REQUEST THAT HOLDS 2 TASK NOTICES", "ANSWER OF THE SECOND TURN", "SUBAGENT REPORT", "SECOND SUBAGENT REPORT"];
+/** What the cuts of the property test come to, over all captures. */
+const [PROPERTY_CUTS, PROPERTY_REPLIES, PROPERTY_MARKED] = [870, 153, 94];
+/** The texts no reading of the turn may ever hold: another room turn's answer, a sub-agent's report. */
+const NOT_THE_TURNS = ["ANSWER OF THE SECOND TURN", "SUBAGENT REPORT", "SECOND SUBAGENT REPORT", "SUMMARY OF THE CONVERSATION"];
+
+const A = "ANSWER OF THE TURN";
+const N = "ANSWER TO THE TASK NOTICE";
+const N1 = "ANSWER TO THE FIRST TASK NOTICE";
+const N2 = "ANSWER TO THE SECOND TASK NOTICE";
+/**
+ * What is read: no proven answer, a reply that the session proves complete, or a reply with what it lacks.
+ * `no_report`: the session holds no notice of some of the background work that the turn started.
+ * `ended_unreported`: it holds the notice of all of that work, and not an answer to each.
+ */
+type Read = null | string | [text: string, lacks: "no_report" | "ended_unreported"];
+const noReport = (...texts: string[]): Read => [texts.join("\n\n"), "no_report"];
+const unreported = (...texts: string[]): Read => [texts.join("\n\n"), "ended_unreported"];
+const whole = (...texts: string[]): Read => texts.join("\n\n");
+const asRead = (read: Read) => read === null ? null : typeof read === "string" ? replyFromSession(read) : { ...replyFromSession(read[0]), backgroundWork: read[1] };
+/** A turn with one tool call that started background work: the request, the call, its result, the turn's answer. */
+const HELD = [null, null, null, noReport(A)];
+/** The same with two calls. */
+const HELD_FOR_TWO = [null, null, null, null, null, noReport(A)];
 
 /**
- * What the real session of each capture proves, whenever the process ended: after each of its rows, the answer
- * that is read, or null where no answer is proven. The rows after the turn are part of the file, and never give
- * the turn another answer.
+ * What the real session file of each capture proves, whenever the process ended: after each of its messages,
+ * what is read for the turn. The rows after the turn are part of the file. The answer to the notice of the
+ * turn's own background work is part of the turn's reply, as it is for a turn that the adapter holds open; the
+ * answer of another room turn never is, and a sub-agent's report never is.
  */
-const REAL_SESSION_ANSWERS: Record<string, Array<string | null>> = {
+const REAL_SESSION_READS: Record<string, Read[]> = {
   completed_answer: [null, "PROBE_OK"],
   // The request, and the CLI's request for visible output.
   completed_without_answer: [null, null],
@@ -344,72 +370,108 @@ const REAL_SESSION_ANSWERS: Record<string, Array<string | null>> = {
   stop_reason_max_tokens: [null, null, null, null, null, null, null, null, null],
   // The request, an answer, the Stop hook's refusal of it, the answer after that.
   stop_hook_refuses_end_once: [null, "ANSWER BEFORE THE HOOK", null, "ANSWER AFTER THE HOOK"],
-  // The request, a tool call, its result, the turn's answer; then the task's notice and the CLI's answer to it.
-  background_command: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
-  subagent_in_background: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
-  subagent_api_error: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
-  // The request, the Task call, its result with the sub-agent's report, the turn's answer.
-  subagent_in_foreground: [null, null, null, "ANSWER OF THE TURN"],
+  // The request, a tool call, its result, the turn's answer; then the task's notice, and the CLI's answer to it.
+  background_command: [...HELD, unreported(A), whole(A, N)],
+  subagent_in_background: [...HELD, unreported(A), whole(A, N)],
+  subagent_api_error: [...HELD, unreported(A), whole(A, N)],
+  background_command_fails: [...HELD, unreported(A), whole(A, N)],
+  background_command_running_at_interrupt: [...HELD, unreported(A), whole(A, N)],
+  subagent_stopped_by_request: [...HELD, unreported(A), whole(A, N)],
+  // The request, the Task call, its result with the sub-agent's report, the turn's answer. Nothing ran in the background.
+  subagent_in_foreground: [null, null, null, A],
   // The request, the Skill call, its result, the skill's text, the turn's answer.
-  skill_call: [null, null, null, null, "ANSWER OF THE TURN"],
+  skill_call: [null, null, null, null, A],
   // The request, two tool calls, their results, the turn's answer; then, for each task, its notice and the answer to it.
-  two_background_commands: [null, null, null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
-  two_subagents_in_background: [null, null, null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
-  subagent_and_background_command: [null, null, null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
-  // The same turn; then both notices, and the one answer to them.
-  two_background_commands_end_together: [null, null, null, null, null, ...Array<string>(4).fill("ANSWER OF THE TURN")],
-  // The request, a tool call, its result, the turn's answer; then the task's notice, and what the CLI wrote for it:
-  // an answer, its request for visible output, the provider's error, or the mark of an interrupt.
-  background_command_fails: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
-  background_command_notice_answer_empty: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
-  background_command_notice_api_error: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
-  background_command_running_at_interrupt: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
-  interrupt_during_task_notice_answer: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
-  subagent_stopped_by_request: [null, null, null, "ANSWER OF THE TURN", "ANSWER OF THE TURN", "ANSWER OF THE TURN"],
-  // A command that was stopped has no notice: the session ends with the turn.
-  background_command_stopped_by_request: [null, null, null, "ANSWER OF THE TURN"],
-  background_command_running_at_input_close: [null, null, null, "ANSWER OF THE TURN"],
-  // The task ended while the turn still ran. Its notice went to the model with the turn's last request, and is no row of the session.
+  two_background_commands: [...HELD_FOR_TWO, noReport(A), noReport(A, N1), unreported(A, N1), whole(A, N1, N2)],
+  two_subagents_in_background: [...HELD_FOR_TWO, noReport(A), noReport(A, N1), unreported(A, N1), whole(A, N1, N2)],
+  subagent_and_background_command: [...HELD_FOR_TWO, noReport(A), noReport(A, N1), unreported(A, N1), whole(A, N1, N2)],
+  // The same turn; then both notices, which went to the model with one request, and the one answer to them.
+  two_background_commands_end_together: [...HELD_FOR_TWO, noReport(A), unreported(A), whole(A, N1)],
+  // The turn; then the task's notice, and what the CLI wrote for it in place of an answer: its request for
+  // visible output, the provider's error, or the mark of an interrupt.
+  background_command_notice_answer_empty: [...HELD, unreported(A), unreported(A)],
+  background_command_notice_api_error: [...HELD, unreported(A), unreported(A)],
+  interrupt_during_task_notice_answer: [...HELD, unreported(A), unreported(A)],
+  // A command that was stopped, and one that still ran when the CLI ended, have no notice: the session ends with the turn.
+  background_command_stopped_by_request: HELD,
+  background_command_running_at_input_close: HELD,
+  // A sub-agent that an interrupt stopped has no notice either.
+  subagent_running_at_interrupt: HELD,
+  // The task ended while the turn still ran. Its notice went to the model with the turn's last request: the
+  // file holds that as an attachment, and the turn's answer is the answer to it.
   task_ends_while_turn_goes_on: [null, null, null, null, null, "ANSWER OF THE TURN, TO A REQUEST THAT HOLDS THE TASK NOTICE"],
-  // The turn; then the first notice, a tool call and its result, and the answer, whose request held both notices.
-  task_ends_while_notice_is_answered: [null, null, null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
-  // The turn; then a second prompt and its answer; then the task's notice and the answer to it.
-  task_ends_during_next_turn: [null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
+  // The turn; then the first notice, a tool call and its result, and the answer, whose request took the second notice.
+  task_ends_while_notice_is_answered: [...HELD_FOR_TWO, noReport(A), noReport(A), noReport(A),
+    whole(A, "ANSWER NUMBER 1 AFTER THE TURN, TO A REQUEST THAT HOLDS 2 TASK NOTICES")],
+  // The turn; then a second prompt and its answer; then the task's notice and the answer to it. The adapter
+  // sends no prompt while it holds a turn open, so what follows a prompt is not read for the turn.
+  task_ends_during_next_turn: [...HELD, noReport(A), noReport(A), noReport(A), noReport(A)],
   // The turn; then the task's notice, the mark of the interrupt that ended its answer, and a second prompt with its answer.
-  interrupt_during_task_notice_answer_then_prompt: [null, null, null, ...Array<string>(5).fill("ANSWER OF THE TURN")],
+  interrupt_during_task_notice_answer_then_prompt: [...HELD, unreported(A), unreported(A), unreported(A), unreported(A)],
   // The same, with the command that the answer to the notice called and the refusal of it before the interrupt's mark.
-  approval_in_task_notice_answer_interrupted: [null, null, null, ...Array<string>(7).fill("ANSWER OF THE TURN")],
-  approval_in_task_notice_answer_denied_and_interrupted: [null, null, null, ...Array<string>(7).fill("ANSWER OF THE TURN")],
-  // A sub-agent that an interrupt stopped has no notice: the session ends with the turn.
-  subagent_running_at_interrupt: [null, null, null, "ANSWER OF THE TURN"],
+  approval_in_task_notice_answer_interrupted: [...HELD, ...Array<Read>(6).fill(unreported(A))],
+  approval_in_task_notice_answer_denied_and_interrupted: [...HELD, ...Array<Read>(6).fill(unreported(A))],
+  // The turn; then the task's notice and its answer; then a second prompt, which the CLI kept until that answer had ended.
+  prompt_during_task_notice_answer: [...HELD, unreported(A), whole(A, N), whole(A, N), whole(A, N)],
+  // The request and its answer; then the rows of the CLI's own command /compact, and a second prompt with its answer.
+  compaction_by_command: [null, A, A, A, A, A, A, A],
+  // A hook of another kind than Stop writes no message of its own: its words are an attachment, or the result of the call that it denied.
+  hook_adds_context_to_prompt: [null, A],
+  hook_denies_tool_call: [null, null, null, A],
+  hook_feedback_after_tool_call: [null, null, null, A],
+  write_outside_run_folder_denied: [null, null, null, A],
+  // Two commands of one message whose notices come in the other order than the tasks started.
+  two_background_commands_end_in_the_other_order: [...HELD_FOR_TWO, noReport(A), noReport(A, N1), unreported(A, N1), whole(A, N1, N2)],
+  // The request, a call that starts a command in the background, its result, the call that stops that command, its
+  // result, the turn's answer. No report is due on a command that the turn itself stopped: nothing is missing.
+  background_command_stopped_by_the_turn: [null, null, null, null, null, A],
+  // The request and its answer; then, written by the process that was started again for the session, a second prompt and its answer.
+  resumed_session: [null, A, A, A],
 };
 
-test("real Claude Code sessions: wherever the process ended, the answer read is the turn's own or none", () => {
-  for (const [name, answers] of Object.entries(REAL_SESSION_ANSWERS)) {
-    const { session, subagent } = realRows(name);
-    assert.equal(session.length, answers.length, name);
-    assert.equal(session[0]!.uuid, turnId, name);
-    for (const [index, answer] of answers.entries()) {
-      const read = recoverExactClaudeTurnFromSession(session.slice(0, index + 1), turnId, sessionId);
-      assert.deepEqual(read, answer === null ? null : replyFromSession(answer), `${name}, cut after row ${index + 1}`);
+test("real Claude Code sessions: wherever the process ended, what is read is the turn's own reply, and says what the session does not prove", () => {
+  for (const [name, reads] of Object.entries(REAL_SESSION_READS)) {
+    const { file, subagent } = realRows(name);
+    const messages = file.filter(isMessage);
+    assert.equal(messages.length, reads.length, name);
+    assert.equal(file[0]!.uuid, turnId, name);
+    type Reading = ReturnType<typeof recoverExactClaudeTurnFromSession>;
+    let read: Reading = null;
+    for (let length = 1; length <= file.length; length += 1) {
+      const row = file[length - 1]!;
+      const before: Reading = read;
+      read = recoverExactClaudeTurnFromSession(file.slice(0, length), turnId, sessionId);
+      if (isMessage(row)) {
+        const message = messages.indexOf(row);
+        assert.deepEqual(read, asRead(reads[message]!), `${name}, cut after message ${message + 1}`);
+      } else if ((row.attachment as { type?: string } | undefined)?.type !== "queued_command") {
+        // A row that is no message, and no notice that a request took, changes nothing.
+        assert.deepEqual(read, before, `${name}, cut after row ${length} (${row.type})`);
+      }
+      if (read?.outcome === "reply") assert.ok(NOT_THE_TURNS.every((text) => !read!.text!.includes(text)), `${name}, cut after row ${length}`);
     }
     // Claude Code 2.1.278 keeps a sub-agent's rows in a file of their own. A CLI that wrote them into the session
-    // file would write them after the call that started the sub-agent. No cut of that file gives the turn the sub-agent's words.
+    // file would write them after the call that started the sub-agent. They change no reading of that file.
     if (!subagent.length) continue;
     assert.ok(subagent.every((row) => row.isSidechain === true && row.sessionId === sessionId), name);
-    assert.ok(session.every((row) => row.isSidechain === false), name);
-    const withSubagentRows = [...session.slice(0, 2), ...subagent, ...session.slice(2)];
+    assert.ok(file.every((row) => row.isSidechain === false), name);
+    const call = file.findIndex((row) => row.type === "assistant");
+    const withSubagentRows = [...file.slice(0, call + 1), ...subagent, ...file.slice(call + 1)];
     for (let length = 1; length <= withSubagentRows.length; length += 1) {
-      const read = recoverExactClaudeTurnFromSession(withSubagentRows.slice(0, length), turnId, sessionId);
-      const own = answers[withSubagentRows.slice(0, length).filter((row) => row.isSidechain !== true).length - 1]!;
-      assert.deepEqual(read, own === null ? null : replyFromSession(own), `${name} with the sub-agent's rows in the session file, cut after row ${length}`);
+      const cut = withSubagentRows.slice(0, length);
+      assert.deepEqual(recoverExactClaudeTurnFromSession(cut, turnId, sessionId), recoverExactClaudeTurnFromSession(cut.filter((row) => row.isSidechain !== true), turnId, sessionId),
+        `${name} with the sub-agent's rows in the session file, cut after row ${length}`);
     }
   }
-  // The table names every capture that has a tool call, a hook or a sub-agent, and none of its answers is another turn's.
+  // The table names every capture whose session holds more than a request and an answer.
   for (const [name, capture] of Object.entries(CLAUDE_REAL_CAPTURES)) {
-    if (capture.session.some((row) => row.type === "user" && row.uuid !== "TURN_ID")) assert.ok(REAL_SESSION_ANSWERS[name], `${name} is in the table`);
+    if (capture.session.some((row) => row.type === "user" && row.uuid !== "TURN_ID")) assert.ok(REAL_SESSION_READS[name], `${name} is in the table`);
   }
-  assert.ok(Object.values(REAL_SESSION_ANSWERS).flat().every((answer) => answer === null || !NOT_THE_TURNS_ANSWER.includes(answer)));
+  // A prompt that a hook blocked is no row of the session: nothing is read for it.
+  const { file: blocked } = realRows("hook_blocks_prompt");
+  assert.deepEqual(blocked.map((row) => [row.type, row.subtype]), [["system", "informational"]]);
+  assert.equal(recoverExactClaudeTurnFromSession(blocked, turnId, sessionId), null);
+  assert.equal(recoverExactClaudeTurnFailureFromSession(blocked, turnId, sessionId), null);
 });
 
 test("a sub-agent's rows are never the turn's: its message that ended is not the turn's answer, and its error is not the turn's failure", () => {
@@ -449,9 +511,10 @@ test("a sub-agent's rows are never the turn's: its message that ended is not the
   assert.equal(claudeApiErrorCategory({ ...subErrorInStream, parent_tool_use_id: null }, sessionId), "unknown");
 });
 
-test("a user row is inside a Claude turn only when the CLI goes on with the turn; any other user row ends what is read", () => {
+test("a user row is inside a Claude turn only when the CLI goes on with the turn", () => {
   const [request, beforeHook, hookFeedback, afterHook] = realRows("stop_hook_refuses_end_once").session;
-  const [, , toolResult] = realRows("background_command").session;
+  const [, , toolResult] = realRows("hook_feedback_after_tool_call").session;
+  const [, , deniedByHook] = realRows("hook_denies_tool_call").session;
   const [, skillCall, skillResult, skillText, skillAnswer] = realRows("skill_call").session;
   const [, askForOutput] = realRows("completed_without_answer").session;
   const answer = endedWith("message-answer", "THE ANSWER");
@@ -463,27 +526,85 @@ test("a user row is inside a Claude turn only when the CLI goes on with the turn
   assert.match(String((hookFeedback!.message as { content: unknown }).content), /^Stop hook feedback:\n/);
   assert.deepEqual([askForOutput!.isMeta, askForOutput!.turnCompanion, typeof (askForOutput!.message as { content: unknown }).content], [true, true, "string"]);
   assert.deepEqual([skillText!.isMeta, skillText!.turnCompanion, Array.isArray((skillText!.message as { content: unknown }).content)], [true, true, true]);
-  assert.equal(((toolResult!.message as { content: Array<{ type: string }> }).content)[0]!.type, "tool_result");
+  assert.deepEqual((toolResult!.message as { content: Array<{ type: string }> }).content.map((part) => part.type), ["tool_result"]);
+  // A hook that denies a tool call writes its words as the result of that call: a tool's result like any other.
+  assert.deepEqual((deniedByHook!.message as { content: Array<{ type: string; content: string }> }).content.map((part) => [part.type, part.content.split(":")[0]]), [["tool_result", "PreToolUse"]]);
+  for (const row of [hookFeedback!, askForOutput!, skillText!, toolResult!, deniedByHook!]) assert.deepEqual([row.promptSource, row.origin], [undefined, undefined]);
 
   // After a message that ended, each of them says that the turn went on: the answer is the message after it,
   // and a turn cut off before that message has no ending. The message before it is not the answer.
   const goingOn: Array<[string, ClaudeEvidenceRecord]> = [["a Stop hook's refusal", hookFeedback!], ["the CLI's request for visible output", askForOutput!],
-    ["a tool's result", toolResult!], ["a skill's text", skillText!]];
+    ["a tool's result", toolResult!], ["a hook's denial of a tool call", deniedByHook!], ["a skill's text", skillText!]];
   for (const [name, row] of goingOn) {
     assert.equal(recoverExactClaudeTurnFromSession([request!, answer, row], turnId, sessionId), null, `${name}: the turn went on, and has no ending`);
     assert.equal(recoverExactClaudeTurnFailureFromSession([request!, answer, row], turnId, sessionId), null, name);
     assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, row, later], turnId, sessionId), replyFromSession("A LATER MESSAGE"), name);
   }
   assert.equal(recoverExactClaudeTurnFromSession([request!, beforeHook!, hookFeedback!], turnId, sessionId), null, "the message the hook refused is not posted");
+  assert.deepEqual(recoverExactClaudeTurnFromSession([request!, beforeHook!, hookFeedback!, afterHook!], turnId, sessionId), replyFromSession("ANSWER AFTER THE HOOK"));
   // The skill's text is a row of text parts with an id of its own, as a prompt is. It is not the next command.
   assert.deepEqual(recoverExactClaudeTurnFromSession([request!, skillCall!, skillResult!, skillText!, skillAnswer!], turnId, sessionId), replyFromSession("ANSWER OF THE TURN"));
   assert.equal(recoverExactClaudeTurnFromSession([request!, skillCall!, skillResult!, skillText!], turnId, sessionId), null);
+  // The request's own row, written a second time, is the same command and not another one.
+  assert.deepEqual(recoverExactClaudeTurnFromSession([request!, request!, answer], turnId, sessionId), replyFromSession("THE ANSWER"));
+});
 
-  // Any other user row is not known to be the turn going on. What was read before it stays; nothing from there on is read.
+test("a Claude turn is over where another command starts: a prompt, the notice of a task, a compaction that a command made", () => {
+  const [request] = realRows("completed_answer").session;
+  const answer = endedWith("message-answer", "THE ANSWER");
+  const later = endedWith("message-later", "A LATER MESSAGE");
+  // Real rows. Each starts a command of its own, and carries the mark that says so.
+  const prompt = realRows("prompt_during_task_notice_answer").session.find((row) => row.uuid === "SECOND_TURN_ID")!;
+  const notice = realRows("background_command").session.find((row) => row.origin !== undefined)!;
+  const compaction = realRows("compaction_by_command").file;
+  const boundary = compaction.find((row) => row.type === "system")!;
+  const afterBoundary = compaction.slice(compaction.indexOf(boundary) + 1).filter(isMessage);
+  assert.deepEqual([prompt.promptSource, prompt.origin], ["sdk", undefined]);
+  assert.deepEqual([notice.promptSource, notice.origin], ["system", { kind: "task-notification" }]);
+  assert.deepEqual([boundary.subtype, boundary.compactMetadata, boundary.parentUuid], ["compact_boundary", { trigger: "manual" }, null]);
+  // What the CLI wrote for its own command /compact: the summary, a caveat, the command, and what it printed. None is a prompt.
+  assert.deepEqual(afterBoundary.slice(0, 4).map((row) => [row.type, row.promptSource, row.isCompactSummary ?? row.isMeta ?? null, String((row.message as { content: unknown }).content).slice(0, 22)]), [
+    ["user", undefined, true, "This session is being "], ["user", undefined, true, "<local-command-caveat>"],
+    ["user", undefined, null, "<command-name>/compact"], ["user", undefined, null, "<local-command-stdout>"]]);
+
+  for (const [name, starts] of [["a prompt", [prompt]], ["the notice of a task", [notice]], ["the compaction of the CLI's own command", [boundary, ...afterBoundary.slice(0, 4)]]] as const) {
+    // The answer that the turn gave before it is the turn's, and proven: the turn is over.
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, ...starts], turnId, sessionId), replyFromSession("THE ANSWER"), name);
+    // A message that ended after it is the other command's, and is never read as this turn's.
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, ...starts, later], turnId, sessionId), replyFromSession("THE ANSWER"), name);
+    assert.equal(recoverExactClaudeTurnFromSession([request!, ...starts, later], turnId, sessionId), null, `${name}: the turn has no answer`);
+    // Nor is an error after it this turn's failure.
+    const [, apiError] = realClaudeCapture(CLAUDE_API_ERROR_CAPTURES.http_529_overloaded!, sessionId, turnId).session as ClaudeEvidenceRecord[];
+    assert.equal(recoverExactClaudeTurnFailureFromSession([request!, ...starts, apiError!], turnId, sessionId), null, name);
+    assert.match(recoverExactClaudeTurnFailureFromSession([request!, apiError!, ...starts, later], turnId, sessionId)?.error ?? "", /529 Overloaded/, name);
+  }
+  // A prompt is known by its mark, whatever the CLI names as its source, and not by its form.
+  for (const promptSource of ["sdk", "system", "typed", "queued", "suggestion_accepted"]) {
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, { ...prompt, promptSource }, later], turnId, sessionId), replyFromSession("THE ANSWER"), promptSource);
+  }
+  // A summary with no boundary before it is a row that is not known.
+  const summary = afterBoundary[0]!;
+  assert.equal(recoverExactClaudeTurnFromSession([request!, answer, summary], turnId, sessionId), null);
+  assert.equal(recoverExactClaudeTurnFromSession([request!, answer, summary, later], turnId, sessionId), null);
+});
+
+test("a user row that is not known proves nothing: a message that ended before it is not read as the answer, and neither is one after it", () => {
+  const [request, beforeHook, hookFeedback, afterHook] = realRows("stop_hook_refuses_end_once").session;
+  const [, skillCall, skillResult] = realRows("skill_call").session;
+  const [, askForOutput] = realRows("completed_without_answer").session;
+  const [, , toolResult] = realRows("hook_feedback_after_tool_call").session;
+  const prompt = realRows("prompt_during_task_notice_answer").session.find((row) => row.uuid === "SECOND_TURN_ID")!;
+  const answer = endedWith("message-answer", "THE ANSWER");
+  const later = endedWith("message-later", "A LATER MESSAGE");
   const note = (over: Record<string, unknown>): ClaudeEvidenceRecord =>
     ({ type: "user", uuid: "another-row", sessionId, message: { role: "user", content: "A note the CLI wrote." }, ...over });
+  // The mark of an interrupt is a real row of this kind: it follows what was interrupted, and says nothing of what comes next.
+  const interrupted = realRows("interrupt_during_task_notice_answer").session.at(-1)!;
+  assert.deepEqual([interrupted.type, interrupted.promptSource, interrupted.origin, interrupted.isMeta, (interrupted.message as { content: unknown }).content],
+    ["user", undefined, undefined, undefined, [{ type: "text", text: "[Request interrupted by user]" }]]);
   const [, apiError] = realClaudeCapture(CLAUDE_API_ERROR_CAPTURES.http_529_overloaded!, sessionId, turnId).session as ClaudeEvidenceRecord[];
   const others: Array<[string, ClaudeEvidenceRecord]> = [
+    ["the mark of an interrupt", interrupted],
     ["a meta row with other words", note({ isMeta: true })],
     ["a row that is not marked at all", note({})],
     ["the request for visible output without its meta mark", { ...askForOutput!, isMeta: false }],
@@ -493,50 +614,418 @@ test("a user row is inside a Claude turn only when the CLI goes on with the turn
     ["the hook's words not at the start", note({ isMeta: true, message: { role: "user", content: "Note: Stop hook feedback: none." } })],
     ["the hook's words in a row of parts", note({ isMeta: true, message: { role: "user", content: [{ type: "text", text: "Stop hook feedback: go on" }] } })],
     ["a meta row of parts that holds no tool result", note({ isMeta: true, message: { role: "user", content: [{ type: "image", source: {} }] } })],
-    ["a prompt", note({ message: { role: "user", content: [{ type: "text", text: "another request" }] } })],
+    ["a row of text parts with no mark of a prompt", note({ message: { role: "user", content: [{ type: "text", text: "another request" }] } })],
+    ["a row with no parts", note({ message: { role: "user", content: [] } })],
+    // A row with the marks of both kinds is of neither.
+    ["a tool's result with the mark of a prompt", { ...toolResult!, promptSource: "sdk" }],
+    ["the hook's words with the mark of a task's notice", { ...hookFeedback!, origin: { kind: "task-notification" } }],
   ];
   for (const [name, other] of others) {
-    // The answer given before it stays the turn's.
-    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, other], turnId, sessionId), replyFromSession("THE ANSWER"), name);
-    // A message that ended after it can be another turn's: it is never read as this turn's.
-    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, other, later], turnId, sessionId), replyFromSession("THE ANSWER"), name);
-    assert.equal(recoverExactClaudeTurnFromSession([request!, other, later], turnId, sessionId), null, `${name}: no answer is proven`);
+    // The row can be the turn going on. Then the message that ended before it is an interim one: it is not read as the answer.
+    assert.equal(recoverExactClaudeTurnFromSession([request!, answer, other], turnId, sessionId), null, `${name}: no answer is proven`);
+    // The row can be another command. Then a message that ended after it is that command's: it is not read either.
+    assert.equal(recoverExactClaudeTurnFromSession([request!, answer, other, later], turnId, sessionId), null, name);
+    assert.equal(recoverExactClaudeTurnFromSession([request!, other, later], turnId, sessionId), null, name);
     assert.equal(recoverExactClaudeTurnFromSession([request!, skillCall!, skillResult!, other, later], turnId, sessionId), null, name);
-    // Nor is an error after it this turn's failure.
+    // A known end of the turn after it does not make the row known.
+    assert.equal(recoverExactClaudeTurnFromSession([request!, answer, other, prompt, later], turnId, sessionId), null, name);
+    // Nor is an error after it this turn's failure. An error before it is: that the turn failed needs no proof from later rows.
     assert.equal(recoverExactClaudeTurnFailureFromSession([request!, other, apiError!], turnId, sessionId), null, name);
+    assert.match(recoverExactClaudeTurnFailureFromSession([request!, apiError!, other], turnId, sessionId)?.error ?? "", /529 Overloaded/, name);
+    // A turn that has an answer did not fail, whether or not the answer is proven complete.
+    assert.equal(recoverExactClaudeTurnFailureFromSession([request!, apiError!, askForOutput!, answer, other], turnId, sessionId), null, name);
   }
-  // The rows that go on with the turn are read through; the first other row ends the reading.
-  assert.deepEqual(recoverExactClaudeTurnFromSession([request!, beforeHook!, hookFeedback!, afterHook!, others[0]![1], later], turnId, sessionId),
-    replyFromSession("ANSWER AFTER THE HOOK"));
-  // The request's own row, written a second time, is the same command and not another one.
-  assert.deepEqual(recoverExactClaudeTurnFromSession([request!, request!, answer], turnId, sessionId), replyFromSession("THE ANSWER"));
+  // The rows that go on with the turn are read through. After the turn's answer a row that is not known still proves nothing.
+  assert.equal(recoverExactClaudeTurnFromSession([request!, beforeHook!, hookFeedback!, afterHook!, others[1]![1], later], turnId, sessionId), null);
+  assert.deepEqual(recoverExactClaudeTurnFromSession([request!, beforeHook!, hookFeedback!, afterHook!, prompt, others[1]![1], later], turnId, sessionId),
+    replyFromSession("ANSWER AFTER THE HOOK"), "a row after the turn's end is not the turn's");
 });
 
-test("the notice of a background task starts a turn of its own: its answer is never the answer of the turn before it", () => {
+test("a row that holds a tool's result beside another part is not a tool's result: a prompt with one does not keep the turn before it open", () => {
+  const [request] = realRows("completed_answer").session;
+  const [, , toolResult] = realRows("hook_feedback_after_tool_call").session;
+  const answer = endedWith("message-answer", "THE ANSWER");
+  const laterAnswer = endedWith("message-later", "THE ANSWER OF THE NEXT TURN");
+  const [resultPart] = (toolResult!.message as { content: Array<Record<string, unknown>> }).content;
+  // The real row of a second prompt, with a tool's result among its parts.
+  const prompt = realRows("prompt_during_task_notice_answer").session.find((row) => row.uuid === "SECOND_TURN_ID")!;
+  const [promptPart] = (prompt.message as { content: Array<Record<string, unknown>> }).content;
+  for (const parts of [[promptPart, resultPart], [resultPart, promptPart]]) {
+    const mixedPrompt = { ...prompt, message: { role: "user", content: parts } };
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, mixedPrompt, laterAnswer], turnId, sessionId), replyFromSession("THE ANSWER"),
+      "the prompt ends the turn: the next turn's answer is not read");
+    assert.equal(recoverExactClaudeTurnFromSession([request!, mixedPrompt, laterAnswer], turnId, sessionId), null);
+    // The same parts on a row with no mark of a prompt: a row that is not known.
+    const unmarked = { ...toolResult!, message: { role: "user", content: parts } };
+    assert.equal(recoverExactClaudeTurnFromSession([request!, answer, unmarked, laterAnswer], turnId, sessionId), null);
+    assert.equal(recoverExactClaudeTurnFromSession([request!, unmarked, laterAnswer], turnId, sessionId), null);
+  }
+  // A row of several results, and nothing else, is the turn going on.
+  const twoResults = { ...toolResult!, message: { role: "user", content: [resultPart, { ...resultPart, tool_use_id: "toolu_other" }] } };
+  assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, twoResults, laterAnswer], turnId, sessionId), replyFromSession("THE ANSWER OF THE NEXT TURN"));
+});
+
+test("the reply of a turn that started background work is its answer and the answers to the notices of that work, as the adapter posts it", () => {
   for (const name of ["background_command", "subagent_in_background", "subagent_api_error"]) {
     // Real rows. The task ended after the turn, and the CLI answered its notice in the same session.
     const { session, stream } = realRows(name);
-    const [request, , , answer, notice, noticeAnswer] = session;
+    const [request, call, started, answer, notice, noticeAnswer] = session;
     assert.deepEqual(notice!.origin, { kind: "task-notification" }, name);
-    assert.match(String((notice!.message as { content: unknown }).content), /^<task-notification>/, name);
+    assert.match(String((notice!.message as { content: unknown }).content), /^<task-notification>\n<task-id>/, name);
     assert.equal(notice!.isMeta, undefined, name);
-    assert.deepEqual((noticeAnswer!.message as { content: unknown }).content, [{ type: "text", text: "ANSWER TO THE TASK NOTICE" }], name);
-    // In the stream, the result of the notice's turn names no command: it ends no room turn.
+    assert.deepEqual((noticeAnswer!.message as { content: unknown }).content, [{ type: "text", text: N }], name);
+    // The tool's result names the task that it started, in the fields that the CLI keeps beside it; the notice names the same task.
+    const task = claudeCapturedTask(name);
+    const result = started!.toolUseResult as { backgroundTaskId?: string; isAsync?: boolean; agentId?: string };
+    assert.equal(result.backgroundTaskId ?? (result.isAsync === true ? result.agentId : undefined), task, name);
+    assert.ok(String((notice!.message as { content: unknown }).content).includes(`<task-id>${task}</task-id>`), name);
+    // In the stream, the result of the notice's command names no room command: the adapter adds its text to the open turn.
     const results = stream.filter((event) => event.type === "result");
-    assert.deepEqual(results.map((result) => [result.user_message_uuid, result.result]), [[turnId, "ANSWER OF THE TURN"], [undefined, "ANSWER TO THE TASK NOTICE"]], name);
+    assert.deepEqual(results.map((result) => [result.user_message_uuid, result.result]), [[turnId, A], [undefined, N]], name);
     assert.deepEqual(results.map((result) => exactClaudeStreamTerminal(result, turnId, sessionId)),
-      [{ turnId, outcome: "reply", text: "ANSWER OF THE TURN", evidence: "stream" }, null], name);
+      [{ turnId, outcome: "reply", text: A, evidence: "stream" }, null], name);
 
-    assert.deepEqual(recoverExactClaudeTurnFromSession(session, turnId, sessionId), replyFromSession("ANSWER OF THE TURN"), name);
-    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer!, notice!], turnId, sessionId), replyFromSession("ANSWER OF THE TURN"), name);
+    assert.deepEqual(recoverExactClaudeTurnFromSession(session, turnId, sessionId), replyFromSession(`${A}\n\n${N}`), name);
+    // The interim answer alone is never read as the whole reply: the reading says what the session does not prove.
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, call!, started!, answer!], turnId, sessionId), asRead(noReport(A)), name);
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, call!, started!, answer!, notice!], turnId, sessionId), asRead(unreported(A)), name);
+    // A turn that started nothing in the background has its answer, and nothing is added to it.
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer!, notice!, noticeAnswer!], turnId, sessionId), replyFromSession(A), name);
     // The notice ends the turn's rows whatever the turn left: no ending at all, or the provider's error.
-    assert.equal(recoverExactClaudeTurnFromSession([request!, notice!, noticeAnswer!], turnId, sessionId), null, name);
+    assert.equal(recoverExactClaudeTurnFromSession([request!, call!, started!, notice!, noticeAnswer!], turnId, sessionId), null, name);
     const [, apiError] = realClaudeCapture(CLAUDE_API_ERROR_CAPTURES.http_529_overloaded!, sessionId, turnId).session as ClaudeEvidenceRecord[];
-    assert.equal(recoverExactClaudeTurnFromSession([request!, apiError!, notice!, noticeAnswer!], turnId, sessionId), null, name);
-    assert.match(recoverExactClaudeTurnFailureFromSession([request!, apiError!, notice!, noticeAnswer!], turnId, sessionId)?.error ?? "", /529 Overloaded/, name);
-    // And the error the CLI ended the notice's turn with is not the failure of the turn before it.
-    assert.equal(recoverExactClaudeTurnFailureFromSession([request!, notice!, apiError!], turnId, sessionId), null, name);
+    assert.equal(recoverExactClaudeTurnFromSession([request!, call!, started!, apiError!, notice!, noticeAnswer!], turnId, sessionId), null, name);
+    assert.match(recoverExactClaudeTurnFailureFromSession([request!, call!, started!, apiError!, notice!, noticeAnswer!], turnId, sessionId)?.error ?? "", /529 Overloaded/, name);
+    // And the error the CLI ended the notice's command with is not the failure of the turn before it.
+    assert.equal(recoverExactClaudeTurnFailureFromSession([request!, call!, started!, notice!, apiError!], turnId, sessionId), null, name);
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, call!, started!, answer!, notice!, apiError!], turnId, sessionId), asRead(unreported(A)), name);
   }
+
+  const [request, call, started, answer, notice, noticeAnswer] = realRows("background_command").session;
+  const task = claudeCapturedTask("background_command");
+  const read = (...after: ClaudeEvidenceRecord[]) => recoverExactClaudeTurnFromSession([request!, call!, started!, answer!, ...after], turnId, sessionId);
+  const says = (row: ClaudeEvidenceRecord, text: string): ClaudeEvidenceRecord => JSON.parse(JSON.stringify(row).replaceAll(JSON.stringify(N), JSON.stringify(text)).replaceAll(JSON.stringify(A), JSON.stringify(text)));
+  const about = (row: ClaudeEvidenceRecord, other: string): ClaudeEvidenceRecord => JSON.parse(JSON.stringify(row).replaceAll(task!, other));
+  // A text that repeats the text before it is left out, as the adapter leaves it out. Any other text stays.
+  assert.deepEqual(read(notice!, says(noticeAnswer!, A)), replyFromSession(A));
+  // The model's word that it has nothing for the room is no text of the reply.
+  assert.deepEqual(read(notice!, says(noticeAnswer!, "LETAGENTS_NO_ROOM_REPLY")), replyFromSession(A));
+  assert.deepEqual(recoverExactClaudeTurnFromSession([request!, call!, started!, says(answer!, "LETAGENTS_NO_ROOM_REPLY"), notice!, noticeAnswer!], turnId, sessionId), replyFromSession(N));
+  assert.deepEqual(recoverExactClaudeTurnFromSession([request!, call!, started!, says(answer!, "LETAGENTS_NO_ROOM_REPLY"), notice!, says(noticeAnswer!, "LETAGENTS_NO_ROOM_REPLY")], turnId, sessionId),
+    { turnId, outcome: "no_reply", text: null, evidence: "transcript" }, "a turn in which the model wrote nothing for the room posts nothing");
+  assert.deepEqual(recoverExactClaudeTurnFromSession([request!, call!, started!, says(answer!, "LETAGENTS_NO_ROOM_REPLY")], turnId, sessionId),
+    { turnId, outcome: "no_reply", text: null, evidence: "transcript" }, "with or without a line about what it lacks");
+  // The answer to the notice of other work is not this turn's: it is not in the reply, and the turn's own work is still not reported.
+  assert.deepEqual(read(about(notice!, "bother000"), says(noticeAnswer!, "ANSWER ABOUT OTHER WORK")), asRead(noReport(A)));
+  assert.deepEqual(read(about(notice!, "bother000"), says(noticeAnswer!, "ANSWER ABOUT OTHER WORK"), notice!, noticeAnswer!), replyFromSession(`${A}\n\n${N}`));
+  // A notice that names no task is of no known work.
+  const unnamed = { ...notice!, message: { role: "user", content: "<task-notification>\n<status>completed</status>\n</task-notification>" } };
+  assert.deepEqual(read(unnamed, noticeAnswer!), asRead(noReport(A)));
+  // An answer that started more work in the background: that work is the turn's too, and the reply is not complete without its report.
+  const moreWork = [about(call!, "bmore0000"), about(started!, "bmore0000")].map((row, index) => ({ ...row, uuid: `more-${index}` }));
+  assert.deepEqual(read(notice!, ...moreWork, noticeAnswer!), asRead(noReport(A, N)));
+  assert.deepEqual(read(notice!, ...moreWork, noticeAnswer!, about(notice!, "bmore0000"), says(noticeAnswer!, "ANSWER ABOUT THE LATER WORK")),
+    replyFromSession(`${A}\n\n${N}\n\nANSWER ABOUT THE LATER WORK`));
+  // The answer to a notice went on after a message that ended, or a row that is not known follows it: it is not proven.
+  const [, askForOutput] = realRows("completed_without_answer").session;
+  assert.deepEqual(read(notice!, noticeAnswer!, askForOutput!), asRead(unreported(A)));
+  assert.deepEqual(read(notice!, noticeAnswer!, { type: "user", uuid: "another-row", sessionId, message: { role: "user", content: "A note the CLI wrote." } }), asRead(unreported(A)));
+  // A notice that a running request took is an attachment in the file, and needs no answer of its own (real rows of both).
+  for (const [name, text] of [["task_ends_while_turn_goes_on", "ANSWER OF THE TURN, TO A REQUEST THAT HOLDS THE TASK NOTICE"],
+    ["task_ends_while_notice_is_answered", `${A}\n\nANSWER NUMBER 1 AFTER THE TURN, TO A REQUEST THAT HOLDS 2 TASK NOTICES`]] as const) {
+    const { file } = realRows(name);
+    const taken = file.filter((row) => (row.attachment as { type?: string } | undefined)?.type === "queued_command");
+    assert.deepEqual(taken.map((row) => (row.attachment as { commandMode: string; prompt: string }).commandMode), ["task-notification"], name);
+    assert.ok((taken[0]!.attachment as { prompt: string }).prompt.includes(`<task-id>${claudeCapturedTask(name, name === "task_ends_while_turn_goes_on" ? "toolu_probe" : "toolu_probe_2")}</task-id>`), name);
+    assert.deepEqual(recoverExactClaudeTurnFromSession(file, turnId, sessionId), replyFromSession(text), name);
+    // Without that row the session does not show that the model was told of the task.
+    assert.deepEqual(recoverExactClaudeTurnFromSession(file.filter((row) => !taken.includes(row)), turnId, sessionId), asRead(noReport(text)), name);
+    // A command of another kind that a request took is not the notice of a task.
+    const otherMode = file.map((row) => taken.includes(row) ? { ...row, attachment: { ...(row.attachment as object), commandMode: "prompt" } } : row);
+    assert.deepEqual(recoverExactClaudeTurnFromSession(otherMode, turnId, sessionId), asRead(noReport(text)), name);
+  }
+});
+
+test("a compaction that no command made is read as before: the answer before its summary, and nothing after it", () => {
+  // No capture holds a compaction that the CLI made by itself: it could not be made, and the adapter never sends
+  // /compact, so in a room it is the only kind. The rows here are the real boundary and summary of the command's
+  // compaction, with the boundary saying that no command asked for it. They are read by the rule that was there
+  // before the marks were read: the first user row that is not the turn going on ends the turn's rows.
+  const [request] = realRows("completed_answer").session;
+  const compaction = realRows("compaction_by_command").file;
+  const byCommand = compaction.find((row) => row.type === "system")!;
+  const [summary, ...afterSummary] = compaction.slice(compaction.indexOf(byCommand) + 1).filter(isMessage);
+  assert.deepEqual([summary!.type, summary!.isCompactSummary, summary!.promptSource, summary!.parentUuid], ["user", true, undefined, byCommand.uuid]);
+  const answer = endedWith("message-answer", "THE ANSWER");
+  const later = endedWith("message-later", "A LATER MESSAGE");
+  for (const [name, boundary] of [["an automatic boundary", { ...byCommand, compactMetadata: { trigger: "auto" } }], ["a boundary that does not say what asked for it", { ...byCommand, compactMetadata: undefined }],
+    ["a boundary with another word for it", { ...byCommand, compactMetadata: { trigger: "reactive" } }]] as const) {
+    // After the turn's answer: the answer is read, as it was.
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, boundary, summary!], turnId, sessionId), replyFromSession("THE ANSWER"), name);
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, boundary, summary!, ...afterSummary, later], turnId, sessionId), replyFromSession("THE ANSWER"), name);
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, boundary], turnId, sessionId), replyFromSession("THE ANSWER"), name);
+    // Inside a turn: nothing after the summary is read as the turn's, as it was not before.
+    assert.equal(recoverExactClaudeTurnFromSession([request!, boundary, summary!, later], turnId, sessionId), null, name);
+    // The boundary alone ends nothing: only the summary's row does, as before.
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, boundary, answer], turnId, sessionId), replyFromSession("THE ANSWER"), name);
+    // A row that is not known after such a boundary ends the turn's rows too, with the answer before it, as before.
+    assert.deepEqual(recoverExactClaudeTurnFromSession([request!, answer, boundary, { type: "user", uuid: "another-row", sessionId, message: { role: "user", content: "A note the CLI wrote." } }], turnId, sessionId),
+      replyFromSession("THE ANSWER"), name);
+  }
+  // A turn that started background work, with such a compaction after it: its own answer with nothing added, as before.
+  const [heldRequest, call, started, own, notice, noticeAnswer] = realRows("background_command").session;
+  const automatic = { ...byCommand, compactMetadata: { trigger: "auto" } };
+  assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, call!, started!, own!, automatic, summary!, notice!, noticeAnswer!], turnId, sessionId), replyFromSession(A));
+  // The same rows with the boundary of the command, which is captured: the turn is over there, and its background work is not reported.
+  assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, call!, started!, own!, byCommand, summary!, notice!, noticeAnswer!], turnId, sessionId), asRead(noReport(A)));
+});
+
+test("the turn's own request row says whether the CLI marks its prompts: a session with no marks is read by the earlier rule", () => {
+  // Every captured row is of Claude Code 2.1.278, and the app allows older ones. A CLI that does not write
+  // `promptSource` writes it on no prompt: then no prompt would ever end a turn by its mark, and no answer would be
+  // proven. The rows here are real; `unmarked` takes the marks off, as such a CLI would leave them off.
+  const unmarked = (rows: ClaudeEvidenceRecord[]) => rows.map((row) => { const { promptSource: _source, origin: _origin, turnOrigin: _turn, ...rest } = row; return rest as ClaudeEvidenceRecord; });
+  // The sequence in which the reader runs: a turn, then the first prompt of the process that replaced the one that ended, and its answer.
+  const { session: resumed, file: resumedFile } = realRows("resumed_session");
+  const [request, answer, nextPrompt, nextAnswer] = resumed;
+  assert.deepEqual([request!.promptSource, nextPrompt!.promptSource, nextPrompt!.uuid], ["sdk", "sdk", "SECOND_TURN_ID"]);
+  assert.deepEqual((nextAnswer!.message as { content: unknown }).content, [{ type: "text", text: "ANSWER OF THE SECOND TURN" }]);
+  for (const [name, rows] of [["with the marks", resumedFile], ["with no marks", unmarked(resumedFile)], ["messages alone, with the marks", resumed], ["messages alone, with no marks", unmarked(resumed)]] as const) {
+    assert.deepEqual(recoverExactClaudeTurnFromSession(rows, turnId, sessionId), replyFromSession(A), `${name}: the turn's answer is read`);
+    assert.deepEqual(recoverExactClaudeTurnFromSession(rows, "SECOND_TURN_ID", sessionId), { ...replyFromSession("ANSWER OF THE SECOND TURN"), turnId: "SECOND_TURN_ID" }, name);
+    // Cut before the replacement's answer: the turn's answer is proven by the prompt alone.
+    assert.deepEqual(recoverExactClaudeTurnFromSession(rows.slice(0, rows.findIndex((row) => row.uuid === "SECOND_TURN_ID") + 1), turnId, sessionId), replyFromSession(A), name);
+  }
+  // The same holds for the simplest real turn.
+  const completed = realRows("completed_answer").session;
+  assert.deepEqual(recoverExactClaudeTurnFromSession(unmarked([...completed, nextPrompt!, nextAnswer!]), turnId, sessionId), replyFromSession("PROBE_OK"));
+
+  // With no marks, every row is read by the earlier rule: the rows that go on with the turn are read through, and
+  // the first other user row ends the turn's rows. The answer before it stays; nothing after it is read.
+  const [hookRequest, beforeHook, hookFeedback, afterHook] = unmarked(realRows("stop_hook_refuses_end_once").session);
+  const [, askForOutput] = realRows("completed_without_answer").session;
+  const [, , toolResult] = realRows("hook_feedback_after_tool_call").session;
+  const interrupted = realRows("interrupt_during_task_notice_answer").session.at(-1)!;
+  const own = endedWith("message-answer", "THE ANSWER");
+  const later = endedWith("message-later", "A LATER MESSAGE");
+  assert.equal(hookRequest!.promptSource, undefined);
+  assert.deepEqual(recoverExactClaudeTurnFromSession([hookRequest!, beforeHook!, hookFeedback!, afterHook!], turnId, sessionId), replyFromSession("ANSWER AFTER THE HOOK"));
+  assert.equal(recoverExactClaudeTurnFromSession([hookRequest!, beforeHook!, hookFeedback!], turnId, sessionId), null);
+  for (const row of [askForOutput!, toolResult!, hookFeedback!]) {
+    assert.deepEqual(recoverExactClaudeTurnFromSession([hookRequest!, own, row, later], turnId, sessionId), replyFromSession("A LATER MESSAGE"));
+  }
+  const note: ClaudeEvidenceRecord = { type: "user", uuid: "another-row", sessionId, message: { role: "user", content: "A note the CLI wrote." } };
+  for (const other of [interrupted, note, unmarked([nextPrompt!])[0]!, nextPrompt!]) {
+    assert.deepEqual(recoverExactClaudeTurnFromSession([hookRequest!, own, other], turnId, sessionId), replyFromSession("THE ANSWER"));
+    assert.deepEqual(recoverExactClaudeTurnFromSession([hookRequest!, own, other, later], turnId, sessionId), replyFromSession("THE ANSWER"));
+    assert.equal(recoverExactClaudeTurnFromSession([hookRequest!, other, later], turnId, sessionId), null);
+  }
+  // A row that holds a tool's result beside another part is not the turn going on under either rule.
+  const mixedParts = { ...toolResult!, message: { role: "user", content: [...(toolResult!.message as { content: unknown[] }).content, { type: "text", text: "another request" }] } };
+  assert.deepEqual(recoverExactClaudeTurnFromSession([hookRequest!, own, mixedParts, later], turnId, sessionId), replyFromSession("THE ANSWER"));
+
+  // With no marks a notice is not known from any other command: the turn that started background work is read as
+  // it was before, with its own answer and nothing added. No capture of such a CLI shows what else would be true.
+  for (const name of ["background_command", "subagent_in_background", "two_background_commands", "task_ends_while_turn_goes_on"]) {
+    const { file } = realRows(name);
+    const ownAnswer = (file.filter((row) => row.type === "assistant" && (row.message as { stop_reason?: string }).stop_reason === "end_turn")[0]!.message as { content: Array<{ text: string }> }).content[0]!.text;
+    for (let length = 1; length <= file.length; length += 1) {
+      const read = recoverExactClaudeTurnFromSession(unmarked(file.slice(0, length)), turnId, sessionId);
+      assert.ok(read === null || (read.outcome === "reply" && read.text === ownAnswer && read.backgroundWork === undefined), `${name} with no marks, cut after row ${length}`);
+    }
+    assert.deepEqual(recoverExactClaudeTurnFromSession(unmarked(file), turnId, sessionId), replyFromSession(ownAnswer), name);
+  }
+
+  // A file in which only some prompts are marked is not known to occur. It is read by the turn's own request.
+  // A request with no mark, and a marked prompt after it: the earlier rule ends the turn at that prompt.
+  assert.deepEqual(recoverExactClaudeTurnFromSession([...unmarked([request!, answer!]), nextPrompt!, nextAnswer!], turnId, sessionId), replyFromSession(A));
+  // A marked request, and a prompt with no mark after it: that prompt is a row that is not known, and no answer is proven.
+  assert.equal(recoverExactClaudeTurnFromSession([request!, answer!, ...unmarked([nextPrompt!, nextAnswer!])], turnId, sessionId), null);
+
+  // The notice of a task has a mark of its own. A CLI that marks its prompts and not its notices writes a command of
+  // its own (`promptSource: "system"`) with no word on what it is: the turn is then read with its own answer alone.
+  const [heldRequest, call, started, ownAnswer, notice, noticeAnswer] = realRows("background_command").session;
+  const { origin: _origin, ...noticeWithNoMark } = notice!;
+  assert.deepEqual([notice!.promptSource, noticeWithNoMark.promptSource, noticeWithNoMark.origin], ["system", "system", undefined]);
+  assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, call!, started!, ownAnswer!, noticeWithNoMark, noticeAnswer!], turnId, sessionId), replyFromSession(A));
+  assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, call!, started!, ownAnswer!, noticeWithNoMark], turnId, sessionId), replyFromSession(A));
+  // With no command of the CLI's own after the turn, there is no notice in the session, marked or not: the reply says that a report is missing.
+  assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, call!, started!, ownAnswer!], turnId, sessionId), asRead(noReport(A)));
+  assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, call!, started!, ownAnswer!, nextPrompt!, nextAnswer!], turnId, sessionId), asRead(noReport(A)));
+  // A command of the CLI's own that is marked as another kind is no notice, and ends the reading like a prompt:
+  // the notice of the turn's task after it is not read for the turn.
+  const otherKind = { ...notice!, uuid: "another-command", origin: { kind: "scheduled-trigger" } };
+  assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, call!, started!, ownAnswer!, otherKind, noticeAnswer!], turnId, sessionId), asRead(noReport(A)));
+  assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, call!, started!, ownAnswer!, otherKind, endedWith("message-other", "ANSWER TO THE OTHER COMMAND"), notice!, noticeAnswer!], turnId, sessionId),
+    asRead(noReport(A)));
+});
+
+test("the line about a missing report is added only when a report is due: not for a command that the turn itself stopped, and not for work of a kind that is not recognised", () => {
+  // Real rows: the turn starts a command in the background and stops it with the CLI's own tool. The CLI tells the
+  // model of no end of such a command, and the adapter does not hold the turn open for it.
+  const { session, stream } = realRows("background_command_stopped_by_the_turn");
+  const [request, call, started, stopCall, stopped, answer] = session;
+  const task = claudeCapturedTask("background_command_stopped_by_the_turn");
+  assert.equal((started!.toolUseResult as { backgroundTaskId: string }).backgroundTaskId, task);
+  assert.deepEqual(((stopCall!.message as { content: Array<{ name: string; input: unknown }> }).content).map((part) => [part.name, part.input]), [["TaskStop", { task_id: task }]]);
+  assert.deepEqual(stopped!.toolUseResult, { message: `Successfully stopped task: ${task} (sleep 30; echo BACKGROUND_DONE)`, task_id: task, task_type: "local_bash", command: "sleep 30; echo BACKGROUND_DONE" });
+  assert.deepEqual(stream.filter((event) => event.subtype === "task_notification").map((event) => [event.task_id, event.status]), [[task, "stopped"]]);
+  assert.deepEqual(stream.filter((event) => event.type === "result").map((event) => event.result), [A], "one result: no answer to a notice follows");
+  assert.deepEqual(recoverExactClaudeTurnFromSession(session, turnId, sessionId), replyFromSession(A), "nothing is missing, and the reply does not say that something is");
+
+  const read = (...rows: ClaudeEvidenceRecord[]) => recoverExactClaudeTurnFromSession([request!, call!, started!, ...rows, answer!], turnId, sessionId);
+  // Without the stop, a report is due.
+  assert.deepEqual(read(), asRead(noReport(A)));
+  // The stop of another task, a stop that failed, a result of another tool with the same fields, and a stopped
+  // sub-agent (no capture shows that the model is not told of one) leave the report due.
+  const withResult = (toolUseResult: unknown, part: Record<string, unknown> = {}): ClaudeEvidenceRecord =>
+    ({ ...stopped!, toolUseResult, message: { role: "user", content: [{ ...(stopped!.message as { content: Array<Record<string, unknown>> }).content[0]!, ...part }] } });
+  const result = stopped!.toolUseResult as Record<string, unknown>;
+  assert.deepEqual(read(stopCall!, withResult({ ...result, task_id: "bother000" })), asRead(noReport(A)));
+  assert.deepEqual(read(stopCall!, withResult(result, { is_error: true })), asRead(noReport(A)));
+  assert.deepEqual(read(stopCall!, withResult({ ...result, task_type: "local_agent" })), asRead(noReport(A)));
+  assert.deepEqual(read(stopCall!, withResult({ task_id: task, task_type: "local_bash" })), asRead(noReport(A)));
+  assert.deepEqual(read(stopCall!, withResult("Error: no such task")), asRead(noReport(A)));
+  const otherTool = JSON.parse(JSON.stringify(stopCall!).replaceAll("\"TaskStop\"", "\"Bash\"")) as ClaudeEvidenceRecord;
+  assert.deepEqual(read(otherTool, stopped!), asRead(noReport(A)));
+  assert.deepEqual(read(stopped!), asRead(noReport(A)), "a result with no call of the tool");
+  // Of two commands, one stopped: a report on the other is still due.
+  const second = [call!, started!].map((row, index) => ({ ...JSON.parse(JSON.stringify(row).replaceAll(task, "bsecond00").replaceAll("\"toolu_probe\"", "\"toolu_probe_other\"")), uuid: `second-${index}` }) as ClaudeEvidenceRecord);
+  assert.deepEqual(read(...second, stopCall!, stopped!), asRead(noReport(A)));
+
+  // The answer to a notice can stop the turn's other command (real rows of two commands, and of the stop): no
+  // report on that one is due either, and the reply is whole.
+  const two = "two_background_commands";
+  const [twoRequest, firstCall, secondCall, firstStarted, secondStarted, twoAnswer, firstNotice, firstNoticeAnswer] = realRows(two).session;
+  const [endsFirst, endsLater] = [claudeCapturedTask(two, "toolu_probe_1"), claudeCapturedTask(two, "toolu_probe_2")];
+  assert.ok(String((firstNotice!.message as { content: unknown }).content).includes(`<task-id>${endsFirst}</task-id>`));
+  const stopOfTheOther = [stopCall!, stopped!].map((row, index) => ({ ...JSON.parse(JSON.stringify(row).replaceAll(task, endsLater)), uuid: `stop-${index}` }) as ClaudeEvidenceRecord);
+  const turnOfTwo = [twoRequest!, firstCall!, secondCall!, firstStarted!, secondStarted!, twoAnswer!, firstNotice!];
+  assert.deepEqual(recoverExactClaudeTurnFromSession([...turnOfTwo, firstNoticeAnswer!], turnId, sessionId), asRead(noReport(A, N1)));
+  assert.deepEqual(recoverExactClaudeTurnFromSession([...turnOfTwo, ...stopOfTheOther, firstNoticeAnswer!], turnId, sessionId), replyFromSession(`${A}\n\n${N1}`));
+
+  // Background work is recognised by the two fields that the CLI keeps beside a tool's result: the id of a command
+  // that runs in the background, and the id of a sub-agent that was started without waiting for it. A turn whose
+  // work left neither is read as a turn with no background work: its own answer, and no word about a report.
+  for (const name of ["background_command", "subagent_in_background"]) {
+    const [heldRequest, heldCall, heldStarted, own, notice, noticeAnswer] = realRows(name).session;
+    const { toolUseResult: _result, ...notRecognised } = heldStarted!;
+    assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, heldCall!, notRecognised, own!, notice!, noticeAnswer!], turnId, sessionId), replyFromSession(A), name);
+    assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, heldCall!, notRecognised, own!], turnId, sessionId), replyFromSession(A), name);
+    assert.deepEqual(recoverExactClaudeTurnFromSession([heldRequest!, heldCall!, { ...heldStarted!, toolUseResult: { stdout: "", stderr: "", taskId: "bother000" } }, own!], turnId, sessionId), replyFromSession(A), name);
+  }
+  // A sub-agent that the tool call waited for is no background work.
+  assert.deepEqual(recoverExactClaudeTurnFromSession(realRows("subagent_in_foreground").session, turnId, sessionId), replyFromSession(A));
+});
+
+test("two tasks of one message whose notices come in the other order than they started: each answer is bound to its task by the task's id", () => {
+  const name = "two_background_commands_end_in_the_other_order";
+  const { stream, file, session } = realRows(name);
+  const [first, second] = [claudeCapturedTask(name, "toolu_probe_1"), claudeCapturedTask(name, "toolu_probe_2")];
+  const tasksOf = (subtype: string) => stream.filter((event) => event.type === "system" && event.subtype === subtype).map((event) => event.task_id);
+  assert.deepEqual(tasksOf("task_started"), [first, second], "the first call's task started first");
+  assert.deepEqual(tasksOf("task_notification"), [second, first], "and ended last");
+  // In the session the results stand in the order of the calls, and the notices in the order in which the tasks ended.
+  assert.deepEqual(session.flatMap((row) => { const id = (row.toolUseResult as { backgroundTaskId?: string } | undefined)?.backgroundTaskId; return id ? [id] : []; }), [first, second]);
+  const notices = session.filter((row) => row.origin !== undefined).map((row) => String((row.message as { content: unknown }).content));
+  assert.deepEqual(notices.map((text) => /<task-id>([^<]+)<\/task-id>\n<tool-use-id>([^<]+)</.exec(text)!.slice(1, 3)), [[second, "toolu_probe_2"], [first, "toolu_probe_1"]]);
+  assert.deepEqual(recoverExactClaudeTurnFromSession(file, turnId, sessionId), replyFromSession(`${A}\n\n${N1}\n\n${N2}`));
+  // After the first notice's answer the reply still lacks the report on the task that started first.
+  const firstAnswer = file.findIndex((row) => row.type === "assistant" && JSON.stringify(row.message).includes(N1));
+  assert.deepEqual(recoverExactClaudeTurnFromSession(file.slice(0, firstAnswer + 1), turnId, sessionId), asRead(noReport(A, N1)));
+});
+
+/**
+ * Every capture, cut after every row of its session file, as a process that ended there would leave it. What is
+ * the turn's and what is not is read from the rows themselves, by the chain of parents: a message answers the
+ * first prompt, or notice of a task, on its chain.
+ */
+test("no cut of any real session gives a text of another turn or of a sub-agent, or a partial reply that does not say so", () => {
+  let cuts = 0;
+  let replies = 0;
+  let marked = 0;
+  for (const [name, capture] of Object.entries(CLAUDE_REAL_CAPTURES)) {
+    const { file, subagent } = realRows(name);
+    const textOf = (row: ClaudeEvidenceRecord) => ((row.message as { content?: unknown } | undefined)?.content as Array<{ type: string; text?: string }> | undefined ?? [])
+      .flatMap((part) => part.type === "text" && part.text ? [part.text] : []).join("");
+    // The request of a message: the first prompt, or notice of a task, on its chain of parents.
+    const requestOf = (row: ClaudeEvidenceRecord) => claudeParentChain(capture.session_file, capture.session_file.find((other) => other.uuid === row.uuid)!)
+      .find((other) => other.type === "user" && typeof other.promptSource === "string");
+    const answers = file.filter((row) => row.type === "assistant" && textOf(row));
+    const forbidden = [...new Set([...subagent.filter((row) => row.type === "assistant").map(textOf),
+      ...answers.filter((row) => { const request = requestOf(row); return request !== undefined && request.uuid !== "TURN_ID" && (request.origin as { kind?: string } | undefined)?.kind !== "task-notification"; }).map(textOf),
+      // What the CLI itself wrote in a result or a summary is never the model's answer.
+      "SUMMARY OF THE CONVERSATION", "UserPromptSubmit operation blocked"].filter(Boolean))];
+    const whole = recoverExactClaudeTurnFromSession(file, turnId, sessionId);
+    const startsBackgroundWork = file.some((row) => { const result = row.toolUseResult as { backgroundTaskId?: unknown; isAsync?: unknown } | undefined; return result?.backgroundTaskId !== undefined || result?.isAsync === true; });
+    const firstCall = file.findIndex((row) => row.type === "assistant");
+    const withSubagent = subagent.length ? [...file.slice(0, firstCall + 1), ...subagent, ...file.slice(firstCall + 1)] : null;
+    for (const rows of [file, ...(withSubagent ? [withSubagent] : [])]) {
+      for (let length = 1; length <= rows.length; length += 1) {
+        cuts += 1;
+        const read = recoverExactClaudeTurnFromSession(rows.slice(0, length), turnId, sessionId);
+        if (read?.outcome !== "reply") continue;
+        replies += 1;
+        const where = `${name}${rows === file ? "" : " with the sub-agent's rows"}, cut after row ${length}`;
+        for (const text of forbidden) assert.ok(!read.text.includes(text), `${where}: ${JSON.stringify(text)} is not this turn's`);
+        // Each part of the reply is a whole text of a message that the session holds.
+        for (const part of read.text.split("\n\n")) assert.ok(answers.some((row) => textOf(row).trim() === part), `${where}: ${JSON.stringify(part)} is a message of the session`);
+        if (read.backgroundWork) { marked += 1; continue; }
+        // A reply with no word that something is missing is the whole reply: the one that the whole session gives,
+        // or the answer of a turn that started nothing in the background, or of a turn that stopped what it started.
+        assert.ok(!startsBackgroundWork || name === "background_command_stopped_by_the_turn" || (whole?.outcome === "reply" && whole.backgroundWork === undefined && whole.text === read.text),
+          `${where}: a reply that is not the whole one says so`);
+      }
+    }
+  }
+  // The numbers are written out, so that a change of the fixture or of the cuts is seen.
+  assert.deepEqual({ captures: Object.keys(CLAUDE_REAL_CAPTURES).length, cuts, replies, marked }, { captures: 52, cuts: PROPERTY_CUTS, replies: PROPERTY_REPLIES, marked: PROPERTY_MARKED });
+});
+
+test("in a capture each id has a placeholder of its own, so a row names its parent, and an answer is bound to its request by that chain", () => {
+  for (const [name, capture] of Object.entries(CLAUDE_REAL_CAPTURES)) {
+    const file = capture.session_file;
+    const ids = file.map((row) => row.uuid);
+    assert.ok(ids.every((id) => typeof id === "string" && /^(?:TURN_ID|SECOND_TURN_ID|UUID_\d+)$/.test(id)), name);
+    assert.equal(new Set(ids).size, ids.length, `${name}: no two rows share an id`);
+    // A row's parent is a row that the file holds before it. A row with none starts the conversation, or starts it
+    // again after a compaction.
+    for (const [index, row] of file.entries()) {
+      if (row.parentUuid === null) continue;
+      assert.ok(ids.slice(0, index).includes(row.parentUuid), `${name}: row ${index + 1} names a row before it as its parent`);
+    }
+    // No id of a recording is left as the one word that all ids had before.
+    assert.ok(!JSON.stringify(capture).includes("\"UUID\""), name);
+  }
+  // The request of an answer is the first row on its chain that starts a command: a prompt, or the notice of a task.
+  const requestOf = (file: Array<Record<string, unknown>>, text: string) => {
+    const answer = file.find((row) => row.type === "assistant" && JSON.stringify((row.message as { content: unknown }).content).includes(JSON.stringify(text)))!;
+    return claudeParentChain(file, answer).find((row) => row.type === "user" && typeof row.promptSource === "string");
+  };
+  const secondPrompt = CLAUDE_REAL_CAPTURES.prompt_during_task_notice_answer!.session_file;
+  assert.equal(requestOf(secondPrompt, A)!.uuid, "TURN_ID");
+  assert.deepEqual(requestOf(secondPrompt, N)!.origin, { kind: "task-notification" });
+  assert.equal(requestOf(secondPrompt, "ANSWER OF THE SECOND TURN")!.uuid, "SECOND_TURN_ID");
+  const nextTurn = CLAUDE_REAL_CAPTURES.task_ends_during_next_turn!.session_file;
+  assert.equal(requestOf(nextTurn, "ANSWER OF THE SECOND TURN")!.uuid, "SECOND_TURN_ID");
+  assert.deepEqual(requestOf(nextTurn, N)!.origin, { kind: "task-notification" });
+  // A compaction starts the chain again: the rows after it do not lead back to the turn before it.
+  const compacted = CLAUDE_REAL_CAPTURES.compaction_by_command!.session_file;
+  assert.equal(requestOf(compacted, A)!.uuid, "TURN_ID");
+  const afterCompaction = claudeParentChain(compacted, compacted.find((row) => row.uuid === "SECOND_TURN_ID")!);
+  assert.equal(afterCompaction.at(-1)!.subtype, "compact_boundary");
+  assert.ok(afterCompaction.every((row) => row.uuid !== "TURN_ID"));
+});
+
+test("the recorder's sandbox denied a file write beside the run's folder, in a real run", () => {
+  const { session, stream } = realRows("write_outside_run_folder_denied");
+  const [, call, result] = session;
+  const command = ((call!.message as { content: Array<{ input: { command: string } }> }).content[0]!).input.command;
+  assert.match(command, /echo x > inside-the-run && echo INSIDE_WRITTEN; echo x > \.\.\/\.\.\/outside-every-run\/written-by-a-run; echo OUTSIDE_EXIT_\$\?/);
+  // The write in the run's own folder was made. The write beside it was denied by the system, and the command went on.
+  assert.equal(((result!.message as { content: Array<{ content: string }> }).content[0]!).content,
+    "INSIDE_WRITTEN\nsh: ../../outside-every-run/written-by-a-run: Operation not permitted\nOUTSIDE_EXIT_1");
+  assert.equal(stream.find((event) => event.type === "result")!.result, A);
 });
 
 test("a row of another session between a Claude turn's rows is not the turn's", () => {
@@ -557,7 +1046,7 @@ test("Claude session recovery requires the exact user UUID and a terminal assist
     { type: "user", uuid: turnId, sessionId, message: { role: "user", content: [{ type: "text", text: "bounded" }] } },
     { type: "assistant", uuid: "thinking", parentUuid: turnId, sessionId, message: { id: "message-1", role: "assistant", stop_reason: "end_turn", content: [{ type: "thinking", thinking: "private" }] } },
     { type: "assistant", uuid: "answer", parentUuid: "thinking", sessionId, message: { id: "message-1", role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "recovered reply" }] } },
-    { type: "user", uuid: "later-turn", sessionId, message: { role: "user", content: [{ type: "text", text: "later" }] } },
+    { type: "user", uuid: "later-turn", promptSource: "sdk", sessionId, message: { role: "user", content: [{ type: "text", text: "later" }] } },
     { type: "assistant", uuid: "later-answer", parentUuid: "later-turn", sessionId, message: { id: "message-2", role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text: "must not leak" }] } },
   ];
   assert.deepEqual(recoverExactClaudeTurnFromSession(rows, turnId, sessionId), {
@@ -619,7 +1108,7 @@ test("Claude session recovery keeps tool-result rows inside the turn and returns
         content: [{ type: "text", text: "Final room answer." }],
       },
     },
-    { type: "user", uuid: "later-turn", sessionId, message: { role: "user", content: [{ type: "text", text: "later" }] } },
+    { type: "user", uuid: "later-turn", promptSource: "sdk", sessionId, message: { role: "user", content: [{ type: "text", text: "later" }] } },
   ];
 
   assert.deepEqual(recoverExactClaudeTurnFromSession(rows, turnId, sessionId), {
