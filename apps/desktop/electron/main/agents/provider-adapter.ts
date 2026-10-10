@@ -341,6 +341,8 @@ export interface ProviderHandle {
 export type ProviderAttachTerminal = {
   state: "terminal";
   terminal: ProviderTerminalPayload;
+  /** Lines for the owner, when the adapter itself stopped the runtime it found; the daemon records each in the agent's activity. */
+  notices?: readonly string[];
 };
 
 export interface ProviderStopOptions {

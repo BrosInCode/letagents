@@ -792,6 +792,30 @@ test("provider router accepts a missing connection only for the exact remembered
   ], "connection mismatches are rejected by the router instead of delegated to an adapter");
 });
 
+test("provider router answers with the adapter's proof when the adapter stops a remembered Codex as its policy is bound", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const alpha = await router.spawn({ provider: "codex", workAttemptId: "alpha-attempt", roomId: "room", cwd: "/tmp/alpha", launchPolicy: {} });
+  const ref: ProviderActionRef = { workAttemptId: alpha.workAttemptId, provider: "codex",
+    providerContinuationId: alpha.providerContinuationId!, providerConnection: alpha.providerConnection };
+  const policy = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const stopped = { state: "terminal" as const, notices: ["Codex reported another policy, so LetAgents stopped the agent."], terminal: {
+    endedAt: "2026-08-31T08:00:05.000Z", exitCode: null, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: alpha.providerContinuationId,
+    nativeRuntimeDeath: { kind: "codex_app_server" as const, pid: alpha.pid!, processIdentity: alpha.providerConnection!.processIdentity! },
+  } };
+  const nativeAttach = adapter.attach.bind(adapter);
+  // Without a policy the adapter is not asked again, and the remembered runtime is the answer.
+  assert.deepEqual(await router.attach(ref), alpha);
+  // With the policy the adapter binds it, and here it stops the runtime: its proof and its line are the answer, whole.
+  adapter.attach = async () => stopped;
+  assert.deepEqual(await router.attach({ ...ref, launchPolicy: policy }), stopped);
+  // An adapter that answers with another runtime, or with none, still attaches nothing.
+  adapter.attach = async () => null;
+  assert.equal(await router.attach({ ...ref, launchPolicy: policy }), null);
+  adapter.attach = async (input) => ({ ...(await nativeAttach(input))! });
+  assert.equal(await router.attach({ ...ref, launchPolicy: policy }), null);
+});
+
 test("provider router selects Open Model from an exact OpenCode connection", async () => {
   const calls: string[] = [];
   const adapter = fakeAdapter("open-model", calls);

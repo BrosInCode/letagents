@@ -358,7 +358,7 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
 
   if (provider === "codex") {
     for (const key of reservedCodexPolicy) if (Object.hasOwn(policy, key)) throw new Error(`Codex launch policy cannot override '${key}'.`);
-    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write", "auto_review"]);
+    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write", "auto_review", "read_only"]);
     const authority = profile === "auto_review"
       ? {
         approvalPolicy: "on-request",
@@ -369,6 +369,13 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
       : profile === "ask_before_write"
       ? {
         approvalPolicy: "on-request",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }
+      : profile === "read_only"
+      ? {
+        // The sandbox of Ask before writes with nobody to ask: Codex refuses
+        // what needs more access instead of waiting for an approval.
+        approvalPolicy: "never",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
       }
       : {

@@ -1,4 +1,5 @@
 import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
+import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../../shared/codex-read-only-room-tools.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
@@ -103,7 +104,7 @@ import {
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
-type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown; cwd?: unknown; reasoningEffort?: unknown };
+type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown; approvalPolicy?: unknown; sandbox?: unknown; cwd?: unknown; reasoningEffort?: unknown };
 
 /** How long a start waits for Codex to list its models before it leaves the reasoning effort out. */
 const CODEX_MODEL_LIST_TIMEOUT_MS = 5_000;
@@ -219,6 +220,112 @@ function codexEffortMismatchNotice(sent: string | null, result: CodexThreadResul
   if (typeof reported !== "string" || !reported || reported === sent) return null;
   return `This agent's reasoning effort ${shownInNotice(sent)} was given to Codex, but Codex reports ${shownInNotice(reported)} for the conversation. `
     + "The agent runs with the effort Codex reports.";
+}
+
+/** Whether a thread's policy is Read-only's: the one access level that names `never` together with the read-only sandbox. */
+function codexThreadIsReadOnly(policy: Record<string, unknown>): boolean {
+  return policy.approvalPolicy === "never" && policy.sandbox === "read-only";
+}
+
+/** A part of a reported sandbox that grants nothing: off, absent, or an empty list. */
+function grantsNothing(value: unknown): boolean {
+  return value === false || value === null || value === undefined || value === 0 || value === ""
+    || (Array.isArray(value) && value.length === 0)
+    || (recordValue(value) !== null && Object.keys(value as object).length === 0);
+}
+
+/**
+ * Whether a reported read-only sandbox has a part that could let the thread
+ * write or reach the network. A newer Codex may add parts this build does not
+ * know, and a part cannot be judged by a meaning it does not have yet. So it
+ * is judged by its name and its value: a part whose name speaks of writing,
+ * of the network, or of an exception to the sandbox widens it when its value
+ * is anything but off, absent or empty. Every other unknown part is left
+ * alone, which is what keeps a newer Codex from locking Read-only out.
+ */
+function codexReadOnlySandboxWidened(sandbox: unknown, depth = 0): boolean {
+  if (depth > 6) return true;
+  if (Array.isArray(sandbox)) return sandbox.some((item) => codexReadOnlySandboxWidened(item, depth + 1));
+  const record = recordValue(sandbox);
+  if (!record) return false;
+  return Object.entries(record).some(([name, value]) =>
+    (/writ|network|domain|host|socket|proxy|internet|exclu|exempt|escalat|unsandbox|bypass|danger|unrestrict/i.test(name) && !grantsNothing(value))
+    || codexReadOnlySandboxWidened(value, depth + 1));
+}
+
+/**
+ * A thread asked for Read-only must report it: the read-only sandbox with no
+ * network, and nobody to ask. The owner's own Codex settings or an older
+ * app-server could leave the thread another sandbox or approval policy, and
+ * the reply to thread/start and thread/resume is the only word on what the
+ * thread got. The reply is held to the three things the level promises: the
+ * sandbox is the read-only one, its network access is off, and the approval
+ * policy is `never`. A missing one starts no turn, and so does a part that
+ * widens the sandbox (see above). No other access level is checked here.
+ */
+function assertCodexReadOnlyApplied(policy: Record<string, unknown>, result: CodexThreadResult): void {
+  if (!codexThreadIsReadOnly(policy) || codexReplyIsReadOnly(result)) return;
+  throw new Error("Codex did not confirm Read-only access for this agent, so the agent was not started. Update Codex, or choose another access level.");
+}
+
+/** What a conversation's reply says of its approval policy and sandbox. */
+type CodexReportedAccess = Pick<CodexThreadResult, "approvalPolicy" | "sandbox">;
+
+/** Whether a reply reports the three things Read-only promises, and no part that widens the sandbox. */
+function codexReplyIsReadOnly(result: CodexReportedAccess): boolean {
+  const sandbox = recordValue(result.sandbox);
+  return result.approvalPolicy === "never" && sandbox?.type === "readOnly" && sandbox.networkAccess === false
+    && !codexReadOnlySandboxWidened(sandbox);
+}
+
+/** Whether a runtime's own policy is Read-only's. A process found running names no access level, so its policy says it. */
+function codexTurnPolicyIsReadOnly(turnPolicy: Readonly<Record<string, unknown>> | null): boolean {
+  return turnPolicy !== null && codexThreadIsReadOnly(normalizeLaunchPolicy(turnPolicy));
+}
+
+/**
+ * For a Read-only runtime found running: what its loaded conversation reports
+ * when that is not Read-only, as a line for its owner. Null when it reports
+ * Read-only, and for every other access level. Only the names Codex gives its
+ * policy and its sandbox are repeated, short and in quotes.
+ */
+function codexFoundNotReadOnly(turnPolicy: Readonly<Record<string, unknown>> | null, result: CodexReportedAccess): string | null {
+  if (!codexTurnPolicyIsReadOnly(turnPolicy) || codexReplyIsReadOnly(result)) return null;
+  const named = (value: unknown) => typeof value === "string" && value ? shownInNotice(value)
+    : value === undefined || value === null ? "none" : "one this build does not know";
+  const sandbox = recordValue(result.sandbox);
+  const more = sandbox?.networkAccess === true ? " with network access"
+    : sandbox?.type !== "readOnly" ? ""
+    : sandbox.networkAccess !== false ? " with no word on its network access"
+    : codexReadOnlySandboxWidened(sandbox) ? " with a part that widens it" : "";
+  return `Codex reported approval policy ${named(result.approvalPolicy)} and sandbox ${named(sandbox?.type)}${more} for this agent's conversation. `
+    + "That is not Read-only access";
+}
+
+/**
+ * Web search is off for a Read-only agent. Codex runs a search on its model
+ * provider's side, outside the sandbox, and asks nobody: with web search on,
+ * a query or a page address can carry what the agent read. The owner's linked
+ * config decides it otherwise, and can say "live".
+ *
+ * It is said in two places, for a launch that names the Read-only level.
+ * Codex 0.153.4 was seen to take a conversation's own config over the
+ * launch's, so the launch override alone can be undone by a `config` in a
+ * stored policy. A Read-only conversation is therefore given its own config
+ * whole: this setting, the reasoning effort when one is sent, and nothing a
+ * stored policy holds. The installed-Codex tests show both, with a stand-in
+ * model.
+ */
+export const CODEX_READ_ONLY_CONFIG_OVERRIDES: readonly string[] = Object.freeze(['web_search="disabled"']);
+const CODEX_READ_ONLY_THREAD_CONFIG: Readonly<Record<string, unknown>> = Object.freeze({ web_search: "disabled" });
+
+/** The `config` a conversation is started or resumed with: the reasoning effort's, and for a Read-only runtime its own. */
+function codexThreadConfig(
+  readOnlyLevel: boolean,
+  effort: { params: { config?: Record<string, unknown> }; sent: string | null },
+): { config?: Record<string, unknown> } {
+  if (!readOnlyLevel) return effort.params;
+  return { config: { ...(effort.sent === null ? {} : { model_reasoning_effort: effort.sent }), ...CODEX_READ_ONLY_THREAD_CONFIG } };
 }
 
 /**
@@ -520,10 +627,20 @@ const boundedMcpEnvironment = {
  */
 export const CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION = 2;
 
+// The room tools a Read-only agent may use: Codex is told to run these without
+// asking and to refuse every other one. Codex 0.153.4 was seen to refuse a
+// tool that needs an approval when nobody can be asked ("MCP tool call
+// requires approval, but approval policy is never") and to run one approved in
+// advance. The background service keeps the same list for itself.
+export { CODEX_READ_ONLY_ROOM_TOOLS };
+
 function boundedLaunchContract(apiUrl: string, tools: string[]): string {
   // Reuse the generated override: approval modes, filters, credentials and
   // command semantics must change the identity too. Birth/workspace coordinates
   // are independently fenced; replace only those variable launch values.
+  // The access level is not part of this identity: the daemon compares one
+  // contract for every agent of a room server, and a change of access level
+  // already replaces the runtime through its configuration revision.
   const override = custodialMcpOverride("<sealed-entry>", "<workspace>", {
     ...boundedMcpEnvironment, LETAGENTS_API_URL: apiUrl,
   }, [...tools].sort());
@@ -532,21 +649,29 @@ function boundedLaunchContract(apiUrl: string, tools: string[]): string {
   })).digest("hex");
 }
 
-function custodialMcpOverride(entryPath: string, cwd: string, environment: Record<string, string>, tools: string[]): string {
+function custodialMcpOverride(
+  entryPath: string, cwd: string, environment: Record<string, string>, tools: string[],
+  /** The launch is a Read-only agent's: its room tools are the named ones and no others. */
+  readOnlyRoomTools = false,
+): string {
   const env = Object.entries({ ...environment, ELECTRON_RUN_AS_NODE: "1" })
     .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`).join(", ");
   // Native config deep-merges even a parent-table CLI override. Pin each
   // advertised tool so inherited prompt/approve rules cannot alter this policy.
   const toolApprovalModes = tools.map((name) => {
-    // This verified bounded capability only records final-answer routing. It
-    // cannot choose a recipient or send text. Actual message tools remain writes.
-    const mode = environment.LETAGENTS_EXECUTION_PROFILE === "supervised_room_turn"
-      && name === "set_reply_thread" ? "approve" : "writes";
+    const mode = readOnlyRoomTools
+      // "prompt" needs an approval every time, and Codex refuses that when
+      // nobody can be asked. "writes" would not do: under it Codex runs any
+      // tool the room server marks as a read, named above or not.
+      ? CODEX_READ_ONLY_ROOM_TOOLS.has(name) ? "approve" : "prompt"
+      // This verified bounded capability only records final-answer routing. It
+      // cannot choose a recipient or send text. Actual message tools remain writes.
+      : environment.LETAGENTS_EXECUTION_PROFILE === "supervised_room_turn" && name === "set_reply_thread" ? "approve" : "writes";
     return `${JSON.stringify(name)} = { approval_mode = ${JSON.stringify(mode)} }`;
   }).join(", ");
   // Codex merges installed config beneath CLI overrides. Pin every authority
   // coordinate and clear inherited credential names/tool filters explicitly.
-  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [], default_tools_approval_mode = "writes", tools = { ${toolApprovalModes} } }`;
+  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [], default_tools_approval_mode = ${JSON.stringify(readOnlyRoomTools ? "prompt" : "writes")}, tools = { ${toolApprovalModes} } }`;
 }
 
 function isCodexExecutionMethod(method: string): boolean {
@@ -949,6 +1074,21 @@ class CodexProviderHandle implements ProviderHandle {
   /** The process was started with its owner's own Codex setup, so it must never reload a project's config unchecked. */
   ownerSetup = false;
   /**
+   * This runtime is a Read-only agent's: every conversation it starts or loads
+   * again is given the Read-only config. From its launch, the level by name.
+   * For a process found running, whose level is not named, its policy says it:
+   * when it is found with its policy, and when the policy is bound later.
+   */
+  readOnlyLevel = false;
+  /**
+   * What the loaded conversation of a process found running reported, kept
+   * only while the runtime has no policy to hold it to. The daemon can find a
+   * process before it supplies the policy.
+   */
+  reportedWhenFound: CodexReportedAccess | null = null;
+  /** Set when that report was not Read-only for a Read-only runtime: the stop that followed, and what was reported. */
+  foundNotReadOnly: { reported: string; stopped: Promise<ProviderAttachTerminal> } | null = null;
+  /**
    * The Codex home the app-server said it runs with: null when it did not
    * say. Undefined only for a client that cannot be asked, which is never the
    * real one.
@@ -1025,6 +1165,8 @@ class CodexProviderHandle implements ProviderHandle {
 
   requireTurnPolicy(): Readonly<Record<string, unknown>> {
     if (!this.turnPolicy) throw new Error("Codex cannot start a turn without its exact applied permission policy; restart the agent to apply its configuration.");
+    // Its process is being stopped. Should the stop fail, it still takes no turn.
+    if (this.foundNotReadOnly) throw new Error(`${this.foundNotReadOnly.reported}. Restart the agent.`);
     if (this.sandboxed()) {
       // A process that was started before agents had a home of their own, or that
       // a daemon found running, is never kept as it is: it takes no turn at a
@@ -1052,10 +1194,21 @@ class CodexProviderHandle implements ProviderHandle {
     return this.turnPolicy;
   }
 
-  bindTurnPolicy(policy: unknown): void {
+  /**
+   * Returns what the loaded conversation reported when this runtime was found,
+   * once, when this call is the one that gives the runtime its policy: nothing
+   * has held that report to the policy yet.
+   */
+  bindTurnPolicy(policy: unknown): CodexReportedAccess | null {
     // Observation-only recovery may attach before the daemon supplies the
     // applied configuration. Bind once; later settings cannot change this birth.
-    if (this.turnPolicy === null && policy !== undefined) this.turnPolicy = codexTurnPolicy(policy);
+    if (this.turnPolicy !== null || policy === undefined) return null;
+    this.turnPolicy = codexTurnPolicy(policy);
+    // As an attach with the policy does it: see `readOnlyLevel`.
+    this.readOnlyLevel = codexTurnPolicyIsReadOnly(this.turnPolicy);
+    const reported = this.reportedWhenFound;
+    this.reportedWhenFound = null;
+    return reported;
   }
 
   replaceContinuation(providerContinuationId: string): void {
@@ -1163,8 +1316,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     ) {
       if (handle) return null;
     } else {
-      handle.bindTurnPolicy(ref.launchPolicy);
-      return handle;
+      return this.bindFoundPolicy(handle, ref.launchPolicy);
     }
     const connection = ref.providerConnection;
     if (!connection || connection.kind !== "codex_app_server") {
@@ -1178,8 +1330,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)
       ) return null;
       const attached = await pending.promise;
-      if (attached instanceof CodexProviderHandle) attached.bindTurnPolicy(ref.launchPolicy);
-      return attached;
+      return attached instanceof CodexProviderHandle ? this.bindFoundPolicy(attached, ref.launchPolicy) : attached;
     }
     const attaching = this.attachRunning(ref, connection).finally(() => {
       if (this.pendingAttaches.get(ref.workAttemptId)?.promise === attaching) {
@@ -1931,10 +2082,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
             cwd: request.cwd,
             ...policy,
             ...(request.model ? { model: request.model } : {}),
-            ...effort.params,
+            ...codexThreadConfig(handle.readOnlyLevel, effort),
           });
           assertAttached();
           assertCodexReviewerApplied(policy, resumed);
+          assertCodexReadOnlyApplied(policy, resumed);
           readEffort(resumed);
           if (resumed.thread?.id === threadId) return true;
           throw new Error("Codex continuation repair resolved a different thread.");
@@ -1984,9 +2136,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ...policy,
       historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
-      ...effort.params,
+      ...codexThreadConfig(handle.readOnlyLevel, effort),
     });
     assertCodexReviewerApplied(policy, started);
+    assertCodexReadOnlyApplied(policy, started);
     assertCodexThreadDirectory(request.cwd, started);
     readEffort(started);
     const replacement = started.thread?.id?.trim();
@@ -2310,16 +2463,28 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (homeHarness && !custodialRuntime) {
       throw new Error("Codex can use its owner's own setup only as a daemon-supervised room agent.");
     }
+    // The access level itself decides what follows, not the shape of a policy:
+    // the attestation above has tied the level to its policy.
+    const readOnlyLevel = req.permissionProfileId?.trim() === "read_only";
+    // Room tools are approved in advance only for an agent the daemon delivers
+    // room messages to. Such an agent's room tools run in the daemon, on its
+    // own room and workspace. An agent that collects its own messages runs them
+    // in the room server with the caller's `cwd`, so none of its tools is.
+    const readOnlyRoomTools = boundedMcp && readOnlyLevel;
     const serverUrl = await this.deps.resolveServerUrl();
     const launch = await this.deps.launchServer(serverUrl, this.codexBin, {
       trustedProjectPath: req.cwd,
-      configOverrides: custodialRuntime
-        ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, {
-            ...supervisorEnvironment!,
-            ...(boundedMcp ? { LETAGENTS_API_URL: req.supervisorWorkerSession?.apiUrl || desktopApiUrl,
-              LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "" } : {}),
-          }, custodialTools)]
-        : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
+      configOverrides: [
+        ...(custodialRuntime
+          ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, {
+              ...supervisorEnvironment!,
+              ...(boundedMcp ? { LETAGENTS_API_URL: req.supervisorWorkerSession?.apiUrl || desktopApiUrl,
+                LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "" } : {}),
+            }, custodialTools, readOnlyRoomTools)]
+          : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides]),
+        // Read-only only: no other access level's launch changes.
+        ...(readOnlyLevel ? CODEX_READ_ONLY_CONFIG_OVERRIDES : []),
+      ],
       ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
       // The owner's own Codex setup stays on for this agent's app-server.
       ...(homeHarness ? { homeHarness: true } : {}),
@@ -2393,7 +2558,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
             cwd: req.cwd,
             ...policy,
             ...(req.model ? { model: req.model } : {}),
-            ...effort.params,
+            ...codexThreadConfig(readOnlyLevel, effort),
           });
         } catch (error) {
           if (!isMethodNotFound(error)) throw error;
@@ -2407,11 +2572,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
           ...policy,
           historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
-          ...effort.params,
+          ...codexThreadConfig(readOnlyLevel, effort),
         });
         assertCodexThreadDirectory(req.cwd, threadResult);
       }
       assertCodexReviewerApplied(policy, threadResult);
+      assertCodexReadOnlyApplied(policy, threadResult);
       const threadId = threadResult.thread?.id;
       if (!threadId) {
         throw new Error("Codex app-server did not return a thread id.");
@@ -2433,6 +2599,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       );
       handle.managedLaunchContract = managedLaunchContract;
       handle.ownerSetup = homeHarness;
+      handle.readOnlyLevel = readOnlyLevel;
       handle.codexHome = reportedHome;
       handle.cwd = req.cwd;
       // A start with the owner's setup asks Codex nothing more that can fail it, so a line given here reaches the owner.
@@ -2555,6 +2722,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const ownerSetup = ref.ownerSetup === true;
     let handle: CodexProviderHandle | null = null;
     let exactEndpointVerified = false;
+    let reportedWhenFound: CodexReportedAccess | null = null;
+    let notReadOnly: string | null = null;
     const pendingNotifications: RpcNotification[] = [];
     const client = this.deps.createRpcClient(connection.url, (notification) => {
       if (!handle) pendingNotifications.push(notification);
@@ -2622,14 +2791,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
         if (subscribed.thread?.id !== ref.providerContinuationId) {
           throw new Error("Codex subscription resolved a different durable continuation thread.");
         }
+        // The reply names the policy the loaded conversation has. For Read-only it is held to the same check as at a
+        // start. Without a policy there is nothing to hold it to yet: it is kept for the call that binds one.
+        notReadOnly = codexFoundNotReadOnly(turnPolicy, subscribed);
+        if (!turnPolicy) reportedWhenFound = { approvalPolicy: subscribed.approvalPolicy, sandbox: subscribed.sandbox };
         // A turn can finish between the first read and subscription without
         // sending this connection a notification. Reconstruct from a fresh
         // snapshot after subscribing so that gap cannot retain a stale turn.
-        read = await client.request<ThreadReadResult>("thread/read", {
-          threadId: ref.providerContinuationId, includeTurns: true,
-        });
-        if (read.thread?.id !== ref.providerContinuationId) {
-          throw new Error("Codex subscription snapshot resolved a different durable continuation thread.");
+        // A runtime that is about to be stopped is asked nothing more.
+        if (!notReadOnly) {
+          read = await client.request<ThreadReadResult>("thread/read", {
+            threadId: ref.providerContinuationId, includeTurns: true,
+          });
+          if (read.thread?.id !== ref.providerContinuationId) {
+            throw new Error("Codex subscription snapshot resolved a different durable continuation thread.");
+          }
         }
       }
       const observedExit = this.deps.observeProcessExit(
@@ -2644,7 +2820,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         this.deps,
       );
       const launch: CodexAppServerLaunch = { pid: connection.pid, exited: exitEvidence };
-      handle = new CodexProviderHandle(
+      const found = new CodexProviderHandle(
         ref.workAttemptId,
         connection.pid,
         ref.providerContinuationId,
@@ -2655,7 +2831,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
         this.deps.now,
         turnPolicy,
       );
+      this.exitPromises.set(found, launch.exited.then((exit) => this.observeExit(found, exit)));
+      // A runtime that failed the Read-only check is stopped, not attached. It is never kept here
+      // or handed to the daemon, and what it still sends on this connection is dropped.
+      if (notReadOnly) return await this.stopFoundNotReadOnly(notReadOnly, () => this.stop(found));
+      handle = found;
       handle.ownerSetup = ownerSetup;
+      handle.readOnlyLevel = codexTurnPolicyIsReadOnly(turnPolicy);
+      handle.reportedWhenFound = reportedWhenFound;
       // A process found running is held to the same rule as a new one: see requireTurnPolicy.
       handle.codexHome = client.reportedCodexHome?.();
       const conversationFolder = recordValue(read.thread)?.cwd;
@@ -2664,7 +2847,6 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.setLiveState(continuationMissing ? "idle" : "working");
       handle.subscriptionAfterMaterialization = exactEmptyFallback;
       this.handles.set(ref.workAttemptId, handle);
-      this.exitPromises.set(handle, launch.exited.then((exit) => this.observeExit(handle!, exit)));
       const queuedTurnLifecycle = pendingNotifications.some(notification =>
         this.queuedTurnLifecycleIsAmbiguous(handle!, notification));
       this.reconstructAttachedExecution(
@@ -3359,6 +3541,38 @@ export class CodexProviderAdapter implements ProviderAdapter {
     };
     this.streamSink?.(event);
     for (const listener of handle.streamListeners) listener(event);
+  }
+
+  /**
+   * Gives a runtime that was found before the daemon supplied its policy that
+   * policy. What its conversation reported then is held to the policy now, as
+   * an attach with the policy holds it. Every later caller gets the same answer.
+   */
+  private bindFoundPolicy(handle: CodexProviderHandle, policy: unknown): CodexProviderHandle | Promise<ProviderAttachTerminal> {
+    const reported = handle.bindTurnPolicy(policy);
+    const notReadOnly = reported && codexFoundNotReadOnly(handle.appliedTurnPolicy(), reported);
+    if (notReadOnly) handle.foundNotReadOnly = { reported: notReadOnly, stopped: this.stopFoundNotReadOnly(notReadOnly, () => this.stop(handle)) };
+    return handle.foundNotReadOnly?.stopped ?? handle;
+  }
+
+  /**
+   * A Read-only runtime found running whose conversation reports another
+   * policy is not kept: a turn it is in would go on with what the level does
+   * not allow. Its process is stopped, and the answer is the proof that it is
+   * gone, with a line for its owner. The daemon then closes this runtime and
+   * starts the agent again by its normal path. When the process cannot be
+   * proved gone, the attach fails: a second writer must not start.
+   */
+  private async stopFoundNotReadOnly(reported: string, stop: () => Promise<ProviderTerminalPayload>): Promise<ProviderAttachTerminal> {
+    let terminal: ProviderTerminalPayload;
+    try {
+      terminal = await stop();
+      // A stop that ends on a lost connection is not proof that the process is gone.
+      if (!terminal.nativeRuntimeDeath) throw new Error("its process could not be proved gone");
+    } catch (error) {
+      throw new Error(`${reported}, and LetAgents could not stop the agent: ${errorMessage(error)}`);
+    }
+    return { state: "terminal", terminal, notices: [`${reported}, so LetAgents stopped the agent. It starts again by itself.`] };
   }
 
   /**

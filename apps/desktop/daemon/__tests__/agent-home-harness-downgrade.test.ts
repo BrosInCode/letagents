@@ -137,3 +137,14 @@ test("an older build starts an agent the same way when this build recorded a cha
     assert.deepEqual(Object.fromEntries(Object.entries(policy).filter(([key]) => Object.hasOwn(never, key))), never, profile);
   }
 });
+
+test("an older build starts nothing for a Codex agent this build set to Read-only, instead of starting it with more access", () => {
+  // The released build has no Read-only for Codex. What this build stored for one is refused there by name.
+  for (const stored of [
+    deriveProviderConfigurationSnapshot({ provider: "codex", model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 1 }, {}).launchPolicy,
+    storedByThisBuild("codex", "read_only", "on"),
+    storedByThisBuild("codex", "read_only", "on_then_off"),
+  ]) {
+    assert.throws(() => launchPolicyAsDesktop106("codex", "read_only", stored), /Permission profile 'read_only' is unavailable for provider 'codex'/);
+  }
+});
