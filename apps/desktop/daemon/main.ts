@@ -41,7 +41,7 @@ import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { NativeActivityPublicationCoordinator } from "./native-activity-publication-coordinator.js";
 import { ConvergencePacer } from "./convergence-pacer.js";
-import { RoomWorkPublisher } from "./room-work-publisher.js";
+import { recordedRemote, RoomWorkPublisher } from "./room-work-publisher.js";
 import { assertMacOS } from "./platform.js";
 import { type ProviderActionHandle, type ProviderActionPort, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
 import { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
@@ -59,6 +59,7 @@ import { RoomMoveCoordinator } from "./room-move-coordinator.js";
 import { RuntimeConfigurationApplyCoordinator } from "./runtime-configuration-apply-coordinator.js";
 import { RuntimeRecoveryCoordinator } from "./runtime-recovery-coordinator.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
+import { runEveryStopStep } from "./stop-steps.js";
 import { type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import {
   deriveProviderConfigurationSnapshot,
@@ -388,7 +389,7 @@ export class SupervisorDaemon {
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeManifest: (operation) => this.serializeManifestMutation(operation),
       transition: (entryId, state, condition, detail, actor) => this.transition(entryId, state, condition, detail, actor),
-      appendNativeActivity: (entryId, event, activityOnly) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly),
+      appendNativeActivity: (entryId, event, activityOnly, position) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly, position),
       publishNativeActivity: (entryId, method, status, observedAt) => this.publishNativeActivity(entryId, method, status, observedAt),
       handleTerminal: (installation, _bindingIdentity, terminal) =>
         this.providerTerminals.handleTerminal(installation, terminal),
@@ -562,6 +563,7 @@ export class SupervisorDaemon {
           : {}),
         promote: (entryId, handle, executionGenerationId) => this.installProviderHandle(entryId, handle, executionGenerationId),
       },
+      recordNotices: async (entryId, notices) => { await this.providerExecution?.noteRepairNotices(entryId, notices); },
       notifyStateChanged: () => this.notifyStateChanged(),
     });
     this.roomMoves = new RoomMoveCoordinator({
@@ -637,6 +639,7 @@ export class SupervisorDaemon {
         async (agentId) => { await this.providerExecution?.archiveEndedRuntimes(agentId); },
       ) : null;
     this.readModel = new DaemonReadModel({
+      readUsage: (handle) => this.providerPort?.readUsage?.(handle) ?? Promise.resolve(null),
       compactionProgress: (entry) => entry.work_attempt_id
         ? this.providerPort?.compactionProgress?.(entry.work_attempt_id, entry.provider) ?? null : null,
       deliveryAdmission: (entry) => this.providerStreams.deliveryAdmission(entry),
@@ -650,11 +653,7 @@ export class SupervisorDaemon {
         supportsContinuationRepair: () => Boolean(this.providerPort?.repairContinuation),
       },
       recoveryDiagnostics: () => this.providerStreams.recoveryDiagnostics(),
-      manifest: {
-        load: () => this.store.load(),
-        getEntry: (entryId) => this.store.getEntry(entryId),
-        pendingRuntimeRecovery: (entryId) => this.store.pendingRuntimeRecovery(entryId),
-      },
+      manifest: this.store,
       bindings: this.workerBindings,
       inbox: this.supervisedInbox,
       durability: this.durability,
@@ -1028,7 +1027,7 @@ export class SupervisorDaemon {
       this.typedLifecycleEffects.start();
       this.roomWorkPublisher = RoomWorkPublisher.open(this.stateDatabasePath, {
         workspaceLocation: (id) => this.durability.getAttempt(id).then(({ workspace_path: path, workspace_identity }) =>
-          ({ path, revision: workspace_identity.resolved_revision })),
+          ({ path, revision: workspace_identity.resolved_revision, remote: recordedRemote(workspace_identity) })),
         custody: this.workerRuntimeCustody, daemonGeneration: () => this.singleton.currentGeneration,
         isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
       });
@@ -1062,35 +1061,33 @@ export class SupervisorDaemon {
 
   async stop(): Promise<void> {
     // Stop is final for this daemon instance. Fence late delivery/cutover
-    // continuations before awaiting any drain so they cannot retain a socket
-    // or SQLite handle after the caller has observed shutdown.
+    // continuations before awaiting any drain. Every step then runs whatever an
+    // earlier one reports, and the first failure is rethrown at the end: an
+    // open socket would keep the process alive.
     this.handoffScheduled = true;
-    this.convergencePacer.close();
-    this.providerTerminals.close();
-    this.hostApprovals.close();
-    const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
-    this.roomWorkPublisher?.close();
-    this.executionCapture?.close();
-    this.supervisedDelivery?.fence();
-    await this.typedLifecycleEffects?.close();
-    this.wakeRoomMoveReconciliationWaiters();
-    this.notifyStateChanged();
-    this.workerRuntimeCustody.destroyAllCredentials();
-    await executionDelegationDrain;
-    await this.deliveryCutovers.fenceAndDrain();
-    await this.supervisedDelivery?.fenceAndDrain();
-    await this.fenceAndDrainRoomMoveReconciliations();
-    await this.boundedEffects.drainJournalReservations();
-    this.providerExecution?.clearRecoveryTimers();
-    await this.providerReconciliation?.disposeAll();
-    await this.providerExecution?.drainConvergence();
-    await this.providerStreams.disposeAll();
-    await this.socket.stop();
-    await this.serializeManifestCommit(() => this.singleton.release());
-    await this.store.close();
-    await this.durability.close();
-    await this.workerBindings.close();
-    await this.supervisedInbox.close();
+    let executionDelegationDrain: Promise<void> | undefined;
+    await runEveryStopStep([
+      () => this.convergencePacer.close(), () => this.providerTerminals.close(), () => this.hostApprovals.close(),
+      () => { executionDelegationDrain = this.executionDelegations.fenceAndDrain(); },
+      () => this.roomWorkPublisher?.close(), () => this.executionCapture?.close(), () => this.supervisedDelivery?.fence(),
+      () => this.typedLifecycleEffects?.close(),
+      () => this.wakeRoomMoveReconciliationWaiters(), () => this.notifyStateChanged(), () => this.workerRuntimeCustody.destroyAllCredentials(),
+      () => executionDelegationDrain,
+      () => this.deliveryCutovers.fenceAndDrain(),
+      () => this.supervisedDelivery?.fenceAndDrain(),
+      () => this.fenceAndDrainRoomMoveReconciliations(),
+      () => this.boundedEffects.drainJournalReservations(),
+      () => this.providerExecution?.clearRecoveryTimers(),
+      () => this.providerReconciliation?.disposeAll(),
+      () => this.providerExecution?.drainConvergence(),
+      () => this.providerStreams.disposeAll(),
+      () => this.socket.stop(),
+      () => this.serializeManifestCommit(() => this.singleton.release()),
+      () => this.store.close(),
+      () => this.durability.close(),
+      () => this.workerBindings.close(),
+      () => this.supervisedInbox.close(),
+    ]);
   }
 
   /**

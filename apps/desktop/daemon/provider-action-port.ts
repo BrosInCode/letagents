@@ -104,7 +104,7 @@ export function validatedNativeRuntimeDeath(terminal: Pick<ProviderActionTermina
   return death;
 }
 
-export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal };
+export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal; /** Lines for the owner, when the adapter itself stopped the runtime it found. */ notices?: readonly string[] };
 export type CustodialPollingActivationRequest = {
   operationId: string; roomId: string; cwd: string; agentDisplayName: string;
   workerSession: { agentSessionId: string; roomCursor: string };
@@ -163,7 +163,19 @@ export type ProviderRoomTurnResult =
   /** Exact native terminal proof; never synthesized from an exception or stream classifier. */
   | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string;
     /** The provider declined this turn's content on policy grounds; `error` carries its reason. */
-    refusal?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+    refusal?: true;
+    /**
+     * The turn ended on a result of a shape the adapter does not know. `error` may hold the model's own
+     * words, which are for the owner to read: nothing may read them as a provider error and act on them.
+     */
+    unrecognizedResult?: true;
+    /**
+     * Claude Code's own structured account of a failed request to the model: the provider's HTTP status, the
+     * result's terminal reason and Claude Code's name for the error. Task continuity decides on these and not on `error`.
+     */
+    claudeApiFailure?: { status: number | null; terminalReason: string | null; category: string | null; usageLimit?: true; promptTooLong?: true };
+    /** The turn finished, but the wrapper could not prove its remote authority ended. Its journaled reply is never published. */
+    authorityUnproven?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
 export type ProviderRoomTurnCheckpointDisposition = {
   acceptedResult: ProviderRoomTurnResult;
@@ -186,6 +198,12 @@ export type ProviderRoomTurnRecoveryRequest = {
   originProcessEnded?: boolean;
   /** The turn's own conversation, when it is not the one this runtime continues. */
   providerContinuationId?: string;
+  /**
+   * The daemon has this turn saved as completed with an answer that could not
+   * be read, and this read is the second look at it. An adapter that finds no
+   * answer again may end the turn instead of reporting it unreadable again.
+   */
+  savedAsUnreadable?: boolean;
 };
 export type ProviderExactTurnControlResult = { outcome: "no_active" | "terminal" | "interrupt_dispatched"; targetTurnId: string | null };
 export type ProviderContinuationRepairRequest = {
@@ -198,12 +216,21 @@ export type ProviderContinuationRepairRequest = {
   launchPolicy: unknown;
   model?: string | null;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  /** The agent, as its launch names it: a line this repair says is not said again by the agent's next launch. */
+  supervisorEntryId?: string;
 };
 export type ProviderContinuationRepairResult = {
   handle: ProviderActionHandle;
   outcome: "rematerialized" | "replaced";
   previousProviderContinuationId: string;
   replacementProviderContinuationId: string;
+  /** Owner-visible lines of this repair, recorded in the agent's activity once the repair is done. */
+  notices?: readonly string[];
+  /**
+   * The daemon calls this when the repair is committed and its lines, if it has any, are in the agent's
+   * activity. A provider that says a line once counts it as said only then.
+   */
+  noticesRecorded?: () => void;
 };
 export type ProviderFailureCode = "provider_continuation_missing";
 
@@ -223,6 +250,7 @@ export class ProviderActionFailure extends Error {
 export type ProviderRuntimeCustody = { state: "absent" } | { state: "owned" | "retired"; handle: ProviderActionHandle } | { state: "unknown" };
 
 export interface ProviderActionPort {
+  readUsage?(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(workAttemptId: string, provider: string): { state: "compacting"; startedAt: string } | null;
   runtimeCustody?(workAttemptId: string, provider: string): ProviderRuntimeCustody;
   onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription>;

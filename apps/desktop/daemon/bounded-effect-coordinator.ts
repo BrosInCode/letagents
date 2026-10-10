@@ -1,3 +1,4 @@
+import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../shared/codex-read-only-room-tools.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import type {
@@ -37,7 +38,7 @@ export type CompleteBoundedEffectInput = BoundedEffectCoordinates & {
 };
 
 export type BoundedEffectContext = {
-  entry: Pick<DaemonManifestEntry, "id" | "room_id" | "provider" | "workspace_path">;
+  entry: Pick<DaemonManifestEntry, "id" | "room_id" | "provider" | "workspace_path" | "permission_profile_id">;
   agent: Pick<SupervisedIngressAgent,
     "agentSessionId" | "bearer" | "apiUrl" | "workAttemptId" |
     "executionGenerationId" | "providerContinuationId"
@@ -147,6 +148,35 @@ export type BoundedEffectCoordinatorOptions = {
   };
 };
 
+/** Whether an agent is a Codex agent whose saved access level is Read-only. */
+export function codexAgentIsReadOnly(entry: Pick<DaemonManifestEntry, "provider" | "permission_profile_id">): boolean {
+  return entry.provider.trim().toLowerCase() === "codex" && entry.permission_profile_id?.trim() === "read_only";
+}
+
+/**
+ * Why a room tool is refused for a Codex agent whose access level is
+ * Read-only. Null for a tool it may use, and for every other agent.
+ *
+ * The owner's card for the level says what the agent can do in the room: read
+ * it and post in it. Codex is told the same list, but that part is a setting
+ * of Codex, and what Codex does with it can change. Every room tool call of
+ * such an agent passes here, so the limit is kept here whatever Codex asked
+ * for. The level is the one the owner saved: it is the one their card shows,
+ * and it holds from the moment it is saved, also for a process that still
+ * runs with an earlier level. A tool is allowed only by its exact name, so a
+ * tool the room server gains later is refused until it is named.
+ */
+export function readOnlyRoomToolRefusal(
+  entry: Pick<DaemonManifestEntry, "provider" | "permission_profile_id">,
+  toolName: string,
+): string | null {
+  if (!codexAgentIsReadOnly(entry)) return null;
+  if (CODEX_READ_ONLY_ROOM_TOOLS.has(toolName)) return null;
+  const shown = JSON.stringify(toolName.replace(/[^\x20-\x7e]/g, "?").slice(0, 64));
+  return `Read-only access does not allow the room tool ${shown}. This agent can read the room and post in it. `
+    + "It cannot change the task board, join rooms or submit reviews. Its owner can choose another access level.";
+}
+
 /** Narrow shutdown/handoff surface consumed by the daemon lifecycle owner. */
 export type BoundedEffectHandoffPort = {
   drainJournalReservations(): Promise<void>;
@@ -232,6 +262,21 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
 
     // Re-resolve exact authority after journal preparation and before any I/O.
     const context = await this.options.context.exactActive(input);
+    // The entry was loaded again: its owner may have saved Read-only since this call was prepared.
+    // The level holds from the moment it is saved, so the tool is not run, and its effect is closed as failed.
+    const refusedNow = readOnlyRoomToolRefusal(context.entry, input.toolName);
+    if (refusedNow) {
+      try {
+        await this.reserveJournal(() => this.options.executionCompletion.complete({
+          ...input,
+          effectId: prepared.effect_id as string,
+          error: refusedNow,
+        }, true));
+      } catch {
+        // The refusal stands. An effect that could not be closed is never run again by the same request id.
+      }
+      throw new Error(refusedNow);
+    }
     const authorization = this.options.authorizations.get(context.entry.id);
     const session = authorization?.agentSession;
     if (!authorization || !session
@@ -289,6 +334,9 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       throw new Error("A supervised effect requires MCP request and tool identities.");
     }
     const context = await this.options.context.exactActive(input);
+    // Before anything is journaled or run: a refused call leaves no effect behind.
+    const refusal = readOnlyRoomToolRefusal(context.entry, input.toolName);
+    if (refusal) throw new Error(refusal);
     const withExactRoom = (result: Record<string, unknown>): Record<string, unknown> => ({
       ...result,
       room_id: context.entry.room_id,

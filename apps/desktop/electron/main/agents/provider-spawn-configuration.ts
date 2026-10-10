@@ -44,6 +44,11 @@ export function attestProviderSpawnPolicy(
         approvalPolicy: "on-request",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
       }
+      : profile === "read_only"
+      ? {
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }
       : {
         approvalPolicy: "never",
         sandboxPolicy: { type: "dangerFullAccess" },
@@ -121,26 +126,42 @@ export function ownerSetupUnusedOptionsNotice(provider: "Codex" | "Claude Code",
     + `These saved options were not used: ${unused.slice(0, 8).join(", ")}${unused.length > 8 ? ` and ${unused.length - 8} more` : ""}.`;
 }
 
-const unusedOptionsLastSaid = new Map<string, string>();
-
 /**
- * The line above is said when what was left out changes, not at every start.
- * This process remembers what each agent's last start was told and passes the
- * line on only when it differs. Nothing is stored, so the line is said once
- * more after the app restarts. A start that failed after it was given the
- * line forgets it, so the next one says it. An agent with no id is always told.
+ * A launch notice that is said when what it says changes, not at every start.
+ * This process remembers what each agent was last told and passes the line on
+ * only when it differs. Nothing is stored, so the line is said once more after
+ * the app restarts. A start that failed after it was given the line forgets
+ * it, so the next one says it. An agent with no id is always told.
+ * Each kind of notice has a memory of its own, so one kind does not hide another.
+ *
+ * A conversation repair can be the first to find a line. It asks `isLastTold`
+ * before it says the line, and calls `told` when the line has reached the
+ * owner, so the agent's next start does not say it again.
  */
-export const ownerSetupUnusedOptionsSaidOnce = {
-  whenChanged(agentId: string | undefined, notice: string | null): string | null {
-    if (agentId === undefined) return notice;
-    if (unusedOptionsLastSaid.get(agentId) === (notice ?? "")) return null;
-    unusedOptionsLastSaid.set(agentId, notice ?? "");
-    return notice;
-  },
-  forget(agentId: string | undefined, given: readonly string[]): void {
-    if (agentId !== undefined && given.includes(unusedOptionsLastSaid.get(agentId) ?? "")) unusedOptionsLastSaid.delete(agentId);
-  },
-};
+export function launchNoticeSaidOnce() {
+  const lastSaid = new Map<string, string>();
+  const isLastTold = (agentId: string | undefined, notice: string | null): boolean =>
+    agentId !== undefined && lastSaid.get(agentId) === (notice ?? "");
+  const told = (agentId: string | undefined, notice: string | null): void => {
+    if (agentId !== undefined) lastSaid.set(agentId, notice ?? "");
+  };
+  return {
+    isLastTold,
+    told,
+    whenChanged(agentId: string | undefined, notice: string | null): string | null {
+      if (agentId === undefined) return notice;
+      if (isLastTold(agentId, notice)) return null;
+      told(agentId, notice);
+      return notice;
+    },
+    forget(agentId: string | undefined, given: readonly string[]): void {
+      if (agentId !== undefined && given.includes(lastSaid.get(agentId) ?? "")) lastSaid.delete(agentId);
+    },
+  };
+}
+
+/** The line about saved options that were not used: said when what was left out changes. */
+export const ownerSetupUnusedOptionsSaidOnce = launchNoticeSaidOnce();
 
 /**
  * Whether this launch loads the owner's own provider setup. Only an exact

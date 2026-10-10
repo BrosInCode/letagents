@@ -17,6 +17,12 @@ test("only a verified workspace-rooted provider profile is rental-admissible", (
   assert.deepEqual(listRentalSafePermissionProfiles("open-model"), []);
   assert.equal(isRentalSafePermissionProfile("cursor", "sandboxed_write"), true);
   assert.equal(isRentalSafePermissionProfile("cursor", "full_access"), false);
+  // A read-only sandbox is not a workspace-rooted boundary: Codex Read-only stays out of rentals.
+  assert.equal(isRentalSafePermissionProfile("codex", "read_only"), false);
+  assert.throws(
+    () => assertRentalSafePermissionProfile("codex", "read_only"),
+    /verified workspace-rooted rental profile/,
+  );
   assert.throws(
     () => assertRentalSafePermissionProfile("codex", "full_access"),
     /verified workspace-rooted rental profile/,

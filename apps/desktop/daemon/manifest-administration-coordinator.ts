@@ -6,6 +6,7 @@ import {
   entryLaunchPolicy,
   homeHarnessAvailability,
   homeHarnessDiffersFromSaved,
+  latestPermissionChange,
   namesHomeHarness,
   storedHomeHarness,
   storedLaunchPolicy,
@@ -13,7 +14,7 @@ import {
   type ProviderConfigurationSnapshot,
   type ProviderReasoningEffort,
 } from "./provider-configuration.js";
-import { describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
+import { CODEX_READ_ONLY_NEEDS_DELIVERY, codexReadOnlyNeedsDelivery, describeProfilesForAgent, describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
 import type {
   DaemonActivityEvent,
   DaemonAgentConfiguration,
@@ -387,8 +388,16 @@ export class ManifestAdministrationCoordinator {
     });
   }
 
-  /** Preserve native event admission without hydrating an unused history result. */
-  async appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> {
+  /**
+   * Preserve native event admission without hydrating an unused history result.
+   * A provider stream's event takes its position from the agent's activity
+   * before its write is serialized, and a notice written meanwhile can take
+   * that position. With `after_latest` such an event is written after the
+   * newest instead of being refused and lost; any other position is admitted
+   * exactly as given.
+   */
+  async appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean,
+    position: "exact" | "after_latest" = "exact"): Promise<void> {
     if (!event || typeof event !== "object" || !event.observed_at) {
       throw new Error("A bounded activity event is required.");
     }
@@ -397,13 +406,14 @@ export class ManifestAdministrationCoordinator {
       await this.options.authority.assertCurrent();
       const state = await this.options.store.getActivityState(id);
       if (!state) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      if (sanitizedEvent.sequence <= state.last_sequence) {
-        throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${state.last_sequence}.`);
+      const sequence = position === "after_latest" ? Math.max(sanitizedEvent.sequence, state.last_sequence + 1) : sanitizedEvent.sequence;
+      if (sequence <= state.last_sequence) {
+        throw new Error(`Native activity sequence ${sequence} is not newer than ${state.last_sequence}.`);
       }
       const observedState = sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing"
         ? "working" : sanitizedEvent.status === "blocked" ? state.observed_state : "idle";
       const next = await this.options.store.recordActivity(
-        this.options.authority.currentManifestGeneration(), id, sanitizedEvent,
+        this.options.authority.currentManifestGeneration(), id, { ...sanitizedEvent, sequence },
         activityOnly ? null : { observedState, nativeLiveness: {
           state: sanitizedEvent.status === "idle" ? "idle" : "active",
           observed_at: sanitizedEvent.observed_at, detail: sanitizedEvent.summary,
@@ -457,7 +467,8 @@ export class ManifestAdministrationCoordinator {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
       ...configuration,
-      supervised_permission_profiles: homeHarness ? describeProfilesWithOwnerSetup(configuration.provider, profiles) : profiles,
+      supervised_permission_profiles: describeProfilesForAgent(configuration.provider, configuration.delivery_mode,
+        homeHarness ? describeProfilesWithOwnerSetup(configuration.provider, profiles) : profiles),
       home_harness: homeHarness,
       // A running process started before the last change still runs the way it started.
       home_harness_pending: availability === "available"
@@ -589,6 +600,22 @@ export class ManifestAdministrationCoordinator {
         permissionProfileId: profile === null ? null : (profile as string).trim(),
         configurationRevision: input.expectedRevision + 1,
       }, trustedPolicy);
+      // Refused where it is saved, with the reason: the launch would refuse it too, and its owner would learn it only then.
+      if (normalized.permissionProfileId === "read_only" && codexReadOnlyNeedsDelivery(currentConfiguration.provider, currentConfiguration.delivery_mode)) {
+        return { outcome: "invalid" as const, error: CODEX_READ_ONLY_NEEDS_DELIVERY };
+      }
+      // The access level the running process may have: what was saved before, as the next start would read it.
+      let before: string | null = null;
+      try {
+        before = this.options.policies.deriveProviderConfiguration({
+          provider: currentConfiguration.provider,
+          model: null,
+          reasoningEffort: null,
+          permissionProfileId: currentConfiguration.permission_profile_id,
+          configurationRevision: input.expectedRevision,
+        }, trustedPolicy).permissionProfileId;
+      } catch { /* A saved level that cannot be read counts as changed. */ }
+      const permissionChanged = before !== normalized.permissionProfileId;
       return this.options.authority.serialize(async () => {
         await this.options.authority.assertCurrent();
         const result = await this.options.store.updateAgentConfiguration(
@@ -600,8 +627,12 @@ export class ManifestAdministrationCoordinator {
             reasoningEffort: normalized.reasoningEffort,
             charter: charter.trim(),
             permissionProfileId: normalized.permissionProfileId,
-            // An edit to the model or access level keeps the owner's choice.
-            providerLaunchPolicy: storedLaunchPolicy(normalized, { policy: trustedPolicy }),
+            // An edit to the model or access level keeps the owner's choice. The record of an earlier access
+            // level change is read from the stored policy: an agent that cannot use the owner's setup has it removed above.
+            providerLaunchPolicy: storedLaunchPolicy(normalized, {
+              policy: trustedPolicy,
+              permissionChangedAt: permissionChanged ? input.expectedRevision + 1 : latestPermissionChange(currentConfiguration.provider_launch_policy),
+            }),
           },
           this.options.authority.fenceCommit,
         );
@@ -609,6 +640,8 @@ export class ManifestAdministrationCoordinator {
         if (result.outcome === "invalid") {
           return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
         }
+        // A running agent takes the new access level as soon as it is idle: convergence is what tries.
+        if (permissionChanged && result.outcome === "updated") this.options.convergence.request(input.entryId);
         return {
           outcome: result.outcome,
           configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration),

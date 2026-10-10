@@ -42,7 +42,7 @@ import { getCanonicalRoomMessageCatchUp } from "../../server/room-message-catchu
 import {
   resolveRequestProjectRepoAccessRoomName,
 } from "../../rooms/access.js";
-import { resolveMessageActivationIdentity } from "../rooms/messages/activation-identity.js";
+import { replyTurnHoldAgentKey, resolveMessageActivationIdentity } from "../rooms/messages/activation-identity.js";
 import { attachReceiptAuthorityActivations } from "../rooms/messages/receipt-activation.js";
 import {
   openLiveRoomDeliveryController,
@@ -294,15 +294,19 @@ export function registerLegacyProjectMessageRoutes(
     const before = typeof req.query.before === "string" ? req.query.before : undefined;
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const activationIdentity = await resolveMessageActivationIdentity(req, projectId);
+    const workerFrontier = {
+      wait_for_routing: activationIdentity?.session_kind === "worker",
+      hold_agent_key: replyTurnHoldAgentKey(activationIdentity),
+    };
     const result = before === "latest"
-      ? await getLatestMessages(projectId, { limit, include_prompt_only: includePromptOnly, wait_for_routing: activationIdentity?.session_kind === "worker" })
+      ? await getLatestMessages(projectId, { limit, include_prompt_only: includePromptOnly, ...workerFrontier })
       : before
-        ? await getMessagesBefore(projectId, before, { limit, include_prompt_only: includePromptOnly, wait_for_routing: activationIdentity?.session_kind === "worker" })
+        ? await getMessagesBefore(projectId, before, { limit, include_prompt_only: includePromptOnly, ...workerFrontier })
         : await getMessages(projectId, {
           limit,
           after,
           include_prompt_only: includePromptOnly,
-          wait_for_routing: activationIdentity?.session_kind === "worker",
+          ...workerFrontier,
         });
 
     res.json({
@@ -423,6 +427,7 @@ export function registerLegacyProjectMessageRoutes(
           if (liveController.activationIdentity?.session_kind === "worker" && !await waitForMessageRouting({
             roomId: projectId, messageId: event.message.id,
             includePromptOnly: deps.shouldIncludePromptOnlyMessages(req),
+            holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
             closed: () => streamClosed, load: deps.getMessageStreamCheckpoint,
           })) return;
           const attached = await hydrateLiveMessageForSubscriber({
@@ -658,6 +663,7 @@ export function registerLegacyProjectMessageRoutes(
         includePromptOnly,
         load: loadMessagesAfter,
         waitForRouting: liveController.activationIdentity?.session_kind === "worker",
+        holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
       });
       if (!(await liveController.check())) {
         await denyRequestAsync();

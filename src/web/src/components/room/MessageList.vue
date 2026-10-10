@@ -1,5 +1,7 @@
 <template>
   <div class="messages-wrap">
+    <p v-if="openingThreadId || threadOpenError" class="thread-open-status" role="status">{{ threadOpenError || 'Loading thread…' }}</p>
+    <div class="messages-scroll">
     <div class="messages scroll-fade-y" ref="messagesEl" @scrollend="finishMessageReveal">
       <button
         v-if="hasOlderMessages"
@@ -11,12 +13,13 @@
         {{ isLoadingOlderMessages ? 'Loading older messages...' : 'Load older messages' }}
       </button>
 
-        <template v-for="msg in messages" :key="msg.id">
+        <template v-for="msg in timelineMessages" :key="msg.id">
         <div v-if="msg.id === unreadTimeline.dividerId.value" class="explicit-unread" role="separator">New messages</div>
         <ChatMessage
           :message="msg"
           :roomIdentifier="roomIdentifier"
-          :thread="threadSummaries.get(msg.id) || null"
+          :thread="loadedThreadSummaries.get(msg.id) || threadSummaries.get(msg.id) || null"
+          :thread-open="activeThreadId === msg.id"
           :stalePromptTaskStates="stalePromptTaskStates"
           :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
           :class="messageClasses(msg)"
@@ -24,23 +27,33 @@
           :arriving="arrivingMessageIds.has(msg.id)"
           :agentNames="agentNames"
           @reply="emit('reply', $event)"
+          @open-thread="toggleThread"
           @info="handleOpenMessageInfo($event)"
           @openImageViewer="emit('openImageViewer', $event)"
           @scrollToReply="scrollToMessage"
           @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
           @openTask="emit('openTask', $event)"
-        />
+        >
+          <template #thread>
+            <ThreadTransition>
+            <div v-if="openedThreads.has(msg.id)" v-show="activeThreadId === msg.id" class="web-thread-disclosure">
+            <InlineThread
+              :id="`web-thread-${msg.id}`" :parent="msg" :messages="messages" :room-identifier="roomIdentifier || ''"
+              :reasoning-by-anchor-message="reasoningByAnchorMessage" :stale-prompt-task-states="stalePromptTaskStates"
+              @toggle-stale-prompt-mute="emit('toggleStalePromptMute', $event)"
+              :active="activeThreadId === msg.id" :agent-names="agentNames" :task-reference-ids="taskReferenceIds"
+              :search-query="searchQuery" :reveal-message-id="threadRevealId"
+              @close="toggleThread(msg.id)" @info="handleOpenMessageInfo" @open-image-viewer="emit('openImageViewer', $event)"
+              @open-task="emit('openTask', $event)" @jump="scrollToMessage" @rows-changed="observeMessageRows"
+              @summary="loadedThreadSummaries.set(msg.id, $event)" @messages="rememberThreadMessages(msg.id, $event)">
+              <template #composer="context"><slot name="thread-composer" v-bind="context" /></template>
+            </InlineThread>
+            </div>
+            </ThreadTransition>
+          </template>
+        </ChatMessage>
         </template>
 
-      <div v-if="agentWork.length" class="room-local-agent-work-list" role="status" aria-live="polite">
-        <div v-for="work in agentWork.slice(0, 3)" :key="work.id" class="room-local-agent-work"
-          data-motion-work :data-motion-session="work.session" :data-motion-agent="work.key" :data-motion-after="work.after">
-          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
-          <span class="room-local-agent-work-copy"><strong>{{ work.name }}</strong><span>{{ work.summary }}</span></span>
-          <span class="room-local-agent-work-dots" aria-hidden="true"><i></i><i></i><i></i></span>
-        </div>
-        <p v-if="agentWork.length > 3" class="room-local-agent-work-overflow">+{{ agentWork.length - 3 }} more agents working</p>
-      </div>
     </div>
     <button
       v-if="unreadCount > 0 || isScrolledFarUp"
@@ -56,6 +69,21 @@
         <p>Create a room for your agents, copy the join code, and watch messages appear in real time.</p>
       </div>
     </div>
+    </div>
+    <!-- Live strip: who is working or typing right now. It sits outside the
+         scrolling list so it stays in view while the reader is in older history. -->
+    <div ref="liveStripEl" class="room-live-strip">
+      <div v-if="agentWork.length" class="room-local-agent-work-list" role="status" aria-live="polite">
+        <div v-for="work in agentWork.slice(0, 3)" :key="work.id" class="room-local-agent-work"
+          data-motion-work :data-motion-session="work.session" :data-motion-agent="work.key" :data-motion-after="work.after">
+          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+          <span class="room-local-agent-work-copy"><strong>{{ work.name }}</strong><span>{{ work.summary }}</span></span>
+          <span class="room-local-agent-work-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        </div>
+        <p v-if="agentWork.length > 3" class="room-local-agent-work-overflow">+{{ agentWork.length - 3 }} more agents working</p>
+      </div>
+      <TypingIndicator :key="roomIdentifier || ''" :names="typingNames" :color-for="typingColor" />
+    </div>
     <MessageInfoSurface
       :open="infoSurfaceOpen"
       :room-id="roomIdentifier || ''"
@@ -69,14 +97,20 @@
 <script setup lang="ts">
 import "../../../../../shared/ui/room-agent-work.css";
 import { useRoomWorkIndicators } from "./roomWorkIndicators";
+import TypingIndicator from "../../../../../shared/ui/TypingIndicator.vue";
+import { useRoomTypingNames } from "@/composables/roomTyping";
+import { getSenderColor } from "@/composables/room/identity";
 import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../shared/ui/useRoomMessageMotion";
 import { provide, ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { type RoomAgentPresence, type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
+import ThreadTransition from '../../../../../shared/ui/ThreadTransition.vue'
+import InlineThread from './InlineThread.vue'
+import { apiFetch, roomPath } from '@/composables/room/api'
 import { messageMatchesSearch } from './chat-message/formatting'
 import MessageInfoSurface from './MessageInfoSurface.vue'
 import { mergeMessageArrivalIds, watchMessageListGrowth } from './messageArrival'
-import { buildMessageThreadSummaries } from './messageThreading'
+import { buildMessageThreadSummaries, messageThreadParentId, type MessageThreadSummary } from './messageThreading'
 import { createReadEvidenceReporter } from './readEvidence'
 import { injectRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
 import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
@@ -109,6 +143,7 @@ const props = defineProps<{
   agentNames?: ReadonlyMap<string, string>
 }>()
 const emit = defineEmits<{
+  threadMessages: [messages: RoomMessage[]]
   loadOlder: []
   reply: [message: RoomMessage]
   openImageViewer: [imageId: string]
@@ -122,6 +157,9 @@ const emit = defineEmits<{
 const currentAgentWork = useRoomWorkIndicators(() => props.presence || [], () => props.messages, () => props.roomIdentifier)
 
 const messagesEl = ref<HTMLElement | null>(null)
+const liveStripEl = ref<HTMLElement | null>(null)
+const typingNames = useRoomTypingNames(computed(() => props.roomIdentifier || ''))
+const typingColor = (name: string) => getSenderColor(name, 'browser')
 const unreadRoom = computed(() => props.unreadRoomId)
 const roomUnread = useRoomUnread()
 provide(unreadMenuKey, { client: roomUnread, room: unreadRoom })
@@ -176,6 +214,81 @@ const matchedIds = computed(() => {
     }
   }
   return ids
+})
+
+const activeThreadId = ref<string | null>(null)
+const loadedThreadRoots = ref(new Map<string, RoomMessage>())
+const openingThreadId = ref<string | null>(null)
+const threadOpenError = ref('')
+let threadRoomRevision = 0
+const allRootMessages = computed(() => [...new Map([...loadedThreadRoots.value.values(), ...props.messages].map(message => [message.id, message])).values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || Number(a.id.slice(4)) - Number(b.id.slice(4))))
+const openedThreads = ref(new Set<string>())
+const loadedThreadMessages = ref(new Map<string, RoomMessage[]>())
+function rememberThreadMessages(id: string, messages: RoomMessage[]) {
+  loadedThreadMessages.value.set(id, messages)
+  emit('threadMessages', [...loadedThreadRoots.value.values(), ...[...loadedThreadMessages.value.values()].flat()])
+}
+const loadedThreadSummaries = ref(new Map<string, MessageThreadSummary>())
+const threadRevealId = ref<string | null>(null)
+const timelineMessages = computed(() => {
+  const loaded = new Set(allRootMessages.value.map(message => message.id))
+  return allRootMessages.value.filter(message => {
+    const parent = messageThreadParentId(message)
+    return !parent || !loaded.has(parent)
+  })
+})
+async function toggleThread(id: string) {
+  const source = props.messages.find(message => message.id === id)
+  const rootId = source && messageThreadParentId(source)
+  if (rootId) {
+    if (openingThreadId.value) return
+    const revision = threadRoomRevision
+    if (!allRootMessages.value.some(message => message.id === rootId)) {
+      openingThreadId.value = rootId
+      threadOpenError.value = ''
+      try {
+        const page = await apiFetch(`${roomPath(props.roomIdentifier || '')}/messages/${encodeURIComponent(rootId)}/thread`)
+        if (revision !== threadRoomRevision) return
+        loadedThreadRoots.value.set(rootId, page.root)
+        rememberThreadMessages(rootId, page.replies)
+      } catch {
+        if (revision === threadRoomRevision) threadOpenError.value = 'Thread could not be opened. Please try again.'
+        return
+      } finally { if (revision === threadRoomRevision) openingThreadId.value = null }
+    }
+    await toggleThread(rootId)
+    threadRevealId.value = id
+    await nextTick()
+    scrollToMessage(rootId)
+    return
+  }
+  threadOpenError.value = ''
+  const el = messagesEl.value
+  const top = el?.scrollTop ?? 0
+  const returnFocus = activeThreadId.value === id ? el?.querySelector<HTMLButtonElement>(`[data-msg-id="${CSS.escape(id)}"] .thread-marker`) : null
+  scrollRevision++
+  isScrolledToBottom = false
+  messageMotion.cancel()
+  activeThreadId.value = activeThreadId.value === id ? null : id
+  openedThreads.value.add(id)
+  threadRevealId.value = null
+  void nextTick(() => {
+    if (el) el.scrollTo({ top, behavior: 'instant' })
+    checkScroll()
+    observeMessageRows()
+    returnFocus?.focus({ preventScroll: true })
+  })
+}
+watch(() => props.roomIdentifier, () => {
+  threadRoomRevision++
+  openingThreadId.value = null
+  threadOpenError.value = ''
+  loadedThreadRoots.value = new Map()
+  activeThreadId.value = null
+  openedThreads.value = new Set()
+  loadedThreadSummaries.value = new Map()
+  loadedThreadMessages.value = new Map()
+  threadRevealId.value = null
 })
 
 const threadSummaries = computed(() => buildMessageThreadSummaries(props.messages))
@@ -294,6 +407,16 @@ function findMessageElement(messageId: string): HTMLElement | null {
 }
 
 function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth') {
+  const reply = [...props.messages, ...[...loadedThreadMessages.value.values()].flat()].find(message => message.id === messageId)
+  const root = reply && messageThreadParentId(reply)
+  if (root && !allRootMessages.value.some(message => message.id === root)) { void toggleThread(messageId); return }
+  if (root) {
+    if (activeThreadId.value !== root) toggleThread(root)
+    threadRevealId.value = messageId
+    void nextTick(() => scrollToMessage(root, behavior))
+    return
+  }
+
   messageMotion.cancel()
   unreadTimeline.programmaticScroll()
   const target = findMessageElement(messageId)
@@ -312,6 +435,8 @@ function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth')
 // Scroll to first match when search changes
 watch(() => props.searchQuery, async () => {
   await nextTick()
+  const matchingReply = props.messages.find(message => matchedIds.value.has(message.id) && messageThreadParentId(message))
+  if (matchingReply) { scrollToMessage(matchingReply.id); return }
   const firstMatch = messagesEl.value?.querySelector('.search-match')
   if (firstMatch) {
     unreadTimeline.programmaticScroll()
@@ -358,7 +483,7 @@ function keepLatestInViewOnResize() {
   }
 }
 
-watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, addedCount }) => {
+watchMessageListGrowth(() => timelineMessages.value, async ({ prepended, appendedIds, addedCount }) => {
   if (prepended) {
     const el = messagesEl.value
     const previousScrollHeight = el?.scrollHeight || 0
@@ -387,7 +512,7 @@ watchMessageListGrowth(() => props.messages, async ({ prepended, appendedIds, ad
   })
 })
 
-const motionMessages = () => props.messages.map(message => ({
+const motionMessages = () => timelineMessages.value.map(message => ({
   id: message.id, stableId: message.id, text: message.text,
   session: message.agent_identity?.agent_session_id, key: message.agent_identity?.agent_key,
 }))
@@ -405,6 +530,7 @@ watch(() => agentWork.value.map(work => work.id).join('|'), followLatestAfterLay
 
 const messageMotion = useRoomMessageMotion({
   element: messagesEl,
+  work: liveStripEl,
   scope: () => props.roomIdentifier,
   ready: () => Boolean(props.messagesLoaded),
   following: () => isScrolledToBottom,
@@ -427,7 +553,7 @@ function revealRequestedMessage() {
   const historyReady =
     initialScrollSettled &&
     (props.messagesLoaded ?? (props.messages.length > 0 || !props.hasOlderMessages))
-  const found = Boolean(findMessageElement(messageId))
+  const found = props.messages.some(message => message.id === messageId)
     && (!isUnreadReveal || props.messages.some(message => message.id === messageId && (!message.thread_root_id || message.thread_root_id === message.id)))
 
   const action = decideMessageRevealAction({
@@ -486,7 +612,7 @@ const visibleMessageTimers = new Map<string, number>()
  * thread scope or the server (correctly) refuses them as timeline evidence.
  */
 function threadRootSeqForMessage(seq: number): number | null {
-  const message = props.messages.find((candidate) => candidate.id === `msg_${seq}`)
+  const message = [...props.messages, ...[...loadedThreadMessages.value.values()].flat()].find((candidate) => candidate.id === `msg_${seq}`)
   const rootSeq = message?.thread_root_id ? parseMsgNumber(message.thread_root_id) : null
   return rootSeq !== null && rootSeq !== seq ? rootSeq : null
 }
@@ -614,17 +740,22 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 </script>
 
 <style scoped>
+.thread-open-status { margin: 0; padding: 6px 24px; color: var(--muted); font-size: .8rem; }
 .explicit-unread { transition: none !important; animation: none !important; display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
 .explicit-unread::before, .explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
 .room-local-agent-work-list { margin: 6px auto 8px; }
 .room-local-agent-work { cursor: default; }
-.messages-wrap { position: relative; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
+.messages-wrap { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
+/* The list and its floating pill. The live strip sits below it, outside the scroll. */
+.messages-scroll { position: relative; flex: 1 1 0; min-height: 0; }
+/* The strip owns the space under the last message, so its rows grow into that space without moving the list twice. */
+.room-live-strip { min-height: 10px; padding: 0 20px; --room-chat-content-max: 720px; }
 
 .messages {
   height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 16px 20px;
+  padding: 16px 20px 6px;
   --room-chat-content-max: 720px;
   scroll-behavior: smooth;
 }
@@ -650,7 +781,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 
 .new-messages-pill {
   position: absolute;
-  bottom: 12px;
+  bottom: 2px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 10;
@@ -684,8 +815,9 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .empty-state-card p { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
 
 @media (max-width: 768px) {
-  .messages { padding: 12px 18px; }
-  .new-messages-pill { bottom: 8px; font-size: 0.7rem; padding: 5px 12px; }
+  .messages { padding: 12px 18px 6px; }
+  .room-live-strip { min-height: 6px; padding: 0 18px; }
+  .new-messages-pill { bottom: 2px; font-size: 0.7rem; padding: 5px 12px; }
   .empty-state { padding: 24px 16px; }
   .load-older-btn, .new-messages-pill { min-height: 44px; }
 }

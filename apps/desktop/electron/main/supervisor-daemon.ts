@@ -1,3 +1,4 @@
+import { inspectorUsageSchema } from "./agents/provider-usage.js";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -22,6 +23,7 @@ import type {
   DesktopSupervisorManifestEntry,
   DesktopSupervisorRoomDeliveryRetryInput,
   DesktopSupervisorStateSnapshot,
+  DesktopSupervisorServiceSnapshot,
   DesktopSupervisorTurnControlInput,
   DesktopSupervisorTurnControlResolutionInput,
   DesktopSupervisorTurnControlResult,
@@ -44,7 +46,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.208";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.224";
 /**
  * The room-level state channel carries activity summaries, not history. Keep in
  * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
@@ -187,6 +189,7 @@ type WireEntry = {
   delivery_mode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
   polling_contract?: "custodial_polling_v1" | null;
   home_harness?: string;
+  permission_pending?: boolean;
   provider_launch_policy?: unknown;
   created_by: string;
   created_at: string;
@@ -254,6 +257,7 @@ type WireEntry = {
   delivery_receipts?: Array<{
     inbox_item_id: string; source_message_id: string; fifo_sequence?: number; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
     provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code?: string | null; terminal_reason?: string | null; updated_at: string;
+    follow_up?: { for_message_id: string | null; state: string; reason?: string; later_person_turn?: boolean; scheduled: { at_ms: number; attempt: number; attempts: number; kind: string } | null };
     timeline?: Array<{ event_sequence?: number; phase: string; observed_at: string; detail: string | null }>;
   }>;
 };
@@ -584,7 +588,9 @@ export class SupervisorDaemonClient {
   private approvalSigner: { fingerprint: string; promise: Promise<HostApprovalSigner> } | null = null;
   private readonly approvalPresentations = new Map<string, {
     roomId: string; view: DesktopHostApproval; candidate: HostApprovalCandidate; challenge: HostApprovalChallenge;
-    presentationSha256: string; touchedAt: number; decision: { id: string; choice: HostApprovalSelection } | null;
+    presentationSha256: string; touchedAt: number;
+    /** A recorded choice carries the digest it was made on; a choice minted here is signed against the card. */
+    decision: { id: string; choice: HostApprovalSelection; projectionSha256: string | null } | null;
   }>();
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
@@ -716,9 +722,11 @@ export class SupervisorDaemonClient {
         cached.view.retryDecision = null;
         const recorded = candidate.recordedDecision;
         if (recorded) {
-          cached.decision = { id: recorded.decisionId, choice: recorded.decision };
+          cached.decision = { id: recorded.decisionId, choice: recorded.decision, projectionSha256: recorded.projectionSha256 };
+          // The retry is signed against the digest the choice was made on. The card can differ from it by now
+          // (a saved mode changes the tool scope inside it) while the request does not; the daemon checks the request.
           if (candidate.status === "decision_recorded" && recorded.actorId === `host-${challenge.keyFingerprint}`
-            && recorded.projectionSha256 === presentationSha256) cached.view.retryDecision = recorded.decision;
+            && recorded.projectionSha256 !== null) cached.view.retryDecision = recorded.decision;
           else if (candidate.status === "pending" || candidate.status === "decision_recorded") {
             cached.view.status = "unavailable";
             cached.view.detail = "The recorded decision cannot be retried against this presentation. No new decision will be created.";
@@ -789,10 +797,10 @@ export class SupervisorDaemonClient {
     assertCaller?.();
     assertEligible();
     if (cached.candidate !== presented) throw new Error("The approval was refreshed while deciding. Check it before trying again.");
-    const decision = cached.decision ?? { id: randomUUID(), choice: selection.decision };
+    const decision = cached.decision ?? { id: randomUUID(), choice: selection.decision, projectionSha256: null };
     const envelope = signer.sign(challenge, "decide", { expected,
       decisionId: decision.id, actorId: `host-${challenge.keyFingerprint}`,
-      decision: decision.choice, projectionSha256: cached.presentationSha256 });
+      decision: decision.choice, projectionSha256: decision.projectionSha256 ?? cached.presentationSha256 });
     cached.decision = decision;
     cached.view.status = "uncertain";
     cached.view.retryDecision = null;
@@ -940,6 +948,20 @@ export class SupervisorDaemonClient {
   onGeneration(listener: (status: DesktopSupervisorDaemonStatus) => void): () => void {
     this.generationListeners.add(listener);
     return () => this.generationListeners.delete(listener);
+  }
+
+  /** Troubleshooting observes the service without taking lifecycle ownership. */
+  async getServiceSnapshot(): Promise<DesktopSupervisorServiceSnapshot> {
+    const status = await this.connectIfRunning();
+    let state: DesktopSupervisorStateSnapshot | null = null;
+    if (status && !status.maintenanceHoldId && status.capabilities.agentStateSubscription
+      && supervisorStateWatchAcceptsStatus(status)) {
+      state = await this.watchState({ afterDaemonGeneration: 0, afterSequence: 0, waitMs: 0 });
+      if (state.daemonGeneration !== status.generation) {
+        throw new Error("The background service restarted during this read. Refresh to see its current state.");
+      }
+    }
+    return { status, state, observedAt: this.now().toISOString() };
   }
 
   private rememberReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
@@ -2438,7 +2460,8 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
       }
     }
   }
-  return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, continuation_repair: repair, timeline, items, uncertain_effects: uncertainEffects, history_boundary: boundary,
+  const usage = inspectorUsageSchema.safeParse(value.usage);
+  return { usage: usage.success ? usage.data : null, availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, continuation_repair: repair, timeline, items, uncertain_effects: uncertainEffects, history_boundary: boundary,
     ...(recorded ? { recorded_execution: recorded.success ? recorded.data : { availability: "unavailable" } } : {}),
     prepared_context: preparedContext?.success ? preparedContext.data : null,
     latest_intervention: intervention?.success ? intervention.data : null,
@@ -2471,6 +2494,7 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
     ...(entry.polling_contract === "custodial_polling_v1" ? { pollingContract: entry.polling_contract } : {}),
     ...(entry.home_harness === "on" || entry.home_harness === "after_restart" || entry.home_harness === "until_restart"
       ? { homeHarness: entry.home_harness } : {}),
+    ...(entry.permission_pending === true ? { permissionPending: true as const } : {}),
     createdBy: entry.created_by,
     createdAt: entry.created_at,
     sourceRepoPath: entry.source_repo_path ?? null,
@@ -2657,8 +2681,35 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       const sequence = Number(rawSequence);
       timeline.push({ sequence, phase, observedAt, detail });
     }
-    return [{ inboxItemId, sourceMessageId, fifoSequence, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt, timeline }];
+    const followUp = projectFollowUp(receipt.follow_up);
+    return [{ inboxItemId, sourceMessageId, fifoSequence, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt,
+      ...(followUp ? { followUp } : {}), timeline }];
   });
+}
+
+/** Keep in sync with FOLLOW_UP_REASONS in daemon/task-continuity.ts. A test reads both. */
+const FOLLOW_UP_REASONS = ["stopped_by_owner", "skipped", "agent_changed", "task_not_held", "uncertain_action", "uncertain_resolved", "attempts_failed", "ownership_unverified", "other"] as const;
+
+/** A follow-up is shown only when every part of it is what the daemon writes; anything else reads as none. */
+function projectFollowUp(value: unknown): import("../ipc-types/agents.js").DesktopRoomAgentFollowUp | null {
+  const followUp = record(value);
+  if (!followUp) return null;
+  const forMessageId = nullableNonEmptyString(followUp.for_message_id);
+  const state = enumValue(followUp.state, ["scheduled", "waiting_for_owner", "ended"] as const);
+  if (forMessageId === undefined || !state) return null;
+  if (state !== "scheduled") {
+    // A reason that this version does not know, from a newer daemon, reads as none: the follow-up is still shown.
+    const reason = enumValue(followUp.reason, FOLLOW_UP_REASONS);
+    return followUp.scheduled === null ? { forMessageId, state, ...(reason ? { reason } : {}),
+      ...(typeof followUp.later_person_turn === "boolean" ? { laterPersonTurn: followUp.later_person_turn } : {}), scheduled: null } : null;
+  }
+  const scheduled = record(followUp.scheduled);
+  const kind = enumValue(scheduled?.kind, ["provider_fault", "no_reply"] as const);
+  const { at_ms: atMs, attempt, attempts } = scheduled ?? {};
+  if (!kind || typeof atMs !== "number" || !Number.isSafeInteger(atMs) || atMs <= 0
+    || typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 1
+    || typeof attempts !== "number" || !Number.isSafeInteger(attempts) || attempts < attempt) return null;
+  return { forMessageId, state, scheduled: { atMs, attempt, attempts, kind } };
 }
 
 /**

@@ -480,6 +480,22 @@ export const message_agent_receipts = pgTable(
     // transition. Supervised publications carry no reply_to, so this is the
     // only durable link from a replied receipt to its answer.
     reply_message_number: integer("reply_message_number"),
+    // Sequential reply turns: when one broadcast or small-room message
+    // activates several agents, they answer one after another. NULL position
+    // means parallel (or legacy). A receipt is held — hidden from its agent's
+    // worker reads, with everything after it — while hold_release_after is
+    // set (and not yet passed) and hold_released_at is not. Position 1 is
+    // released at send time. turn_done_at marks the end of the agent's turn
+    // (replied, left, or a no-reply/failed/interrupted work report).
+    turn_position: integer("turn_position"),
+    turn_count: integer("turn_count"),
+    hold_release_after: timestamp("hold_release_after", { mode: "string", withTimezone: true }),
+    hold_released_at: timestamp("hold_released_at", { mode: "string", withTimezone: true }),
+    // Why a held turn was released: 'turn' (every earlier position ended its
+    // turn), 'deadline', 'activation' (a direct activation of the agent), or
+    // 'skipped' (the agent left while held). The guidance text depends on it.
+    hold_release_reason: text("hold_release_reason"),
+    turn_done_at: timestamp("turn_done_at", { mode: "string", withTimezone: true }),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
@@ -497,6 +513,14 @@ export const message_agent_receipts = pgTable(
     // One receipt per durable agent per message: several live sessions may
     // share an agent_key, but the agent was asked exactly once.
     agent_uq: uniqueIndex("message_agent_receipts_message_agent_uq").on(table.message_room_id, table.message_number, table.agent_key),
+    // Per-agent worker read frontier and the deadline sweep; held rows only.
+    // Built CONCURRENTLY by reply-turn-hold-rollout.ts, not by a migration.
+    reply_turn_hold_idx: index("message_agent_receipts_reply_turn_hold_idx")
+      .on(table.message_room_id, table.agent_key, table.message_number)
+      .where(sql`${table.hold_released_at} IS NULL AND ${table.hold_release_after} IS NOT NULL`),
+    reply_turn_due_idx: index("message_agent_receipts_reply_turn_due_idx")
+      .on(table.hold_release_after)
+      .where(sql`${table.hold_released_at} IS NULL AND ${table.hold_release_after} IS NOT NULL`),
   })
 );
 

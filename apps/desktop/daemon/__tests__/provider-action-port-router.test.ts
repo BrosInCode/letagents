@@ -75,21 +75,32 @@ test("restoration preserves permission ownership while replacement retires it", 
   await router.observePermissions(handle, event => events.push(event), new AbortController().signal);
   const snapshot = { type: "snapshot" as const, connectionId: "socket-1", requests: [native] };
   listeners[0]!(snapshot);
+  const toldRecorded: string[] = [];
   adapter.repairContinuation = async nativeHandle => {
     listeners[0]!(snapshot); // Pending requests can arrive while restoration awaits the provider.
     return { handle: nativeHandle, outcome: "rematerialized", previousProviderContinuationId: request.expectedProviderContinuationId,
-      replacementProviderContinuationId: request.expectedProviderContinuationId };
+      replacementProviderContinuationId: request.expectedProviderContinuationId, notices: ["said while restoring"],
+      noticesRecorded: () => { toldRecorded.push("restoring"); } };
   };
   const restored = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
   listeners[0]!(snapshot);
   assert.equal(restored.handle, handle);
+  // The provider's owner-visible lines of a repair reach the daemon in its result.
+  assert.deepEqual(restored.notices, ["said while restoring"]);
+  // So does the way to tell the provider that they are recorded. The router does not call it.
+  assert.deepEqual(toldRecorded, []);
+  restored.noticesRecorded!();
   assert.deepEqual(events.map(event => event.type), ["snapshot", "snapshot", "snapshot"]);
   adapter.repairContinuation = async nativeHandle => {
     nativeHandle.providerContinuationId = "replacement";
     return { handle: nativeHandle, outcome: "replaced", previousProviderContinuationId: request.expectedProviderContinuationId,
-      replacementProviderContinuationId: "replacement" };
+      replacementProviderContinuationId: "replacement", notices: ["said while replacing"],
+      noticesRecorded: () => { toldRecorded.push("replacing"); } };
   };
   const replaced = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
+  assert.deepEqual(replaced.notices, ["said while replacing"]);
+  replaced.noticesRecorded!();
+  assert.deepEqual(toldRecorded, ["restoring", "replacing"]);
   listeners[0]!(snapshot);
   assert.equal(events.at(-1)!.type, "unavailable");
   assert.deepEqual(await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native }), { outcome: "correlation_unproven" });
@@ -779,6 +790,30 @@ test("provider router accepts a missing connection only for the exact remembered
     "codex:attach:alpha-attempt",
     "codex:attach:alpha-attempt",
   ], "connection mismatches are rejected by the router instead of delegated to an adapter");
+});
+
+test("provider router answers with the adapter's proof when the adapter stops a remembered Codex as its policy is bound", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const alpha = await router.spawn({ provider: "codex", workAttemptId: "alpha-attempt", roomId: "room", cwd: "/tmp/alpha", launchPolicy: {} });
+  const ref: ProviderActionRef = { workAttemptId: alpha.workAttemptId, provider: "codex",
+    providerContinuationId: alpha.providerContinuationId!, providerConnection: alpha.providerConnection };
+  const policy = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const stopped = { state: "terminal" as const, notices: ["Codex reported another policy, so LetAgents stopped the agent."], terminal: {
+    endedAt: "2026-08-31T08:00:05.000Z", exitCode: null, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: alpha.providerContinuationId,
+    nativeRuntimeDeath: { kind: "codex_app_server" as const, pid: alpha.pid!, processIdentity: alpha.providerConnection!.processIdentity! },
+  } };
+  const nativeAttach = adapter.attach.bind(adapter);
+  // Without a policy the adapter is not asked again, and the remembered runtime is the answer.
+  assert.deepEqual(await router.attach(ref), alpha);
+  // With the policy the adapter binds it, and here it stops the runtime: its proof and its line are the answer, whole.
+  adapter.attach = async () => stopped;
+  assert.deepEqual(await router.attach({ ...ref, launchPolicy: policy }), stopped);
+  // An adapter that answers with another runtime, or with none, still attaches nothing.
+  adapter.attach = async () => null;
+  assert.equal(await router.attach({ ...ref, launchPolicy: policy }), null);
+  adapter.attach = async (input) => ({ ...(await nativeAttach(input))! });
+  assert.equal(await router.attach({ ...ref, launchPolicy: policy }), null);
 });
 
 test("provider router selects Open Model from an exact OpenCode connection", async () => {
@@ -1767,4 +1802,21 @@ test("a handle says its process was started with the owner's setup exactly when 
   await fresh.attach({ workAttemptId: "owner", providerContinuationId: "continuation:owner", provider: "codex", ownerSetup: true });
   await fresh.attach({ workAttemptId: "plain", providerContinuationId: "continuation:plain", provider: "codex" });
   assert.deepEqual(attached, [true, undefined]);
+});
+
+test("usage reads use the acquired native connection and discard replacement responses", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const request = { provider: "codex", workAttemptId: "usage", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(request);
+  const usage = { providerContinuationId: handle.providerContinuationId!, account: { state: "available" as const, windows: [] }, context: null, compaction: null };
+  adapter.readUsage = async () => usage;
+  assert.deepEqual(await router.readUsage(handle), usage);
+  assert.equal(await router.readUsage({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "different-birth" } }), null);
+  let resolve!: (value: typeof usage) => void;
+  adapter.readUsage = () => new Promise(done => { resolve = done; });
+  const reading = router.readUsage(handle);
+  await router.spawn(request);
+  resolve(usage);
+  assert.equal(await reading, null);
 });

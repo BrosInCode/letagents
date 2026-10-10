@@ -10,6 +10,7 @@ import type {
   DesktopAgentPresence,
   DesktopBoardGovernanceSnapshot,
   DesktopBoardIntentSummary,
+  DesktopBoardSettingsSummary,
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../electron/ipc-types";
@@ -274,6 +275,64 @@ describe("board manager panel", () => {
       else delete (globalThis as { window?: unknown }).window;
     }
     assert.deepEqual(decisions, [{ intentId: "intent_a", input: { decision: "deny", reason: "Already merged." } }]);
+  });
+});
+
+describe("board toolbar count", () => {
+  const renderToolbar = (pendingIntentCount: number) => renderToString(createSSRApp({
+    render: () => h(Toolbar, {
+      searchQuery: "", activeFilter: "open", filterOptions: [], busy: false,
+      managerMode: "manager_optional", managerTitle: "Manager optional", pendingIntentCount, governanceOpen: false,
+      ownerFilter: "all", ownerOptions: boardOwnerOptions([]), statusFilter: "all", statusOptions: boardStatusOptions(), sort: "recent",
+    }),
+  }));
+
+  for (const decision of ["approve", "deny"] as const) {
+    it(`drops the Manager badge when the owner ${decision === "approve" ? "approves" : "denies"} the only request`, async () => {
+      // Stands in for the room snapshot, which the parent refreshes later.
+      const roomSettings = ref<DesktopBoardSettingsSummary | null>({
+        managerMode: "manager_optional", activeManager: null, pendingIntentCount: 1,
+      });
+      const pending = intent({ id: "intent_a", actionType: "task_claim", taskId: "task_1" });
+      const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: {
+          letagentsDesktop: {
+            room: {
+              getBoardGovernance: async () => governance({ pendingIntents: [pending], pendingIntentCount: 1 }),
+              decideBoardIntent: async () => ({ governance: governance({ pendingIntentCount: 0 }) }),
+            },
+          },
+        },
+      });
+      try {
+        const board = useBoardGovernance("room_1", () => roomSettings.value);
+        await board.openGovernance();
+        assert.equal(board.pendingIntentCount.value, 1);
+        assert.match(await renderToolbar(board.pendingIntentCount.value), /desktop-board-manager-pending-count/);
+
+        assert.equal(await board.decideIntent("intent_a", decision), true);
+        assert.equal(roomSettings.value?.pendingIntentCount, 1, "the room snapshot has not refreshed yet");
+        assert.equal(board.pendingIntentCount.value, 0, "the toolbar uses the count from the decision");
+        assert.doesNotMatch(await renderToolbar(board.pendingIntentCount.value), /desktop-board-manager-pending-count/);
+
+        roomSettings.value = { managerMode: "manager_optional", activeManager: null, pendingIntentCount: 2 };
+        assert.equal(board.pendingIntentCount.value, 2, "a newer room snapshot is the source again");
+      } finally {
+        if (previous) Object.defineProperty(globalThis, "window", previous);
+        else delete (globalThis as { window?: unknown }).window;
+      }
+    });
+  }
+
+  it("feeds the toolbar from the board manager count in the board view", () => {
+    const view = readFileSync(fileURLToPath(new URL(
+      "../src/components/desktop/content/RoomBoardView.vue",
+      import.meta.url,
+    )), "utf8");
+    assert.match(view, /useBoardGovernance\(props\.roomIdentifier, \(\) => props\.boardSettings\)/);
+    assert.match(view, /:pending-intent-count="pendingIntentCount"/);
   });
 });
 

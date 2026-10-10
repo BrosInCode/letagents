@@ -12,18 +12,14 @@
     <header class="agent-inspector-header">
       <div class="agent-inspector-identity">
         <ProviderBadge
-          v-if="projection.kind === 'local_managed'"
-          :label="projection.session.providerId"
-          :agent-key="projection.session.agentKey"
+          :label="projection.kind === 'local_managed' ? projection.session.providerId : shared.provider"
+          :agent-key="workspaceAgentKey"
         />
         <div>
           <div class="agent-inspector-name-line">
             <h2 id="agent-inspector-participant-title">{{ projection.title }}</h2>
-            <span v-if="projection.kind === 'local_managed'" class="agent-inspector-state-label" :data-state="sessionState">
-              <span aria-hidden="true"></span>{{ projection.heading }}
-            </span>
           </div>
-          <p>{{ projection.eyebrow }}</p>
+          <p>{{ projection.kind === 'local_managed' ? [projection.session.providerId, projection.session.model, projection.session.effort].filter(Boolean).join(' · ') : shared.provider }}</p>
         </div>
       </div>
       <button ref="closeButton" type="button" class="agent-inspector-close" aria-label="Close agent inspector" @click="emit('close')">
@@ -31,6 +27,10 @@
       </button>
     </header>
 
+    <template v-if="projection.kind === 'external' && shared.owner">
+      <p class="agent-inspector-owner-line">{{ shared.ownerLabel }}</p>
+      <AgentInspectorSignal v-bind="shared.signal" />
+    </template>
     <div class="agent-inspector-tabs" role="tablist" aria-label="Agent inspector sections" @keydown="handleWorkspaceTabs">
       <button id="participant-overview-tab" type="button" role="tab" :aria-selected="!workspaceSelected" :tabindex="workspaceSelected ? -1 : 0" aria-controls="participant-overview-panel" @click="workspaceSelected = false">Overview</button>
       <button id="participant-workspace-tab" type="button" role="tab" :aria-selected="workspaceSelected" :tabindex="workspaceSelected ? 0 : -1" aria-controls="participant-workspace-panel" @click="workspaceSelected = true">Workspace</button>
@@ -38,11 +38,11 @@
     <AgentInspectorWorkspace v-if="workspaceSelected" id="participant-workspace-panel" class="agent-inspector-scroll-region" role="tabpanel" aria-labelledby="participant-workspace-tab"
       :work="roomAgentWork ?? []" :agent-key="workspaceAgentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" :request-version="requestVersion" />
     <div v-show="!workspaceSelected" id="participant-overview-panel" role="tabpanel" aria-labelledby="participant-overview-tab" class="agent-inspector-participant-overview">
-    <div class="agent-inspector-status-copy">
+    <div v-if="projection.kind !== 'external'" class="agent-inspector-status-copy">
       <strong>{{ projection.heading }}</strong>
       <p>{{ projection.detail }}</p>
     </div>
-    <AgentInspectorWaiting :agent-key="workspaceAgentKey ?? null" />
+    <AgentInspectorWaiting v-if="projection.kind !== 'external'" :agent-key="workspaceAgentKey ?? null" />
 
     <template v-if="projection.kind === 'local_managed'">
       <div class="agent-inspector-actions" aria-label="Local agent actions">
@@ -132,35 +132,38 @@
     </template>
 
     <div v-else class="agent-inspector-scroll-region agent-inspector-participant-scroll">
-      <section class="agent-inspector-overview-section">
-        <div class="agent-inspector-section-heading"><p>{{ projection.kind === 'unavailable' ? 'Identity' : 'Room participant' }}</p></div>
-        <p class="agent-inspector-charter">
-          {{ projection.kind === 'unavailable'
-            ? 'This desktop will not expose controls until one exact local identity can be confirmed.'
-            : 'This desktop has no authority to change this participant’s runtime, permissions, or work.' }}
-        </p>
-      </section>
-      <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-external-progress-heading">
-        <div class="agent-inspector-section-heading">
-          <p id="agent-inspector-external-progress-heading">Published progress</p>
-          <button v-if="reasoning" type="button" class="agent-inspector-inline-action" @click="emit('open-reasoning', reasoning.id)">Open stream</button>
-        </div>
-        <article v-if="reasoning" class="agent-inspector-participant-reasoning">
-          <strong>{{ reasoningTitle(reasoning) }}</strong>
-          <p>{{ reasoningSummary(reasoning) }}</p>
-          <dl v-if="reasoningRows.length" class="agent-inspector-context-list">
-            <div v-for="row in reasoningRows" :key="row.label"><dt>{{ row.label }}</dt><dd>{{ row.value }}</dd></div>
-          </dl>
-          <small>{{ reasoningStatus(reasoning) }} · {{ reasoningTimestamp }}</small>
-        </article>
-        <p v-else class="agent-inspector-work-empty">No readable progress has been published for this participant.</p>
-      </section>
+      <template v-if="projection.kind === 'external'">
+        <template v-if="!shared.owner">
+          <p class="agent-inspector-owner-line">{{ shared.ownerLabel }}</p>
+          <AgentInspectorSignal v-bind="shared.signal">
+            <template #footer>
+              <span>Shared with {{ roomDisplayName || roomIdentifier }}</span>
+              <button v-if="reasoning" type="button" class="agent-inspector-signal-link" @click="emit('open-reasoning', reasoning.id)">View activity <span aria-hidden="true">→</span></button>
+            </template>
+          </AgentInspectorSignal>
+        </template>
+        <template v-else>
+          <section class="agent-inspector-overview-section">
+            <div class="agent-inspector-section-heading"><p>Shared work</p></div>
+            <p class="agent-inspector-charter">{{ reasoning ? reasoningSummary(reasoning) : 'No work summary has been shared yet.' }}</p>
+            <button v-if="reasoning" type="button" class="agent-inspector-inline-action" @click="emit('open-reasoning', reasoning.id)">View activity →</button>
+          </section>
+          <button type="button" class="agent-inspector-shared-changes" @click="workspaceSelected = true">
+            <span>Workspace</span><span>View shared changes <span aria-hidden="true">→</span></span>
+          </button>
+        </template>
+      </template>
+      <p v-else class="agent-inspector-work-empty">Controls return when this agent’s identity can be confirmed.</p>
+
     </div>
     </div>
+    <footer v-if="projection.kind === 'external' && shared.owner" class="agent-inspector-footer">Manage on the host machine</footer>
   </aside>
 </template>
 
 <script setup lang="ts">
+import AgentInspectorSignal from "./AgentInspectorSignal.vue";
+import type { sharedAgentInspectorPresentation } from "../../../../domain/agent-inspector-presentation";
 import AgentInspectorWorkspace from "./AgentInspectorWorkspace.vue";
 import AgentInspectorWaiting from "./AgentInspectorWaiting.vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
@@ -197,6 +200,8 @@ const props = defineProps<{
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
   workspaceAgentKey?: string | null;
+  shared: ReturnType<typeof sharedAgentInspectorPresentation>;
+  roomDisplayName?: string;
   compact: boolean;
   projection: AgentInspectorParticipantProjection;
   roomIdentifier: string;

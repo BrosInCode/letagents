@@ -1,7 +1,7 @@
 import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
-import { taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
+import { defaultFollowUpDelayMs, FOLLOW_UP_ENDED, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL, OWNERSHIP_UNVERIFIED_DETAIL, taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
 
 function providerFailureDisplayText(message: string): string {
   const normalized = message
@@ -34,6 +34,12 @@ export type SupervisedIngressAgent = {
   /** Exact daemon generation that owns this room worker binding. */
   executionGenerationId: string;
   daemonGeneration: number;
+  /**
+   * What happens to this lane if its current runtime ends now: restarted by
+   * the convergence loop, or left for the owner. Absent when unknown, and the
+   * messages then make no promise about it.
+   */
+  laneOutlook?: () => Promise<"restarts" | "needs_owner" | undefined>;
 };
 
 /** The bearer is intentionally memory-only and must never be persisted or logged. */
@@ -188,6 +194,8 @@ export class SupervisedAgentDelivery {
   /** Delivery demand survives internal ingress restart on the same handle. */
   private readonly admissionDemands = new WeakMap<ProviderActionHandle, object>();
   private readonly pumpControllers = new Map<string, AbortController>();
+  /** The wait of each agent's scheduled follow-up. Its owner ends it early with Try now or Stop trying. */
+  private readonly followUpWaits = new Map<string, AbortController>();
   private readonly retries = new Map<string, Set<Promise<void>>>();
   private readonly retryControllers = new Map<string, Set<AbortController>>();
   private readonly agentWork = new Map<string, Set<Promise<void>>>();
@@ -253,6 +261,17 @@ export class SupervisedAgentDelivery {
     // version. They cannot be rerun, so their already-retired exact aggregate
     // remains the publication source for that one recovered legacy turn.
     if (result.publicationContract === "legacy_cursor_aggregate_v0") return result;
+    // The wrapper could not prove this turn's authority ended, so even its
+    // journaled proposal stays unpublished. The turn is settled as lost, and its
+    // reason says truthfully what happens to the agent next.
+    if (result.outcome === "interrupted" && result.authorityUnproven) {
+      const outlook = await agent.laneOutlook?.().catch(() => undefined);
+      const next = outlook === "restarts" ? "LetAgents restarts the agent."
+        : outlook === "needs_owner"
+          ? "Automatic recovery was stopped after repeated provider exits. The agent needs you to recover it."
+          : "";
+      return { ...result, error: [result.error, next].filter(Boolean).join(" ") };
+    }
     const proposals = await this.inbox.roomTurnCompletionEffects(
       agent.agentId,
       originExecutionGenerationId,
@@ -272,9 +291,14 @@ export class SupervisedAgentDelivery {
       : { turnId: result.turnId, outcome: "reply", text: completion.text, evidence: "stream" };
   }
 
-  /** Pause new FIFO admissions without aborting an admitted turn or its approvals. */
+  /**
+   * Pause new FIFO admissions without aborting an admitted turn or its approvals. A pump that only waits for a
+   * follow-up's time holds no turn: its wait ends here, so a drain does not wait for it. The follow-up keeps its
+   * saved time, and whichever pump runs next waits for what is left of it.
+   */
   pauseDispatch(): void {
     this.dispatchPaused = true;
+    for (const wait of this.followUpWaits.values()) wait.abort();
   }
 
   async drainAdmittedTurns(agentIds: readonly string[]): Promise<void> {
@@ -1142,9 +1166,18 @@ export class SupervisedAgentDelivery {
     const receipts = await this.inbox.receipts(agent.agentId);
     if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
     const item = receipts.find((receipt) => receipt.source_message_id === sourceMessageId && receipt.state === "blocked");
-    if (!item) throw new Error("The blocked room delivery is no longer available for this exact agent.");
+    const scheduled = item ? null : scheduledFollowUp(receipts, sourceMessageId);
+    if (!item && !scheduled) throw new Error(noLongerAvailable(sourceMessageId, "The blocked room delivery is no longer available for this exact agent."));
     if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
-    await this.inbox.retryBlocked(item.inbox_item_id);
+    if (scheduled) {
+      // Try now. The follow-up that waited for its time starts at once, as the attempt it already was.
+      await this.inbox.startTaskContinuationNow(scheduled.inbox_item_id);
+      if (!await this.hasExecutionAuthority(agent, controller)) throw new Error(AGENT_CHANGED_BEFORE_TRY_NOW);
+      this.followUpWaits.get(agent.agentId)?.abort();
+      if (!this.wake(agent)) throw new Error(AGENT_CHANGED_BEFORE_TRY_NOW);
+      return;
+    }
+    await this.inbox.retryBlocked(item!.inbox_item_id);
     // The row is now truthfully pending; if authority changed during the
     // durable transition, reject the stale control request rather than claim
     // it began provider work. The successor will recover this pending head.
@@ -1200,9 +1233,17 @@ export class SupervisedAgentDelivery {
 
   private async skipMessageOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
     if (!await this.hasIngressAuthority(agent, controller)) throw new AuthorityLostError();
-    const item = (await this.inbox.receipts(agent.agentId)).find((candidate) =>
-      candidate.source_message_id === sourceMessageId && candidate.state === "blocked");
-    if (!item) throw new Error("The blocked room message is no longer available for this exact agent.");
+    const receipts = await this.inbox.receipts(agent.agentId);
+    const item = receipts.find((candidate) => candidate.source_message_id === sourceMessageId && candidate.state === "blocked");
+    const scheduled = item ? null : scheduledFollowUp(receipts, sourceMessageId);
+    if (scheduled) {
+      // Stop trying. Nothing has started for this follow-up, and nothing more starts by itself for its task.
+      await this.inbox.stopTaskContinuation(scheduled.inbox_item_id, FOLLOW_UP_ENDED.stoppedByOwner);
+      this.followUpWaits.get(agent.agentId)?.abort();
+      this.wake(agent);
+      return;
+    }
+    if (!item) throw new Error(noLongerAvailable(sourceMessageId, "The blocked room message is no longer available for this exact agent."));
     // Blocked rows have no live consumer; refuse if this process still has one.
     if (this.activeTurns.get(agent.agentId)?.inboxItemId === item.inbox_item_id
       || this.activeTurnAborts.get(agent.agentId)?.inboxItemId === item.inbox_item_id) {
@@ -1293,19 +1334,24 @@ export class SupervisedAgentDelivery {
             if (binding?.work_attempt_id !== agent.workAttemptId || binding.provider_continuation_id !== agent.providerContinuationId) return;
             const prior = await this.inbox.taskContinuation(failed.inbox_item_id);
             const attempt = (prior?.attempt ?? 0) + 1;
-            const policy = taskFailurePolicy(failed.last_error, attempt, await this.inbox.providerRefusedTurn(failed.inbox_item_id));
+            // Claude's structured fields, and Claude Code's own words, decide for a Claude failure. Any other
+            // provider's failure is read as before.
+            const claudeCode = agent.provider === "claude-code";
+            const policy = taskFailurePolicy(failed.last_error, attempt, await this.inbox.providerRefusedTurn(failed.inbox_item_id),
+              await this.inbox.providerResultUnrecognized(failed.inbox_item_id),
+              claudeCode ? await this.inbox.claudeApiFailure(failed.inbox_item_id) : null, claudeCode);
             let tasks: ContinuityTask[] = [];
             let lookupError: string | null = null;
             try { tasks = await this.ownedTasks(agent, { taskIds: prior?.tasks?.map((task) => task.id), heldBefore: prior?.heldBefore ?? String(failed.activation.task_continuity_failed_at), signal: controller.signal }); }
-            catch { lookupError = "Task ownership could not be verified. Check the room connection before continuing work."; }
+            catch { lookupError = OWNERSHIP_UNVERIFIED_DETAIL; }
             if (!await this.hasExecutionAuthority(agent, controller)) return;
             const queued = await this.inbox.enqueueTaskContinuation({ parentId: failed.inbox_item_id,
               agentId: agent.agentId, roomId: agent.roomId, workAttemptId: agent.workAttemptId,
               providerContinuationId: binding.provider_continuation_id, agentSessionId: agent.agentSessionId,
               tasks: lookupError ? null : prior?.tasks ? tasks.filter((task) => prior.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)) : tasks,
               blockReason: lookupError ?? (policy.automatic ? null : policy.detail), detail: policy.detail,
-              settleReason: policy.settle ? policy.detail : null, note: policy.note ?? null,
-              delayMs: this.retryDelayMs === 0 ? 0 : Math.min(60_000, 10_000 * 2 ** Math.min(attempt - 1, 3)),
+              settleReason: policy.settle ? policy.detail : null, note: policy.note ?? null, kind: policy.kind ?? null,
+              delayMs: this.retryDelayMs === 0 ? 0 : policy.delayMs ?? defaultFollowUpDelayMs(attempt),
             });
             if (queued) continue;
           }
@@ -1324,28 +1370,45 @@ export class SupervisedAgentDelivery {
           if (continuation) {
             if (continuation.workAttemptId !== agent.workAttemptId || continuation.agentSessionId !== agent.agentSessionId
               || continuation.providerContinuationId !== agent.providerContinuationId || head.room_id !== agent.roomId) {
-              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, "The original task owner changed; no continuation was started.");
+              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, FOLLOW_UP_ENDED.agentChanged);
               continue;
             }
             const delay = await this.inbox.taskContinuationDelay(head.inbox_item_id);
-            if (delay > 0) await this.waitForPollDelay(delay, controller.signal);
+            if (delay > 0) {
+              const wait = new AbortController();
+              const endWithPump = () => wait.abort();
+              controller.signal.addEventListener("abort", endWithPump, { once: true });
+              // An abort during the reads above has already happened: no event will come for it.
+              if (controller.signal.aborted || this.dispatchPaused) wait.abort();
+              this.followUpWaits.set(agent.agentId, wait);
+              try { await this.waitForPollDelay(delay, wait.signal); } finally {
+                controller.signal.removeEventListener("abort", endWithPump);
+                if (this.followUpWaits.get(agent.agentId) === wait) this.followUpWaits.delete(agent.agentId);
+              }
+              // The owner ended the wait. Read the head again: the follow-up is due now, or it is gone.
+              if (wait.signal.aborted && !controller.signal.aborted) continue;
+            }
             if (!await this.hasExecutionAuthority(agent, controller)) return;
             let tasks: ContinuityTask[];
             try {
               tasks = await this.ownedTasks(agent, { taskIds: continuation.tasks?.map((task) => task.id), heldBefore: continuation.heldBefore, signal: controller.signal });
             } catch {
-              if (await this.hasExecutionAuthority(agent, controller)) await this.inbox.transition(head.inbox_item_id, "blocked", { last_error: "Task ownership could not be verified. Check the room connection and use Retry delivery." });
+              if (await this.hasExecutionAuthority(agent, controller)) await this.inbox.transition(head.inbox_item_id, "blocked", { last_error: OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL });
               return;
             }
             if (!await this.hasExecutionAuthority(agent, controller)) return;
             const retained = continuation.tasks ? tasks.filter((task) => continuation!.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)) : tasks;
             if (!retained.length) {
-              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, "The task finished or its ownership changed; no continuation was started.");
+              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, FOLLOW_UP_ENDED.taskNotHeld);
               continue;
             }
-            continuation = await this.inbox.refreshTaskContinuationSnapshot(head.inbox_item_id, retained);
+            try { continuation = await this.inbox.refreshTaskContinuationSnapshot(head.inbox_item_id, retained); } catch (error) {
+              // Its owner stopped it at the moment its time came. That is not a fault: go on with the next head.
+              if ((await this.inbox.get(head.inbox_item_id))?.state !== "pending") continue;
+              throw error;
+            }
             if (await this.inbox.taskContinuationHasUncertainEffects(head.inbox_item_id)) {
-              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, "Automatic task continuation stopped because a previous action has an uncertain result. Check its external result, then send an instruction to continue only the verified unfinished work.");
+              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, FOLLOW_UP_ENDED.uncertainEffects);
               return;
             }
           }
@@ -1806,6 +1869,7 @@ export class SupervisedAgentDelivery {
           ...(recordEnding ? { recordEnding: true } : {}),
           ...(originProcessEnded ? { originProcessEnded: true } : {}),
           ...(earlierContinuationId ? { providerContinuationId: earlierContinuationId } : {}),
+          ...(item.state === "result_recovery" ? { savedAsUnreadable: true } : {}),
         }, { detachSignal: turnController.signal, checkpointProviderState, settleLifecycleBeforeIdle, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,
@@ -2400,6 +2464,21 @@ function persistedAcceptedTerminal(outcome: string | null):
 function pollErrorBackoffMs(consecutiveErrors: number): number {
   const exponent = Math.max(0, Math.min(30, consecutiveErrors - 1));
   return Math.min(POLL_ERROR_BACKOFF_CAP_MS, POLL_ERROR_BACKOFF_BASE_MS * (2 ** exponent));
+}
+
+/** What the owner reads when Try now was saved, and the agent changed before its attempt could start. */
+const AGENT_CHANGED_BEFORE_TRY_NOW = "The agent changed before it could try again. Refresh and check again.";
+
+/** The follow-up with this id that waits for its time, when nothing has started for it. */
+function scheduledFollowUp<Receipt extends Pick<SupervisedInboxItem, "source_message_id" | "state" | "next_attempt_at_ms" | "provider_turn_id" | "outcome">>(
+  receipts: readonly Receipt[], sourceMessageId: string): Receipt | null {
+  return receipts.find((receipt) => receipt.source_message_id === sourceMessageId && sourceMessageId.startsWith("task-continuation:")
+    && receipt.state === "pending" && receipt.next_attempt_at_ms !== null && !receipt.provider_turn_id && !receipt.outcome) ?? null;
+}
+
+/** What the owner reads when Try now or Stop trying comes too late: the automatic attempt is no longer waiting. */
+function noLongerAvailable(sourceMessageId: string, otherwise: string): string {
+  return sourceMessageId.startsWith("task-continuation:") ? "This automatic attempt has already started or ended." : otherwise;
 }
 
 /** An abortable delay that releases its signal listener on either completion path. */

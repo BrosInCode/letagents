@@ -426,6 +426,13 @@ export interface DesktopSupervisorStateSnapshot {
   entries: DesktopSupervisorManifestEntry[];
 }
 
+/** Read-only service observation. Null state means unavailable, not an empty fleet. */
+export interface DesktopSupervisorServiceSnapshot {
+  status: DesktopSupervisorDaemonStatus | null;
+  state: DesktopSupervisorStateSnapshot | null;
+  observedAt: string;
+}
+
 /** One human retirement request. The renderer supplies the stable operation
  * id before dispatch so a completion event cannot race ahead of correlation. */
 export interface DesktopSupervisorRetirementInput {
@@ -632,7 +639,48 @@ export interface DesktopRoomAgentDeliveryReceipt {
   failureCode: "provider_continuation_missing" | null;
   terminalReason: "upgrade_authority_unavailable" | null;
   updatedAt: string;
+  /** Set on a follow-up of failed work, which has no room message of its own. */
+  followUp?: DesktopRoomAgentFollowUp;
   timeline: DesktopRoomAgentCausalEvent[];
+}
+
+/**
+ * Where an agent's follow-up of failed work stands, and the room message that work began with (null when that
+ * receipt is no longer kept). `scheduled`: the agent tries again by itself at a saved time. `waiting_for_owner`:
+ * the follow-up is blocked. `ended`: it ended with nothing started, and the receipt's error says why.
+ */
+export interface DesktopRoomAgentFollowUp {
+  forMessageId: string | null;
+  state: "scheduled" | "waiting_for_owner" | "ended";
+  /**
+   * Why it waits for its owner or ended. Absent while it waits for its time, and from a daemon that does not say. Anything
+   * that reads this must treat an absent reason as one that it cannot rely on: the note stays.
+   */
+  reason?: DesktopRoomAgentFollowUpReason;
+  /**
+   * For a note that asks its owner to send a message: whether a turn has started for a message of a person that came after the follow-up.
+   * Absent from a daemon that does not say, and then the note stays.
+   */
+  laterPersonTurn?: boolean;
+  scheduled: DesktopRoomAgentScheduledRetry | null;
+}
+
+/**
+ * `ended` has one of the first six. `waiting_for_owner` has one of the last three; `other` is a block with no reason of
+ * its own, and its text says what it is.
+ */
+export type DesktopRoomAgentFollowUpReason = "stopped_by_owner" | "skipped" | "agent_changed" | "task_not_held" | "uncertain_action"
+  | "uncertain_resolved" | "attempts_failed" | "ownership_unverified" | "other";
+
+/** An automatic attempt that waits for its time. The time is the daemon's saved one, so it holds across restarts. */
+export interface DesktopRoomAgentScheduledRetry {
+  /** When the attempt starts, in milliseconds since the epoch. */
+  atMs: number;
+  /** Which automatic attempt this is, from 1, and how many there are in all. */
+  attempt: number;
+  attempts: number;
+  /** What the agent tries again after: a short provider fault, or a turn that ended without a reply. */
+  kind: "provider_fault" | "no_reply";
 }
 
 /** Four independent truths; no field is inferred from another. */
@@ -720,6 +768,12 @@ export interface DesktopSupervisorManifestEntry {
    * once it restarts, or still does until it restarts. Absent means off.
    */
   homeHarness?: "on" | "after_restart" | "until_restart";
+  /**
+   * Read-only: the owner saved another access level (permission mode) after
+   * this agent's process started, and the process has not been replaced yet.
+   * The daemon replaces it as soon as the agent is idle. Absent means none.
+   */
+  permissionPending?: true;
   createdBy: string;
   createdAt: string;
   /** User-selected source checkout. Distinct from the daemon's private work-attempt workspace. */
@@ -884,6 +938,7 @@ export interface DesktopSupervisorContinuationRepair {
   attempt_count: number; last_error: string | null; created_at: string; updated_at: string;
 }
 export interface DesktopSupervisorAgentInspectorDetail {
+  usage?: import("../../shared/provider-usage.js").InspectorUsage | null;
   /** Optional on older supervisors; bounded room text captured before native dispatch. */
   prepared_context?: import("../../shared/message-outcome.js").PreparedRoomContext | null;
   latest_intervention?: import("../../shared/message-outcome.js").MessageIntervention | null;

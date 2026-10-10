@@ -42,7 +42,7 @@ import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIn
 import { createGitCommand, RepositoryNetworkError, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
-import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs } from "../reconciler-policy.js";
+import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS, decideReconciliation, restartBackoffMs, restartsAfterNextFailure } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
 import { advanceReconciliationState, recordReconciliationActionFailure, rememberCompletedControlAction } from "../reconciler-state.js";
 import type { ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
@@ -4669,6 +4669,16 @@ test("direct provider convergence quarantines persisted crash loops without anot
   }
 });
 
+test("the lane outlook mirrors the crash-loop check that runs before every provider restart", () => {
+  const now = 50_000_000;
+  const recent = (count: number) => Array.from({ length: count }, (_, index) => now - 1_000 * (index + 1));
+  assert.equal(restartsAfterNextFailure([], now), true);
+  assert.equal(restartsAfterNextFailure(recent(CRASH_LOOP_EXIT_LIMIT - 2), now), true, "the next ending is the last one still restarted");
+  assert.equal(restartsAfterNextFailure(recent(CRASH_LOOP_EXIT_LIMIT - 1), now), false, "the next ending reaches the limit, so the agent is quarantined");
+  assert.equal(restartsAfterNextFailure(Array.from({ length: CRASH_LOOP_EXIT_LIMIT }, () => now - CRASH_LOOP_WINDOW_MS - 1), now), true,
+    "endings outside the window do not count");
+});
+
 test("reconciler policy may poke stalled addressed work but silence never proves runtime loss", () => {
   const base = {
     desiredState: "running" as const, observedState: "working" as const, condition: "none" as const,
@@ -6296,6 +6306,47 @@ for (const mode of ["idle", "surviving", "missing_turn_id", "missing_terminal", 
       assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true);
     } else {
       assert.equal(result.ok, true, result.error);
+      await within(env.daemon.waitForHandoff(), "compatible handoff");
+    }
+  } finally { await env.cleanup(); }
+});
+
+/**
+ * The head of an agent's queue is a follow-up that was made blocked, because the last automatic attempt failed: it waits
+ * for its owner, and nothing was ever sent to a provider for it. An update must not wait for its owner. One that its
+ * owner retried may have been sent, and an acknowledgement may have been lost, so that one still holds the update.
+ */
+for (const retried of [false, true]) test(`provider-aware handoff ${retried ? "is deferred by a blocked follow-up that was retried" : "goes on past a blocked follow-up that never reached a provider"}`, async () => {
+  const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "claude-code", {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: false }),
+  });
+  await env.internals.providerStreams.install(env.id, env.handle, env.generation);
+  env.handle.observedState = "idle";
+  try {
+    const store = env.internals.supervisedInbox;
+    const [item] = await store.ingestPoll({ agent_id: env.id, room_id: "room_1", last_observed_message_id: "1",
+      messages: [{ source_message_id: "task-continuation:parent", source_message: { text: "continue the task" }, activation: {} }] });
+    // Exactly what the daemon saves for a follow-up that it makes blocked.
+    const db = new DatabaseSync(env.paths.manifestPath);
+    db.prepare("UPDATE supervised_agent_inbox SET state='blocked',last_error='All three automatic attempts failed.' WHERE inbox_item_id=?").run(item!.inbox_item_id);
+    db.prepare("INSERT INTO supervised_agent_inbox_events VALUES(?,3,'task-continuation:0','blocked',?,NULL)").run(item!.inbox_item_id, new Date().toISOString());
+    db.close();
+    assert.equal(await store.isUntouchedBlockedFollowUp(item!.inbox_item_id), true);
+    if (retried) {
+      // Its owner used Retry, and it blocked again with no turn id: the same shape as a lost acknowledgement.
+      await store.transition(item!.inbox_item_id, "pending");
+      await store.transition(item!.inbox_item_id, "blocked", { last_error: "native completion is unknown" });
+      assert.equal(await store.isUntouchedBlockedFollowUp(item!.inbox_item_id), false);
+    }
+    assert.equal((await store.head(env.id))?.state, "blocked");
+    const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    if (retried) {
+      assert.equal(result.ok, false);
+      assert.match(result.error ?? "", /no confirmed completion/);
+      assert.equal((await store.head(env.id))?.state, "blocked");
+    } else {
+      assert.equal(result.ok, true, result.error);
+      assert.equal((await store.get(item!.inbox_item_id))?.state, "blocked", "and it still waits for its owner");
       await within(env.daemon.waitForHandoff(), "compatible handoff");
     }
   } finally { await env.cleanup(); }
@@ -10111,7 +10162,8 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     const codexProjection = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: providerNeutralId, room_id: "provider-neutral-room", provider: "codex",
       desired_state: "running", observed_state: "working",
-      delivery_mode: "daemon_inbox", permission_profile_id: "read_only",
+      // Not Read-only: a Read-only Codex agent may not claim a task, and this test is about the turn capability.
+      delivery_mode: "daemon_inbox", permission_profile_id: "full_access",
       workspace_path: providerNeutralAttempt.workspace_path, work_attempt_id: providerNeutralAttempt.work_attempt_id,
       run_id: providerNeutralExecution.execution_generation_id,
       deployment_id: serializeDaemonDeploymentId(providerNeutralId, providerNeutralExecution.execution_generation_id),
@@ -13731,7 +13783,7 @@ test("read model projects child compaction before admission without changing dur
     capabilities: { hasDelivery: () => false, supportsRoomTurns: () => true, supportsContinuationRepair: () => false },
     recoveryDiagnostics: () => { throw new Error("not part of progress projection"); }, deliveryAdmission: () => null,
     compactionProgress: candidate => { assert.equal(candidate.work_attempt_id, "compaction-attempt"); return progress; },
-    manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null },
+    manifest: { load: async () => ({ entries: [] }), getEntry: async () => undefined, pendingRuntimeRecovery: async () => null, getAgentConfiguration: async () => undefined },
     bindings: { credentialFor: async () => null, get: async () => null, list: async () => [] },
     inbox: { detail: async () => { throw new Error("unused"); }, ingressHealth: async () => null,
       latestContinuationRepair: async () => null, receiptProjection: async () => [] },
@@ -13753,4 +13805,32 @@ test("read model projects child compaction before admission without changing dur
   }
   progress = null;
   assert.equal((await model.entryWithDerivedLiveness(starting)).provider_progress, null);
+});
+
+test("inspector usage is read for the exact live continuation and drops races during the read", async () => {
+  for (const mutation of ["none", "room", "continuation", "execution", "daemon", "handle", "failure"] as const) {
+    const handle = { workAttemptId: "usage-attempt", providerContinuationId: "thread" } as any;
+    let current: DaemonManifestEntry = { ...entry, id: "usage-agent", room_id: "usage-room", work_attempt_id: "usage-attempt",
+      provider_ref: { work_attempt_id: "usage-attempt", provider_continuation_id: "thread", execution_generation_id: "execution", provider_connection: null } };
+    let generation = 4;
+    const handles = new Map([[current.id, handle]]);
+    const usage = { providerContinuationId: "thread", account: { state: "available", windows: [] }, context: null, compaction: null };
+    const model = new DaemonReadModel({
+      manifest: { getEntry: async () => current }, currentDaemonGeneration: () => generation, liveHandles: handles,
+      inbox: { detail: async () => ({ availability: "not_loaded" }) },
+      readUsage: async (received: any) => {
+        assert.equal(received, handle);
+        if (mutation === "room") current = { ...current, room_id: "another-room" };
+        if (mutation === "continuation") current = { ...current, provider_ref: { ...current.provider_ref!, provider_continuation_id: "replacement" } };
+        if (mutation === "execution") current = { ...current, provider_ref: { ...current.provider_ref!, execution_generation_id: "replacement" } };
+        if (mutation === "daemon") generation++;
+        if (mutation === "handle") handles.set(current.id, { ...handle });
+        if (mutation === "failure") throw new Error("provider unavailable");
+        return usage;
+      },
+    } as any);
+    const result = await model.inspectorDetail(current.id, "usage-room", null);
+    assert.deepEqual(result.usage, mutation === "none" ? { ...usage, executionGenerationId: "execution", daemonGeneration: 4 } : null, mutation);
+    assert.equal(result.availability, "not_loaded", "usage failures do not break retained Work detail");
+  }
 });

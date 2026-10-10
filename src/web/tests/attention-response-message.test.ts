@@ -107,7 +107,7 @@ test('the room shows the answer as a reply to the agent, in the message and in r
   assert.doesNotMatch(reply, /@agent:|Human response/)
 })
 
-test('thread previews and the composer reply chip show the answer by agent name', async () => {
+test('collapsed threads stay compact and the composer reply chip shows the answer by agent name', async () => {
   const thread = await renderToString(createSSRApp({
     render: () => h(ChatMessage as object, {
       roomIdentifier: 'github.com/emmymay/year-dots',
@@ -116,7 +116,8 @@ test('thread previews and the composer reply chip show the answer by agent name'
       thread: { count: 1, latest: message() },
     }),
   }))
-  assert.match(thread, /@SummitMisty Noted\. Post each verdict/)
+  assert.match(thread, /aria-label="Open 1 reply"/)
+  assert.doesNotMatch(thread, /thread-marker-preview/)
   assert.doesNotMatch(thread, /@agent:|Human response/)
 
   const composer = await renderToString(createSSRApp({

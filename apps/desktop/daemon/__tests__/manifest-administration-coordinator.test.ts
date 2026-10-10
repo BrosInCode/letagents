@@ -553,6 +553,21 @@ test("activity-only persistence sanitizes presentation without acquiring lifecyc
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
 });
 
+test("a provider stream's event whose position a notice took meanwhile is written after the newest, not refused", async () => {
+  for (const activityOnly of [false, true]) {
+    const state = harness([entry({ observed_state: "idle", activity: Array.from({ length: 6 }, (_, sequence) => activity({ sequence })) })]);
+    // The event read position 5 as the next free one; a notice has taken it since.
+    await assert.rejects(state.subject.appendNativeActivity("agent-1", activity({ sequence: 5 }), activityOnly), /not newer than 5/,
+      "an exact position is still admitted exactly");
+    await state.subject.appendNativeActivity("agent-1", activity({ sequence: 5, summary: "stream event" }), activityOnly, "after_latest");
+    assert.deepEqual(state.manifest.entries[0]!.activity!.slice(-2).map(event => [event.sequence, event.summary]),
+      [[5, activity({ sequence: 5 }).summary], [6, "stream event"]]);
+    // A position that is still free is kept as it is.
+    await state.subject.appendNativeActivity("agent-1", activity({ sequence: 9, summary: "later event" }), activityOnly, "after_latest");
+    assert.equal(state.manifest.entries[0]!.activity!.at(-1)!.sequence, 9);
+  }
+});
+
 test("native activity keeps scalar admission, redaction, lifecycle ownership, and fencing without entry reads", async () => {
   for (const activityOnly of [false, true]) {
     const nativeLiveness = { state: "idle" as const, detail: "prior native evidence" };
@@ -725,6 +740,8 @@ const OWN_SETUP_KEY = "letagentsOwnerIsolation";
 /** The stored form of "on", and of the revisions at which the choice changed. */
 const OWN_SETUP_ON = { [OWN_SETUP_KEY]: false };
 const changedAt = (...revisions: number[]) => Object.fromEntries(revisions.map((revision) => [`letagentsOwnerIsolationChangedAt${revision}`, false]));
+/** The revision at which the access level (permission mode) was last changed. */
+const permissionChangedAt = (revision: number) => ({ [`letagentsPermissionChangedAt${revision}`]: false });
 
 test("the owner's own setup is turned on and off as its own revisioned change, and other edits keep it", async () => {
   const state = harness([entry({ provider: "codex" })]);
@@ -765,6 +782,8 @@ test("the owner's own setup is turned on and off as its own revisioned change, a
   assert.equal(edited.configuration?.home_harness, true);
   assert.deepEqual(state.configuration?.provider_launch_policy, {
     approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, ...OWN_SETUP_ON, ...changedAt(4),
+    // The access level changed in this save, which is recorded beside the choice and does not disturb it.
+    ...permissionChangedAt(5),
   });
   assert.equal(edited.configuration?.home_harness_pending, true);
 
@@ -986,6 +1005,48 @@ test("an agent that collects its own room messages cannot be given the owner's o
   }
 });
 
+test("a Codex agent that collects its own room messages cannot be saved as Read-only: the level is listed as unavailable with the reason, and the save says it", async () => {
+  const NEEDS_DELIVERY = "Read-only access is for a Codex agent that LetAgents delivers room messages to. "
+    + "This agent collects its own room messages, so LetAgents cannot hold it to the room tools that Read-only allows. Choose another access level for this agent.";
+  type Listed = { id: string; status: string; detail: string | null };
+  const save = (state: ReturnType<typeof harness>, profile: string) => state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3,
+    configuration: { model: null, reasoning_effort: null, charter: "Help the room, carefully", permission_profile_id: profile },
+  });
+  const usual = supervisedPermissionProfilesForProvider("codex") as Listed[];
+  for (const deliveryMode of ["mcp_polling", undefined] as const) {
+    const state = harness([entry({ provider: "codex" })]);
+    const stored = storedConfiguration({ model: null, reasoning_effort: null });
+    if (deliveryMode) stored.delivery_mode = deliveryMode; else delete stored.delivery_mode;
+    state.setConfiguration(stored);
+    // Where the access levels are offered: Read-only cannot be chosen, and says why. Every other level is as it was.
+    const listed = (await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).supervised_permission_profiles as Listed[];
+    assert.deepEqual(listed.map((profile) => (profile.id === "read_only" ? [profile.status, profile.detail] : profile)),
+      usual.map((profile) => (profile.id === "read_only" ? ["gated", NEEDS_DELIVERY] : profile)), String(deliveryMode));
+    // Where it is saved: refused in the same words, and nothing is written.
+    state.events.length = 0;
+    const refused = await save(state, "read_only");
+    assert.deepEqual([refused.outcome, (refused as { error?: string }).error], ["invalid", NEEDS_DELIVERY], String(deliveryMode));
+    assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false, "nothing is written");
+    assert.equal(state.configuration!.permission_profile_id, "full_access");
+    // Another level is saved as before.
+    assert.equal((await save(state, "ask_before_write")).outcome, "updated");
+    assert.equal(state.configuration!.permission_profile_id, "ask_before_write");
+  }
+  // An agent the background service delivers room messages to: Read-only is offered and saved.
+  const delivered = harness([entry({ provider: "codex" })]);
+  delivered.setConfiguration(storedConfiguration({ model: null, reasoning_effort: null }));
+  assert.deepEqual((await delivered.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).supervised_permission_profiles, usual);
+  assert.equal((await save(delivered, "read_only")).outcome, "updated");
+  assert.equal(delivered.configuration!.permission_profile_id, "read_only");
+  // Read-only for another provider is another thing, and is not touched.
+  const claude = harness([entry({ provider: "claude-code" })]);
+  claude.setConfiguration(storedConfiguration({ provider: "claude-code", model: null, reasoning_effort: null, permission_profile_id: "ask_before_write",
+    provider_launch_policy: { permissionMode: "default", dangerouslySkipPermissions: false }, delivery_mode: "mcp_polling" }));
+  assert.deepEqual((await claude.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).supervised_permission_profiles, supervisedPermissionProfilesForProvider("claude-code"));
+  assert.equal((await save(claude, "read_only")).outcome, "updated");
+});
+
 test("a new agent cannot be created with the owner's own setup already on", async () => {
   const state = harness();
   for (const value of [false, true, "false", null]) {
@@ -1001,6 +1062,8 @@ test("a new agent cannot be created with the owner's own setup already on", asyn
   for (const policy of [
     { approvalPolicy: "never", nested: OWN_SETUP_ON },
     { approvalPolicy: "never", ...changedAt(1) },
+    // The record of a changed access level is the daemon's own too: a caller that could write one could make it restart the agent for ever.
+    { approvalPolicy: "never", ...permissionChangedAt(99_999_999) },
     JSON.parse(`{"approvalPolicy":"never","__proto__":{"${OWN_SETUP_KEY}":false}}`),
     JSON.parse(`{"approvalPolicy":"never","sandboxPolicy":{"__proto__":{"${OWN_SETUP_KEY}":false}}}`),
     // Any spelling of a key LetAgents keeps for itself, and the escaped and repeated forms JSON text allows.
@@ -1037,4 +1100,80 @@ test("an agent that uses its owner's Claude settings is told so beside each acce
   const off = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
   assert.match((off.supervised_permission_profiles as Array<{ detail: string | null }>).map((profile) => profile.detail ?? "").join(" "),
     /Other Claude settings do not apply/);
+});
+
+test("a change to the access level is recorded against its revision and asks for the agent to be restarted; no other edit does", async () => {
+  // Open Model cannot use the owner's setup: its stored policy is read without any key of LetAgents' own.
+  const state = harness([entry({ provider: "open-model" })]);
+  state.setConfiguration(storedConfiguration({ provider: "open-model", model: "qwen/qwen3-coder", reasoning_effort: null,
+    permission_profile_id: "full_access", provider_launch_policy: { permission: { "*": "allow" } } }));
+  const save = (expectedRevision: number, permission: string, extra: Record<string, unknown> = {}) => state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision,
+    configuration: { model: "qwen/qwen3-coder", reasoning_effort: null, charter: "Help the room", permission_profile_id: permission, ...extra },
+  });
+  const requests = () => state.events.filter((event) => event.startsWith("convergence:"));
+
+  state.events.length = 0;
+  assert.equal((await save(3, "ask_before_write")).outcome, "updated");
+  assert.deepEqual(state.configuration?.provider_launch_policy, { permission: { "*": "allow", edit: "ask", bash: "ask" }, ...permissionChangedAt(4) });
+  assert.deepEqual(requests(), ["convergence:agent-1"], "a running agent is asked to take the new level as soon as it is idle");
+
+  // Another edit while the agent has not restarted yet keeps the record, even though this agent's policy is read without it.
+  state.events.length = 0;
+  assert.equal((await save(4, "ask_before_write", { model: "qwen/other" })).outcome, "updated");
+  assert.equal(state.configuration?.model, "qwen/other");
+  assert.deepEqual(state.configuration?.provider_launch_policy, { permission: { "*": "allow", edit: "ask", bash: "ask" }, ...permissionChangedAt(4) },
+    "the process that started before revision 4 still runs the old level, so the record stays");
+  assert.deepEqual(requests(), [], "no other edit asks for a restart");
+
+  // A later change replaces the record: it is the latest that decides.
+  state.events.length = 0;
+  assert.equal((await save(5, "auto_review")).outcome, "updated");
+  assert.deepEqual(state.configuration?.provider_launch_policy, { permission: { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" }, ...permissionChangedAt(6) });
+  assert.deepEqual(requests(), ["convergence:agent-1"]);
+
+  // Nothing is recorded, or asked for, when nothing changed or nothing was saved.
+  state.events.length = 0;
+  assert.equal((await save(6, "auto_review", { charter: "Another" })).outcome, "updated");
+  assert.equal((await save(6, "full_access")).outcome, "conflict", "a stale revision saves nothing");
+  state.setConfigurationOutcome("invalid");
+  assert.equal((await save(7, "full_access")).outcome, "invalid");
+  assert.deepEqual(requests(), []);
+  assert.deepEqual(state.configuration?.provider_launch_policy, { permission: { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" }, ...permissionChangedAt(6) });
+});
+
+test("an agent that never had its access level saved is changed from the level it would have started with", async () => {
+  // No level is saved: Codex starts with full access, so choosing full access changes nothing.
+  const state = harness([entry({ provider: "codex" })]);
+  state.setConfiguration(storedConfiguration({ permission_profile_id: null, provider_launch_policy: {} }));
+  const save = (expectedRevision: number, permission: string) => state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision,
+    configuration: { model: "gpt-5.6", reasoning_effort: "high", charter: "Help the room", permission_profile_id: permission },
+  });
+  state.events.length = 0;
+  assert.equal((await save(3, "full_access")).outcome, "updated");
+  assert.equal(Object.keys(state.configuration!.provider_launch_policy as object).some((key) => key.startsWith("letagentsPermission")), false);
+  assert.deepEqual(state.events.filter((event) => event.startsWith("convergence:")), []);
+  assert.equal((await save(4, "ask_before_write")).outcome, "updated");
+  assert.deepEqual(state.events.filter((event) => event.startsWith("convergence:")), ["convergence:agent-1"]);
+});
+
+test("the owner's own setup is saved beside a change to the access level without disturbing it", async () => {
+  const state = harness([entry({ provider: "codex" })]);
+  await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3,
+    configuration: { model: "gpt-5.6", reasoning_effort: "high", charter: "Help the room", permission_profile_id: "ask_before_write" },
+  });
+  assert.deepEqual(state.configuration?.provider_launch_policy, {
+    approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, ...permissionChangedAt(4),
+  });
+  state.events.length = 0;
+  const on = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 4, configuration: {}, homeHarness: true,
+  });
+  assert.equal(on.outcome, "updated");
+  assert.deepEqual(state.configuration?.provider_launch_policy, {
+    approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, ...OWN_SETUP_ON, ...changedAt(5), ...permissionChangedAt(4),
+  }, "the record of the access level survives the switch");
+  assert.deepEqual(state.events.filter((event) => event.startsWith("convergence:")), [], "the switch has its own restart");
 });

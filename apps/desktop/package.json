@@ -2,7 +2,7 @@
   "name": "letagents-desktop",
   "productName": "LetAgents",
   "private": true,
-  "version": "0.1.112",
+  "version": "0.1.114",
   "description": "A desktop control plane for collaborating AI agents.",
   "license": "BUSL-1.1",
   "repository": {
@@ -12,7 +12,7 @@
   "type": "module",
   "letagentsRuntime": {
     "openCodeVersion": "1.18.20",
-    "mcpVersion": "0.12.35"
+    "mcpVersion": "0.12.36"
   },
   "main": "dist-electron/main.js",
   "scripts": {
@@ -41,10 +41,11 @@
     "smoke:opencode-contract": "npm run build:electron && node electron/scripts/opencode-runtime-contract-smoke.mjs",
     "smoke:claude-daemon-inbox": "node --import tsx electron/scripts/claude-daemon-inbox-spike.ts",
     "test": "npm run test:renderer && npm run test:electron && npm run test:daemon && npm run test:packaging",
-    "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
-    "test:electron": "node --import tsx --test --test-concurrency=1 --experimental-test-module-mocks electron/__tests__/*.test.ts",
+    "test:renderer": "node --import tsx --test --test-timeout=600000 renderer/__tests__/*.test.ts",
+    "test:electron": "node --import tsx --test --test-concurrency=1 --test-timeout=600000 --experimental-test-module-mocks electron/__tests__/*.test.ts",
     "test:daemon": "node --import tsx --test --test-timeout=180000 daemon/__tests__/*.test.ts",
-    "test:packaging": "node --test electron/scripts/*.test.mjs",
+    "test:packaging": "node --test --test-timeout=600000 electron/scripts/*.test.mjs",
+    "test:clean-home": "node electron/scripts/run-with-clean-home.mjs -- npm test",
     "lint:vue-components": "eslint \"renderer/src/**/*.vue\"",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
   },
@@ -57,7 +58,7 @@
     "cuelume": "0.1.0",
     "electron-updater": "6.8.9",
     "undici": "7.29.1",
-    "vue": "3.5.33",
+    "vue": "3.5.43",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -91,6 +92,10 @@
     "ip-address": "10.7.2",
     "builder-util-runtime": "9.7.0",
     "joi": "18.2.9",
-    "js-yaml": "4.3.2"
+    "js-yaml": "4.3.2",
+    "concurrently": {
+      "shell-quote": "1.11.0"
+    },
+    "@modelcontextprotocol/sdk": "1.31.0"
   }
 }

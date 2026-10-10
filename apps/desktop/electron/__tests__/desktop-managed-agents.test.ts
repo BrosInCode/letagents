@@ -556,6 +556,26 @@ test("managed agent permission profiles map provider-specific available and gate
     assertManagedAgentPermissionProfileAvailable("open-model", "ask_before_write", "supervised").status,
     "available",
   );
+  // Read-only is a supervised Codex level only: the catalog and a legacy start still refuse it.
+  assert.equal(codexProfiles.find((profile) => profile.id === "read_only")?.status, "gated");
+  assert.throws(
+    () => assertManagedAgentPermissionProfileAvailable("codex", "read_only"),
+    /Read-only is not available for codex/,
+  );
+  const supervisedCodexReadOnly = assertManagedAgentPermissionProfileAvailable("codex", "read_only", "supervised");
+  assert.equal(supervisedCodexReadOnly.status, "available");
+  assert.equal(supervisedCodexReadOnly.risk, "medium");
+  assert.equal(supervisedCodexReadOnly.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
+  assert.equal(supervisedCodexReadOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
+  assert.equal(codexProfiles.find((profile) => profile.isDefault)?.id, "full_access");
+  assert.throws(
+    () => assertManagedAgentPermissionProfileAvailable("codex", "sandboxed_write", "supervised"),
+    /Sandboxed writes is not available for codex/,
+  );
+  assert.throws(
+    () => assertManagedAgentPermissionProfileAvailable("open-model", "read_only", "supervised"),
+    /Read-only is not available for open-model/,
+  );
 
   for (const provider of ["claude-code", "codex", "open-model"] as const) {
     assert.equal(listManagedAgentPermissionProfiles(provider).find((profile) => profile.id === "auto_review")?.status, "gated");
@@ -2594,6 +2614,24 @@ test("Cursor desktop event prompts keep top-level messages free of thread contex
   assert.doesNotMatch(prompt, /Thread context:/);
   assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /NO_ROOM_REPLY/);
+});
+
+test("Cursor sandboxed-write prompts say there is no network and git fails from the sandbox, and no other mode does", () => {
+  const limit = /In this mode there is no network\. git and gh usually fail inside the workspace/;
+  const sandboxed = buildCursorDesktopEventPrompt(
+    cursorLiveSession({ permission_profile_id: "sandboxed_write" }),
+    messageEvent(),
+  );
+  assert.match(sandboxed, limit);
+  assert.match(sandboxed, /This is caused by the sandbox, so do not report it as a problem with the owner's Mac\./);
+  assert.match(sandboxed, /Ask a teammate or the owner to commit, push and open the pull request\./);
+  const fullAccess = buildCursorDesktopEventPrompt(
+    cursorLiveSession({ permission_profile_id: "full_access" }),
+    messageEvent(),
+  );
+  assert.doesNotMatch(fullAccess, limit);
+  const codex = buildDesktopEventPrompt(liveSession({ display_name: "CedarVista" }), messageEvent());
+  assert.doesNotMatch(codex, limit);
 });
 
 test("desktop-delivered event prompts do not claim participation in unrelated threads", () => {

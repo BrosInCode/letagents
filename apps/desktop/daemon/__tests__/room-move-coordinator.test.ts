@@ -664,6 +664,42 @@ test("an agent-requested room move fails before joining when its activating turn
   }
 });
 
+test("a room move the agent asked for is not made once its owner saved Read-only, and a move its owner makes is", async () => {
+  const waiting = () => roomMove({
+    phase: "waiting_for_current_turn", activating_inbox_item_id: "inbox-1", provider_turn_id: "turn-1", effect_id: "effect-1",
+  });
+  // The agent's own call was prepared, its turn ended well, and its level is Read-only now.
+  const h = harness();
+  h.setMove(waiting());
+  h.setActivatingTurn(inboxItem({ state: "acknowledged" }), null);
+  h.setEntry({ ...entry(), permission_profile_id: "read_only" });
+  const refused = await h.coordinator.reconcile(waiting());
+  assert.equal(refused.phase, "failed");
+  assert.equal(refused.error, "The agent's access level is now Read-only, which does not let it move to another room.");
+  assert.equal(h.events.some((event) => event.startsWith("http:")), false, "the destination was never joined");
+  assert.equal(h.getEntry()?.room_id, "source-room");
+
+  // The same move at another level, or for another agent app, goes on to join the destination.
+  for (const saved of [{ permission_profile_id: null }, { permission_profile_id: "ask_before_write" }, { permission_profile_id: "read_only", provider: "claude-code" }]) {
+    const other = harness();
+    other.setMove(waiting());
+    other.setActivatingTurn(inboxItem({ state: "acknowledged" }), null);
+    other.setEntry({ ...entry(), ...saved });
+    const moved = await other.coordinator.reconcile(waiting());
+    assert.notEqual(moved.error, refused.error, JSON.stringify(saved));
+    assert.equal(other.events.includes("store:advance:waiting_for_current_turn->joining_destination"), true, JSON.stringify(saved));
+  }
+
+  // A move the owner makes in the Inspector is no call of the agent's: it has no effect of the agent's, and is not held to its level.
+  const inspector = harness();
+  const owned = roomMove({ phase: "waiting_for_current_turn", activating_inbox_item_id: null, provider_turn_id: null, effect_id: null });
+  inspector.setMove(owned);
+  inspector.setEntry({ ...entry(), permission_profile_id: "read_only" });
+  const made = await inspector.coordinator.reconcile(owned);
+  assert.notEqual(made.error, refused.error);
+  assert.equal(inspector.events.includes("store:advance:waiting_for_current_turn->joining_destination"), true);
+});
+
 test("a failed inbox label alone cannot authorize room-move terminalization", async () => {
   const h = harness();
   const moving = roomMove({

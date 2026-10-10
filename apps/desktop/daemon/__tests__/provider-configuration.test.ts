@@ -12,8 +12,12 @@ import {
   homeHarnessDiffersFromSaved,
   homeHarnessRosterState,
   homeHarnessState,
+  launchPolicyForToolRules,
+  latestPermissionChange,
   namesHomeHarness,
   ownerSetupRef,
+  permissionChangeKey,
+  permissionChangedSince,
   startedWithHomeHarness,
   providerSupportsConcurrentSupervisedAgents,
   resolveProviderConfigurationSnapshot,
@@ -23,6 +27,7 @@ import {
 } from "../provider-configuration.js";
 import { attestProviderSpawnPolicy } from "../../electron/main/agents/provider-spawn-configuration.js";
 import {
+  assertSupervisedPermissionProfileAvailable,
   assertSupervisedRentalPermissionProfileAvailable,
   describeProfilesWithOwnerSetup,
   supervisedPermissionProfilesForProvider,
@@ -267,7 +272,7 @@ test("provider configuration rejects unsupported and conflicting native settings
     provider: "codex",
     model: null,
     reasoningEffort: null,
-    permissionProfileId: "read_only",
+    permissionProfileId: "sandboxed_write",
     launchPolicy: {},
     configurationRevision: 1,
   }), /unavailable for provider/);
@@ -321,6 +326,95 @@ test("supervised profile contract exposes Claude prompt approval while retaining
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.isDefault, false);
   assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.isDefault, true);
   assert.equal(cursor.find((profile) => profile.id === "full_access")?.status, "available");
+});
+
+test("Codex Read-only maps to a read-only sandbox with no network and nobody to ask", () => {
+  const readOnly = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const codex = { provider: "codex", model: null, reasoningEffort: null, configurationRevision: 4 } as const;
+
+  // An agent created in Add Agent stores an empty policy; the daemon supplies the whole authority.
+  assert.deepEqual(resolveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "read_only", launchPolicy: {} }), {
+    provider: "codex", model: null, reasoningEffort: null, permissionProfileId: "read_only",
+    launchPolicy: readOnly, configurationRevision: 4,
+  });
+  // Nothing in the mapping names a reviewer: the host stays the one an approval would go to.
+  assert.equal(Object.hasOwn(resolveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "read_only", launchPolicy: {} }).launchPolicy, "approvalsReviewer"), false);
+
+  // A stored policy that would widen it, ask, or hand approvals to Codex is refused.
+  for (const [launchPolicy, reason] of [
+    [{ sandboxPolicy: { type: "dangerFullAccess" } }, /conflicts with permission-profile authority at 'sandboxPolicy'/],
+    [{ sandboxPolicy: { type: "workspaceWrite", networkAccess: false } }, /conflicts with permission-profile authority at 'sandboxPolicy'/],
+    [{ sandboxPolicy: { type: "readOnly", networkAccess: true } }, /conflicts with permission-profile authority at 'sandboxPolicy'/],
+    [{ approvalPolicy: "on-request" }, /conflicts with permission-profile authority at 'approvalPolicy'/],
+    [{ approvalsReviewer: "auto_review" }, /conflicts with permission-profile authority at 'approvalsReviewer'/],
+    [{ sandbox: "danger-full-access" }, /cannot override 'sandbox'/],
+  ] as const) {
+    assert.throws(() => resolveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "read_only", launchPolicy }), reason, JSON.stringify(launchPolicy));
+  }
+
+  // Choosing it replaces the access level's own options and nothing else, from every other level and back.
+  const authorities = {
+    full_access: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
+    ask_before_write: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } },
+    auto_review: { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" },
+  } as const;
+  for (const [other, authority] of Object.entries(authorities)) {
+    const from = deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: other }, { experimental: true });
+    assert.deepEqual(from.launchPolicy, { experimental: true, ...authority }, other);
+    const to = deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "read_only" }, from.launchPolicy);
+    assert.equal(to.permissionProfileId, "read_only");
+    assert.deepEqual(to.launchPolicy, { experimental: true, ...readOnly }, `${other} to read_only`);
+    assert.deepEqual(deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: other }, to.launchPolicy).launchPolicy,
+      { experimental: true, ...authority }, `read_only to ${other}`);
+  }
+});
+
+test("a supervised Codex agent may be set to Read-only, and nothing else about Codex's access levels moves", () => {
+  const codex = supervisedPermissionProfilesForProvider("codex");
+  const readOnly = codex.find((profile) => profile.id === "read_only")!;
+  assert.equal(readOnly.status, "available");
+  // Not "low": Codex's sandbox denies no read, so the agent can read every file this account can, and it can post in the room.
+  assert.equal(readOnly.risk, "medium");
+  assert.equal(readOnly.isDefault, false);
+  // The whole card, word for word: what the agent can read, what it cannot do, that it asks for no approval,
+  // and that the owner's saved command rules stay away from it.
+  assert.equal(readOnly.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
+  assert.equal(readOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
+  const card = `${readOnly.description} ${readOnly.detail}`;
+  // Reads are not limited to the project, and the card says so instead of leaving it out.
+  assert.match(card, /read files on this Mac, also outside your project/);
+  // One file is kept from the agent's commands, and the card names that file and no more than it.
+  assert.match(card, /Its commands cannot read your Codex sign-in file\./);
+  assert.doesNotMatch(card, /\bsafe\b|\bprivate\b|\bsecure\b/i, "the rest of the Mac is still readable, so the card promises nothing wider");
+  // The limit on the network is stated for what is enforced: the agent's own commands, and Codex's web search.
+  assert.match(card, /Its commands cannot use the network, and web search is off\./);
+  // It can put a question to a person in the room, so the card speaks of approvals, not of asking.
+  assert.match(card, /It asks for no approval: a command that needs more is refused\./);
+  assert.doesNotMatch(card, /asks for nothing|asks you for nothing/);
+  assert.doesNotMatch(card, /always allowed|except/, "saved rules no longer reach the agent, so the card names no exception");
+  assert.doesNotMatch(card, /use LetAgents room tools/, "it does not get every room tool");
+  assert.doesNotMatch(card, /\bsafe|secure|unavailable|sandbox|approvalPolicy|MCP/i);
+
+  // Launch validation accepts it by name, and an agent that names no level still gets Full access.
+  assert.equal(assertSupervisedPermissionProfileAvailable("codex", "read_only"), "read_only");
+  assert.equal(assertSupervisedPermissionProfileAvailable("codex", " read_only "), "read_only");
+  assert.equal(assertSupervisedPermissionProfileAvailable("codex", null), "full_access");
+  assert.deepEqual(codex.filter((profile) => profile.isDefault).map((profile) => profile.id), ["full_access"]);
+  assert.equal(deriveProviderConfigurationSnapshot({
+    provider: "codex", model: null, reasoningEffort: null, permissionProfileId: null, configurationRevision: 1,
+  }, {}).permissionProfileId, "full_access");
+  assert.deepEqual(codex.filter((profile) => profile.status === "available").map((profile) => profile.id).sort(),
+    ["ask_before_write", "auto_review", "full_access", "read_only"]);
+
+  // What stays unavailable stays refused: Codex's restricted editing, and Read-only for Open Model.
+  assert.throws(() => assertSupervisedPermissionProfileAvailable("codex", "sandboxed_write"), /Sandboxed writes is unavailable for supervised codex/);
+  assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "read_only")?.status, "gated");
+  assert.throws(() => assertSupervisedPermissionProfileAvailable("open-model", "read_only"), /Read-only is unavailable for supervised open-model/);
+  assert.throws(() => deriveProviderConfigurationSnapshot({
+    provider: "open-model", model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 1,
+  }, {}), /Read-only is unavailable for supervised open-model/);
+  // A rented agent is never a Codex agent, whatever level it names.
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "read_only"), /verified workspace-rooted permission profile/);
 });
 
 test("rental admission rejects trusted-local profiles at the daemon launch boundary", () => {
@@ -552,66 +646,86 @@ test("a running agent's real state is told apart from the saved choice until it 
 
 test("the roster never shows an agent as rid of the owner's setup while a process that started with it may be alive", () => {
   // Turned on at revision 4 and off at revision 6. The agent last started at revision 4, with the setup.
+  // That revision is the store's record: an entry read from the manifest carries none, so it is passed beside the entry.
   const entry = (overrides: Record<string, unknown> = {}) => ({
-    id: "supervised_abc", provider: "codex", delivery_mode: "daemon_inbox", provider_launch_policy: changedAt(4, 6), runtime_configuration_revision: 4,
+    id: "supervised_abc", provider: "codex", delivery_mode: "daemon_inbox", provider_launch_policy: changedAt(4, 6),
     provider_ref: { work_attempt_id: "attempt" }, observed_state: "idle", ...overrides,
   });
   // The background service holds the process.
-  assert.equal(homeHarnessRosterState(entry(), { startedAtRevision: 4 }), "until_restart");
-  assert.equal(homeHarnessRosterState(entry(), { startedAtRevision: 6 }), null, "its successor does not have it");
-  assert.equal(homeHarnessRosterState(entry(), { startedAtRevision: undefined }), "until_restart", "a held process of unknown age is read from the agent's last start");
+  assert.equal(homeHarnessRosterState(entry(), 4, { startedAtRevision: 4 }), "until_restart");
+  assert.equal(homeHarnessRosterState(entry(), 4, { startedAtRevision: 6 }), null, "its successor does not have it");
+  assert.equal(homeHarnessRosterState(entry(), 4, { startedAtRevision: undefined }), "until_restart", "a held process of unknown age is read from the agent's last start");
   // It was restarted and has not re-attached the process yet. The process may well be running.
   // A paused agent is among them: it is marked paused when its process's end is recorded, but one route
   // marks it with no such record, so the read model asks for the record before it drops the reference.
   for (const state of ["idle", "working", "starting", "stopping", "recovering", "checkpointing", "paused", "pausing"]) {
-    assert.equal(homeHarnessRosterState(entry({ observed_state: state }), null), "until_restart", state);
+    assert.equal(homeHarnessRosterState(entry({ observed_state: state }), 4, null), "until_restart", state);
   }
   // Only when the process is known gone, or there never was one, does the saved choice stand alone.
   for (const state of ["stopped", "failed", "absent"]) {
-    assert.equal(homeHarnessRosterState(entry({ observed_state: state }), null), null, state);
+    assert.equal(homeHarnessRosterState(entry({ observed_state: state }), 4, null), null, state);
   }
-  assert.equal(homeHarnessRosterState(entry({ provider_ref: undefined }), null), null);
-  assert.equal(homeHarnessRosterState(entry({ runtime_configuration_revision: 6 }), null), null, "it last started after the setup was turned off");
+  assert.equal(homeHarnessRosterState(entry({ provider_ref: undefined }), 4, null), null);
+  assert.equal(homeHarnessRosterState(entry(), 6, null), null, "it last started after the setup was turned off");
   // The other direction: saved on, and a process that may be alive started without it.
   const on = { ...OWN_SETUP, ...changedAt(4) };
-  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on, runtime_configuration_revision: 3 }), null), "after_restart");
-  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on, runtime_configuration_revision: 3, observed_state: "stopped" }), null), "on");
-  assert.equal(homeHarnessRosterState(entry({ id: "supervised_rental_abc" }), { startedAtRevision: 4 }), null);
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on }), 3, null), "after_restart");
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on, observed_state: "stopped" }), 3, null), "on");
+  // And the same agent whose process started at the revision the setup was turned on at: it has the setup now.
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on }), 4, null), "on");
+  // A revision the store could not give is never read as a start after every change.
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: changedAt(6) }), undefined, null), "until_restart");
+  assert.equal(homeHarnessRosterState(entry({ provider_launch_policy: on }), undefined, null), "after_restart");
+  assert.equal(homeHarnessRosterState(entry({ id: "supervised_rental_abc" }), 4, { startedAtRevision: 4 }), null);
 });
 
 test("whether a process was started with the owner's setup is the daemon's own record, and a record that cannot be read says no", () => {
   const entry = (policy: unknown, overrides: Record<string, unknown> = {}) => ({
-    id: "supervised_abc", provider: "codex", delivery_mode: "daemon_inbox", provider_launch_policy: policy, runtime_configuration_revision: 4, ...overrides,
+    id: "supervised_abc", provider: "codex", delivery_mode: "daemon_inbox", provider_launch_policy: policy, ...overrides,
   });
+  // The process last started at revision 4. That is the store's record, passed beside the entry: an entry read from the manifest carries none.
   // An agent that never had the setup has no record of it at all.
   for (const never of [{}, { approvalPolicy: "never" }, undefined]) {
-    assert.equal(startedWithHomeHarness(entry(never)), false);
-    assert.deepEqual(ownerSetupRef(entry(never)), {}, "and its reference carries no key");
+    assert.equal(startedWithHomeHarness(entry(never), 4), false);
+    assert.deepEqual(ownerSetupRef(entry(never), 4), {}, "and its reference carries no key");
   }
-  assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(4) })), true);
-  assert.deepEqual(ownerSetupRef(entry({ ...OWN_SETUP, ...changedAt(4) })), { ownerSetup: true });
-  assert.equal(startedWithHomeHarness(entry(changedAt(5))), true, "turned off since: the process still has it");
-  assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(5) })), false, "turned on since: the process does not have it yet");
-  assert.equal(startedWithHomeHarness(entry(changedAt(5, 6))), false, "on and off again since: it never had it");
+  assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(4) }), 4), true);
+  assert.deepEqual(ownerSetupRef(entry({ ...OWN_SETUP, ...changedAt(4) }), 4), { ownerSetup: true });
+  assert.equal(startedWithHomeHarness(entry(changedAt(5)), 4), true, "turned off since: the process still has it");
+  assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(5) }), 4), false, "turned on since: the process does not have it yet");
+  assert.equal(startedWithHomeHarness(entry(changedAt(5, 6)), 4), false, "on and off again since: it never had it");
   // A stored policy that is not a plain object, or a value that is not the exact one, is not read as on.
   // A launch reads the same record the same way (agentUsesHomeHarness), so such an agent starts isolated.
   for (const unreadable of [null, "letagentsOwnerIsolation", ["letagentsOwnerIsolation"], 7, { letagentsOwnerIsolation: true },
     { letagentsOwnerIsolation: "false" }, { letagentsOwnerIsolation: null }, Object.create({ letagentsOwnerIsolation: false })]) {
-    assert.equal(startedWithHomeHarness(entry(unreadable)), false, JSON.stringify(unreadable));
+    assert.equal(startedWithHomeHarness(entry(unreadable), 4), false, JSON.stringify(unreadable));
     assert.equal(agentUsesHomeHarness({ id: "supervised_abc", provider: "codex", deliveryMode: "daemon_inbox" }, unreadable), false, JSON.stringify(unreadable));
   }
   // A stored policy that is there but is not an object at all cannot say how the process was started.
   // Its reference says so, which keeps the process from being asked to read its project again; nothing else changes.
   for (const unreadable of ["letagentsOwnerIsolation", ["letagentsOwnerIsolation"], 7, true, Object.create({ letagentsOwnerIsolation: false })]) {
-    assert.deepEqual(ownerSetupRef(entry(unreadable)), { ownerSetup: "unknown" }, JSON.stringify(unreadable));
+    assert.deepEqual(ownerSetupRef(entry(unreadable), 4), { ownerSetup: "unknown" }, JSON.stringify(unreadable));
   }
   // A readable record without the setup carries nothing, whatever else it holds, and nor does a row with no policy stored.
   for (const readable of [{}, { approvalPolicy: "never" }, { letagentsOwnerIsolation: true }, { letagentsOwnerIsolation: "false" }, changedAt(3), undefined, null]) {
-    assert.deepEqual(ownerSetupRef(entry(readable)), {}, JSON.stringify(readable));
+    assert.deepEqual(ownerSetupRef(entry(readable), 4), {}, JSON.stringify(readable));
   }
   // An agent that may not have the setup never has it, whatever is stored.
   for (const overrides of [{ id: "supervised_rental_abc" }, { provider: "cursor" }, { provider: "open-model" }, { delivery_mode: "mcp_polling" }, { delivery_mode: undefined }]) {
-    assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(4) }, overrides)), false, JSON.stringify(overrides));
+    assert.equal(startedWithHomeHarness(entry({ ...OWN_SETUP, ...changedAt(4) }, overrides), 4), false, JSON.stringify(overrides));
+  }
+  // The same stored record answers by the revision the process started at, and only by that one.
+  const turnedOnAt4 = entry({ ...OWN_SETUP, ...changedAt(4) });
+  assert.equal(startedWithHomeHarness(turnedOnAt4, 4), true, "started when the setup was turned on");
+  assert.equal(startedWithHomeHarness(turnedOnAt4, 7), true, "started later, with it still on");
+  assert.equal(startedWithHomeHarness(turnedOnAt4, 3), false, "started before it was turned on");
+  assert.equal(startedWithHomeHarness(turnedOnAt4, 1), false);
+  // Without a revision there is no answer to give, and nothing is guessed: not "isolated", and not "the owner's setup".
+  for (const unknown of [undefined, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    for (const stored of [turnedOnAt4, entry(changedAt(5)), entry({}), entry(undefined), entry("not a policy")]) {
+      assert.throws(() => startedWithHomeHarness(stored, unknown), /cannot tell which settings this agent's process started with/, String(unknown));
+      assert.throws(() => ownerSetupRef(stored, unknown), /cannot tell which settings this agent's process started with/, String(unknown));
+    }
   }
 });
 
@@ -643,6 +757,48 @@ test("a save keeps the history of changes a running process may predate, and rec
   for (const [key, value] of Object.entries(policy)) if (key.startsWith("letagents")) assert.equal(value, false, key);
   assert.equal(storedHomeHarness(policy), true, "41 changes from off leave it on");
   assert.equal(homeHarnessDiffersFromSaved(policy, 1), true, "and the process from before them all still runs without it");
+});
+
+test("a change to the access level is recorded against its revision, and tells a process that started before it from one that did not", () => {
+  const native = { permission: { "*": "allow", edit: "ask", bash: "ask" } };
+  const snapshot = { launchPolicy: native };
+  // Changed at revision 4 while the process from revision 2 runs: the key's value is exactly false, which an older build drops.
+  const changed = storedLaunchPolicy(snapshot, { policy: native, permissionChangedAt: 4 });
+  assert.deepEqual(changed, { ...native, letagentsPermissionChangedAt4: false });
+  assert.equal(permissionChangeKey(4), "letagentsPermissionChangedAt4");
+  assert.equal(latestPermissionChange(changed), 4);
+  assert.equal(permissionChangedSince(changed, 2), true, "the process that started before the change runs the old level");
+  assert.equal(permissionChangedSince(changed, 3), true);
+  assert.equal(permissionChangedSince(changed, 4), false, "a process that started at the change has it");
+  assert.equal(permissionChangedSince(changed, 9), false, "and so does a later one");
+  for (const unknown of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 1.5]) {
+    assert.equal(permissionChangedSince(changed, unknown), true, `a process whose revision is not known counts as older than every change: ${String(unknown)}`);
+  }
+  // Nothing recorded, nothing changed.
+  for (const none of [native, {}, undefined, null, "not a policy", [], { letagentsPermissionChangedAt4: true }, { letagentsPermissionChangedAt4: "false" },
+    { letagentspermissionchangedat4: false }, { letagentsPermissionChangedAt0: false }, { letagentsPermissionChangedAt4x: false }]) {
+    assert.equal(latestPermissionChange(none), undefined, JSON.stringify(none));
+    assert.equal(permissionChangedSince(none, 1), false, JSON.stringify(none));
+  }
+  // An ordinary save keeps the record, a later change replaces it, and only the latest is ever kept.
+  assert.deepEqual(storedLaunchPolicy(snapshot, { policy: changed }), changed);
+  assert.deepEqual(storedLaunchPolicy(snapshot, { policy: changed, permissionChangedAt: 7 }), { ...native, letagentsPermissionChangedAt7: false });
+  assert.deepEqual(storedLaunchPolicy(snapshot, { policy: { ...changed, letagentsPermissionChangedAt3: false } }), changed, "an older record is dropped");
+  // The owner's own setup is saved beside it without disturbing it, in either order.
+  const both = storedLaunchPolicy({ launchPolicy: native, homeHarness: true }, { policy: changed, runtimeRevision: 2, changedAt: 5 });
+  assert.deepEqual(both, { ...native, letagentsOwnerIsolation: false, letagentsOwnerIsolationChangedAt5: false, letagentsPermissionChangedAt4: false });
+  assert.equal(homeHarnessDiffersFromSaved(both, 2), true);
+  assert.equal(permissionChangedSince(both, 2), true);
+  // Neither key reaches a provider, and neither counts when a saved "Always allowed" tool is matched to its access level.
+  assert.deepEqual(withoutHomeHarness(both), native);
+  assert.equal(namesHomeHarness(changed), true, "a creation request cannot supply one");
+  assert.deepEqual(launchPolicyForToolRules(both), { ...native, letagentsOwnerIsolation: false });
+  assert.deepEqual(launchPolicyForToolRules(changed), native);
+  assert.equal(launchPolicyForToolRules(native), native);
+  // The record does not change what the next start derives.
+  const derived = (policy: unknown) => deriveProviderConfigurationSnapshot(
+    { provider: "open-model", model: null, reasoningEffort: null, permissionProfileId: "ask_before_write", configurationRevision: 5 }, policy);
+  assert.deepEqual(derived(changed), derived(native));
 });
 
 test("the owner's own setup is offered only for an owner's Codex and Claude Code agents, never a rental", () => {
@@ -684,11 +840,11 @@ test("an agent that collects its own room messages never gets the owner's own se
   assert.equal(homeHarnessAvailability(agentOn("supervised_abc", "cursor", "mcp_polling")), "unsupported");
   // And the roster never marks it, with or without a running process.
   const entry = { id: "supervised_abc", provider: "codex", delivery_mode: "mcp_polling", provider_launch_policy: stored,
-    runtime_configuration_revision: 4, provider_ref: { work_attempt_id: "attempt" }, observed_state: "idle" };
-  assert.equal(homeHarnessRosterState(entry, { startedAtRevision: 4 }), null);
-  assert.equal(homeHarnessRosterState(entry, null), null);
-  assert.equal(homeHarnessRosterState({ ...entry, delivery_mode: undefined }, { startedAtRevision: 4 }), null);
-  assert.equal(homeHarnessRosterState({ ...entry, delivery_mode: "daemon_inbox" }, { startedAtRevision: 4 }), "on");
+    provider_ref: { work_attempt_id: "attempt" }, observed_state: "idle" };
+  assert.equal(homeHarnessRosterState(entry, 4, { startedAtRevision: 4 }), null);
+  assert.equal(homeHarnessRosterState(entry, 4, null), null);
+  assert.equal(homeHarnessRosterState({ ...entry, delivery_mode: undefined }, 4, { startedAtRevision: 4 }), null);
+  assert.equal(homeHarnessRosterState({ ...entry, delivery_mode: "daemon_inbox" }, 4, { startedAtRevision: 4 }), "on");
 });
 
 test("a snapshot names the owner's own setup beside a native policy that never carries the key", () => {
@@ -774,6 +930,12 @@ test("Claude's access levels are described truthfully for an agent that uses its
     assert.match(text(codexDescribed, id), /Your own MCP tools, hooks and plugins are not held to these limits: they run as you/, id);
     assert.equal(text(codexDescribed, id).startsWith(text(codex, id).slice(0, 60)), true, `${id}: what Codex's own commands may do is unchanged`);
   }
+  // Read-only keeps everything its own card says, then says what the limits do not cover.
+  assert.equal(text(codexDescribed, "read_only").startsWith(text(codex, "read_only")), true);
+  const ownerSetup = text(codexDescribed, "read_only").slice(text(codex, "read_only").length);
+  // What was seen of the owner's MCP tools is stated; hooks and plugins were not tried, so nothing is said about what they do.
+  assert.equal(ownerSetup, " These limits cover Codex's own commands and the room's tools only. Your own MCP tools can run without asking when your own Codex settings already approve them or their own server labels them read-only, which nothing checks. This level puts no limit of its own on your hooks and plugins.");
+  assert.doesNotMatch(ownerSetup, /[Oo]nly two kinds|they run as you/);
   assert.deepEqual(codexDescribed.find((profile) => profile.id === "full_access"), codex.find((profile) => profile.id === "full_access"));
   assert.deepEqual(codexDescribed.filter((profile) => profile.status !== "available"), codex.filter((profile) => profile.status !== "available"));
   // Agent apps that never get the owner's setup are never redescribed, and neither is anything unreadable.
@@ -786,7 +948,7 @@ test("Claude's access levels are described truthfully for an agent that uses its
 
 test("the daemon's policy for each access level is the one the adapters attest, with and without the owner's own setup", () => {
   for (const [provider, profiles] of [
-    ["codex", ["full_access", "ask_before_write", "auto_review"]],
+    ["codex", ["full_access", "ask_before_write", "auto_review", "read_only"]],
     ["claude-code", ["read_only", "ask_before_write", "auto_review", "full_access"]],
   ] as const) {
     for (const profile of profiles) {

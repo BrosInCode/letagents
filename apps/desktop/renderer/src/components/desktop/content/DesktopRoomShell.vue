@@ -140,6 +140,7 @@
       @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
       @resolve-permission="resolveComposerPermission"
       @stop-agent-turn="stopAgentTurnForApproval"
+      @post-agent-answer-now="postAgentAnswerNow"
       @open-events="openEventsTab"
       @open-github-event="openGitHubEventFromChat"
       @open-task="openBoardTask"
@@ -256,6 +257,9 @@
       :daemon-status="supervisorStatus"
       :refresh-diagnostics="refreshAgentInspectorDiagnostics"
       :selection="selectedAgentDetailTarget"
+      :presence="presence"
+      :presence-fresh="sourceStates?.presence.status !== 'error'"
+      :viewer-login="viewerLogin"
       :action-state="selectedAgentInspectorActionState"
       :work-resource="agentInspectorWorkResource"
       :selected-work-source-message-id="agentInspectorWorkSourceMessageId"
@@ -374,6 +378,8 @@ import { useAgentPauseRequests } from "../../../domain/agent-pause-requests";
 import { appendAgentInspectorLiveBatch } from "../../../domain/agent-inspector-live";
 import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
+import { roomMessageDeliveryReceipts } from "../../../domain/room-message-receipts";
+import { agentScheduledRetry, waitingAgentIndicators } from "../../../domain/scheduled-retry";
 import { roomMentionCandidates } from "../../../domain/participants";
 import {
   isCurrentAgentInspectorSupervisorUpdate,
@@ -388,6 +394,7 @@ import {
   isCurrentAgentInspectorParticipantSessionUpdate,
   type AgentInspectorParticipantSessionUpdate,
 } from "../../../domain/agent-inspector-participant";
+import { agentInspectorActionErrorMessage } from "../../../domain/agent-inspector-presentation";
 import {
   agentInspectorActionStateForEntry,
   clearAgentInspectorActionStateIfMatching,
@@ -490,6 +497,7 @@ import { hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./
 import { provideRoomWakeRules, useRoomWakeRules } from "../../../composables/useRoomWakeRules";
 
 const props = defineProps<{
+  viewerLogin?: string | null;
   sidebarMode: SidebarMode;
   roomLoading: boolean;
   room: DesktopRoomInfo;
@@ -706,36 +714,7 @@ const selectedAgentInspectorWorkArtifacts = computed(() => {
   const projection = selectedAgentDetailProjection.value;
   return projection ? agentInspectorWorkArtifacts(projection.assignedWork, props.roomArtifacts) : [];
 });
-const deliveryReceiptsByMessage = computed(() => {
-  const grouped: Record<string, Array<{
-    agentId: string;
-    agentName: string;
-    state: string;
-    blockedByMessageId: string | null;
-    error: string | null;
-    failureCode: string | null;
-    terminalReason: string | null;
-    attemptCount: number;
-    providerTurnId: string | null;
-    retry: DesktopRoomAgentDeliveryAttention["retry"] | null;
-  }>> = {};
-  for (const entry of supervisorEntries.value) for (const receipt of entry.deliveryReceipts ?? []) {
-    const attention = entry.deliveryAttention;
-    (grouped[receipt.sourceMessageId] ??= []).push({
-      agentId: entry.id,
-      agentName: supervisedAgentDisplayLabel(entry.displayName, entry.id),
-      state: receipt.state,
-      blockedByMessageId: receipt.blockedByMessageId,
-      error: receipt.error,
-      failureCode: receipt.failureCode,
-      terminalReason: receipt.terminalReason,
-      attemptCount: receipt.attemptCount,
-      providerTurnId: receipt.providerTurnId,
-      retry: receipt.state === "blocked" && attention?.sourceMessageId === receipt.sourceMessageId ? attention.retry : null,
-    });
-  }
-  return grouped;
-});
+const deliveryReceiptsByMessage = computed(() => roomMessageDeliveryReceipts(supervisorEntries.value));
 provide(managedAgentSessionsKey, {
   sessions: shallowReadonly(managedAgentSessions),
   refresh: refreshManagedAgentSessions,
@@ -955,6 +934,7 @@ const agentMentionInsertTextByEntryId = computed(() => {
 });
 const localAgentWork = computed(() =>
   [
+    ...waitingAgentIndicators(supervisorEntries.value, props.room.identifier),
     ...activeManagedAgentWorkIndicators(
       roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId),
       props.room.identifier,
@@ -1074,6 +1054,17 @@ watch(
   },
   { immediate: true },
 );
+
+// Read only while an inspector is open; quota changes need not produce room activity.
+watch(() => selectedAgentDetailTarget.value?.kind === "supervised" ? selectedAgentDetailTarget.value.supervisorEntryId : null,
+  (entryId, _previous, onCleanup) => {
+    if (!entryId) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId.value, true, false);
+    }, 5_000);
+    onCleanup(() => clearInterval(timer));
+  });
 
 onBeforeUnmount(() => {
   agentInspectorWorkRequestToken += 1;
@@ -1414,6 +1405,8 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
     return;
   }
   const { workAttemptId, executionGenerationId, agentSessionId } = entry;
+  // Try now: the id names the agent's automatic attempt that waits for its time, not a blocked message.
+  const tryNow = agentScheduledRetry(entry.deliveryReceipts)?.sourceMessageId === sourceMessageId;
   const result = await deliveryRetryCoordinator.run({ agentId, sourceMessageId }, async () => {
     await desktopIpc.supervisor!.retryRoomDelivery({
       entryId: entry.id,
@@ -1430,6 +1423,11 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
   if (!result.started) return;
   if (!result.ok) {
     pushActionToast(result.error instanceof Error ? result.error.message : "Could not retry room delivery.", "error", 7_000);
+    return;
+  }
+  if (tryNow) {
+    // Accepted is all that is known here: the turn has not started yet.
+    pushActionToast("Request accepted. The agent tries again as soon as it can start.", "success", 5_000);
     return;
   }
   pushActionToast(
@@ -1486,6 +1484,8 @@ async function skipRoomDelivery(agentId: string, sourceMessageId: string): Promi
     pushActionToast("This agent binding changed. Refresh the room before skipping the message.", "error", 7_000);
     return;
   }
+  // Stop trying: the id names the agent's automatic attempt that waits for its time, not a blocked message.
+  const stopTrying = agentScheduledRetry(supervisorEntries.value.find((candidate) => candidate.id === agentId)?.deliveryReceipts)?.sourceMessageId === sourceMessageId;
   const result = await roomDeliverySkipCoordinator.run({ agentId, sourceMessageId }, async () => {
     await desktopIpc.supervisor.skipRoomDelivery(input);
   });
@@ -1494,7 +1494,9 @@ async function skipRoomDelivery(agentId: string, sourceMessageId: string): Promi
     pushActionToast(result.error instanceof Error ? result.error.message : "Could not safely skip this message.", "error", 7_000);
     return;
   }
-  pushActionToast("Message skipped. Later room work can continue.", "success", 5_000);
+  pushActionToast(stopTrying
+    ? "Stopped the automatic attempts. The task is still assigned to this agent. Send it a message to continue."
+    : "Message skipped. Later room work can continue.", "success", stopTrying ? 8_000 : 5_000);
 }
 
 async function revealRoomMessage(messageId: string): Promise<void> {
@@ -1824,6 +1826,13 @@ async function stopAgentTurnForApproval(entryId: string, approvalId: string): Pr
   void runAgentInspectorAction({ entryId, roomId, kind: "stop_turn" });
 }
 
+function postAgentAnswerNow(entryId: string, sourceMessageId: string | null): void { // The stop of a turn that only waits for background work posts the answer it has.
+  const entry = supervisorEntries.value.find((candidate) => candidate.id === entryId && candidate.roomId === props.room.identifier);
+  if (!entry || !sourceMessageId || entry.roomAgentState?.turn.sourceMessageId !== sourceMessageId) return; // Only the turn that the button was shown for: a later turn would be stopped at its work.
+  openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: ownerAttributionLabel(entry.createdBy) }));
+  void runAgentInspectorAction({ entryId, roomId: entry.roomId, kind: "stop_turn" });
+}
+
 function openComposerPermissionDetail(approval: ManagedAgentPermissionApproval): void {
   const target = agentTargetForManagedSession(approval.session);
   if (approval.session.supervisorEntryId) {
@@ -1961,6 +1970,11 @@ async function loadAgentInspectorProviders(): Promise<void> {
     .finally(() => { agentInspectorProvidersRequest = null; });
   return agentInspectorProvidersRequest;
 }
+
+// Identity can resolve after the panel opens from a historical message.
+watch([() => selectedAgentDetailProjection.value?.entryId, selectedAgentDetailRequestVersion], ([entryId]) => {
+  if (entryId && agentInspectorConfigurationResource.value.status === "idle") void loadAgentInspectorSettings();
+});
 
 function closeAgentDetail(): void {
   agentInspectorMessageIdentityRequestToken += 1;
@@ -2908,23 +2922,6 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         : agentInspectorActionErrorMessage(intent.kind, error),
     };
   }
-}
-
-function agentInspectorActionErrorMessage(
-  kind: AgentInspectorActionIntent["kind"],
-  error: unknown,
-): string {
-  const detail = error instanceof Error ? error.message : "";
-  if (kind === "reconnect" && /previous provider runtime is unavailable|no longer has a live runtime/i.test(detail)) {
-    return "This provider process has stopped. Recover the agent to continue with the same identity and workspace.";
-  }
-  if (kind === "recover" && /cannot prove that the previous provider process stopped/i.test(detail)) {
-    return "LetAgents could not safely prove the old provider stopped. No replacement was started.";
-  }
-  if (kind === "recover" && /desktop credentials are required/i.test(detail)) {
-    return "LetAgents could not restore this agent’s room credentials. Try recovery again.";
-  }
-  return detail || "The agent action could not be completed.";
 }
 
 function actionProgressMessage(kind: Exclude<AgentInspectorActionIntent["kind"], "recovery_options">): string {

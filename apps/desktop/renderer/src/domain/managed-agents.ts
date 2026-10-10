@@ -408,6 +408,10 @@ export function supervisedAgentWorkIndicators(
         summary: resourceFreshness === "fresh" && agentCompactionProgress(entry) ? "Compacting conversation" : latest
           ? humanFacingSupervisorActivitySummary(latest)
           : roomTurnFallbackSummary(turn.state),
+        // The turn has its answer and only waits: its owner may have the answer posted now. The wait must be
+        // this turn's own, so the start of the turn must be known: activity from before it is another turn's.
+        ...(resourceFreshness === "fresh" && turn.state === "responding" && Number.isFinite(turnStartedAtMs)
+          && latest?.method.trim().toLowerCase() === BACKGROUND_WORK_METHOD ? { waitsForBackgroundWork: true } : {}),
         startedAt: turnStartedAt
           ?? latest?.observedAt
           ?? entry.roomAgentState?.connection.observedAt
@@ -456,6 +460,11 @@ function roomTurnFallbackSummary(state: string): string {
 const PROVIDER_RETRY_METHOD = "letagents/providerretry";
 const PROVIDER_RETRY_SUMMARY = /^The model provider returned an error\. Retrying \(attempt \d{1,3}\)\.$/;
 
+/** A Claude turn that stays open for background work it started is not thinking, and looks stuck unless its
+ * owner is told what it waits for and for how long. The adapter sends this as a `provider_event` too. */
+const BACKGROUND_WORK_METHOD = "letagents/backgroundwork";
+const BACKGROUND_WORK_SUMMARY = /^(?:Waiting for (?:a sub-agent|sub-agents) to finish \((?:under 1 min|\d{1,4} min)\): "[^\n]{1,600}\.|Waiting up to \d{1,3} min for (?:a background command|background commands|background work): "[^\n]{1,400}\.|Waiting for Claude's answer about background work that ended (?:under 1 min|\d{1,4} min) ago\.)$/;
+
 /** Provider transport/account notifications remain in diagnostics, but they
  * are not evidence that an agent is doing work for the room. */
 export function isHumanVisibleSupervisorActivity(
@@ -467,7 +476,7 @@ export function isHumanVisibleSupervisorActivity(
     || method === "account/ratelimitsupdated"
     || method === "thread/read"
   ) return false;
-  if (method === PROVIDER_RETRY_METHOD) return true;
+  if (method === PROVIDER_RETRY_METHOD || method === BACKGROUND_WORK_METHOD) return true;
   return event.kind !== "usage" && event.kind !== "provider_event";
 }
 
@@ -484,6 +493,11 @@ export function humanFacingSupervisorActivitySummary(
     // method gets fixed copy, so provider text cannot be shown here.
     const summary = event.summary.trim();
     return PROVIDER_RETRY_SUMMARY.test(summary) ? summary : "Waiting for the model provider";
+  }
+  if (method === BACKGROUND_WORK_METHOD) {
+    // The adapter's sentence, with the model's own short description of the work. Anything else gets fixed copy.
+    const summary = event.summary.trim();
+    return BACKGROUND_WORK_SUMMARY.test(summary) ? liveActivityEchoText(summary) : "Waiting for background work to finish";
   }
   if (method === "item/reasoning/summarytextdelta") {
     // The Codex adapter places only the provider-approved reasoning summary in
@@ -621,6 +635,10 @@ export interface ManagedAgentWorkIndicator {
   agentKey?: string | null;
   /** Exact activating room message; establishes causal order without comparing host clocks. */
   sourceMessageId?: string | null;
+  /** The agent is not working: it waits for the time of its automatic attempt. The row rests. */
+  waiting?: true;
+  /** The turn is held open for background work. Its answer exists, and its owner can end the wait. The row works: something runs. */
+  waitsForBackgroundWork?: boolean;
 }
 
 /** Longest live-activity echo shown in the room work indicator. */
@@ -676,28 +694,55 @@ export function workIndicatorSupersededByAgentMessage(
 export interface CollapsedWorkIndicators {
   visible: ManagedAgentWorkIndicator[];
   hiddenCount: number;
+  /** How many of the hidden rows are agents that wait to try again. The rest work. */
+  hiddenWaitingCount: number;
 }
 
 /**
  * Keep the work-indicator area unobtrusive when many agents are active at once
  * (EmmyMay's ten-agent noise constraint): show the most recent `maxVisible` and
  * report the rest as an overflow count instead of an unbounded list.
+ *
+ * The rows go in three kinds, in this order, whether or not any is hidden: a row of
+ * work that carries a control (a turn held open for background work, with "Post
+ * answer now"), because it is the oldest row of work and, hidden, its control
+ * could not be used; the other rows of work; and the rows at rest, the agents that
+ * wait to try again. A row at rest never hides a row of work.
+ *
+ * Inside a kind the rows keep the order that they were given, so a row never jumps
+ * because a time ticked. Time decides only when a kind does not fit and a row would
+ * be hidden: that kind is ordered by time, the most recent rows of work first and
+ * the rows at rest that try first first, and the places go to the first of them.
+ * The time of a row at rest is the future time of its attempt, which is not a time
+ * to rank by when nothing is hidden.
  */
 export function collapseWorkIndicators(
   indicators: readonly ManagedAgentWorkIndicator[],
   maxVisible: number = WORK_INDICATOR_VISIBLE_LIMIT,
 ): CollapsedWorkIndicators {
-  if (maxVisible <= 0 || indicators.length <= maxVisible) {
-    return { visible: [...indicators], hiddenCount: 0 };
+  if (maxVisible <= 0) return { visible: [...indicators], hiddenCount: 0, hiddenWaitingCount: 0 };
+  const visible: ManagedAgentWorkIndicator[] = [];
+  let room = maxVisible;
+  let hiddenCount = 0;
+  let hiddenWaitingCount = 0;
+  for (const kind of ["control", "work", "waiting"] as const) {
+    const rows = indicators.filter((work) => (work.waiting ? "waiting" : work.waitsForBackgroundWork ? "control" : "work") === kind);
+    // When every row of this kind fits, they stay as given. When some do not, the places go by time.
+    const shown = rows.length <= room ? rows
+      : [...rows].sort((left, right) => kind === "waiting" ? left.startedAt.localeCompare(right.startedAt) : right.startedAt.localeCompare(left.startedAt)).slice(0, room);
+    visible.push(...shown);
+    room -= shown.length;
+    hiddenCount += rows.length - shown.length;
+    if (kind === "waiting") hiddenWaitingCount += rows.length - shown.length;
   }
-  // Show the MOST RECENT maxVisible (newest first). The upstream list may be
-  // sorted oldest-first, so select by startedAt descending rather than taking
-  // the head, which would surface the stalest agents.
-  const byRecency = [...indicators].sort((left, right) => right.startedAt.localeCompare(left.startedAt));
-  return {
-    visible: byRecency.slice(0, maxVisible),
-    hiddenCount: indicators.length - maxVisible,
-  };
+  return { visible, hiddenCount, hiddenWaitingCount };
+}
+
+/** What the strip says of the rows that it does not show: "+2 more agents working", "+1 more agent waiting to try again". */
+export function workIndicatorOverflowLabel(collapsed: Pick<CollapsedWorkIndicators, "hiddenCount" | "hiddenWaitingCount">): string {
+  const { hiddenCount, hiddenWaitingCount } = collapsed;
+  const what = hiddenWaitingCount === 0 ? "working" : hiddenWaitingCount === hiddenCount ? "waiting to try again" : "working or waiting to try again";
+  return `+${hiddenCount} more ${hiddenCount === 1 ? "agent" : "agents"} ${what}`;
 }
 
 /** Minimum time an entry's echo text is held before it may change again. */
@@ -1230,6 +1275,11 @@ export function supervisedPermissionProfilePresentation(
       description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
       detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project." };
   }
+  if (profile.id === "read_only" && providerId === "codex") {
+    return { ...profile, status: "available", risk: "medium",
+      description: "Can read files on this Mac, also outside your project, and read and post in the room.",
+      detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews." };
+  }
   if (profile.id !== "ask_before_write"
     || (providerId !== "codex" && providerId !== "open-model" && providerId !== "claude-code")) return profile;
   if (providerId === "claude-code") {
@@ -1270,6 +1320,7 @@ const SUPERVISED_PERMISSION_PROFILE_LIMITS: Partial<Record<
     full_access: NOTHING_BLOCKED,
     ask_before_write: "Without your approval: no file changes, no write commands and no network access.",
     auto_review: "No network access and no changes outside its working folder, unless Codex approves more.",
+    read_only: "Can't change files. Its commands can't use the network, and web search is off. Can't change the task board, join rooms or submit reviews. It asks for no approval.",
   },
   "claude-code": {
     read_only: "Can't change files, run commands or browse the web.",
@@ -1302,6 +1353,7 @@ const OWNER_SETUP_PERMISSION_PROFILE_LIMITS: Partial<Record<
   codex: {
     ask_before_write: "Without your approval, Codex's own commands change no files and have no network access. Your own MCP tools, hooks and plugins are not held to this.",
     auto_review: "Codex's own commands have no network access and change nothing outside its working folder, unless Codex approves more. Your own MCP tools, hooks and plugins are not held to this.",
+    read_only: "Codex's own commands change no files and have no network access, web search is off, and it asks for no approval. Your own MCP tools, hooks and plugins are not held to this.",
   },
   "claude-code": {
     read_only: "Its own tools can't change files, run commands or browse the web. Your MCP tools and hooks can, where your own Claude Code settings allow them.",

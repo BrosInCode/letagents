@@ -162,7 +162,7 @@ test("host approval client authenticates raw presentations and restores exact re
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 
-test("host approval client rejects stale recorded hashes, foreign actors, malformed candidates, and renderer authority fields", async () => {
+test("host approval client rejects a missing recorded hash, foreign actors, malformed candidates, and renderer authority fields", async () => {
   const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
   const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
   const verifier = new HostApprovalVerifier(7, signer.publicKey); const base = hostApprovalCandidate();
@@ -185,7 +185,7 @@ test("host approval client rejects stale recorded hashes, foreign actors, malfor
     }
     const recorded = { decisionId: "durable-decision", actorId: `host-${verifier.challenge()!.keyFingerprint}`,
       decision: "allow_once" as const, projectionSha256: createHash("sha256").update(JSON.stringify(base.presentation)).digest("hex") };
-    for (const decision of [null, { ...recorded, projectionSha256: null }, { ...recorded, projectionSha256: "b".repeat(64) }, { ...recorded, actorId: "other-host" }]) {
+    for (const decision of [null, { ...recorded, projectionSha256: null }, { ...recorded, actorId: "other-host" }]) {
       candidates = [{ ...base, status: "decision_recorded", recordedDecision: decision }];
       const snapshot = await client.listHostApprovals("room_1"); assert.equal(snapshot.available, true);
       assert.equal(snapshot.approvals[0]!.status, "unavailable"); assert.equal(snapshot.approvals[0]!.retryDecision, null);
@@ -217,6 +217,37 @@ test("host approval client rejects stale recorded hashes, foreign actors, malfor
       await assert.rejects(client.decideHostApproval({ id: prior.id, decision: "allow_once" }), /Refresh/);
     }
     assert.equal(decisions, 0);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval client retries a recorded choice against the digest it was made on when the card has moved on", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey); const candidate = hostApprovalCandidate();
+  // A saved mode changes the tool scope inside the card, so its digest is no longer the one the choice was made on.
+  const decidedOn = "b".repeat(64);
+  assert.notEqual(createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex"), decidedOn);
+  candidate.status = "decision_recorded";
+  candidate.recordedDecision = { decisionId: "durable-decision", actorId: `host-${verifier.challenge()!.keyFingerprint}`,
+    decision: "deny", projectionSha256: decidedOn };
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge(); const sent: HostApprovalDecision[] = [];
+  wire.hostApprovals.request = envelope => {
+    const request = verifier.verify(envelope); assert.ok(request);
+    if (request.operation === "list") return [candidate];
+    sent.push(request.input as HostApprovalDecision); return "decision_sent";
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
+  try {
+    const [view] = (await client.listHostApprovals("room_1")).approvals;
+    assert.equal(view!.status, "decision_recorded"); assert.equal(view!.retryDecision, "deny");
+    await assert.rejects(client.decideHostApproval({ id: view!.id, decision: "allow_once" }), /Refresh/, "only the recorded choice can be retried");
+    assert.equal(sent.length, 0);
+    assert.equal(await client.decideHostApproval({ id: view!.id, decision: "deny" }), "decision_sent");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]!.decisionId, "durable-decision", "no new decision is made");
+    assert.equal(sent[0]!.projectionSha256, decidedOn, "the retry names the digest the choice was made on, not the card's");
+    assert.deepEqual(sent[0]!.expected, candidate.reference, "the request is still named exactly");
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 
@@ -953,6 +984,47 @@ function fakeChild(): ChildProcess {
   return child as unknown as ChildProcess;
 }
 
+test("service health snapshot never starts a daemon and reads only matching bounded state", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { assert.fail("Troubleshooting must not start the daemon"); },
+    now: () => new Date("2026-10-09T12:00:00.000Z") });
+  try {
+    assert.deepEqual(await client.getServiceSnapshot(), {
+      status: null, state: null, observedAt: "2026-10-09T12:00:00.000Z",
+    });
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+    wire.entries.push(wireEntryWithCausalProjection());
+    try {
+      const snapshot = await client.getServiceSnapshot();
+      assert.equal(snapshot.status?.generation, 19);
+      assert.equal(snapshot.status?.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+      assert.equal(snapshot.state?.entries[0]?.id, "agent_1");
+      assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate", "manifest.watch_state"]);
+      assert.equal(wire.requests.at(-1)?.params?.wait_ms, 0);
+      wire.maintenance.id = "hold";
+      assert.equal((await client.getServiceSnapshot()).state, null, "maintenance is not an empty fleet");
+      wire.maintenance.id = null;
+      const watchState = client.watchState.bind(client);
+      client.watchState = async input => ({ ...await watchState(input), daemonGeneration: 20 });
+      await assert.rejects(client.getServiceSnapshot(), /restarted during this read/);
+    } finally { await closeServer(wire.server, env.socketPath); }
+    const old = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 18, undefined, "older");
+    try {
+      const snapshot = await client.getServiceSnapshot();
+      assert.equal(snapshot.status?.implementationVersion, "older");
+      assert.equal(snapshot.state, null);
+      assert.deepEqual(old.requests.map(request => request.method), ["daemon.negotiate"], "no handoff or unsupported state read");
+    } finally { await closeServer(old.server, env.socketPath); }
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 function fakeDaemonProcessIdentity(
   overrides: Partial<Omit<DaemonProcessIdentity, "expectedScriptPath">> = {},
 ): Omit<DaemonProcessIdentity, "expectedScriptPath"> {
@@ -1649,6 +1721,53 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
   assert.equal(settledReceipt?.canonicalMessageId, null);
 });
 
+test("a follow-up crosses to the desktop only when every part of it is what the daemon writes", () => {
+  const followUp = (value: unknown) => {
+    const wire = wireEntryWithCausalProjection();
+    Object.assign(wire.delivery_receipts![0]!, { state: "pending", source_message_id: "task-continuation:inbox_0", follow_up: value });
+    const receipts = mapEntry(wire).deliveryReceipts!;
+    assert.equal(receipts.length, 1, "the receipt itself is kept whatever the follow-up holds");
+    return receipts[0]!.followUp;
+  };
+  const at = { at_ms: 1_790_000_030_000, attempt: 2, attempts: 3, kind: "provider_fault" };
+  const scheduled = (parts: object, for_message_id: unknown = "msg_1") => ({ for_message_id, state: "scheduled", scheduled: { ...at, ...parts } });
+  assert.deepEqual(followUp(scheduled({})),
+    { forMessageId: "msg_1", state: "scheduled", scheduled: { atMs: 1_790_000_030_000, attempt: 2, attempts: 3, kind: "provider_fault" } });
+  assert.deepEqual(followUp(scheduled({ attempt: 1, attempts: 1, kind: "no_reply" }, null)),
+    { forMessageId: null, state: "scheduled", scheduled: { atMs: 1_790_000_030_000, attempt: 1, attempts: 1, kind: "no_reply" } });
+  // One that waits for its owner, and one that ended with nothing started, hold no time.
+  assert.deepEqual(followUp({ for_message_id: "msg_1", state: "waiting_for_owner", scheduled: null }), { forMessageId: "msg_1", state: "waiting_for_owner", scheduled: null });
+  assert.deepEqual(followUp({ for_message_id: null, state: "ended", scheduled: null }), { forMessageId: null, state: "ended", scheduled: null });
+  // Why it waits for its owner or ended crosses with it, for each reason that the daemon writes.
+  for (const reason of ["stopped_by_owner", "skipped", "agent_changed", "task_not_held", "uncertain_action", "uncertain_resolved", "attempts_failed", "ownership_unverified", "other"]) {
+    const state = ["attempts_failed", "ownership_unverified", "other"].includes(reason) ? "waiting_for_owner" : "ended";
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state, reason, scheduled: null }), { forMessageId: "msg_1", state, reason, scheduled: null }, reason);
+  }
+  // Whether the owner has sent a message since crosses with it, when it is a boolean, and is dropped otherwise: the note then stays.
+  for (const later_person_turn of [true, false]) {
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state: "ended", reason: "stopped_by_owner", later_person_turn, scheduled: null }),
+      { forMessageId: "msg_1", state: "ended", reason: "stopped_by_owner", laterPersonTurn: later_person_turn, scheduled: null });
+  }
+  for (const later_person_turn of ["true", 1, null]) {
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state: "ended", reason: "stopped_by_owner", later_person_turn, scheduled: null }),
+      { forMessageId: "msg_1", state: "ended", reason: "stopped_by_owner", scheduled: null }, JSON.stringify(later_person_turn));
+  }
+  // A reason that this version does not know, or one that is not a text, reads as none: the follow-up is still shown, and its note stays.
+  for (const reason of ["resolved_elsewhere", "", 3, null, ["skipped"]]) {
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state: "ended", reason, scheduled: null }), { forMessageId: "msg_1", state: "ended", scheduled: null }, JSON.stringify(reason));
+  }
+  // A daemon that sends none, or anything that is not what it writes, shows no follow-up.
+  for (const malformed of [undefined, null, "soon", [], {}, scheduled({ at_ms: "1790000030000" }), scheduled({ at_ms: 0 }), scheduled({ at_ms: 1.5 }),
+    scheduled({ attempt: 0 }), scheduled({ attempt: 4 }), scheduled({ attempts: "3" }), scheduled({ kind: "other" }), scheduled({ kind: undefined }),
+    scheduled({}, ""), scheduled({}, 7), { state: "scheduled", scheduled: at },
+    { for_message_id: "msg_1", state: "scheduled", scheduled: null }, { for_message_id: "msg_1", state: "scheduled" },
+    { for_message_id: "msg_1", state: "later", scheduled: null }, { for_message_id: "msg_1", scheduled: null },
+    { for_message_id: "msg_1", state: "ended", scheduled: at }, { for_message_id: "msg_1", state: "waiting_for_owner" }]) {
+    assert.equal(followUp(malformed), undefined, JSON.stringify(malformed));
+  }
+  assert.equal(Object.hasOwn(mapEntry(wireEntryWithCausalProjection()).deliveryReceipts![0]!, "followUp"), false, "a receipt that is no follow-up has no such field");
+});
+
 test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
   const legacy = wireEntryWithCausalProjection();
   legacy.delivery_receipts![0]!.timeline = Array.from({ length: 64 }, (_, index) => ({
@@ -1718,6 +1837,10 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
     uncertain_effects: [{ effect_id: "effect_1", tool_name: "send_message", mcp_request_id: "request_1", error: "May have completed.", created_at: "2026-01-01T00:00:01.000Z", updated_at: "2026-01-01T00:00:02.000Z" }],
     history_boundary: { earliest_retained_observed_message_id: "msg_1", earliest_retained_inbox_message_id: "msg_1", earliest_retained_receipt_sequence: 1, pruned_before_message_id: null, pruned_at: null },
   };
+  const usage = { providerContinuationId: "thread", executionGenerationId: "generation", daemonGeneration: 1,
+    account: { state: "available", windows: [{ id: "primary", label: "5 hours", usedPercent: 31, resetsAt: null, observedAt: "2026-10-10T20:00:00.000Z" }] }, context: null, compaction: null };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, usage }, input).usage, usage);
+  assert.equal(mapAgentInspectorDetail({ ...wire, usage: { ...usage, daemonGeneration: "1" } }, input).usage, null);
   const mapped = mapAgentInspectorDetail(wire, input);
   assert.equal(mapped.requested_source_message_id, "msg_1");
   assert.equal(mapped.items[0]?.sender, "Ada");
@@ -3113,7 +3236,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.208");
+    assert.equal(status.implementationVersion, "2.0.224");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -3666,6 +3789,19 @@ test("an agent's use of the owner's own setup is read as off unless the backgrou
   assert.equal(Object.hasOwn(wire({ provider_launch_policy: { letagentsOwnerIsolation: false } }), "homeHarness"), false);
 });
 
+test("an agent whose saved access level has not reached its process is marked pending only when the background service says exactly that", async () => {
+  const wire = (overrides: Record<string, unknown>) => mapEntry({
+    id: "agent", room_id: "room", display_name: "Agent", provider: "open-model", model: null, charter: "help",
+    desired_state: "running", observed_state: "idle", condition: "none", permission_profile_id: "ask_before_write",
+    created_by: "desktop", created_at: "2026-10-01T00:00:00.000Z", ...overrides,
+  } as never);
+  assert.equal(wire({ permission_pending: true }).permissionPending, true);
+  for (const value of [undefined, false, "true", 1, null]) {
+    assert.equal(Object.hasOwn(wire({ permission_pending: value }), "permissionPending"), false, String(value));
+  }
+  // The stored policy alone is never read as the state on this side.
+  assert.equal(Object.hasOwn(wire({ provider_launch_policy: { letagentsPermissionChangedAt4: false } }), "permissionPending"), false);
+});
 
 for (const takeover of [false, true]) test(`provider-aware ${takeover ? "startup takeover" : "application update"} keeps approvals available and honors deferred handoff`, { timeout: 10_000 }, async (t) => {
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;

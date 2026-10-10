@@ -28,7 +28,7 @@ export function projectPullRequestEvent(input: {
   currentStatus: TaskStatusLike;
 }): BoardProjectionResult | null {
   const PRE_REVIEW: Set<TaskStatusLike> = new Set(["assigned", "in_progress"]);
-  const MERGEABLE: Set<TaskStatusLike> = new Set(["in_review", "in_progress", "assigned"]);
+  const MERGEABLE: Set<TaskStatusLike> = new Set(["in_review", "in_progress", "assigned", "blocked"]);
 
   if (input.action === "opened" || input.action === "ready_for_review") {
     if (PRE_REVIEW.has(input.currentStatus)) {

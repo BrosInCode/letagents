@@ -240,6 +240,8 @@ Submit a task for review. Moves status to `in_review`.
 
 **Task lifecycle:** `proposed` → `accepted` → `assigned` → `in_progress` → `in_review` → `merged` → `done`
 
+When the pull request linked to a task merges on GitHub, the task moves to `merged`, also from `assigned`, `in_progress` or `blocked`, but only if the task's active work lease covers that pull request. A `proposed` or `accepted` task, or a task whose lease does not cover the pull request, does not move.
+
 ---
 
 ## Identity & Auth

@@ -5,7 +5,7 @@ import {
 import type { WorkDurabilityStore } from "./durability-store.js";
 import { executionRuntimeStorageIdentity } from "./execution-shadow-store.js";
 import type { ProviderActionHandle } from "./provider-action-port.js";
-import { homeHarnessRosterState } from "./provider-configuration.js";
+import { homeHarnessAvailability, homeHarnessRosterState, latestPermissionChange, permissionChangedSince } from "./provider-configuration.js";
 import type { ProviderRecoveryDiagnostics } from "./provider-stream-coordinator.js";
 import type { LifecycleCaptureAdmissionStatus } from "./lifecycle-projection-ledger.js";
 import {
@@ -31,6 +31,7 @@ import type {
 const OWNER_SETUP_END_ATTENTION_AFTER_MS = 30_000;
 
 export type DaemonReadModelPorts = {
+  readUsage?(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(entry: DaemonManifestEntry): DaemonManifestEntryView["provider_progress"];
   currentDaemonGeneration(): number;
   nowMs(): number;
@@ -52,6 +53,7 @@ export type DaemonReadModelPorts = {
     pendingRuntimeRecovery(agentId: string): Promise<import("./runtime-recovery-journal.js").RuntimeRecoveryRecord | null>;
     load(): Promise<{ entries: DaemonManifestEntry[] }>;
     getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+    getAgentConfiguration(entryId: string): Promise<{ runtime_configuration_revision: number } | undefined>;
   };
   bindings: Pick<WorkerBindingStore, "credentialFor" | "get" | "list">;
   inbox: Pick<
@@ -124,7 +126,21 @@ export class DaemonReadModel {
       runtimeFence = { executionGenerationId: entry.provider_ref.execution_generation_id,
         runtimeGenerationId, daemonGenerationId: String(this.ports.currentDaemonGeneration()) };
     }
-    return this.ports.inbox.detail(entryId, roomId, sourceMessageId, runtimeFence);
+    const handle = this.ports.liveHandles.get(entryId);
+    const generation = this.ports.currentDaemonGeneration();
+    const continuation = entry.provider_ref?.provider_continuation_id;
+    const execution = entry.provider_ref?.execution_generation_id;
+    const [detail, usage] = await Promise.all([
+      this.ports.inbox.detail(entryId, roomId, sourceMessageId, runtimeFence),
+      handle && handle.workAttemptId === entry.work_attempt_id && handle.providerContinuationId === continuation
+        ? this.ports.readUsage?.(handle).catch(() => null) ?? null : null,
+    ]);
+    const current = await this.ports.manifest.getEntry(entryId);
+    const valid = current?.room_id === roomId && current.provider_ref?.execution_generation_id === execution
+      && current.provider_ref?.provider_continuation_id === continuation && this.ports.liveHandles.get(entryId) === handle
+      && this.ports.currentDaemonGeneration() === generation && usage?.providerContinuationId === continuation;
+    return { ...detail, usage: valid && usage && execution
+      ? { ...usage, executionGenerationId: execution, daemonGeneration: generation } : null };
   }
 
   private runtimeGenerationId(entry: DaemonManifestEntry): string | null {
@@ -207,12 +223,18 @@ export class DaemonReadModel {
     });
     const pollingContract = await this.ports.workerAuthority.pollingContract(entry);
     const recovery = await this.ports.manifest.pendingRuntimeRecovery(entry.id);
-    let homeHarness = homeHarnessRosterState(entry, liveHandle ? { startedAtRevision: liveHandle.appliedConfigurationRevision } : null);
+    // The entry carries no revision: the one the agent last started at is the store's. Nothing is read for an agent that may not have the setup
+    // and whose access level was never changed.
+    const lastStartedAt = homeHarnessAvailability({ id: entry.id, provider: entry.provider, deliveryMode: entry.delivery_mode }) === "available"
+      || latestPermissionChange(entry.provider_launch_policy) !== undefined
+      ? (await this.ports.manifest.getAgentConfiguration(entry.id))?.runtime_configuration_revision : undefined;
+    let homeHarness = homeHarnessRosterState(entry, lastStartedAt, liveHandle ? { startedAtRevision: liveHandle.appliedConfigurationRevision } : null);
     // A paused agent keeps the reference to its process for its conversation.
     // Its process is gone once the daemon has recorded its end, and not before.
     if (homeHarness && !liveHandle && entry.observed_state === "paused" && await this.processEnded(entry)) {
-      homeHarness = homeHarnessRosterState({ ...entry, provider_ref: undefined }, null);
+      homeHarness = homeHarnessRosterState({ ...entry, provider_ref: undefined }, lastStartedAt, null);
     }
+    const permissionPending = lastStartedAt !== undefined && await this.accessLevelPending(entry, liveHandle, lastStartedAt);
     // The owner turned their setup off, the process that still has it is idle
     // and could not be replaced, and a message has been waiting for that. The
     // daemon keeps trying; meanwhile the agent is shown as needing attention,
@@ -236,7 +258,20 @@ export class DaemonReadModel {
         executionGenerationId: recovery.execution_generation_id, runtimeGenerationId: recovery.runtime_generation_id,
         mode: recovery.mode, phase: recovery.phase as "prepared" | "stopped" } : null,
       ...(pollingContract ? { polling_contract: pollingContract } : {}),
-      ...(homeHarness ? { home_harness: homeHarness } : {}) };
+      ...(homeHarness ? { home_harness: homeHarness } : {}),
+      ...(permissionPending ? { permission_pending: true as const } : {}) };
+  }
+
+  /**
+   * Whether a process of this agent runs with an older access level than its
+   * owner saved. A paused agent keeps the reference to its process until the
+   * daemon records its end, as for the owner's setup above.
+   */
+  private async accessLevelPending(entry: DaemonManifestEntry, liveHandle: ProviderActionHandle | undefined, lastStartedAt: number): Promise<boolean> {
+    if (!permissionChangedSince(entry.provider_launch_policy, liveHandle?.appliedConfigurationRevision ?? lastStartedAt)) return false;
+    if (liveHandle) return true;
+    return Boolean(entry.provider_ref) && !["absent", "stopped", "failed"].includes(entry.observed_state)
+      && !(entry.observed_state === "paused" && await this.processEnded(entry));
   }
 
   /** Whether the daemon has recorded the end of the process this entry refers to. Not known counts as not ended. */

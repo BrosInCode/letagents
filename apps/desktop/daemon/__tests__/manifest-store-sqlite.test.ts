@@ -1525,7 +1525,6 @@ test("approval journal rechecks operational checkpoint and configuration at sele
       ["runtime_deployments", "provider_process_identity", "other", "birth"],
       ["runtime_deployments", "provider_connection_url", "http://127.0.0.1:9999", "http://127.0.0.1:4311"],
       ["agent_configurations", "runtime_configuration_revision", 2, 1],
-      ["agent_configurations", "config_revision", 2, 1],
       ["agent_configurations", "delivery_mode", "mcp_polling", "daemon_inbox"],
       ["agent_launch_intents", "desired_state", "paused", "running"],
       ["work_attempt_executions", "terminal_json", "{}", null],
@@ -1544,6 +1543,21 @@ test("approval journal rechecks operational checkpoint and configuration at sele
         await store.validateExecutionApprovalAuthority(expected, authority);
       }
     }
+    // A saved edit ahead of the applied revision waits for the next start. The live runtime keeps its authority
+    // for a decision a person chose, but not for one that depends on the configuration in force. The journal
+    // reads who chose from the stored decision, so the authority itself says nothing about it.
+    const automatic = approvalJournalRequest("automatic", 3);
+    await admitApproval(store, automatic.input, authority, async commit => commit());
+    await store.selectHostApproval({ authority, expected: automatic.expected, decisionId: "automatic-decision", actorId: "automatic-review",
+      decision: "allow_once", projectionSha256: "b".repeat(64), atMs: 111 }, async commit => commit());
+    const assertNativeWriteAfterSave = await store.validateExecutionApprovalAuthority(expected, authority);
+    database.exec("UPDATE agent_configurations SET config_revision=2");
+    assertNativeWriteAfterSave();
+    await store.validateExecutionApprovalAuthority(expected, authority);
+    await assert.rejects(store.validateExecutionApprovalAuthority(automatic.expected, authority), { code: "missing_turn" });
+    await assert.rejects(store.validateExecutionApprovalAuthority(expected, { ...authority, ownerAnswer: true } as typeof authority), { code: "invalid_input" });
+    database.exec("UPDATE agent_configurations SET config_revision=1");
+    await store.validateExecutionApprovalAuthority(automatic.expected, authority);
     await assert.rejects(store.beginExecutionApprovalDispatch(dispatch, async commit => {
       database.exec("UPDATE supervised_agent_inbox SET outcome='{}'"); await commit();
     }), { code: "missing_turn" }, "post-inspection checkpoint change is rechecked inside the committed intent");

@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "dependencies": {
-    "letagents": "0.12.35"
+    "letagents": "0.12.36"
   },
   "overrides": {
     "@hono/node-server": "2.0.10",
@@ -12,6 +12,8 @@
     },
     "fast-uri": "3.1.8",
     "hono": "4.13.8",
-    "ip-address": "10.7.2"
+    "ip-address": "10.7.2",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "proxy-addr": "2.0.8"
   }
 }

@@ -1,4 +1,6 @@
 export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
+/** "Answer in turns": enabled is the room's sequential reply order; off (parallel) by default. */
+export interface DesktopReplyOrderSettings { enabled: boolean; can_manage: boolean; }
 /** Reactions of the messages in a requested range, in the shape the shared reaction store reads. */
 export interface DesktopMessageReactionsRange {
   /** Only reacted messages appear. */
@@ -313,6 +315,8 @@ export interface DesktopApi {
     stopAccountActivity?: () => Promise<void>;
     onAccountActivity?: (callback: (state: DesktopAccountActivityState) => void) => () => void;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
+    getReplyOrder: (roomIdentifier: string) => Promise<DesktopReplyOrderSettings>;
+    setReplyOrder: (roomIdentifier: string, enabled: boolean) => Promise<DesktopReplyOrderSettings>;
     /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */
     getMessageLinkPreviews?: (roomIdentifier: string, references: import("../../../../shared/message-link-previews.mjs").LinkPreviewReference[]) => Promise<import("../../../../shared/message-link-previews.mjs").MessageLinkPreviewsResponse>;
     getMessagePins?: (roomIdentifier: string) => Promise<import("../../../../shared/message-pins.mjs").MessagePinsResponse>;
@@ -451,6 +455,7 @@ export interface DesktopApi {
     listHostApprovals?: (roomIdentifier: string) => Promise<import("../../shared/host-approvals.js").DesktopHostApprovalSnapshot>;
     decideHostApproval?: (input: { id: string; decision: import("../../shared/host-approvals.js").HostApprovalSelection }) => Promise<import("../../shared/host-approvals.js").HostApprovalStatus>;
     getStatus: () => Promise<DesktopSupervisorDaemonStatus>;
+    getServiceSnapshot?: () => Promise<import("./agents.js").DesktopSupervisorServiceSnapshot>;
     listAgents: (roomIdentifier?: string | null) => Promise<DesktopSupervisorManifestEntry[]>;
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
     resumeOwnershipTransfer: (id: string) => Promise<DesktopSupervisorManifestEntry>;

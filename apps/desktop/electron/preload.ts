@@ -194,6 +194,8 @@ const api: DesktopApi = {
       };
     },
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-conversation-routing", roomIdentifier, enabled),
+    getReplyOrder: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-reply-order", roomIdentifier),
+    setReplyOrder: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-reply-order", roomIdentifier, enabled),
     getMessageLinkPreviews: (roomIdentifier, references) => ipcRenderer.invoke("desktop:room:get-message-link-previews", roomIdentifier, references),
     getMessagePins: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-message-pins", roomIdentifier),
     createMessageReminder: (room: string, message: string, dueAt: string) => ipcRenderer.invoke("desktop:room:create-message-reminder", room, message, dueAt),
@@ -384,6 +386,7 @@ const api: DesktopApi = {
     listHostApprovals: roomIdentifier => ipcRenderer.invoke("desktop:supervisor:list-host-approvals", roomIdentifier),
     decideHostApproval: input => ipcRenderer.invoke("desktop:supervisor:decide-host-approval", input),
     getStatus: () => ipcRenderer.invoke("desktop:supervisor:get-status"),
+    getServiceSnapshot: () => ipcRenderer.invoke("desktop:supervisor:get-service-snapshot"),
     listAgents: (roomIdentifier) => ipcRenderer.invoke("desktop:supervisor:list-agents", roomIdentifier ?? null),
     createAgent: (input) => ipcRenderer.invoke("desktop:supervisor:create-agent", input),
     resumeOwnershipTransfer: (id) => ipcRenderer.invoke("desktop:supervisor:resume-ownership-transfer", id),

@@ -280,9 +280,23 @@ export function registerTaskRecordRoutes(
         } catch {
           console.warn("Task Git room enrichment failed after committed update", { roomId: project.id, taskId });
         }
-        let taskWithDetails: typeof updated | Awaited<ReturnType<typeof attachTaskDetails>> = updated;
+        // A pull request that merged before it was linked moves the task now.
+        let settled = updated;
+        if (updates.pr_url !== undefined || updates.workflow_artifacts !== undefined || updates.status !== undefined) {
+          try {
+            settled = (await deps.replayStoredPullRequestMerge?.({ project, task: updated, actorLabel })) ?? updated;
+          } catch (error) {
+            // The worker's write is committed. A failed replay cannot undo it.
+            console.warn("Stored merge replay failed after committed update", {
+              roomId: project.id,
+              taskId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        let taskWithDetails: typeof updated | Awaited<ReturnType<typeof attachTaskDetails>> = settled;
         try {
-          taskWithDetails = await attachTaskDetails(project.id, updated);
+          taskWithDetails = await attachTaskDetails(project.id, settled);
         } catch {
           // Preserve the committed result without inventing unknown lease/lock state.
           console.warn("Task detail enrichment failed after committed update", { roomId: project.id, taskId });

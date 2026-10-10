@@ -321,19 +321,27 @@ export class ProviderExecutionCoordinator {
     this.clearRecoveryTimeout = options.clearTimeout ?? clearTimeout;
   }
 
-  providerRef(
+  /**
+   * The reference to an entry's process. Whether that process has its owner's
+   * setup is read against the revision the store says it started with: the
+   * entry carries none. A caller that has just read it passes it in; with none
+   * to be had the reference is refused.
+   */
+  async providerRef(
     entry: DaemonManifestEntry,
     lifecycleAuthorityMode?: LifecycleAuthorityMode,
-  ): ProviderActionRef {
+    appliedRevision?: number,
+  ): Promise<ProviderActionRef> {
     const ref = entry.provider_ref;
     if (!ref) throw new Error("Manifest entry has no durable provider ref.");
+    const startedAt = appliedRevision ?? (await this.options.store.getAgentConfiguration(entry.id))?.runtime_configuration_revision;
     return {
       workAttemptId: ref.work_attempt_id,
       providerContinuationId: ref.provider_continuation_id,
       provider: entry.provider,
       providerConnection: ref.provider_connection,
       ...(lifecycleAuthorityMode ? { lifecycleAuthorityMode } : {}),
-      ...ownerSetupRef(entry),
+      ...ownerSetupRef(entry, startedAt),
     };
   }
 
@@ -521,6 +529,11 @@ export class ProviderExecutionCoordinator {
    */
   noteExitUnsettled(entryId: string, exitId: string): void {
     void this.recordLaunchNotices(entryId, [EXIT_UNSETTLED_NOTICE], false, exitId).catch(() => undefined);
+  }
+
+  /** The owner-visible lines of a conversation repair: recorded in the agent's activity as a launch's are. */
+  noteRepairNotices(entryId: string, notices: readonly string[]): Promise<void> {
+    return this.recordLaunchNotices(entryId, notices);
   }
 
   private async recordLaunchNotices(entryId: string, notices: readonly string[], unlessLatest = false, exit?: string): Promise<void> {
@@ -983,7 +996,7 @@ export class ProviderExecutionCoordinator {
           configurationRevision: appliedRevision!,
         })
       : null;
-    const attachRef = this.providerRef(entry, frozenAuthority ?? undefined);
+    const attachRef = await this.providerRef(entry, frozenAuthority ?? undefined, appliedRevision);
     // Pending Inspector edits are a future launch contract. Never apply them
     // to a surviving runtime whose original configuration is no longer stored.
     if (entry.provider === "codex" && configuration!.config_revision === appliedRevision) {
@@ -1006,6 +1019,9 @@ export class ProviderExecutionCoordinator {
           "Provider attach terminal evidence belongs to a different durable continuation.",
         );
       }
+      // The adapter stopped the runtime it found, and says why. The owner reads it in the agent's activity.
+      // Telling the owner never keeps the proof of the exit from being recorded.
+      if (attachment.notices?.length) await this.recordLaunchNotices(entry.id, attachment.notices).catch(() => undefined);
       await this.options.durability.recordTerminal(
         ref.work_attempt_id,
         execution.execution_generation_id,
@@ -1612,7 +1628,7 @@ export class ProviderExecutionCoordinator {
     // Resume must name the lifecycle authority the saved runtime was born
     // under, exactly as attach does; without it a typed birth is read back as
     // typed_shadow and every daemon-inbox resume is refused.
-    const ref = entry.provider_ref ? this.providerRef(entry, await this.frozenLifecycleAuthority(entry) ?? undefined) : null;
+    const ref = entry.provider_ref ? await this.providerRef(entry, await this.frozenLifecycleAuthority(entry) ?? undefined) : null;
     const requiresGrant = await this.options.host.requiresGrant(entry);
     const mintedAuthorization = requiresGrant
       ? await this.options.host.mintAuthorization(entry)
@@ -2143,7 +2159,7 @@ export class ProviderExecutionCoordinator {
         `desired state changed to ${entry.desired_state}`,
         "daemon-convergence",
       );
-      const terminal = await this.options.provider.stopRef(this.providerRef(entry), {
+      const terminal = await this.options.provider.stopRef(await this.providerRef(entry), {
         actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
       });
       const attempt = await this.options.durability.getAttempt(exactStopRef.work_attempt_id);
