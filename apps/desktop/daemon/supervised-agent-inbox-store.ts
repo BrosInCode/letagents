@@ -11,7 +11,7 @@ import { prepareRoomContext } from "./prepared-room-context.js";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
 import { assertNoPollingActivation } from "./custodial-polling-activation.js";
-import { FOLLOW_UP_ENDED, parseClaudeApiFailure, parseTaskContinuation, type ClaudeApiFailure, type ContinuityTask, type TaskContinuation } from "./task-continuity.js";
+import { endedFollowUpReason, FOLLOW_UP_ENDED, FOLLOW_UP_REASONS_THAT_ASK_THE_OWNER, followUpOrigin, parseClaudeApiFailure, parseTaskContinuation, type ClaudeApiFailure, type ContinuityTask, type FollowUpKind, type TaskContinuation } from "./task-continuity.js";
 import {
   MAX_QUEUED_NOTICES_PER_TURN, peopleFirstOrder, queuedDeliveryKind, queuedNoticeIds, queuedNoticeReason, queuedNoticesFor, roomArrival,
   type QueuedDeliveryKind,
@@ -85,7 +85,20 @@ export type SupervisedInboxReceiptWithTimeline = SupervisedInboxReceipt & {
   timeline: SupervisedInboxEvent[];
   canonical_message_id: string | null;
 };
-export type SupervisedInboxReceiptProjection = Omit<SupervisedInboxReceiptWithTimeline, "source_message" | "activation">;
+export type SupervisedInboxReceiptProjection = Omit<SupervisedInboxReceiptWithTimeline, "source_message" | "activation"> & {
+  /** What a follow-up that waits for its time is for. Absent on any other receipt, and on a follow-up that an earlier daemon made. */
+  follow_up_kind?: FollowUpKind;
+  /**
+   * Set on a follow-up that ended because of an uncertain result: whether an action of the turn that failed is still
+   * uncertain in the daemon's record. Absent on any other receipt.
+   */
+  follow_up_uncertain?: boolean;
+  /**
+   * Set on a follow-up that ended with nothing started and whose note asks its owner to send a message: whether a turn started for a
+   * message of a person after it. Absent on any other receipt.
+   */
+  follow_up_person_turn?: boolean;
+};
 type SupervisedInboxItemMetadata = Omit<SupervisedInboxItem, "source_message" | "activation">;
 
 export type SupervisedEffectRecord = {
@@ -194,6 +207,16 @@ const UNTOUCHED_PENDING_SQL = `(i.state='pending' AND i.attempt_count=0 AND i.pr
     AND e.idempotency_key NOT IN ('received:0','queued:0','queued:person_first') AND e.idempotency_key NOT GLOB 'passed:*')
   AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
   AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.inbox_item_id=i.inbox_item_id))`;
+/**
+ * A follow-up that was made blocked and has not been touched since: no claim, retry, dispatch, turn or turn control.
+ * Nothing was ever sent to a provider for it, so no native work can be running for it. Alias `i`.
+ */
+const UNTOUCHED_BLOCKED_FOLLOW_UP_SQL = `(i.state='blocked' AND i.source_message_id GLOB 'task-continuation:*' AND i.attempt_count=0
+  AND i.provider_turn_id IS NULL AND i.outcome IS NULL
+  AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e WHERE e.inbox_item_id=i.inbox_item_id
+    AND e.idempotency_key NOT IN ('received:0','queued:0','task-continuation:0'))
+  AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
+  AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.inbox_item_id=i.inbox_item_id))`;
 const RECEIPT_METADATA_COLUMNS = "i.inbox_item_id,i.agent_id,i.room_id,i.source_message_id,i.fifo_sequence,i.state,i.attempt_count,i.action_id,i.reply_client_message_id,i.provider_turn_id,i.outcome,i.last_error,i.failure_code,i.blocked_by_inbox_item_id,i.next_attempt_at_ms,i.terminal_reason,i.created_at,i.updated_at,i.acknowledged_at";
 const RECEIPT_SELECTION_SQL = `FROM supervised_agent_inbox i
         LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
@@ -207,7 +230,11 @@ const RECEIPT_SELECTION_SQL = `FROM supervised_agent_inbox i
         ) ORDER BY i.fifo_sequence`;
 const INBOX_READS = {
   receipts: `SELECT i.*,p.canonical_message_id ${RECEIPT_SELECTION_SQL}`,
-  receiptProjection: `SELECT ${RECEIPT_METADATA_COLUMNS},p.canonical_message_id ${RECEIPT_SELECTION_SQL}`,
+  // What a follow-up that waits for its time is for. It is read from the saved follow-up and from no other row,
+  // so that the payload of an ordinary message is still never read here.
+  receiptProjection: `SELECT ${RECEIPT_METADATA_COLUMNS},p.canonical_message_id,
+    CASE WHEN i.state='pending' AND i.next_attempt_at_ms IS NOT NULL AND i.source_message_id GLOB 'task-continuation:*' AND json_valid(i.activation_json)
+      THEN json_extract(i.activation_json,'$.task_continuity.kind') END AS follow_up_kind ${RECEIPT_SELECTION_SQL}`,
   receiptTimelines: `WITH selected_inbox AS (
           SELECT inbox_item_id,fifo_sequence
           FROM supervised_agent_inbox
@@ -606,7 +633,9 @@ export class SupervisedAgentInboxStore {
     /** Stop without a follow-up, keeping this reason on the failed message, so later messages are not blocked. */
     settleReason?: string | null;
     /** Guidance for the follow-up turn about why the previous one failed. */
-    note?: string | null }): Promise<SupervisedInboxItem | null> {
+    note?: string | null;
+    /** What the follow-up is for. It is saved with the follow-up, and the owner is told from it. */
+    kind?: FollowUpKind | null }): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? ORDER BY fifo_sequence DESC LIMIT 1").get(input.agentId) as Row | undefined;
       if (!row || row.inbox_item_id !== input.parentId) return null;
@@ -621,7 +650,8 @@ export class SupervisedAgentInboxStore {
       const continuation: TaskContinuation = { parentId: parent.inbox_item_id,
         attempt: (prior?.attempt ?? 0) + 1, workAttemptId: input.workAttemptId,
         providerContinuationId: input.providerContinuationId, agentSessionId: input.agentSessionId,
-        heldBefore: prior?.heldBefore ?? String(parent.activation.task_continuity_failed_at), tasks: input.tasks };
+        heldBefore: prior?.heldBefore ?? String(parent.activation.task_continuity_failed_at), tasks: input.tasks,
+        ...(input.kind ? { kind: input.kind } : {}) };
       if (!parseTaskContinuation(continuation)) throw new Error("Invalid task continuation snapshot.");
       const childSource = `task-continuation:${parent.inbox_item_id}`;
       run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"),
@@ -634,13 +664,10 @@ export class SupervisedAgentInboxStore {
       if (settleReason) {
         // Also show the reason on the room message the task continued from;
         // a synthetic follow-up has no chat message of its own.
-        let origin = parent;
-        for (let depth = 0; depth < 8 && origin.source_message_id.startsWith("task-continuation:"); depth += 1) {
-          const parentId = parseTaskContinuation(origin.activation.task_continuity)?.parentId;
-          const row = parentId ? database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(parentId) as Row | undefined : undefined;
-          if (!row) break;
-          origin = rowToItem(row);
-        }
+        const origin = followUpOrigin(parent, (inboxItemId) => {
+          const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+          return row ? rowToItem(row) : undefined;
+        });
         const timestamp = this.now();
         for (const id of new Set([parent.inbox_item_id, origin.inbox_item_id])) run(setLastError, settleReason, timestamp, id);
         return null;
@@ -687,11 +714,14 @@ export class SupervisedAgentInboxStore {
     });
   }
 
-  private hasUncertainTaskEffects(database: DatabaseSync, parent: SupervisedInboxItem): boolean {
+  private hasUncertainTaskEffects(database: DatabaseSync, parent: Pick<SupervisedInboxItemMetadata, "inbox_item_id" | "agent_id" | "room_id" | "provider_turn_id">): boolean {
     const binding = database.prepare("SELECT origin_execution_generation_id FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(parent.inbox_item_id) as Row | undefined;
+    // A turn that is kept without its binding cannot be matched to its actions. It is taken as uncertain: no follow-up is made for it, and
+    // a note about it stays. A projection must never throw for it.
+    if (!binding) return true;
     return ["supervised_agent_effects", "supervised_agent_effect_tombstones"].some((table) => Boolean(database.prepare(`SELECT 1 FROM ${table}
       WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=? AND mutation=1 AND state IN ('executing','uncertain') LIMIT 1`)
-      .get(parent.agent_id, parent.room_id, binding?.origin_execution_generation_id as string, parent.provider_turn_id)));
+      .get(parent.agent_id, parent.room_id, binding.origin_execution_generation_id as string, parent.provider_turn_id)));
   }
 
   async taskContinuationHasUncertainEffects(inboxItemId: string): Promise<boolean> {
@@ -875,6 +905,14 @@ export class SupervisedAgentInboxStore {
       this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
     }));
+  }
+  /**
+   * Whether this item is a follow-up that was made blocked, because its automatic attempts were used up or its
+   * tasks could not be verified, and that nothing has touched since. It never reached a provider.
+   */
+  async isUntouchedBlockedFollowUp(inboxItemId: string): Promise<boolean> {
+    return this.read(async (database) => Boolean(database.prepare(
+      `SELECT 1 FROM supervised_agent_inbox i WHERE i.inbox_item_id=? AND ${UNTOUCHED_BLOCKED_FOLLOW_UP_SQL}`).get(inboxItemId)));
   }
   /** Exact-entry, exact-room, bounded renderer-safe projection. */
   async detail(
@@ -2165,10 +2203,14 @@ export class SupervisedAgentInboxStore {
       const detail = started
         ? "Skipped by the user. The provider's turn was not rerun and its answer was dropped."
         : "Skipped by the user before any provider turn started.";
+      // A follow-up has no room message of its own. Its owner reads on the message it is for what became of it, so a
+      // follow-up that was skipped before it started says that it was skipped, and nothing more: no attempt waited for
+      // its time, and what the task is now is not known here. A follow-up that started keeps the text of a started turn.
+      const lastError = started ? detail : item.source_message_id.startsWith("task-continuation:") ? FOLLOW_UP_ENDED.skippedByOwner : null;
       const timestamp = this.now();
       run(database.prepare(`UPDATE supervised_agent_inbox
         SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
-        WHERE inbox_item_id=?`), started ? detail : null, timestamp, timestamp, inboxItemId);
+        WHERE inbox_item_id=?`), lastError, timestamp, timestamp, inboxItemId);
       this.settleTerminalItem(database, item, timestamp);
       this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, detail);
       this.pruneAgentHistory(database, item.agent_id);
@@ -2369,11 +2411,46 @@ export class SupervisedAgentInboxStore {
 
   /** State projections never need activating message bodies or activation payloads. */
   async receiptProjection(agentId: string, terminalLimit = RETAINED_TERMINAL_RECEIPTS_PER_AGENT): Promise<SupervisedInboxReceiptProjection[]> {
-    return this.readReceipts(agentId, terminalLimit, "receiptProjection", rowToItemMetadata);
+    return this.readReceipts(agentId, terminalLimit, "receiptProjection", rowToReceiptProjectionMetadata, (database, item) => this.followUpFacts(database, item));
+  }
+
+  /**
+   * What the receipt of a follow-up that ended with nothing started also says, which only the daemon can know. It is asked for such a
+   * follow-up and for no other row, so the bodies of ordinary messages are not read for a projection. It never throws: a projection
+   * of every receipt must not fail for one of them. A fact that cannot be found is the one that keeps the note.
+   * - `follow_up_uncertain`, for the reason `uncertain_action`: an action of the failed turn is still executing or uncertain.
+   * - `follow_up_person_turn`, for a reason whose note asks the owner to send a message: a turn started for a message of a person that
+   *   came after the follow-up. A turn for another agent's message, a follow-up or a correction is not one.
+   */
+  private followUpFacts<Item extends SupervisedInboxItemMetadata>(database: DatabaseSync, item: Item): Item & { follow_up_uncertain?: boolean; follow_up_person_turn?: boolean } {
+    if ((item.state !== "acknowledged_no_reply" && item.state !== "cancelled_by_user") || item.provider_turn_id || !item.source_message_id.startsWith("task-continuation:")) return item;
+    const reason = endedFollowUpReason(item.last_error);
+    try {
+      if (reason === "uncertain_action") {
+        const parent = database.prepare("SELECT inbox_item_id,agent_id,room_id,provider_turn_id FROM supervised_agent_inbox WHERE inbox_item_id=?")
+          .get(item.source_message_id.slice("task-continuation:".length)) as Row | undefined;
+        // A parent that is no longer kept cannot be asked: the reason stays, which keeps the note.
+        return { ...item, follow_up_uncertain: parent ? this.hasUncertainTaskEffects(database, {
+          inbox_item_id: String(parent.inbox_item_id), agent_id: String(parent.agent_id), room_id: String(parent.room_id),
+          provider_turn_id: parent.provider_turn_id === null ? null : String(parent.provider_turn_id) }) : true };
+      }
+      if (reason && FOLLOW_UP_REASONS_THAT_ASK_THE_OWNER.has(reason)) {
+        // Only the fields that tell a person from an agent are read, and not the text.
+        const later = database.prepare(`SELECT source_message_id,
+            CASE WHEN json_valid(source_message_json) THEN json_extract(source_message_json,'$.source') END AS source,
+            CASE WHEN json_valid(source_message_json) THEN json_type(source_message_json,'$.agent_identity') END AS agent_identity,
+            CASE WHEN json_valid(source_message_json) THEN json_extract(source_message_json,'$.publisher_agent_key') END AS publisher_agent_key
+          FROM supervised_agent_inbox WHERE agent_id=? AND fifo_sequence>? AND provider_turn_id IS NOT NULL`).all(item.agent_id, item.fifo_sequence) as Row[];
+        return { ...item, follow_up_person_turn: later.some((row) => queuedDeliveryKind(String(row.source_message_id), {
+          source: row.source, ...(row.agent_identity === "object" ? { agent_identity: {} } : {}), publisher_agent_key: row.publisher_agent_key }) === "person") };
+      }
+    } catch { return reason === "uncertain_action" ? { ...item, follow_up_uncertain: true } : item; }
+    return item;
   }
 
   private async readReceipts<Item extends SupervisedInboxItemMetadata>(agentId: string, terminalLimit: number,
-    statement: "receipts" | "receiptProjection", decode: (row: Row) => Item): Promise<Array<Item & {
+    statement: "receipts" | "receiptProjection", decode: (row: Row) => Item,
+    enrich: (database: DatabaseSync, item: Item) => Item = (_database, item) => item): Promise<Array<Item & {
       timeline: SupervisedInboxEvent[]; canonical_message_id: string | null; receipt_state: SupervisedInboxReceiptState;
     }>> {
     return this.read(async (database) => {
@@ -2399,7 +2476,7 @@ export class SupervisedAgentInboxStore {
       const head = rows.find((row) => !finalStates.has(String(row.state) as SupervisedInboxState));
       const firstBlocked = head && String(head.state) === "blocked" ? head : undefined;
       return rows.map((row) => {
-        const item = decode(row);
+        const item = enrich(database, decode(row));
         const timeline = timelines.get(item.inbox_item_id) ?? [];
         const canonicalMessageId = row.canonical_message_id === null
           ? null
@@ -2715,6 +2792,10 @@ function isNewerCursor(candidate: string, current: string | null): boolean {
 
 function rowToItem(row: Row): SupervisedInboxItem {
   return { ...rowToItemMetadata(row), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)) };
+}
+function rowToReceiptProjectionMetadata(row: Row): SupervisedInboxItemMetadata & { follow_up_kind?: FollowUpKind } {
+  const metadata = rowToItemMetadata(row);
+  return row.follow_up_kind === "provider_fault" || row.follow_up_kind === "no_reply" ? { ...metadata, follow_up_kind: row.follow_up_kind } : metadata;
 }
 function rowToItemMetadata(row: Row): SupervisedInboxItemMetadata {
   return { inbox_item_id: String(row.inbox_item_id), agent_id: String(row.agent_id), room_id: String(row.room_id), source_message_id: String(row.source_message_id), fifo_sequence: Number(row.fifo_sequence), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), action_id: String(row.action_id), reply_client_message_id: String(row.reply_client_message_id), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), outcome: row.outcome === null ? null : String(row.outcome), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", blocked_by_inbox_item_id: row.blocked_by_inbox_item_id === null ? null : String(row.blocked_by_inbox_item_id), next_attempt_at_ms: row.next_attempt_at_ms === null ? null : Number(row.next_attempt_at_ms), terminal_reason: row.terminal_reason === null || row.terminal_reason === undefined ? null : String(row.terminal_reason) as "upgrade_authority_unavailable", created_at: String(row.created_at), updated_at: String(row.updated_at), acknowledged_at: row.acknowledged_at === null ? null : String(row.acknowledged_at) };

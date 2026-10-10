@@ -6311,6 +6311,47 @@ for (const mode of ["idle", "surviving", "missing_turn_id", "missing_terminal", 
   } finally { await env.cleanup(); }
 });
 
+/**
+ * The head of an agent's queue is a follow-up that was made blocked, because the last automatic attempt failed: it waits
+ * for its owner, and nothing was ever sent to a provider for it. An update must not wait for its owner. One that its
+ * owner retried may have been sent, and an acknowledgement may have been lost, so that one still holds the update.
+ */
+for (const retried of [false, true]) test(`provider-aware handoff ${retried ? "is deferred by a blocked follow-up that was retried" : "goes on past a blocked follow-up that never reached a provider"}`, async () => {
+  const env = await observationDaemonFixture((_handle, listener) => new ProviderExecutionObserver(() => new Date().toISOString()).subscribe(listener), "claude-code", {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: true, survivesRestart: false }),
+  });
+  await env.internals.providerStreams.install(env.id, env.handle, env.generation);
+  env.handle.observedState = "idle";
+  try {
+    const store = env.internals.supervisedInbox;
+    const [item] = await store.ingestPoll({ agent_id: env.id, room_id: "room_1", last_observed_message_id: "1",
+      messages: [{ source_message_id: "task-continuation:parent", source_message: { text: "continue the task" }, activation: {} }] });
+    // Exactly what the daemon saves for a follow-up that it makes blocked.
+    const db = new DatabaseSync(env.paths.manifestPath);
+    db.prepare("UPDATE supervised_agent_inbox SET state='blocked',last_error='All three automatic attempts failed.' WHERE inbox_item_id=?").run(item!.inbox_item_id);
+    db.prepare("INSERT INTO supervised_agent_inbox_events VALUES(?,3,'task-continuation:0','blocked',?,NULL)").run(item!.inbox_item_id, new Date().toISOString());
+    db.close();
+    assert.equal(await store.isUntouchedBlockedFollowUp(item!.inbox_item_id), true);
+    if (retried) {
+      // Its owner used Retry, and it blocked again with no turn id: the same shape as a lost acknowledgement.
+      await store.transition(item!.inbox_item_id, "pending");
+      await store.transition(item!.inbox_item_id, "blocked", { last_error: "native completion is unknown" });
+      assert.equal(await store.isUntouchedBlockedFollowUp(item!.inbox_item_id), false);
+    }
+    assert.equal((await store.head(env.id))?.state, "blocked");
+    const result = await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff");
+    if (retried) {
+      assert.equal(result.ok, false);
+      assert.match(result.error ?? "", /no confirmed completion/);
+      assert.equal((await store.head(env.id))?.state, "blocked");
+    } else {
+      assert.equal(result.ok, true, result.error);
+      assert.equal((await store.get(item!.inbox_item_id))?.state, "blocked", "and it still waits for its owner");
+      await within(env.daemon.waitForHandoff(), "compatible handoff");
+    }
+  } finally { await env.cleanup(); }
+});
+
 for (const scenario of [
   { name: "stopped absent", desired: "stopped", custody: "absent", installed: false, allowed: true },
   { name: "paused absent", desired: "paused", custody: "absent", installed: false, allowed: true },

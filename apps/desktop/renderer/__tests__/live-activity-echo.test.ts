@@ -10,6 +10,7 @@ import {
   liveActivityEchoText,
   isHumanVisibleSupervisorActivity,
   supervisedAgentWorkIndicators,
+  workIndicatorOverflowLabel,
   workIndicatorSupersededByAgentMessage,
   type ManagedAgentWorkIndicator,
 } from "../src/domain/managed-agents";
@@ -357,6 +358,72 @@ test("collapse shows the MOST RECENT indicators (newest first) and reports the o
   assert.equal(result.visible.length, 3);
   assert.equal(result.hiddenCount, 7);
   assert.deepEqual(result.visible.map((w) => w.id), ["agent_9", "agent_8", "agent_7"]);
+});
+
+test("an agent that waits to try again never hides an agent that works, and the strip names the rows that it does not show", () => {
+  // A row that waits has the future time of its attempt as its time. It must not rank as the newest for that.
+  const waits = (id: string, dueAt: string): ManagedAgentWorkIndicator => ({ ...indicator(id, dueAt, "Waiting to try again"), waiting: true });
+  const soon = waits("waits_soon", "2026-07-17T00:10:00.000Z");
+  const later = waits("waits_later", "2026-07-17T00:20:00.000Z");
+  const olderWork = indicator("works_old", "2026-07-17T00:00:01.000Z");
+  const newerWork = indicator("works_new", "2026-07-17T00:00:02.000Z");
+
+  // Two agents wait and two work: both that work are shown, as given, and the row that waits and tries first takes the place that is left.
+  const mixed = collapseWorkIndicators([later, soon, olderWork, newerWork]);
+  assert.deepEqual(mixed.visible.map((row) => row.id), ["works_old", "works_new", "waits_soon"]);
+  assert.deepEqual([mixed.hiddenCount, mixed.hiddenWaitingCount], [1, 1]);
+  assert.equal(workIndicatorOverflowLabel(mixed), "+1 more agent waiting to try again");
+  // Rows of work are all shown before any row that waits, however many work.
+  const busy = collapseWorkIndicators([soon, later, ...Array.from({ length: 4 }, (_, index) => indicator(`w${index}`, `2026-07-17T00:00:0${index}.000Z`))]);
+  assert.deepEqual(busy.visible.map((row) => row.id), ["w3", "w2", "w1"]);
+  assert.deepEqual([busy.hiddenCount, busy.hiddenWaitingCount], [3, 2]);
+  assert.equal(workIndicatorOverflowLabel(busy), "+3 more agents working or waiting to try again");
+  // Only agents that work are hidden: the strip says "working", as before.
+  const crowd = collapseWorkIndicators(Array.from({ length: 5 }, (_, index) => indicator(`w${index}`, `2026-07-17T00:00:0${index}.000Z`)));
+  assert.deepEqual([crowd.hiddenCount, crowd.hiddenWaitingCount], [2, 0]);
+  assert.equal(workIndicatorOverflowLabel(crowd), "+2 more agents working");
+  assert.equal(workIndicatorOverflowLabel({ hiddenCount: 1, hiddenWaitingCount: 0 }), "+1 more agent working");
+  assert.equal(workIndicatorOverflowLabel({ hiddenCount: 2, hiddenWaitingCount: 2 }), "+2 more agents waiting to try again");
+  // The order does not depend on how many rows there are. Under the limit, nothing is hidden, and a row that waits is below a row of work.
+  const few = collapseWorkIndicators([soon, olderWork, later]);
+  assert.deepEqual(few.visible.map((row) => row.id), ["works_old", "waits_soon", "waits_later"]);
+  assert.deepEqual([few.hiddenCount, few.hiddenWaitingCount], [0, 0]);
+  assert.deepEqual(collapseWorkIndicators([later, soon, newerWork, olderWork]).visible.map((row) => row.id), ["works_new", "works_old", "waits_soon"]);
+  // A turn that is held open for background work has a control: "Post answer now". It is the oldest row of work, and still is shown,
+  // before the rows without a control, and before a row that waits. It is a row of work, not a row that waits.
+  const held: ManagedAgentWorkIndicator = { ...indicator("held", "2026-07-17T00:00:00.000Z", "Waiting for a sub-agent to finish"), waitsForBackgroundWork: true };
+  const four = Array.from({ length: 4 }, (_, index) => indicator(`w${index}`, `2026-07-17T00:00:0${index + 1}.000Z`));
+  const crowded = collapseWorkIndicators([held, ...four]);
+  assert.deepEqual(crowded.visible.map((row) => row.id), ["held", "w3", "w2"]);
+  assert.deepEqual([crowded.hiddenCount, crowded.hiddenWaitingCount], [2, 0]);
+  assert.deepEqual(collapseWorkIndicators([soon, ...four, held]).visible.map((row) => row.id), ["held", "w3", "w2"]);
+  assert.deepEqual(collapseWorkIndicators([soon, later, held]).visible.map((row) => row.id), ["held", "waits_soon", "waits_later"]);
+  assert.deepEqual(collapseWorkIndicators([held, soon]).visible.map((row) => row.id), ["held", "waits_soon"]);
+
+  // A row never jumps because a time ticked. The rows of a kind keep the order that they were given when they all are shown. Time decides
+  // only for a kind that does not fit: its rows are ordered by time, and the places go to the first.
+  const tick = (row: ManagedAgentWorkIndicator, startedAt: string) => ({ ...row, startedAt });
+  const ids = (rows: ManagedAgentWorkIndicator[]) => collapseWorkIndicators(rows).visible.map((row) => row.id);
+  assert.deepEqual(ids([olderWork, newerWork]), ["works_old", "works_new"]);
+  assert.deepEqual(ids([tick(olderWork, "2026-07-17T00:00:09.000Z"), newerWork]), ["works_old", "works_new"], "its time is now the newer: it stays first");
+  assert.deepEqual(ids([newerWork, olderWork]), ["works_new", "works_old"]);
+  assert.deepEqual(ids([tick(soon, "2026-07-17T00:50:00.000Z"), later]), ["waits_soon", "waits_later"], "a row that waits keeps its place when its time moves");
+  assert.deepEqual(ids([soon, olderWork, held]), ["held", "works_old", "waits_soon"], "the kinds keep their order");
+  assert.deepEqual(ids([later, soon, olderWork]), ["works_old", "waits_later", "waits_soon"], "and a kind keeps the order given, whatever the times of its rows");
+  assert.deepEqual(ids([soon, olderWork, held, later]), ["held", "works_old", "waits_soon"], "of the rows that wait, the one that tries first keeps the place that is left");
+  const five = Array.from({ length: 5 }, (_, index) => indicator(`w${index}`, `2026-07-17T00:00:0${index + 1}.000Z`));
+  // Rows are hidden: the most recent are shown, the newest first.
+  assert.deepEqual(ids([five[3]!, five[0]!, five[4]!, five[1]!, five[2]!]), ["w4", "w3", "w2"]);
+  assert.deepEqual(ids(five), ["w4", "w3", "w2"]);
+  // Several rows that carry a control keep the order given when they all fit. When they do not, the oldest is hidden first.
+  const heldRows = ["a", "b", "c", "d"].map((id, index): ManagedAgentWorkIndicator => ({ ...indicator(`held_${id}`, `2026-07-17T00:00:0${index}.000Z`), waitsForBackgroundWork: true }));
+  assert.deepEqual(ids([heldRows[1]!, heldRows[0]!]), ["held_b", "held_a"], "all shown: as given");
+  assert.deepEqual(ids([heldRows[2]!, heldRows[0]!, heldRows[1]!]), ["held_c", "held_a", "held_b"]);
+  assert.deepEqual(ids([heldRows[1]!, heldRows[3]!, heldRows[0]!, heldRows[2]!]), ["held_d", "held_c", "held_b"], "four held rows: the oldest is hidden");
+  assert.deepEqual(ids([...heldRows, ...five]), ["held_d", "held_c", "held_b"], "rows with a control fill the places before any other");
+  // The rows that wait fill the places that are left, the one that tries first coming first.
+  assert.deepEqual(collapseWorkIndicators([later, soon, waits("waits_last", "2026-07-17T00:30:00.000Z"), waits("waits_next", "2026-07-17T00:05:00.000Z")]).visible.map((row) => row.id),
+    ["waits_next", "waits_soon", "waits_later"]);
 });
 
 test("echo coalescing shows a new entry immediately", () => {

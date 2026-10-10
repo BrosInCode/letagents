@@ -266,16 +266,20 @@
   color: var(--text-tertiary);
 }
 
+/*
+ * The agent recovers by itself: it reads a result again, it waits to try again, or a message waits for that.
+ * The next rule is the agent that waits for its owner. It comes after this one and has the same weight, so a receipt
+ * that is both is red: what needs the owner is never painted as a recovery.
+ */
+.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-state="queued_behind_retry"], [data-follow-up="scheduled"]) {
+  border-color: rgba(251, 191, 36, 0.18);
+  background: rgba(251, 191, 36, 0.045);
+}
+
 /* The agent waits for its owner: for a blocked message, or after the last automatic attempt. */
 .room-message-delivery-receipts li:is([data-state="blocked"], [data-state="queued_behind_blocked"], [data-follow-up="waiting_for_owner"]) {
   border-color: rgba(248, 113, 113, 0.2);
   background: rgba(248, 113, 113, 0.055);
-}
-
-/* The agent recovers by itself: it reads a result again, or it waits to try again. */
-.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-follow-up="scheduled"]) {
-  border-color: rgba(251, 191, 36, 0.18);
-  background: rgba(251, 191, 36, 0.045);
 }
 
 .room-message-delivery-receipts strong {
@@ -308,13 +312,26 @@
   flex-basis: 100%;
 }
 
-/* The countdown is the one text that is not read aloud. It does not wrap, so its number stays with its unit, and the controls are on the line after it, so they do not move as it counts. */
-.room-message-delivery-receipts li > small[aria-hidden="true"] {
+/* The sentence after the two controls follows a button, so the rule above does not reach it. It has a line of its own too, and does not become a tall narrow column beside them. */
+.room-message-delivery-receipts li > small.room-message-delivery-outcome {
+  flex-basis: 100%;
+}
+
+/*
+ * The countdown is the one text that is not read aloud. It has a line of its own, and the controls are on the line
+ * after it, so they do not move as it counts. In a narrow receipt it wraps between its two parts, the wait and the
+ * attempt, and nowhere else: each part is kept whole, so a number stays with its unit. A receipt that is narrower
+ * than one part cuts it with an ellipsis.
+ */
+.room-message-delivery-receipts li > small.room-message-delivery-countdown {
   flex: none;
   width: 100%;
   overflow: hidden;
   font-variant-numeric: tabular-nums;
   text-overflow: ellipsis;
+}
+
+.room-message-delivery-countdown > span {
   white-space: nowrap;
 }
 
@@ -327,12 +344,12 @@
   color: #6ee7b7;
 }
 
-.room-message-delivery-receipts li:is([data-state="blocked"], [data-state="queued_behind_blocked"], [data-follow-up="waiting_for_owner"]) > .room-message-delivery-indicator {
-  color: #fca5a5;
+.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-state="queued_behind_retry"], [data-follow-up="scheduled"]) > .room-message-delivery-indicator {
+  color: #fcd34d;
 }
 
-.room-message-delivery-receipts li:is([data-state="result_recovery"], [data-follow-up="scheduled"]) > .room-message-delivery-indicator {
-  color: #fcd34d;
+.room-message-delivery-receipts li:is([data-state="blocked"], [data-state="queued_behind_blocked"], [data-follow-up="waiting_for_owner"]) > .room-message-delivery-indicator {
+  color: #fca5a5;
 }
 
 .room-message-delivery-dots {
@@ -352,6 +369,17 @@
 
 .room-message-delivery-dots i:nth-child(2) { animation-delay: 110ms; }
 .room-message-delivery-dots i:nth-child(3) { animation-delay: 220ms; }
+
+/* The agent that a message waits for does not work: it waits for its time, for up to ten minutes. The dots rest, as the live strip's do for an agent that waits. */
+.room-message-delivery-receipts li[data-state="queued_behind_retry"] .room-message-delivery-dots i {
+  animation: none;
+  opacity: 0.72;
+}
+
+/* The label keeps its own width, and the link to the earlier message goes to the next line when both do not fit. */
+.room-message-delivery-receipts li[data-state="queued_behind_retry"] > small {
+  flex: 1 1 auto;
+}
 
 .room-message-delivery-receipts button {
   flex: none;
