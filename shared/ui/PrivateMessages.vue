@@ -1,9 +1,12 @@
 <template>
   <section
     class="private-messages"
-    :class="{ 'chat-open': selectedId || composing }"
+    :class="{ 'chat-open': selectedId || composing, 'has-navigation': $slots.navigation }"
     aria-label="Private messages"
   >
+    <div v-if="$slots.navigation" class="conversation-navigation">
+      <slot name="navigation" />
+    </div>
     <aside class="conversation-list" aria-label="Conversations">
       <header class="conversation-list-heading">
         <h1>Messages</h1>
