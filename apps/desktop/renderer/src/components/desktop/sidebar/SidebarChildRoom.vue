@@ -25,7 +25,6 @@
     <span class="room-title-line">
       <span class="room-title">{{ sidebarRoomTitle(entry) }}</span>
       <RoomMutedIcon :room-identifier="entry.roomIdentifier" />
-      <span v-if="entry.currentWorkspace" class="room-workspace-pill">Current</span>
       <SidebarRoomActivity :activity="entry.activity" />
       <RoomUnreadBadge :count="entry.unreadCount || 0" :marked-unread="entry.hasUnread" />
     </span>
