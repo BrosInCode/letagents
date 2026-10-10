@@ -54,13 +54,22 @@ export function agentInspectorDetailRequestIsCurrent(key: string, token: number,
     && agentInspectorDetailKey(current.entry, current.source, current.generation) === key);
 }
 
+function fencedUsage(detail: DesktopSupervisorAgentInspectorDetail, entry: DesktopSupervisorManifestEntry | undefined | null, generation: number) {
+  const usage = detail.usage;
+  return usage && entry && usage.executionGenerationId === entry.executionGenerationId
+    && usage.providerContinuationId === entry.providerContinuationId && usage.daemonGeneration === generation ? usage : null;
+}
+
 export function invalidateAgentInspectorRuntimeControl(resource: AgentInspectorWorkResource,
   snapshot: DesktopSupervisorStateSnapshot, entryId: string, roomId: string): AgentInspectorWorkResource {
   const entry = snapshot.entries.find(candidate => candidate.id === entryId);
   const detail = resource.detail;
+  if (detail?.usage && !fencedUsage(detail, entry, snapshot.daemonGeneration)) {
+    resource = { ...resource, detail: { ...detail, usage: null } };
+  }
   if (detail?.runtime_control && (!entry || entry.roomId !== roomId || !agentInspectorRuntimeControlMatchesFence(
     detail.runtime_control, entry.executionGenerationId, snapshot.daemonGeneration, entry.runtimeGenerationId ?? null))) {
-    return { ...resource, detail: { ...detail, runtime_control: null } };
+    return { ...resource, detail: { ...resource.detail!, runtime_control: null } };
   }
   return resource;
 }
@@ -74,9 +83,11 @@ export async function readAgentInspectorWorkDetail(input: {
   write: (resource: AgentInspectorWorkResource) => void;
 }): Promise<DesktopSupervisorAgentInspectorDetail | null> {
   const { entry, source, generation } = input;
-  const fenceHealth = (detail: DesktopSupervisorAgentInspectorDetail) => detail.runtime_control
-    && !agentInspectorRuntimeControlMatchesFence(detail.runtime_control, entry.executionGenerationId, generation, entry.runtimeGenerationId ?? null)
-    ? { ...detail, runtime_control: null } : detail;
+  const fenceHealth = (detail: DesktopSupervisorAgentInspectorDetail): DesktopSupervisorAgentInspectorDetail => ({
+    ...detail, usage: fencedUsage(detail, entry, generation),
+    runtime_control: detail.runtime_control && !agentInspectorRuntimeControlMatchesFence(
+      detail.runtime_control, entry.executionGenerationId, generation, entry.runtimeGenerationId ?? null) ? null : detail.runtime_control,
+  });
   const cached = input.previous.detail;
   const previous = input.previous.sourceMessageId === source && cached
     && isCurrentAgentInspectorWorkResponse(cached, entry.id, entry.roomId, source) ? fenceHealth(cached) : null;

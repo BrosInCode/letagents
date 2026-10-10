@@ -1055,6 +1055,17 @@ watch(
   { immediate: true },
 );
 
+// Read only while an inspector is open; quota changes need not produce room activity.
+watch(() => selectedAgentDetailTarget.value?.kind === "supervised" ? selectedAgentDetailTarget.value.supervisorEntryId : null,
+  (entryId, _previous, onCleanup) => {
+    if (!entryId) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      void loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId.value, true, false);
+    }, 5_000);
+    onCleanup(() => clearInterval(timer));
+  });
+
 onBeforeUnmount(() => {
   agentInspectorWorkRequestToken += 1;
   agentInspectorDetailRequest.reset();

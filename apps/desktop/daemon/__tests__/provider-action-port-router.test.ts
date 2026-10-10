@@ -1803,3 +1803,20 @@ test("a handle says its process was started with the owner's setup exactly when 
   await fresh.attach({ workAttemptId: "plain", providerContinuationId: "continuation:plain", provider: "codex" });
   assert.deepEqual(attached, [true, undefined]);
 });
+
+test("usage reads use the acquired native connection and discard replacement responses", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const request = { provider: "codex", workAttemptId: "usage", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(request);
+  const usage = { providerContinuationId: handle.providerContinuationId!, account: { state: "available" as const, windows: [] }, context: null, compaction: null };
+  adapter.readUsage = async () => usage;
+  assert.deepEqual(await router.readUsage(handle), usage);
+  assert.equal(await router.readUsage({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "different-birth" } }), null);
+  let resolve!: (value: typeof usage) => void;
+  adapter.readUsage = () => new Promise(done => { resolve = done; });
+  const reading = router.readUsage(handle);
+  await router.spawn(request);
+  resolve(usage);
+  assert.equal(await reading, null);
+});

@@ -13806,3 +13806,31 @@ test("read model projects child compaction before admission without changing dur
   progress = null;
   assert.equal((await model.entryWithDerivedLiveness(starting)).provider_progress, null);
 });
+
+test("inspector usage is read for the exact live continuation and drops races during the read", async () => {
+  for (const mutation of ["none", "room", "continuation", "execution", "daemon", "handle", "failure"] as const) {
+    const handle = { workAttemptId: "usage-attempt", providerContinuationId: "thread" } as any;
+    let current: DaemonManifestEntry = { ...entry, id: "usage-agent", room_id: "usage-room", work_attempt_id: "usage-attempt",
+      provider_ref: { work_attempt_id: "usage-attempt", provider_continuation_id: "thread", execution_generation_id: "execution", provider_connection: null } };
+    let generation = 4;
+    const handles = new Map([[current.id, handle]]);
+    const usage = { providerContinuationId: "thread", account: { state: "available", windows: [] }, context: null, compaction: null };
+    const model = new DaemonReadModel({
+      manifest: { getEntry: async () => current }, currentDaemonGeneration: () => generation, liveHandles: handles,
+      inbox: { detail: async () => ({ availability: "not_loaded" }) },
+      readUsage: async (received: any) => {
+        assert.equal(received, handle);
+        if (mutation === "room") current = { ...current, room_id: "another-room" };
+        if (mutation === "continuation") current = { ...current, provider_ref: { ...current.provider_ref!, provider_continuation_id: "replacement" } };
+        if (mutation === "execution") current = { ...current, provider_ref: { ...current.provider_ref!, execution_generation_id: "replacement" } };
+        if (mutation === "daemon") generation++;
+        if (mutation === "handle") handles.set(current.id, { ...handle });
+        if (mutation === "failure") throw new Error("provider unavailable");
+        return usage;
+      },
+    } as any);
+    const result = await model.inspectorDetail(current.id, "usage-room", null);
+    assert.deepEqual(result.usage, mutation === "none" ? { ...usage, executionGenerationId: "execution", daemonGeneration: 4 } : null, mutation);
+    assert.equal(result.availability, "not_loaded", "usage failures do not break retained Work detail");
+  }
+});

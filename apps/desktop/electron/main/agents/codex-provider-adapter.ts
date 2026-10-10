@@ -4,6 +4,8 @@ import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-hi
 import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
 import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
+import { ProviderUsageTracker, readCodexUsageTail } from "./provider-usage.js";
+import type { ProviderUsage } from "../../../shared/provider-usage.js";
 import { execFile } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -1179,6 +1181,10 @@ function isCodexRuntimeUnavailable(state: ProviderObservedState): boolean {
 }
 
 class CodexProviderHandle implements ProviderHandle {
+  readonly usage: ProviderUsageTracker;
+  usageRead: Promise<void> | null = null;
+  usageReadAt = 0;
+  usageConnection = "";
   subscriptionAfterMaterialization = false;
   /** Told what was turned down for the owner, so it can be shown in the agent's activity. */
   ownerRequestDeclined: ((summary: string) => void) | null = null;
@@ -1269,6 +1275,7 @@ class CodexProviderHandle implements ProviderHandle {
     private turnPolicy: Readonly<Record<string, unknown>> | null,
   ) {
     this.providerContinuationId = providerContinuationId;
+    this.usage = new ProviderUsageTracker(providerContinuationId);
     this.execution = new ProviderExecutionObserver(now);
     client.onDisconnect(() => {
       this.permissionFileChangeProposals.clear();
@@ -1390,6 +1397,46 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly deps: CodexProviderAdapterDependencies;
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
+  async readUsage(providerHandle: ProviderHandle): Promise<ProviderUsage | null> {
+    const handle = this.requireHandle(providerHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = handle.client.currentConnectionId();
+    if (this.handles.get(handle.workAttemptId) !== handle || !connection) return null;
+    handle.usage.snapshot(continuation);
+    const current = () => this.handles.get(handle.workAttemptId) === handle
+      && handle.providerContinuationId === continuation && handle.client.currentConnectionId() === connection;
+    const now = Date.parse(this.deps.now());
+    const key = `${connection}:${continuation}`;
+    if (handle.usageConnection !== key) {
+      handle.usageReadAt = 0; handle.usageRead = null;
+      if (handle.usageConnection) handle.usage.accountFailed();
+      handle.usageConnection = key;
+    }
+    if (!handle.usageRead && (!handle.usageReadAt || now - handle.usageReadAt >= 30_000)) {
+      handle.usageReadAt = now;
+      const accountRevision = handle.usage.accountRevision;
+      const reading = (async () => {
+        await Promise.all([
+          handle.client.request("account/rateLimits/read", undefined, { timeoutMs: 2_000 }).then(payload => {
+            if (current()) handle.usage.account(payload, this.deps.now(), accountRevision);
+          }, () => { if (current()) handle.usage.accountFailed(accountRevision); }),
+          (async () => {
+            if (handle.usage.snapshot(continuation).context) return;
+            try {
+              const read = await handle.client.request<{ thread?: { id?: string; path?: unknown } }>("thread/read", { threadId: continuation, includeTurns: false }, { timeoutMs: 2_000 });
+              if (!current() || read.thread?.id !== continuation) return;
+              const context = await readCodexUsageTail(read.thread.path);
+              if (current()) handle.usage.seedContext(context);
+            } catch { /* A not-yet-materialized thread has no previous sample. */ }
+          })(),
+        ]);
+      })().finally(() => { if (handle.usageRead === reading) handle.usageRead = null; });
+      handle.usageRead = reading;
+    }
+    await handle.usageRead;
+    return current() ? handle.usage.snapshot(continuation) : null;
+  }
+
   private readonly handles = new Map<string, CodexProviderHandle>();
   private readonly pollingLaunches = new WeakMap<CodexProviderHandle, { roomId: string; cwd: string; configurationRevision: number | undefined; agentSessionId: string }>();
   private readonly pollingDispatches = new WeakSet<CodexProviderHandle>();
@@ -3240,6 +3287,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     notification: RpcNotification,
     correlateLifecycle = true,
   ): void {
+    handle.usage.snapshot(handle.providerContinuationId);
+    handle.usage.codex(notification.method, notification.params, this.deps.now());
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
     const terminalMatch = /^turn\/(completed|interrupted|failed|cancelled|stopped)$/i.exec(notification.method);
