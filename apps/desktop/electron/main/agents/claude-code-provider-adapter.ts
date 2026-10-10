@@ -620,6 +620,12 @@ export const CLAUDE_BACKGROUND_WORK_TEXT = {
   notReported: "Background work that this turn started has ended, but Claude's report on it is not in this reply.",
   /** The owner ended the wait: with Stop, or with "Post answer now". Only the owner's request to stop the turn posts it. */
   ownerEnded: "The owner ended the wait for background work that this turn started. A later result will not be posted.",
+  /**
+   * The live result was missed, and the reply was read from the session. The rows that were read for the turn
+   * hold no notice of some of its work: the work still ran when the session ended, or it was stopped, or
+   * another prompt came before its notice. True for each of these.
+   */
+  noReportInSession: "This reply was read from Claude's saved session. A report on background work that this turn started is missing from it.",
   // For the owner, in the agent's activity.
   limitReached: "The wait for background work reached its time limit. The turn was ended, and a later result will not be posted to the room.",
   noAnswerBegan: "Background work has ended and Claude gave no further answer about it. The turn was ended with the answer it had.",
@@ -1560,6 +1566,12 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         throw new ClaudeRoomTurnRecoveryError("Claude room-turn recovery found no transcript for the conversation where the CLI keeps it.");
       }
       terminal = rows && recoverExactClaudeTurnFromSession(rows, turnId, handle.providerContinuationId);
+      // The turn started background work, and the session does not prove the reply complete. The reply says so
+      // in one plain line, as a turn that is held open does when it ends before all of that work was answered.
+      if (terminal && !("error" in terminal) && terminal.outcome === "reply" && terminal.backgroundWork) {
+        terminal = { turnId, outcome: "reply", evidence: terminal.evidence, text: `${terminal.text}\n\n${terminal.backgroundWork === "ended_unreported"
+          ? CLAUDE_BACKGROUND_WORK_TEXT.notReported : CLAUDE_BACKGROUND_WORK_TEXT.noReportInSession}` };
+      }
       // A turn that ended on a provider error has it in the session; that
       // is how it ended, and its reason is the provider's.
       if (!terminal && rows) {
@@ -2990,7 +3002,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     handle.permissionControlAvailable = false;
     handle.clearPermissions();
     // A turn that was held open ends like any turn the process ended under: its waiters are told below, and
-    // the session, which holds the turn's own answer, is read for it.
+    // the session is read for it. That gives the turn's own answer with the answers to the notices of its work
+    // that the session holds, and one line when the session does not prove that reply complete.
     const held = handle.heldRoomTurn;
     if (held) {
       handle.heldRoomTurn = null;

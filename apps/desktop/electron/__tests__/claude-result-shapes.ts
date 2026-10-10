@@ -140,17 +140,26 @@ export type RealClaudeCapture = {
   stream: Array<Record<string, unknown>>;
   /** The user and assistant rows of the session file, in order. They go on after the turn when the CLI did. */
   session: Array<Record<string, unknown>>;
+  /**
+   * Every row of the session file that has an id, in order: the rows of `session`, and between them the rows
+   * that are no message. Of such a row the fixture keeps its type, its ids, and the kind of its attachment.
+   */
+  session_file: Array<Record<string, unknown>>;
   /** The user and assistant rows of the separate file in which the CLI keeps a sub-agent's rows. */
   subagent_session?: Array<Record<string, unknown>>;
+  /** Every line of the process that was started again for the same session, in the capture that has one. */
+  stream_after_resume?: Array<Record<string, unknown>>;
 };
 
 /**
  * Real output of Claude Code 2.1.278. The fixture's `about` says how it was
  * recorded and what was replaced; `electron/scripts/record-claude-result-shapes.mjs` records it.
  */
-export const CLAUDE_REAL_CAPTURES: Record<string, RealClaudeCapture> = (JSON.parse(readFileSync(
+export const CLAUDE_REAL_CAPTURES: Record<string, RealClaudeCapture> = Object.fromEntries(Object.entries((JSON.parse(readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "..", "..", "__fixtures__", "claude-code-result-shapes.json"), "utf8",
-)) as { captures: Record<string, RealClaudeCapture> }).captures;
+)) as { captures: Record<string, Omit<RealClaudeCapture, "session_file">> }).captures)
+  // The fixture's `session` holds every row with an id. A test that reads messages gets the messages.
+  .map(([name, capture]) => [name, { ...capture, session: capture.session.filter((row) => row.type === "user" || row.type === "assistant"), session_file: capture.session }]));
 
 /** The `result` line of a capture. */
 export function realClaudeResult(capture: RealClaudeCapture): Record<string, unknown> {
@@ -161,11 +170,35 @@ export function realClaudeResult(capture: RealClaudeCapture): Record<string, unk
 export const CLAUDE_API_ERROR_CAPTURES: Record<string, RealClaudeCapture> = Object.fromEntries(
   Object.entries(CLAUDE_REAL_CAPTURES).filter(([, capture]) => realClaudeResult(capture).is_error === true));
 
+/**
+ * The id that the CLI gave the task of one tool call of a capture. Each recording has ids of its own, and the
+ * CLI starts the calls of one message in an order of its own, so a test names a task by the call that started
+ * it: the stand-in names its calls (`toolu_probe`; `toolu_probe_1` and `toolu_probe_2` for two calls in one
+ * message), and the CLI says in the stream which task it started for which call.
+ */
+export function claudeCapturedTask(name: string, toolUseId = "toolu_probe"): string {
+  const started = CLAUDE_REAL_CAPTURES[name]!.stream.find((event) => event.type === "system" && event.subtype === "task_started" && event.tool_use_id === toolUseId);
+  if (typeof started?.task_id !== "string") throw new Error(`The capture ${name} started no task for the call ${toolUseId}.`);
+  return started.task_id;
+}
+
 /** A capture as the CLI wrote it for this session and this turn. */
 export function realClaudeCapture(capture: RealClaudeCapture, sessionId: string, turnId: string): RealClaudeCapture {
   return JSON.parse(JSON.stringify(capture)
     .replaceAll("\"SESSION_ID\"", JSON.stringify(sessionId))
     .replaceAll("\"TURN_ID\"", JSON.stringify(turnId))) as RealClaudeCapture;
+}
+
+/**
+ * The chain of rows that a row of a session file stands on: the row, the row that its `parentUuid` names, that
+ * row's parent, and so on. It ends at the row that starts the conversation, or that starts it again after a
+ * compaction.
+ */
+export function claudeParentChain(rows: ReadonlyArray<Record<string, unknown>>, from: Record<string, unknown>): Array<Record<string, unknown>> {
+  const byId = new Map(rows.map((row) => [row.uuid, row]));
+  const chain = [from];
+  for (let parent = byId.get(from.parentUuid); parent && !chain.includes(parent); parent = byId.get(parent.parentUuid)) chain.push(parent);
+  return chain;
 }
 
 /** What happens next for an agent that holds a task, after a turn that failed. */
