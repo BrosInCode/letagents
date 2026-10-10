@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -742,6 +742,8 @@ test("the committed recordings hold no known leak shape and do not change under 
     const text = readFileSync(join(folder, `${name}.ndjson`), "utf8");
     const transcript = parseProviderReplayTranscript(text, name);
     assert.deepEqual(findReplayLeaks(text, context), [], `${name} holds no known leak shape`);
+    // The agents' Codex home can be named with a digest of the path of its owner's Codex home. No recording holds one.
+    assert.doesNotMatch(text, /codex-agent-home-[0-9a-f]{8,}/, `${name} holds no digest of a home's path`);
     const redactor = new ReplayRedactor(context);
     const entries = transcript.entries.map(({ line: _line, ...entry }): ProviderReplayEntry =>
       entry.type === "runtime_exit" ? entry : { ...entry, frame: redactor.redactFrame(entry.frame, entry.label) });
@@ -751,7 +753,21 @@ test("the committed recordings hold no known leak shape and do not change under 
 
 test("the Codex recorder records nothing when it is imported, and its cleanup stops the app-server and removes the workspace", async () => {
   // Importing would run a recording if the file did not check how it was started.
-  const { discardRecording } = await import("../scripts/record-codex-replay.js");
+  const { agentHomeDigest, discardRecording } = await import("../scripts/record-codex-replay.js");
+
+  // A recording made with HOME on an empty folder and CODEX_HOME on the owner's Codex home runs Codex in a folder
+  // whose name ends in a digest of that home's path. The recorder finds the digest, to keep it out of the transcript.
+  const emptyHome = mkdtempSync(join(tmpdir(), "letagents-replay-home-"));
+  const digest = agentHomeDigest({ HOME: emptyHome, CODEX_HOME: join(emptyHome, "another", "codex-home") });
+  assert.match(digest ?? "", /^[0-9a-f]{12}$/);
+  const hidden = new ReplayRedactor({
+    workspacePaths: [], tempDirectories: [], repositoryPaths: [], homeDirectory: emptyHome, username: "",
+    personalNames: [], hostnames: [], secrets: [digest!], ownerSetupNames: [], accountMethods: [],
+  }).redactFrame({ id: 1, result: { codexHome: join(emptyHome, ".letagents", `codex-agent-home-${digest}`) } });
+  assert.deepEqual(hidden, { id: 1, result: { codexHome: "/home/replay-user/.letagents/codex-agent-home-<redacted>" } });
+  // The usual arrangement has the plain name, and nothing to keep out.
+  assert.equal(agentHomeDigest({ HOME: emptyHome }), null);
+  rmSync(emptyHome, { recursive: true, force: true });
   const stopped: number[] = [];
   const running = mkdtempSync(join(tmpdir(), "letagents-replay-cleanup-"));
   writeFileSync(join(running, "left-behind.txt"), "x");

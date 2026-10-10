@@ -110,7 +110,9 @@ export const CODEX_SCENARIOS = {
 
 export type CodexScenarioName = keyof typeof CODEX_SCENARIOS;
 
-const WORK_ATTEMPT_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+/** The work attempt of every scenario's agent. The name of its Read-only permission profile is made from it. */
+export const CODEX_SCENARIO_WORK_ATTEMPT_ID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const WORK_ATTEMPT_ID = CODEX_SCENARIO_WORK_ATTEMPT_ID;
 
 /**
  * The reasoning effort every scenario's agent is given. It is not the effort
@@ -132,12 +134,12 @@ function spawnRequest(environment: CodexScenarioEnvironment): ProviderSpawnReque
     deliveryMode: "daemon_inbox",
     // What production pairs with daemon-inbox delivery (daemon/lifecycle-authority-mode.ts).
     lifecycleAuthorityMode: "typed",
-    // The tightest policy that still completes a turn: nothing is written and nothing is asked.
-    // It is the Read-only level's policy, and the scenarios were recorded before that level named a permission
-    // profile, with no level named. The product's launch now starts no Codex this way, so the recorder cannot
-    // run these scenarios as they are. Recording `simple`, `resume` or `turn_interrupt` again means naming the
-    // level here (`permissionProfileId: "read_only"`, `configurationRevision: 1`) and recording all three,
-    // because their frames then name the profile in place of the sandbox.
+    // The tightest access level that still completes a turn: nothing is written and nothing is asked.
+    // The level is named, as the daemon names it, and the policy is the one the daemon derives from it. So the
+    // launch is a Read-only agent's: it defines the permission profile that keeps the owner's sign-in file from
+    // a command, and every conversation and every turn names that profile in place of a sandbox.
+    permissionProfileId: "read_only",
+    configurationRevision: 1,
     launchPolicy: {
       approvalPolicy: "never",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
