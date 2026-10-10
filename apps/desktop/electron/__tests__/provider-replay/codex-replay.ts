@@ -135,6 +135,9 @@ export class CodexReplay {
       assertLiveIsolationUnchanged: async () => {},
       writeSupervisorBridgeContext: notReplayed("writeSupervisorBridgeContext"),
       resolveServerUrl: async () => REPLAY_SERVER_URL,
+      // The recording stands in for the launch too. The product's launch starts no Codex for the Read-only policy
+      // without the level's permission profile; the scenarios were recorded with that policy and no level, before
+      // there was a profile, and are replayed as they were recorded (see codex-scenarios.ts).
       launchServer: () => ({ pid: REPLAY_PID, exited: this.exited }),
       waitForServer: async () => true,
       createRpcClient: (serverUrl, onNotification) =>

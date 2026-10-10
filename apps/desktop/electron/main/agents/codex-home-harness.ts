@@ -179,11 +179,12 @@ function refusal(reason: string, remedy: string): Error {
 /**
  * Start a short-lived app-server, ask it things, and stop it. It opens no
  * thread, so it starts no MCP server and runs no hook. It is always stopped,
- * and a slow one is an error.
+ * and a slow one is an error. `experimentalApi`: the questions use a part of
+ * Codex's protocol that it answers only to a client that asks for it.
  */
 export function askCodexAppServer<T>(
   codexBin: string,
-  options: LaunchView,
+  options: LaunchView & { experimentalApi?: boolean },
   ask: (request: (method: string, params: unknown) => Promise<unknown>, initialized: unknown) => Promise<T>,
   timeoutMs = INSPECTION_TIMEOUT_MS,
 ): Promise<T> {
@@ -242,7 +243,10 @@ export function askCodexAppServer<T>(
       }
     });
     void (async () => {
-      const initialized = await request("initialize", { clientInfo: { name: "letagents", title: "LetAgents", version: "1" } });
+      const initialized = await request("initialize", {
+        clientInfo: { name: "letagents", title: "LetAgents", version: "1" },
+        ...(options.experimentalApi ? { capabilities: { experimentalApi: true } } : {}),
+      });
       child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
       finish(null, await ask(request, initialized));
     })().catch((error: unknown) => finish(error instanceof Error ? error : new Error(String(error))));

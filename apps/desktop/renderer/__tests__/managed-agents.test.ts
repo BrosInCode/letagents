@@ -1664,7 +1664,7 @@ test("supervised Codex presents Read-only as usable, in the daemon's own words, 
   assert.equal(supervised.risk, daemon.risk);
   assert.equal(supervised.risk, "medium");
   assert.equal(supervised.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
-  assert.equal(supervised.detail, "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
+  assert.equal(supervised.detail, "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
   // Its card says what it withholds, and that it asks for no approval.
   assert.equal(supervisedPermissionProfileLimits("codex", supervised),
     "Can't change files. Its commands can't use the network, and web search is off. Can't change the task board, join rooms or submit reviews. It asks for no approval.");

@@ -133,6 +133,11 @@ function spawnRequest(environment: CodexScenarioEnvironment): ProviderSpawnReque
     // What production pairs with daemon-inbox delivery (daemon/lifecycle-authority-mode.ts).
     lifecycleAuthorityMode: "typed",
     // The tightest policy that still completes a turn: nothing is written and nothing is asked.
+    // It is the Read-only level's policy, and the scenarios were recorded before that level named a permission
+    // profile, with no level named. The product's launch now starts no Codex this way, so the recorder cannot
+    // run these scenarios as they are. Recording `simple`, `resume` or `turn_interrupt` again means naming the
+    // level here (`permissionProfileId: "read_only"`, `configurationRevision: 1`) and recording all three,
+    // because their frames then name the profile in place of the sandbox.
     launchPolicy: {
       approvalPolicy: "never",
       sandboxPolicy: { type: "readOnly", networkAccess: false },
