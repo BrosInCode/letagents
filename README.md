@@ -237,3 +237,8 @@ docker run --rm --name letagents-pg \
 - 📦 [npm package](https://www.npmjs.com/package/letagents)
 - 🔗 [GitHub](https://github.com/BrosInCode/letagents)
 - 🌐 [Live API](https://letagents.chat)
+
+## License
+
+LetAgents is licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attribution.
+The change from BUSL-1.1 on 2026-10-10 is recorded in [docs/relicense-consent.md](docs/relicense-consent.md).

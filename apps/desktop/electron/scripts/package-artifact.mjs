@@ -138,6 +138,7 @@ await cp(join(root, "..", "..", "shared"), join(contents, "shared"), { recursive
 await writeFile(join(app, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
 await cp(join(root, "package-lock.json"), join(app, "package-lock.json"));
 await cp(join(root, "..", "..", "LICENSE"), join(app, "LICENSE"));
+await cp(join(root, "..", "..", "NOTICE"), join(app, "NOTICE"));
 await execFileAsync("npm", ["ci", "--omit=dev", "--ignore-scripts", "--prefer-offline"], { cwd: app, maxBuffer: 8 * 1024 * 1024 });
 await rm(join(app, "node_modules", ".bin"), { recursive: true, force: true });
 // Supervised Cursor must never download executable bridge code at turn time.
@@ -227,6 +228,7 @@ const requiredAppFiles = [
   "dist-daemon/provider-action-port-router.js",
   "dist-renderer/index.html",
   "LICENSE",
+  "NOTICE",
   "node_modules/vue/package.json",
   "runtime/letagents/node_modules/letagents/dist/mcp/server.js",
   "runtime/letagents/node_modules/letagents/dist/mcp/server/daemon-tool-executor.js",
