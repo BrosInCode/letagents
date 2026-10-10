@@ -81,8 +81,6 @@
       </div>
     </section>
 
-    <button v-if="isScrolledUp" type="button" class="room-thread-latest" @click="scrollToLatest">Latest replies ↓</button>
-
     <form class="room-thread-composer" data-testid="room-thread-composer" @submit.prevent="submitThreadReply">
       <div v-if="quoteTarget" class="room-thread-quote-preview" data-testid="room-thread-quote-preview">
         <div>
@@ -143,6 +141,7 @@
         </button>
       </div>
       <div class="room-thread-composer-footer">
+        <button v-if="isScrolledUp" type="button" class="room-thread-latest" aria-label="Latest replies" @click="scrollToLatest">Latest ↓</button>
         <p v-if="sendError || attachmentError" class="room-thread-composer-error" data-testid="room-thread-send-error">
           {{ sendError || attachmentError }}
         </p>
@@ -284,9 +283,13 @@ function cancelMessageRevealFrame(): void {
   revealFrame = null;
 }
 
-function handleScroll(): void {
+function updateScrollState(): void {
   const body = bodyElement.value;
   isScrolledUp.value = Boolean(body && body.scrollHeight - body.scrollTop - body.clientHeight > 96);
+}
+
+function handleScroll(): void {
+  updateScrollState();
   scrollRevision++;
   cancelMessageRevealFrame();
 }
@@ -328,6 +331,7 @@ onBeforeUnmount(() => {
 // IntersectionObserver clips against both the reply scroller and the room viewport.
 // Merely keeping a thread expanded is not evidence that its replies were read.
 let readObserver: IntersectionObserver | null = null;
+let sizeObserver: ResizeObserver | null = null;
 const visibleReplies = new Set<string>();
 function reportVisibleReplies(): void {
   const visible = props.active !== false && document.visibilityState === "visible" && document.hasFocus();
@@ -354,6 +358,10 @@ function observeReplies(): void {
 }
 onMounted(() => {
   observeReplies();
+  if (typeof ResizeObserver !== "undefined" && bodyElement.value) {
+    sizeObserver = new ResizeObserver(updateScrollState);
+    sizeObserver.observe(bodyElement.value);
+  }
   document.addEventListener("visibilitychange", reportVisibleReplies);
   window.addEventListener("focus", reportVisibleReplies);
   window.addEventListener("blur", reportVisibleReplies);
@@ -361,6 +369,7 @@ onMounted(() => {
 watch(() => [props.replies, props.active], () => void nextTick(observeReplies));
 onBeforeUnmount(() => {
   readObserver?.disconnect();
+  sizeObserver?.disconnect();
   document.removeEventListener("visibilitychange", reportVisibleReplies);
   window.removeEventListener("focus", reportVisibleReplies);
   window.removeEventListener("blur", reportVisibleReplies);
@@ -452,6 +461,7 @@ watch(
     const oldFirstId = oldReplies[0]?.id;
     const isPrepend = oldFirstId && newReplies.findIndex(reply => reply.id === oldFirstId) > 0;
     await nextTick();
+    updateScrollState();
     if (revision !== scrollRevision || body !== bodyElement.value || body.scrollTop !== previousScrollTop) return;
     if (isPrepend) {
       body.scrollTop = previousScrollTop + body.scrollHeight - previousScrollHeight;

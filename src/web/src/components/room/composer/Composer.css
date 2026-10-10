@@ -372,7 +372,7 @@
 
 /* Inline replies keep the room's composer independent. */
 .composer.inline-thread-composer { padding: 10px 0 0; margin: 0; border-top: 1px solid var(--line, #27272a); background: transparent; }
-.inline-thread-composer .composer-card { display: flex; align-items: flex-end; gap: 8px; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+.inline-thread-composer .composer-card { display: flex; flex-direction: row; align-items: flex-end; gap: 8px; padding: 0; border: 0; border-radius: 0; box-shadow: none; background: transparent; }
 .inline-thread-composer .composer-scroll-content { min-width: 0; flex: 1; padding: 0; }
 .inline-thread-composer .composer-typing-input { padding: 0; }
 .inline-thread-composer .message-textarea { min-height: 34px; max-height: 120px; padding: 7px 0; font-size: .85rem; }
