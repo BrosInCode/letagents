@@ -15,12 +15,12 @@ import {
   type JevRoutingMode,
 } from "../../messages/jev-conversation-routing.js";
 import { db } from "../client.js";
-import { message_agent_receipts, messages, room_agent_sessions, rooms } from "../schema.js";
+import { message_agent_receipts, messages, room_agent_sessions, room_settings, rooms } from "../schema.js";
 import type { MessageRecipientAgentTarget } from "../types.js";
 import { MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { chooseAnsweringSession } from "../../rooms/answering-session.js";
 import { getSessionConnections } from "./session-connections.js";
-import { releaseAgentReplyTurnHoldsTx } from "./reply-turns.js";
+import { planReplyTurns, releaseAgentReplyTurnHoldsTx } from "./reply-turns.js";
 
 /** Rooms above this size fall back to deterministic routing rather than ship a huge state. */
 const MAX_JEV_ROUTING_SESSIONS = 200;
@@ -242,7 +242,11 @@ export async function applyDeferredJevReceipts(
 ): Promise<MessageRecipientAgentTarget[]> {
   const wanted = new Set(decision.agentKeys.slice(0, MAX_ACCOUNT_ROUTING_TARGETS));
   const publisherAgentKey = plan.message.publisher_agent_key?.trim() || null;
-  const [visible] = await tx.select({ number: messages.number }).from(messages).where(and(
+  const [visible] = await tx.select({
+    number: messages.number,
+    // ISO form, as create.ts plans with; the column's text form is not one.
+    sent_at: sql<string>`to_char(${messages.timestamp} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
+  }).from(messages).where(and(
     eq(messages.room_id, plan.roomId), eq(messages.number, plan.message.number),
     sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`,
   ));
@@ -303,15 +307,59 @@ export async function applyDeferredJevReceipts(
     }];
   });
   if (rows.length === 0) return [];
+  // Several elected agents answer in turns when the room turned that on,
+  // exactly as at send time. Deadlines count from the message's send time,
+  // not from this pass: a slow Jev run shortens the turns, and a run longer
+  // than one step (90 s) leaves the message effectively parallel. Only the
+  // active pass reaches here; shadow mode compares and never writes receipts.
+  const [replyOrder] = rows.length >= 2
+    ? await tx.select({ order: room_settings.agent_reply_order })
+      .from(room_settings).where(eq(room_settings.room_id, plan.roomId))
+    : [];
+  const planned = planReplyTurns(rows, {
+    messageNumber: plan.message.number,
+    timestamp: visible.sent_at,
+    sequential: replyOrder?.order === "sequential",
+  });
   const inserted = await tx
     .insert(message_agent_receipts)
-    .values(rows)
+    .values(planned)
     .onConflictDoNothing()
-    .returning({ agent_key: message_agent_receipts.agent_key, agent_session_id: message_agent_receipts.agent_session_id });
-  // Deferred receipts are parallel, so they end the agents' earlier held
-  // reply turns like any other activation. The caller's message_routed wakes
-  // every worker of the room after commit.
-  await releaseAgentReplyTurnHoldsTx(tx, plan.roomId, inserted.map((receipt) => receipt.agent_key));
+    .returning({
+      agent_key: message_agent_receipts.agent_key,
+      agent_session_id: message_agent_receipts.agent_session_id,
+      turn_position: message_agent_receipts.turn_position,
+    });
+  // A parallel deferred receipt is a direct activation: it ends the agent's
+  // earlier held turns, as at send time. A sequenced one never does. The
+  // caller's message_routed wakes every worker of the room after commit;
+  // the per-agent hold frontier keeps positions 2 and later hidden.
+  await releaseAgentReplyTurnHoldsTx(
+    tx,
+    plan.roomId,
+    inserted.filter((receipt) => receipt.turn_position === null).map((receipt) => receipt.agent_key),
+  );
+  // The send-time rule (a direct activation ends the agent's holds) ran
+  // before these holds existed. An agent that was mentioned, replied to or
+  // otherwise directly activated on a later message while Jev was deciding
+  // must not wait behind a turn on this one: the frontier would hide that
+  // later message too. The caller's message_routed after commit reaches
+  // every worker of the room, so it is also the wake for these agents.
+  await tx.execute(sql`
+    UPDATE ${message_agent_receipts} AS held
+       SET hold_released_at = now(), hold_release_reason = 'activation'
+     WHERE held.message_room_id = ${plan.roomId}
+       AND held.message_number = ${plan.message.number}
+       AND held.hold_released_at IS NULL
+       AND held.hold_release_after IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM ${message_agent_receipts} AS later
+          WHERE later.message_room_id = held.message_room_id
+            AND later.agent_key = held.agent_key
+            AND later.message_number > held.message_number
+            AND later.turn_position IS NULL
+       )
+  `);
   return inserted.map((receipt) => ({
     agent_key: receipt.agent_key,
     agent_session_id: receipt.agent_session_id,
