@@ -104,7 +104,7 @@ export function validatedNativeRuntimeDeath(terminal: Pick<ProviderActionTermina
   return death;
 }
 
-export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal };
+export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal; /** Lines for the owner, when the adapter itself stopped the runtime it found. */ notices?: readonly string[] };
 export type CustodialPollingActivationRequest = {
   operationId: string; roomId: string; cwd: string; agentDisplayName: string;
   workerSession: { agentSessionId: string; roomCursor: string };

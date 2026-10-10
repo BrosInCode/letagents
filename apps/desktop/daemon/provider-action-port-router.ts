@@ -183,10 +183,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       // omitted a provider connection it did not know how to serialize; the
       // remembered native handle is the authority needed to repair that
       // manifest, never permission to launch a replacement.
-      if (provider === "codex" && ref.launchPolicy !== undefined
-        && await (await this.adapter(provider)).attach({
+      if (provider === "codex" && ref.launchPolicy !== undefined) {
+        const bound = await (await this.adapter(provider)).attach({
           ...ref, providerConnection: ref.providerConnection ?? handle.providerConnection,
-        }) !== handle) return null;
+        });
+        // The adapter can stop a runtime that fails a check against the policy it is given
+        // here. Its proof that the process is gone is then the answer, as at a first attach.
+        if (bound !== handle) return bound && isAttachTerminal(bound) ? bound : null;
+      }
       return publicHandle(handle);
     }
     const adapter = await this.adapter(provider);

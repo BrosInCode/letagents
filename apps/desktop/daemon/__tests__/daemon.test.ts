@@ -10121,7 +10121,8 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     const codexProjection = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: providerNeutralId, room_id: "provider-neutral-room", provider: "codex",
       desired_state: "running", observed_state: "working",
-      delivery_mode: "daemon_inbox", permission_profile_id: "read_only",
+      // Not Read-only: a Read-only Codex agent may not claim a task, and this test is about the turn capability.
+      delivery_mode: "daemon_inbox", permission_profile_id: "full_access",
       workspace_path: providerNeutralAttempt.workspace_path, work_attempt_id: providerNeutralAttempt.work_attempt_id,
       run_id: providerNeutralExecution.execution_generation_id,
       deployment_id: serializeDaemonDeploymentId(providerNeutralId, providerNeutralExecution.execution_generation_id),

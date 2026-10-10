@@ -8,8 +8,10 @@ import type {
   DesktopAgentProviderPreflight,
   DesktopAgentProviderPreflightInput,
 } from "../../electron/ipc-types";
+import { listManagedAgentPermissionProfiles } from "../../electron/main/agents/managed-agent-permission-profiles";
 import { useAddAgentConfiguration } from "../src/components/desktop/content/add-agent/useAddAgentConfiguration";
 import { useAddAgentSetup } from "../src/components/desktop/content/add-agent/useAddAgentSetup";
+import { supervisedPermissionProfilePresentation } from "../src/domain/managed-agents";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -350,6 +352,65 @@ test("Cursor defaults to supervision and retains legacy permission compatibility
     "read_only",
     "a new repo-less room is safe before its provider refresh resolves",
   );
+});
+
+test("Codex in a room with no project is offered Read-only first, and can start with it", () => {
+  const configuration = useAddAgentConfiguration();
+  const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("codex");
+  const repoRootPath = ref<string | null>(null);
+  // The real catalog, presented as Add Agent presents it for a supervised agent.
+  const catalog = listManagedAgentPermissionProfiles("codex");
+  const selectedPermissionProfiles = computed(() => configuration.launchMode.value === "supervised"
+    ? catalog.map((profile) => supervisedPermissionProfilePresentation("codex", profile, { hasProject: Boolean(repoRootPath.value) }))
+    : catalog);
+  const selectedPermissionProfile = computed(() =>
+    selectedPermissionProfiles.value.find((profile) => profile.id === configuration.selectedPermissionProfileId.value) ?? null);
+  const actions = configuration.bind({
+    open: () => true,
+    roomIdentifier: () => "room-without-project",
+    roomGitRoom: () => null,
+    repoRootPath: () => repoRootPath.value,
+    selectedProviderId,
+    selectedProvider: computed<DesktopAgentProvider>(() => ({ ...provider("codex"), permissionProfiles: catalog, defaultPermissionProfileId: "full_access" })),
+    selectedPermissionProfiles,
+    selectedPermissionProfile,
+    showOpenModelConfig: computed(() => false),
+    showModelSelector: computed(() => false),
+    showEffortSelector: computed(() => false),
+    providerModelOptions: computed(() => []),
+    selectedModel: computed(() => null),
+    selectedModelSource: computed(() => null),
+    requestPreflight: () => undefined,
+    runPreflight: async () => undefined,
+    onMessage: () => undefined,
+  });
+
+  // No project: a scratch folder is not a trusted boundary, so the most restrictive level is the one offered.
+  configuration.launchMode.value = "supervised";
+  actions.syncPermissionProfileSelection();
+  assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
+  // Start is enabled only for a level that is available. Before Codex had Read-only this choice was
+  // shown as unavailable, and the owner had to pick another level before the agent could start.
+  assert.equal(selectedPermissionProfile.value?.status, "available");
+  assert.equal(selectedPermissionProfile.value?.label, "Read-only");
+
+  // The owner's own choice in that room is kept over the offered one.
+  actions.selectPermissionProfile(selectedPermissionProfiles.value.find((profile) => profile.id === "ask_before_write")!);
+  actions.syncPermissionProfileSelection();
+  assert.equal(configuration.selectedPermissionProfileId.value, "ask_before_write");
+
+  // With a project Codex is offered its default level, as before.
+  repoRootPath.value = "/repo";
+  actions.syncPermissionProfileSelection();
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+  assert.equal(catalog.find((profile) => profile.isDefault)?.id, "full_access");
+
+  // A legacy agent still has no Read-only: the level stays unavailable there, selected or not.
+  repoRootPath.value = null;
+  configuration.launchMode.value = "legacy";
+  actions.syncPermissionProfileSelection();
+  assert.equal(selectedPermissionProfiles.value.find((profile) => profile.id === "read_only")?.status, "gated");
+  assert.notEqual(selectedPermissionProfile.value?.id === "read_only" && selectedPermissionProfile.value.status === "available", true);
 });
 
 test("Codex keeps legacy and supervised ask-before-write selections independent", () => {

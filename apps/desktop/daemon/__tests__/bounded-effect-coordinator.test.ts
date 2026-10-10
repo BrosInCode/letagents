@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../shared/codex-read-only-room-tools.mjs";
 import {
   BoundedEffectCoordinator,
+  readOnlyRoomToolRefusal,
   type BoundedEffectContext,
   type BoundedEffectCoordinates,
   type BoundedEffectCoordinatorOptions,
@@ -103,9 +105,9 @@ function session(provider = "codex"): DaemonToolAgentSession {
   };
 }
 
-function boundedContext(provider = "codex"): BoundedEffectContext {
+function boundedContext(provider = "codex", permissionProfileId: string | null = "full_access"): BoundedEffectContext {
   return {
-    entry: { id: "agent-a", room_id: "room-a", provider, workspace_path: "/workspace/a" },
+    entry: { id: "agent-a", room_id: "room-a", provider, workspace_path: "/workspace/a", permission_profile_id: permissionProfileId },
     agent: {
       agentSessionId: "session-a",
       bearer: "bearer-a",
@@ -124,6 +126,8 @@ function boundedContext(provider = "codex"): BoundedEffectContext {
 type HarnessOptions = {
   assertContext?: (input: BoundedEffectCoordinates) => void;
   provider?: string;
+  /** The access level the agent's owner saved; Full access unless a test says otherwise. */
+  permissionProfileId?: string | null;
   prepareResult?: { created: boolean; effect: SupervisedEffectRecord };
   roomMoveResult?: { created: boolean; effect: SupervisedEffectRecord };
   markResult?: SupervisedEffectRecord;
@@ -135,7 +139,7 @@ type HarnessOptions = {
 
 function harness(options: HarnessOptions = {}) {
   const events: string[] = [];
-  const context = boundedContext(options.provider);
+  const context = boundedContext(options.provider, options.permissionProfileId === undefined ? "full_access" : options.permissionProfileId);
   let contextCalls = 0;
   let capturedPrepare: Record<string, unknown> | null = null;
   let capturedRoomMove: Record<string, unknown> | null = null;
@@ -709,4 +713,117 @@ test("raw daemon thread intent rejects arguments before admitting a journal effe
     assert.equal(h.events.includes("journal:prepare"), false);
     assert.equal(h.events.includes("runtime:execute"), false);
   }
+});
+
+/** Every room tool the room server registers for a supervised turn, by its own registration code. */
+async function registeredRoomTools(): Promise<string[]> {
+  const { letAgentsRuntimeContract } = await import(new URL("../../../../src/mcp/server/runtime-contract.ts", import.meta.url).href);
+  return [...new Set<string>(["https://letagents.chat", "letagents-local://rooms"]
+    .flatMap((apiUrl) => letAgentsRuntimeContract(apiUrl).profiles.cursor_supervised_room_turn.tools as string[]))].sort();
+}
+
+/** A call the coordinator accepts for the tool, as far as its own input checks go. */
+const roomToolCall = (toolName: string) => ({ toolName, input: toolName === "set_reply_thread" ? {} : toolName === "join_room" ? { name: "room-b" } : { text: "hello" } });
+const READ_ONLY_REFUSAL = (toolName: string) => new RegExp(`^Error: Read-only access does not allow the room tool "${toolName}"\\. This agent can read the room and post in it\\. `
+  + "It cannot change the task board, join rooms or submit reviews\\. Its owner can choose another access level\\.$");
+
+test("the daemon lets a Read-only Codex agent use the 17 named room tools and refuses every other one, before anything is journaled or run", { timeout: 30_000 }, async () => {
+  const registered = await registeredRoomTools();
+  const allowed = [
+    "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events",
+    "get_room_guidelines", "get_room_memory", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
+    "read_messages", "request_human_input", "send_message", "send_thread_message", "set_reply_thread",
+  ];
+  // One list: the one Codex is told is the one the daemon keeps.
+  assert.deepEqual([...CODEX_READ_ONLY_ROOM_TOOLS].sort(), allowed);
+  assert.deepEqual(allowed.filter((toolName) => !registered.includes(toolName)), [], "every allowed tool is one the room server has");
+  const others = registered.filter((toolName) => !allowed.includes(toolName));
+  assert.equal(others.length >= 31, true, "the room server registers the other tools this test refuses");
+  for (const toolName of ["update_task", "claim_task", "join_room", "submit_review_verdict", "initialize_repo", "check_repo", "remember_room_fact", "add_wake_rule"]) {
+    assert.equal(others.includes(toolName), true, toolName);
+  }
+
+  // Each allowed tool passes, on the path that prepares an effect and on the path that runs the tool in the daemon.
+  for (const toolName of allowed) {
+    const prepared = harness({ permissionProfileId: "read_only" });
+    assert.equal((await prepared.subject.prepare(prepareInput(roomToolCall(toolName)))).state, "prepared", toolName);
+    assert.equal(prepared.events.includes("journal:prepare"), true, toolName);
+    const executed = harness({ permissionProfileId: "read_only" });
+    assert.equal((await executed.subject.execute(executeInput(roomToolCall(toolName)))).state, "completed", toolName);
+    assert.equal(executed.events.includes("runtime:execute"), true, toolName);
+  }
+
+  // Each other registered tool is refused with a tool error that names the level, and leaves nothing behind.
+  for (const toolName of others) {
+    for (const path of ["prepare", "execute"] as const) {
+      const refused = harness({ permissionProfileId: "read_only" });
+      await assert.rejects(path === "prepare"
+        ? refused.subject.prepare(prepareInput(roomToolCall(toolName)))
+        : refused.subject.execute(executeInput(roomToolCall(toolName))), READ_ONLY_REFUSAL(toolName), `${path} ${toolName}`);
+      assert.deepEqual(refused.events.filter((event) => /^(journal|room-move|commit|fence):|^runtime:execute$/.test(event)), [], `${path} ${toolName}: nothing was journaled, moved or run`);
+      assert.equal(refused.capturedPrepare, null);
+      assert.equal(refused.capturedRoomMove, null);
+      assert.equal(refused.capturedExecution, null);
+    }
+  }
+
+  // The limit is the list, not the kind of tool. A tool the room server classes as a read is refused as well
+  // when it is not named: these two run git in a folder on this Mac, and one asks another machine.
+  for (const toolName of ["check_repo", "check_repo_visibility"]) {
+    assert.equal(others.includes(toolName), true, toolName);
+    const read = harness({ permissionProfileId: "read_only", runtimeMutation: false });
+    await assert.rejects(read.subject.execute(executeInput({ toolName, input: {} })), READ_ONLY_REFUSAL(toolName), toolName);
+    assert.deepEqual(read.events.filter((event) => /^(journal|room-move|commit|fence):|^runtime:execute$/.test(event)), [], `${toolName}: nothing was journaled or run`);
+    assert.equal(read.capturedPrepare, null);
+    assert.equal(read.capturedExecution, null);
+    const prepared = harness({ permissionProfileId: "read_only", runtimeMutation: false });
+    await assert.rejects(prepared.subject.prepare(prepareInput({ toolName, input: {}, mutation: false })), READ_ONLY_REFUSAL(toolName), toolName);
+    assert.equal(prepared.capturedPrepare, null);
+    // The same call is run for an agent at another level: only Read-only changes.
+    const other = harness({ permissionProfileId: "ask_before_write", runtimeMutation: false });
+    assert.equal((await other.subject.execute(executeInput({ toolName, input: {} }))).state, "completed", toolName);
+    assert.equal(other.capturedPrepare?.mutation, false, `${toolName} is prepared as a read`);
+  }
+  // And a named tool passes as a read, the way the room server classes most of them.
+  const namedRead = harness({ permissionProfileId: "read_only", runtimeMutation: false });
+  assert.equal((await namedRead.subject.execute(executeInput({ toolName: "read_messages", input: { limit: 1 } }))).state, "completed");
+  assert.equal(namedRead.capturedPrepare?.mutation, false);
+
+  // A tool the room server gains later has no name here: it is refused by default.
+  const later = harness({ permissionProfileId: "read_only" });
+  await assert.rejects(later.subject.execute(executeInput(roomToolCall("tool_added_later"))), READ_ONLY_REFUSAL("tool_added_later"));
+  assert.equal(later.capturedExecution, null);
+  // A name is allowed only as it is: one that differs by a space or by case is another tool.
+  for (const toolName of ["send_message ", " send_message", "Send_Message", "send_message\n"]) {
+    assert.match(readOnlyRoomToolRefusal({ provider: "codex", permission_profile_id: "read_only" }, toolName) ?? "", /^Read-only access does not allow the room tool/, JSON.stringify(toolName));
+  }
+  // The level is read as it is stored, whatever surrounds its name or the provider's.
+  assert.match(readOnlyRoomToolRefusal({ provider: " Codex ", permission_profile_id: " read_only " }, "update_task") ?? "", /^Read-only access does not allow/);
+});
+
+test("the Read-only room tool limit changes nothing for any other access level or agent app", { timeout: 30_000 }, async () => {
+  const registered = [...await registeredRoomTools(), "tool_added_later"];
+  // Codex at every other level, and the other agent apps at their own Read-only: no tool is refused by this limit.
+  const unchanged: Array<[string, string | null]> = [
+    ["codex", "full_access"], ["codex", "ask_before_write"], ["codex", "auto_review"], ["codex", null], ["codex", "sandboxed_write"],
+    ["claude-code", "read_only"], ["cursor", "read_only"], ["open-model", "read_only"], ["claude-code", "full_access"],
+  ];
+  for (const [provider, permissionProfileId] of unchanged) {
+    for (const toolName of registered) {
+      assert.equal(readOnlyRoomToolRefusal({ provider, permission_profile_id: permissionProfileId }, toolName), null, `${provider}/${permissionProfileId}/${toolName}`);
+    }
+  }
+  // Through the coordinator: a board tool and a tool with no name here are prepared and run as before.
+  for (const [provider, permissionProfileId] of unchanged) {
+    if (provider === "cursor") continue; // Cursor's turns carry a capability these calls do not model.
+    for (const toolName of ["update_task", "submit_review_verdict", "tool_added_later"]) {
+      const subject = harness({ provider, permissionProfileId });
+      assert.equal((await subject.subject.execute(executeInput(roomToolCall(toolName)))).state, "completed", `${provider}/${permissionProfileId}/${toolName}`);
+      assert.equal(subject.events.includes("runtime:execute"), true);
+    }
+  }
+  // A room move is still the room-move port's, for an agent that may move.
+  const move = harness({ permissionProfileId: "full_access" });
+  await move.subject.prepare(prepareInput(roomToolCall("join_room")));
+  assert.notEqual(move.capturedRoomMove, null);
 });
