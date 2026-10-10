@@ -12,8 +12,14 @@
  * routing-frontier.ts): every receipt is still written at send time, so
  * Message info and the human transcript do not change.
  */
+// Deadlines count from the message's send time. Receipts applied later (Jev's
+// deferred election) therefore get shorter turns; one delayed past a step
+// finds that position already due.
 export const REPLY_TURN_HOLD_STEP_MS = 90_000;
-export const SEQUENTIAL_REPLY_REASONS: ReadonlySet<string> = new Set(["broadcast", "small_room"]);
+// Reasons that wake several agents for one untagged question. jev_routed is
+// Jev's election in a room with Smart conversation routing; it is applied by
+// the deferred pass, after commit. recent_conversation is always one agent.
+export const SEQUENTIAL_REPLY_REASONS: ReadonlySet<string> = new Set(["broadcast", "small_room", "jev_routed"]);
 /**
  * Above this many agents a broadcast stays parallel: the last position would
  * wait (count - 1) × the step, which stops being a conversation turn.

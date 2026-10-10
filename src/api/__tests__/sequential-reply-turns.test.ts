@@ -49,6 +49,8 @@ test("mentions, single receipts, mixed reasons and the parallel setting stay par
   assert.ok(parallel([...receipts().slice(0, 2), { agent_key: "owner/d", activation_reason: "reply_target" }]));
   assert.ok(parallel(receipts(), false));
   assert.ok(!parallel(receipts("small_room").slice(0, 2)));
+  assert.ok(!parallel(receipts("jev_routed")), "Jev's election of several agents is sequenced too");
+  assert.ok(parallel(receipts("recent_conversation")), "recent_conversation stays parallel");
 });
 
 test("guidance names who answered, or says the agent before ran out of time", () => {
