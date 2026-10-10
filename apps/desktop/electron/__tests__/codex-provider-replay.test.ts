@@ -3,12 +3,16 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 
+import { SIGN_IN_NOT_HIDDEN, codexReadOnlyProfileId } from "../main/agents/codex-agent-home.js";
+import { READ_ONLY_POLICY_WITHOUT_LEVEL } from "../main/agents/codex-app-server.js";
+import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
 import type { ProviderObservedState, ProviderStreamEvent } from "../main/agents/provider-adapter.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
-import { CODEX_REPLAY_PROMPT, CodexReplay, normalizeCodexOutbound } from "./provider-replay/codex-replay.js";
+import { CODEX_REPLAY_PROMPT, CodexReplay, normalizeCodexOutbound, type CodexReplayOptions } from "./provider-replay/codex-replay.js";
 import {
   CODEX_SCENARIOS,
   CODEX_SCENARIO_REASONING_EFFORT,
+  CODEX_SCENARIO_WORK_ATTEMPT_ID,
   runCodexScenario,
   scenarioSourceMessageLine,
   type CodexScenarioName,
@@ -28,6 +32,14 @@ import {
 // sends: the recording does. See docs/provider-replay-tests.md.
 
 const WORKSPACE = "/replay/workspace";
+
+/**
+ * Every scenario's agent has the Read-only access level, so its launch defines this permission profile, and
+ * its conversations and turns name it in place of a sandbox. The name is made from the work attempt.
+ */
+const READ_ONLY_PROFILE = codexReadOnlyProfileId(CODEX_SCENARIO_WORK_ATTEMPT_ID);
+/** The `config` a conversation of a Read-only agent is started or resumed with, for one reasoning effort. */
+const readOnlyThreadConfig = (effort: string) => ({ model_reasoning_effort: effort, web_search: "disabled" });
 
 function loadFixture(name: CodexScenarioName): ProviderReplayTranscript {
   return loadProviderReplayTranscript(
@@ -82,8 +94,10 @@ async function replayScenario(
     replay: CodexReplay,
     observedState: () => ProviderObservedState | null,
   ) => void,
+  /** What the stand-in launch is told of the launch's own checks. */
+  launch: Pick<CodexReplayOptions, "codexHonoursDeny"> = {},
 ) {
-  const replay = new CodexReplay(transcript, { workspace: WORKSPACE });
+  const replay = new CodexReplay(transcript, { workspace: WORKSPACE, ...launch });
   sessions.push(replay.session);
   const published: ProviderStreamEvent[] = [];
   let spawnedState: (() => ProviderObservedState) | null = null;
@@ -274,7 +288,7 @@ test("Codex replay: the thread runs with the reasoning effort the agent was give
     // What the adapter sent: the effort in the form Codex takes it, and after Codex listed its models.
     const [threadStart, ...otherThreadStarts] = sentFrames(replay, "thread/start");
     assert.deepEqual(otherThreadStarts, [], name);
-    assert.deepEqual((threadStart!.params as Row).config, { model_reasoning_effort: CODEX_SCENARIO_REASONING_EFFORT }, name);
+    assert.deepEqual((threadStart!.params as Row).config, readOnlyThreadConfig(CODEX_SCENARIO_REASONING_EFFORT), name);
     assert.equal(Object.hasOwn(threadStart!.params as Row, "reasoningEffort"), false, name);
     const sent = replay.session.outbound.map((frame) => frame.method);
     assert.ok(sent.indexOf("model/list") >= 0 && sent.indexOf("model/list") < sent.indexOf("thread/start"), name);
@@ -323,7 +337,8 @@ test("Codex replay: a reply that reports no effort is told to the owner, and a r
   // explicit null. So a null effort is Codex saying that the conversation has none.
   const real = recorded(fixture).response("thread/start").frame.result as Row;
   assert.equal(real.reasoningEffort, CODEX_SCENARIO_REASONING_EFFORT);
-  assert.equal(Object.hasOwn(real, "activePermissionProfile") && real.activePermissionProfile, null);
+  // The work folder of the recording is no Git repository.
+  assert.equal(Object.hasOwn(real.thread, "gitInfo") && real.thread.gitInfo, null);
   // Not a recording: the effort in the recorded reply is changed here.
   const replied = (change: (result: JsonObject) => JsonObject): ProviderReplayTranscript => ({
     ...fixture,
@@ -358,7 +373,7 @@ test("Codex replay: a resume in a second process gives the conversation the effo
   assert.deepEqual(otherResumes, []);
   for (const [sent, effort] of [[resume!, reasoningEffort], [loadedResume!, loadedReasoningEffort]] as const) {
     assert.equal((sent.params as Row).threadId, real.threadId);
-    assert.deepEqual((sent.params as Row).config, { model_reasoning_effort: effort });
+    assert.deepEqual((sent.params as Row).config, readOnlyThreadConfig(effort));
     assert.equal(Object.hasOwn(sent.params as Row, "reasoningEffort"), false);
   }
   // It asks Codex for its models before each resume. (That it waits for the answer is a matter for the adapter's own tests.)
@@ -469,21 +484,122 @@ test("Codex replay fails when the adapter no longer sends what was recorded", as
   const stale: ProviderReplayTranscript = {
     ...fixture,
     entries: fixture.entries.map((entry) => entry.type === "expect_outbound" && entry.label === "thread/start"
-      ? { ...entry, frame: { ...entry.frame, params: { ...(entry.frame.params as JsonObject), sandbox: "workspace-write" } } }
+      ? { ...entry, frame: { ...entry.frame, params: { ...(entry.frame.params as JsonObject), permissions: "another_profile" } } }
       : entry),
   };
   await assert.rejects(replayScenario("simple", stale), (error: Error) => {
     // The two frames are on the error as data, and in its message as a diff.
     const { actual, expected } = error.cause as { actual: Row; expected: Row };
-    assert.equal(actual.params.sandbox, "read-only");
-    assert.equal(expected.params.sandbox, "workspace-write");
+    assert.equal(actual.params.permissions, READ_ONLY_PROFILE);
+    assert.equal(expected.params.permissions, "another_profile");
     // A terminal that asks for colour gets colour codes in the diff. They are not part of the text.
     const message = stripVTControlCharacters(error.message);
     assert.match(message, /Outbound frame \d+ does not match the recording .*expect_outbound "thread\/start"/);
-    assert.match(message, /\+\s+sandbox: 'read-only'/);
-    assert.match(message, /-\s+sandbox: 'workspace-write'/);
+    assert.match(message, new RegExp(`\\+\\s+permissions: '${READ_ONLY_PROFILE}'`));
+    assert.match(message, /-\s+permissions: 'another_profile'/);
     return true;
   });
+});
+
+test("Codex replay: each recording is a Read-only agent's launch: the launch defines its permission profile, every conversation and every turn names that profile and no sandbox, and Codex reports it", async () => {
+  const sends = {
+    simple: ["thread/start", "turn/start"],
+    turn_interrupt: ["thread/start", "turn/start"],
+    resume: ["thread/resume", "thread/resume", "turn/start"],
+  } as const satisfies Record<CodexScenarioName, readonly string[]>;
+  for (const name of Object.keys(sends) as CodexScenarioName[]) {
+    const { transcript, replay } = await replayScenario(name);
+    const real = recorded(transcript);
+
+    // The launch the adapter asked for: one, sandboxed, with the Read-only policy and the profile of the agent's work attempt.
+    const [launch, ...otherLaunches] = replay.launches;
+    assert.deepEqual(otherLaunches, [], name);
+    assert.deepEqual(
+      [launch!.options.sandboxed, launch!.options.readOnlySandbox, launch!.options.hideSignInProfile, Object.hasOwn(launch!.options, "writableSandbox")],
+      [true, true, READ_ONLY_PROFILE, false], name);
+    assert.equal(launch!.options.configOverrides.includes('web_search="disabled"'), true, name);
+    // What the product's launch gives Codex for it, once Codex has shown that it keeps a denied file from a command:
+    // the profile, which is Codex's read-only one with the sign-in file denied at the owner's path and at the link in
+    // the agents' home, and that profile as the default. The recorded Codex ran with that home, and said so.
+    const home = (real.response("initialize").frame.result as Row).codexHome as string;
+    assert.match(home, /^\/home\/replay-user\/\.letagents\/codex-agent-home(?:-<redacted>)?$/, name);
+    assert.equal(launch!.codexHome, home, name);
+    assert.deepEqual(launch!.profileOverrides, [
+      `permissions.${READ_ONLY_PROFILE}={ extends = ":read-only", filesystem = { "/home/replay-user/.codex/auth.json" = "deny", ${JSON.stringify(`${home}/auth.json`)} = "deny" } }`,
+      `default_permissions="${READ_ONLY_PROFILE}"`,
+    ], name);
+
+    // What the adapter sent: each frame that gives a conversation or a turn its access names the profile, and none names a sandbox.
+    const access = replay.session.outbound.filter((frame) => ["thread/start", "thread/resume", "turn/start"].includes(String(frame.method)));
+    assert.deepEqual(access.map((frame) => frame.method), sends[name], name);
+    for (const frame of access) {
+      const params = frame.params as Row;
+      assert.deepEqual([params.permissions, params.approvalPolicy, params.approvalsReviewer], [READ_ONLY_PROFILE, "never", "user"], `${name}, ${String(frame.method)}`);
+    }
+    const namesASandbox = (frame: JsonObject) => {
+      const params = (frame.params ?? {}) as Row;
+      return Object.hasOwn(params, "sandbox") || Object.hasOwn(params, "sandboxPolicy");
+    };
+    assert.deepEqual(replay.session.outbound.filter(namesASandbox).map((frame) => frame.method), [], `${name}: no frame names a sandbox`);
+
+    // What real Codex answered to each start and each resume: the profile by name, as an extension of its own
+    // read-only one, the read-only sandbox with no network, and nobody to ask. A reply to `turn/start` holds none of it.
+    const opened = real.inbound
+      .filter((entry) => (entry.label === "thread/start" || entry.label === "thread/resume") && Object.hasOwn(entry.frame, "result"))
+      .map((entry) => entry.frame.result as Row);
+    assert.equal(opened.length, sends[name].length - 1, name);
+    for (const reply of opened) {
+      assert.deepEqual(reply.activePermissionProfile, { id: READ_ONLY_PROFILE, extends: ":read-only" }, name);
+      assert.deepEqual(reply.sandbox, { type: "readOnly", networkAccess: false }, name);
+      assert.deepEqual([reply.approvalPolicy, reply.approvalsReviewer], ["never", "user"], name);
+    }
+    // Codex reported no change of those settings afterwards.
+    assert.deepEqual(real.notifications.filter((entry) => entry.frame.method === "thread/settings/updated"), [], name);
+  }
+});
+
+test("Codex replay: a start or a resume whose reply does not report the launch's permission profile starts no Read-only agent", async () => {
+  const notConfirmed = "This version of Codex did not confirm that it keeps your Codex sign-in file from this agent's commands, so the agent was not started. "
+    + "If Codex is not up to date, update it. If it is, update LetAgents, or choose another access level: at every other level the agent's commands can read that file.";
+  // Not recordings: the reply that opens the conversation is changed here. Everything else in it stays as Codex sent it.
+  const changes: Array<[string, (result: JsonObject) => JsonObject]> = [
+    ["no profile", (result) => ({ ...result, activePermissionProfile: null })],
+    ["no field for it", ({ activePermissionProfile: _notReported, ...result }) => result],
+    ["another profile", (result) => ({ ...result, activePermissionProfile: { id: "another_profile", extends: ":read-only" } })],
+    ["the profile, as an extension of another one", (result) => ({ ...result, activePermissionProfile: { id: READ_ONLY_PROFILE, extends: ":workspace" } })],
+  ];
+  for (const [name, label] of [["simple", "thread/start"], ["resume", "thread/resume"]] as const) {
+    const fixture = loadFixture(name);
+    const reply = fixture.entries.find((entry) => entry.type === "emit_inbound" && entry.label === label && Object.hasOwn(entry.frame, "result"));
+    assert.ok(reply && reply.type === "emit_inbound", `${name} holds a reply to ${label}`);
+    for (const [what, change] of changes) {
+      const changed: ProviderReplayTranscript = {
+        ...fixture,
+        entries: fixture.entries.map((entry) => entry === reply ? { ...reply, frame: { ...reply.frame, result: change(reply.frame.result as JsonObject) } } : entry),
+      };
+      await assert.rejects(replayScenario(name, changed), (error: Error) => error.message === notConfirmed, `${name}: ${what}`);
+    }
+  }
+});
+
+test("Codex replay: the stand-in launch refuses what the product's launch refuses, and then no frame is sent", async () => {
+  // A Codex that did not show that it keeps a denied file from a command: no Read-only agent is started with it.
+  const careless = new CodexReplay(loadFixture("simple"), { workspace: WORKSPACE, codexHonoursDeny: false });
+  await assert.rejects(runCodexScenario(CODEX_SCENARIOS.simple, {
+    dependencies: careless.dependencies, codexBin: "codex-replay", workspace: WORKSPACE, settled: async () => {},
+  }), (error: Error) => error.message === SIGN_IN_NOT_HIDDEN);
+  assert.deepEqual([careless.launches, careless.session.outbound, careless.signals], [[], [], []]);
+  careless.session.dispose();
+
+  // The Read-only policy without the name of the level has no profile: the launch starts nothing for it.
+  const unnamed = new CodexReplay(loadFixture("simple"), { workspace: WORKSPACE });
+  await assert.rejects(new CodexProviderAdapter({ codexBin: "codex-replay", dependencies: unnamed.dependencies }).spawn({
+    workAttemptId: CODEX_SCENARIO_WORK_ATTEMPT_ID, roomId: "replay-room", agentDisplayName: "ReplayFinch", cwd: WORKSPACE,
+    deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed",
+    launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } },
+  }), (error: Error) => error.message === READ_ONLY_POLICY_WITHOUT_LEVEL);
+  assert.deepEqual([unnamed.launches, unnamed.session.outbound, unnamed.signals], [[], [], []]);
+  unnamed.session.dispose();
 });
 
 test("Codex outbound frames are compared without this run's workspace path and without the prompt wording", () => {
