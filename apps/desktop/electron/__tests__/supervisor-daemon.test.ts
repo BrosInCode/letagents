@@ -1837,6 +1837,10 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
     uncertain_effects: [{ effect_id: "effect_1", tool_name: "send_message", mcp_request_id: "request_1", error: "May have completed.", created_at: "2026-01-01T00:00:01.000Z", updated_at: "2026-01-01T00:00:02.000Z" }],
     history_boundary: { earliest_retained_observed_message_id: "msg_1", earliest_retained_inbox_message_id: "msg_1", earliest_retained_receipt_sequence: 1, pruned_before_message_id: null, pruned_at: null },
   };
+  const usage = { providerContinuationId: "thread", executionGenerationId: "generation", daemonGeneration: 1,
+    account: { state: "available", windows: [{ id: "primary", label: "5 hours", usedPercent: 31, resetsAt: null, observedAt: "2026-10-10T20:00:00.000Z" }] }, context: null, compaction: null };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, usage }, input).usage, usage);
+  assert.equal(mapAgentInspectorDetail({ ...wire, usage: { ...usage, daemonGeneration: "1" } }, input).usage, null);
   const mapped = mapAgentInspectorDetail(wire, input);
   assert.equal(mapped.requested_source_message_id, "msg_1");
   assert.equal(mapped.items[0]?.sender, "Ada");
@@ -3232,7 +3236,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.223");
+    assert.equal(status.implementationVersion, "2.0.224");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

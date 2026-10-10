@@ -10084,3 +10084,31 @@ test("a Read-only process started before conversations named a permission profil
   // The daemon compares this number with the one a running process was started under.
   assert.ok(CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION >= 3);
 });
+
+test("inspector reads idle Codex account limits without opening Live and fences delayed responses", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const original = client.request.bind(client);
+  let reads = 0;
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "account/rateLimits/read") { reads++; return { rateLimits: { primary: { usedPercent: 32, windowDurationMins: 300 } } } as T; }
+    return original<T>(method, params);
+  };
+  client.emit({ method: "thread/tokenUsage/updated", params: { threadId: handle.providerContinuationId,
+    tokenUsage: { last: { totalTokens: 31000 }, total: { totalTokens: 930000 }, modelContextWindow: 200000 } } });
+  const [a, b] = await Promise.all([adapter.readUsage(handle), adapter.readUsage(handle)]);
+  assert.equal(a?.account.windows[0]?.usedPercent, 32);
+  assert.equal(b?.context?.usedTokens, 31000);
+  assert.equal(reads, 1, "coalesces concurrent inspector reads");
+  await adapter.readUsage(handle); assert.equal(reads, 1, "throttles account reads while context remains live");
+  (handle as { providerContinuationId: string }).providerContinuationId = "replacement";
+  let finish!: (value: unknown) => void;
+  client.request = <T>(method: string, params?: unknown): Promise<T> => method === "account/rateLimits/read"
+    ? new Promise(resolve => { finish = value => resolve(value as T); }) : original<T>(method, params);
+  const pending = adapter.readUsage(handle);
+  await flush();
+  client.connectionEpoch = "reconnected";
+  finish({ rateLimits: { primary: { usedPercent: 99 } } });
+  assert.equal(await pending, null, "old connection response is never presented as current");
+});

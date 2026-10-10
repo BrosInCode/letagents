@@ -6691,3 +6691,20 @@ test("a result for a task's notice with no call to the model and a text is not t
     await agent.adapter.stop(agent.handle);
   }
 });
+
+test("inspector usage retains native Claude measurements without a Live subscriber", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  const session_id = handle.providerContinuationId;
+  child.emit({ type: "rate_limit_event", session_id, rate_limit_info: { rateLimitType: "five_hour", utilization: .2 } });
+  child.emit({ type: "assistant", session_id, parent_tool_use_id: null,
+    message: { model: "opus", usage: { input_tokens: 3000, cache_read_input_tokens: 14000, cache_creation_input_tokens: 6000 }, content: [] } });
+  const usage = await adapter.readUsage(handle);
+  assert.equal(usage?.account.windows[0]?.usedPercent, 20);
+  assert.equal(usage?.context?.usedTokens, 23000);
+  assert.equal(usage?.context?.capacityTokens, null, "no guessed model capacity");
+  child.emit({ type: "assistant", session_id: "another", message: { model: "opus", usage: { input_tokens: 1 }, content: [] } });
+  assert.equal((await adapter.readUsage(handle))?.context?.usedTokens, 23000);
+});

@@ -536,6 +536,7 @@ export interface ProviderRoomTurnOptions {
 }
 
 export interface ProviderAdapter {
+  readUsage?(handle: ProviderHandle): Promise<import("../../../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   readonly id: ProviderAdapterId;
 

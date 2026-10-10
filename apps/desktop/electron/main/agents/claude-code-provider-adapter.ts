@@ -8,6 +8,7 @@ import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "
 import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { ProviderUsageTracker } from "./provider-usage.js";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -1347,6 +1348,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     return this.processCustody.state(workAttemptId, handle === providerHandle ? handle?.child : undefined);
   }
 
+  private readonly usage = new WeakMap<ClaudeProviderHandle, ProviderUsageTracker>();
+
+  async readUsage(providerHandle: ProviderHandle): Promise<import("../../../shared/provider-usage.js").ProviderUsage | null> {
+    const handle = this.handles.get(providerHandle.workAttemptId);
+    if (!handle || handle !== providerHandle) return null;
+    const tracker = this.usage.get(handle);
+    return tracker?.snapshot(handle.providerContinuationId) ?? null;
+  }
+
   compactionProgress(workAttemptId: string): { state: "compacting"; startedAt: string } | null {
     return this.compactions.get(workAttemptId)?.progress() ?? null;
   }
@@ -2340,6 +2350,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.heldRoomTurnPublished(handle);
       return;
     }
+    let usage = this.usage.get(handle);
+    if (!usage) { usage = new ProviderUsageTracker(handle.providerContinuationId); this.usage.set(handle, usage); }
+    usage.snapshot(handle.providerContinuationId);
+    usage.claude(message, this.deps.now());
     this.handleCompactions.get(handle)?.observe(message);
     // Native approval payloads stay host-ephemeral; do not publish them to room activity.
     if (message.type === "control_request" || message.type === "control_cancel_request") {
