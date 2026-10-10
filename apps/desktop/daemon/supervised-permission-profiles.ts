@@ -200,6 +200,28 @@ export function describeProfilesWithOwnerSetup(providerId: string, profiles: unk
   });
 }
 
+/**
+ * Why a Codex agent that collects its own room messages cannot have Read-only.
+ * Read-only limits the room tools to a named list, and the background service
+ * holds that list only for an agent it delivers room messages to. Said where
+ * the level is offered and where it is saved, so the owner learns it there
+ * and not only when the agent does not start.
+ */
+export const CODEX_READ_ONLY_NEEDS_DELIVERY = "Read-only access is for a Codex agent that LetAgents delivers room messages to. "
+  + "This agent collects its own room messages, so LetAgents cannot hold it to the room tools that Read-only allows. Choose another access level for this agent.";
+
+/** Whether Read-only cannot be used by this agent: a Codex agent the background service does not deliver room messages to. */
+export function codexReadOnlyNeedsDelivery(providerId: string, deliveryMode: string | null | undefined): boolean {
+  return providerId.trim().toLowerCase() === "codex" && deliveryMode !== "daemon_inbox";
+}
+
+/** A provider's access levels as one agent can use them: Read-only is shown as unavailable, with the reason, to an agent that cannot have it. */
+export function describeProfilesForAgent(providerId: string, deliveryMode: string | null | undefined, profiles: unknown): unknown {
+  if (!codexReadOnlyNeedsDelivery(providerId, deliveryMode) || !Array.isArray(profiles)) return profiles;
+  return profiles.map((profile) => (profile && typeof profile === "object" && (profile as { id?: unknown }).id === "read_only"
+    ? { ...profile, status: "gated", detail: CODEX_READ_ONLY_NEEDS_DELIVERY } : profile));
+}
+
 export function assertSupervisedPermissionProfileAvailable(providerId: string, requestedId: string | null): string {
   const profiles = supervisedPermissionProfilesForProvider(providerId);
   if (!profiles.length) throw new Error(`Provider '${providerId}' does not expose supervised permission profiles.`);

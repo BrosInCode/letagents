@@ -395,6 +395,11 @@ function createHarness(harnessOptions: {
   const threadPolicies = new Map<string, { approvalPolicy?: unknown; sandbox?: unknown }>();
   /** Each time a running process was asked whether a conversation it loaded now would read a command rule, and the answer. */
   const ruleLoadChecks: Array<{ cwd: string; codexHome: string | null }> = [];
+  /** For each of those, whether the process's sandbox lets a command write the project. */
+  const writableSandboxAsked: boolean[] = [];
+  /** Each time a running process without its owner's setup was compared with what a launch would turn off now. */
+  const isolationChecks: Array<{ commandLine: string; cwd: string | null; codexHome: string | null; launchOverrides: readonly string[] | null }> = [];
+  const isolation: { changed: string | null } = { changed: null };
   const ruleLoad: { refusal: string | null } = { refusal: null };
   const launches: FakeLaunch[] = [];
   const clients: FakeRpc[] = [];
@@ -496,8 +501,13 @@ function createHarness(harnessOptions: {
       liveChecks.push(live);
       if (project.changed) throw new Error(project.changed);
     },
+    assertLiveIsolationUnchanged: async (_codexBin, live) => {
+      isolationChecks.push(live);
+      if (isolation.changed) throw new Error(isolation.changed);
+    },
     sandboxedLoadRefusal: async (_codexBin, live) => {
-      ruleLoadChecks.push(live);
+      ruleLoadChecks.push({ cwd: live.cwd, codexHome: live.codexHome });
+      writableSandboxAsked.push(live.writableSandbox);
       return ruleLoad.refusal;
     },
     writeSupervisorBridgeContext: async (cwd, context) => {
@@ -519,6 +529,10 @@ function createHarness(harnessOptions: {
     liveChecks,
     commandLineReads,
     ruleLoadChecks,
+    writableSandboxAsked,
+    isolationChecks,
+    /** A launch now would turn off an MCP server or a skill that the running process was not started with turned off. */
+    changeIsolation: (refusal: string | null) => { isolation.changed = refusal; },
     /** A conversation the running process started or loaded now would read a command rule. */
     refuseRuleLoad: (refusal: string | null) => { ruleLoad.refusal = refusal; },
     /** What every app-server connected from now on says its Codex home is. */
@@ -1801,12 +1815,13 @@ test("Codex Read-only starts with web search off, at launch and for every conver
   }, { checkpointReplacement: async () => {} });
   assert.deepEqual(sent(found.clients[1]!, "thread/start")[0]!.config, { web_search: "disabled" });
 
-  // The polling kind of launch is Read-only by the same name, so its Codex has web search off as well.
+  // The polling kind of launch is not started at Read-only at all: see the test of the room tools.
   const polling = createHarness();
-  await new CodexProviderAdapter({ dependencies: polling.dependencies }).spawn(readOnly({
+  await assert.rejects(new CodexProviderAdapter({ dependencies: polling.dependencies }).spawn(readOnly({
     pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling", supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
-    supervisorExecutionGenerationId: "execution_exact", supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" } }));
-  assert.deepEqual(polling.launchOptions[0]!.options.configOverrides.slice(-1), ['web_search="disabled"']);
+    supervisorExecutionGenerationId: "execution_exact", supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" } })),
+    /^Error: Read-only access is for a Codex agent that LetAgents delivers room messages to\./);
+  assert.deepEqual(polling.launchOptions, [], "no Codex was started");
 
   // No other access level changes: no override, and a stored config reaches the conversation as it always did.
   for (const [permissionProfileId, launchPolicy] of [
@@ -1869,7 +1884,7 @@ function assertStoppedNotReadOnly(answer: unknown, scene: Awaited<ReturnType<typ
   assert.deepEqual(stopped.terminal!.nativeRuntimeDeath, { kind: "codex_app_server", pid, processIdentity: scene.harness.launches[0]!.processIdentity }, what);
   // One line for the owner: what Codex reported, that the agent was stopped, and what happens next.
   assert.equal(stopped.notices?.length, 1, what);
-  assert.match(stopped.notices![0]!, /^Codex reported approval policy (?:"[a-z-]+"|none) and sandbox (?:"[A-Za-z]+"|none)(?: with [a-z ]+)? for this agent's conversation\. That is not Read-only access, so LetAgents stopped the agent\. It starts again by itself\.$/, what);
+  assert.match(stopped.notices![0]!, /^Codex reported approval policy (?:"[a-z-]+"|none) and sandbox (?:"[A-Za-z]+"|none)(?: with [a-z ]+)? for this agent's conversation\. That is not Read-only access, so LetAgents stopped the agent\. It starts again by itself, unless you paused it\.$/, what);
   // No turn was started on it.
   assert.equal(scene.harness.clients.slice(1).some((client) => client.requests.some((call) => call.method === "turn/start")), false, what);
   return stopped.notices![0]!;
@@ -2172,15 +2187,18 @@ test("a Read-only Codex agent's room tools are an exact named list, and every ot
   assert.equal(unnamed.defaultMode, "writes");
   assert.deepEqual(unnamed.otherOverrides, []);
 
-  // Only an agent the daemon delivers room messages to. One that collects its own messages runs room tools in the
-  // room server with the caller's folder, so a Read-only launch of that kind has no tool approved in advance.
+  // The background service holds that list only where it runs the room tools itself. An agent that
+  // collects its own messages calls the room server directly, and only Codex would hold the list there.
+  // So that kind of launch is not started at Read-only, and its owner is told what to do.
   const polling = { pollingContract: "custodial_polling_v1" as const, deliveryMode: "mcp_polling" as const };
-  const pollingReadOnly = await launchOf({ ...polling, ...readOnlyLevel });
+  const NOT_FOR_POLLING = "Read-only access is for a Codex agent that LetAgents delivers room messages to. This agent collects its own room messages, "
+    + "so LetAgents cannot hold it to the room tools that Read-only allows, and did not start it. Choose another access level for this agent.";
+  await assert.rejects(launchOf({ ...polling, ...readOnlyLevel }), (error: Error) => error.message === NOT_FOR_POLLING);
+  // A launch that does not say how its messages arrive is taken as that kind too.
+  await assert.rejects(new CodexProviderAdapter({ dependencies: createHarness().dependencies }).spawn(spawnRequest({ ...readOnlyLevel, configurationRevision: 1 })),
+    (error: Error) => error.message === NOT_FOR_POLLING);
   const pollingFullAccess = await launchOf({ ...polling, permissionProfileId: "full_access", launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } });
-  assert.equal(pollingReadOnly.tools.includes("wait_for_messages"), true, "this is the launch that collects its own messages");
-  assert.deepEqual(pollingReadOnly.modes, Object.fromEntries(pollingReadOnly.tools.map((name) => [name, "writes"])));
-  assert.equal(pollingReadOnly.defaultMode, "writes");
-  assert.equal(pollingReadOnly.override === pollingFullAccess.override, true, "Read-only changes nothing about a polling launch's room server");
+  assert.equal(pollingFullAccess.tools.includes("wait_for_messages"), true, "every other level starts that kind of launch as before");
 
   // The daemon compares one launch contract for a room server: a Read-only agent records the one it expects,
   // so it is not replaced again and again as out of date.
@@ -9264,14 +9282,16 @@ test("a sandboxed Codex takes no turn and loads no conversation in a project tha
   const top = await realpath(project);
   const cwd = join(top, "packages", "app");
   await mkdir(cwd, { recursive: true });
+  // A folder Codex takes as the top of a repository: its .git holds HEAD. An empty .git folder is not one.
   await mkdir(join(top, ".git"));
+  await writeFile(join(top, ".git", "HEAD"), "ref: refs/heads/main\n");
   const home = await scratchCodexHome(t, false);
   // The rules are at the top of the repository, two folders above the one the agent works in.
   const addRules = async () => { await mkdir(join(top, ".codex", "rules"), { recursive: true }); await writeFile(join(top, ".codex", "rules", "allow.rules"), "saved\n"); };
-  const REFUSED = "This project has command rules for Codex in .codex/rules (allow.rules). "
-    + "A sandboxed Codex agent would run every command that matches one with no sandbox and no approval, "
-    + "so LetAgents does not start Codex here, or give it work, at this access level. "
-    + "Remove or rename .codex/rules, or give this agent Full access if you accept that.";
+  const REFUSED = "Codex reads command rules from .codex/rules in this agent's work folder once it trusts the project, and that folder is not empty (allow.rules). "
+    + "LetAgents does not read the files in it. If one of them allows a command, a sandboxed Codex agent runs that command with no sandbox and no approval. "
+    + "So LetAgents does not start Codex here, or give it work, at this access level. "
+    + "Remove or rename .codex/rules in the agent's work folder, which can differ from your own copy of the project, or give this agent Full access if you accept that.";
   const refused = (error: Error) => { assert.equal(error.message, REFUSED); return true; };
   const run = (harness: ReturnType<typeof createHarness>, adapter: CodexProviderAdapter, handle: ProviderHandle, client: number, name: string) => adapter.runRoomTurn(handle, turnOf(name), {
     checkpointTurnStarted: async (turnId) => { harness.clients[client]!.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } }); },
@@ -9408,7 +9428,7 @@ test("Codex Read-only counts as a sandboxed access level wherever a saved comman
   await run(inProject, projectAdapter, projectHandle, 0, "before");
   await mkdir(join(cwd, ".codex", "rules"), { recursive: true });
   await writeFile(join(cwd, ".codex", "rules", "allow.rules"), "saved\n");
-  const PROJECT_RULES = /^Error: This project has command rules for Codex in \.codex\/rules \(allow\.rules\)/;
+  const PROJECT_RULES = /^Error: Codex reads command rules from \.codex\/rules in this agent's work folder once it trusts the project, and that folder is not empty \(allow\.rules\)/;
   await assert.rejects(run(inProject, projectAdapter, projectHandle, 0, "turn"), PROJECT_RULES);
   assert.equal(turnStarts(inProject, 0), 1, "Codex was sent no turn");
   const beforeRepair = inProject.clients[0]!.requests.length;
@@ -9463,4 +9483,252 @@ test("a Read-only conversation's reply is held to its policy and compared with i
   agreeing.dependencies.createRpcClient = (...args) => { const client = createRpcClient(...args) as FakeRpc; client.approvalPolicyFromOwnSettings = "on-request"; return client; };
   await assert.rejects(new CodexProviderAdapter({ dependencies: agreeing.dependencies }).resume(
     { workAttemptId: request().workAttemptId, providerContinuationId: handle.providerContinuationId! }, request()), /did not confirm Read-only access/);
+});
+
+test("before a sandboxed Codex without its owner's setup starts or loads a conversation, what it would turn off now is compared with what it was started with", async (t) => {
+  const home = await scratchCodexHome(t, false);
+  const repair = (adapter: CodexProviderAdapter, handle: ProviderHandle, launchPolicy: unknown) => adapter.repairContinuation(handle, {
+    workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+    cwd: spawnRequest().cwd, launchPolicy, forceReplacement: true,
+  }, { checkpointReplacement: async () => {} });
+  const conversationCallsAfter = (harness: ReturnType<typeof createHarness>, from: number) =>
+    harness.clients[0]!.requests.slice(from).map((request) => request.method).filter((method) => /^thread\/(start|resume)$/.test(method));
+
+  // Nothing changed: the repair goes on. Codex was asked with the process's own command line, the agent's folder and the home it runs with.
+  const clean = createHarness({ exitOnSignal: true, reportedCodexHome: home });
+  const cleanAdapter = new CodexProviderAdapter({ dependencies: clean.dependencies });
+  const repaired = await cleanAdapter.spawn(spawnRequest(SANDBOXED_LAUNCH));
+  assert.equal((await repair(cleanAdapter, repaired, SANDBOXED_LAUNCH.launchPolicy)).outcome, "replaced");
+  assert.equal(clean.isolationChecks.length, 1);
+  assert.deepEqual({ cwd: clean.isolationChecks[0]!.cwd, codexHome: clean.isolationChecks[0]!.codexHome }, { cwd: spawnRequest().cwd, codexHome: home });
+  for (const override of CODEX_OWNER_FEATURE_OVERRIDES) assert.ok(clean.isolationChecks[0]!.commandLine.includes(override), override);
+  // And with its launch's own overrides, which set the room's server: Codex is asked to list its servers as that launch asked.
+  assert.equal(clean.launchOptions[0]!.options.configOverrides.some((override) => override.startsWith("mcp_servers.letagents")), true);
+  assert.deepEqual(clean.isolationChecks[0]!.launchOverrides, clean.launchOptions[0]!.options.configOverrides);
+  assert.deepEqual(clean.signals, []);
+
+  // A process that another service instance started and this one found running: its launch's overrides are not known, and the check is told so.
+  const found = createHarness({ exitOnSignal: true, reportedCodexHome: home });
+  const started = await new CodexProviderAdapter({ dependencies: found.dependencies }).spawn(spawnRequest(SANDBOXED_LAUNCH));
+  const finder = new CodexProviderAdapter({ dependencies: found.dependencies });
+  const attached = await finder.attach({ workAttemptId: started.workAttemptId, providerContinuationId: started.providerContinuationId!,
+    providerConnection: started.providerConnection, launchPolicy: SANDBOXED_LAUNCH.launchPolicy });
+  assertProviderHandle(attached);
+  assert.equal((await repair(finder, attached, SANDBOXED_LAUNCH.launchPolicy)).outcome, "replaced");
+  assert.deepEqual(found.isolationChecks.map((check) => check.launchOverrides), [null]);
+
+  // A project the owner trusts gained an MCP server since the launch: no conversation is started, and the agent is stopped and says why.
+  const CHANGED = "This project's Codex config, or your own, now has an MCP server or a skill that was not there when this agent started, "
+    + "so LetAgents stopped the agent before Codex could load it. It starts again with it turned off, unless you paused it.";
+  const harness = createHarness({ exitOnSignal: true, reportedCodexHome: home });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest(SANDBOXED_LAUNCH));
+  const said: string[] = [];
+  adapter.onStream(handle, (event) => { if (event.method === "sandboxRules/stopped") said.push(event.summary ?? ""); });
+  const before = harness.clients[0]!.requests.length;
+  harness.changeIsolation(CHANGED);
+  await assert.rejects(repair(adapter, handle, SANDBOXED_LAUNCH.launchPolicy), (error: Error) => error.message === CHANGED);
+  assert.deepEqual(conversationCallsAfter(harness, before), []);
+  assert.deepEqual(said, [`Stopped this agent. ${CHANGED}`]);
+  assert.deepEqual(harness.signals.map((signal) => signal.signal), ["SIGTERM"]);
+
+  // A process whose command line cannot be read is not taken as unchanged.
+  const unreadable = createHarness({ exitOnSignal: true, reportedCodexHome: home, processUnreadable: true });
+  const unreadableAdapter = new CodexProviderAdapter({ dependencies: unreadable.dependencies });
+  const unread = await unreadableAdapter.spawn(spawnRequest(SANDBOXED_LAUNCH));
+  await assert.rejects(repair(unreadableAdapter, unread, SANDBOXED_LAUNCH.launchPolicy),
+    /^Error: LetAgents could not read how this agent's Codex was started, so it stopped the agent before Codex could load a project's MCP servers\. It starts again by itself, unless you paused it\.$/);
+  assert.deepEqual(unreadable.isolationChecks, []);
+  assert.deepEqual(unreadable.signals.map((signal) => signal.signal), ["SIGTERM"]);
+
+  // At Full access nothing is asked, as before: there is no sandbox for a new server to start outside of.
+  const fullAccess = createHarness({ reportedCodexHome: home });
+  const fullAccessAdapter = new CodexProviderAdapter({ dependencies: fullAccess.dependencies });
+  const unsandboxed = await fullAccessAdapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  fullAccess.changeIsolation(CHANGED);
+  assert.equal((await repair(fullAccessAdapter, unsandboxed, spawnRequest().launchPolicy)).outcome, "replaced");
+  assert.deepEqual([fullAccess.isolationChecks, fullAccess.commandLineReads], [[], []]);
+});
+
+test("a launch and a load say whether the sandbox lets a command write the project, so the folders the Codex config adds to it are looked at only then", async (t) => {
+  const home = await scratchCodexHome(t, false);
+  const AUTO = { deliveryMode: "daemon_inbox" as const, permissionProfileId: "auto_review" as const, configurationRevision: 1,
+    launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" } };
+  for (const [name, launch, writes] of [["Auto", AUTO, true], ["Ask before writes", SANDBOXED_LAUNCH, false], ["Read-only", READ_ONLY_LAUNCH, false]] as const) {
+    const harness = createHarness({ reportedCodexHome: home });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest(launch));
+    const options = harness.launchOptions[0]!.options as { sandboxed?: boolean; writableSandbox?: boolean };
+    assert.deepEqual([options.sandboxed, options.writableSandbox === true], [true, writes], name);
+    await adapter.repairContinuation(handle, { workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+      cwd: spawnRequest().cwd, launchPolicy: launch.launchPolicy, forceReplacement: true }, { checkpointReplacement: async () => {} });
+    assert.deepEqual(harness.writableSandboxAsked, [writes], name);
+  }
+});
+
+test("the folders the Codex config lets a command write are looked at again before every turn, as they were named at the launch and then at the last load", async (t) => {
+  const home = await scratchCodexHome(t, false);
+  const AUTO = { deliveryMode: "daemon_inbox" as const, permissionProfileId: "auto_review" as const, configurationRevision: 1,
+    launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" } };
+  const harness = createHarness({ reportedCodexHome: home });
+  // What the launch's look and the load's look answer when they are asked again. A launch gives one only for a sandbox that writes.
+  const answers: { launch: string | null | Error; load: string | null } = { launch: null, load: null };
+  const asked: string[] = [];
+  const launchServer = harness.dependencies.launchServer;
+  harness.dependencies.launchServer = async (...args) => ({ ...(await launchServer(...args)), writableFoldersCheck: () => {
+    asked.push("launch");
+    if (answers.launch instanceof Error) throw answers.launch;
+    return answers.launch;
+  } });
+  const sandboxedLoadRefusal = harness.dependencies.sandboxedLoadRefusal;
+  harness.dependencies.sandboxedLoadRefusal = async (codexBin, live, keep) => {
+    const refusal = await sandboxedLoadRefusal(codexBin, live);
+    keep?.(() => { asked.push("load"); return answers.load; });
+    return refusal;
+  };
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest(AUTO));
+  const turnsStarted = () => harness.clients[0]!.requests.filter((call) => call.method === "turn/start").length;
+  const turn = (name: string) => adapter.runRoomTurn(handle, turnOf(name), {
+    checkpointTurnStarted: async (turnId) => { harness.clients[0]!.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } }); },
+  });
+
+  // Nothing has changed: the turn starts, and the folders were looked at for it.
+  await turn("first");
+  assert.deepEqual([turnsStarted(), asked.includes("launch")], [1, true]);
+  // A named folder now leads into a home: the turn is not started, in the look's own words.
+  const INTO_A_HOME = "Your Codex config lets a sandboxed command write a folder that is now the Codex home LetAgents keeps for sandboxed agents.";
+  answers.launch = INTO_A_HOME;
+  await assert.rejects(turn("second"), (error: Error) => error.message === INTO_A_HOME);
+  assert.equal(turnsStarted(), 1);
+  // A look that fails is not taken as safe.
+  answers.launch = new Error("EACCES: permission denied\nmore");
+  await assert.rejects(turn("third"),
+    /^Error: LetAgents could not look at the folders your Codex config lets a sandboxed command write \(EACCES: permission denied\), so it gives this agent no work\. Pause the agent and resume it\.$/);
+  assert.equal(turnsStarted(), 1);
+
+  // A load names the folders anew: from then on its look is the one asked, and the launch's is not.
+  answers.launch = null;
+  await adapter.repairContinuation(handle, { workAttemptId: handle.workAttemptId, expectedProviderContinuationId: handle.providerContinuationId!,
+    cwd: spawnRequest().cwd, launchPolicy: AUTO.launchPolicy, forceReplacement: true }, { checkpointReplacement: async () => {} });
+  answers.launch = INTO_A_HOME;
+  asked.length = 0;
+  await turn("fourth");
+  assert.deepEqual([turnsStarted(), [...new Set(asked)]], [2, ["load"]]);
+  answers.load = "The folder named at the load now leads into a home.";
+  await assert.rejects(turn("fifth"), (error: Error) => error.message === answers.load);
+  assert.equal(turnsStarted(), 2);
+});
+
+test("a Read-only Codex whose stop failed when its policy was bound is stopped at the next attach, not left running until its owner restarts it", { timeout: 30_000 }, async () => {
+  const scene = await foundRunning(foundAsReadOnly(), (client) => { client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; }, false);
+  // Found before the daemon supplied its policy: attached as it is.
+  assertProviderHandle(await scene.attach());
+  // The policy is bound, and the stop cannot be made: the process's birth cannot be read for now.
+  scene.harness.setIdentityObservable(false);
+  const NOT_STOPPED = /^Error: Codex reported approval policy "never" and sandbox "dangerFullAccess" for this agent's conversation\. That is not Read-only access, and LetAgents could not stop the agent: /;
+  await assert.rejects(Promise.resolve(scene.attach(true)), NOT_STOPPED);
+  // Each attach tries again, and while it cannot be stopped the runtime takes no turn.
+  await assert.rejects(Promise.resolve(scene.attach(true)), NOT_STOPPED);
+  assert.deepEqual(scene.harness.signals, []);
+  assert.equal(scene.harness.launches[0]!.alive, true);
+  // Its birth can be read again: the next attach stops it and answers with the proof.
+  scene.harness.setIdentityObservable(true);
+  assertStoppedNotReadOnly(await scene.attach(true), scene, "after the stop could be made");
+  // One stop serves every later caller.
+  assert.equal((await scene.attach(true) as { state?: string }).state, "terminal");
+  assert.equal(scene.harness.signals.length, 1);
+});
+
+test("a Read-only Codex found with no loaded conversation is held to what the conversation reports when it is first subscribed to", { timeout: 30_000 }, async () => {
+  for (const misreports of [true, false]) {
+    const harness = createHarness({ exitOnSignal: true });
+    const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest(READ_ONLY_LAUNCH));
+    const createRpcClient = harness.dependencies.createRpcClient;
+    let materialized = false;
+    harness.dependencies.createRpcClient = (serverUrl, notify) => {
+      const client = createRpcClient(serverUrl, notify) as FakeRpc;
+      const request = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown) => {
+        // The conversation has had no message yet, so it cannot be read with its turns, and nothing is loaded to subscribe to.
+        if (method === "thread/read" && !materialized && (params as { includeTurns?: boolean }).includeTurns) {
+          throw new Error(`thread ${first.providerContinuationId} is not materialized yet; includeTurns is unavailable before first user message`);
+        }
+        if (method === "turn/start") { materialized = true; client.turnStatus = "inProgress"; }
+        // The first reply that names what the conversation got.
+        if (method === "thread/resume") { if (misreports) client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; client.turnStatus = "completed"; }
+        return request<T>(method, params);
+      };
+      return client;
+    };
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const attached = await adapter.attach({ workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId!,
+      providerConnection: first.providerConnection, launchPolicy: READ_ONLY_LAUNCH.launchPolicy });
+    assertProviderHandle(attached);
+    assert.equal(harness.clients[1]!.requests.some((call) => call.method === "thread/resume"), false, "nothing was loaded to subscribe to when it was found");
+    const turn = adapter.runRoomTurn(attached, turnOf("first-turn"), { checkpointTurnStarted: async () => {} });
+    if (!misreports) {
+      await turn;
+      assert.deepEqual(harness.signals, []);
+      continue;
+    }
+    await assert.rejects(turn, /^Error: Codex reported approval policy "never" and sandbox "dangerFullAccess" for this agent's conversation\. That is not Read-only access, so LetAgents stopped the agent\. It starts again by itself, unless you paused it\.$/);
+    assert.deepEqual(harness.signals.map((signal) => signal.signal), ["SIGTERM"], "its process is stopped: the turn must not go on");
+    // And it takes no other turn.
+    await assert.rejects(adapter.runRoomTurn(attached, turnOf("second-turn"), { checkpointTurnStarted: async () => {} }), /That is not Read-only access/);
+    assert.equal(harness.clients[1]!.requests.filter((call) => call.method === "turn/start").length, 1);
+  }
+});
+
+test("a turn that is running when a Read-only Codex is stopped at reattach ends as a failed room item that says so, is not run again, and the next message runs on the fresh start", { timeout: 60_000 }, async () => {
+  const agent = await codexDaemonFixture();
+  const snap = async () => { const current = await agent.view(); return `agent is ${current.observed_state}/${current.condition} (${current.last_error}); launches ${agent.harness.launches.length}; signals ${JSON.stringify(agent.harness.signals)}`; };
+  try {
+    // The owner saves Read-only, and the daemon starts the agent again at that level by itself.
+    const configuration = (await agent.request("supervisor.get_agent_configuration", { entry_id: agent.id, daemon_generation: agent.daemonGeneration() })).result;
+    const saved = await agent.request("supervisor.update_agent_configuration", { entry_id: agent.id, daemon_generation: agent.daemonGeneration(),
+      expected_revision: configuration.config_revision, configuration: { model: configuration.model, reasoning_effort: configuration.reasoning_effort ?? null,
+        charter: configuration.charter, permission_profile_id: "read_only" } });
+    assert.equal(saved.result?.outcome, "updated", saved.error ?? JSON.stringify(saved.result));
+    await agent.eventually(() => agent.harness.launches.length === 2 && agent.harness.clients.length === 2, "the Read-only runtime is started")
+      .catch(async (error) => { throw new Error(`${(error as Error).message}: ${await snap()}`); });
+    agent.serveThread(agent.harness.clients[1]!);
+    const readOnlyRuntime = agent.harness.launches[1]!;
+
+    // A room message starts its turn on it, and the turn is still running when the daemon ends.
+    agent.roomMessages.push({ id: "msg_1", sender: "someone", text: "request 1", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => agent.turns.length === 1 && Boolean((await agent.receipt("msg_1"))?.provider_turn_id), "msg_1 starts its turn");
+    const turn = agent.turns[0]!;
+    agent.harness.clients.at(-1)!.emit({ method: "turn/started", params: { threadId: agent.threadId, turnId: turn.id, turn: { id: turn.id, status: "inProgress" } } });
+    assert.equal((await agent.receipt("msg_1"))?.state, "dispatching");
+
+    // The new daemon finds the runtime, and its conversation reports a sandbox that is not Read-only.
+    agent.whenNextConnects((server) => { server.sandboxFromOwnSettings = { type: "dangerFullAccess" }; });
+    await agent.restartDaemon();
+
+    // The runtime is stopped, and the agent starts again as a new Read-only process.
+    await agent.eventually(() => agent.harness.launches.length === 3 && agent.harness.clients.length === 4, "the agent starts again")
+      .catch(async (error) => { throw new Error(`${(error as Error).message}: ${await snap()}`); });
+    assert.deepEqual(agent.harness.signals.filter((signal) => signal.pid === readOnlyRuntime.pid), [{ pid: readOnlyRuntime.pid, signal: "SIGTERM" }]);
+    assert.equal(readOnlyRuntime.alive, false);
+    assert.deepEqual(agent.harness.launchOptions[2]!.options.configOverrides.slice(-1), ['web_search="disabled"']);
+    assert.ok((await executionRecord(agent).notices()).includes('Codex reported approval policy "never" and sandbox "dangerFullAccess" for this agent\'s conversation. '
+      + "That is not Read-only access, so LetAgents stopped the agent. It starts again by itself, unless you paused it."), "the owner is told why");
+
+    // The room item of the stopped turn: failed, with the reason, after one attempt. Its turn is not started again on the new process.
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "the item of the stopped turn is failed")
+      .catch(async (error) => { throw new Error(`${(error as Error).message}: ${JSON.stringify(await agent.receipt("msg_1"))}`); });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const failed = (await agent.receipt("msg_1"))! as unknown as { state: string; attempt_count: number; last_error: string | null; next_attempt_at_ms: number | null };
+    assert.deepEqual({ state: failed.state, attempts: failed.attempt_count, error: failed.last_error, retry: failed.next_attempt_at_ms }, { state: "acknowledged_failed", attempts: 1,
+      error: "The agent's process ended during this turn, and the turn's result could not be recovered. The message was not run again.", retry: null });
+    assert.equal(agent.turns.length, 1, "the stopped turn is not started again");
+
+    // The agent is not left stuck behind it: the next message runs on the new process and is answered.
+    await answerOnReplacement(agent, 2);
+    assert.equal(agent.turns.length, 2);
+    assert.equal((await agent.receipt("msg_1"))?.state, "acknowledged_failed");
+  } finally {
+    await agent.cleanup();
+  }
 });

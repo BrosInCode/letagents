@@ -35,6 +35,12 @@ export interface CodexAppServerLaunch {
   codexHome?: string;
   /** What the owner is to be told about this launch. */
   notices?: readonly string[];
+  /**
+   * For a launch whose sandbox lets a command write the project: why a folder
+   * the Codex config lets it write too, as named at this launch, may not be
+   * written now. Null while there is none. Asked again before each turn.
+   */
+  writableFoldersCheck?: () => string | null;
 }
 
 interface CodexAppServerLaunchOptions {
@@ -61,6 +67,8 @@ interface CodexAppServerLaunchOptions {
    * command out of the sandbox, or does not start.
    */
   sandboxed?: boolean;
+  /** That sandbox lets a command write the project, so the folders the Codex config adds to it are checked. */
+  writableSandbox?: boolean;
   /** The Codex home for this launch, in place of the owner's. A managed launch sets it. */
   codexHome?: string;
 }
@@ -567,7 +575,7 @@ export async function launchManagedCodexAppServer(
   const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
   // Decided before anything else is asked of Codex, so every listing below reads the home the launch will.
   const home = options.sandboxed === true
-    ? await codexHomeForSandboxedLaunch(codexBin, { cwd: trustedProjectPath, env: ownerHomeEnv })
+    ? await codexHomeForSandboxedLaunch(codexBin, { cwd: trustedProjectPath, env: ownerHomeEnv, writableSandbox: options.writableSandbox === true })
     : null;
   const codexHome = home?.codexHome ?? undefined;
   const env = codexHome ? { ...ownerHomeEnv, CODEX_HOME: codexHome } : ownerHomeEnv;
@@ -586,7 +594,7 @@ export async function launchManagedCodexAppServer(
     configOverrides: [...isolation, ...(options.configOverrides ?? [])],
     codexHome,
   });
-  return home?.notices.length ? { ...launch, notices: home.notices } : launch;
+  return { ...launch, ...(home?.notices.length ? { notices: home.notices } : {}), ...(home?.writableFoldersCheck ? { writableFoldersCheck: home.writableFoldersCheck } : {}) };
 }
 
 export function terminateSpawnedProcess(pid: number): void {

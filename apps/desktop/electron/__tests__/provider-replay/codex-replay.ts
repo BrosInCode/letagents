@@ -126,11 +126,13 @@ export class CodexReplay {
     this.dependencies = {
       resolveMcpRuntime: notReplayed("resolveMcpRuntime"),
       readMcpRuntimeContract: notReplayed("readMcpRuntimeContract"),
-      readCommandLine: notReplayed("readCommandLine"),
       assertLiveProjectUnchanged: notReplayed("assertLiveProjectUnchanged"),
-      // Which command rules a Codex would read is asked of a second Codex process and of the disk.
-      // A recording holds neither, so the stand-in refuses nothing.
+      // Which command rules a Codex would read, and which MCP servers a launch would turn off now, is asked
+      // of a second Codex process, of the disk and of the process list. A recording holds none of them, so
+      // the stand-ins refuse nothing. The command line is read before the second question and is not looked at.
       sandboxedLoadRefusal: async () => null,
+      readCommandLine: async () => "codex app-server (replayed)",
+      assertLiveIsolationUnchanged: async () => {},
       writeSupervisorBridgeContext: notReplayed("writeSupervisorBridgeContext"),
       resolveServerUrl: async () => REPLAY_SERVER_URL,
       launchServer: () => ({ pid: REPLAY_PID, exited: this.exited }),

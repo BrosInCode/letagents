@@ -1,13 +1,15 @@
 import { spawn } from "node:child_process";
-import { lstatSync, readdirSync, realpathSync } from "node:fs";
+import { lstatSync, opendirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, parse, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 
 import {
   CODEX_OWNER_FEATURE_OVERRIDES,
   LETAGENTS_MCP_SERVER_NAME,
   assertProjectKeepsLetAgentsServer,
+  codexHomeDirectory,
   codexMcpServerDisableOverride,
+  codexOwnerIsolationOverrides,
   listCodexMcpServers,
   runCodexMcpList,
   type CodexMcpListRunner,
@@ -25,6 +27,12 @@ import {
 // AGENTS.md and skills still load, as they do for every agent.
 
 const INSPECTION_TIMEOUT_MS = 15_000;
+/**
+ * What an owner is told when LetAgents stopped a running agent so that it
+ * starts afresh. The background service starts an agent again only when it is
+ * set to run, so the words hold for an agent its owner paused too.
+ */
+export const STARTS_AGAIN_BY_ITSELF = "It starts again by itself, unless you paused it.";
 const DID_NOT_ANSWER_IN_TIME = "Codex did not answer in time";
 /** Where Codex says a hook comes from when it is the owner's or the machine's, not the project's. */
 const OWNER_HOOK_SOURCES = new Set([
@@ -51,7 +59,20 @@ export type CodexProjectInspection = { projectLayers: CodexProjectLayer[]; hooks
  * `otherRuleFolders`: the `rules` folder of every other layer Codex applies that is a file in a folder:
  * the system and managed config, and defaults shipped with Codex. Not the user's own layer.
  */
-export type CodexSettingsInspection = { projectLayers: CodexProjectLayer[]; credentialStore: string | null; otherRuleFolders: string[] };
+export type CodexSettingsInspection = {
+  projectLayers: CodexProjectLayer[];
+  credentialStore: string | null;
+  otherRuleFolders: string[];
+  /**
+   * The folders the owner's or the project's Codex config lets a sandboxed
+   * command write besides the project (`sandbox_workspace_write.writable_roots`).
+   * They apply to a turn whose sandbox lets it write the project. Null when
+   * Codex named them in a form this code cannot read: that is not "none".
+   */
+  writableRoots?: string[] | null;
+  /** What Codex says it is: its name and version. Null when it did not say. */
+  userAgent?: string | null;
+};
 type LaunchView = { cwd: string; env: NodeJS.ProcessEnv; configOverrides: readonly string[] };
 
 export type CodexHomeHarnessDependencies = {
@@ -88,14 +109,45 @@ function serverShape(entry: CodexMcpServerEntry): string {
 }
 
 /**
+ * Whether Codex takes a folder as the top of a repository. Codex 0.153.4 does
+ * when the folder's `.git`, with links followed, is a file of any content, or
+ * a folder that holds a HEAD: a file or a folder, also through a link. It does
+ * not for a `.git` that is an empty folder, a folder without HEAD or with a
+ * HEAD link that leads nowhere, or a link that leads nowhere: it reads on to
+ * the folders above. Anything this cannot look at is not a top, so the walk
+ * goes on: it may read further up than Codex, never less far.
+ */
+function isRepositoryTop(folder: string): boolean {
+  try {
+    const git = statSync(join(folder, ".git"), { throwIfNoEntry: false });
+    if (!git) return false;
+    return git.isFile() || (git.isDirectory() && statSync(join(folder, ".git", "HEAD"), { throwIfNoEntry: false }) !== undefined);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `inner` as it is named from `outer`, when it is that folder or in it: empty
+ * for the folder itself. Null when it is not. The two are compared name by
+ * name and not letter by letter, so "/" holds every path, "/a" does not hold
+ * "/ab", a folder named "..b" is in its parent, and a separator at the end
+ * changes nothing.
+ */
+export function pathFrom(outer: string, inner: string): string | null {
+  const from = relative(outer, inner);
+  return from === ".." || from.startsWith(`..${sep}`) || isAbsolute(from) ? null : from;
+}
+
+/**
  * A path as its owner knows it: from the top of the repository, not from
  * wherever LetAgents keeps the agent's copy of it. The top is the nearest
- * folder at or above the agent's that has a `.git`, or the agent's own.
+ * folder at or above the agent's that Codex takes as one, or the agent's own.
  */
 function pathInRepository(cwd: string, path: string): string {
   const tops = [cwd];
   try {
-    const hasGit = (folder: string) => lstatSync(join(folder, ".git"), { throwIfNoEntry: false }) !== undefined;
+    const hasGit = isRepositoryTop;
     let top = cwd;
     while (!hasGit(top) && dirname(top) !== top) top = dirname(top);
     if (hasGit(top)) tops[0] = top;
@@ -105,8 +157,8 @@ function pathInRepository(cwd: string, path: string): string {
     // A folder that cannot be looked at is not the top.
   }
   for (const top of tops) {
-    const shown = relative(top, path);
-    if (shown && !shown.startsWith("..") && !isAbsolute(shown)) return shown;
+    const shown = pathFrom(top, path);
+    if (shown) return shown;
   }
   return path;
 }
@@ -132,7 +184,7 @@ function refusal(reason: string, remedy: string): Error {
 export function askCodexAppServer<T>(
   codexBin: string,
   options: LaunchView,
-  ask: (request: (method: string, params: unknown) => Promise<unknown>) => Promise<T>,
+  ask: (request: (method: string, params: unknown) => Promise<unknown>, initialized: unknown) => Promise<T>,
   timeoutMs = INSPECTION_TIMEOUT_MS,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -190,9 +242,9 @@ export function askCodexAppServer<T>(
       }
     });
     void (async () => {
-      await request("initialize", { clientInfo: { name: "letagents", title: "LetAgents", version: "1" } });
+      const initialized = await request("initialize", { clientInfo: { name: "letagents", title: "LetAgents", version: "1" } });
       child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
-      finish(null, await ask(request));
+      finish(null, await ask(request, initialized));
     })().catch((error: unknown) => finish(error instanceof Error ? error : new Error(String(error))));
   });
 }
@@ -220,9 +272,11 @@ export function inspectCodexProject(codexBin: string, options: LaunchView, timeo
  * would apply, and where Codex keeps its sign-in.
  */
 export function inspectCodexSettings(codexBin: string, options: LaunchView, timeoutMs = INSPECTION_TIMEOUT_MS): Promise<CodexSettingsInspection> {
-  return askCodexAppServer(codexBin, { ...options, cwd: parse(options.cwd).root || "/" }, async (request) => {
+  return askCodexAppServer(codexBin, { ...options, cwd: parse(options.cwd).root || "/" }, async (request, initialized) => {
     const config = await request("config/read", { includeLayers: true, cwd: options.cwd });
     const credentialStore = record(record(config)?.config)?.cli_auth_credentials_store;
+    const writableRoots = record(record(record(config)?.config)?.sandbox_workspace_write)?.writable_roots;
+    const userAgent = record(initialized)?.userAgent;
     const projectLayers = readProjectLayers(config);
     // Codex reads command rules from the folder of each layer it applies. The
     // layers that are neither the user's nor a project's are named by a file
@@ -239,6 +293,12 @@ export function inspectCodexSettings(codexBin: string, options: LaunchView, time
       projectLayers,
       credentialStore: typeof credentialStore === "string" ? credentialStore : null,
       otherRuleFolders: [...new Set(otherRuleFolders)],
+      // Codex 0.153.4 names each folder by its full path, with "~", ".." and a path from the config's own folder worked out.
+      // Any other form is one this code cannot place.
+      writableRoots: writableRoots == null ? []
+        : Array.isArray(writableRoots) && writableRoots.every((root): root is string =>
+          typeof root === "string" && isAbsolute(root) && !root.split(/[\\/]/).includes("..")) ? writableRoots : null,
+      userAgent: typeof userAgent === "string" && userAgent ? userAgent : null,
     };
   }, timeoutMs);
 }
@@ -300,11 +360,56 @@ export function projectFolderEntries(folder: string): string[] {
 }
 
 /**
+ * The first entries of a folder, `limit` at most. It means what
+ * `projectFolderEntries` means, and reads no more of the folder than it
+ * returns: a check that runs at every turn must not list a folder of any size.
+ */
+export function firstFolderEntries(folder: string, limit = 4): string[] {
+  let open;
+  try {
+    open = opendirSync(folder);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !lstatSync(folder, { throwIfNoEntry: false })) return [];
+    return [folder];
+  }
+  try {
+    const entries: string[] = [];
+    for (let entry = open.readSync(); entry && entries.length < limit; entry = open.readSync()) entries.push(join(folder, entry.name));
+    return entries;
+  } catch {
+    return [folder];
+  } finally {
+    open.closeSync();
+  }
+}
+
+/** The names of a folder's first entries as they are shown: printable, short, three at most, and whether there are more. */
+function shownFirstNames(folder: string, entries: readonly string[]): string {
+  const names = entries.map((entry) => relative(folder, entry)).filter(Boolean);
+  if (!names.length) return "the folder cannot be listed";
+  return `${names.slice(0, 3).map((name) => name.replace(/[^\x20-\x7e]/g, "?").slice(0, 60)).join(", ")}${names.length > 3 ? " and more" : ""}`;
+}
+
+/** Whether two paths name one folder, with links followed. A folder that is not there is the same only by name. */
+function sameFolder(left: string, right: string): boolean {
+  const real = (path: string) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  // Without regard to case or to how a letter is composed: a disk may keep one folder under both spellings.
+  const folded = (path: string) => real(path).normalize("NFC").toLowerCase();
+  return folded(left) === folded(right);
+}
+
+/**
  * The folders Codex reads a project's command rules from, for work in `cwd`:
  * `.codex/rules` in that folder and in each folder above it, up to the top of
- * its repository. Codex 0.153.4 reads no further up, not from a folder beside
- * these, and not from a worktree's main clone. With no repository it reads
- * the folder's own only.
+ * its repository (see `isRepositoryTop`). Codex 0.153.4 reads no further up,
+ * not from a folder beside these, and not from a worktree's main clone. With
+ * no repository it reads the folder's own only.
  */
 export function projectRuleFolders(cwd: string): string[] {
   let folder = resolve(cwd);
@@ -313,45 +418,145 @@ export function projectRuleFolders(cwd: string): string[] {
   } catch {
     // A folder that is not there yet is looked for as it was named.
   }
-  const hasGit = (path: string) => lstatSync(join(path, ".git"), { throwIfNoEntry: false }) !== undefined;
   let top = folder;
-  try {
-    while (!hasGit(top) && dirname(top) !== top) top = dirname(top);
-    if (!hasGit(top)) top = folder;
-  } catch {
-    top = folder;
-  }
+  while (!isRepositoryTop(top) && dirname(top) !== top) top = dirname(top);
+  if (!isRepositoryTop(top)) top = folder;
   const folders = [folder];
   while (folders.at(-1) !== top) folders.push(dirname(folders.at(-1)!));
   return folders.map((path) => join(path, ".codex", "rules"));
 }
 
 /**
- * Why Codex is not used at a sandboxed access level in a project that has
- * command rules of its own. Null when it has none. A command that matches a
- * rule runs outside Codex's sandbox with no approval.
+ * The `.codex` folder of each project layer Codex reads for work in `cwd`, as
+ * `projectRuleFolders` walks them. `own`: the layer of the work folder itself.
+ * `shown`: its path from the top of the repository.
+ */
+export function projectDotCodexFolders(cwd: string): Array<{ folder: string; shown: string; own: boolean }> {
+  return projectRuleFolders(cwd).map((rules, index) => {
+    const folder = dirname(rules);
+    return { folder, shown: pathInRepository(cwd, folder).replace(/[^\x20-\x7e]/g, "?").slice(0, 120), own: index === 0 };
+  });
+}
+
+/**
+ * What a trusted project's Codex config may set for an agent at a sandboxed
+ * access level. A key is here only when it was shown to be harmless there, or
+ * is dealt with by a check of its own. Every other key that Codex reports for
+ * a project layer refuses the launch, and so does a key that a later Codex
+ * adds: nothing here depends on a list of keys known to be bad.
+ *
+ * - `mcp_servers`: each server is turned off by name, and they are compared
+ *   again before a conversation is started or loaded.
+ * - `hooks`: off for the launch, by its flag or one by one.
+ * - `approval_policy`, `sandbox_mode`: every conversation and every turn names
+ *   its approval policy and its sandbox. With Codex 0.153.4 the named ones
+ *   hold against these, for a command and for a sub-agent the model starts.
+ * - `sandbox_workspace_write`, for what `SANDBOX_KEYS_A_PROJECT_MAY_SET` names
+ *   and nothing else. `network_access`: the turn's own "no network" holds
+ *   against it. The two `exclude_` keys only say whether the temp folders are
+ *   written, which the access level allows as it is. `writable_roots` is not
+ *   among them: Codex adds those folders to a turn whatever the turn names,
+ *   so a project would choose where the agent's commands may write. It
+ *   refuses where the sandbox can write at all, unless the list is empty.
+ * - The rest choose the model and how it answers, or are text for the model,
+ *   as the project's AGENTS.md is.
+ *
+ * Not here, with the reason for some: `project_root_markers` moves the top of
+ * the repository, and with it the rule folders Codex reads; `web_search` can
+ * give the model the live web at a level whose commands have no network;
+ * `features`, `tools`, `agents`, `apps` and `shell_environment_policy` turn
+ * on or shape things nobody has shown to be harmless; `projects` trusts other
+ * folders; the sign-in and storage keys move where Codex keeps things; and
+ * `zsh_path` and `js_repl_node_path` name a program (Codex 0.153.4 was seen
+ * to run neither, which is no promise for the next one).
+ */
+export const SANDBOXED_PROJECT_KEYS: ReadonlySet<string> = new Set([
+  "mcp_servers", "hooks",
+  "approval_policy", "sandbox_mode", "sandbox_workspace_write",
+  "model", "model_reasoning_effort", "model_reasoning_summary", "model_verbosity", "personality",
+  "instructions", "developer_instructions", "project_doc_max_bytes", "project_doc_fallback_filenames",
+]);
+/** What a project may set under `sandbox_workspace_write`. A list of folders to write is not one of them. */
+export const SANDBOX_KEYS_A_PROJECT_MAY_SET: ReadonlySet<string> = new Set(["network_access", "exclude_tmpdir_env_var", "exclude_slash_tmp"]);
+
+/**
+ * Why Codex is not used at a sandboxed access level in a project whose own
+ * config sets something that is not in `SANDBOXED_PROJECT_KEYS`. Null when
+ * every project layer Codex applies sets only what is. A layer Codex does not
+ * apply, such as a project its owner has not trusted, is not in `layers`: so
+ * to stop trusting the project in Codex is a way out that leaves the file,
+ * which can be a team's, as it is.
+ */
+export function projectKeysRefusal(
+  cwd: string,
+  layers: readonly CodexProjectLayer[],
+  /** `writableSandbox`: the access level's sandbox lets a command write the project, so folders a project adds would be written too. */
+  options: { writableSandbox?: boolean } = {},
+): string | null {
+  for (const layer of layers) {
+    const others = Object.keys(layer.config).filter((key) => !SANDBOXED_PROJECT_KEYS.has(key));
+    if (Object.hasOwn(layer.config, "sandbox_workspace_write")) {
+      const sandbox = record(layer.config.sandbox_workspace_write);
+      // A value in a form this code does not know is not looked into: the whole key is refused.
+      if (!sandbox) others.push("sandbox_workspace_write");
+      for (const [key, value] of Object.entries(sandbox ?? {})) {
+        const noFolders = key === "writable_roots" && ((Array.isArray(value) && value.length === 0) || options.writableSandbox !== true);
+        if (!SANDBOX_KEYS_A_PROJECT_MAY_SET.has(key) && !noFolders) others.push(`sandbox_workspace_write.${key}`);
+      }
+    }
+    others.sort();
+    if (!others.length) continue;
+    const file = pathInRepository(cwd, join(layer.dotCodexFolder, "config.toml")).replace(/[^\x20-\x7e]/g, "?").slice(0, 120);
+    const one = others.length === 1;
+    // Every key is named while they fit, so one visit to the file is enough.
+    const named = `${others.slice(0, 8).map((key) => key.replace(/[^\x20-\x7e]/g, "?").slice(0, 40)).join(", ")}${others.length > 8 ? ` and ${others.length - 8} more` : ""}`;
+    return `This project's Codex config (${file}) sets ${named}. `
+      + `LetAgents does not know that ${one ? "this setting is" : "these settings are"} harmless for a sandboxed agent, so it will not start Codex here at this access level. `
+      + `Remove ${one ? "it" : "them"} from that file, stop trusting the project in Codex, or give this agent Full access if you accept that.`;
+  }
+  return null;
+}
+
+/**
+ * Why Codex is not used at a sandboxed access level in a work folder that has
+ * command rule folders of its own. Null when it has none. A command that
+ * matches an allow rule runs outside Codex's sandbox with no approval.
  *
  * It does not ask whether Codex trusts the project. Codex reads these folders
  * once it does, and trust can come at any time from outside this agent: the
  * owner's own Codex, an agent with Full access, or a conversation that is
  * started with the folder named, which Codex takes as trust and which turns
  * the rules on for that same conversation. So a folder that holds anything is
- * enough. Only the names in it are read.
+ * enough. Only names are read, and no more of them than are shown: what a
+ * file says, and whether it is a rule file at all, is not known here, and the
+ * words say so.
+ *
+ * `savedRules` is the owner's own saved-rules folder. An agent whose
+ * repository top is the folder that holds the owner's Codex home has that
+ * folder as its project's, and is told so.
  */
 export function projectCommandRulesRefusal(
   cwd: string,
-  folderEntries: (folder: string) => string[] = projectFolderEntries,
+  folderEntries: (folder: string) => string[] = firstFolderEntries,
   folders: readonly string[] = projectRuleFolders(cwd),
+  savedRules: string = join(codexHomeDirectory(process.env), "rules"),
 ): string | null {
   for (const path of folders) {
     const entries = folderEntries(path);
     if (!entries.length) continue;
-    const names = entries.map((entry) => relative(path, entry)).filter(Boolean);
+    const holds = shownFirstNames(path, entries);
+    const unread = "LetAgents does not read the files in it. If one of them allows a command, a sandboxed Codex agent runs that command with no sandbox and no approval. "
+      + "So LetAgents does not start Codex here, or give it work, at this access level. ";
+    if (sameFolder(path, savedRules)) {
+      return "This agent's work folder is in a repository whose top is the folder that holds your Codex home. "
+        + `So Codex reads your saved command rules (the rules folder in your Codex home) as this project's own once it trusts the project, and that folder is not empty (${holds}). `
+        + unread
+        + "Give the agent a work folder in a repository of its own, remove your saved rules, or give this agent Full access if you accept that.";
+    }
     const shown = pathInRepository(cwd, path);
-    return `This project has command rules for Codex in ${shown} (${names.length ? shownNames(names) : "the folder cannot be listed"}). `
-      + "A sandboxed Codex agent would run every command that matches one with no sandbox and no approval, "
-      + "so LetAgents does not start Codex here, or give it work, at this access level. "
-      + `Remove or rename ${shown}, or give this agent Full access if you accept that.`;
+    return `Codex reads command rules from ${shown} in this agent's work folder once it trusts the project, and that folder is not empty (${holds}). `
+      + unread
+      + `Remove or rename ${shown} in the agent's work folder, which can differ from your own copy of the project, or give this agent Full access if you accept that.`;
   }
   return null;
 }
@@ -364,27 +569,23 @@ export function projectCommandRulesRefusal(
 export function assertLayersAddNoCommandRules(
   cwd: string | undefined,
   inspection: Pick<CodexSettingsInspection, "projectLayers" | "otherRuleFolders">,
-  folderEntries: (folder: string) => string[] = projectFolderEntries,
+  folderEntries: (folder: string) => string[] = firstFolderEntries,
 ): void {
-  const found = (path: string) => {
-    const entries = folderEntries(path);
-    const names = entries.map((entry) => relative(path, entry)).filter(Boolean);
-    return entries.length ? (names.length ? `has entries LetAgents cannot check (${shownNames(names)})` : "cannot be listed") : null;
-  };
-  const outsideSandbox = "and a command that matches one runs outside this agent's sandbox";
   const layerFolders = inspection.projectLayers.map((layer) => join(layer.dotCodexFolder, "rules"));
   const inProject = layerFolders.length ? projectCommandRulesRefusal(cwd ?? dirname(dirname(layerFolders[0]!)), folderEntries, layerFolders) : null;
   if (inProject) throw new Error(inProject);
   for (const path of inspection.otherRuleFolders) {
-    const holds = found(path);
-    if (!holds) continue;
+    const entries = folderEntries(path);
+    if (!entries.length) continue;
     // A folder in the user's own home is named from there, never by its full path.
-    const fromHome = relative(homedir(), path);
-    const shown = fromHome && !fromHome.startsWith("..") && !isAbsolute(fromHome) ? join("~", fromHome) : path;
+    const fromHome = pathFrom(homedir(), path);
+    const shown = fromHome ? join("~", fromHome) : path;
     throw new Error(
-      `Codex also reads command rules from ${shown}, a folder of this computer's own Codex settings, ${outsideSandbox}. `
-      + `That folder ${holds}, so LetAgents will not start Codex at this access level. `
-      + `Remove the rules from ${shown} (this can need an administrator), or give this agent Full access.`,
+      `Codex also reads command rules from ${shown}, a folder of this computer's own Codex settings that applies to every Codex on it, and that folder is not empty (${shownFirstNames(path, entries)}). `
+      + "LetAgents does not read the files in it. If one of them allows a command, a sandboxed Codex agent runs that command with no sandbox and no approval. "
+      + "So LetAgents starts no Codex agent at a sandboxed access level on this computer while that folder holds anything. "
+      + "Only someone who may change that folder can empty it: on a computer that your organization manages, that is its administrator. "
+      + "Until then, give this agent Full access if you accept that.",
     );
   }
 }
@@ -647,13 +848,84 @@ export function assertLiveCodexProjectUnchanged(
       if (!notAsked) throw error;
       throw new Error(
         `LetAgents could not check what this project adds to your own setup (${notAsked}), so it stopped the agent `
-        + "before Codex could load the project's configuration. It starts again by itself.",
+        + `before Codex could load the project's configuration. ${STARTS_AGAIN_BY_ITSELF}`,
       );
     }
     if (needed.every((override) => live.commandLine.includes(override))) return;
     throw new Error(
       "This project's Codex config now adds MCP servers or hooks that were not there when this agent started, "
-      + "so LetAgents stopped the agent before Codex could load them with your own setup. It starts again with them turned off.",
+      + "so LetAgents stopped the agent before Codex could load them with your own setup. It starts again with them turned off, unless you paused it.",
+    );
+  });
+}
+
+/**
+ * One server or one personal skill as a launch override turns it off: whole,
+ * with its quoted name or path, so that no name is found inside another.
+ */
+const TURNED_OFF_BY_NAME = /"(?:[^"\\]|\\.)*" = \{ enabled = false \}|\{ path = "(?:[^"\\]|\\.)*", enabled = false \}/g;
+
+/**
+ * The same for a process that was started without its owner's setup. Such a
+ * launch turns every MCP server off by name, but the room's own, and every
+ * personal skill. A server that a trusted project's config, or the owner's,
+ * gained since then has no such override: Codex would start it, with no
+ * sandbox, when the process next starts or loads a conversation. So what a
+ * launch would turn off now is compared with what the process was started
+ * with. Throws when they differ, and when Codex cannot be asked.
+ *
+ * The room's own server is compared in and outside the project exactly as a
+ * launch compares it: with the launch's own overrides, `launchOverrides`,
+ * which set that server. Codex merges a project's keys for it under those, so
+ * a project that sets only keys the launch sets changes nothing, and one that
+ * adds a key does. Without them such a project would stop its agent at every
+ * load while every launch accepts it. A process that was found running has
+ * no known overrides (null). Its project may then not name the room's server
+ * at all, and the words say that the next start decides.
+ */
+export function assertLiveCodexIsolationUnchanged(
+  codexBin: string,
+  live: CodexLiveProcess & { launchOverrides?: readonly string[] | null },
+  env: NodeJS.ProcessEnv,
+  run: CodexMcpListRunner = runCodexMcpListForLaunch,
+): Promise<void> {
+  return inLiveCheckSlot(async () => {
+    const cwd = live.cwd;
+    if (!cwd) throw new Error("LetAgents could not tell which folder this Codex agent runs in, so it will not let Codex load a project's MCP servers.");
+    const known = live.launchOverrides ?? null;
+    if (!known) {
+      const view = { env, configOverrides: [...CODEX_OWNER_FEATURE_OVERRIDES] };
+      const [inProject, outsideProject] = await Promise.all([
+        listCodexMcpServers(codexBin, { ...view, cwd }, run),
+        listCodexMcpServers(codexBin, { ...view, cwd: parse(cwd).root || "/" }, run),
+      ]);
+      let named = false;
+      try {
+        assertProjectKeepsLetAgentsServer(inProject, outsideProject);
+      } catch {
+        named = true;
+      }
+      if (named) {
+        throw new Error(
+          "This project's Codex config has settings of its own for the LetAgents MCP server. This agent's Codex was started before LetAgents last restarted, "
+          + "so LetAgents cannot compare those settings with what the agent was started with, and stopped the agent before Codex could load them. "
+          + "LetAgents starts it again and compares them then, unless you paused it.",
+        );
+      }
+    }
+    // Throws as a launch does: the servers cannot be listed, or the project changes the room's own server.
+    const needed = await codexOwnerIsolationOverrides(codexBin, { cwd, env, configOverrides: known ?? [] }, run);
+    // Servers and skills are turned off one by one, by name, in one override each. They are compared by name:
+    // one that is gone since the launch is no reason to stop, and only one the process was not started without is.
+    const startedWithout = new Set(live.commandLine.match(TURNED_OFF_BY_NAME) ?? []);
+    const gained = needed.some((override) => {
+      const byName = override.startsWith("mcp_servers={ ") || override.startsWith("skills.config=[") ? override.match(TURNED_OFF_BY_NAME) : null;
+      return byName ? byName.some((one) => !startedWithout.has(one)) : !live.commandLine.includes(override);
+    });
+    if (!gained) return;
+    throw new Error(
+      "This project's Codex config, or your own, now has an MCP server or a skill that was not there when this agent started, "
+      + "so LetAgents stopped the agent before Codex could load it. It starts again with it turned off, unless you paused it.",
     );
   });
 }

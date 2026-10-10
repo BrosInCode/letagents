@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
-import { basename, join } from "node:path";
+import { basename, dirname, join, parse } from "node:path";
 import { createInterface } from "node:readline";
 import test from "node:test";
 
@@ -31,9 +31,13 @@ writeFileSync(process.env.LETAGENTS_AGENT_COMMIT_IDENTITY_PATH!, JSON.stringify(
 
 const {
   CODEX_TOKEN_SERVICE_OVERRIDES, CodexAgentHomeError, CodexAgentHomeSignInError, checkCodexKeepsLinkedSignIn, codexAgentHomeDirectory, codexHomeForSandboxedLaunch,
-  linkCodexAgentHome, sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal,
+  folderHolds, linkCodexAgentHome, sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal,
 } = await import("../main/agents/codex-agent-home.js");
-const { assertLayersAddNoCommandRules, inspectCodexSettings, projectRuleFolders } = await import("../main/agents/codex-home-harness.js");
+const {
+  SANDBOXED_PROJECT_KEYS, SANDBOX_KEYS_A_PROJECT_MAY_SET, assertLayersAddNoCommandRules, assertLiveCodexIsolationUnchanged, firstFolderEntries, inspectCodexSettings, pathFrom,
+  projectCommandRulesRefusal, projectKeysRefusal, projectRuleFolders,
+} = await import("../main/agents/codex-home-harness.js");
+const { codexOwnerIsolationOverrides } = await import("../../../../shared/codex-owner-isolation.mjs");
 const { codexAppServerEnvironment, launchManagedCodexAppServer, terminateSpawnedProcess, waitForLaunchedCodexAppServer } = await import("../main/agents/codex-app-server.js");
 const { CodexProviderAdapter } = await import("../main/agents/codex-provider-adapter.js");
 const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
@@ -203,13 +207,20 @@ test("the agents' home is a folder apart from the owner's home", () => {
   assert.equal(codexAgentHomeDirectory({ HOME: owner.home }), owner.agentHome);
 });
 
-const noProject = { projectLayers: [], credentialStore: "file", otherRuleFolders: [] };
+const noProject = { projectLayers: [], credentialStore: "file", otherRuleFolders: [], writableRoots: [] as string[], userAgent: "codex-stand-in/1.0" as string | null };
 /** What the owner is told about a project that has command rules of its own: what was found, what it would do, and the two ways out. */
 const projectRulesRefusal = (folder: string, names: string) =>
-  `This project has command rules for Codex in ${folder} (${names}). `
-  + "A sandboxed Codex agent would run every command that matches one with no sandbox and no approval, "
-  + "so LetAgents does not start Codex here, or give it work, at this access level. "
-  + `Remove or rename ${folder}, or give this agent Full access if you accept that.`;
+  `Codex reads command rules from ${folder} in this agent's work folder once it trusts the project, and that folder is not empty (${names}). `
+  + "LetAgents does not read the files in it. If one of them allows a command, a sandboxed Codex agent runs that command with no sandbox and no approval. "
+  + "So LetAgents does not start Codex here, or give it work, at this access level. "
+  + `Remove or rename ${folder} in the agent's work folder, which can differ from your own copy of the project, or give this agent Full access if you accept that.`;
+/** The same when the folder is the owner's own saved rules, because the agent's repository top is the folder that holds their Codex home. */
+const savedRulesAsProjectRefusal = (names: string) =>
+  "This agent's work folder is in a repository whose top is the folder that holds your Codex home. "
+  + `So Codex reads your saved command rules (the rules folder in your Codex home) as this project's own once it trusts the project, and that folder is not empty (${names}). `
+  + "LetAgents does not read the files in it. If one of them allows a command, a sandboxed Codex agent runs that command with no sandbox and no approval. "
+  + "So LetAgents does not start Codex here, or give it work, at this access level. "
+  + "Give the agent a work folder in a repository of its own, remove your saved rules, or give this agent Full access if you accept that.";
 const useAgentsHome = (codexHome: string) => ({ codexHome, notices: [] });
 const useOwnersHome = { codexHome: null, notices: [] };
 
@@ -226,7 +237,7 @@ test("a sandboxed launch gets the agents' home when Codex keeps its sign-in in a
   assert.deepEqual(asked, [`inspect ${project} ${owner.codexHome}`, "sign-in check"], "Codex is asked about the owner's home, before any link is made");
   // An agent that works in the user's own folder has the owner's saved rules as its project's: Codex reads them as the project's once it trusts that folder.
   await assert.rejects(codexHomeForSandboxedLaunch("codex", { cwd: owner.home, env: owner.env }, deps), (error: Error) => {
-    assert.equal(error.message, projectRulesRefusal(".codex/rules", "default.rules"));
+    assert.equal(error.message, savedRulesAsProjectRefusal("default.rules"));
     return true;
   });
   assert.deepEqual(entries(owner.agentHome), ["AGENTS.md@", "auth.json@", "config.toml@", "rules/", "sessions@"]);
@@ -313,7 +324,16 @@ test("a sandboxed launch does not start when Codex cannot be asked, when the age
  * sign-in file the way its `signIn` setting says: `in-place` rewrites the
  * file, `replace` writes a new file over the name, `none` leaves it.
  */
-function fakeCodex(settings: { signIn?: "in-place" | "replace" | "none"; store?: string; layers?: unknown[] } = {}): {
+function fakeCodex(settings: {
+  signIn?: "in-place" | "replace" | "none"; store?: string; layers?: unknown[];
+  /**
+   * The MCP servers it lists besides the room's own, and what a project does to the room's own: add a key, which no launch
+   * override takes back, or set only keys that a launch's own override for that server sets too.
+   */
+  servers?: string[]; projectChangesRoomServer?: boolean; projectSetsRoomServerKeys?: boolean; listFails?: boolean;
+  /** What it says it is when it is asked for its settings, and the folders its config lets a sandboxed command write. */
+  userAgent?: string; writableRoots?: string[];
+} = {}): {
   bin: string; calls: () => Array<{ args: string[]; cwd: string; codexHome: string | null; refreshUrl: string | null; revokeUrl: string | null; room: string | null }>;
 } {
   const directory = fixture("fake-codex");
@@ -329,13 +349,20 @@ function fakeCodex(settings: { signIn?: "in-place" | "replace" | "none"; store?:
     "fs.appendFileSync(path.join(__dirname, 'calls.jsonl'), JSON.stringify({ args, cwd: process.cwd(), codexHome: process.env.CODEX_HOME ?? null,",
     "  refreshUrl: process.env.CODEX_REFRESH_TOKEN_URL_OVERRIDE ?? null, revokeUrl: process.env.CODEX_REVOKE_TOKEN_URL_OVERRIDE ?? null,",
     "  room: process.env.LETAGENTS_SUPERVISOR_ROOM_ID ?? null }) + '\\n');",
-    "if (args[0] === 'mcp') process.stdout.write(JSON.stringify([{ name: 'letagents', enabled: true, transport: { type: 'stdio', command: 'npx', args: ['-y', 'letagents'], env: null } }]));",
+    "if (args[0] === 'mcp') {",
+    "  if (settings.listFails) process.exit(3);",
+    "  const overridden = args.some((arg) => arg.startsWith('mcp_servers.letagents='));",
+    "  const changed = process.cwd() !== '/' && (settings.projectChangesRoomServer || (settings.projectSetsRoomServerKeys && !overridden));",
+    "  const off = (name) => args.join(' ').includes(JSON.stringify(name) + ' = { enabled = false }');",
+    "  process.stdout.write(JSON.stringify([{ name: 'letagents', enabled: true, transport: { type: 'stdio', command: 'npx', args: changed ? ['./from-the-project.js'] : ['-y', 'letagents'], env: null } },",
+    "    ...(settings.servers ?? []).map((name) => ({ name, enabled: !off(name) }))]));",
+    "}",
     "if (args[0] === 'app-server' && args.includes('stdio://')) {",
     "  const send = (m) => process.stdout.write(JSON.stringify(m) + '\\n');",
     "  require('node:readline').createInterface({ input: process.stdin }).on('line', async (line) => {",
     "    const m = JSON.parse(line);",
-    "    if (m.method === 'initialize') send({ id: m.id, result: {} });",
-    "    if (m.method === 'config/read') send({ id: m.id, result: { config: { cli_auth_credentials_store: settings.store }, layers: settings.layers ?? [] } });",
+    "    if (m.method === 'initialize') send({ id: m.id, result: settings.userAgent ? { userAgent: settings.userAgent } : {} });",
+    "    if (m.method === 'config/read') send({ id: m.id, result: { config: { cli_auth_credentials_store: settings.store, sandbox_workspace_write: { writable_roots: settings.writableRoots ?? [] } }, layers: settings.layers ?? [] } });",
     "    if (m.method === 'hooks/list') send({ id: m.id, result: { data: m.params.cwds.map((cwd) => ({ cwd, hooks: [] })) } });",
     "    if (m.method === 'account/read') {",
     "      const file = path.join(process.env.CODEX_HOME, 'auth.json');",
@@ -664,14 +691,17 @@ test("the installed Codex names the machine's own config folder as a layer, and 
 
 type ModelItem = Record<string, unknown>;
 /** A stand-in model service on this machine, so a turn needs no sign-in. `plan` holds one answer for each model request. */
-async function stubModel(): Promise<{ port: number; plan: Array<() => ModelItem[]>; requests: Array<Record<string, unknown>>; close(): void }> {
+async function stubModel(): Promise<{ port: number; plan: Array<() => ModelItem[]>; requests: Array<Record<string, unknown>>; others: string[]; close(): void }> {
   const plan: Array<() => ModelItem[]> = [];
   const requests: Array<Record<string, unknown>> = [];
+  /** Every other address that was asked for here: a command that reached the network asks for one. */
+  const others: string[] = [];
   const server = createHttpServer((request, response) => {
     let body = "";
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
       if (request.method !== "POST" || !String(request.url).endsWith("/responses")) {
+        others.push(String(request.url));
         response.statusCode = 404;
         response.end("{}");
         return;
@@ -688,7 +718,7 @@ async function stubModel(): Promise<{ port: number; plan: Array<() => ModelItem[
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
-  return { port: (server.address() as { port: number }).port, plan, requests, close: () => server.close() };
+  return { port: (server.address() as { port: number }).port, plan, requests, others, close: () => server.close() };
 }
 
 test("the installed Codex lets a saved rule's command out of its sandbox with the owner's home and not with the agents' home, and each home resumes the other's conversation", {
@@ -840,9 +870,11 @@ test("a sandboxed launch is refused while the machine's own Codex config folder 
   const refused = ownerHome({ rules: false });
   await assert.rejects(codexHomeForSandboxedLaunch("codex", { env: refused.env }, deps), (error: Error) => {
     assert.equal(error.message,
-      `Codex also reads command rules from ${join(machine, "rules")}, a folder of this computer's own Codex settings, and a command that matches one runs outside this agent's sandbox. `
-      + "That folder has entries LetAgents cannot check (site.rules), so LetAgents will not start Codex at this access level. "
-      + `Remove the rules from ${join(machine, "rules")} (this can need an administrator), or give this agent Full access.`);
+      `Codex also reads command rules from ${join(machine, "rules")}, a folder of this computer's own Codex settings that applies to every Codex on it, and that folder is not empty (site.rules). `
+      + "LetAgents does not read the files in it. If one of them allows a command, a sandboxed Codex agent runs that command with no sandbox and no approval. "
+      + "So LetAgents starts no Codex agent at a sandboxed access level on this computer while that folder holds anything. "
+      + "Only someone who may change that folder can empty it: on a computer that your organization manages, that is its administrator. "
+      + "Until then, give this agent Full access if you accept that.");
     return true;
   });
   assert.equal(existsSync(refused.agentHome), false, "nothing is linked for a launch that is refused");
@@ -880,9 +912,11 @@ test("a home that holds anything of its own is asked about again as the agents' 
   assert.deepEqual(asked, [owner.codexHome, owner.agentHome], "once as the owner's home, once as the home the launch will use");
   assert.equal(kept.codexHome, owner.agentHome);
   assert.deepEqual(kept.notices, [
-    "Codex wrote files of its own in the folder LetAgents keeps for sandboxed Codex agents (codex-agent-home in your .letagents folder): config.toml. "
-    + "Sandboxed agents use those, not the ones in your Codex home, so they do not see your later changes there. "
-    + "LetAgents does not delete them, because they can hold conversations. To use your own again, stop the sandboxed Codex agents and delete them.",
+    "The folder LetAgents keeps for sandboxed Codex agents (codex-agent-home in your .letagents folder) holds entries of its own with the same names as entries of your Codex home: config.toml. "
+    + "That happens when a sandboxed agent's Codex makes an entry before your Codex home has it, for example the first time after a Codex update adds one. "
+    + "Sandboxed agents use those, not yours, so they do not see what you or your own Codex later put in yours. "
+    + "LetAgents never deletes them, because they can hold conversations; an empty one it replaces with a link to yours by itself. "
+    + "To use your own again, stop the sandboxed Codex agents and delete those entries from that folder.",
   ]);
   assert.equal(readFileSync(join(owner.agentHome, "config.toml"), "utf8"), 'model = "a-copy"\n');
 
@@ -893,7 +927,7 @@ test("a home that holds anything of its own is asked about again as the agents' 
   mkdirSync(join(project, "inner"));
   answers.push(noProject, { ...noProject, projectLayers: [{ dotCodexFolder: join(project, ".codex"), config: {} }] } as typeof noProject);
   // The project is no repository, and the rules are in a folder above the agent's: only Codex's own answer names that folder.
-  await assert.rejects(codexHomeForSandboxedLaunch("codex", { cwd: join(project, "inner"), env: owner.env }, deps), (error: Error) => error.message.startsWith("This project has command rules for Codex in "));
+  await assert.rejects(codexHomeForSandboxedLaunch("codex", { cwd: join(project, "inner"), env: owner.env }, deps), (error: Error) => error.message.startsWith("Codex reads command rules from "));
 
   // Its own config moves the sign-in: a refreshed token would be saved apart from the owner's file.
   answers.push(noProject, { ...noProject, credentialStore: "keyring" });
@@ -935,7 +969,7 @@ test("a running sandboxed Codex may start or load a conversation only when nothi
   mkdirSync(join(elsewhere, ".codex", "rules"), { recursive: true });
   writeFileSync(join(elsewhere, ".codex", "rules", "allow.rules"), ALLOW_RULE);
   answer = { ...noProject, projectLayers: [{ dotCodexFolder: join(elsewhere, ".codex"), config: {} }] } as typeof noProject;
-  assert.match((await refusal(owner.codexHome))!, /^This project has command rules for Codex in .*\.codex[\\/]rules \(allow\.rules\)\./);
+  assert.match((await refusal(owner.codexHome))!, /^Codex reads command rules from .*\.codex[\\/]rules in this agent's work folder once it trusts the project, and that folder is not empty \(allow\.rules\)\./);
   answer = noProject;
 
   // The owner saved a rule in the home this process runs with: nothing more needs asking.
@@ -1106,4 +1140,875 @@ test("a sandboxed Codex is not started, and loads no conversation, in a project 
   }
   assert.equal(sandboxedCodexProjectRefusal(null),
     "Codex did not say which folder this agent works in, so LetAgents cannot look for command rules in its project, and gives it no work. Pause the agent and resume it.");
+});
+
+/** A work folder two folders below `inner`, which is below `outer`, a real repository. Each folder has rules of its own. `git` makes what `inner` has as its `.git`. */
+function nestedProject(git: (inner: string) => void): { outer: string; inner: string; work: string; all: string[] } {
+  const outer = join(fixture("nested"), "outer");
+  const inner = join(outer, "mid", "inner");
+  const work = join(inner, "packages", "work");
+  mkdirSync(work, { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: outer });
+  const all = [work, join(inner, "packages"), inner, join(outer, "mid"), outer];
+  for (const folder of all) {
+    mkdirSync(join(folder, ".codex", "rules"), { recursive: true });
+    writeFileSync(join(folder, ".codex", "rules", "allow.rules"), ALLOW_RULE);
+  }
+  git(inner);
+  return { outer, inner, work, all };
+}
+/** What `.git` can be, and whether Codex 0.153.4 takes its folder as the top of a repository. */
+const GIT_KINDS: Array<{ name: string; top: boolean; make(inner: string): void }> = [
+  { name: "a real repository", top: true, make: (inner) => { execFileSync("git", ["init", "-q"], { cwd: inner }); } },
+  { name: "a worktree's .git file", top: true, make: (inner) => writeFileSync(join(inner, ".git"), "gitdir: /nowhere/at/all\n") },
+  { name: "an empty .git file", top: true, make: (inner) => writeFileSync(join(inner, ".git"), "") },
+  { name: "a .git folder that holds only HEAD", top: true, make: (inner) => { mkdirSync(join(inner, ".git")); writeFileSync(join(inner, ".git", "HEAD"), "ref: refs/heads/main\n"); } },
+  { name: "an empty .git folder", top: false, make: (inner) => mkdirSync(join(inner, ".git")) },
+  { name: "a .git folder without HEAD", top: false, make: (inner) => { mkdirSync(join(inner, ".git", "objects"), { recursive: true }); writeFileSync(join(inner, ".git", "config"), ""); } },
+  { name: "a .git link that leads nowhere", top: false, make: (inner) => symlinkSync(join(inner, "nowhere"), join(inner, ".git")) },
+  { name: "no .git at all", top: false, make: () => {} },
+  // HEAD only has to be there, with its links followed: a folder counts, a link that leads nowhere does not.
+  { name: "a .git folder whose HEAD is a folder", top: true, make: (inner) => mkdirSync(join(inner, ".git", "HEAD"), { recursive: true }) },
+  { name: "a .git folder whose HEAD is a link to a folder", top: true, make: (inner) => { mkdirSync(join(inner, ".git")); mkdirSync(join(inner, "elsewhere")); symlinkSync(join(inner, "elsewhere"), join(inner, ".git", "HEAD")); } },
+  { name: "a .git folder whose HEAD is a link to a file", top: true, make: (inner) => { mkdirSync(join(inner, ".git")); writeFileSync(join(inner, "a-file"), "x"); symlinkSync(join(inner, "a-file"), join(inner, ".git", "HEAD")); } },
+  { name: "a .git folder whose HEAD is a link that leads nowhere", top: false, make: (inner) => { mkdirSync(join(inner, ".git")); symlinkSync(join(inner, "nowhere"), join(inner, ".git", "HEAD")); } },
+  { name: "a .git link to a folder with HEAD", top: true, make: (inner) => { mkdirSync(join(inner, "elsewhere")); writeFileSync(join(inner, "elsewhere", "HEAD"), "x"); symlinkSync(join(inner, "elsewhere"), join(inner, ".git")); } },
+  { name: "a .git link to an empty folder", top: false, make: (inner) => { mkdirSync(join(inner, "elsewhere")); symlinkSync(join(inner, "elsewhere"), join(inner, ".git")); } },
+  { name: "a .git link to a file", top: true, make: (inner) => { writeFileSync(join(inner, "a-file"), "gitdir: x\n"); symlinkSync(join(inner, "a-file"), join(inner, ".git")); } },
+];
+
+test("the walk for a project's rule folders stops where Codex stops: an empty .git folder or a dangling .git link is no repository top, and the walk reads on above it", () => {
+  for (const kind of GIT_KINDS) {
+    const project = nestedProject(kind.make);
+    const expected = kind.top ? project.all.slice(0, 3) : project.all;
+    assert.deepEqual(projectRuleFolders(project.work), expected.map((folder) => join(folder, ".codex", "rules")), kind.name);
+  }
+  // What sits above a folder that is no top is found, and named from the top Codex takes.
+  const above = nestedProject((inner) => mkdirSync(join(inner, ".git")));
+  for (const folder of above.all.slice(0, 4)) execFileSync("rm", ["-r", join(folder, ".codex")]);
+  assert.equal(projectCommandRulesRefusal(above.work), projectRulesRefusal(".codex/rules", "allow.rules"));
+  // A .git that cannot be looked at is no top either: the walk goes on, never short.
+  const locked = nestedProject((inner) => { mkdirSync(join(inner, ".git")); writeFileSync(join(inner, ".git", "HEAD"), "x"); chmodSync(join(inner, ".git"), 0o000); });
+  try {
+    assert.equal(projectRuleFolders(locked.work).length, 5);
+  } finally {
+    chmodSync(join(locked.inner, ".git"), 0o700);
+  }
+});
+
+test("the installed Codex applies exactly the project layers the walk names, for every kind of .git", {
+  skip: realCodex ? false : "Codex is not installed",
+  timeout: 180_000,
+}, async () => {
+  for (const kind of GIT_KINDS) {
+    const project = nestedProject(kind.make);
+    const owner = ownerHome({ rules: false });
+    // Every folder is trusted, so only where Codex puts the top of the project decides what it reads.
+    writeFileSync(join(owner.codexHome, "config.toml"), project.all.map((folder) => `[projects.${JSON.stringify(folder)}]\ntrust_level = "trusted"\n`).join(""));
+    const inspection = await inspectCodexSettings(realCodex!, { cwd: project.work, env: { PATH: process.env.PATH, ...owner.env }, configOverrides: [] });
+    assert.deepEqual(inspection.projectLayers.map((layer) => join(layer.dotCodexFolder, "rules")).sort(), projectRuleFolders(project.work).sort(), kind.name);
+  }
+});
+
+test("the refusal for a project's rule folder says only what is known: the folder is not empty, it is in the agent's own work folder, and what an allow rule there would do", () => {
+  const project = fixture("project");
+  mkdirSync(join(project, ".git"));
+  writeFileSync(join(project, ".git", "HEAD"), "ref: refs/heads/main\n");
+  mkdirSync(join(project, ".codex", "rules"), { recursive: true });
+  // A README is no rule, and LetAgents does not read it: the words must hold for it too.
+  writeFileSync(join(project, ".codex", "rules", "README.md"), "nothing here allows a command\n");
+  const refusal = projectCommandRulesRefusal(project)!;
+  assert.equal(refusal, projectRulesRefusal(".codex/rules", "README.md"));
+  assert.ok(!/every command that matches|has command rules/.test(refusal), "nothing is said about what the files hold");
+  // More entries than are shown are not counted: the folder is not listed to its end.
+  for (const name of ["a.rules", "b.rules", "c.rules", "d.rules"]) writeFileSync(join(project, ".codex", "rules", name), ALLOW_RULE);
+  assert.match(projectCommandRulesRefusal(project)!, /and that folder is not empty \((?:[A-Za-z.]+, ){2}[A-Za-z.]+ and more\)\./);
+
+  // An agent whose repository top is the folder that holds the owner's Codex home: the folder is the owner's saved rules, and is called that.
+  const owner = ownerHome();
+  mkdirSync(join(owner.home, ".git"));
+  writeFileSync(join(owner.home, ".git", "HEAD"), "ref: refs/heads/main\n");
+  mkdirSync(join(owner.home, "work", "here"), { recursive: true });
+  assert.equal(projectCommandRulesRefusal(join(owner.home, "work", "here"), undefined, undefined, join(owner.codexHome, "rules")), savedRulesAsProjectRefusal("default.rules"));
+});
+
+test("a rules folder is read no further than its first entries, whatever its size", () => {
+  const folder = fixture("many");
+  for (let index = 0; index < 40; index += 1) writeFileSync(join(folder, `rule-${index}.rules`), "");
+  assert.equal(firstFolderEntries(folder).length, 4);
+  assert.equal(firstFolderEntries(folder, 1).length, 1);
+  assert.ok(firstFolderEntries(folder).every((entry) => entry.startsWith(`${folder}/rule-`)));
+  // It means what a full listing means: nothing for no folder and for an empty one, something for one that cannot be listed.
+  assert.deepEqual(firstFolderEntries(join(folder, "not-there")), []);
+  assert.deepEqual(firstFolderEntries(fixture("empty")), []);
+  const locked = fixture("locked");
+  chmodSync(locked, 0o000);
+  try {
+    assert.deepEqual(firstFolderEntries(locked), [locked]);
+  } finally {
+    chmodSync(locked, 0o700);
+  }
+  const linked = join(fixture("link"), "rules");
+  symlinkSync(folder, linked);
+  assert.equal(firstFolderEntries(linked).length, 4, "a folder that is a link is read through it");
+});
+
+/** The words of the refusal for a folder the Codex config lets a sandboxed command write. */
+const writableRootText = (shown: string, touches: string) =>
+  `Your Codex config lets a sandboxed command write ${shown} (sandbox_workspace_write.writable_roots), and that folder ${touches}. `
+  + "A command could change what Codex reads there and leave its sandbox, so LetAgents will not start Codex at this access level. "
+  + `Take ${shown} out of writable_roots in your Codex config.toml, or give this agent Full access if you accept that.`;
+const AGENTS_HOME = "the Codex home LetAgents keeps for sandboxed agents";
+
+test("a launch whose sandbox lets a command write the project is refused when the Codex config lets it write where Codex reads its settings or rules", async () => {
+  const owner = ownerHome({ rules: false });
+  const elsewhere = fixture("elsewhere");
+  const launch = (writableRoots: string[], writableSandbox: boolean, more: { cwd?: string; otherRuleFolders?: string[] } = {}) =>
+    codexHomeForSandboxedLaunch("codex", { env: owner.env, writableSandbox, ...(more.cwd ? { cwd: more.cwd } : {}) }, {
+      inspect: async () => ({ ...noProject, writableRoots, otherRuleFolders: more.otherRuleFolders ?? [] }), keepsLinkedSignIn: async () => true,
+    });
+  const refused = async (root: string, shown: string, touches: string, more: { cwd?: string; otherRuleFolders?: string[] } = {}) => {
+    await assert.rejects(launch([elsewhere, root], true, more), (error: Error) => { assert.equal(error.message, writableRootText(shown, touches)); return true; });
+    // A read-only sandbox writes nowhere, and the folders do not apply to it.
+    assert.equal((await launch([elsewhere, root], false, more)).codexHome, owner.agentHome, root);
+  };
+  // Each line says how the folder and the home lie: the folder is the home, holds it, or is in it.
+  const disk = parse(owner.home).root;
+  await refused(disk, disk, `holds ${AGENTS_HOME}`);
+  await refused(dirname(owner.home), dirname(owner.home), `holds ${AGENTS_HOME}`);
+  await refused(owner.home, "~", `holds ${AGENTS_HOME}`);
+  await refused(`${owner.home}/`, "~", `holds ${AGENTS_HOME}`);
+  await refused(join(owner.home, ".letagents"), "~/.letagents", `holds ${AGENTS_HOME}`);
+  await refused(`${join(owner.home, ".letagents")}/`, "~/.letagents", `holds ${AGENTS_HOME}`);
+  await refused(owner.agentHome, "~/.letagents/codex-agent-home", `is ${AGENTS_HOME}`);
+  await refused(join(owner.agentHome, "rules"), "~/.letagents/codex-agent-home/rules", `is in ${AGENTS_HOME}`);
+  // Another owner home's agents' home in the same data folder, there or not there yet.
+  await refused(join(owner.home, ".letagents", "codex-agent-home-0123456789ab"), "~/.letagents/codex-agent-home-0123456789ab", "is a Codex home LetAgents keeps for sandboxed agents");
+  await refused(join(owner.home, ".letagents", "codex-agent-home-0123456789ab", "rules"), "~/.letagents/codex-agent-home-0123456789ab/rules", "is in a Codex home LetAgents keeps for sandboxed agents");
+  // The owner's own home: all of it. Nothing in it is left out.
+  await refused(owner.codexHome, "~/.codex", "is your Codex home");
+  await refused(join(owner.codexHome, "rules"), "~/.codex/rules", "is in your Codex home");
+  await refused(join(owner.codexHome, "worktrees", "one"), "~/.codex/worktrees/one", "is in your Codex home");
+
+  // One folder under another name: in another case, through a link, and with a link in the middle.
+  const shouted = join(owner.home, ".LETAGENTS");
+  await refused(shouted, "~/.LETAGENTS", `holds ${AGENTS_HOME}`);
+  await refused(join(owner.home, ".Codex", "Rules"), "~/.Codex/Rules", "is in your Codex home");
+  const link = join(fixture("links"), "to-the-data-folder");
+  symlinkSync(join(owner.home, ".letagents"), link);
+  await refused(link, link, `holds ${AGENTS_HOME}`);
+  await refused(join(link, "codex-agent-home", "rules"), join(link, "codex-agent-home", "rules"), `is in ${AGENTS_HOME}`);
+  // A second path that the disk itself gives the folder, where it has one: macOS shows every folder below this one too.
+  const second = join("/System/Volumes/Data", owner.home);
+  const same = (left: string, right: string) => { try { const [a, b] = [statSync(left), statSync(right)]; return a.dev === b.dev && a.ino === b.ino; } catch { return false; } };
+  if (same(second, owner.home)) {
+    await refused(join(second, ".letagents"), join(second, ".letagents"), `holds ${AGENTS_HOME}`);
+    await refused(join(second, ".codex"), join(second, ".codex"), "is your Codex home");
+    // And another owner home's agents' home that is there, named by that second path.
+    const other = join(owner.home, ".letagents", "codex-agent-home-ba9876543210");
+    mkdirSync(other, { recursive: true });
+    await refused(join(second, ".letagents", basename(other), "rules"), join(second, ".letagents", basename(other), "rules"), "is in a Codex home LetAgents keeps for sandboxed agents");
+    execFileSync("rm", ["-r", join(owner.home, ".letagents")]);
+  }
+
+  // A folder that touches none of them changes nothing: beside the homes, and one whose name only starts like one.
+  for (const apart of [elsewhere, join(owner.home, "projects"), join(owner.home, ".letagents-other"), join(owner.home, ".codex-backup"), join(owner.home, ".letagents", "workspaces")]) {
+    assert.equal((await launch([apart], true)).codexHome, owner.agentHome, apart);
+  }
+
+  // The rules folder of another layer Codex reads rules from: the computer's own settings.
+  const machine = fixture("machine-settings");
+  mkdirSync(join(machine, "rules"));
+  const layers = { otherRuleFolders: [join(machine, "rules")] };
+  const from = `a folder that Codex reads command rules from (${join(machine, "rules")})`;
+  await refused(join(machine, "rules"), join(machine, "rules"), `is ${from}`, layers);
+  await refused(machine, machine, `holds ${from}`, layers);
+  await refused(join(machine, "rules", "more"), join(machine, "rules", "more"), `is in ${from}`, layers);
+  assert.equal((await launch([join(machine, "cache")], true, layers)).codexHome, owner.agentHome, "a folder beside that rules folder");
+
+  // An owner whose Codex home is not in the user folder: the folder above it holds it.
+  const above = fixture("apart");
+  mkdirSync(join(above, "codex"));
+  writeFileSync(join(above, "codex", "auth.json"), '{"pretend":"owner sign-in"}\n', { mode: 0o600 });
+  await assert.rejects(codexHomeForSandboxedLaunch("codex", { env: { HOME: fixture("apart-user"), CODEX_HOME: join(above, "codex") }, writableSandbox: true },
+    { inspect: async () => ({ ...noProject, writableRoots: [above] }), keepsLinkedSignIn: async () => true }),
+  (error: Error) => { assert.equal(error.message, writableRootText(above, "holds your Codex home")); return true; });
+
+  // The same before a running process starts or loads a conversation, with the home it runs with.
+  const project = fixture("project");
+  const load = (writableRoots: string[], writableSandbox: boolean, codexHome = owner.agentHome) => sandboxedCodexLoadRefusal("codex", { cwd: project, codexHome, env: owner.env, writableSandbox },
+    { inspect: async () => ({ ...noProject, writableRoots }) });
+  assert.equal(await load([join(owner.home, ".letagents")], true), writableRootText("~/.letagents", `holds ${AGENTS_HOME}`));
+  assert.equal(await load([disk], true), writableRootText(disk, `holds ${AGENTS_HOME}`));
+  assert.equal(await load([join(owner.home, ".letagents")], false), null);
+  assert.equal(await load([elsewhere], true), null);
+  const custom = fixture("another-agents-home");
+  assert.equal(await load([custom], true, custom), writableRootText(custom, `is ${AGENTS_HOME}`), "the home the process says it runs with");
+
+  // What Codex reports is what is looked at: the installed stand-in names its config's writable folders.
+  const reported = await inspectCodexSettings(fakeCodex({ writableRoots: [elsewhere, "/"], userAgent: "codex-stand-in/2.0" }).bin, { cwd: project, env: { PATH: process.env.PATH, ...owner.env }, configOverrides: [] });
+  assert.deepEqual([reported.writableRoots, reported.userAgent], [[elsewhere, "/"], "codex-stand-in/2.0"]);
+
+  // Folders that Codex names in a form this code cannot place are not taken as none: a sandbox that can write is refused, and one that cannot is not.
+  // Codex 0.153.4 names each by its full path, so a "~", a "..", or a path from some other folder is such a form.
+  const UNREADABLE = "Codex named the folders its config lets a sandboxed command write (sandbox_workspace_write.writable_roots) in a form LetAgents cannot read. "
+    + "LetAgents cannot tell whether a command could write a Codex home and leave its sandbox, so it will not start Codex at this access level. "
+    + "Give this agent an access level that does not let it write the project, or Full access if you accept that.";
+  for (const odd of [[{ path: elsewhere }], [elsewhere, 7], "everything", ["~/.letagents"], ["~"], [`${elsewhere}/../${basename(owner.home)}`], ["relative/folder"], [""]] as unknown[]) {
+    const inspected = await inspectCodexSettings(fakeCodex({ writableRoots: odd as string[] }).bin, { cwd: project, env: { PATH: process.env.PATH, ...owner.env }, configOverrides: [] });
+    assert.equal(inspected.writableRoots, null, JSON.stringify(odd));
+    const asked = (writableSandbox: boolean) => codexHomeForSandboxedLaunch("codex", { env: owner.env, writableSandbox }, { inspect: async () => inspected, keepsLinkedSignIn: async () => true });
+    await assert.rejects(asked(true), (error: Error) => error.message === UNREADABLE);
+    assert.equal((await asked(false)).codexHome, owner.agentHome);
+    assert.equal(await sandboxedCodexLoadRefusal("codex", { cwd: project, codexHome: owner.agentHome, env: owner.env, writableSandbox: true }, { inspect: async () => inspected }), UNREADABLE);
+  }
+});
+
+test("a writable folder is refused when it leaves a project layer's .codex folder open to a command, and not when Codex itself keeps that folder", async () => {
+  const owner = ownerHome({ rules: false });
+  // A repository whose work folder is two folders below its top: three project layers.
+  const outer = fixture("outer");
+  const repo = join(outer, "repo");
+  const work = join(repo, "packages", "work");
+  mkdirSync(work, { recursive: true });
+  mkdirSync(join(repo, ".git"));
+  writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+  const launch = (writableRoots: string[], cwd: string, writableSandbox = true) => codexHomeForSandboxedLaunch("codex", { env: owner.env, cwd, writableSandbox }, {
+    inspect: async () => ({ ...noProject, writableRoots }), keepsLinkedSignIn: async () => true,
+  });
+  const from = (shown: string) => `this project's ${shown} folder, where Codex reads command rules and settings`;
+  const refused = (root: string, touches: string, cwd = work) => assert.rejects(launch([root], cwd), (error: Error) => { assert.equal(error.message, writableRootText(root, touches)); return true; });
+
+  // A folder above the repository: the .codex of each layer above the work folder is open to a command there.
+  await refused(outer, `holds ${from("packages/.codex")}`);
+  // The top of the repository: its own .codex is directly in the root, which Codex keeps. The layer between is open.
+  await refused(repo, `holds ${from("packages/.codex")}`);
+  // A .codex folder itself, and a folder in one: the work folder's own too.
+  await refused(join(repo, ".codex"), `is ${from(".codex")}`);
+  await refused(join(repo, ".codex", "rules"), `is in ${from(".codex")}`);
+  await refused(join(work, ".codex"), `is ${from("packages/work/.codex")}`);
+  await refused(join(work, ".codex", "rules"), `is in ${from("packages/work/.codex")}`);
+  // The folder between, as a root: its own .codex is directly in it, and the work folder's own is kept whatever the roots are.
+  assert.equal((await launch([join(repo, "packages")], work)).codexHome, owner.agentHome);
+  // A folder beside the project, and the work folder itself.
+  assert.equal((await launch([fixture("beside"), work], work)).codexHome, owner.agentHome);
+  // Nothing of this at a sandbox that writes nowhere.
+  assert.equal((await launch([outer], work, false)).codexHome, owner.agentHome);
+
+  // An agent that works at the top of its repository has one layer, its own, and Codex keeps that one: a folder above it is not refused.
+  assert.equal((await launch([outer], repo)).codexHome, owner.agentHome);
+  assert.equal((await launch([repo], repo)).codexHome, owner.agentHome);
+  await refused(join(repo, ".codex"), `is ${from(".codex")}`, repo);
+
+  // The same before a running process starts or loads a conversation.
+  assert.equal(await sandboxedCodexLoadRefusal("codex", { cwd: work, codexHome: owner.agentHome, env: owner.env, writableSandbox: true },
+    { inspect: async () => ({ ...noProject, writableRoots: [outer] }) }), writableRootText(outer, `holds ${from("packages/.codex")}`));
+  assert.equal(await sandboxedCodexLoadRefusal("codex", { cwd: repo, codexHome: owner.agentHome, env: owner.env, writableSandbox: true },
+    { inspect: async () => ({ ...noProject, writableRoots: [outer] }) }), null);
+});
+
+test("the folders the Codex config lets a command write are handed on to be looked at again, and a folder that has become a way into a home is found then", async () => {
+  const owner = ownerHome({ rules: false });
+  const base = fixture("named-folders");
+  const named = join(base, "cache");
+  mkdirSync(named);
+  const inspect = async () => ({ ...noProject, writableRoots: [named] });
+  // A launch whose sandbox writes hands on a look at the folders as it named them. One whose sandbox does not write has none to look at.
+  const launch = await codexHomeForSandboxedLaunch("codex", { env: owner.env, writableSandbox: true }, { inspect, keepsLinkedSignIn: async () => true });
+  assert.equal(launch.codexHome, owner.agentHome);
+  assert.equal(launch.writableFoldersCheck!(), null);
+  assert.equal(Object.hasOwn(await codexHomeForSandboxedLaunch("codex", { env: owner.env }, { inspect, keepsLinkedSignIn: async () => true }), "writableFoldersCheck"), false);
+  // And so does a load, when it refuses nothing.
+  const project = fixture("project");
+  const kept: Array<() => string | null> = [];
+  const load = (writableSandbox: boolean, roots = [named]) => sandboxedCodexLoadRefusal("codex",
+    { cwd: project, codexHome: owner.agentHome, env: owner.env, writableSandbox, keepWritableFoldersCheck: (check) => { kept.push(check); } }, { inspect: async () => ({ ...noProject, writableRoots: roots }) });
+  assert.equal(await load(true), null);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0]!(), null);
+  assert.equal(await load(false), null);
+  assert.match(String(await load(true, [owner.home])), /holds the Codex home LetAgents keeps for sandboxed agents/);
+  assert.equal(kept.length, 1, "no look is handed on for a sandbox that writes nowhere, or for a load that is refused");
+
+  // The named folder is now a link into the LetAgents data folder: both looks find it, in the words of the refusal.
+  execFileSync("rmdir", [named]);
+  symlinkSync(join(owner.home, ".letagents"), named);
+  const found = writableRootText(named, `holds ${AGENTS_HOME}`);
+  assert.equal(launch.writableFoldersCheck!(), found);
+  assert.equal(kept[0]!(), found);
+  // And a link to a folder that is no one's home is nothing to find.
+  execFileSync("rm", [named]);
+  symlinkSync(fixture("harmless"), named);
+  assert.equal(launch.writableFoldersCheck!(), null);
+
+  // The managed launch hands the look on with the process it started, for the level that writes and for no other.
+  const managedOwner = ownerHome({ rules: false });
+  const cache = join(fixture("managed"), "cache");
+  mkdirSync(cache);
+  const codex = fakeCodex({ writableRoots: [cache] });
+  const managed = async (writableSandbox: boolean) => {
+    const started = await launchManagedCodexAppServer("ws://127.0.0.1:1", codex.bin, { trustedProjectPath: project, configOverrides: [], env: managedOwner.env, sandboxed: true, writableSandbox });
+    await waitForExit(started);
+    return started;
+  };
+  assert.equal(Object.hasOwn(await managed(false), "writableFoldersCheck"), false);
+  const writes = await managed(true);
+  assert.equal(writes.writableFoldersCheck!(), null);
+  execFileSync("rmdir", [cache]);
+  symlinkSync(managedOwner.codexHome, cache);
+  assert.equal(writes.writableFoldersCheck!(), writableRootText(cache, "is your Codex home"));
+});
+
+test("the installed Codex keeps a command out of the work folder's own .codex and out of the .codex directly in a writable root, not out of one below a root, and holds a named sandbox against a project's config", {
+  skip: realCodex ? false : "Codex is not installed",
+  timeout: 240_000,
+}, async (t) => {
+  const model = await stubModel();
+  t.after(() => model.close());
+  /**
+   * One turn of the installed Codex in `work`, started as LetAgents starts one, in which the model runs a command that
+   * writes each of `targets`. Answers which of them are there afterwards.
+   */
+  const written = async (scene: { outer: string; repo: string; work: string; roots: string[]; projectConfig?: string; sandbox: "workspace-write" | "read-only" }, targets: string[]) => {
+    const home = fixture("contract-home");
+    mkdirSync(join(home, ".codex"));
+    writeFileSync(join(home, ".codex", "config.toml"), [
+      'model = "stand-in"', 'model_provider = "standin"', "",
+      "[model_providers.standin]", 'name = "standin"', `base_url = "http://127.0.0.1:${model.port}/v1"`,
+      'wire_api = "responses"', "requires_openai_auth = false", "supports_websockets = false", "",
+      ...(scene.roots.length ? ["[sandbox_workspace_write]", `writable_roots = ${JSON.stringify(scene.roots)}`, ""] : []),
+      ...[...new Set([scene.repo, scene.work])].flatMap((folder) => [`[projects.${JSON.stringify(folder)}]`, 'trust_level = "trusted"', ""]),
+    ].join("\n"));
+    if (scene.projectConfig) {
+      mkdirSync(join(scene.repo, ".codex"), { recursive: true });
+      writeFileSync(join(scene.repo, ".codex", "config.toml"), scene.projectConfig);
+    }
+    const overrides = ["features.plugins=false", "features.apps=false", "features.hooks=false", "features.memories=false", "notify=[]", "analytics.enabled=false"];
+    const child = spawn(realCodex!, ["app-server", ...overrides.flatMap((override) => ["-c", override]), "--listen", "stdio://"], {
+      cwd: scene.work, env: { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: fixture("tmp") }, stdio: ["pipe", "pipe", "ignore"],
+    });
+    const answers = new Map<number, (answer: { result?: unknown; error?: { message?: string } }) => void>();
+    let turnEnded: (() => void) | null = null;
+    let serial = 0;
+    createInterface({ input: child.stdout }).on("line", (line) => {
+      const message = JSON.parse(line) as { id?: number; method?: string; result?: unknown; error?: { message?: string } };
+      if (message.method === "turn/completed") turnEnded?.();
+      // Nobody is there to approve anything.
+      if (typeof message.id === "number" && message.method) child.stdin.write(`${JSON.stringify({ id: message.id, result: { decision: "decline" } })}\n`);
+      else if (typeof message.id === "number") answers.get(message.id)?.(message);
+    });
+    const ask = (method: string, params: unknown) => new Promise<Record<string, unknown>>((resolve, reject) => {
+      answers.set(++serial, (answer) => (answer.error ? reject(new Error(String(answer.error.message))) : resolve(answer.result as Record<string, unknown>)));
+      child.stdin.write(`${JSON.stringify({ id: serial, method, params })}\n`);
+    });
+    try {
+      await ask("initialize", { clientInfo: { name: "letagents-test", title: "test", version: "1" }, capabilities: { experimentalApi: true } });
+      child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
+      const approvalPolicy = scene.sandbox === "read-only" ? "on-request" : "never";
+      const started = await ask("thread/start", { cwd: scene.work, approvalPolicy, sandbox: scene.sandbox, approvalsReviewer: "user" });
+      const cmd = `${targets.map((file) => `mkdir -p ${JSON.stringify(dirname(file))} 2>/dev/null; echo x > ${JSON.stringify(file)} 2>/dev/null`).join(" ; ")} ; true`;
+      model.plan.push(
+        () => [{ type: "function_call", call_id: `call_${model.requests.length}`, name: "exec_command", arguments: JSON.stringify({ cmd, login: false }) }],
+        () => [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] }],
+      );
+      const ended = new Promise<void>((resolve) => { turnEnded = resolve; });
+      // The temp folders are left out of the sandbox: these scratch folders are below one.
+      const sandboxPolicy = scene.sandbox === "read-only" ? { type: "readOnly", networkAccess: false }
+        : { type: "workspaceWrite", networkAccess: false, excludeSlashTmp: true, excludeTmpdirEnvVar: true };
+      await ask("turn/start", { threadId: (started.thread as { id: string }).id, input: [{ type: "text", text: "Run the command." }], approvalPolicy, approvalsReviewer: "user", sandboxPolicy });
+      await ended;
+      assert.equal(model.plan.length, 0, "the model was asked for the command and for its last word");
+      return { started, written: targets.filter((file) => existsSync(file)) };
+    } finally {
+      child.kill("SIGKILL");
+      await new Promise((resolve) => child.once("exit", resolve));
+    }
+  };
+  const project = () => {
+    const outer = fixture("contract-outer");
+    const repo = join(outer, "repo");
+    const work = join(repo, "sub");
+    mkdirSync(work, { recursive: true });
+    mkdirSync(join(repo, ".git"));
+    writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+    return { outer, repo, work, own: join(work, ".codex", "rules", "a.rules"), above: join(repo, ".codex", "rules", "b.rules"), plain: join(work, "plain-file") };
+  };
+
+  // No folder besides the project: the work folder is written, its own .codex is not, and nothing above it is.
+  const alone = project();
+  assert.deepEqual((await written({ ...alone, roots: [], sandbox: "workspace-write" }, [alone.own, alone.above, alone.plain])).written, [alone.plain]);
+  // A root that is the top of the repository: the .codex directly in it is kept too.
+  const atTop = project();
+  assert.deepEqual((await written({ ...atTop, roots: [atTop.repo], sandbox: "workspace-write" }, [atTop.own, atTop.above, atTop.plain])).written, [atTop.plain]);
+  // A root above the repository: the work folder's own .codex is still kept, and the one of the layer above is open. That root is refused.
+  const below = project();
+  assert.deepEqual((await written({ ...below, roots: [below.outer], sandbox: "workspace-write" }, [below.own, below.above, below.plain])).written, [below.above, below.plain]);
+  // An agent that works at the top of its repository, with the same root above it: its one .codex is its own, and is kept.
+  const top = project();
+  const ownAtTop = join(top.repo, ".codex", "rules", "c.rules");
+  assert.deepEqual((await written({ ...top, work: top.repo, roots: [top.outer], sandbox: "workspace-write" }, [ownAtTop, join(top.repo, "plain-file")])).written, [join(top.repo, "plain-file")]);
+
+  // A trusted project's config asks for no sandbox, no approvals and the network. The sandbox the conversation and the turn name holds.
+  const wide = project();
+  const outside = join(fixture("contract-outside"), "planted");
+  const named = await written({ ...wide, roots: [], sandbox: "read-only",
+    projectConfig: 'approval_policy = "never"\nsandbox_mode = "danger-full-access"\n[sandbox_workspace_write]\nnetwork_access = true\n' }, [outside, wide.plain]);
+  assert.deepEqual(named.written, []);
+  assert.deepEqual([named.started.approvalPolicy, named.started.sandbox], ["on-request", { type: "readOnly", networkAccess: false }]);
+});
+
+/**
+ * The installed Codex at an access level, started by the real adapter: the adapter's own conversation start, and turns that carry
+ * the adapter's own turn policy. `asCodexDoes` starts it past the launch's refusals, with the home it names, to see what Codex
+ * itself does with a config the launch would refuse.
+ */
+async function adapterStartedCodex(t: { after(cleanup: () => Promise<void> | void): void }, model: Awaited<ReturnType<typeof stubModel>>, options: {
+  level?: "auto" | "ask";
+  ownerRoots?: (scene: Record<string, string>) => string[];
+  projectConfig?: (scene: Record<string, string>) => string;
+  asCodexDoes?: "the owner's home" | "the agents' home";
+}) {
+  const owner = ownerHome({ rules: false });
+  execFileSync("rm", [join(owner.codexHome, "auth.json")]);
+  const base = fixture("adapter-started");
+  const scene: Record<string, string> = { base, project: join(base, "project"), ownerRoot: join(base, "owner-root"), projectRoot: join(base, "project-root"),
+    control: join(base, "control"), data: join(owner.home, ".letagents"), agentHome: owner.agentHome };
+  // The temp folder is one of its own, so that no folder of the scene is written for being below it.
+  const tmp = join(base, "tmp");
+  for (const dir of [tmp, join(scene.project!, ".git"), join(scene.project!, ".codex"), scene.ownerRoot!, scene.projectRoot!, scene.control!]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(scene.project!, ".git", "HEAD"), "ref: refs/heads/main\n");
+  const roomServer = join(base, "room-server.mjs");
+  writeFileSync(roomServer, [
+    "import { createInterface } from 'node:readline';",
+    "const send = (m) => process.stdout.write(JSON.stringify(m) + '\\n');",
+    "createInterface({ input: process.stdin }).on('line', (line) => {",
+    "  let m; try { m = JSON.parse(line); } catch { return; }",
+    "  if (m.method === 'initialize') send({ jsonrpc: '2.0', id: m.id, result: { protocolVersion: m.params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'stand-in', version: '1' } } });",
+    "  else if (m.method === 'tools/list') send({ jsonrpc: '2.0', id: m.id, result: { tools: [{ name: 'room_tool', inputSchema: { type: 'object', properties: {} } }] } });",
+    "  else if (m.id !== undefined) send({ jsonrpc: '2.0', id: m.id, result: {} });",
+    "});", "",
+  ].join("\n"));
+  const projectConfig = options.projectConfig?.(scene);
+  writeFileSync(join(owner.codexHome, "config.toml"), [
+    'model = "stand-in"', 'model_provider = "standin"', "",
+    "[model_providers.standin]", 'name = "standin"', `base_url = "http://127.0.0.1:${model.port}/v1"`, 'wire_api = "responses"', "requires_openai_auth = false", "supports_websockets = false", "",
+    "[mcp_servers.letagents]", 'command = "node"', `args = [${JSON.stringify(roomServer)}]`, "",
+    ...(options.ownerRoots ? ["[sandbox_workspace_write]", `writable_roots = ${JSON.stringify(options.ownerRoots(scene))}`, ""] : []),
+    ...(projectConfig ? [`[projects.${JSON.stringify(scene.project)}]`, 'trust_level = "trusted"', ""] : []),
+  ].join("\n"));
+  if (projectConfig) writeFileSync(join(scene.project!, ".codex", "config.toml"), projectConfig);
+  if (options.asCodexDoes === "the agents' home") linkCodexAgentHome(owner.codexHome, owner.agentHome);
+  const launches: Array<{ pid: number | null; exited: Promise<unknown> }> = [];
+  const clients: InstanceType<typeof CodexRpcClient>[] = [];
+  const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+  let turnEnded: (() => void) | null = null;
+  t.after(async () => {
+    for (const client of clients) client.close();
+    for (const launch of launches) {
+      if (launch.pid !== null) terminateSpawnedProcess(launch.pid);
+      await waitForExit(launch);
+    }
+  });
+  const adapter = new CodexProviderAdapter({
+    codexBin: realCodex!,
+    dependencies: {
+      resolveServerUrl: freeLoopbackUrl,
+      launchServer: async (serverUrl, bin, launchOptions) => {
+        const launch = await launchManagedCodexAppServer(serverUrl, bin, {
+          ...launchOptions,
+          ...(options.asCodexDoes ? { sandboxed: false } : {}),
+          env: { HOME: owner.home, CODEX_HOME: options.asCodexDoes === "the agents' home" ? owner.agentHome : owner.codexHome, TMPDIR: tmp },
+        });
+        launches.push(launch);
+        return launch;
+      },
+      createRpcClient: (serverUrl, notify) => {
+        const client = new CodexRpcClient(serverUrl, (notification) => { if (notification.method === "turn/completed") turnEnded?.(); notify?.(notification); });
+        const request = client.request.bind(client);
+        client.request = async <T>(method: string, params?: unknown, requestOptions?: { timeoutMs?: number }): Promise<T> => {
+          if (method === "thread/start" || method === "turn/start") sent.push({ method, params: params as Record<string, unknown> });
+          return request<T>(method, params, requestOptions);
+        };
+        clients.push(client);
+        return client;
+      },
+    },
+  });
+  const level = options.level === "ask"
+    ? { permissionProfileId: "ask_before_write", configurationRevision: 1, launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } }
+    : { permissionProfileId: "auto_review", configurationRevision: 1, launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" } };
+  const handle = await adapter.spawn({ ...spawnRequest, cwd: scene.project, deliveryMode: "daemon_inbox", ...level } as never);
+  return {
+    scene, sent, handle,
+    /** One turn in which the model runs each command, sent with the adapter's own turn policy, or with `sandboxPolicy` in its place. */
+    turn: async (commands: string[], sandboxPolicy?: Record<string, unknown>) => {
+      model.plan.push(
+        ...commands.map((cmd) => () => [{ type: "function_call", call_id: `call_${model.requests.length}`, name: "exec_command", arguments: JSON.stringify({ cmd, login: false }) }]),
+        () => [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] }],
+      );
+      const turnPolicy = (handle as unknown as { requireTurnPolicy(): Record<string, unknown> }).requireTurnPolicy();
+      const ended = new Promise<void>((resolve) => { turnEnded = resolve; });
+      await clients[0]!.request("turn/start", { ...turnPolicy, ...(sandboxPolicy ? { sandboxPolicy } : {}), threadId: handle.providerContinuationId,
+        input: [{ type: "text", text: "Run the commands.", text_elements: [] }] });
+      await ended;
+      assert.equal(model.plan.length, 0, "the model was asked for each command and for its last word");
+    },
+  };
+}
+/** A command that makes each file and never fails, so nothing is asked of a reviewer. */
+const touchEach = (...files: string[]) => `${files.map((file) => `touch ${JSON.stringify(file)} 2>/dev/null`).join("; ")}; true`;
+
+test("the installed Codex, asked as the adapter asks it at the Auto level, lets a command write each folder the Codex config names, whatever sandbox the turn names", {
+  skip: realCodex ? false : "Codex is not installed",
+  timeout: 300_000,
+}, async (t) => {
+  const model = await stubModel();
+  t.after(() => model.close());
+
+  // A folder the owner's config names, beside the homes: the launch does not refuse it, and a command writes it.
+  const owned = await adapterStartedCodex(t, model, { ownerRoots: (scene) => [scene.ownerRoot!] });
+  const first = { control: join(owned.scene.control!, "x"), project: join(owned.scene.project!, "in-project"), named: join(owned.scene.ownerRoot!, "x") };
+  await owned.turn([touchEach(...Object.values(first))]);
+  assert.deepEqual(Object.values(first).filter((file) => existsSync(file)), [first.project, first.named], "the project and the named folder are written, and nothing else");
+  // These are the adapter's own requests: the conversation start names the level's sandbox, and each turn names it again with no folder beside the project.
+  const started = owned.sent.find((call) => call.method === "thread/start")!.params;
+  assert.deepEqual({ approvalPolicy: started.approvalPolicy, sandbox: started.sandbox, approvalsReviewer: started.approvalsReviewer },
+    { approvalPolicy: "on-request", sandbox: "workspace-write", approvalsReviewer: "auto_review" });
+  const turned = owned.sent.find((call) => call.method === "turn/start")!.params;
+  assert.deepEqual({ approvalPolicy: turned.approvalPolicy, sandboxPolicy: turned.sandboxPolicy, approvalsReviewer: turned.approvalsReviewer },
+    { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" });
+  // A turn that names an empty list of folders does not take the config's folder away either: nothing a turn names does.
+  const again = join(owned.scene.ownerRoot!, "with-an-empty-list");
+  await owned.turn([touchEach(again)], { type: "workspaceWrite", networkAccess: false, writableRoots: [] });
+  assert.equal(existsSync(again), true);
+
+  // A folder that a trusted project's config names (the launch refuses that project, so Codex is started past the launch here).
+  // The project also asks for the network, which the turn's own "no network" withholds.
+  const repository = await adapterStartedCodex(t, model, { asCodexDoes: "the owner's home",
+    projectConfig: (scene) => `[sandbox_workspace_write]\nwritable_roots = [${JSON.stringify(scene.projectRoot)}]\nnetwork_access = true\n` });
+  const second = { control: join(repository.scene.control!, "x"), named: join(repository.scene.projectRoot!, "x"), before: join(repository.scene.project!, "before"), after: join(repository.scene.project!, "after") };
+  await repository.turn([`touch ${JSON.stringify(second.control)} ${JSON.stringify(second.named)} ${JSON.stringify(second.before)} 2>/dev/null; curl -s -m 3 http://127.0.0.1:${model.port}/reached-the-network >/dev/null 2>&1; touch ${JSON.stringify(second.after)}; true`]);
+  assert.deepEqual(Object.values(second).filter((file) => existsSync(file)), [second.named, second.before, second.after], "the project's folder is written; the command ran to its end");
+  assert.deepEqual(model.others, [], "and it did not reach the network");
+
+  // The agents' home below a named folder (the launch refuses that folder too): its rules folder is made writable, and a rule is put in it.
+  const covered = await adapterStartedCodex(t, model, { asCodexDoes: "the agents' home", ownerRoots: (scene) => [scene.data!] });
+  const rules = join(covered.scene.agentHome!, "rules");
+  await covered.turn([`chmod u+w ${JSON.stringify(rules)} 2>/dev/null; ${touchEach(join(rules, "planted.rules"))}`]);
+  assert.deepEqual(readdirSync(rules), ["planted.rules"]);
+
+  // At a level whose sandbox writes nowhere, the same named folder is not written, and neither is the project.
+  const asking = await adapterStartedCodex(t, model, { level: "ask", ownerRoots: (scene) => [scene.ownerRoot!] });
+  const third = [join(asking.scene.ownerRoot!, "x"), join(asking.scene.project!, "in-project")];
+  await asking.turn([touchEach(...third)]);
+  assert.deepEqual(third.filter((file) => existsSync(file)), []);
+});
+
+test("the installed Codex keeps a command from turning a folder it may write into another one: it cannot remove it or move the folder above it, and runs nothing more once it is a link", {
+  skip: realCodex ? false : "Codex is not installed",
+  timeout: 180_000,
+}, async (t) => {
+  const model = await stubModel();
+  t.after(() => model.close());
+  // Three named folders in the project, where a command can write all around them: two that are there, and one that is not there yet.
+  const agent = await adapterStartedCodex(t, model, { ownerRoots: (scene) => [join(scene.project!, "kept"), join(scene.project!, "a", "below"), join(scene.project!, "b", "later")] });
+  const { project, control } = agent.scene as { project: string; control: string };
+  mkdirSync(join(project, "kept"));
+  mkdirSync(join(project, "a", "below"), { recursive: true });
+  await agent.turn([
+    `rmdir ${JSON.stringify(join(project, "kept"))} 2>/dev/null; mv ${JSON.stringify(join(project, "a"))} ${JSON.stringify(join(project, "a-moved"))} 2>/dev/null; true`,
+    // The one that is not there yet can be made as a link to a folder outside the project.
+    `mkdir -p ${JSON.stringify(join(project, "b"))}; ln -s ${JSON.stringify(control)} ${JSON.stringify(join(project, "b", "later"))}; ${touchEach(join(control, "through-the-link"))}`,
+    touchEach(join(project, "after-the-link"), join(control, "after-the-link")),
+  ]);
+  assert.equal(lstatSync(join(project, "kept")).isDirectory(), true, "a named folder is not removed");
+  assert.deepEqual([existsSync(join(project, "a", "below")), existsSync(join(project, "a-moved"))], [true, false], "the folder above a named folder is not moved");
+  assert.equal(lstatSync(join(project, "b", "later")).isSymbolicLink(), true);
+  assert.deepEqual(readdirSync(control), [], "the folder the link leads to is not written, by that command or by a later one");
+  assert.equal(existsSync(join(project, "after-the-link")), false, "Codex runs no command while a named folder is a link");
+  assert.match(JSON.stringify(model.requests.at(-1)), /symlinked writable roots are not supported/);
+});
+
+test("one folder is told from another name by name and by what it is on disk, so a disk's top, another spelling and a second path are all found", () => {
+  const base = fixture("holds");
+  mkdirSync(join(base, "a", "b"), { recursive: true });
+  mkdirSync(join(base, "ab"));
+  const top = parse(base).root;
+  // Name by name: the top holds everything, and a name that only starts like another is another folder.
+  assert.equal(folderHolds(top, join(base, "a", "b")), true);
+  assert.equal(folderHolds(top, top), true);
+  assert.equal(folderHolds(join(base, "a"), join(base, "a", "b")), true);
+  assert.equal(folderHolds(`${join(base, "a")}/`, join(base, "a", "b")), true);
+  assert.equal(folderHolds(join(base, "a"), join(base, "a")), true);
+  assert.equal(folderHolds(join(base, "a"), join(base, "ab")), false);
+  assert.equal(folderHolds(join(base, "a", "b"), join(base, "a")), false);
+  assert.equal(folderHolds(join(base, "a"), top), false);
+  // A folder that is not there yet is compared by name, without regard to case.
+  assert.equal(folderHolds(join(base, "a"), join(base, "a", "not", "there")), true);
+  assert.equal(folderHolds(join(base, "NEW"), join(base, "new", "x")), true);
+  assert.equal(folderHolds(join(base, "new"), join(base, "newer")), false);
+  // A link: by what it leads to.
+  symlinkSync(join(base, "a"), join(base, "link"));
+  assert.equal(folderHolds(join(base, "link"), join(base, "a", "b")), true);
+  assert.equal(folderHolds(join(base, "a"), join(base, "link", "b")), true);
+  assert.equal(folderHolds(join(base, "link", "b"), join(base, "a")), false);
+
+  // The same test of names for a path that is only shown.
+  assert.equal(pathFrom("/", "/home/someone"), "home/someone");
+  assert.equal(pathFrom("/a", "/a"), "");
+  assert.equal(pathFrom("/a/", "/a/b"), "b");
+  assert.equal(pathFrom("/a", "/ab"), null);
+  assert.equal(pathFrom("/a/b", "/a"), null);
+  assert.equal(pathFrom("/a", "/a/..b/c"), "..b/c");
+
+  // The agents' home must be apart from the owner's home whatever the two are: a home at the disk's top holds every folder.
+  assert.throws(() => linkCodexAgentHome(top, join(base, "agents-home")), /must be a folder apart from the owner's Codex home/);
+  assert.equal(existsSync(join(base, "agents-home")), false, "nothing is made before the two are known to be apart");
+  const ownerInside = join(base, "agents", "owner");
+  mkdirSync(ownerInside, { recursive: true });
+  assert.throws(() => linkCodexAgentHome(ownerInside, `${join(base, "agents")}/`), /must be a folder apart/);
+  assert.throws(() => linkCodexAgentHome(ownerInside, join(base, "AGENTS", "OWNER", "inside")), /must be a folder apart/);
+});
+
+test("a project's Codex config may set only what is known to be harmless for a sandboxed agent, and the refusal names the key and the file", async () => {
+  const owner = ownerHome({ rules: false });
+  const repo = fixture("repo");
+  mkdirSync(join(repo, ".git"));
+  writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+  const work = join(repo, "packages", "work");
+  mkdirSync(work, { recursive: true });
+  const layer = (folder: string, config: Record<string, unknown>) => ({ dotCodexFolder: join(folder, ".codex"), config });
+  const text = (file: string, keys: string, one: boolean) =>
+    `This project's Codex config (${file}) sets ${keys}. `
+    + `LetAgents does not know that ${one ? "this setting is" : "these settings are"} harmless for a sandboxed agent, so it will not start Codex here at this access level. `
+    + `Remove ${one ? "it" : "them"} from that file, stop trusting the project in Codex, or give this agent Full access if you accept that.`;
+
+  // An ordinary project: a model, how it thinks, its instructions, the defaults for approval and sandbox, its MCP servers.
+  const ordinary = {
+    model: "gpt-x", model_reasoning_effort: "high", model_reasoning_summary: "auto", model_verbosity: "low", personality: "friendly",
+    approval_policy: "on-request", sandbox_mode: "workspace-write", sandbox_workspace_write: { network_access: true },
+    instructions: "Be brief.", developer_instructions: "Use pnpm.", project_doc_max_bytes: 4096, project_doc_fallback_filenames: ["CLAUDE.md"],
+    mcp_servers: { docs: { command: "docs-server" } }, hooks: {},
+  };
+  assert.deepEqual(Object.keys(ordinary).sort(), [...SANDBOXED_PROJECT_KEYS].sort(), "the list is exactly these keys");
+  assert.equal(projectKeysRefusal(work, [layer(repo, ordinary), layer(work, { model: "gpt-y" })]), null);
+  assert.equal(projectKeysRefusal(work, []), null);
+
+  // Every other key refuses, one by one: the two that name a program, and each one Codex 0.153.4 takes from a project.
+  for (const key of ["zsh_path", "js_repl_node_path", "project_root_markers", "features", "tools", "web_search", "shell_environment_policy", "agents", "apps",
+    "projects", "permissions", "default_permissions", "cli_auth_credentials_store", "mcp_oauth_credentials_store", "forced_login_method", "sqlite_home", "log_dir",
+    "history", "file_opener", "model_instructions_file", "analytics", "profiles", "profile", "model_provider", "model_providers", "notify", "otel",
+    "a_key_a_later_codex_adds"]) {
+    assert.equal(projectKeysRefusal(work, [layer(repo, { ...ordinary, [key]: "anything" })]), text(".codex/config.toml", key, true), key);
+  }
+  // Every key is named, sorted, with the file of the layer that sets them, from the top of the repository.
+  assert.equal(projectKeysRefusal(work, [layer(repo, ordinary), layer(work, { zsh_path: "/x", model: "m", features: { a: true } })]),
+    text("packages/work/.codex/config.toml", "features, zsh_path", false));
+  const many = Object.fromEntries(Array.from({ length: 10 }, (_, index) => [`key_${index}`, 1]));
+  assert.equal(projectKeysRefusal(repo, [layer(repo, many)]), text(".codex/config.toml", "key_0, key_1, key_2, key_3, key_4, key_5, key_6, key_7 and 2 more", false));
+  assert.equal(projectKeysRefusal(repo, [layer(repo, { "odd\nkey\u202e": 1 })]), text(".codex/config.toml", "odd?key?", true));
+
+  // Under sandbox_workspace_write a project may say whether its commands use the network and the temp folders. The turn's own
+  // "no network" holds against the first, and the temp folders are the access level's as they are.
+  assert.deepEqual([...SANDBOX_KEYS_A_PROJECT_MAY_SET].sort(), ["exclude_slash_tmp", "exclude_tmpdir_env_var", "network_access"]);
+  const may = { network_access: true, exclude_tmpdir_env_var: false, exclude_slash_tmp: false };
+  for (const writableSandbox of [true, false]) assert.equal(projectKeysRefusal(repo, [layer(repo, { sandbox_workspace_write: may })], { writableSandbox }), null);
+  // It may not name folders to write: Codex adds them to a turn whatever the turn names, so the repository would choose where an
+  // agent's commands write. Refused where the sandbox can write at all; an empty list names none.
+  const folders = { ...may, writable_roots: ["/somewhere/outside/the/project"] };
+  assert.equal(projectKeysRefusal(repo, [layer(repo, { sandbox_workspace_write: folders })], { writableSandbox: true }), text(".codex/config.toml", "sandbox_workspace_write.writable_roots", true));
+  assert.equal(projectKeysRefusal(repo, [layer(repo, { model: "m" }), layer(work, { sandbox_workspace_write: folders })], { writableSandbox: true }),
+    text("packages/work/.codex/config.toml", "sandbox_workspace_write.writable_roots", true));
+  assert.equal(projectKeysRefusal(repo, [layer(repo, { sandbox_workspace_write: folders })], { writableSandbox: false }), null, "a sandbox that writes nowhere takes no folders");
+  assert.equal(projectKeysRefusal(repo, [layer(repo, { sandbox_workspace_write: folders })]), null);
+  assert.equal(projectKeysRefusal(repo, [layer(repo, { sandbox_workspace_write: { writable_roots: [] } })], { writableSandbox: true }), null);
+  assert.equal(projectKeysRefusal(repo, [layer(repo, { sandbox_workspace_write: { writable_roots: "/one/folder" } })], { writableSandbox: true }),
+    text(".codex/config.toml", "sandbox_workspace_write.writable_roots", true), "a list in a form this code does not know is not taken as empty");
+  // Any other key there, and a value that is no table, is not looked into.
+  for (const writableSandbox of [true, false]) {
+    assert.equal(projectKeysRefusal(repo, [layer(repo, { sandbox_workspace_write: { ...may, something_new: 1 }, zsh_path: "/x" })], { writableSandbox }),
+      text(".codex/config.toml", "sandbox_workspace_write.something_new, zsh_path", false));
+    assert.equal(projectKeysRefusal(repo, [layer(repo, { sandbox_workspace_write: "everything" })], { writableSandbox }), text(".codex/config.toml", "sandbox_workspace_write", true));
+  }
+  // At a launch and at a load: for the level that writes, and not for one that does not.
+  const namesFolders = { ...noProject, projectLayers: [layer(repo, { sandbox_workspace_write: folders })] };
+  const FOLDERS = text(".codex/config.toml", "sandbox_workspace_write.writable_roots", true);
+  await assert.rejects(codexHomeForSandboxedLaunch("codex", { env: owner.env, cwd: repo, writableSandbox: true }, { inspect: async () => namesFolders, keepsLinkedSignIn: async () => true }),
+    (error: Error) => { assert.equal(error.message, FOLDERS); return true; });
+  assert.equal(await sandboxedCodexLoadRefusal("codex", { cwd: repo, codexHome: owner.agentHome, env: owner.env, writableSandbox: true }, { inspect: async () => namesFolders }), FOLDERS);
+  assert.equal(await sandboxedCodexLoadRefusal("codex", { cwd: repo, codexHome: owner.agentHome, env: owner.env, writableSandbox: false }, { inspect: async () => namesFolders }), null);
+  assert.equal((await codexHomeForSandboxedLaunch("codex", { env: owner.env, cwd: repo }, { inspect: async () => namesFolders, keepsLinkedSignIn: async () => true })).codexHome, owner.agentHome);
+  execFileSync("rm", ["-r", join(owner.home, ".letagents")]);
+
+  // At a launch, for a sandbox that writes and one that does not, and before a running process starts or loads a conversation.
+  const setsAKey = { ...noProject, projectLayers: [layer(repo, { model: "m", js_repl_node_path: "/some/program" })] };
+  for (const writableSandbox of [true, false]) {
+    await assert.rejects(codexHomeForSandboxedLaunch("codex", { env: owner.env, cwd: repo, writableSandbox }, { inspect: async () => setsAKey, keepsLinkedSignIn: async () => true }),
+      (error: Error) => { assert.equal(error.message, text(".codex/config.toml", "js_repl_node_path", true)); return true; });
+  }
+  assert.equal(existsSync(owner.agentHome), false, "a refused launch makes nothing");
+  assert.equal(await sandboxedCodexLoadRefusal("codex", { cwd: repo, codexHome: owner.agentHome, env: owner.env }, { inspect: async () => setsAKey }), text(".codex/config.toml", "js_repl_node_path", true));
+  const ordinaryProject = { ...noProject, projectLayers: [layer(repo, ordinary)] };
+  assert.equal((await codexHomeForSandboxedLaunch("codex", { env: owner.env, cwd: repo, writableSandbox: true }, { inspect: async () => ordinaryProject, keepsLinkedSignIn: async () => true })).codexHome, owner.agentHome);
+  assert.equal(await sandboxedCodexLoadRefusal("codex", { cwd: repo, codexHome: owner.agentHome, env: owner.env, writableSandbox: true }, { inspect: async () => ordinaryProject }), null);
+
+  // An agents' home with a config of its own can trust a project that the owner's home does not. Codex is asked again as it reads
+  // that home, and that answer is held to the same list.
+  const kept = ownerHome({ rules: false });
+  mkdirSync(kept.agentHome, { recursive: true });
+  writeFileSync(join(kept.agentHome, "config.toml"), "# of its own\n");
+  const askedWith: string[] = [];
+  await assert.rejects(codexHomeForSandboxedLaunch("codex", { env: kept.env, cwd: repo }, {
+    inspect: async (_codexBin, options) => { askedWith.push(String(options.env.CODEX_HOME)); return options.env.CODEX_HOME === kept.agentHome ? setsAKey : noProject; },
+    keepsLinkedSignIn: async () => true,
+  }), (error: Error) => { assert.equal(error.message, text(".codex/config.toml", "js_repl_node_path", true)); return true; });
+  assert.deepEqual(askedWith, [kept.codexHome, kept.agentHome]);
+
+  // From what a Codex answers to the refusal: the layers it applies are read, and one it does not apply (a project its owner has not trusted) sets nothing.
+  const applied = { name: { type: "project", dotCodexFolder: join(repo, ".codex") }, config: { model: "m", zsh_path: "/some/shell" }, disabledReason: null };
+  const env = { ...owner.env, PATH: process.env.PATH };
+  await assert.rejects(codexHomeForSandboxedLaunch(fakeCodex({ layers: [applied] }).bin, { env, cwd: repo }, { keepsLinkedSignIn: async () => true }),
+    (error: Error) => { assert.equal(error.message, text(".codex/config.toml", "zsh_path", true)); return true; });
+  assert.equal((await codexHomeForSandboxedLaunch(fakeCodex({ layers: [{ ...applied, disabledReason: "untrusted" }] }).bin, { env, cwd: repo }, { keepsLinkedSignIn: async () => true })).codexHome, owner.agentHome);
+});
+
+test("the installed Codex reports the keys of a trusted project's config, the two that name a program among them, and each one that is not known to be harmless is refused", {
+  skip: realCodex ? false : "Codex is not installed",
+  timeout: 60_000,
+}, async () => {
+  const owner = ownerHome({ rules: false });
+  const repo = fixture("keys-repo");
+  mkdirSync(join(repo, ".git"));
+  writeFileSync(join(repo, ".git", "HEAD"), "ref: refs/heads/main\n");
+  mkdirSync(join(repo, ".codex"));
+  writeFileSync(join(repo, ".codex", "config.toml"), [
+    'model = "some-model"', 'model_reasoning_effort = "high"', 'approval_policy = "on-request"', 'sandbox_mode = "workspace-write"', 'developer_instructions = "Use pnpm."',
+    'zsh_path = "/some/shell"', 'js_repl_node_path = "/some/node"', 'project_root_markers = [".hg"]', 'web_search = "live"',
+    "[sandbox_workspace_write]", "network_access = true", `writable_roots = [${JSON.stringify(fixture("outside-the-project"))}]`,
+    "[features]", "shell_zsh_fork = true", "[mcp_servers.docs]", 'command = "docs-server"', "",
+  ].join("\n"));
+  const env = { PATH: process.env.PATH, ...owner.env };
+  const trust = (level: string) => writeFileSync(join(owner.codexHome, "config.toml"), `[projects.${JSON.stringify(repo)}]\ntrust_level = "${level}"\n`);
+  trust("trusted");
+  const inspection = await inspectCodexSettings(realCodex!, { cwd: repo, env, configOverrides: [] });
+  assert.deepEqual(Object.keys(inspection.projectLayers[0]!.config).sort(), [
+    "approval_policy", "developer_instructions", "features", "js_repl_node_path", "mcp_servers", "model", "model_reasoning_effort",
+    "project_root_markers", "sandbox_mode", "sandbox_workspace_write", "web_search", "zsh_path",
+  ]);
+  assert.deepEqual(Object.keys(inspection.projectLayers[0]!.config.sandbox_workspace_write as object).sort(), ["network_access", "writable_roots"]);
+  const refusal = (keys: string) => `This project's Codex config (.codex/config.toml) sets ${keys}. `
+    + "LetAgents does not know that these settings are harmless for a sandboxed agent, so it will not start Codex here at this access level. "
+    + "Remove them from that file, stop trusting the project in Codex, or give this agent Full access if you accept that.";
+  assert.equal(projectKeysRefusal(repo, inspection.projectLayers), refusal("features, js_repl_node_path, project_root_markers, web_search, zsh_path"));
+  // Where the sandbox writes, the folders the project names to write are one more.
+  assert.equal(projectKeysRefusal(repo, inspection.projectLayers, { writableSandbox: true }),
+    refusal("features, js_repl_node_path, project_root_markers, sandbox_workspace_write.writable_roots, web_search, zsh_path"));
+  // To stop trusting the project is a way out that leaves the file as it is: Codex then does not apply the layer, and nothing is refused for its keys.
+  trust("untrusted");
+  const untrusted = await inspectCodexSettings(realCodex!, { cwd: repo, env, configOverrides: [] });
+  assert.deepEqual(untrusted.projectLayers, []);
+  assert.deepEqual(untrusted.writableRoots, []);
+  assert.equal(projectKeysRefusal(repo, untrusted.projectLayers, { writableSandbox: true }), null);
+});
+
+test("the remembered sign-in check is kept for what Codex says it is, so a Codex that is replaced behind the same command is checked again", async () => {
+  const codex = fakeCodex({ signIn: "in-place" });
+  const launch = (userAgent: string | null) => codexHomeForSandboxedLaunch(codex.bin, { env: { ...ownerHome({ rules: false }).env, PATH: process.env.PATH } },
+    { inspect: async () => ({ ...noProject, userAgent }) });
+  await launch("codex/0.153.4");
+  await launch("codex/0.153.4");
+  assert.equal(codex.calls().length, 1, "one check for one version");
+  // The command on disk is the same file; the program behind it is another one.
+  await launch("codex/0.154.0");
+  assert.equal(codex.calls().length, 2, "another version is checked");
+  await launch("codex/0.153.4");
+  await launch("codex/0.154.0");
+  assert.equal(codex.calls().length, 2);
+  // A Codex that does not say what it is cannot be told from another one: it is checked at every launch.
+  await launch(null);
+  await launch(null);
+  assert.equal(codex.calls().length, 4);
+});
+
+test("before a running Codex without its owner's setup loads a conversation, what a launch would turn off now is compared with what it was started with", async () => {
+  const owner = ownerHome({ rules: false });
+  const project = fixture("project");
+  const env = { ...owner.env, PATH: process.env.PATH };
+  const codex = fakeCodex({ servers: ["owner_browser"] });
+  const settle = (settings: Record<string, unknown>) => writeFileSync(join(codex.bin, "..", "settings.json"), JSON.stringify({ signIn: "in-place", store: "file", ...settings }));
+  // What the process was started with: its launch's own override for the room's server, and every other server turned off by name.
+  const ROOM = 'mcp_servers.letagents={ command = "node", args = ["/room/server.js"], enabled = true }';
+  const startedWith = await codexOwnerIsolationOverrides(codex.bin, { cwd: project, env, configOverrides: [ROOM] });
+  assert.ok(startedWith.includes('mcp_servers={ "owner_browser" = { enabled = false } }'));
+  const commandLine = `codex app-server ${[...startedWith, ROOM].map((override) => `-c ${override}`).join(" ")} --listen ws://127.0.0.1:1`;
+  // Started by this service, so its launch's own overrides are known; and found running, when they are not.
+  const live = { commandLine, cwd: project, launchOverrides: [ROOM] };
+  const found = { commandLine, cwd: project, launchOverrides: null };
+  await assertLiveCodexIsolationUnchanged(codex.bin, live, env);
+  await assertLiveCodexIsolationUnchanged(codex.bin, found, env);
+
+  // The project the owner trusts gained a server since then: Codex would start it, with no sandbox, at the next load.
+  const GAINED = "This project's Codex config, or your own, now has an MCP server or a skill that was not there when this agent started, "
+    + "so LetAgents stopped the agent before Codex could load it. It starts again with it turned off, unless you paused it.";
+  settle({ servers: ["owner_browser", "added_by_the_project"] });
+  for (const process of [live, found]) await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, process, env), (error: Error) => error.message === GAINED);
+  // A server that is gone is no reason to stop: nothing new would start.
+  settle({ servers: [] });
+  await assertLiveCodexIsolationUnchanged(codex.bin, live, env);
+  // The same when one of several is gone, and a skill: each is compared by its own name, not as one list.
+  const several = ["first", 'odd"name', "third"];
+  settle({ servers: several });
+  for (const name of ["one", "two"]) {
+    mkdirSync(join(owner.codexHome, "skills", name), { recursive: true });
+    writeFileSync(join(owner.codexHome, "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: test.\n---\n`);
+  }
+  const withSeveral = await codexOwnerIsolationOverrides(codex.bin, { cwd: project, env, configOverrides: [ROOM] });
+  assert.equal(withSeveral.filter((override) => override.startsWith("mcp_servers={ ") || override.startsWith("skills.config=[")).length, 2);
+  const startedWithSeveral = { cwd: project, launchOverrides: [ROOM], commandLine: `codex app-server ${[...withSeveral, ROOM].map((override) => `-c ${override}`).join(" ")}` };
+  await assertLiveCodexIsolationUnchanged(codex.bin, startedWithSeveral, env);
+  settle({ servers: ["third"] });
+  execFileSync("rm", ["-r", join(owner.codexHome, "skills", "one")]);
+  await assertLiveCodexIsolationUnchanged(codex.bin, startedWithSeveral, env);
+  // A name is not found inside another one: a new server "name" is not taken for the 'odd"name' the process was started without.
+  settle({ servers: ["third", "name"] });
+  await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, startedWithSeveral, env), (error: Error) => error.message === GAINED);
+  // And one more skill is one more thing the process was not started without.
+  settle({ servers: ["third"] });
+  mkdirSync(join(owner.codexHome, "skills", "three"));
+  writeFileSync(join(owner.codexHome, "skills", "three", "SKILL.md"), "---\nname: three\ndescription: test.\n---\n");
+  await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, startedWithSeveral, env), (error: Error) => error.message === GAINED);
+  execFileSync("rm", ["-r", join(owner.codexHome, "skills")]);
+
+  // The project now adds a key to the room's own server. No launch override takes that back, so a launch refuses it, and so does this.
+  settle({ servers: ["owner_browser"], projectChangesRoomServer: true });
+  await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, live, env), /^Error: This project's Codex config changes the LetAgents MCP server, so LetAgents will not start Codex here\./);
+  // The project sets only keys of that server that the launch's own override sets too. Codex gives the override the last word,
+  // so a launch accepts that project, and the server is listed for the comparison as that launch listed it: with the override.
+  settle({ servers: ["owner_browser"], projectSetsRoomServerKeys: true });
+  const before = codex.calls().length;
+  await assertLiveCodexIsolationUnchanged(codex.bin, live, env);
+  const listings = codex.calls().slice(before).filter((call) => call.args[0] === "mcp");
+  assert.equal(listings.length, 2);
+  for (const listing of listings) assert.ok(listing.args.includes(ROOM), "listed with the launch's own override");
+  // For a process that was found running the override is not known. Its project may then not name the room's server at all,
+  // and its owner is told what is known: the next start compares.
+  const NOT_COMPARED = "This project's Codex config has settings of its own for the LetAgents MCP server. This agent's Codex was started before LetAgents last restarted, "
+    + "so LetAgents cannot compare those settings with what the agent was started with, and stopped the agent before Codex could load them. "
+    + "LetAgents starts it again and compares them then, unless you paused it.";
+  for (const settings of [{ projectSetsRoomServerKeys: true }, { projectChangesRoomServer: true }]) {
+    settle({ servers: ["owner_browser"], ...settings });
+    await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, found, env), (error: Error) => { assert.equal(error.message, NOT_COMPARED); return true; });
+  }
+
+  // A personal skill the owner added is turned off at a launch, so it is one more thing the process was not started without.
+  settle({ servers: ["owner_browser"] });
+  mkdirSync(join(owner.codexHome, "skills", "new-skill"), { recursive: true });
+  writeFileSync(join(owner.codexHome, "skills", "new-skill", "SKILL.md"), "---\nname: new-skill\ndescription: test.\n---\n");
+  await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, live, env), (error: Error) => error.message === GAINED);
+  execFileSync("rm", ["-r", join(owner.codexHome, "skills")]);
+  // A Codex that cannot list its servers, or a folder that is not known, is never taken as unchanged.
+  settle({ servers: ["owner_browser"], listFails: true });
+  for (const process of [live, found]) await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, process, env), /Codex could not list its MCP servers/);
+  settle({ servers: ["owner_browser"] });
+  await assert.rejects(assertLiveCodexIsolationUnchanged(codex.bin, { ...live, cwd: null }, env), /could not tell which folder this Codex agent runs in/);
 });
