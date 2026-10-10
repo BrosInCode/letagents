@@ -45,6 +45,12 @@ export type ClaudeExactTurnFailure = {
   apiFailure?: ClaudeApiFailure;
   /** The provider declined the turn's content: the answer stopped with `stop_reason: "refusal"`. */
   refusal?: true;
+  /**
+   * Claude Code ended the command with a text of its own and no call to the
+   * model: a UserPromptSubmit hook stopped the prompt, or the cause is not
+   * known. For code to decide on; `error` is for the owner to read.
+   */
+  modelNotCalled?: "hook_stopped_prompt" | "unknown";
 };
 
 /**
@@ -145,6 +151,19 @@ function unrecognizedResultText(subtype: string | null, isError: unknown): strin
   return `Claude ended this turn with a result LetAgents does not recognize (${named}, ${flag}), so nothing was posted.`;
 }
 
+/** How Claude Code begins the text of the result of a prompt that a UserPromptSubmit hook stopped. */
+const CLAUDE_HOOK_BLOCKED_PROMPT = "UserPromptSubmit operation blocked by hook:";
+
+/**
+ * What the owner reads for a command that Claude Code ended with a text of its
+ * own and no call to the model. Neither repeats the CLI's text: it can hold
+ * the words of a hook, a path of the owner's machine, and the prompt.
+ */
+export const CLAUDE_TURN_WITHOUT_MODEL_TEXT = {
+  hookStoppedPrompt: "A Claude Code UserPromptSubmit hook stopped this message before the model saw it, so the agent wrote no answer and nothing was posted.",
+  noCallToTheModel: "Claude Code ended this turn without a call to the model, so the text of its result is not the agent's answer and nothing was posted.",
+} as const;
+
 export function exactClaudeCommandLifecycleState(
   event: ClaudeEvidenceRecord,
   turnId: string,
@@ -216,6 +235,21 @@ export function exactClaudeStreamTerminal(
       ...(apiError ? apiFailureFacts(event.api_error_status, event.terminal_reason, apiErrorCategory, [resultText], usageLimitRejected) : {}),
       ...(apiError && event.stop_reason === "refusal" ? { refusal: true as const } : {}),
     };
+  }
+  // A `success` result that says the model was not called, and that carries a
+  // text: the text is the CLI's own, and never an answer. The one captured
+  // case is a prompt that a UserPromptSubmit hook stopped. Its text holds the
+  // path of the hook's script, the hook's words, and the whole prompt, so none
+  // of it is kept: the owner reads why nothing was posted, and no more.
+  // The mark makes task continuity settle the message: no follow-up turn is
+  // sent, which the hook could stop again, and no later message waits.
+  // (A result with no call to the model and no text is read as before: the
+  // CLI writes one for a notice that went to the model with another, and for
+  // its own command.)
+  if (event.num_turns === 0 && typeof event.result === "string" && event.result.trim()) {
+    const hook = event.result.trimStart().startsWith(CLAUDE_HOOK_BLOCKED_PROMPT);
+    return { turnId, nativeOutcome: "failed", unrecognizedResult: true, modelNotCalled: hook ? "hook_stopped_prompt" : "unknown",
+      error: hook ? CLAUDE_TURN_WITHOUT_MODEL_TEXT.hookStoppedPrompt : CLAUDE_TURN_WITHOUT_MODEL_TEXT.noCallToTheModel };
   }
   return exactTextResult(
     turnId,
