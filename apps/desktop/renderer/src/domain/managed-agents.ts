@@ -1278,7 +1278,7 @@ export function supervisedPermissionProfilePresentation(
   if (profile.id === "read_only" && providerId === "codex") {
     return { ...profile, status: "available", risk: "medium",
       description: "Can read files on this Mac, also outside your project, and read and post in the room.",
-      detail: "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews." };
+      detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews." };
   }
   if (profile.id !== "ask_before_write"
     || (providerId !== "codex" && providerId !== "open-model" && providerId !== "claude-code")) return profile;

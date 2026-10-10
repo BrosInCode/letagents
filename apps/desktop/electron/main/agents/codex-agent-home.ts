@@ -32,12 +32,30 @@ import {
 // would leave the owner's own file with a dead one. Codex rewrites the file in
 // place, through the link. That is checked for each Codex binary, with a
 // made-up sign-in and a made-up token service, before the real link is used.
+//
+// Codex's sandboxes refuse no read, so a command of a sandboxed agent can read
+// the owner's sign-in file, at the owner's path and through the link. A
+// Read-only agent is therefore started with a permission profile of its own:
+// Codex's built-in read-only one, and a `deny` for the sign-in file. Codex's
+// own process is not in the sandbox, so it still reads the file and refreshes
+// it. The profile is given as launch overrides, and nothing is written to the
+// owner's config. That Codex honours such a `deny` is checked for each Codex
+// binary with a made-up file, before a Read-only agent is started.
 
 const SIGN_IN_FILE = "auth.json";
 const SIGN_IN_CHECK_TIMEOUT_MS = 15_000;
 const SIGN_IN_CHECK_FOLDER = "codex-sign-in-check-";
 const TOKEN_AFTER_REFRESH = "letagents-check-token-after-refresh";
 const TOKEN_SERVICE_OVERRIDE = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
+const READ_ONLY_PROFILE_PREFIX = "letagents_read_only_";
+/** Codex's own read-only profile, which a Read-only agent's profile extends. Codex reports it back with the profile's name. */
+export const CODEX_BUILT_IN_READ_ONLY_PROFILE = ":read-only";
+const DENY_CHECK_TIMEOUT_MS = 15_000;
+const DENY_CHECK_FOLDER = "codex-deny-check-";
+const DENY_CHECK_DENIED = "letagents-check-denied-file";
+const DENY_CHECK_OPEN = "letagents-check-open-file";
+/** An address on this machine where nothing listens: what a check that needs no service gives Codex for every address it could call. */
+const NOWHERE = "http://127.0.0.1:9";
 /**
  * Codex sends its sign-in tokens to the address in these variables. Only the
  * sign-in check, with its made-up sign-in, may set one: no agent is ever
@@ -116,6 +134,59 @@ export function codexAgentHomeDirectory(env: NodeJS.ProcessEnv): string {
 /** How the agents' home is named to its owner: by its last two names, never by its full path, which can be shown in a room. */
 function shownAgentHome(home: string): string {
   return `${basename(home)} in your ${basename(dirname(home))} folder`;
+}
+
+/**
+ * The name of the permission profile a Read-only agent's Codex is started
+ * with, for one work attempt. Every request of that Codex names it, and every
+ * reply is held to it.
+ *
+ * The name is made from the work attempt's own id, which nobody knows before
+ * the attempt exists. Codex 0.153.4 was seen to merge a profile of the same
+ * name from the owner's config, and so from a trusted project's, into the
+ * launch's: a `":root" = "write"` entry and an open network of such a profile
+ * stayed in force beside the launch's `deny`. A name that cannot be written
+ * into a config file beforehand has nothing to be merged with.
+ */
+export function codexReadOnlyProfileId(workAttemptId: string): string {
+  return `${READ_ONLY_PROFILE_PREFIX}${createHash("sha256").update(`letagents codex read-only profile\n${workAttemptId}`).digest("hex").slice(0, 24)}`;
+}
+
+/**
+ * The launch overrides that define a profile which extends Codex's built-in
+ * read-only one and denies `denied` to every command, and that make it the
+ * launch's default. A conversation still has to name the profile: one that is
+ * started with a named sandbox does not get the default.
+ */
+export function codexReadOnlyProfileOverrides(profile: string, denied: readonly string[]): string[] {
+  const entries = [...new Set(denied)].map((path) => `${JSON.stringify(path)} = "deny"`).join(", ");
+  return [
+    `permissions.${profile}={ extends = ${JSON.stringify(CODEX_BUILT_IN_READ_ONLY_PROFILE)}, filesystem = { ${entries} } }`,
+    `default_permissions=${JSON.stringify(profile)}`,
+  ];
+}
+
+/**
+ * Every path that names the owner's sign-in file for a launch: the file in
+ * the owner's home with that home's links followed, the file it leads to when
+ * it is a link itself, and the link in the agents' home when the launch runs
+ * with one.
+ *
+ * The owner's path is the one the sandbox holds a command to: it looks at the
+ * file a path leads to, so a `deny` there also refuses a read through the
+ * link. Codex 0.153.4 was also seen to refuse the file when only the link is
+ * named. Both are named, so that the `deny` rests on neither alone.
+ */
+export function codexSignInPaths(env: NodeJS.ProcessEnv, codexHome: string | null): string[] {
+  const owners = join(resolvedPath(codexHomeDirectory(env)), SIGN_IN_FILE);
+  const paths = [owners];
+  try {
+    paths.push(realpathSync(owners));
+  } catch {
+    // Not there yet, or a link that leads nowhere: a deny for a path that is not there holds once it is.
+  }
+  if (codexHome) paths.push(join(codexHome, SIGN_IN_FILE), join(resolvedPath(codexHome), SIGN_IN_FILE));
+  return [...new Set(paths)];
 }
 
 /**
@@ -268,22 +339,16 @@ export async function checkCodexKeepsLinkedSignIn(codexBin: string, env: NodeJS.
   }
 }
 
-const signInChecks = new Map<string, Promise<boolean>>();
 /**
- * The check above, made once for each Codex as it answers now. Only a pass is
- * remembered. It is kept for the command together with what Codex says it is:
- * the command of an npm install is a small script that starts the real
- * program from another package, so the file on disk can stay the same when
- * the program is replaced, while the version Codex reports changes with it.
- * A Codex that does not say what it is is checked at every launch.
- *
- * It is not kept for each owner home: how Codex rewrites a sign-in file is a
- * matter of the program, and the check gives it a made-up home with the file
- * store. Where one owner home keeps its sign-in is never remembered: Codex is
- * asked at every launch.
+ * A check of a Codex program, made once for each Codex as it answers now.
+ * Only a pass is remembered. It is kept for the command together with what
+ * Codex says it is: the command of an npm install is a small script that
+ * starts the real program from another package, so the file on disk can stay
+ * the same when the program is replaced, while the version Codex reports
+ * changes with it. A Codex that does not say what it is is checked at every
+ * launch.
  */
-export function codexKeepsLinkedSignIn(codexBin: string, env: NodeJS.ProcessEnv, version: string | null): Promise<boolean> {
-  const check = () => checkCodexKeepsLinkedSignIn(codexBin, env, dirname(codexAgentHomeDirectory(env)));
+function oncePerCodex(remembered: Map<string, Promise<boolean>>, codexBin: string, version: string | null, check: () => Promise<boolean>): Promise<boolean> {
   if (!version) return check();
   let identity = `${codexBin}\n${version}`;
   try {
@@ -293,19 +358,105 @@ export function codexKeepsLinkedSignIn(codexBin: string, env: NodeJS.ProcessEnv,
   } catch {
     // A command found on PATH is checked under its own name.
   }
-  let remembered = signInChecks.get(identity);
-  if (!remembered) {
-    remembered = check();
-    signInChecks.set(identity, remembered);
-    void remembered.then((kept) => { if (!kept) signInChecks.delete(identity); });
+  let passed = remembered.get(identity);
+  if (!passed) {
+    passed = check();
+    remembered.set(identity, passed);
+    void passed.then((pass) => { if (!pass) remembered.delete(identity); });
   }
-  return remembered;
+  return passed;
+}
+
+const signInChecks = new Map<string, Promise<boolean>>();
+/**
+ * The sign-in check above, made once for each Codex as it answers now.
+ *
+ * It is not kept for each owner home: how Codex rewrites a sign-in file is a
+ * matter of the program, and the check gives it a made-up home with the file
+ * store. Where one owner home keeps its sign-in is never remembered: Codex is
+ * asked at every launch.
+ */
+export function codexKeepsLinkedSignIn(codexBin: string, env: NodeJS.ProcessEnv, version: string | null): Promise<boolean> {
+  return oncePerCodex(signInChecks, codexBin, version, () => checkCodexKeepsLinkedSignIn(codexBin, env, dirname(codexAgentHomeDirectory(env))));
+}
+
+/**
+ * Whether this Codex keeps a file that a launch's permission profile denies
+ * from a command. Codex is started with a made-up home and a profile, given
+ * as launch overrides the way a Read-only launch gives its own, that denies a
+ * made-up file and a link to it. It is asked to run a command that reads the
+ * file, one that reads it through the link, and one that reads a file beside
+ * them. True only when the first two are refused and print nothing of the
+ * file, and the third prints its file: a Codex that runs no command at all
+ * does not pass. No conversation is started and no model is asked.
+ *
+ * What this shows is that the program honours a `deny` for a command. It does
+ * not show that one conversation has the profile: each reply is held to that.
+ * Codex's own tool that reads a picture without the shell can only be asked
+ * for by a model, so it is not tried here; the installed-Codex tests try it.
+ *
+ * Like the sign-in check, the folder is made in `parent`, beside the agents'
+ * home and never in a temp folder, it is looked at again just before Codex
+ * starts, and it is removed on every path.
+ */
+export async function checkCodexHonoursDeny(codexBin: string, env: NodeJS.ProcessEnv, parent: string): Promise<boolean> {
+  let scratch: string | null = null;
+  try {
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    scratch = mkdtempSync(join(parent, DENY_CHECK_FOLDER));
+    const home = join(scratch, "home");
+    const denied = join(scratch, "denied.txt");
+    const open = join(scratch, "open.txt");
+    const link = join(home, "linked.txt");
+    mkdirSync(home, { mode: 0o700 });
+    writeFileSync(denied, DENY_CHECK_DENIED, { mode: 0o600 });
+    writeFileSync(open, DENY_CHECK_OPEN, { mode: 0o600 });
+    symlinkSync(denied, link);
+    const proxies = Object.fromEntries(["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"].map((key) => [key, NOWHERE]));
+    const toRun = Object.fromEntries(["PATH", "Path", "PATHEXT", "SystemRoot", "LANG"].flatMap((key) => env[key] ? [[key, env[key]]] : []));
+    // Exactly what was written above, and nothing else: no config, no rules, nothing unknown.
+    if (entriesBelow(scratch).sort().join("\n") !== ["denied.txt", "home", "home/linked.txt", "open.txt"].join("\n")) return false;
+    const folder = scratch;
+    const profile = `${READ_ONLY_PROFILE_PREFIX}check`;
+    const reads = (path: string) => process.platform === "win32" ? ["cmd.exe", "/d", "/c", "type", path] : ["/bin/cat", path];
+    return await askCodexAppServer(codexBin, {
+      cwd: folder,
+      env: { ...toRun, HOME: folder, CODEX_HOME: home, TMPDIR: folder, ...proxies },
+      configOverrides: [
+        ...CODEX_OWNER_FEATURE_OVERRIDES, `chatgpt_base_url="${NOWHERE}/"`, `openai_base_url="${NOWHERE}/v1"`,
+        ...codexReadOnlyProfileOverrides(profile, [denied, link]),
+      ],
+      experimentalApi: true,
+    }, async (request) => {
+      const ran = async (path: string) => {
+        const answer = await request("command/exec", { command: reads(path), cwd: folder, permissionProfile: profile }) as { exitCode?: unknown; stdout?: unknown } | null;
+        return { ended: typeof answer?.exitCode === "number" ? answer.exitCode : null, printed: typeof answer?.stdout === "string" ? answer.stdout : null };
+      };
+      const refused = (command: Awaited<ReturnType<typeof ran>>) => command.ended !== null && command.ended !== 0 && command.printed !== null && !command.printed.includes(DENY_CHECK_DENIED);
+      const atItsPath = await ran(denied);
+      const throughTheLink = await ran(link);
+      const beside = await ran(open);
+      return refused(atItsPath) && refused(throughTheLink) && beside.ended === 0 && beside.printed === DENY_CHECK_OPEN;
+    }, DENY_CHECK_TIMEOUT_MS);
+  } catch {
+    return false;
+  } finally {
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+const denyChecks = new Map<string, Promise<boolean>>();
+/** The check above, made once for each Codex as it answers now. Only a pass is remembered. */
+export function codexHonoursDeny(codexBin: string, env: NodeJS.ProcessEnv, version: string | null): Promise<boolean> {
+  return oncePerCodex(denyChecks, codexBin, version, () => checkCodexHonoursDeny(codexBin, env, dirname(codexAgentHomeDirectory(env))));
 }
 
 export type CodexAgentHomeDependencies = {
   inspect(codexBin: string, options: { cwd: string; env: NodeJS.ProcessEnv; configOverrides: readonly string[] }): Promise<CodexSettingsInspection>;
   /** `version`: what Codex said it is when it answered for its settings. Null when it did not say. */
   keepsLinkedSignIn(codexBin: string, env: NodeJS.ProcessEnv, version: string | null): Promise<boolean>;
+  /** Whether this Codex keeps a file its launch's permission profile denies from a command. Asked only for a Read-only launch. */
+  honoursDeny(codexBin: string, env: NodeJS.ProcessEnv, version: string | null): Promise<boolean>;
   link(ownerHome: string, agentHome: string): { own: string[]; inPlaceOfOwners: string[] };
   /** The first entries of one folder: none means it holds nothing. It may name more than Codex reads, never less. */
   folderEntries(folder: string): string[];
@@ -314,6 +465,7 @@ export type CodexAgentHomeDependencies = {
 const DEFAULT_DEPENDENCIES: CodexAgentHomeDependencies = {
   inspect: inspectCodexSettings,
   keepsLinkedSignIn: codexKeepsLinkedSignIn,
+  honoursDeny: codexHonoursDeny,
   link: linkCodexAgentHome,
   folderEntries: firstFolderEntries,
 };
@@ -353,7 +505,9 @@ const DEFAULT_DEPENDENCIES: CodexAgentHomeDependencies = {
  *
  * A permission profile is not looked at: one that is the config's default was
  * seen not to apply to a conversation that is started with a named sandbox,
- * which is how every conversation here is started.
+ * which is how every conversation with a writable sandbox is started here.
+ * A Read-only conversation names a profile of the launch's own, which extends
+ * Codex's read-only one and so writes nowhere.
  */
 function writableRootsRefusal(
   inspection: CodexSettingsInspection,
@@ -458,6 +612,15 @@ async function inspected(
 }
 
 /**
+ * Why a Read-only launch is refused when Codex has not shown that it honours a `deny`. Said to the owner as it is.
+ * The check cannot tell a Codex that is too old from one that is newer than LetAgents knows, so the line claims
+ * neither and names what helps in each case.
+ */
+export const SIGN_IN_NOT_HIDDEN = "Read-only access keeps your Codex sign-in file from the agent's commands, and LetAgents could not confirm that this version of Codex does that: "
+  + "it asked Codex to keep a made-up file from a command, and Codex did not show that it does. So LetAgents will not start Codex at this access level. "
+  + "If Codex is not up to date, update it and start the agent again. If it is, update LetAgents, or choose another access level: at every other level the agent's commands can read that file.";
+
+/**
  * The Codex home for a launch at a sandboxed access level: the agents' home,
  * or null for the owner's own, and what the owner is to be told. `env` is the
  * launch's environment as it is for the owner's home.
@@ -467,13 +630,22 @@ async function inspected(
  * used only if it holds no saved rule, and the launch is refused if it holds
  * one. A launch is refused always when another layer Codex applies holds a
  * command rule: the project's own, or the machine's.
+ *
+ * For a Read-only launch, which names its permission profile, the answer also
+ * holds the launch overrides that define the profile, with a `deny` for the
+ * owner's sign-in file. They are given only once this Codex has shown, with a
+ * made-up file, that it honours a `deny`. When it has not, the launch is
+ * refused: it is never started the old way, without the profile.
  */
 export async function codexHomeForSandboxedLaunch(
   codexBin: string,
-  /** `writableSandbox`: the access level's sandbox lets a command write the project. */
-  options: { cwd?: string; env: NodeJS.ProcessEnv; writableSandbox?: boolean },
+  /**
+   * `writableSandbox`: the access level's sandbox lets a command write the project.
+   * `hideSignInProfile`: the launch is a Read-only agent's, and this is the name of its permission profile.
+   */
+  options: { cwd?: string; env: NodeJS.ProcessEnv; writableSandbox?: boolean; hideSignInProfile?: string },
   dependencies: Partial<CodexAgentHomeDependencies> = {},
-): Promise<{ codexHome: string | null; notices: string[]; writableFoldersCheck?: CodexWritableFoldersCheck }> {
+): Promise<{ codexHome: string | null; notices: string[]; writableFoldersCheck?: CodexWritableFoldersCheck; configOverrides?: string[] }> {
   const deps = { ...DEFAULT_DEPENDENCIES, ...dependencies };
   const ownerHome = codexHomeDirectory(options.env);
   // The project's own rule folders first, trusted or not, before Codex is asked anything.
@@ -490,6 +662,12 @@ export async function codexHomeForSandboxedLaunch(
   let named = inspection;
   const checked = <T extends { codexHome: string | null; notices: string[] }>(home: T): T & { writableFoldersCheck?: CodexWritableFoldersCheck } => (writableSandbox
     ? { ...home, writableFoldersCheck: () => writableRootsRefusal(named, options.env, { cwd: options.cwd, runsWith: home.codexHome }) } : home);
+  /** The home a launch runs with, and for a Read-only launch the profile that keeps the sign-in file from its commands. */
+  const launchedWith = async <T extends { codexHome: string | null; notices: string[] }>(home: T): Promise<T & { configOverrides?: string[] }> => {
+    if (!options.hideSignInProfile) return home;
+    if (!await deps.honoursDeny(codexBin, options.env, inspection.userAgent ?? null)) throw new Error(SIGN_IN_NOT_HIDDEN);
+    return { ...home, configOverrides: codexReadOnlyProfileOverrides(options.hideSignInProfile, codexSignInPaths(options.env, home.codexHome)) };
+  };
 
   let why: string;
   let otherWayOut = "";
@@ -531,7 +709,7 @@ export async function codexHomeForSandboxedLaunch(
       // Kept and said, not refused: the copy can hold conversations, and it cannot open the sandbox,
       // because Codex was just asked what it reads with it. Deleting it is the owner's choice.
       const shown = linked.inPlaceOfOwners.slice(0, 5).map((name) => name.replace(/[^\x20-\x7e]/g, "?").slice(0, 60)).join(", ");
-      return checked({
+      return launchedWith(checked({
         codexHome: agentHome,
         notices: linked.inPlaceOfOwners.length ? [
           `The folder LetAgents keeps for sandboxed Codex agents (${shownAgentHome(agentHome)}) holds entries of its own with the same names as entries of your Codex home: ${shown}`
@@ -541,10 +719,10 @@ export async function codexHomeForSandboxedLaunch(
           + "LetAgents never deletes them, because they can hold conversations; an empty one it replaces with a link to yours by itself. "
           + "To use your own again, stop the sandboxed Codex agents and delete those entries from that folder.",
         ] : [],
-      });
+      }));
     }
   }
-  if (!deps.folderEntries(join(ownerHome, "rules")).length) return checked({ codexHome: null, notices: [] });
+  if (!deps.folderEntries(join(ownerHome, "rules")).length) return launchedWith(checked({ codexHome: null, notices: [] }));
   throw new Error(
     "Codex has saved command rules (the rules folder in your Codex home), and a command that matches one runs outside this agent's sandbox. "
     + `LetAgents could not give this agent a Codex home without them: ${why!}. `

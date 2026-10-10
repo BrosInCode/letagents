@@ -566,7 +566,7 @@ test("managed agent permission profiles map provider-specific available and gate
   assert.equal(supervisedCodexReadOnly.status, "available");
   assert.equal(supervisedCodexReadOnly.risk, "medium");
   assert.equal(supervisedCodexReadOnly.description, "Can read files on this Mac, also outside your project, and read and post in the room.");
-  assert.equal(supervisedCodexReadOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
+  assert.equal(supervisedCodexReadOnly.detail, "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.");
   assert.equal(codexProfiles.find((profile) => profile.isDefault)?.id, "full_access");
   assert.throws(
     () => assertManagedAgentPermissionProfileAvailable("codex", "sandboxed_write", "supervised"),
