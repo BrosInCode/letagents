@@ -198,6 +198,7 @@
         <span v-if="threadMarkerPreview" class="room-thread-marker-preview">
           {{ threadMarkerPreview }}
         </span>
+        <ChevronDown class="room-thread-marker-chevron" :size="14" aria-hidden="true" />
       </button>
         <ThreadTransition>
           <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread" /></div>
@@ -397,7 +398,7 @@ import { reminderAccount } from "../../../composables/useMessageReminders";
 import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
-import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
+import { Check, ChevronDown, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
 import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
