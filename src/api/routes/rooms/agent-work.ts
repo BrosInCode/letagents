@@ -187,9 +187,9 @@ async function pollRoomAgentWork(req: AuthenticatedRequest, res: Response, deps:
     // Bound intentional waiting, not the duration of database/upstream checks.
     const deadline = performance.now() + Math.min(30_000, parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined));
     const currentReaderEpoch = async (): Promise<number | null> => {
-      // Shared repository leases may originate from a public-room message
-      // stream whose callback skips credential checks. Keep this check outside
-      // that lease and after any upstream refresh, even for public rooms.
+      // The shared lease re-resolves the credential at most once per period.
+      // This view is per account, so confirm the exact account again after
+      // any upstream refresh before trusting the lease for one more read.
       const epoch = authorizationEpoch;
       if (closed() || !(await authorization!.check())) return null;
       const fresh = await resolveRequestAuth(req);

@@ -324,6 +324,12 @@ jobs:
           src/api/__tests__/repo-room-access-integration.test.ts
           src/api/__tests__/github-repo-access.test.ts
 
+      # Own step: DB-backed files in one node --test run start in parallel
+      # processes and drop the same schema.
+      - name: Test live room rechecks and leases after a credential is revoked
+        timeout-minutes: 5
+        run: node --import tsx --test src/api/__tests__/room-access-live-recheck-db.test.ts src/api/__tests__/live-room-authorization.test.ts
+
       - name: Run repo migration tests
         run: >-
           node
