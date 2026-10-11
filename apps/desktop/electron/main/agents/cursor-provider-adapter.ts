@@ -120,6 +120,9 @@ import { resolveLetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { buildCursorChildEnv, cursorDaemonChildEnv } from "./cursor-runner.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { cursorPermissionProfileInstructionLines } from "./cursor-permission-profile.js";
+import { readCursorAccountUsage, readCursorContext, readCursorUsageOwner } from "./cursor-usage.js";
+import { emptyProviderUsage } from "./provider-usage.js";
+import type { ProviderUsage } from "../../../shared/provider-usage.js";
 import {
   createSupervisedWorkspaceGeneration,
   openSupervisedWorkspaceGeneration,
@@ -196,6 +199,9 @@ export interface CursorProviderAdapterDependencies {
   createWorkspaceGeneration: typeof createSupervisedWorkspaceGeneration;
   recoverWorkspaceGeneration: typeof recoverSupervisedWorkspaceGeneration;
   removeWorkspaceGenerationReceipt: typeof removeSupervisedWorkspaceGenerationReceipt;
+  readUsageAccount: typeof readCursorAccountUsage;
+  readUsageContext: typeof readCursorContext;
+  readUsageOwner: typeof readCursorUsageOwner;
   now(): string;
 }
 
@@ -432,6 +438,9 @@ const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   createWorkspaceGeneration: createSupervisedWorkspaceGeneration,
   recoverWorkspaceGeneration: recoverSupervisedWorkspaceGeneration,
   removeWorkspaceGenerationReceipt: removeSupervisedWorkspaceGenerationReceipt,
+  readUsageAccount: readCursorAccountUsage,
+  readUsageContext: readCursorContext,
+  readUsageOwner: readCursorUsageOwner,
   now: () => new Date().toISOString(),
 };
 
@@ -588,6 +597,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private readonly stopGraceMs: number;
   private readonly supervisedProfileFactory: NonNullable<CursorProviderAdapterOptions["supervisedProfileFactory"]>;
   private readonly handles = new Map<string, CursorProviderHandle>();
+  private readonly usage = new WeakMap<CursorProviderHandle, {
+    value: ProviderUsage; lastRead: number; request?: Promise<void>; summaryId?: string | null;
+  }>();
   private readonly processCustody: ProviderProcessCustody;
   readonly runtimeCustody: ReturnType<typeof createCursorRuntimeCustodyReader>;
 
@@ -625,6 +637,74 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   capabilities(): ProviderAdapterCapabilities {
     return { ...BASE_CURSOR_CAPABILITIES };
+  }
+
+  async readUsage(providerHandle: ProviderHandle): Promise<ProviderUsage | null> {
+    const handle = this.requireHandle(providerHandle);
+    const sessionId = handle.providerContinuationId;
+    const profile = handle.supervisedProfile;
+    if (!sessionId || !profile || handle.terminal || this.handles.get(handle.workAttemptId) !== handle) return null;
+    const turn = handle.liveTurn;
+    const workspace = turn?.workspaceGeneration?.liveWorkspace ?? handle.cwd;
+    const current = () => this.handles.get(handle.workAttemptId) === handle && !handle.terminal
+      && handle.providerContinuationId === sessionId && handle.liveTurn === turn
+      && (handle.liveTurn?.workspaceGeneration?.liveWorkspace ?? handle.cwd) === workspace;
+    let state = this.usage.get(handle);
+    if (!state || state.value.providerContinuationId !== sessionId) {
+      state = { value: emptyProviderUsage(sessionId), lastRead: -Infinity };
+      this.usage.set(handle, state);
+    }
+    const reading = this.deps.readUsageContext(profile.configDir, workspace, sessionId);
+    // Missing/replaced state must clear old counts, including during native
+    // compaction and workspace namespace relocation. Never retain guessed data.
+    state.value.context = reading?.context ?? null;
+    if (reading) {
+      if (state.summaryId !== undefined && reading.summaryId !== state.summaryId && reading.summaryId !== null) {
+        state.value.compaction = "compacted";
+      }
+      state.summaryId = reading.summaryId;
+    }
+    const now = Date.parse(this.deps.now());
+    if (!state.request && now - state.lastRead >= 30_000) {
+      state.lastRead = now;
+      const captured = state;
+      state.request = (async () => {
+        try {
+          const account = await this.readAccountForHandle(handle, current);
+          if (current()) captured.value.account = account ?? { state: "unavailable", windows: [] };
+        } catch {
+          if (current()) captured.value.account.state = captured.value.account.windows.length ? "stale" : "unavailable";
+        }
+      })().finally(() => { captured.request = undefined; });
+    }
+    await state.request;
+    return current() ? structuredClone(state.value) : null;
+  }
+
+  private async readAccountForHandle(handle: CursorProviderHandle, current: () => boolean): Promise<ProviderUsage["account"] | null> {
+    const profile = handle.supervisedProfile!;
+    const ownerId = this.deps.readUsageOwner(profile.configDir);
+    if (ownerId === null) return null;
+    // Use the existing read-only native identity probe, also for idle restored
+    // sessions. Never read ambient credentials or start an inference to refresh.
+    const root = mkdtempSync(join(tmpdir(), "letagents-cursor-usage-"));
+    try {
+      const inspection = this.supervisedProfileFactory({
+        apiBaseUrl: handle.spawnRequest.supervisorWorkerSession?.apiUrl ?? desktopApiUrl,
+        workAttemptId: `${handle.workAttemptId}:usage:${randomUUID()}`, cwd: handle.cwd,
+        profileRoot: root, includeAuth: true, identityAttestationOnly: true, inspectionOnly: true,
+        exactWorkspaceOnly: usesExactScratchWorkspace(handle.spawnRequest),
+        devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath, mcpWorkingDirectory: root,
+      });
+      const identity = await this.deps.attestPersonalIdentity({
+        cursorBin: this.cursorBin, cwd: root, env: cursorDaemonChildEnv(inspection.env),
+        writableProfileRoot: root, requiredReadableRoots: inspection.authReadRoots, timeoutMs: 3000,
+      });
+      if (!current() || identity.userId !== ownerId || this.deps.readUsageOwner(profile.configDir) !== ownerId
+        || !identity.providerAuthorization) return null;
+      const account = await this.deps.readUsageAccount(identity.providerAuthorization, this.deps.now());
+      return current() && this.deps.readUsageOwner(profile.configDir) === ownerId ? account : null;
+    } finally { rmSync(root, { recursive: true, force: true }); }
   }
 
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {

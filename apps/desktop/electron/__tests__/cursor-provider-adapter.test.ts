@@ -445,6 +445,9 @@ function createHarness(options: HarnessOptions = {}) {
   let mintedSessions = 0;
 
   const dependencies: CursorProviderAdapterDependencies = {
+    readUsageOwner: () => null,
+    readUsageContext: () => null,
+    readUsageAccount: async () => ({ state: "unavailable", windows: [] }),
     relocateConversationNamespace() {},
     async openWorkspaceGeneration(path) {
       const generation = generations.get(path);
@@ -8788,4 +8791,67 @@ test("a Cursor turn that finished while its daemon was replaced is answered from
   } finally {
     await agent.cleanup();
   }
+});
+
+test("Cursor usage reads idle sessions without inference, throttles account reads, and clears missing context", async () => {
+  const h = createHarness();
+  let now = Date.parse("2026-10-11T10:00:00Z"), calls = 0, fail = false;
+  let reading: ReturnType<CursorProviderAdapterDependencies["readUsageContext"]> = {
+    context: { usedTokens: 39386, capacityTokens: 256000, observedAt: new Date(now).toISOString() }, rootId: "root", summaryId: null,
+  };
+  h.dependencies.now = () => new Date(now).toISOString();
+  h.dependencies.readUsageOwner = () => 12345;
+  h.dependencies.readUsageContext = (_config, cwd, id) => {
+    assert.equal(cwd, "/tmp/wa-cursor-1"); assert.equal(id, "sess-cursor-usage"); return reading;
+  };
+  h.dependencies.readUsageAccount = async (auth, at) => {
+    assert.equal(auth, "Bearer test-provider-authorization"); calls++;
+    if (fail) throw new Error("offline");
+    return { state: "available", windows: [{ id: "cursor-plan", label: "Included usage", usedPercent: 20, resetsAt: null, observedAt: at }] };
+  };
+  const adapter = supervisedAdapter(h);
+  const handle = await adapter.resume({ workAttemptId: "wa-cursor-1", providerContinuationId: "sess-cursor-usage" }, daemonSpawnRequest());
+  const [first, concurrent] = await Promise.all([adapter.readUsage(handle), adapter.readUsage(handle)]);
+  assert.equal(first?.account.windows[0]?.usedPercent, 20);
+  assert.deepEqual(first, concurrent);
+  assert.equal(first?.context?.usedTokens, 39386);
+  assert.equal(calls, 1);
+  assert.equal(h.launches.length, 0, "usage must never start an inference or room turn");
+  assert.equal(h.identityAttestations.length, 1);
+  assert.ok(!existsSync(h.identityAttestations[0]!.writableProfileRoot), "temporary identity profile is removed");
+  reading = { ...reading!, rootId: "compacted", summaryId: "summary", context: { ...reading!.context!, usedTokens: 9000 } };
+  now += 31000;
+  const compacted = await Promise.all([adapter.readUsage(handle), adapter.readUsage(handle)]);
+  assert.ok(compacted.every(value => value?.compaction === "compacted"));
+  assert.equal((await adapter.readUsage(handle))?.compaction, "compacted");
+  reading = null;
+  assert.equal((await adapter.readUsage(handle))?.context, null);
+  fail = true; now += 31000;
+  const stale = await adapter.readUsage(handle);
+  assert.equal(stale?.account.state, "stale");
+  assert.equal(stale?.account.windows[0]?.usedPercent, 20);
+  assert.equal(calls, 3);
+  await adapter.stop(handle);
+});
+
+test("Cursor usage rejects another account and discards a read after the exact handle is retired", async () => {
+  const h = createHarness();
+  let calls = 0, owner = 999, now = Date.now();
+  h.dependencies.readUsageOwner = () => owner;
+  h.dependencies.now = () => new Date(now).toISOString();
+  let complete!: (value: Awaited<ReturnType<CursorProviderAdapterDependencies["readUsageAccount"]>>) => void;
+  let started!: () => void;
+  const didStart = new Promise<void>(resolve => { started = resolve; });
+  h.dependencies.readUsageAccount = () => { calls++; started(); return new Promise(resolve => { complete = resolve; }); };
+  const adapter = supervisedAdapter(h);
+  const handle = await adapter.resume({ workAttemptId: "wa-cursor-1", providerContinuationId: "sess-cursor-usage" }, daemonSpawnRequest());
+  assert.equal((await adapter.readUsage(handle))?.account.state, "unavailable");
+  assert.equal(calls, 0, "never query the current account for another account's agent");
+  owner = 12345; now += 31000;
+  const pending = adapter.readUsage(handle);
+  await didStart;
+  await adapter.stop(handle);
+  complete({ state: "available", windows: [] });
+  assert.equal(await pending, null);
+  assert.equal(await adapter.readUsage(handle), null);
 });

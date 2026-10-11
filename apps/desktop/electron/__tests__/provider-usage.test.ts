@@ -110,3 +110,75 @@ test("Claude synthetic notices and API errors do not replace measured context wi
     assert.equal(tracker.snapshot("session").context?.usedTokens, 12000);
   }
 });
+
+test("Cursor uses reported plan percentages, native dollar caps and millisecond resets without inventing windows", async () => {
+  const { cursorAccountUsage } = await import("../main/agents/cursor-usage.js");
+  const period = { billingCycleEnd: "1793364839000", planUsage: { includedSpend: 2000, totalSpend: 9533, limit: 2000, totalPercentUsed: 20.175661375661374 }, spendLimitUsage: { individualUsed: 2500, limitType: "user" } };
+  const account = cursorAccountUsage(period, { hardLimit: 100 }, at);
+  assert.deepEqual(account.windows.map(w => w.usedPercent), [20.175661375661374, 25]);
+  assert.equal(account.windows[0]?.resetsAt, new Date(1793364839000).toISOString());
+  for (const hard of [{ noUsageBasedAllowed: true }, { hardLimit: 2147483647 }, { hardLimit: 0 }]) {
+    assert.equal(cursorAccountUsage(period, hard, at).windows.length, 1);
+  }
+  assert.equal(cursorAccountUsage({}, null, at).state, "unavailable");
+  assert.equal(cursorAccountUsage({ spendLimitUsage: { individualLimit: 5000 } }, {}, at).windows.length, 0);
+  assert.equal(cursorAccountUsage({ spendLimitUsage: { individualLimit: 5000 } }, null, at).windows[0]?.usedPercent, 0);
+  assert.equal(cursorAccountUsage({ planUsage: { totalPercentUsed: 0 } }, null, at).windows[0]?.usedPercent, 0);
+  assert.equal(cursorAccountUsage({ planUsage: { includedSpend: 120, limit: 100 } }, null, at).windows[0]?.usedPercent, 100);
+  assert.equal(cursorAccountUsage({ planUsage: { totalPercentUsed: "20", limit: -1 } }, null, at).state, "unavailable");
+});
+
+test("Cursor account transport is bounded and sends authorization only to its fixed native read endpoints", async () => {
+  const { readCursorAccountUsage } = await import("../main/agents/cursor-usage.js");
+  const urls: string[] = [];
+  const request = (async (url, options) => {
+    urls.push(String(url));
+    assert.equal(options?.redirect, "error"); assert.equal(options?.body, "{}");
+    assert.equal(new Headers(options?.headers).get("authorization"), "Bearer test");
+    return new Response(String(url).endsWith("GetHardLimit") ? '{"noUsageBasedAllowed":true}' : '{"planUsage":{"totalPercentUsed":20}}');
+  }) as typeof fetch;
+  assert.equal((await readCursorAccountUsage("Bearer test", at, request)).windows[0]?.usedPercent, 20);
+  assert.deepEqual(urls.sort(), ["https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage", "https://api2.cursor.sh/aiserver.v1.DashboardService/GetHardLimit"]);
+  await assert.rejects(readCursorAccountUsage("Bearer test", at, (async () => new Response('x'.repeat(1024 * 1024 + 1))) as typeof fetch));
+  await assert.rejects(readCursorAccountUsage("Bearer test\nheader", at, request));
+});
+
+test("Cursor reads only exact session context from its native SQLite/protobuf state, including zero after compaction", async () => {
+  const { readCursorContext, readCursorUsageOwner } = await import("../main/agents/cursor-usage.js");
+  const { DatabaseSync } = await import("node:sqlite");
+  const { createHash } = await import("node:crypto");
+  const { mkdir, symlink } = await import("node:fs/promises");
+  const root = await mkdtemp(join(tmpdir(), "cursor-usage-"));
+  const workspace = "/tmp/cursor-usage-workspace", id = "36786173-8026-471a-b132-102fa5079aea", rootId = "a".repeat(64);
+  const dir = join(root, "cursor", "chats", createHash("md5").update(workspace).digest("hex"), id);
+  await mkdir(dir, { recursive: true });
+  const db = new DatabaseSync(join(dir, "store.db"));
+  const varint = (n: number): number[] => { const bytes: number[] = []; do { const rest = Math.floor(n / 128); bytes.push(n % 128 | (rest ? 128 : 0)); n = rest; } while (n); return bytes; };
+  const state = (used: number, cap: number) => {
+    const details = [...(used ? [8, ...varint(used)] : []), 16, ...varint(cap)];
+    return Buffer.from([42, ...varint(details.length), ...details, 50, 2, 1, 2]);
+  };
+  try {
+    db.exec("CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT); CREATE TABLE blobs(id TEXT PRIMARY KEY, data BLOB);");
+    const metadata = (agentId: string) => Buffer.from(JSON.stringify({ agentId, latestRootBlobId: rootId })).toString("hex");
+    db.prepare("INSERT INTO meta VALUES ('0', ?)").run(metadata(id));
+    db.prepare("INSERT INTO blobs VALUES (?, ?)").run(rootId, state(39386, 256000));
+    const reading = readCursorContext(root, workspace, id);
+    assert.equal(reading?.context?.usedTokens, 39386); assert.equal(reading?.context?.capacityTokens, 256000);
+    assert.equal(reading?.summaryId, "0102");
+    db.prepare("UPDATE blobs SET data=?").run(state(0, 256000));
+    assert.equal(readCursorContext(root, workspace, id)?.context?.usedTokens, 0);
+    db.prepare("UPDATE blobs SET data=?").run(Buffer.from([42, 255]));
+    assert.equal(readCursorContext(root, workspace, id), null, "truncated protobuf fails closed");
+    db.prepare("UPDATE blobs SET data=?").run(state(9000, 256000));
+    db.prepare("UPDATE meta SET value=?").run(metadata("another-session"));
+    assert.equal(readCursorContext(root, workspace, id), null);
+    assert.equal(readCursorContext(root, workspace, "../escape"), null);
+    assert.equal(readCursorContext(root, "/different-workspace", id), null);
+    await writeFile(join(root, "letagents-cursor-identity.json"), '{"userId":12345}');
+    assert.equal(readCursorUsageOwner(root), 12345);
+    await symlink(root, join(root, "redirected"));
+    assert.equal(readCursorContext(join(root, "redirected"), workspace, id), null);
+    assert.equal(readCursorUsageOwner(join(root, "redirected")), null);
+  } finally { db.close(); await rm(root, { recursive: true, force: true }); }
+});
