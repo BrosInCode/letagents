@@ -1,8 +1,15 @@
-import { createHash } from "node:crypto";
-import { lstatSync, readFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ProviderUsage } from "../../../shared/provider-usage.js";
+import type { ProviderSpawnRequest } from "./provider-adapter.js";
+import type { CursorManagedProfile } from "./cursor-managed-profile.js";
+import type { assertCursorPersonalIdentity } from "./cursor-identity.js";
+import { cursorDaemonChildEnv } from "./cursor-runner.js";
+import { emptyProviderUsage } from "./provider-usage.js";
+import { apiUrl as desktopApiUrl } from "../paths.js";
 
 // Cursor CLI 2026.09.18: usage/usage-data.ts uses these DashboardService
 // methods. Its agent-kv store persists ConversationStateStructure.token_details
@@ -154,4 +161,106 @@ export function readCursorContext(configDir: string, workspace: string, sessionI
       context: tokens.has(1) || tokens.has(2) ? { usedTokens: Number(used), capacityTokens: capacity > 0 ? Number(capacity) : null, observedAt: new Date(modified).toISOString() } : null };
   } catch { return null; }
   finally { db?.close(); }
+}
+
+/** Only the lane identity and profile needed by the usage reader. */
+interface CursorUsageHandle {
+  workAttemptId: string;
+  providerContinuationId: string | null;
+  supervisedProfile: CursorManagedProfile | null;
+  terminal: unknown;
+  liveTurn: { workspaceGeneration: { liveWorkspace: string } | null } | null;
+  cwd: string;
+  spawnRequest: ProviderSpawnRequest;
+}
+
+interface CursorUsageDependencies {
+  readUsageAccount: typeof readCursorAccountUsage;
+  readUsageContext: typeof readCursorContext;
+  readUsageOwner: typeof readCursorUsageOwner;
+  attestPersonalIdentity: typeof assertCursorPersonalIdentity;
+  now(): string;
+}
+
+type CursorUsageProfileFactory = (input: {
+  apiBaseUrl: string; workAttemptId: string; cwd: string; profileRoot: string;
+  includeAuth: boolean; identityAttestationOnly: boolean; inspectionOnly: boolean;
+  exactWorkspaceOnly: boolean; devMcpServerEntryPath?: string; mcpWorkingDirectory: string;
+}) => CursorManagedProfile;
+
+export function createCursorUsageReader(
+  cursorBin: string,
+  deps: CursorUsageDependencies,
+  currentHandle: (workAttemptId: string) => CursorUsageHandle | undefined,
+  profileFactory: CursorUsageProfileFactory,
+): (handle: CursorUsageHandle) => Promise<ProviderUsage | null> {
+  const usage = new WeakMap<CursorUsageHandle, {
+    value: ProviderUsage; lastRead: number; request?: Promise<void>; summaryId?: string | null;
+  }>();
+  async function readAccountForHandle(handle: CursorUsageHandle, current: () => boolean): Promise<ProviderUsage["account"] | null> {
+    const profile = handle.supervisedProfile!;
+    const ownerId = deps.readUsageOwner(profile.configDir);
+    if (ownerId === null) return null;
+    // Use the existing read-only native identity probe, also for idle restored
+    // sessions. Never read ambient credentials or start an inference to refresh.
+    const root = mkdtempSync(join(tmpdir(), "letagents-cursor-usage-"));
+    try {
+      const inspection = profileFactory({
+        apiBaseUrl: handle.spawnRequest.supervisorWorkerSession?.apiUrl ?? desktopApiUrl,
+        workAttemptId: `${handle.workAttemptId}:usage:${randomUUID()}`, cwd: handle.cwd,
+        profileRoot: root, includeAuth: true, identityAttestationOnly: true, inspectionOnly: true,
+        exactWorkspaceOnly: handle.spawnRequest.workspaceKind === "room_scratch",
+        devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath, mcpWorkingDirectory: root,
+      });
+      const identity = await deps.attestPersonalIdentity({
+        cursorBin, cwd: root, env: cursorDaemonChildEnv(inspection.env),
+        writableProfileRoot: root, requiredReadableRoots: inspection.authReadRoots, timeoutMs: 3000,
+      });
+      if (!current() || identity.userId !== ownerId || deps.readUsageOwner(profile.configDir) !== ownerId
+        || !identity.providerAuthorization) return null;
+      const account = await deps.readUsageAccount(identity.providerAuthorization, deps.now());
+      return current() && deps.readUsageOwner(profile.configDir) === ownerId ? account : null;
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+
+  return async (handle) => {
+    const sessionId = handle.providerContinuationId;
+    const profile = handle.supervisedProfile;
+    if (!sessionId || !profile || handle.terminal || currentHandle(handle.workAttemptId) !== handle) return null;
+    const turn = handle.liveTurn;
+    const workspace = turn?.workspaceGeneration?.liveWorkspace ?? handle.cwd;
+    const current = () => currentHandle(handle.workAttemptId) === handle && !handle.terminal
+      && handle.providerContinuationId === sessionId && handle.liveTurn === turn
+      && (handle.liveTurn?.workspaceGeneration?.liveWorkspace ?? handle.cwd) === workspace;
+    let state = usage.get(handle);
+    if (!state || state.value.providerContinuationId !== sessionId) {
+      state = { value: emptyProviderUsage(sessionId), lastRead: -Infinity };
+      usage.set(handle, state);
+    }
+    const reading = deps.readUsageContext(profile.configDir, workspace, sessionId);
+    // Missing/replaced state must clear old counts, including during native
+    // compaction and workspace namespace relocation. Never retain guessed data.
+    state.value.context = reading?.context ?? null;
+    if (reading) {
+      if (state.summaryId !== undefined && reading.summaryId !== state.summaryId && reading.summaryId !== null) {
+        state.value.compaction = "compacted";
+      }
+      state.summaryId = reading.summaryId;
+    }
+    const now = Date.parse(deps.now());
+    if (!state.request && now - state.lastRead >= 30_000) {
+      state.lastRead = now;
+      const captured = state;
+      state.request = (async () => {
+        try {
+          const account = await readAccountForHandle(handle, current);
+          if (current()) captured.value.account = account ?? { state: "unavailable", windows: [] };
+        } catch {
+          if (current()) captured.value.account.state = captured.value.account.windows.length ? "stale" : "unavailable";
+        }
+      })().finally(() => { captured.request = undefined; });
+    }
+    await state.request;
+    return current() ? structuredClone(state.value) : null;
+  };
 }
