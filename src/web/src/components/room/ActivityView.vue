@@ -5,22 +5,8 @@
       <span>Refreshing activity…</span>
     </div>
 
-    <ActivitySummary
-      :active-view="activeView"
-      :connected-agents-count="connectedAgents.length"
-      :working-agents-count="workingAgents.length"
-      :recently-disconnected-agents-count="recentlyDisconnectedAgents.length"
-      :humans-count="humans.length"
-      :active-reasoning-sessions-count="activeReasoningSessions.length"
-      :shared-artifacts-count="props.roomArtifacts.length"
-      :history-cards="historySummaryCards"
-    />
-
-    <ActivityModeToolbar
-      v-model:active-view="activeView"
-      :cleared-live-count="clearedLiveCount"
-    />
-
+    <div ref="surface" class="agents-ui">
+    <header v-if="activeView === 'live'" class="agents-heading"><h2>Agents</h2></header>
     <ActivityApprovalEvidence
       v-if="activeView === 'live'"
       :entries="approvalEntries"
@@ -35,45 +21,25 @@
       @decide="decideApproval"
     />
 
-    <ActivityArtifactsPanel
-      :artifacts="props.roomArtifacts"
-      :tasks="props.tasks"
-      :pr-repo="props.currentRoom?.gitRoom ? {
-        host: props.currentRoom.gitRoom.host,
-        owner: props.currentRoom.gitRoom.repository.owner,
-        name: props.currentRoom.gitRoom.repository.name,
-      } : null"
-    />
-
-    <p v-if="activeView === 'live'" class="activity-desktop-note">
-      Run LetAgents Desktop on the Mac running your agents to see more detailed activity and connection updates.
-    </p>
-
     <ActivityHistoryView
       v-if="activeView === 'history'"
+      v-model:mode="archiveMode"
       v-model:history-room-id="historyRoomId"
       v-model:history-query="historyQuery"
-      v-model:history-kind="historyKind"
-      v-model:selected-history-participant-key="selectedHistoryParticipantKey"
       :activity-history="props.activityHistory"
       :activity-history-loading="props.activityHistoryLoading"
       :activity-history-error="props.activityHistoryError"
       :history-room-options="historyRoomOptions"
-      :selected-history-room-option="selectedHistoryRoomOption"
-      :history-count-label="historyCountLabel"
       :history-page-label="historyPageLabel"
-      :history-entries-count="historyEntries.length"
-      :history-agents="historyAgents"
-      :history-humans="historyHumans"
-      :show-history-agent-section="showHistoryAgentSection"
-      :show-history-human-section="showHistoryHumanSection"
-      :selected-history-participant="selectedHistoryParticipant"
-      :task-github-status="props.taskGithubStatus"
+      :task-github-status="historyRoomId === (props.currentRoom?.identifier || props.roomIdentifier) ? props.taskGithubStatus : {}"
       @change-page="changeHistoryPage"
-    />
+      @back="navigate('live', $event)"
+    >
+      <template #changes="{ query }"><ActivityArtifactsPanel v-if="historyRoomId === (props.currentRoom?.identifier || props.roomIdentifier)" :artifacts="filteredArtifacts(query)" :tasks="props.tasks" :pr-repo="props.currentRoom?.gitRoom ? { host: props.currentRoom.gitRoom.host, owner: props.currentRoom.gitRoom.repository.owner, name: props.currentRoom.gitRoom.repository.name } : null" /><p v-else class="agents-empty">Open this room to see its changes and pull requests.</p><p v-if="historyRoomId === (props.currentRoom?.identifier || props.roomIdentifier) && !filteredArtifacts(query).length" class="agents-empty">No matching changes or pull requests.</p></template>
+    </ActivityHistoryView>
 
+    <div v-show="activeView === 'live'">
     <ActivityLiveView
-      v-else
       v-model:selected-participant-key="selectedParticipantKey"
       :participants="participants"
       :connected-agents="connectedAgents"
@@ -93,6 +59,10 @@
       @open-message="emit('openMessage', $event)"
     />
 
+    </div>
+    <footer v-if="activeView === 'live'" class="agents-footer"><button ref="pastButton" class="agents-quiet" type="button" @click="archiveMode = 'past'; navigate('history', $event)">Past agents →</button></footer>
+    </div>
+
     <ReasoningTraceModal
       :open="Boolean(selectedReasoningSession)"
       :roomIdentifier="roomIdentifier"
@@ -103,7 +73,8 @@
 </template>
 
 <script setup lang="ts">
-import { toRef } from 'vue'
+import { ref, toRef } from 'vue'
+import { useAgentsNavigation } from '../../../../../shared/ui/agents/useAgentsNavigation'
 import { useRoomAgentApprovals } from '@/composables/roomAgentApprovals'
 import { useRoomWakeRules } from '@/composables/roomWakeRules'
 import ReasoningTraceModal from './ReasoningTraceModal.vue'
@@ -111,8 +82,6 @@ import ActivityApprovalEvidence from './activity/ActivityApprovalEvidence.vue'
 import ActivityArtifactsPanel from './activity/ActivityArtifactsPanel.vue'
 import ActivityHistoryView from './activity/ActivityHistoryView.vue'
 import ActivityLiveView from './activity/ActivityLiveView.vue'
-import ActivityModeToolbar from './activity/ActivityModeToolbar.vue'
-import ActivitySummary from './activity/ActivitySummary.vue'
 import type { ActivityViewProps } from './activity/types'
 import { useActivityViewModel } from './activity/useActivityViewModel'
 
@@ -143,35 +112,26 @@ const {
 const {
   activeView,
   selectedParticipantKey,
-  selectedHistoryParticipantKey,
   selectedReasoningId,
   historyQuery,
-  historyKind,
   historyRoomId,
   clearBusy,
   connectedAgents,
-  workingAgents,
   recentlyDisconnectedAgents,
-  activeReasoningSessions,
   humans,
   participants,
-  historyEntries,
   clearedLiveCount,
   historyRoomOptions,
-  selectedHistoryRoomOption,
-  historyCountLabel,
   historyPageLabel,
-  historyAgents,
-  historyHumans,
-  showHistoryAgentSection,
-  showHistoryHumanSection,
-  historySummaryCards,
   selectedParticipant,
   selectedReasoningSession,
-  selectedHistoryParticipant,
   changeHistoryPage,
   handleClearDisconnected,
 } = useActivityViewModel(props)
+const surface = ref<HTMLElement>();
+const archiveMode = ref<'past' | 'history'>('past');
+const { navigate, pastButton } = useAgentsNavigation(activeView, surface);
+function filteredArtifacts(query: string) { return props.roomArtifacts.filter(artifact => [artifact.title, artifact.ref, artifact.state, artifact.kind].join(' ').toLowerCase().includes(query.trim().toLowerCase())); }
 </script>
 
 <style src="./activity/styles/base.css"></style>
@@ -179,3 +139,14 @@ const {
 <style src="./activity/styles/detail.css"></style>
 <style src="./activity/styles/toolbar-history.css"></style>
 <style src="./activity/styles/responsive.css"></style>
+
+<style scoped>
+.activity-panel { padding: 28px 32px; }
+.activity-panel :deep(.activity-artifacts) { border: 0; background: transparent; padding: 0 12px; margin: 0; }
+.activity-panel :deep(.activity-artifacts-header) { display: none; }
+.activity-panel :deep(.activity-artifact-list) { max-height: none; overflow: visible; grid-template-columns: minmax(0, 1fr); gap: 0; }
+.activity-panel :deep(.activity-artifact-row) { border: 0; border-top: 1px solid var(--agents-line); border-radius: 0; background: none; padding: 18px 0; }
+.activity-panel :deep(.activity-artifact-kind) { background: none; padding: 0; color: var(--agents-muted); font-size: 11px; }
+.activity-panel :deep(.activity-artifact-title-line a), .activity-panel :deep(.activity-artifact-title-line strong) { font-size: 14px; font-weight: 500; }
+@media(max-width:640px) { .activity-panel { padding: 22px 16px; } }
+</style>

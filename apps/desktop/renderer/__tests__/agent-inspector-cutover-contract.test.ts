@@ -25,9 +25,10 @@ test("one agent inspector owns every selected detail surface", () => {
 });
 
 test("Activity opens the exact shared Inspector for supervised and generic participants", () => {
-  assert.match(activity, /@click="selectInspectorAgent\(agent\)"/);
+  assert.match(activity, /@select="selectRosterAgent"/);
+  assert.match(activity, /if \(native\) selectInspectorAgent\(native\)/);
   assert.match(activity, /supervisedAgentInspectorRequest\(agent\.entry/);
-  assert.match(activity, /@click="selectParticipantAgent\(agent\)"/);
+  assert.match(activity, /if \(legacy\) selectParticipantAgent\(legacy\)/);
   assert.match(activity, /participantAgentInspectorRequest\(activityParticipantToAgentTarget\(agent\)\)/);
   assert.match(activity, /useRoomActivityViewModel\(props, \{ autoSelectLive: false \}\)/);
   assert.match(shell, /:agent-projections="agentInspectorProjections"/);

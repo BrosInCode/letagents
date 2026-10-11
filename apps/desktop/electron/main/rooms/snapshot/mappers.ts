@@ -251,6 +251,7 @@ export function mapRecentActivity(data: ActivityHistoryResponse): DesktopActivit
     participantDisplayName: entry.participant.display_name,
     participantKind: entry.participant.kind,
     participantActorLabel: entry.participant.actor_label || null,
+    participantAgentKey: entry.participant.agent_key || null,
     participantOwnerLabel: entry.participant.owner_label || null,
     participantIdeLabel: entry.participant.ide_label || null,
     repoBranch: entry.participant.repo_branch || null,

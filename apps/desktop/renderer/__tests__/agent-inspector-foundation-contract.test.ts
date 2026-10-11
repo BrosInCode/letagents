@@ -55,10 +55,11 @@ test("unavailable agent details stay product-safe and can retry the background s
 });
 
 test("Activity opens the exact shared projection only after an explicit click", () => {
-  assert.match(activity, /@click="selectInspectorAgent\(agent\)"/);
+  assert.match(activity, /@select="selectRosterAgent"/);
+  assert.match(activity, /nativeById\.value\.get\(id\)/);
+  assert.match(activity, /if \(native\) selectInspectorAgent\(native\)/);
   assert.match(activity, /supervisedAgentInspectorRequest\(agent\.entry/);
   assert.match(activity, /autoSelectLive: false/);
-  assert.match(activity, /watch\(inspectorTruthfulAgents[\s\S]{0,300}selectedTruthfulId\.value = null/);
   assert.match(shell, /:agent-projections="agentInspectorProjections"/);
 });
 

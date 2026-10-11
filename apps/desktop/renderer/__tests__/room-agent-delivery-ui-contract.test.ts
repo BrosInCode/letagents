@@ -248,17 +248,12 @@ describe("durable room delivery UI contracts", () => {
     const activity = await source("src/components/desktop/content/RoomActivityTabView.vue");
     assert.match(activity, /const inspectorTruthfulAgents = computed\(\(\) =>/);
     assert.match(activity, /supervisedActivityIdentity\(\s*props\.agentProjections\.map/);
-    assert.match(activity, /!hasLiveActivity/);
     assert.match(activity, /legacyReachableAgents/);
     assert.match(activity, /legacyWorkingAgents/);
-    for (const group of ["online", "responding", "recovering", "reconnecting", "needs_attention", "starting", "paused", "disconnected", "status_unavailable"]) {
-      assert.match(activity, new RegExp(`key: "${group}"`));
-    }
-    assert.match(activity, /agentInspectorActivityGroupState\(agent\)/);
-    assert.match(activity, /group\.key === "status_unavailable" \? "Status unavailable" : agent\.overallLabel/);
-    assert.match(activity, /agent\.resourceFreshness === 'stale'/);
-    assert.match(activity, /selectInspectorAgent\(agent\)/);
-    assert.match(activity, /selectParticipantAgent\(agent\)/);
+    assert.match(activity, /agentInspectorSignal\(agent\)/);
+    assert.match(activity, /agent\.overallState !== "retired"/);
+    assert.match(activity, /if \(native\) selectInspectorAgent\(native\)/);
+    assert.match(activity, /if \(legacy\) selectParticipantAgent\(legacy\)/);
   });
 
   it("presents Online activity with the same connected visual treatment", async () => {
@@ -276,11 +271,11 @@ describe("durable room delivery UI contracts", () => {
       source("src/components/desktop/content/RoomActivityTabView.vue"),
       source("src/components/desktop/content/DesktopRoomShell.vue"),
     ]);
-    assert.match(activity, /Results saved from earlier work\./);
-    assert.match(activity, /data-testid="desktop-recorded-room-work"/);
-    assert.match(activity, /recordedWorkEvidenceIncomplete\(work\)/);
+    assert.match(activity, /<AgentHistory v-if="activeView === 'history'"/);
+    assert.match(activity, /#work-detail="\{ record \}"/);
+    assert.match(activity, /recordedWorkEvidenceIncomplete\(recordedWorkById\.get\(record\.id\)!\)/);
     assert.match(activity, /The owner cleared this shared work history\./);
-    assert.match(activity, /emit\('reveal-message', work\.sourceMessageId\)/);
+    assert.match(activity, /emit\('reveal-message', recordedWorkById\.get\(record\.id\)!\.sourceMessageId\)/);
     for (const [field, label] of [
       ["unresolved", "unresolved"],
       ["succeeded", "succeeded"],
@@ -293,7 +288,8 @@ describe("durable room delivery UI contracts", () => {
       assert.match(activity, new RegExp(`counts\\.${field}`));
       assert.match(activity, new RegExp(label));
     }
-    const liveActivityProjection = activity.match(/const hasLiveActivity = computed\(\(\) => Boolean\(([\s\S]*?)\n\)\);/)?.[1] || "";
+    const liveActivityProjection = activity.slice(activity.indexOf("const rosterRows"), activity.indexOf("function rosterAgentKey"));
+    assert.ok(liveActivityProjection.length > 0);
     assert.doesNotMatch(liveActivityProjection, /roomAgentWork/);
     assert.match(shell, /async function revealRecordedWorkMessage[\s\S]*?activeTab\.value = "chat";[\s\S]*?revealRoomMessage\(messageId\)/);
   });

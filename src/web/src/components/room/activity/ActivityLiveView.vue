@@ -1,111 +1,28 @@
 <template>
-  <div v-if="participants.length === 0" class="activity-empty">
-    <h3>{{ clearedLiveCount > 0 ? 'Live roster cleared' : 'No live room participants right now' }}</h3>
-    <p>
-      {{
-        clearedLiveCount > 0
-          ? 'Disconnected agents were cleared from the live roster. Switch to History to inspect the full room record.'
-          : 'Activity will appear here as participants connect or interact with the room.'
-      }}
-    </p>
-  </div>
-
-  <div v-else class="activity-layout">
-    <div class="activity-groups">
-      <section class="activity-group">
-        <div class="activity-group-header">
-          <div>
-            <h3>Connected</h3>
-            <p>Agents that are currently online and reachable.</p>
-          </div>
-          <span class="activity-group-count">{{ connectedAgents.length }}</span>
-        </div>
-
-        <ActivityRosterList
-          :participants="connectedAgents"
-          :selectedKey="selectedParticipantKey"
-          mode="live"
-          showConnectionBadges
-          :wakeRulesByAgentKey="activeWakeRules"
-          emptyMessage="No agents are connected to this room right now."
-          @select="selectedParticipantKey = $event"
-        />
-      </section>
-
-      <section class="activity-group">
-        <div class="activity-group-header">
-          <div>
-            <h3>Recently disconnected</h3>
-            <p>Agents that recently went offline and are no longer reachable.</p>
-          </div>
-          <div class="activity-group-header-actions">
-            <span class="activity-group-count">{{ recentlyDisconnectedAgents.length }}</span>
-            <button
-              v-if="canManageParticipants && recentlyDisconnectedAgents.length > 0"
-              class="activity-action-button"
-              type="button"
-              :disabled="clearBusy"
-              @click="emit('clearDisconnected')"
-            >
-              {{ clearBusy ? 'Clearing…' : 'Clear disconnected' }}
-            </button>
-          </div>
-        </div>
-
-        <ActivityRosterList
-          :participants="recentlyDisconnectedAgents"
-          :selectedKey="selectedParticipantKey"
-          mode="live"
-          showConnectionBadges
-          :wakeRulesByAgentKey="activeWakeRules"
-          :emptyMessage="clearedLiveCount > 0 ? 'Disconnected agents were cleared from the live roster.' : 'No recently disconnected agents have been seen yet.'"
-          @select="selectedParticipantKey = $event"
-        />
-      </section>
-
-      <section class="activity-group">
-        <div class="activity-group-header">
-          <div>
-            <h3>Humans seen in room</h3>
-            <p>Human participants currently active in the room.</p>
-          </div>
-          <span class="activity-group-count">{{ humans.length }}</span>
-        </div>
-
-        <ActivityRosterList
-          :participants="humans"
-          :selectedKey="selectedParticipantKey"
-          mode="live"
-          showHumanKind
-          emptyMessage="No human browser activity has been seen yet."
-          @select="selectedParticipantKey = $event"
-        />
-      </section>
-    </div>
-
-    <ActivityLiveDetail
-      v-if="selectedParticipant"
-      :participant="selectedParticipant"
-      :taskGithubStatus="taskGithubStatus"
-      :roomIdentifier="roomIdentifier"
-      :wakeRules="wakeRulesForAgent(activeWakeRules, selectedParticipant.agentKey)"
-      :recentWakeRules="wakeRulesForAgent(recentWakeRules, selectedParticipant.agentKey)"
-      :wakeRuleApi="wakeRuleApi"
-      @openReasoning="emit('openReasoning', $event)"
-      @openMessage="emit('openMessage', $event)"
-    />
-  </div>
+  <AgentRoster :rows="rosterRows" @select="selectAgent">
+    <template #provider="{ row }"><IdeBadge :label="row.provider" /></template>
+    <template #detail="{ row }"><WakeRuleLine v-if="row.state === 'Online' && wakeRulesForAgent(activeWakeRules, byId.get(row.id)?.agentKey).length" :rules="wakeRulesForAgent(activeWakeRules, byId.get(row.id)?.agentKey)" /><template v-else>{{ row.detail }}</template></template>
+  </AgentRoster>
+  <div v-if="canManageParticipants && recentlyDisconnectedAgents.length" class="agents-live-actions"><button class="agents-quiet" type="button" :disabled="clearBusy" @click="emit('clearDisconnected')">{{ clearBusy ? 'Clearing…' : 'Clear disconnected' }}</button></div>
+  <dialog ref="dialog" :data-instant="instantDialog" class="agents-live-dialog" aria-label="Agent details" @close="openedId = null" @click.self="dialog?.close()">
+    <button type="button" class="agents-quiet agents-dialog-close" aria-label="Close agent details" @click="dialog?.close()">✕</button>
+    <ActivityLiveDetail v-if="dialogAgent" :participant="dialogAgent" :task-github-status="taskGithubStatus" :room-identifier="roomIdentifier" :wake-rules="wakeRulesForAgent(activeWakeRules, dialogAgent.agentKey)" :recent-wake-rules="wakeRulesForAgent(recentWakeRules, dialogAgent.agentKey)" :wake-rule-api="wakeRuleApi" @open-reasoning="openReasoning" @open-message="openMessage" />
+  </dialog>
 </template>
 
 <script setup lang="ts">
+import { computed, nextTick, ref, watch } from 'vue'
+import AgentRoster from '../../../../../../shared/ui/agents/AgentRoster.vue'
+import type { AgentRosterRow } from '../../../../../../shared/ui/agents/types'
+import WakeRuleLine from '../../../../../../shared/ui/WakeRuleLine.vue'
+import IdeBadge from '../chat-message/IdeBadge.vue'
 import type { WakeRule, WakeRuleApi } from '../../../../../../shared/wake-rules.mjs'
 import type { TaskGitHubArtifactStatus } from '@/composables/useRoom'
 import { wakeRulesForAgent } from '@/composables/roomWakeRules'
 import ActivityLiveDetail from './ActivityLiveDetail.vue'
-import ActivityRosterList from './ActivityRosterList.vue'
 import type { ActivityParticipant } from './types'
 
-defineProps<{
+const props = defineProps<{
   participants: readonly ActivityParticipant[]
   connectedAgents: readonly ActivityParticipant[]
   recentlyDisconnectedAgents: readonly ActivityParticipant[]
@@ -128,4 +45,33 @@ const emit = defineEmits<{
 }>()
 
 const selectedParticipantKey = defineModel<string | null>('selectedParticipantKey', { required: true })
+const dialog = ref<HTMLDialogElement>();
+const instantDialog = ref(false);
+const openedId = ref<string | null>(null);
+const liveAgents = computed(() => [...props.connectedAgents, ...props.recentlyDisconnectedAgents]);
+const byId = computed(() => new Map(liveAgents.value.map(agent => [agent.key, agent])));
+const dialogAgent = computed(() => openedId.value ? byId.value.get(openedId.value) : null);
+const rosterRows = computed<AgentRosterRow[]>(() => liveAgents.value.map(agent => {
+  const stale = agent.freshness === 'stale';
+  const reachable = !stale && (agent.activityState === 'active' || agent.activityState === 'away');
+  const working = reachable && (agent.status === 'working' || agent.status === 'reviewing');
+  const attention = reachable && agent.status === 'blocked';
+  return { id: agent.key, name: agent.label, provider: agent.ideLabel || 'Agent', owner: agent.ownerLabel || '', state: stale ? 'Updates delayed' : attention ? 'Needs attention' : working ? (agent.status === 'reviewing' ? 'Reviewing' : 'Working') : reachable ? 'Online' : 'Offline', detail: stale ? 'Waiting for a fresh update from the host.' : agent.statusText || (reachable ? 'Ready for room work.' : 'Shared work is still available.'), tone: stale || attention ? 'amber' : working ? 'blue' : reachable ? 'green' : 'neutral', working, attention, moving: working };
+}));
+async function selectAgent(id: string, event: MouseEvent) { instantDialog.value = event.detail === 0; openedId.value = id; selectedParticipantKey.value = id; await nextTick(); dialog.value?.showModal(); }
+function openReasoning(id: string) { dialog.value?.close(); emit('openReasoning', id); }
+function openMessage(id: string) { dialog.value?.close(); emit('openMessage', id); }
+watch(liveAgents, agents => { if (!agents.some(agent => agent.key === openedId.value)) dialog.value?.close(); });
 </script>
+
+<style scoped>
+.agents-live-actions { display: flex; justify-content: flex-end; padding: 8px 0; }
+.agents-live-dialog { border: 1px solid var(--agents-line); border-radius: 18px; padding: 24px; width: 620px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 40px); background: var(--bg, #0a0a0a); color: var(--agents-text); overscroll-behavior: contain; }
+.agents-live-dialog::backdrop { background: #0009; }
+.agents-live-dialog[open] { animation: agent-dialog-in 220ms cubic-bezier(.22,1,.36,1); }
+.agents-live-dialog[data-instant=true] { animation: none; }
+.agents-dialog-close { position: sticky; top: 0; float: right; z-index: 1; background: var(--bg, #0a0a0a); }
+.agents-live-dialog :deep(.activity-detail) { border: 0; background: transparent; padding: 0; overflow: visible; max-height: none; }
+@keyframes agent-dialog-in { from { opacity: 0; transform: translateY(6px) scale(.99); } to { opacity: 1; transform: none; } }
+@media(prefers-reduced-motion:reduce) { .agents-live-dialog[open] { animation: none; } }
+</style>

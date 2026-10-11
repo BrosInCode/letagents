@@ -1252,7 +1252,7 @@ const tabs = computed<RoomTab[]>(() => {
   nextTabs.push(
     { id: "memory", label: "Memory", count: null },
     { id: "board", label: "Board", count: null },
-    { id: "activity", label: "Activity", count: null },
+    { id: "activity", label: "Agents", count: null },
   );
   if (!isLocalRoom.value) {
     nextTabs.push({ id: "rooms", label: "Rooms", count: props.roomLoading ? null : props.focusRooms.length });

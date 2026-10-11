@@ -112,17 +112,13 @@ export function buildWorkSignal(input: {
     return { state: 'working', label: 'Working', detail: input.statusText }
   }
 
+  if (input.status === 'idle') return null
+
   if (input.activeReasoning.length > 0) {
     return { state: 'responding', label: 'Responding', detail: 'Live work stream active' }
   }
 
-  if (input.currentTasks.length > 0) {
-    return {
-      state: 'working',
-      label: 'Working',
-      detail: `${input.currentTasks.length} open task${input.currentTasks.length === 1 ? '' : 's'} assigned`,
-    }
-  }
+  // An assignment is a responsibility, not evidence of a live turn.
 
   return null
 }
@@ -165,7 +161,7 @@ export function buildAgentParticipant(input: {
   ).slice(0, 8)
   const rawStatusText = presenceEntry?.status_text || (latestStatusMessage ? extractStatusText(latestStatusMessage.text || '') : null) || null
   const statusText = activityState === 'offline' ? null : rawStatusText
-  const workSignal = buildWorkSignal({
+  const workSignal = presenceEntry?.freshness === 'stale' || activityState === 'offline' ? null : buildWorkSignal({
     status: presenceEntry?.status || null,
     statusText,
     currentTasks,
@@ -195,6 +191,7 @@ export function buildAgentParticipant(input: {
     repoBranch: presenceEntry?.repo_branch || null,
     activityState,
     hasCanonicalPresence: Boolean(presenceEntry?.source_flags?.includes('delivery')),
+    freshness: presenceEntry?.freshness || null,
     status: presenceEntry?.status || null,
     statusText,
     livenessObservation: presenceEntry?.liveness_observation ?? null,

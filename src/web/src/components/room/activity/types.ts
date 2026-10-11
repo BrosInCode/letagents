@@ -49,6 +49,7 @@ export interface ActivityParticipant {
   repoBranch: string | null
   activityState: ParticipantActivityState | null
   hasCanonicalPresence: boolean
+  freshness?: RoomAgentPresence['freshness'] | null
   status: RoomAgentPresence['status'] | null
   statusText: string | null
   livenessObservation: RoomAgentPresence['liveness_observation']

@@ -88,6 +88,7 @@ export function buildAgentParticipant(input: BuildAgentParticipantInput): Activi
     runtime: presence?.runtime || null,
     repoBranch: presence?.repoBranch || null,
     activityState,
+    freshness: presence?.freshness || null,
     status: presence?.status || null,
     statusText,
     livenessObservation: presence?.livenessObservation || null,
