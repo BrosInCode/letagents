@@ -679,9 +679,10 @@
   .agents-trace {
     animation: none;
   }
-  .agent-disclosure-grid,
-  .agent-disclosure-clip,
-  .agents-chevron {
+  /* Match the open-state specificity so it cannot restore motion. */
+  .agents-ui .agent-disclosure .agent-disclosure-grid,
+  .agents-ui .agent-disclosure .agent-disclosure-grid > .agent-disclosure-clip,
+  .agents-ui .agent-disclosure .agent-disclosure-trigger > .agents-chevron {
     transition: none;
   }
 }
