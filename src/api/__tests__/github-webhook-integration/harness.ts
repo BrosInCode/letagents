@@ -117,6 +117,34 @@ export async function createInReviewTaskWithLease(
   return task;
 }
 
+/**
+ * A local stand-in for the GitHub REST API. The access check reads repository
+ * visibility from GITHUB_API_BASE_URL, so the scenarios never depend on the
+ * live api.github.com answer. Only the test repository is known; any other
+ * repository gets 404, as GitHub answers for an unknown repository.
+ */
+async function startGitHubApiStub(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  const repoPath = `/repos/${repoRoomName.replace(/^github\.com\//, "")}`;
+  const server = createServer((req, res) => {
+    const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname.toLowerCase();
+    const known = req.method === "GET" && pathname === repoPath;
+    res.writeHead(known ? 200 : 404, { "content-type": "application/json" });
+    res.end(JSON.stringify(known ? { private: false, full_name: repoRoomName } : { message: "Not Found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("failed to bind GitHub API stub");
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    }),
+  };
+}
+
 export function webhookIntegrationTest(
   name: string,
   fn: (context: WebhookIntegrationContext) => Promise<void>,
@@ -131,9 +159,14 @@ export function webhookIntegrationTest(
     async (t) => {
       await resetDatabase();
 
-      const { child, port } = await startServer(options.serverEnv);
+      const githubApi = await startGitHubApiStub();
+      const { child, port } = await startServer({
+        GITHUB_API_BASE_URL: githubApi.baseUrl,
+        ...options.serverEnv,
+      });
       t.after(async () => {
         await stopServer(child);
+        await githubApi.close();
       });
 
       await fn({

@@ -76,6 +76,41 @@ export function buildPullRequestPayload(input: {
   };
 }
 
+export function buildPullRequestParticipantPayload(input: {
+  action: "review_requested" | "review_request_removed" | "assigned" | "unassigned";
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  branchRef: string;
+  sha: string;
+  actor?: string;
+  requestedReviewer?: { login: string; id?: number };
+  requestedTeam?: { slug: string; name?: string };
+  assignee?: { login: string; id?: number };
+  /** Full name of the head repository. A different name makes a fork pull request. */
+  headRepository?: string;
+}) {
+  const base = buildPullRequestPayload({
+    number: input.number,
+    title: input.title,
+    body: input.body,
+    url: input.url,
+    branchRef: input.branchRef,
+    sha: input.sha,
+    actor: input.actor,
+    headRepository: input.headRepository,
+  });
+  return {
+    ...base,
+    action: input.action,
+    sender: { login: input.actor ?? "octocat" },
+    ...(input.requestedReviewer ? { requested_reviewer: input.requestedReviewer } : {}),
+    ...(input.requestedTeam ? { requested_team: input.requestedTeam } : {}),
+    ...(input.assignee ? { assignee: input.assignee } : {}),
+  };
+}
+
 export function buildPullRequestReviewPayload(input: {
   number: number;
   title: string;

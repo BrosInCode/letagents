@@ -17,6 +17,8 @@ interface EmitProjectMessageOptions {
   source?: string;
   agent_prompt_kind?: AgentPromptKind | null;
   client_message_id?: string | null;
+  /** Same meaning as in `emitProjectMessage`: the push goes to these people only. */
+  notify_github_users?: Array<{ login: string; github_user_id: string | null }>;
 }
 
 export interface TaskActivityMessageDeps {
@@ -53,6 +55,8 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
     github_routing_context?: FocusGitHubRoutingContext;
     client_message_id?: string | null;
     parent_client_message_id?: string | null;
+    /** Pushes the visible message only. The parent anchor never pushes. */
+    notify_github_users?: Array<{ login: string; github_user_id: string | null }>;
   }
   type RoomDeliveryCheck = (room: Pick<Project, "id" | "parent_room_id">) => Promise<boolean>;
 
@@ -103,6 +107,7 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
         source: options?.source,
         agent_prompt_kind: options?.agent_prompt_kind ?? null,
         client_message_id: options?.client_message_id ?? null,
+        ...(options?.notify_github_users ? { notify_github_users: options.notify_github_users } : {}),
       });
     }
 
@@ -114,6 +119,7 @@ export function createTaskActivityMessageEmitters(deps: TaskActivityMessageDeps)
       source: options?.source,
       agent_prompt_kind: options?.agent_prompt_kind ?? null,
       client_message_id: options?.client_message_id ?? null,
+      ...(options?.notify_github_users ? { notify_github_users: options.notify_github_users } : {}),
     });
     const hardIsolatedGitHubEvent =
       options?.event_kind === "github" &&

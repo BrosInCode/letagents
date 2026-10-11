@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { GitHubRoomEvent } from "../db.js";
+import type { GitHubWebhookPayload } from "../github/app.js";
 import {
   materializeGitHubRoomEvent,
   materializeGitHubWebhookEvent,
 } from "../github-room-events.js";
+import { rehydratePullRequestRoomEvent } from "../github/room-events.js";
 import {
   buildRepoRoomEventArtifactMatches,
   formatRepoRoomEventMessage,
@@ -673,4 +676,317 @@ test("native review dismissal uses updated_at instead of the old submission", ()
   const event=materializeGitHubWebhookEvent("pull_request_review", {action:"dismissed",repository:{id:1,full_name:"BrosInCode/letagents",name:"letagents",owner:{login:"BrosInCode"}},pull_request:{number:42,title:"Activity",html_url:"https://github.com/BrosInCode/letagents/pull/42"},review:{id:9,state:"dismissed",submitted_at:"2026-09-01T10:00:00Z",updated_at:"2026-10-11T10:00:00Z",html_url:"https://github.com/BrosInCode/letagents/pull/42#pullrequestreview-9"}},"dismiss-now-native");
   assert.equal(event?.provider_event_at,"2026-10-11T10:00:00.000Z");
   assert.equal(event?.metadata?.review_submitted_at,"2026-09-01T10:00:00.000Z");
+});
+
+function participantPayload(
+  pullRequestOverrides: Record<string, unknown>,
+  participant: Record<string, unknown>,
+): GitHubWebhookPayload {
+  return {
+    repository: {
+      id: 1,
+      full_name: "owner/repo",
+      name: "repo",
+      owner: { login: "owner" },
+    },
+    sender: { login: "lerato" },
+    pull_request: {
+      number: 88,
+      title: "Add review pings",
+      html_url: "https://github.com/owner/repo/pull/88",
+      updated_at: "2026-10-10T09:00:00Z",
+      base: { ref: "staging" },
+      head: { ref: "codex/review-pings", sha: "abc123" },
+      user: { login: "lerato" },
+      ...pullRequestOverrides,
+    },
+    ...participant,
+  } as GitHubWebhookPayload;
+}
+
+/** The row a webhook would store for a materialized event. */
+function storedRowFor(event: NonNullable<ReturnType<typeof materializeGitHubWebhookEvent>>): GitHubRoomEvent {
+  return {
+    event_type: event.event_type,
+    action: event.action,
+    github_object_id: event.github_object_id,
+    github_object_url: event.github_object_url,
+    title: event.title,
+    head_ref: event.head_ref,
+    head_sha: event.head_sha,
+    actor_login: event.actor_login,
+    metadata: event.metadata,
+  } as unknown as GitHubRoomEvent;
+}
+
+test("materializeGitHubWebhookEvent maps review_requested for a user into a participant room event", () => {
+  const event = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({}, {
+      action: "review_requested",
+      requested_reviewer: { login: "katrin", id: 555 },
+    }),
+    "delivery-review-requested-1"
+  );
+
+  assert.ok(event);
+  assert.equal(event?.event_type, "pull_request");
+  assert.equal(event?.action, "review_requested");
+  assert.equal(
+    event?.semantic_id,
+    "owner/repo:pr:88:review_requested:user:katrin:at:2026-10-10T09:00:00.000Z"
+  );
+  assert.equal(
+    event?.idempotency_key,
+    "owner/repo:pr:88:review_requested:user:katrin:at:2026-10-10T09:00:00.000Z:delivery:delivery-review-requested-1"
+  );
+  assert.equal(event?.actor_login, "lerato");
+  assert.equal(event?.state, "open");
+  assert.deepEqual(event?.metadata?.participant, {
+    role: "reviewer",
+    change: "added",
+    login: "katrin",
+    github_user_id: "555",
+    team_slug: null,
+    team_name: null,
+  });
+  assert.equal(event?.roomEvent?.kind, "pull_request_participant");
+  assert.equal(
+    event?.roomEvent?.kind === "pull_request_participant" ? event.roomEvent.participant.login : null,
+    "katrin"
+  );
+  assert.equal(event?.roomEvent?.action, "review_requested");
+});
+
+test("materializeGitHubWebhookEvent maps review_requested for a team with the subject in the key", () => {
+  const event = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({}, {
+      action: "review_requested",
+      requested_team: { slug: "backend" },
+    }),
+    "delivery-review-team-1"
+  );
+
+  assert.ok(event);
+  assert.equal(
+    event?.semantic_id,
+    "owner/repo:pr:88:review_requested:team:backend:at:2026-10-10T09:00:00.000Z"
+  );
+  assert.deepEqual(event?.metadata?.participant, {
+    role: "reviewer",
+    change: "added",
+    login: null,
+    github_user_id: null,
+    team_slug: "backend",
+    team_name: null,
+  });
+  assert.equal(event?.roomEvent?.kind, "pull_request_participant");
+});
+
+test("materializeGitHubWebhookEvent gives each reviewer its own semantic key", () => {
+  const first = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({}, { action: "review_requested", requested_reviewer: { login: "katrin" } }),
+    "delivery-a"
+  );
+  const second = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({}, { action: "review_requested", requested_reviewer: { login: "sipho" } }),
+    "delivery-b"
+  );
+
+  assert.notEqual(first?.semantic_id, second?.semantic_id);
+});
+
+test("materializeGitHubWebhookEvent maps review_request_removed with change removed", () => {
+  const event = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({}, {
+      action: "review_request_removed",
+      requested_reviewer: { login: "katrin", id: 555 },
+    }),
+    "delivery-review-removed-1"
+  );
+
+  assert.ok(event);
+  assert.equal(event?.action, "review_request_removed");
+  assert.match(event?.semantic_id ?? "", /:review_request_removed:user:katrin:at:/);
+  assert.equal(
+    event?.metadata?.participant && (event.metadata.participant as { change: string }).change,
+    "removed"
+  );
+  assert.equal(event?.roomEvent?.kind, "pull_request_participant");
+});
+
+test("materializeGitHubWebhookEvent maps assigned and unassigned for an assignee", () => {
+  const assigned = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({}, { action: "assigned", assignee: { login: "katrin", id: 555 } }),
+    "delivery-assigned-1"
+  );
+  const unassigned = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({}, { action: "unassigned", assignee: { login: "katrin", id: 555 } }),
+    "delivery-unassigned-1"
+  );
+
+  assert.ok(assigned);
+  assert.match(assigned?.semantic_id ?? "", /:assigned:user:katrin:at:/);
+  assert.deepEqual(assigned?.metadata?.participant, {
+    role: "assignee",
+    change: "added",
+    login: "katrin",
+    github_user_id: "555",
+    team_slug: null,
+    team_name: null,
+  });
+  assert.equal(assigned?.roomEvent?.kind, "pull_request_participant");
+
+  assert.ok(unassigned);
+  assert.match(unassigned?.semantic_id ?? "", /:unassigned:user:katrin:at:/);
+  assert.equal(
+    unassigned?.metadata?.participant && (unassigned.metadata.participant as { change: string }).change,
+    "removed"
+  );
+});
+
+test("materializeGitHubWebhookEvent keeps participant metadata and rehydrates the same kind", () => {
+  const event = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({ draft: true }, {
+      action: "review_requested",
+      requested_reviewer: { login: "katrin", id: 555 },
+    }),
+    "delivery-rehydrate-1"
+  );
+
+  assert.ok(event);
+  const rehydrated = rehydratePullRequestRoomEvent(storedRowFor(event!));
+  assert.ok(rehydrated);
+  assert.equal(rehydrated?.kind, "pull_request_participant");
+  assert.equal(rehydrated?.action, "review_requested");
+  assert.equal(rehydrated?.repositoryFullName, "owner/repo");
+  assert.equal(rehydrated?.pullRequest.number, 88);
+  assert.equal(rehydrated?.pullRequest.draft, true);
+  assert.deepEqual(
+    rehydrated?.kind === "pull_request_participant" ? rehydrated.participant : null,
+    event?.roomEvent?.kind === "pull_request_participant" ? event.roomEvent.participant : undefined
+  );
+});
+
+test("rehydratePullRequestRoomEvent rebuilds a team participant from stored metadata", () => {
+  const event = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({}, {
+      action: "review_request_removed",
+      requested_team: { slug: "backend", name: "Backend" },
+    }),
+    "delivery-rehydrate-team-1"
+  );
+
+  assert.ok(event);
+  const rehydrated = rehydratePullRequestRoomEvent(storedRowFor(event!));
+  assert.equal(rehydrated?.kind, "pull_request_participant");
+  assert.deepEqual(
+    rehydrated?.kind === "pull_request_participant" ? rehydrated.participant : null,
+    {
+      role: "reviewer",
+      change: "removed",
+      login: null,
+      github_user_id: null,
+      team_slug: "backend",
+      team_name: "Backend",
+    }
+  );
+});
+
+test("rehydratePullRequestRoomEvent returns null for a participant row without participant metadata", () => {
+  const row = {
+    event_type: "pull_request",
+    action: "assigned",
+    github_object_id: "88",
+    github_object_url: "https://github.com/owner/repo/pull/88",
+    title: "Add review pings",
+    head_ref: null,
+    head_sha: null,
+    actor_login: "lerato",
+    metadata: {},
+  } as unknown as GitHubRoomEvent;
+
+  assert.equal(rehydratePullRequestRoomEvent(row), null);
+});
+
+test("formatRepoRoomEventMessage formats review and assignment participant events", () => {
+  const materialize = (action: string, participant: Record<string, unknown>) => {
+    const event = materializeGitHubWebhookEvent(
+      "pull_request",
+      participantPayload({}, { action, ...participant }),
+      "delivery-message-1"
+    );
+    assert.ok(event?.roomEvent);
+    return event!.roomEvent!;
+  };
+  const url = "https://github.com/owner/repo/pull/88";
+  const title = "Add review pings";
+
+  assert.equal(
+    formatRepoRoomEventMessage({
+      event: materialize("review_requested", { requested_reviewer: { login: "katrin" } }),
+    }),
+    `@katrin review requested by lerato on PR #88 in owner/repo: ${title} ${url}`
+  );
+  assert.equal(
+    formatRepoRoomEventMessage({
+      event: materialize("review_requested", { requested_team: { slug: "backend" } }),
+    }),
+    `Review requested from team owner/backend by lerato on PR #88 in owner/repo: ${title} ${url}`
+  );
+  assert.equal(
+    formatRepoRoomEventMessage({
+      event: materialize("review_requested", { requested_team: { slug: "backend", name: "Backend" } }),
+    }),
+    `Review requested from team owner/backend by lerato on PR #88 in owner/repo: ${title} ${url}`
+  );
+  assert.equal(
+    formatRepoRoomEventMessage({
+      event: materialize("review_request_removed", { requested_reviewer: { login: "katrin" } }),
+    }),
+    `Review request for @katrin removed by lerato on PR #88 in owner/repo: ${title} ${url}`
+  );
+  assert.equal(
+    formatRepoRoomEventMessage({
+      event: materialize("review_request_removed", { requested_team: { slug: "backend" } }),
+    }),
+    `Review request for team owner/backend removed by lerato on PR #88 in owner/repo: ${title} ${url}`
+  );
+  assert.equal(
+    formatRepoRoomEventMessage({
+      event: materialize("assigned", { assignee: { login: "katrin" } }),
+    }),
+    `@katrin assigned by lerato to PR #88 in owner/repo: ${title} ${url}`
+  );
+  assert.equal(
+    formatRepoRoomEventMessage({
+      event: materialize("unassigned", { assignee: { login: "katrin" } }),
+    }),
+    `@katrin unassigned by lerato from PR #88 in owner/repo: ${title} ${url}`
+  );
+});
+
+test("formatRepoRoomEventMessage omits the by clause when the sender is missing", () => {
+  const event = materializeGitHubWebhookEvent(
+    "pull_request",
+    participantPayload({}, { action: "assigned", assignee: { login: "katrin" } }),
+    "delivery-message-no-sender-1"
+  );
+  assert.ok(event?.roomEvent);
+  const withoutSender = { ...event!.roomEvent!, senderLogin: null };
+  const url = "https://github.com/owner/repo/pull/88";
+  const title = "Add review pings";
+
+  assert.equal(
+    formatRepoRoomEventMessage({ event: withoutSender }),
+    `@katrin assigned to PR #88 in owner/repo: ${title} ${url}`
+  );
 });

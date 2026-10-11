@@ -66,10 +66,13 @@ export interface GitHubWebhookPullRequest {
   };
   user?: {
     login: string;
+    id?: number;
   };
   merged_by?: {
     login: string;
   } | null;
+  requested_reviewers?: Array<{ login: string; id?: number }>;
+  assignees?: Array<{ login: string; id?: number }>;
 }
 
 export interface GitHubWorkflowRun {
@@ -170,8 +173,11 @@ export interface GitHubWebhookPayload {
     html_url: string;
     submitted_at?: string | null;
     updated_at?: string | null;
-    user?: { login: string };
+    user?: { login: string; id?: number };
   };
+  requested_reviewer?: { login: string; id?: number };
+  requested_team?: { slug: string; name?: string };
+  assignee?: { login: string; id?: number };
   check_run?: {
     id: number;
     name: string;
@@ -198,6 +204,7 @@ export interface GitHubWebhookPayload {
   };
   sender?: {
     login: string;
+    id?: number;
   };
 }
 

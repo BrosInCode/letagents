@@ -99,6 +99,9 @@ jobs:
       - name: Test automatic command review
         run: node --import tsx --test src/api/__tests__/command-review.test.ts src/api/__tests__/jev-conversation-routing.test.ts
 
+      - name: Run GitHub room event unit tests
+        run: node --import tsx --test src/api/__tests__/github-notify-account-access.test.ts src/api/__tests__/github-room-events.test.ts src/api/__tests__/github-room-event-projection.test.ts src/api/__tests__/github-room-event-artifacts.test.ts src/api/__tests__/github-git-room-routing.test.ts
+
       - name: Build Vue app
         run: npm run build:web
 

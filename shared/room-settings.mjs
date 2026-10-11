@@ -89,6 +89,7 @@ export function normalizeGitHubRoomChatEventKinds(value) {
 export function githubRoomChatEventKind(event) {
   switch (event?.kind) {
     case "pull_request":
+    case "pull_request_participant":
       return "pull_request";
     case "pull_request_review":
       return "review";

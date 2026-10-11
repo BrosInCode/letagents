@@ -157,6 +157,16 @@ export interface AddMessageOptions {
   account_id?: string | null;
   account_agent_routing?: boolean;
   /**
+   * Accounts to notify by desktop push even when they have no recents row for
+   * the room (for example a GitHub review request). Resolved and access-checked by the caller.
+   */
+  notify_account_ids?: readonly string[];
+  /**
+   * Accounts that get a recents row for the room in the message transaction.
+   * Only accounts whose room access was allowed belong here.
+   */
+  recents_account_ids?: readonly string[];
+  /**
    * Runs inside the message-insert transaction after the row is created, so
    * callers can persist state that must be atomic with message creation
    * (e.g. liveness announcement markers). A throw rolls the message back too.
@@ -443,7 +453,10 @@ export async function addMessageWithCreateStatus(
     let notificationEnqueueDurationMs = 0;
     if (!createdMessageIsPromptOnly && !addressedTo) {
       const notificationEnqueueStartedAtMs = Date.now();
-      await enqueueDesktopPushNotifications(tx, createdMessage);
+      await enqueueDesktopPushNotifications(tx, createdMessage, {
+        notify_account_ids: options?.notify_account_ids,
+        recents_account_ids: options?.recents_account_ids,
+      });
       notificationEnqueueDurationMs = Date.now() - notificationEnqueueStartedAtMs;
     }
 
