@@ -120,6 +120,8 @@ import { resolveLetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { buildCursorChildEnv, cursorDaemonChildEnv } from "./cursor-runner.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { cursorPermissionProfileInstructionLines } from "./cursor-permission-profile.js";
+import { createCursorUsageReader, readCursorAccountUsage, readCursorContext, readCursorUsageOwner } from "./cursor-usage.js";
+import type { ProviderUsage } from "../../../shared/provider-usage.js";
 import {
   createSupervisedWorkspaceGeneration,
   openSupervisedWorkspaceGeneration,
@@ -196,6 +198,9 @@ export interface CursorProviderAdapterDependencies {
   createWorkspaceGeneration: typeof createSupervisedWorkspaceGeneration;
   recoverWorkspaceGeneration: typeof recoverSupervisedWorkspaceGeneration;
   removeWorkspaceGenerationReceipt: typeof removeSupervisedWorkspaceGenerationReceipt;
+  readUsageAccount: typeof readCursorAccountUsage;
+  readUsageContext: typeof readCursorContext;
+  readUsageOwner: typeof readCursorUsageOwner;
   now(): string;
 }
 
@@ -432,6 +437,9 @@ const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   createWorkspaceGeneration: createSupervisedWorkspaceGeneration,
   recoverWorkspaceGeneration: recoverSupervisedWorkspaceGeneration,
   removeWorkspaceGenerationReceipt: removeSupervisedWorkspaceGenerationReceipt,
+  readUsageAccount: readCursorAccountUsage,
+  readUsageContext: readCursorContext,
+  readUsageOwner: readCursorUsageOwner,
   now: () => new Date().toISOString(),
 };
 
@@ -588,6 +596,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private readonly stopGraceMs: number;
   private readonly supervisedProfileFactory: NonNullable<CursorProviderAdapterOptions["supervisedProfileFactory"]>;
   private readonly handles = new Map<string, CursorProviderHandle>();
+  private readonly readCursorUsage: ReturnType<typeof createCursorUsageReader>;
   private readonly processCustody: ProviderProcessCustody;
   readonly runtimeCustody: ReturnType<typeof createCursorRuntimeCustodyReader>;
 
@@ -621,10 +630,17 @@ export class CursorProviderAdapter implements ProviderAdapter {
           devEntryPath: input.devMcpServerEntryPath,
         }),
       }));
+    this.readCursorUsage = createCursorUsageReader(
+      this.cursorBin, this.deps, (id) => this.handles.get(id), this.supervisedProfileFactory,
+    );
   }
 
   capabilities(): ProviderAdapterCapabilities {
     return { ...BASE_CURSOR_CAPABILITIES };
+  }
+
+  async readUsage(providerHandle: ProviderHandle): Promise<ProviderUsage | null> {
+    return this.readCursorUsage(this.requireHandle(providerHandle));
   }
 
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
