@@ -198,3 +198,22 @@ test("Agents keeps stale state honest and task history requests land on Changes"
   assert.match(history, /Usage PR/);
   assert.match(history, /aria-pressed="true"[^>]*>Changes<\/button>/);
 });
+
+
+test("Agents owner uses the durable room identity, never the launcher or a matching display name", async () => {
+  const candidate = entry('native-owner', 'QuartzPeak', false);
+  candidate.createdBy = 'desktop';
+  const props = {
+    recentActivity: [], participants: [], liveClearedCount: 0, presence: [], reasoningSessions: [], roomGitRoom: null,
+    roomIdentifier: 'focus_1', roomArtifacts: [], roomAgentWork: [], roomAgentWorkStatus: 'ready', roomAgentWorkTruncated: false,
+    activityHistoryRequest: 0, artifactTaskFilterId: null, tasks: [], messages: [], workers: [],
+    supervisorEntries: [candidate], agentProjections: [project(candidate)],
+  };
+  const render = (extra: object) => renderToString(createSSRApp({ render: () => h(ActivityTab, { ...props, ...extra }) }));
+  const history = { id: 'record', participantKind: 'agent', participantDisplayName: candidate.displayName, participantAgentKey: candidate.agentKey, participantOwnerLabel: 'EmmyMay', currentTasks: [], completedTasks: [], createdTasks: [] };
+  assert.match(await render({ recentActivity: [history] }), /class="agents-owner"[^>]*>EmmyMay</);
+  assert.match(await render({ participants: [{ kind: 'agent', agentKey: candidate.agentKey, ownerLabel: 'Ada', displayName: 'Renamed' }] }), /class="agents-owner"[^>]*>Ada</);
+  assert.match(await render({ presence: [{ agentKey: candidate.agentKey, ownerLabel: 'Grace', actorLabel: 'Grace/QuartzPeak', displayName: 'QuartzPeak', freshness: 'active' }] }), /class="agents-owner"[^>]*>Grace</);
+  const wrong = await render({ recentActivity: [{ ...history, participantAgentKey: 'other/quartzpeak' }] });
+  assert.doesNotMatch(wrong, /class="agents-owner"[^>]*>(?:desktop|EmmyMay|You)</);
+});

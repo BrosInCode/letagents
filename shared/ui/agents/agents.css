@@ -679,9 +679,37 @@
   .agents-trace {
     animation: none;
   }
-  .agent-disclosure-grid,
-  .agent-disclosure-clip,
-  .agents-chevron {
+  /* Match the open-state specificity so it cannot restore motion. */
+  .agents-ui .agent-disclosure .agent-disclosure-grid,
+  .agents-ui .agent-disclosure .agent-disclosure-grid > .agent-disclosure-clip,
+  .agents-ui .agent-disclosure .agent-disclosure-trigger > .agents-chevron {
     transition: none;
   }
+}
+
+.agents-change-summary {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 90px 80px;
+  align-items: center;
+  gap: 16px;
+  color: var(--agents-muted);
+  font-size: 12px;
+}
+.agents-change-summary strong { font-size: 14px; font-weight: 500; white-space: normal; }
+.agents-change-summary time { text-align: right; font-size: 11px; font-variant-numeric: tabular-nums; }
+.agents-change-mark { width: 20px; height: 20px; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.agents-change-state { text-align: right; }
+.agents-change-state[data-failed="true"], .agents-change-mark[data-failed="true"] { color: #e68d8d; }
+.agents-change-mobile-state { display: none; }
+.agents-change-tasks { margin-top: 16px; }
+.agents-change-tasks > span { font-size: 11px; color: var(--agents-faint); }
+.agents-change-tasks p { margin: 3px 0; }
+.agents-change-branch { font-size: 12px; }
+.agents-changes .agent-disclosure-body { margin-left: 23px; }
+@media (max-width: 640px) {
+  .agents-change-summary { grid-template-columns: 20px minmax(0, 1fr); gap: 12px; }
+  .agents-change-summary strong { font-size: 13px; }
+  .agents-change-summary time, .agents-change-state { display: none; }
+  .agents-change-mobile-state { display: inline; }
+  .agents-changes .agent-disclosure-body { margin-left: 14px; }
 }

@@ -18,51 +18,17 @@
       <template #provider="{ person }"><ProviderBadge v-if="person.kind === 'agent'" :label="person.provider" /><span v-else>{{ person.name.slice(0,1) }}</span></template>
       <template #status><p v-if="roomAgentWorkStatus === 'loading'" class="agents-note" role="status">Loading saved work…</p><p v-else-if="roomAgentWorkStatus === 'error'" class="agents-note" role="status">Saved work is temporarily unavailable. <button class="agents-quiet" type="button" @click="refreshActivity">Retry</button></p><p v-else-if="roomAgentWorkStatus === 'stale'" class="agents-note">Showing saved work while updates reconnect.</p></template>
       <template #work-detail="{ record }"><template v-if="recordedWorkById.get(record.id)"><ContributionDescription :work="recordedWorkById.get(record.id)!" /><p v-if="recordedWorkEvidenceIncomplete(recordedWorkById.get(record.id)!)" class="agents-note">Some work details weren't recorded.</p><button class="agents-quiet" type="button" @click="emit('reveal-message', recordedWorkById.get(record.id)!.sourceMessageId)">View in room →</button></template></template>
-      <template #changes="{ query }"><p v-if="artifactTaskFilterId" class="agents-filter-note">{{ artifactTimelineDescription }} <button class="agents-quiet" type="button" @click="emit('clear-artifact-task-filter')">Show all</button></p><div class="agents-changes" :data-query="query">          <ol v-if="filteredArtifacts(query).length" class="desktop-activity-artifact-timeline">
-            <li
-              v-for="item in filteredArtifacts(query)"
-              :key="item.artifact.identityKey"
-              class="desktop-activity-artifact-event"
-            >
-              <span class="desktop-activity-artifact-marker" :data-kind="item.artifact.kind" aria-hidden="true"></span>
-              <div class="desktop-activity-artifact-content">
-                <span class="desktop-activity-artifact-title-line">
-                  <span class="desktop-activity-mini-pill">{{ item.kindLabel }}</span>
-                  <a
-                    v-if="item.artifact.url"
-                    :href="item.artifact.url"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    {{ item.title }}
-                  </a>
-                  <strong v-else>{{ item.title }}</strong>
-                </span>
-                <small v-if="item.metaLabel">{{ item.metaLabel }}</small>
-                <small v-if="item.occurredAt">
-                  {{ item.wasUpdated ? "Updated" : "First seen" }} {{ formatRelativeTime(item.occurredAt) }}
-                  <template v-if="item.wasUpdated && item.firstSeenAt">
-                    · first seen {{ formatRelativeTime(item.firstSeenAt) }}
-                  </template>
-                </small>
-                <ChangeSummaryFilePanel
-                  v-if="item.artifact.kind === 'change_summary' && item.artifact.detail"
-                  :detail="item.artifact.detail"
-                  :expanded="isChangeExpanded(item.artifact)"
-                  :list-id="fileListId(item.artifact)"
-                  :label="item.title"
-                  :linked-pull-request="findLinkedPullRequest(item.artifact, roomArtifacts, changePrRepoScope)"
-                  @toggle="toggleChange(item.artifact)"
-                />
-              </div>
-              <span v-if="item.taskCountLabel" class="desktop-activity-row-meta">
-                <span class="desktop-activity-mini-pill">{{ item.taskCountLabel }}</span>
-              </span>
-            </li>
-          </ol>
-          <article v-else class="desktop-activity-empty">
-            {{ query.trim() ? 'No matching changes.' : artifactTaskFilterId ? 'No changes or pull requests are linked to this task yet.' : 'No changes or pull requests have been shared yet.' }}
-          </article></div></template>
+      <template #changes="{ query }">
+        <p v-if="artifactTaskFilterId" class="agents-filter-note">{{ artifactTimelineDescription }} <button class="agents-quiet" type="button" @click="emit('clear-artifact-task-filter')">Show all</button></p>
+        <AgentChanges :records="changeRecords" :query="query" :empty-text="artifactTaskFilterId ? 'No changes or pull requests are linked to this task yet.' : undefined">
+          <template #default="{ record }">
+            <template v-for="artifact in [artifactsById.get(record.id)!]" :key="artifact.identityKey">
+              <ChangeSummaryFilePanel v-if="artifact.kind === 'change_summary' && artifact.detail" :detail="artifact.detail" :expanded="isChangeExpanded(artifact)" :list-id="fileListId(artifact)" :label="record.title" :linked-pull-request="findLinkedPullRequest(artifact, roomArtifacts, changePrRepoScope)" @toggle="toggleChange(artifact)" />
+              <p v-else-if="!record.url && !record.branch && !record.tasks.length">No further details were shared.</p>
+            </template>
+          </template>
+        </AgentChanges>
+      </template>
       <template #footer><span>{{ roomAgentWorkTruncated ? 'Showing the latest 50 saved work records.' : 'Saved in this room' }}<template v-if="recentActivity.length >= 50"> · Latest 50 participants</template></span><button class="agents-quiet" type="button" @click="refreshActivity">Refresh history</button></template>
     </AgentHistory>
   </section>
@@ -71,6 +37,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, useId, watch } from "vue";
 import AgentRoster from "../../../../../../../shared/ui/agents/AgentRoster.vue";
+import AgentChanges from "../../../../../../../shared/ui/agents/AgentChanges.vue";
+import { agentChange } from "../../../../../../../shared/ui/agents/changes";
 import AgentHistory from "../../../../../../../shared/ui/agents/AgentHistory.vue";
 import { mergeHistoryWork, type AgentRosterRow, type AgentHistoryPerson } from "../../../../../../../shared/ui/agents/types";
 import { useAgentsNavigation } from "../../../../../../../shared/ui/agents/useAgentsNavigation";
@@ -105,7 +73,6 @@ import { isProjectedSupervisedActivityParticipant, supervisedActivityIdentity } 
 import {
   findLinkedPullRequest,
   retainExpandableChangeArtifacts,
-  roomArtifactTimelineItems,
 } from "../../../domain/room-artifacts";
 import ContributionDescription from "./room-chat/ContributionDescription.vue";
 import { readableContributionText } from "../../../../../../../shared/contribution-text.mjs";
@@ -204,7 +171,7 @@ watch(
   },
 );
 
-const { activeView, selectedLiveKey, reachableAgents, workingAgents, formatRelativeTime } = useRoomActivityViewModel(props, { autoSelectLive: false });
+const { activeView, selectedLiveKey, reachableAgents, workingAgents } = useRoomActivityViewModel(props, { autoSelectLive: false });
 const surface = ref<HTMLElement>();
 const { navigate, pastButton } = useAgentsNavigation(activeView, surface);
 const archiveMode = ref<'past' | 'history'>('past');
@@ -236,7 +203,7 @@ const legacyAgents = computed(() => [...legacyReachableAgents.value, ...legacyWo
 const rosterRows = computed<AgentRosterRow[]>(() => [
   ...inspectorTruthfulAgents.value.map(agent => {
     const signal = agentInspectorSignal(agent);
-    return { id: agent.entryId, name: agent.displayName, provider: agentInspectorProviderLabel(agent.provider), model: agent.model, owner: agent.entry.createdBy || '', state: signal.label, detail: signal.detail, tone: signal.tone, working: ['responding', 'publishing', 'compacting'].includes(signal.state), attention: signal.state === 'needs_attention', moving: signal.moving };
+    return { id: agent.entryId, name: agent.displayName, provider: agentInspectorProviderLabel(agent.provider), model: agent.model, owner: nativeOwner(agent), state: signal.label, detail: signal.detail, tone: signal.tone, working: ['responding', 'publishing', 'compacting'].includes(signal.state), attention: signal.state === 'needs_attention', moving: signal.moving };
   }),
   ...legacyAgents.value.map(agent => {
     const stale = agent.freshness === 'stale';
@@ -264,11 +231,20 @@ const historyWork = computed(() => mergeHistoryWork([
     return { id: `record:${work.attemptId}:${work.agentKey}`, title: recordedWorkTitle(work), people: props.recentActivity.filter(entry => entry.participantAgentKey === work.agentKey || (Boolean(actor) && entry.participantActorLabel === actor)).map(entry => entry.id), byline: recordedAgentName(work.agentKey), state: recordedWorkStateLabel(work), time: work.updatedAt, detail: recordedWorkDetail(work), links: [] };
   }),
 ]));
-function filteredArtifacts(query: string) { return artifactTimeline.value.filter(item => `${item.title} ${item.metaLabel}`.toLowerCase().includes(query.trim().toLowerCase())); }
+// createdBy identifies the launcher (often "desktop"), not necessarily the owner.
+// Use the same room identity as People, keyed by durable agent identity, never name.
+function nativeOwner(agent: AgentInspectorProjection): string {
+  const key = agent.agentKey;
+  if (!key) return '';
+  return props.participants.find(person => person.kind === 'agent' && person.agentKey === key && person.ownerLabel)?.ownerLabel
+    || props.presence.find(person => person.agentKey === key && person.ownerLabel)?.ownerLabel
+    || props.recentActivity.find(person => person.participantKind === 'agent' && person.participantAgentKey === key && person.participantOwnerLabel)?.participantOwnerLabel
+    || '';
+}
 function selectInspectorAgent(agent: AgentInspectorProjection): void {
   selectedLiveKey.value = null;
   emit("open-agent-detail", supervisedAgentInspectorRequest(agent.entry, {
-    ownerAttribution: ownerAttribution(agent.entry.createdBy),
+    ownerAttribution: ownerAttribution(nativeOwner(agent)),
   }));
 }
 
@@ -286,11 +262,15 @@ function selectParticipantAgent(agent: Parameters<typeof activityParticipantToAg
   selectedLiveKey.value = agent.key;
   emit("open-agent-detail", participantAgentInspectorRequest(activityParticipantToAgentTarget(agent)));
 }
-const artifactTimeline = computed(() =>
-  roomArtifactTimelineItems(props.roomArtifacts, {
-    taskId: props.artifactTaskFilterId,
-  })
-);
+const artifactsById = computed(() => new Map(props.roomArtifacts.map(artifact => [artifact.identityKey, artifact])));
+const changeRecords = computed(() => props.roomArtifacts
+  .filter(artifact => !props.artifactTaskFilterId || artifact.linkedTaskIds.includes(props.artifactTaskFilterId))
+  .map(artifact => agentChange({
+    id: artifact.identityKey, kind: artifact.kind, provider: artifact.provider,
+    title: artifact.title, number: artifact.artifactNumber, state: artifact.state,
+    time: artifact.updatedAt || artifact.firstSeenAt, url: artifact.url, branch: artifact.ref,
+    tasks: artifact.linkedTaskIds.map(id => props.tasks.find(task => task.id === id)?.title || id),
+  })));
 const artifactFilterTask = computed(() =>
   props.artifactTaskFilterId
     ? props.tasks.find((task) => task.id === props.artifactTaskFilterId) || null
@@ -366,11 +346,6 @@ onMounted(refreshActivity);
 <style scoped>
 .room-agents-page { display: block; padding: 28px 32px; overflow-y: auto; min-height: 0; }
 .agents-correct { display: flex; margin: -10px 32px 10px auto; }
-.agents-changes { padding: 0 12px; }
 .agents-ui :deep(.desktop-activity-mini-pill) { padding: 0; background: none; min-height: 20px; margin-right: 10px; font-size: 10px; font-weight: 400; color: var(--text-tertiary); }
-.agents-ui :deep(.desktop-activity-artifact-marker) { box-shadow: none; }
-.agents-ui :deep(.desktop-activity-artifact-marker::after) { display: none; }
-.agents-ui :deep(.desktop-activity-artifact-event) { padding: 18px 0; border-top: 1px solid var(--agents-line); }
-.agents-ui :deep(.desktop-activity-artifact-title-line strong), .agents-ui :deep(.desktop-activity-artifact-title-line a) { font-size: 14px; font-weight: 500; }
 @media(max-width:640px) { .room-agents-page { padding: 22px 16px; } }
 </style>
