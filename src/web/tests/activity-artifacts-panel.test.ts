@@ -208,3 +208,48 @@ test("change_summary panel hides the disclosure when files fit within the collap
   assert.ok(html.includes("src/a.ts") && html.includes("src/b.ts"), "both files rendered");
   assert.ok(!html.includes("more files"), "no disclosure when files <= collapsed limit");
 });
+
+// The Agents archive uses the same production components as desktop, including
+// the task->Changes entry point and contributor-aware Work search.
+test('history search finds work through every linked contributor and owner', async () => {
+  const History = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/agents/AgentHistory.vue', import.meta.url)))).default;
+  const { mergeHistoryWork } = await import('../../../shared/ui/agents/types');
+  const people = [
+    { id: 'one', name: 'OwlMoon', kind: 'agent', owner: 'EmmyMay', provider: 'Codex', room: 'sky-lake', firstSeen: null, lastSeen: null, past: true },
+    { id: 'two', name: 'StoneFox', kind: 'agent', owner: 'Ada', provider: 'Claude Code', room: 'sky-lake', branch: 'feature/usage', firstSeen: null, lastSeen: null, past: false },
+  ];
+  const work = mergeHistoryWork(people.map(person => ({ id: 'task_7', title: 'Wire real usage', people: [person.id], byline: person.name, state: 'merged', time: '2026-10-10T12:00:00Z', links: [] })));
+  assert.equal(work.length, 1);
+  for (const query of ['Ada', 'StoneFox', 'feature/usage', 'task_7']) {
+    const html = await renderToString(createSSRApp(History, { mode: 'history', tab: 'Work', query, people, work }));
+    assert.match(html, /Wire real usage/, query);
+    assert.doesNotMatch(html, /No matching work/, query);
+  }
+});
+
+test('Past agents excludes active agents and humans without losing them from People', async () => {
+  const History = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/agents/AgentHistory.vue', import.meta.url)))).default;
+  const people = [
+    { id: 'past', name: 'PastOwl', kind: 'agent', owner: '', provider: 'Codex', room: 'sky-lake', firstSeen: null, lastSeen: null, past: true },
+    { id: 'live', name: 'LiveFox', kind: 'agent', owner: '', provider: 'Codex', room: 'sky-lake', firstSeen: null, lastSeen: null, past: false },
+    { id: 'human', name: 'HumanEmmy', kind: 'human', owner: '', provider: '', room: 'sky-lake', firstSeen: null, lastSeen: null, past: true },
+  ];
+  const past = await renderToString(createSSRApp(History, { mode: 'past', query: '', people, work: [] }));
+  assert.match(past, /PastOwl/);
+  assert.doesNotMatch(past, /LiveFox|HumanEmmy/);
+  const history = await renderToString(createSSRApp(History, { mode: 'history', tab: 'People', query: '', people, work: [] }));
+  for (const person of people) assert.ok(history.includes(person.name));
+});
+
+test('web roster does not turn assigned tasks or stale provider state into live work', async () => {
+  const Live = (await vite.ssrLoadModule('/src/components/room/activity/ActivityLiveView.vue')).default;
+  const agents = [
+    { key: 'idle', label: 'IdleFox', kind: 'agent', ownerLabel: 'Emmy', ideLabel: 'Codex', activityState: 'away', freshness: 'active', status: 'idle', currentTasks: [{ title: 'Assigned work' }], activeReasoning: [] },
+    { key: 'stale', label: 'StaleOwl', kind: 'agent', ownerLabel: 'Emmy', ideLabel: 'Codex', activityState: 'active', freshness: 'stale', status: 'working', activeReasoning: [] },
+  ];
+  const html = await renderToString(createSSRApp(Live, { participants: agents, connectedAgents: agents, recentlyDisconnectedAgents: [], humans: [], selectedParticipant: agents[0], selectedParticipantKey: 'idle', clearedLiveCount: 0, canManageParticipants: false, clearBusy: false, taskGithubStatus: {}, roomIdentifier: '', activeWakeRules: new Map(), recentWakeRules: new Map(), wakeRuleApi: null }));
+  assert.match(html, /Updates delayed/);
+  assert.match(html, /Working <span>0<\/span>/);
+  assert.match(html, /Online/);
+  assert.doesNotMatch(html, /<dialog[^>]*\sopen(?:[\s>])/);
+});

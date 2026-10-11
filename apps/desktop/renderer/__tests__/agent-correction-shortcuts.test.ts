@@ -182,3 +182,19 @@ test("switching Inspector tabs keeps the hand-over's text, edits included, and n
   assert.equal(third.vm.draft.value, "");
   third.unmount();
 });
+
+test("Agents keeps stale state honest and task history requests land on Changes", async () => {
+  const props = {
+    recentActivity: [], participants: [], liveClearedCount: 0, presence: [], reasoningSessions: [], roomGitRoom: null,
+    roomIdentifier: "focus_1", roomArtifacts: [{ identityKey: "pr:7", kind: "pull_request", provider: "github", title: "Usage PR", url: "https://github.com/BrosInCode/letagents/pull/7", linkedTaskIds: ["task_7"], lastSeenAt: "2026-10-10T12:00:00Z" }], roomAgentWork: [], roomAgentWorkStatus: "ready", roomAgentWorkTruncated: false,
+    activityHistoryRequest: 0, artifactTaskFilterId: "task_7", tasks: [], messages: [], workers: [],
+    supervisorEntries: [busy.entry, idle.entry], agentProjections: [project(busy.entry, "stale"), idle],
+  };
+  const html = await renderToString(createSSRApp({ render: () => h(ActivityTab, props) }));
+  assert.match(html, /Updates delayed/);
+  assert.match(html, /Working <span>0<\/span>/);
+  assert.doesNotMatch(html, /data-testid="desktop-activity-correct-agent"/);
+  const history = await renderToString(createSSRApp({ render: () => h(ActivityTab, { ...props, activityHistoryRequest: 1 }) }));
+  assert.match(history, /Usage PR/);
+  assert.match(history, /aria-pressed="true"[^>]*>Changes<\/button>/);
+});

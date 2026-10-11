@@ -9,7 +9,7 @@ function source(relative: string): string {
 
 const chatMessage = source('../src/components/room/ChatMessage.vue')
 const messageList = source('../src/components/room/MessageList.vue')
-const rosterList = source('../src/components/room/activity/ActivityRosterList.vue')
+const rosterList = source('../src/components/room/activity/ActivityLiveView.vue')
 const liveDetail = source('../src/components/room/activity/ActivityLiveDetail.vue')
 const activityView = source('../src/components/room/ActivityView.vue')
 const tabPanels = source('../src/pages/room/RoomTabPanels.vue')
@@ -43,9 +43,9 @@ test('wake-notice styling stays neutral, readable, and still under reduced motio
 })
 
 test('live agent rows show what they wait for through the shared wake-rule line', () => {
-  assert.match(rosterList, /<WakeRuleLine\s+v-if="waitingRules\(participant\)\.length"/)
-  assert.match(rosterList, /<template v-else>\s*<span>\{\{ participantNoteText\(participant\) \}\}<\/span>/)
-  assert.match(rosterList, /rosterWaitingRules\(participant, props\.mode, props\.wakeRulesByAgentKey\)/)
+  assert.match(rosterList, /<WakeRuleLine\s+v-if="row.state === 'Online'/)
+  assert.match(rosterList, /wakeRulesForAgent\(activeWakeRules, byId.get\(row.id\)\?\.agentKey\)/)
+  assert.match(rosterList, /<template v-else>\{\{ row.detail \}\}<\/template>/)
 })
 
 test('the agent detail shows its wake rules and opens the wake message in the chat', () => {
