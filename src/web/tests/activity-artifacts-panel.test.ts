@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { readFile } from 'node:fs/promises';
+import { compileScript, compileTemplate, parse } from '@vue/compiler-sfc';
+import { transpileModule, ModuleKind } from 'typescript';
+import * as Vue from 'vue';
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp } from "vue";
+import { createRenderer, createSSRApp, h, nextTick, ssrContextKey } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 
@@ -19,6 +23,23 @@ before(async () => {
   ActivityArtifactsPanel = (
     await vite.ssrLoadModule("/src/components/room/activity/ActivityArtifactsPanel.vue")
   ).default;
+  // As in the desktop component tests, attach client render functions to the
+  // Vite-loaded production modules so handlers can run in a lightweight host.
+  for (const path of [
+    fileURLToPath(new URL('../src/components/room/activity/ActivityArtifactsPanel.vue', import.meta.url)),
+    fileURLToPath(new URL('../../../shared/ui/agents/AgentChanges.vue', import.meta.url)),
+    fileURLToPath(new URL('../../../shared/ui/agents/AgentDisclosure.vue', import.meta.url)),
+  ]) {
+    const component = (await vite.ssrLoadModule(path)).default;
+    const descriptor = parse(await readFile(path, 'utf8')).descriptor;
+    const script = compileScript(descriptor, { id: path });
+    const template = compileTemplate({ source: descriptor.template!.content, filename: path, id: path, compilerOptions: { bindingMetadata: script.bindings } });
+    assert.deepEqual(template.errors, []);
+    const code = transpileModule(template.code, { compilerOptions: { module: ModuleKind.ESNext } }).outputText
+      .replace(/import \{([\s\S]*?)\} from "vue";/g, (_all, names: string) => `const {${names.replace(/\s+as\s+/g, ': ')}} = vue;`)
+      .replace('export function render', 'function render');
+    component.render = Function('vue', code + '\nreturn render;')(Vue);
+  }
 });
 
 after(async () => {
@@ -101,8 +122,36 @@ function pullRequestArtifact(ref: string, artifactNumber: number | null, url: st
 }
 
 type PrRepoScope = { host: string; owner: string; name: string } | null
+// Exercise the real disclosure before checking its file/PR contents. Closed
+// Changes rows intentionally mount their details only on first expansion.
 async function render(artifacts: unknown[], prRepo: PrRepoScope = null): Promise<string> {
-  return renderToString(createSSRApp(ActivityArtifactsPanel, { artifacts, tasks: [], prRepo }));
+  type Node = { tag: string; props: Record<string, any>; children: Node[]; text?: string; parent?: Node };
+  const node = (tag = ''): Node => ({ tag, props: {}, children: [] });
+  const renderer = createRenderer<Node, Node>({
+    createElement: tag => node(tag), createText: text => ({ ...node(), text }), createComment: () => node(),
+    setText(n, text) { n.text = text; }, setElementText(n, text) { n.children = []; n.text = text; },
+    patchProp(n, key, _old, value) { n.props[key] = value; },
+    insert(child, parent, anchor) { if (child.parent) { const i = child.parent.children.indexOf(child); if (i >= 0) child.parent.children.splice(i, 1); } child.parent = parent; const i = anchor ? parent.children.indexOf(anchor) : -1; parent.children.splice(i < 0 ? parent.children.length : i, 0, child); },
+    remove(n) { const i = n.parent?.children.indexOf(n) ?? -1; if (i >= 0) n.parent!.children.splice(i, 1); },
+    parentNode: n => n.parent || null, nextSibling: n => n.parent?.children[n.parent.children.indexOf(n) + 1] || null,
+  });
+  const root = node('root');
+  const app = renderer.createApp({ render: () => h(ActivityArtifactsPanel, { artifacts, tasks: [], prRepo }) });
+  app.provide(ssrContextKey, { modules: new Set() });
+  app.mount(root);
+  function all(n: Node): Node[] { return [n, ...n.children.flatMap(all)]; }
+  try {
+    for (const trigger of all(root).filter(n => n.props.class === 'agent-disclosure-trigger')) trigger.props.onClick({ detail: 0 });
+    await nextTick();
+    const escape = (value: unknown) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    function html(n: Node): string {
+      const text = (n.text === undefined ? '' : escape(n.text)) + n.children.map(html).join('');
+      if (!n.tag) return text;
+      const attrs = Object.entries(n.props).filter(([key, value]) => !key.startsWith('on') && value != null).map(([key, value]) => ` ${key}="${escape(value)}"`).join('');
+      return `<${n.tag}${attrs}>${text}</${n.tag}>`;
+    }
+    return html(root);
+  } finally { app.unmount(); }
 }
 
 const REPO = { host: "github.com", owner: "octo", name: "repo" };
@@ -252,4 +301,23 @@ test('web roster does not turn assigned tasks or stale provider state into live 
   assert.match(html, /Working <span>0<\/span>/);
   assert.match(html, /Online/);
   assert.doesNotMatch(html, /<dialog[^>]*\sopen(?:[\s>])/);
+});
+
+
+test('Changes groups compact collapsed rows, searches metadata and never prints internal identities', async () => {
+  const { agentChange, groupChanges } = await import('../../../shared/ui/agents/changes');
+  const artifacts = [changeArtifact(), { ...pullRequestArtifact('feature/y', 7, prIn(7)), updated_at: '2026-07-01T10:00:00Z', state: 'merged' }];
+  const html = await renderToString(createSSRApp(ActivityArtifactsPanel, { artifacts, tasks: [] }));
+  assert.equal((html.match(/class="agents-record-day"/g) || []).length, 2);
+  assert.equal((html.match(/aria-expanded="false"/g) || []).length, 2);
+  assert.doesNotMatch(html, /managed-agent:key|Task workflow|first seen|linked task|src\/a.ts/);
+  assert.match(html, /Pull request #7 · GitHub/);
+  const empty = await renderToString(createSSRApp(ActivityArtifactsPanel, { artifacts, tasks: [], query: 'missing' }));
+  assert.match(empty, /No matching changes/);
+  const record = agentChange({ id: 'internal', kind: 'change_summary', provider: 'git', tasks: ['Room motion'], state: 'updated', time: '2026-10-10T10:00:00', title: null });
+  assert.equal(record.title, 'Changes');
+  const groups = groupChanges([record], 'room motion', new Date('2026-10-11T12:00:00'));
+  assert.equal(groups[0]?.day, 'Yesterday');
+  assert.equal(groupChanges([record], 'missing').length, 0);
+  assert.equal(groupChanges([{ ...record, time: 'invalid' }], '')[0]?.day, 'Date not recorded');
 });

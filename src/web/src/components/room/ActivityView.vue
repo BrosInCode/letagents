@@ -35,7 +35,7 @@
       @change-page="changeHistoryPage"
       @back="navigate('live', $event)"
     >
-      <template #changes="{ query }"><ActivityArtifactsPanel v-if="historyRoomId === (props.currentRoom?.identifier || props.roomIdentifier)" :artifacts="filteredArtifacts(query)" :tasks="props.tasks" :pr-repo="props.currentRoom?.gitRoom ? { host: props.currentRoom.gitRoom.host, owner: props.currentRoom.gitRoom.repository.owner, name: props.currentRoom.gitRoom.repository.name } : null" /><p v-else class="agents-empty">Open this room to see its changes and pull requests.</p><p v-if="historyRoomId === (props.currentRoom?.identifier || props.roomIdentifier) && !filteredArtifacts(query).length" class="agents-empty">No matching changes or pull requests.</p></template>
+      <template #changes="{ query }"><ActivityArtifactsPanel v-if="historyRoomId === (props.currentRoom?.identifier || props.roomIdentifier)" :artifacts="props.roomArtifacts" :query="query" :tasks="props.tasks" :pr-repo="props.currentRoom?.gitRoom ? { host: props.currentRoom.gitRoom.host, owner: props.currentRoom.gitRoom.repository.owner, name: props.currentRoom.gitRoom.repository.name } : null" /><p v-else class="agents-empty">Open this room to see its changes and pull requests.</p></template>
     </ActivityHistoryView>
 
     <div v-show="activeView === 'live'">
@@ -131,7 +131,6 @@ const {
 const surface = ref<HTMLElement>();
 const archiveMode = ref<'past' | 'history'>('past');
 const { navigate, pastButton } = useAgentsNavigation(activeView, surface);
-function filteredArtifacts(query: string) { return props.roomArtifacts.filter(artifact => [artifact.title, artifact.ref, artifact.state, artifact.kind].join(' ').toLowerCase().includes(query.trim().toLowerCase())); }
 </script>
 
 <style src="./activity/styles/base.css"></style>
@@ -142,11 +141,5 @@ function filteredArtifacts(query: string) { return props.roomArtifacts.filter(ar
 
 <style scoped>
 .activity-panel { padding: 28px 32px; }
-.activity-panel :deep(.activity-artifacts) { border: 0; background: transparent; padding: 0 12px; margin: 0; }
-.activity-panel :deep(.activity-artifacts-header) { display: none; }
-.activity-panel :deep(.activity-artifact-list) { max-height: none; overflow: visible; grid-template-columns: minmax(0, 1fr); gap: 0; }
-.activity-panel :deep(.activity-artifact-row) { border: 0; border-top: 1px solid var(--agents-line); border-radius: 0; background: none; padding: 18px 0; }
-.activity-panel :deep(.activity-artifact-kind) { background: none; padding: 0; color: var(--agents-muted); font-size: 11px; }
-.activity-panel :deep(.activity-artifact-title-line a), .activity-panel :deep(.activity-artifact-title-line strong) { font-size: 14px; font-weight: 500; }
 @media(max-width:640px) { .activity-panel { padding: 22px 16px; } }
 </style>
