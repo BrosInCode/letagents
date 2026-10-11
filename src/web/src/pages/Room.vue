@@ -98,6 +98,8 @@
       :loadActivityHistory="loadActivityHistory"
       :clearDisconnectedParticipants="clearDisconnectedParticipants"
       @loadOlder="loadOlderMessages"
+      @refreshGitHubEvents="refreshRoomGitHubEvents()"
+      @loadOlderGitHubEvents="loadOlderGitHubEvents"
       @reply="selectedReply = $event"
       @thread-messages="threadImageMessages = $event"
       @openImageViewer="openImageViewer"
@@ -260,6 +262,7 @@ const {
   refreshRoomBoard,
   refreshRoomFocusRooms,
   refreshRoomGitHubEvents,
+  loadOlderGitHubEvents,
 } = useRoom()
 const auth = useAuth()
 const toast = useToast()

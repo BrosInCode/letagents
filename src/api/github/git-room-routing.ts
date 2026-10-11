@@ -247,7 +247,7 @@ function isCrossRepositoryPullRequestEvent(input: {
   payload: GitHubWebhookPayload;
   repositoryFullName: string;
 }): boolean {
-  if (input.event.roomEvent?.kind !== "pull_request") {
+  if (!input.payload.pull_request) {
     return false;
   }
 

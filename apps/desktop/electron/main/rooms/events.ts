@@ -24,11 +24,17 @@ export interface GitHubRoomEventPayload {
   metadata?: unknown;
   linked_task_id?: string | null;
   created_at?: string | null;
+  provider_event_at?: string | null;
+  provider_object_updated_at?: string | null;
+  event_order_at?: string | null;
+  head_sha?: string | null;
 }
 
 const githubRoomEventTypes = new Set<DesktopGitHubRoomEventType>([
   "pull_request",
   "pull_request_review",
+  "workflow_run", "workflow_job", "pull_request_review_comment", "pull_request_review_thread",
+  "push", "create", "delete",
   "issue",
   "issue_comment",
   "check_run",
@@ -118,6 +124,10 @@ export function mapGitHubRoomEventPayload(
     actorLogin: payload.actor_login || null,
     metadata: normalizeMetadata(payload.metadata),
     linkedTaskId: payload.linked_task_id || null,
+    providerEventAt: payload.provider_event_at || null,
+    providerObjectUpdatedAt: payload.provider_object_updated_at || null,
+    eventOrderAt: payload.event_order_at || null,
+    headSha: payload.head_sha || null,
     createdAt: payload.created_at || new Date(0).toISOString(),
   };
 }
@@ -150,8 +160,8 @@ function normalizeMetadata(value: unknown): Record<string, unknown> {
 }
 
 function compareGitHubRoomEvents(left: DesktopGitHubRoomEvent, right: DesktopGitHubRoomEvent): number {
-  const leftTime = Date.parse(left.createdAt || "");
-  const rightTime = Date.parse(right.createdAt || "");
+  const leftTime = Date.parse(left.eventOrderAt || left.createdAt || "");
+  const rightTime = Date.parse(right.eventOrderAt || right.createdAt || "");
   if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
     return rightTime - leftTime;
   }

@@ -53,6 +53,10 @@
         key="events"
         class="room-tab-panel"
         :events="githubEvents"
+        :roomIdentifier="room?.identifier || ''"
+        @refresh="emit('refreshGitHubEvents')"
+        @loadOlder="emit('loadOlderGitHubEvents')"
+        @openTask="emit('openTask', $event)"
         :repository="githubEventsRepository"
         :isAvailable="githubEventsAvailable"
         :hasMore="githubEventsHasMore"
@@ -231,6 +235,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  refreshGitHubEvents: []
+  loadOlderGitHubEvents: []
   loadOlder: []
   reply: [message: RoomMessage]
   threadMessages: [messages: RoomMessage[]]

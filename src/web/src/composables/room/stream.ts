@@ -19,6 +19,7 @@ import { isVisibleRoomMessage } from './identity'
 import { playNotificationSound } from './sound'
 import { roomNotificationPreferences } from './notificationPreferences'
 import type {
+  RoomGitHubEvent,
   RoomMessage,
   RoomReasoningSession,
   RoomReasoningUpdate,
@@ -30,7 +31,7 @@ interface RoomStreamHandlers {
   setStreaming: (streaming: boolean) => void
   appendMessage: (message: RoomMessage) => boolean
   onGitHubMessage: () => void
-  onGitHubEvent: (roomIdentifier?: string | null) => void
+  onGitHubEvent: (roomIdentifier?: string | null, event?: RoomGitHubEvent) => void
   onTaskLifecycleMessage: () => void
   onArtifactUpdate: (roomIdentifier?: string | null) => void
   onAgentActivityMessage: () => void
@@ -559,6 +560,9 @@ export function createRoomStream(
         bufferOrApplyRoomEvent(roomIdentifier, () => {
           handlers.onGitHubEvent(
             typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier,
+            typeof payload?.id === 'string' && typeof payload?.event_type === 'string'
+              && typeof payload?.action === 'string' && typeof payload?.created_at === 'string'
+              ? payload as RoomGitHubEvent : undefined,
           )
           publishMessageLinkPreviewInvalidation(roomIdentifier)
         }, streamEventBytes(event))

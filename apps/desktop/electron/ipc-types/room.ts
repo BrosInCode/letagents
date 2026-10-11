@@ -396,6 +396,13 @@ export interface DesktopGitHubIntegrationActionResult {
 export type DesktopGitHubRoomEventType =
   | "pull_request"
   | "pull_request_review"
+  | "workflow_run"
+  | "workflow_job"
+  | "pull_request_review_comment"
+  | "pull_request_review_thread"
+  | "push"
+  | "create"
+  | "delete"
   | "issue"
   | "issue_comment"
   | "check_run"
@@ -414,6 +421,10 @@ export interface DesktopGitHubRoomEvent {
   actorLogin: string | null;
   metadata: Record<string, unknown>;
   linkedTaskId: string | null;
+  providerEventAt?: string | null;
+  providerObjectUpdatedAt?: string | null;
+  eventOrderAt?: string | null;
+  headSha?: string | null;
   createdAt: string;
 }
 

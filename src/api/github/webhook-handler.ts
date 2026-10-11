@@ -31,6 +31,7 @@ import {
   createGitHubAppSync,
   toGitHubWebhookId,
 } from "./app-sync.js";
+import { enrichWorkflowJob } from "./workflow-activity.js";
 import { clearGitHubInstallationTokenCache } from "./app-client.js";
 import { getExistingGitHubEventRefRoom } from "./git-room-routing.js";
 import { materializeGitHubWebhookEvent } from "./room-events.js";
@@ -224,6 +225,7 @@ async function handleMaterializedRepoRoomWebhook(
   githubRepoId: string | null;
   roomId: string | null;
 }> {
+  if (eventName === "workflow_job") payload = await enrichWorkflowJob(payload);
   const materializedEvent = materializeGitHubWebhookEvent(eventName, payload, deliveryId);
   if (!materializedEvent) {
     return {
@@ -570,6 +572,10 @@ export async function handleGitHubWebhookEvent(
     case "issue_comment":
     case "pull_request_review":
     case "check_run":
+    case "workflow_run":
+    case "workflow_job":
+    case "pull_request_review_comment":
+    case "pull_request_review_thread":
     case "push":
     case "create":
     case "delete":
