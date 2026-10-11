@@ -2,6 +2,7 @@ import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
 import type { DesktopAuthAccount, DesktopRoomLatestMessage } from "../../../electron/ipc-types";
 import { countUnreadRoomMessages, roomReadKey, type RoomReadMarkers, type RoomUnreadSnapshot } from "../domain/desktop-room-read-state";
 import { desktopIpc } from "../ipc";
+import { githubEventsVisibilityRevision, readGitHubEventsVisible } from "../components/desktop/content/room-shell/preferences";
 
 export function useDesktopUnreadCounts(options: {
   account: Readonly<Ref<DesktopAuthAccount | null>>;
@@ -57,6 +58,7 @@ export function useDesktopUnreadCounts(options: {
                 latestMessageId: room.latestMessageId,
                 previous,
                 ownSenderNames: [account.login, account.displayName || ""],
+                githubEventsVisible: readGitHubEventsVisible(room.roomIdentifier),
                 loadPage: (after) => loadPage(room.roomIdentifier, after),
                 isCurrent,
               });
@@ -71,11 +73,11 @@ export function useDesktopUnreadCounts(options: {
     return running;
   }
 
-  watch(() => [options.account.value?.id, options.storageMode.value], () => {
+  watch(() => [options.account.value?.id, options.storageMode.value, githubEventsVisibilityRevision.value], () => {
     revision += 1;
     snapshots.value = {};
   }, { flush: "sync" });
-  watch(() => JSON.stringify([options.account.value?.id, options.storageMode.value, options.rooms.value, options.readMarkers.value]), () => {
+  watch(() => JSON.stringify([options.account.value?.id, options.storageMode.value, options.rooms.value, options.readMarkers.value, githubEventsVisibilityRevision.value]), () => {
     revision += 1;
     void refresh();
   }, { immediate: true });
