@@ -1,6 +1,7 @@
 import crypto from "crypto";
-import { and, desc, eq, inArray, isNull, like, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like, notInArray, or, sql } from "drizzle-orm";
 
+import { PARTICIPANT_PULL_REQUEST_ACTION_LIST } from "../../github/room-events/pull-request.js";
 import { db } from "../client.js";
 import { github_room_events, rooms } from "../schema.js";
 import type { GitHubRoomEventMetadata, GitHubRoomEventType } from "../schema.js";
@@ -125,6 +126,7 @@ export async function getLatestPullRequestRoomEvent(input: {
     .where(and(
       eq(github_room_events.event_type, "pull_request"),
       eq(github_room_events.github_object_url, input.github_object_url),
+      notInArray(github_room_events.action, [...PARTICIPANT_PULL_REQUEST_ACTION_LIST]),
       inArray(
         github_room_events.room_id,
         db

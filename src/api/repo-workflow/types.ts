@@ -85,6 +85,23 @@ export interface RepoPullRequestEvent extends RepoRoomEventBase {
   pullRequest: RepoPullRequestRef;
 }
 
+/** A reviewer or assignee that GitHub added to or removed from a pull request. */
+export interface RepoPullRequestParticipant {
+  role: "reviewer" | "assignee";
+  change: "added" | "removed";
+  /** The GitHub login of a person. Null for a team. */
+  login: string | null;
+  github_user_id: string | null;
+  team_slug: string | null;
+  team_name: string | null;
+}
+
+export interface RepoPullRequestParticipantEvent extends RepoRoomEventBase {
+  kind: "pull_request_participant";
+  pullRequest: RepoPullRequestRef;
+  participant: RepoPullRequestParticipant;
+}
+
 export interface RepoIssueEvent extends RepoRoomEventBase {
   kind: "issue";
   issue: RepoIssueRef;
@@ -124,6 +141,7 @@ export interface RepoBranchLifecycleEvent extends RepoRoomEventBase {
 
 export type RepoRoomEvent =
   | RepoPullRequestEvent
+  | RepoPullRequestParticipantEvent
   | RepoIssueEvent
   | RepoIssueCommentEvent
   | RepoPullRequestReviewEvent

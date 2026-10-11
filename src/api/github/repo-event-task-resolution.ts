@@ -171,7 +171,7 @@ export function createRepoRoomEventTaskResolver(deps: RepoRoomEventTaskResolverD
       };
     }
 
-    if (event.kind === "pull_request") {
+    if (event.kind === "pull_request" || event.kind === "pull_request_participant") {
       const artifactTask =
         (await deps.findTaskByWorkflowArtifactMatches(project.id, artifactMatches)) ??
         (await deps.findTaskByPrUrl(project.id, event.pullRequest.url));

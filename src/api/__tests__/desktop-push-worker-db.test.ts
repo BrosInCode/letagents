@@ -27,6 +27,7 @@ const recordResult = workerModule?.recordResult;
 const failureThreshold = workerModule?.MAX_CONSECUTIVE_DEVICE_FAILURES;
 const preferenceStore = testDatabaseUrl ? await import('../db/room-notification-preferences.js') : null;
 const enqueueModule = testDatabaseUrl ? await import('../notifications/enqueue.js') : null;
+const githubAccountModule = testDatabaseUrl ? await import('../db/auth/find-account-by-github.js') : null;
 
 function requireTestDeps(): void {
   assert.ok(db);
@@ -472,4 +473,83 @@ test('bulk preferences are personal, non-default and capped at 500', runOptions,
   assert.equal(list.truncated, true);
   assert.ok(list.preferences.every((row) => row.level === 'muted'));
   assert.deepEqual(await preferenceStore!.listRoomNotificationPreferences(f.other.id), { preferences: [], truncated: false });
+});
+
+test('GitHub account lookup matches only the GitHub user id', runOptions, async () => {
+  requireTestDeps();
+  await pool!.query(`INSERT INTO accounts (id, provider, provider_user_id, login, created_at, updated_at) VALUES
+    ('lookup-old', 'github', '9001', 'Katrin-Dev', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('lookup-new', 'github', '9002', 'katrin-dev', '2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z'),
+    ('lookup-other', 'gitlab', '9003', 'katrin-dev', '2026-01-01T00:00:00Z', '2026-03-01T00:00:00Z')`);
+  const find = githubAccountModule!.findAccountByGitHubUser;
+  assert.equal((await find({ login: 'Katrin-Dev', github_user_id: '9001' }))?.id, 'lookup-old');
+  assert.equal(await find({ login: 'katrin-dev', github_user_id: '9999' }), null);
+  // A login alone never matches an account, even when one exists with that login.
+  assert.equal(await find({ login: 'KATRIN-DEV', github_user_id: null }), null);
+  assert.deepEqual(await githubAccountModule!.resolveGitHubNotifyAccountIds([
+    { login: 'katrin-dev', github_user_id: '9001' },
+    { login: 'katrin-dev', github_user_id: null },
+    { login: 'nobody', github_user_id: null },
+  ]), ['lookup-old']);
+});
+
+test('targeted push reaches a named account with no recents row and creates the recent', runOptions, async () => {
+  requireTestDeps();
+  const person = await upsertAccount!({ provider: 'github', provider_user_id: 'review-person', login: 'katrin-review' });
+  const scenario = await seedScenario({ states: [], accountId: person.id });
+  const before = await pool!.query('SELECT 1 FROM account_room_recents WHERE account_id=$1 AND room_id=$2', [person.id, scenario.roomId]);
+  assert.equal(before.rowCount, 0);
+  const sent = await dbModule!.addMessageWithCreateStatus!(scenario.roomId, 'github', '@katrin-review review requested by lerato on PR #88', {
+    source: 'github', notify_account_ids: [person.id], recents_account_ids: [person.id],
+  });
+  const number = Number(sent.message.id.slice(4));
+  const pushes = await pool!.query('SELECT device_id, state FROM desktop_push_notifications WHERE room_id=$1 AND message_number=$2', [scenario.roomId, number]);
+  assert.deepEqual(pushes.rows, [{ device_id: scenario.deviceId, state: 'queued' }]);
+  const recent = await pool!.query('SELECT archived FROM account_room_recents WHERE account_id=$1 AND room_id=$2', [person.id, scenario.roomId]);
+  assert.deepEqual(recent.rows, [{ archived: false }]);
+});
+
+test('targeted push without a recents list pushes but writes no recents row', runOptions, async () => {
+  requireTestDeps();
+  const person = await upsertAccount!({ provider: 'github', provider_user_id: 'review-retry', login: 'retry-review' });
+  const scenario = await seedScenario({ states: [], accountId: person.id });
+  const sent = await dbModule!.addMessageWithCreateStatus!(scenario.roomId, 'github', '@retry-review review requested by lerato on PR #91', {
+    source: 'github', notify_account_ids: [person.id],
+  });
+  const pushes = await pool!.query('SELECT device_id FROM desktop_push_notifications WHERE room_id=$1 AND message_number=$2', [scenario.roomId, Number(sent.message.id.slice(4))]);
+  assert.deepEqual(pushes.rows, [{ device_id: scenario.deviceId }]);
+  const recent = await pool!.query('SELECT 1 FROM account_room_recents WHERE account_id=$1 AND room_id=$2', [person.id, scenario.roomId]);
+  assert.equal(recent.rowCount, 0);
+});
+
+test('targeted push skips snoozed accounts and disabled devices', runOptions, async () => {
+  requireTestDeps();
+  const snoozed = await upsertAccount!({ provider: 'github', provider_user_id: 'review-snoozed', login: 'snoozed-review' });
+  const disabled = await upsertAccount!({ provider: 'github', provider_user_id: 'review-disabled', login: 'disabled-review' });
+  const snoozedScenario = await seedScenario({ states: [], accountId: snoozed.id });
+  await seedScenario({ states: [], accountId: disabled.id, roomId: snoozedScenario.roomId, enabled: false });
+  await preferenceStore!.setRoomNotificationPreference(snoozed.id, snoozedScenario.roomId, {
+    snoozed_until: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+  const sent = await dbModule!.addMessageWithCreateStatus!(snoozedScenario.roomId, 'github', '@snoozed-review review requested by lerato on PR #89', {
+    source: 'github', notify_account_ids: [snoozed.id, disabled.id],
+  });
+  const pushes = await pool!.query('SELECT device_id FROM desktop_push_notifications WHERE room_id=$1 AND message_number=$2', [snoozedScenario.roomId, Number(sent.message.id.slice(4))]);
+  assert.deepEqual(pushes.rows, []);
+});
+
+test('targeted push skips a muted account and leaves its recents row as it was', runOptions, async () => {
+  requireTestDeps();
+  const muted = await upsertAccount!({ provider: 'github', provider_user_id: 'review-muted', login: 'muted-review' });
+  const scenario = await seedScenario({ states: [], accountId: muted.id });
+  await preferenceStore!.setRoomNotificationPreference(muted.id, scenario.roomId, { level: 'muted' });
+  await pool!.query(`INSERT INTO account_room_recents (account_id, room_id, first_opened_at, last_opened_at, updated_at, archived)
+    VALUES ($1, $2, NOW(), NOW(), NOW(), TRUE)`, [muted.id, scenario.roomId]);
+  const sent = await dbModule!.addMessageWithCreateStatus!(scenario.roomId, 'github', '@muted-review review requested by lerato on PR #90', {
+    source: 'github', notify_account_ids: [muted.id],
+  });
+  const pushes = await pool!.query('SELECT device_id FROM desktop_push_notifications WHERE room_id=$1 AND message_number=$2', [scenario.roomId, Number(sent.message.id.slice(4))]);
+  assert.deepEqual(pushes.rows, []);
+  const recent = await pool!.query('SELECT archived FROM account_room_recents WHERE account_id=$1 AND room_id=$2', [muted.id, scenario.roomId]);
+  assert.deepEqual(recent.rows, [{ archived: true }]);
 });

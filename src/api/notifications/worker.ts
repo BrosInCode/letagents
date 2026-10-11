@@ -4,10 +4,7 @@ import { canNotifyConversation } from "../conversations/store.js";
 
 import { getProjectById } from "../db.js";
 import { pool } from "../db/client.js";
-import {
-  resolveProjectRepoRoomAccessDecision,
-  type RoomAccessAccount,
-} from "../rooms/access.js";
+import { resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
 import {
   ApnsClient,
   readApnsCredentials,
@@ -19,6 +16,7 @@ import {
   type DesktopPushAuthorizationDecision,
 } from "./authorization.js";
 import { classifyApnsResult, type ApnsDisposition } from "./delivery-policy.js";
+import { getPushDeliveryAccount } from "./push-account.js";
 
 const POLL_INTERVAL_MS = 2_000;
 const CLAIM_LIMIT = 50;
@@ -115,41 +113,6 @@ async function claimDeliveryTable(workerId: string, table: DeliveryTable): Promi
   } finally {
     client.release();
   }
-}
-
-async function getPushDeliveryAccount(accountId: string): Promise<RoomAccessAccount | null> {
-  const result = await pool.query<RoomAccessAccount>(`
-    SELECT account_record.id AS account_id,
-           account_record.provider,
-           account_record.login,
-           COALESCE(
-             (
-               SELECT owner_token.provider_access_token
-               FROM owner_tokens AS owner_token
-               WHERE owner_token.account_id = account_record.id
-                 AND owner_token.provider_access_token IS NOT NULL
-                 AND (
-                   owner_token.oauth_token_expires_at IS NULL
-                   OR owner_token.oauth_token_expires_at > NOW()
-                 )
-               ORDER BY owner_token.updated_at DESC
-               LIMIT 1
-             ),
-             (
-               SELECT session.provider_access_token
-               FROM auth_sessions AS session
-               WHERE session.account_id = account_record.id
-                 AND session.provider_access_token IS NOT NULL
-                 AND session.expires_at > NOW()
-               ORDER BY session.created_at DESC
-               LIMIT 1
-             )
-           ) AS provider_access_token
-    FROM accounts AS account_record
-    WHERE account_record.id = $1
-    LIMIT 1
-  `, [accountId]);
-  return result.rows[0] ?? null;
 }
 
 export async function recordAuthorizationDenied(

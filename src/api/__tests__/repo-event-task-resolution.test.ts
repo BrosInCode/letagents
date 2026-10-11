@@ -9,9 +9,11 @@ import {
   getPullRequestWorkflowRef,
   toGitHubRoutingContext,
 } from "../github/repo-event-task-resolution.js";
-import type {
-  RepoRoomEvent,
-  TaskWorkflowArtifactMatch,
+import {
+  buildRepoRoomEventArtifactMatches,
+  projectRepoRoomEvent,
+  type RepoRoomEvent,
+  type TaskWorkflowArtifactMatch,
 } from "../repo-workflow.js";
 
 function makeTask(id: string, overrides: Partial<Task> = {}): Task {
@@ -418,4 +420,83 @@ test("a matching focus-room lease wins over an unrelated task number in PR prose
   assert.equal(resolution.matchedByWorkflowArtifact, true);
   assert.equal(resolution.matchedByTaskReference, false);
   assert.deepEqual(taskByIdCalls, []);
+});
+
+function makeParticipantEvent(overrides: Partial<RepoRoomEvent> = {}): RepoRoomEvent {
+  return {
+    provider: "github",
+    kind: "pull_request_participant",
+    action: "review_requested",
+    repositoryFullName: "BrosInCode/letagents",
+    senderLogin: "lerato",
+    pullRequest: {
+      number: 88,
+      title: "Review pings",
+      url: "https://github.com/BrosInCode/letagents/pull/88",
+      body: "adds review request pings",
+      headRef: "lerato/review-pings",
+    },
+    participant: {
+      role: "reviewer",
+      change: "added",
+      login: "katrin",
+      github_user_id: "424242",
+      team_slug: null,
+      team_name: null,
+    },
+    ...overrides,
+  } as RepoRoomEvent;
+}
+
+test("a review request event matches its task by the PR URL like a pull_request event", async () => {
+  const task = makeTask("task_8");
+  const { artifactMatchCalls, prUrlCalls, resolver } = createHarness({ prUrlTask: task });
+  const event = makeParticipantEvent();
+
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, event);
+
+  assert.equal(resolution.task, task);
+  assert.equal(resolution.matchedByWorkflowArtifact, true);
+  assert.equal(artifactMatchCalls.length, 1);
+  assert.equal(artifactMatchCalls[0]?.matches.some((match) => match.kind === "pull_request"), true);
+  assert.deepEqual(prUrlCalls, [
+    { projectId: "github.com/brosincode/letagents", prUrl: "https://github.com/BrosInCode/letagents/pull/88" },
+  ]);
+});
+
+test("a review request event matches a task through its PR workflow artifact", async () => {
+  const task = makeTask("task_9");
+  const { resolver } = createHarness({ artifactTask: task });
+
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, makeParticipantEvent({
+    action: "assigned",
+    participant: {
+      role: "assignee",
+      change: "added",
+      login: "katrin",
+      github_user_id: "424242",
+      team_slug: null,
+      team_name: null,
+    },
+  } as Partial<RepoRoomEvent>));
+
+  assert.equal(resolution.task, task);
+  assert.equal(resolution.matchedByWorkflowArtifact, true);
+});
+
+test("a review request event has the PR match and no task projection, so it cannot change a task", () => {
+  const event = makeParticipantEvent();
+
+  assert.deepEqual(
+    buildRepoRoomEventArtifactMatches(event).map((match) => match.kind),
+    buildRepoRoomEventArtifactMatches(makePullRequestEvent({
+      pullRequest: (event as Extract<RepoRoomEvent, { kind: "pull_request_participant" }>).pullRequest,
+    })).map((match) => match.kind),
+  );
+  // No lease or coordination decision: the workflow ref is null, so the webhook projection skips the lease check.
+  assert.equal(getPullRequestWorkflowRef(event), null);
+  // No status change: the board projection ignores the kind.
+  for (const currentStatus of ["accepted", "in_progress", "in_review", "done"] as const) {
+    assert.equal(projectRepoRoomEvent({ event, currentStatus }), null);
+  }
 });
