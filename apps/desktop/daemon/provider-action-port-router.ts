@@ -21,7 +21,7 @@ import type {
   ProviderActionTerminal,
   ProviderTurnControlResult,
 } from "./provider-action-port.js";
-import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
@@ -573,12 +573,18 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const remembered = this.required(handle);
     const continuation = handle.providerContinuationId;
     const connection = structuredClone(handle.providerConnection);
-    if (!sameProviderActionConnectionIdentity(remembered.handle.providerConnection, connection)
+    // Cursor keeps its session between turns without a live process. Reading
+    // that exact idle lane needs stable state, not evidence of process life.
+    // Other providers and running Cursor turns still require a process birth.
+    const sameConnection = remembered.provider === "cursor" && connection?.kind === "cursor_cli"
+      && connection.pid === null && connection.processIdentity == null
+      ? sameProviderActionConnectionSnapshot : sameProviderActionConnectionIdentity;
+    if (!sameConnection(remembered.handle.providerConnection, connection)
       || this.exits.get(remembered.handle)?.exited) return null;
     const usage = await remembered.adapter.readUsage?.(remembered.handle) ?? null;
     const current = this.handles.get(handle.workAttemptId);
     return current === remembered && current.handle?.providerContinuationId === continuation
-      && sameProviderActionConnectionIdentity(current.handle.providerConnection, connection)
+      && sameConnection(current.handle.providerConnection, connection)
       && !this.exits.get(remembered.handle)?.exited && usage?.providerContinuationId === continuation ? usage : null;
   }
 
