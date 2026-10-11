@@ -52,6 +52,9 @@ test("materializeGitHubWebhookEvent maps pull_request_review into a persisted ro
   assert.equal(event?.state, "approved");
   assert.deepEqual(event?.metadata, {
     body: "Looks good",
+    review_id: "9001",
+    review_submitted_at: null,
+    review_commit_id: "abc123def456",
     dismissed_by_login: null,
     head_ref: "codex/review-context",
     head_sha: "abc123def456",
@@ -127,6 +130,9 @@ test("materializeGitHubWebhookEvent maps dismissed review to original reviewer",
   assert.equal(event?.actor_login, "reviewer");
   assert.deepEqual(event?.metadata, {
     body: "Old blocker",
+    review_id: "9001",
+    review_submitted_at: null,
+    review_commit_id: null,
     dismissed_by_login: "maintainer",
     head_ref: null,
     head_sha: null,
@@ -605,4 +611,66 @@ test("materializeGitHubWebhookEvent distinguishes repeated installation actions 
   assert.ok(first);
   assert.ok(second);
   assert.notEqual(first?.idempotency_key, second?.idempotency_key);
+});
+
+test("Activity workflow events retain attempts and PR ownership without task/chat effects", () => {
+  const payload = {
+    action: "in_progress", repository: { id: 1, full_name: "BrosInCode/letagents", name: "letagents", owner: { login: "BrosInCode" } },
+    workflow_run: { id: 901, run_attempt: 2, name: "CI", html_url: "https://github.com/BrosInCode/letagents/actions/runs/901", status: "in_progress", conclusion: null, head_sha: "merge-sha", head_branch: "codex/activity", head_repository: {id: 1, full_name: "BrosInCode/letagents"}, updated_at: "2026-10-11T10:00:00Z", pull_requests: [{ number: 42, head: { sha: "pr-head" } }] },
+  };
+  const run = materializeGitHubWebhookEvent("workflow_run", payload, "run-1");
+  assert.ok(run);
+  assert.equal(run.roomEvent, null);
+  assert.equal(run.routingEvent?.kind, "pull_request");
+  assert.equal(run.metadata?.pull_request_number, 42);
+  assert.equal(run.metadata?.run_attempt, 2);
+  assert.equal(run.metadata?.pull_request_head_sha, "pr-head");
+  const job = materializeGitHubWebhookEvent("workflow_job", { ...payload, workflow_job: {id: 19, run_id: 901, run_attempt: 1, name: "build", html_url: "https://github.com/BrosInCode/letagents/actions/runs/901/job/19", status: "in_progress", conclusion: null, head_sha: "merge-sha", started_at: "2026-10-11T09:00:00Z"} }, "job-1");
+  assert.equal(job?.metadata?.run_attempt, 1, "late job keeps its own attempt, not the API's current attempt");
+  assert.equal(job?.metadata?.job_id, "19");
+  assert.equal(job?.roomEvent, null);
+});
+
+test("Activity review comments and thread state carry identity, never comment contents", () => {
+  const payload = {
+    action: "created", repository: { id: 1, full_name: "BrosInCode/letagents", name: "letagents", owner: { login: "BrosInCode" } },
+    pull_request: { number: 42, title: "Activity", html_url: "https://github.com/BrosInCode/letagents/pull/42", head: {ref: "codex/activity", sha: "abc"} },
+    comment: { id: 17, pull_request_review_id: 12, body: "PRIVATE COMMENT", html_url: "https://github.com/BrosInCode/letagents/pull/42#discussion_r17", updated_at: "2026-10-11T10:00:00Z", user: {login: "reviewer"} },
+  };
+  const comment = materializeGitHubWebhookEvent("pull_request_review_comment", payload, "comment-1");
+  assert.equal(comment?.metadata?.review_id, "12");
+  assert.equal(comment?.metadata?.comment_id, "17");
+  assert.equal(comment?.roomEvent, null);
+  assert.ok(!JSON.stringify(comment).includes("PRIVATE COMMENT"));
+  const threadPayload = {...payload, comment: undefined, action: "resolved", thread: {node_id: "PRRT_17", comments: [{id:17,pull_request_review_id:12,body:"PRIVATE THREAD"}]} };
+  const thread = materializeGitHubWebhookEvent("pull_request_review_thread", threadPayload, "thread-1");
+  assert.equal(thread?.metadata?.resolved, true);
+  assert.equal(thread?.metadata?.thread_id, "PRRT_17");
+  assert.ok(!JSON.stringify(thread).includes("PRIVATE THREAD"));
+  assert.notEqual(thread?.semantic_id, materializeGitHubWebhookEvent("pull_request_review_thread", threadPayload, "thread-2")?.semantic_id, "resolution can cycle without a provider timestamp");
+});
+
+test("workflow jobs resolve their run before routing and reject mismatched identities", async () => {
+  const { enrichWorkflowJob } = await import("../github/workflow-activity.js");
+  const payload = {action:"queued", installation:{id:2}, repository:{id:1,full_name:"BrosInCode/letagents",name:"letagents",owner:{login:"BrosInCode"}},workflow_job:{id:19,run_id:901,run_attempt:1,name:"build",html_url:"https://github.com/BrosInCode/letagents/actions/runs/901/job/19",status:"queued",conclusion:null,head_sha:"sha"}};
+  const run = {id:901,run_attempt:1,name:"CI",html_url:"https://github.com/BrosInCode/letagents/actions/runs/901",status:"queued",conclusion:null,head_sha:"sha",repository:{id:1,full_name:"BrosInCode/letagents"},pull_requests:[{number:42}]};
+  const enriched = await enrichWorkflowJob(payload, async (repo, id, installation) => {assert.equal(repo,"BrosInCode/letagents");assert.equal(id,901);assert.equal(installation,"2");return run;});
+  assert.equal(enriched.workflow_run?.pull_requests?.[0].number,42);
+  await assert.rejects(enrichWorkflowJob(payload,async()=>({...run,head_sha:"different"})), /identity mismatch/);
+  await assert.rejects(enrichWorkflowJob(payload,async()=>({...run,repository:{...run.repository,id:22}})), /identity mismatch/);
+});
+
+
+test("dismissing an old review orders by receipt while retaining original review time", () => {
+  const event=materializeGitHubWebhookEvent("pull_request_review", {action:"dismissed",repository:{id:1,full_name:"BrosInCode/letagents",name:"letagents",owner:{login:"BrosInCode"}},pull_request:{number:42,title:"Activity",html_url:"https://github.com/BrosInCode/letagents/pull/42"},review:{id:9,state:"dismissed",submitted_at:"2026-09-01T10:00:00Z",html_url:"https://github.com/BrosInCode/letagents/pull/42#pullrequestreview-9"}},"dismiss-now");
+  assert.equal(event?.provider_event_at,null);
+  assert.equal(event?.provider_object_updated_at,null);
+  assert.equal(event?.metadata?.review_submitted_at,"2026-09-01T10:00:00.000Z");
+});
+
+
+test("native review dismissal uses updated_at instead of the old submission", () => {
+  const event=materializeGitHubWebhookEvent("pull_request_review", {action:"dismissed",repository:{id:1,full_name:"BrosInCode/letagents",name:"letagents",owner:{login:"BrosInCode"}},pull_request:{number:42,title:"Activity",html_url:"https://github.com/BrosInCode/letagents/pull/42"},review:{id:9,state:"dismissed",submitted_at:"2026-09-01T10:00:00Z",updated_at:"2026-10-11T10:00:00Z",html_url:"https://github.com/BrosInCode/letagents/pull/42#pullrequestreview-9"}},"dismiss-now-native");
+  assert.equal(event?.provider_event_at,"2026-10-11T10:00:00.000Z");
+  assert.equal(event?.metadata?.review_submitted_at,"2026-09-01T10:00:00.000Z");
 });

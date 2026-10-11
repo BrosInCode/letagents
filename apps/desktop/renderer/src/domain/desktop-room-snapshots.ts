@@ -350,8 +350,8 @@ export function messageReferencesMissingThreadContext(
 }
 
 function compareDesktopGitHubEvents(left: DesktopGitHubRoomEvent, right: DesktopGitHubRoomEvent): number {
-  const leftTime = Date.parse(left.createdAt || "");
-  const rightTime = Date.parse(right.createdAt || "");
+  const leftTime = Date.parse(left.eventOrderAt || left.createdAt || "");
+  const rightTime = Date.parse(right.eventOrderAt || right.createdAt || "");
   if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
     return rightTime - leftTime;
   }

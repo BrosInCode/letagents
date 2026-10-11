@@ -1236,7 +1236,7 @@ const tabs = computed<RoomTab[]>(() => {
   if (showEventsTab.value) {
     nextTabs.push({
       id: "events",
-      label: "Events",
+      label: "Activity",
       count: null,
       indicator: eventsUnseenCount.value > 0 && activeTab.value !== "events"
         ? {
