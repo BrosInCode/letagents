@@ -102,6 +102,7 @@ export function useRoomMessageMotion(options: {
   following: () => boolean;
   scrollToLatest: () => void;
   onInterrupt?: () => void;
+  onOwnSend?: () => void;
 }) {
   const send = injectRoomMessageMotion();
   const animator = createRoomMessageAnimator(() => options.element.value, () => options.work?.value ?? null);
@@ -127,6 +128,7 @@ export function useRoomMessageMotion(options: {
       if (source) sends.set(message.id, source);
     }
     if (!appended.length && !sends.size) return;
+    if (sends.size) options.onOwnSend?.();
     const element = options.element.value;
     const following = options.following();
     // Capture the current presentation before cancelling a previous flight, so

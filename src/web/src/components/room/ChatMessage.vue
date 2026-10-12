@@ -37,7 +37,7 @@
       <slot name="thread" />
     </div>
     <div v-else class="message-body">
-      <MessageMeta
+      <MessageMeta v-if="!githubHistory"
         :display-name="displayName"
         :owner-attribution="senderRole?.endsWith('agent') ? identity.ownerAttribution : null"
         :provenance-badge="provenanceBadge"
@@ -80,6 +80,7 @@
         <GitHubEventCard
           v-if="githubEvent"
           :history="githubHistory"
+          :timestamp="message.timestamp"
           room
           :event="githubEvent"
           :taskLinkEnabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
@@ -919,7 +920,7 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 </style>
 
 <style scoped>
-.message.is-github-history { display: block; width: 100%; padding: 8px 4px 10px 0; border-bottom: 1px solid var(--border); }
+.message.is-github-history { display: block; width: 100%; padding: 0 4px 0 0; border-bottom: 1px solid var(--border); }
 .message.is-github-history > .message-avatar { display: none; }
 .message.is-github-history > .message-body { width: 100%; }
 .message.is-github-history :deep(.message-meta) { min-height: 20px; margin-bottom: 3px; }

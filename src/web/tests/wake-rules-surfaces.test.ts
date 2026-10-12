@@ -57,7 +57,7 @@ test('the agent detail shows its wake rules and opens the wake message in the ch
   assert.match(tabPanels, /:revealMessageId="revealMessageId"/)
   assert.match(tabPanels, /@revealed="handleMessageRevealed"/)
   assert.match(roomPage, /@openChat="handleActiveTabChange\('chat'\)"/)
-  // The chat reveals the message after its own first scroll to the bottom.
-  assert.match(messageList, /scrollToBottom\('instant'\)\s*setupReadObserver\(\)\s*initialScrollSettled = true\s*revealRequestedMessage\(\)/)
+  // The chat reveals the message after restoring the room reading position.
+  assert.match(messageList, /restorePosition\(\)\s*setupReadObserver\(\)\s*initialScrollSettled = true\s*revealRequestedMessage\(\)/)
   assert.match(messageList, /MAX_REVEAL_OLDER_PAGES = 20/)
 })

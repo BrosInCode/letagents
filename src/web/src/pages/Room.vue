@@ -61,6 +61,7 @@
       :messagesHasOlder="messagesHasOlder"
       :messagesLoaded="messagesLoaded"
       :isLoadingOlderMessages="isLoadingOlderMessages"
+        :olderMessagesError="olderMessagesError"
       :tasks="tasks"
       :focusRooms="focusRooms"
       :presence="presence"
@@ -212,6 +213,7 @@ const {
   messagesHasOlder,
   messagesLoaded,
   isLoadingOlderMessages,
+  olderMessagesError,
   tasks,
   focusRooms,
   presence,

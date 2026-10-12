@@ -123,7 +123,7 @@
       :correctable-agents="correctableAgents"
       :search-query="searchQuery"
       :active-search-message-id="activeSearchMessageId"
-      :initial-scroll-top="initialChatScrollTop ?? null"
+      :initial-scroll-position="initialChatScrollPosition ?? null"
       @send-message="sendRoomMessage"
       @discard-attachment="discardAttachment"
       @load-older="loadOlderMessages"
@@ -318,6 +318,7 @@
 </template>
 
 <script setup lang="ts">
+import type { ChatScrollPosition } from "../../../domain/chat-scroll";
 import { roomAgentRecoveryAction } from "../../../domain/room-agent-delivery";
 import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowReadonly, toRef, watch } from "vue";
@@ -527,7 +528,7 @@ const props = defineProps<{
   notificationRevealNonce?: number;
   attentionIntent?: AttentionNavigationIntent | null;
   attention?: { count: number; pulse: boolean };
-  initialChatScrollTop?: number | null;
+  initialChatScrollPosition?: ChatScrollPosition | null;
   onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
 const { pushActionToast } = useDesktopActionToasts();
@@ -542,7 +543,7 @@ const emit = defineEmits<{
   "refresh-room": [snapshot?: DesktopRoomSnapshot];
   "open-focus-room": [roomIdentifier: string];
   "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
-  "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
+  "chat-scroll-position": [roomIdentifier: string, scrollTop: ChatScrollPosition];
   "connect-project": [];
   "choose-worktree": [rootPath: string];
   "open-repo-root": [rootPath: string];
@@ -1218,7 +1219,7 @@ async function reconcilePendingRetirementFromDurableState(snapshot: DesktopSuper
   }
 }
 
-function rememberChatScrollPosition(scrollTop: number): void {
+function rememberChatScrollPosition(scrollTop: ChatScrollPosition): void {
   emit("chat-scroll-position", props.room.identifier, scrollTop);
 }
 

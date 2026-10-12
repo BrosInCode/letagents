@@ -33,7 +33,7 @@
     <div v-else class="room-chat-avatar" :style="{ '--avatar-color': senderColor }" aria-hidden="true" />
 
     <div class="room-chat-message-content">
-      <div class="room-message-meta">
+      <div v-if="!githubHistory" class="room-message-meta">
         <div class="room-message-author-block">
           <button
             v-if="ownerKind === 'agent'"
@@ -132,6 +132,7 @@
         <DesktopGitHubEventCard
           v-if="githubEvent"
           :history="githubHistory"
+          :timestamp="message.timestamp"
           room
           :event="githubEvent"
           :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"

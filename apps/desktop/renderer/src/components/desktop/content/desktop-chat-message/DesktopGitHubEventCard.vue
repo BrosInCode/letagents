@@ -4,6 +4,7 @@
     :event="event"
     :compact="compact"
     :history="history"
+    :timestamp="timestamp"
     :room="room"
     :task-link-enabled="taskLinkEnabled"
     show-event-link
@@ -25,6 +26,7 @@ defineProps<{
   event: GitHubEventPresentation;
   taskLinkEnabled?: boolean;
   room?: boolean
+  timestamp?: string
   history?: boolean
   compact?: boolean;
 }>();

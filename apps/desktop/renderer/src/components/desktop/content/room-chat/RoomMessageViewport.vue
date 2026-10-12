@@ -1,7 +1,7 @@
 <template>
   <div class="room-message-viewport" data-testid="room-chat-viewport">
     <div class="room-message-scroll">
-    <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll" @scrollend="finishMessageReveal">
+    <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @wheel.passive="cancelInitialRestore" @touchstart.passive="cancelInitialRestore" @pointerdown="cancelInitialRestore" @keydown="cancelInitialRestore" @scroll="handleScroll" @scrollend="finishMessageReveal">
       <p v-if="olderMessagesError" role="status" class="room-load-older-error">{{ olderMessagesError }}</p>
       <button
         v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages"
@@ -179,6 +179,7 @@
 </template>
 
 <script setup lang="ts">
+import type { ChatScrollPosition } from "../../../../domain/chat-scroll";
 import RoomGitHubUpdates from "../../../../../../../../shared/ui/RoomGitHubUpdates.vue";
 import { createGitHubTimeline } from "../../../../../../../../shared/grouped-github-updates";
 import { parseGitHubEvent } from "../desktop-chat-message/github-event";
@@ -266,7 +267,7 @@ const props = defineProps<{
   roomLoading: boolean;
   searchQuery: string;
   taskReferenceIds: ReadonlySet<string>;
-  initialScrollTop?: number | null;
+  initialScrollPosition?: ChatScrollPosition | null;
 }>();
 
 const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
@@ -285,7 +286,7 @@ const emit = defineEmits<{
   "skip-delivery": [agentId: string, sourceMessageId: string];
   "reveal-message": [messageId: string];
   "quote-selection": [messageId: string, text: string];
-  "scroll-position": [scrollTop: number];
+  "scroll-position": [position: ChatScrollPosition];
   "open-github-event": [url: string];
   "open-task": [taskId: string];
 }>();
@@ -349,6 +350,8 @@ function followLatestAfterLayout(): void {
     if (revision === scrollRevision && props.active && messagesElement.value?.scrollTop === top) jumpToBottom();
   });
 }
+let restoreRequestedBefore: string | undefined;
+let restorePagesRequested = 0;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
 let shouldJumpToLatestOnActivate = false;
@@ -426,6 +429,7 @@ watch(
       }
       return;
     }
+    if (shouldRestoreInitialScroll && restoreInitialScrollPosition()) return;
     if (isPrepend && messagesElement.value) {
       if (!restoreScrollAnchor(prependAnchor)) {
         setInstantScrollTop(
@@ -474,6 +478,7 @@ const messageMotion = useRoomMessageMotion({
   // Loading older history must not disable navigation for a new own send.
   // The motion watcher independently excludes prepended/historical messages.
   ready: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll,
+  onOwnSend: () => { if (props.active && !props.roomLoading) cancelInitialRestore(); },
   following: () => isScrolledToBottom,
   scrollToLatest: () => scrollToBottom("auto"),
   messages: motionMessages,
@@ -668,13 +673,15 @@ watch(
     isScrolledFarUp.value = false;
     isScrolledToBottom = false;
     hasAppliedInitialScroll = false;
+    restorePagesRequested = 0;
+    restoreRequestedBefore = undefined;
     shouldRestoreInitialScroll = hasInitialScrollPosition();
     shouldJumpToLatestOnActivate = false;
     shouldRestoreKeepAliveScroll = false;
     autoViewportBackfillCount.value = 0;
     cancelAutoFillViewport();
     void nextTick(() => {
-      if (!restoreInitialScrollPosition()) {
+      if (!hasAppliedInitialScroll && !restoreInitialScrollPosition()) {
         scrollToBottom("auto");
       }
     });
@@ -682,12 +689,15 @@ watch(
 );
 
 watch(
-  () => props.initialScrollTop,
+  () => props.initialScrollPosition,
   () => {
     if (hasAppliedInitialScroll) return;
     shouldRestoreInitialScroll = hasInitialScrollPosition();
   },
 );
+
+watch(() => [props.roomLoading, props.loadingOlderMessages, props.olderMessagesError, props.messages.length],
+  () => { if (shouldRestoreInitialScroll) void nextTick(restoreInitialScrollPosition); }, { flush: "post" });
 
 // Reactions or previews appearing under a message make the list taller without a
 // new message. A reader at the newest message stays there.
@@ -714,8 +724,9 @@ function keepLatestInViewOnResize(): void {
 
 onMounted(() => {
   void nextTick(() => {
-    if (!restoreInitialScrollPosition()) {
-      updateScrollState();
+    if (!hasAppliedInitialScroll && !restoreInitialScrollPosition()) {
+      if (props.messages.length && !props.roomLoading) scrollToBottom("auto");
+      else updateScrollState();
     }
     scheduleAutoFillViewport();
   });
@@ -840,7 +851,7 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   unreadTimeline.programmaticScroll();
   if (!messagesElement.value) return;
   // Choosing latest settles initial navigation too. The parent feeds our live
-  // scroll reports back as initialScrollTop; they must not re-arm restoration.
+  // scroll reports back as initialScrollPosition; they must not re-arm restoration.
   hasAppliedInitialScroll = true;
   shouldRestoreInitialScroll = false;
   cancelMessageReveal();
@@ -873,7 +884,14 @@ function jumpToBottom(): void {
   emitScrollPosition();
 }
 
+function cancelInitialRestore(): void {
+  if (!shouldRestoreInitialScroll) return;
+  shouldRestoreInitialScroll = false;
+  hasAppliedInitialScroll = true;
+}
+
 function handleScroll(): void {
+  if (shouldRestoreInitialScroll) return;
   scrollRevision++;
   cancelMessageRevealFrame();
   if (messagesElement.value?.scrollTop !== layoutRestoredScrollTop) cancelLayoutAnchorRestore();
@@ -934,42 +952,47 @@ function updateScrollState(): void {
 
 function restoreInitialScrollPosition(): boolean {
   if (hasAppliedInitialScroll || !shouldRestoreInitialScroll || !messagesElement.value) return false;
-  const scrollTop = props.initialScrollTop;
-  if (typeof scrollTop !== "number" || !Number.isFinite(scrollTop)) return false;
-  if (!props.messages.length) return false;
+  const position = props.initialScrollPosition;
+  if (position === null || position === undefined) return false;
   const element = messagesElement.value;
-  const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
-  if (scrollTop > maxScrollTop + 24) {
-    hasAppliedInitialScroll = true;
-    shouldRestoreInitialScroll = false;
-    return false;
+  // Loading/hidden viewports must not consume the saved position or publish 0.
+  if (props.roomLoading || !props.messages.length || !isMeasurableScrollViewport(element)) return true;
+  const bookmark = position;
+  if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
+    && props.hasOlderMessages && !props.olderMessagesError && restorePagesRequested < 20) {
+    if (!props.loadingOlderMessages && restoreRequestedBefore !== props.messages[0]?.id) {
+      restoreRequestedBefore = props.messages[0]?.id; restorePagesRequested++; emit("load-older");
+    }
+    return true;
   }
-  setInstantScrollTop(element, Math.max(0, Math.min(scrollTop, maxScrollTop)));
   hasAppliedInitialScroll = true;
   shouldRestoreInitialScroll = false;
+  if (bookmark.latest) { jumpToBottom(); return true; }
+  if (bookmark.anchor && restoreScrollAnchor(bookmark.anchor)) return true;
+  const max = Math.max(0, element.scrollHeight - element.clientHeight);
+  // A remembered offset can exceed a fresh bounded page; never strand at top.
+  setInstantScrollTop(element, Math.max(0, Math.min(bookmark.top, max)));
   updateScrollState();
   emitScrollPosition();
   return true;
 }
 
 function hasInitialScrollPosition(): boolean {
-  const scrollTop = props.initialScrollTop;
-  return typeof scrollTop === "number" && Number.isFinite(scrollTop);
+  const position = props.initialScrollPosition;
+  return Boolean(position);
 }
 
 function emitScrollPosition(): void {
   const element = messagesElement.value;
-  if (!element) return;
+  if (!element || !isMeasurableScrollViewport(element) || props.roomLoading || shouldRestoreInitialScroll) return;
   lastKnownScrollTop = element.scrollTop;
-  if (props.active && element.isConnected && element.clientHeight > 0) {
-    lastKnownScrollAnchor = captureScrollAnchor();
-  }
-  emit("scroll-position", element.scrollTop);
+  lastKnownScrollAnchor = captureScrollAnchor();
+  emit("scroll-position", { top: element.scrollTop, latest: isScrolledToBottom, anchor: lastKnownScrollAnchor });
 }
 
 function rememberScrollAnchor(): void {
   const element = messagesElement.value;
-  if (!element) return;
+  if (!element || !isMeasurableScrollViewport(element)) return;
   const nextAnchor = captureScrollAnchor();
   if (nextAnchor) {
     lastKnownScrollAnchor = nextAnchor;
@@ -1057,11 +1080,18 @@ function captureScrollAnchor(): ScrollAnchor | null {
   };
 }
 
+function findScrollAnchor(messageId: string): HTMLElement | null {
+  getAnchorElements();
+  // Prepending a page can place this original inside a group whose stable anchor
+  // belongs to the newer page. Restore the containing group, not its hidden row.
+  return anchorElementsById.get(messageId)
+    || messagesElement.value?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(messageId)}"]`)?.closest<HTMLElement>('.room-github-updates') || null;
+}
+
 function restoreScrollAnchor(anchor: ScrollAnchor | null): boolean {
   const element = messagesElement.value;
   if (!element || !anchor || !isMeasurableScrollViewport(element)) return false;
-  getAnchorElements();
-  const anchorElement = anchorElementsById.get(anchor.messageId);
+  const anchorElement = findScrollAnchor(anchor.messageId);
   if (!anchorElement) return false;
   const viewportTop = element.getBoundingClientRect().top;
   const nextOffsetTop = anchorElement.getBoundingClientRect().top - viewportTop;
@@ -1105,6 +1135,7 @@ function revealOrScrollToMessage(messageId: string | null): void {
 }
 
 function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "smooth", historyReady = false): boolean {
+  cancelInitialRestore();
   messageMotion.cancel();
   unreadTimeline.programmaticScroll();
   if (!messageId || !messagesElement.value) return false;

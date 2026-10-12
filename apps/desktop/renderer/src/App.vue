@@ -195,7 +195,7 @@
           :notification-reveal-nonce="notificationRevealNonce"
           :attention-intent="attentionIntent"
           @attention-opened="attentionIntent = null"
-          :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
+          :initial-chat-scroll-position="chatScrollPositionForRoom(selectedRoomInfo.identifier)"
           :on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"
           @chat-scroll-position="rememberChatScrollPosition"
           @message-sent="handleOwnMessageSent"
@@ -381,6 +381,7 @@
 </template>
 
 <script setup lang="ts">
+import type { ChatScrollPosition } from "./domain/chat-scroll";
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
 import { invalidateRoomWakeRules } from "./composables/useRoomWakeRules";
@@ -569,7 +570,7 @@ const sidebarWidth = ref(readStoredSidebarWidth());
 const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
 const isSidebarResizing = ref(false);
 const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
-const chatScrollTopByRoom = ref<Record<string, number>>({});
+const chatScrollPositionsByRoom = ref<Record<string, ChatScrollPosition>>({});
 const loadingChatScrollRoomIdentifiers = ref<Set<string>>(new Set());
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
@@ -2521,7 +2522,7 @@ function handleRoomMessageRevealUnavailable(_messageId: string, reason?: "not_fo
   }
 }
 
-function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): void {
+function rememberChatScrollPosition(roomIdentifier: string, position: ChatScrollPosition): void {
   const storageKey = chatScrollPositionKey(roomIdentifier) || roomIdentifier;
   if (!shouldRememberChatScrollPosition({
     roomIdentifier,
@@ -2531,18 +2532,18 @@ function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): 
   })) {
     return;
   }
-  chatScrollTopByRoom.value = {
-    ...chatScrollTopByRoom.value,
-    [storageKey]: scrollTop,
+  chatScrollPositionsByRoom.value = {
+    ...chatScrollPositionsByRoom.value,
+    [storageKey]: position,
   };
 }
 
-function chatScrollTopForRoom(roomIdentifier: string): number | null {
+function chatScrollPositionForRoom(roomIdentifier: string): ChatScrollPosition | null {
   const storageKey = chatScrollPositionKey(roomIdentifier);
-  if (storageKey && chatScrollTopByRoom.value[storageKey] !== undefined) {
-    return chatScrollTopByRoom.value[storageKey];
+  if (storageKey && chatScrollPositionsByRoom.value[storageKey] !== undefined) {
+    return chatScrollPositionsByRoom.value[storageKey];
   }
-  return chatScrollTopByRoom.value[roomIdentifier] ?? null;
+  return chatScrollPositionsByRoom.value[roomIdentifier] ?? null;
 }
 
 function rememberLoadingChatScrollRoom(roomIdentifier: string | null | undefined): void {
