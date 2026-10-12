@@ -103,6 +103,15 @@ async function standIn(t: TestContext): Promise<StandIn> {
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
       const url = String(request.url);
+      if (request.method === "GET" && url.endsWith("/api/codex/accounts/check")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ accounts: [{
+          id: "made-up-account", name: "Synthetic workspace", plan_type: "plus",
+          workspace_backend_origin: "https://codex-check.letagents.invalid",
+          account_routing_override: "NO_CONSTRAINT",
+        }] }));
+        return;
+      }
       if (request.method === "POST" && url.endsWith("/oauth/token")) {
         service.refreshes += 1;
         response.writeHead(200, { "content-type": "application/json" });

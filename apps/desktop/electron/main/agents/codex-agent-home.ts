@@ -296,6 +296,18 @@ export async function checkCodexKeepsLinkedSignIn(codexBin: string, env: NodeJS.
   const listener = createServer((request, response) => {
     request.resume();
     request.on("end", () => {
+      // Recent Codex versions discover workspace routing during account/read.
+      // This is synthetic account metadata only; the proxy still refuses all
+      // tunnels, including requests to this deliberately non-existent origin.
+      if (request.method === "GET" && String(request.url).endsWith("/api/codex/accounts/check")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ accounts: [{
+          id: "letagents-check", name: "LetAgents sign-in check", plan_type: "plus",
+          workspace_backend_origin: "https://codex-check.letagents.invalid",
+          account_routing_override: "NO_CONSTRAINT",
+        }] }));
+        return;
+      }
       const refresh = request.method === "POST" && String(request.url).endsWith("/oauth/token");
       response.statusCode = refresh ? 200 : 404;
       response.setHeader("content-type", "application/json");

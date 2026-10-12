@@ -4852,6 +4852,9 @@ test("Codex app-server launcher uses the managed worktree as its process cwd", a
 
   const launch = launchCodexAppServer("ws://127.0.0.1:1", bin, {
     trustedProjectPath: tempDir,
+    // A native macOS SSH socket shares /private/ with the worktree path;
+    // credential-prefix redaction would hide that part of this cwd fixture.
+    env: { SSH_AUTH_SOCK: undefined },
   });
   const exit = await waitForCodexLaunchExitForTest(launch);
 
