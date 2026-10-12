@@ -215,6 +215,7 @@
         </svg>
         <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
       </button>
+      <RoomGifPicker :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending" @select="selectedGif = $event" />
       <button
         class="desktop-composer-send"
         type="submit"
@@ -227,6 +228,7 @@
         <ArrowUp v-else :size="17" aria-hidden="true" />
       </button>
     </div>
+    <div v-if="selectedGif" class="desktop-composer-gif-draft">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
     <DesktopAttachmentDrafts
       :attachments="attachmentDrafts"
       :pending-attachments="pendingAttachmentDrafts"
@@ -268,6 +270,8 @@
 </template>
 
 <script setup lang="ts">
+import type { RoomGif } from "../../../../../../../../shared/room-expressions.mjs";
+
 import { injectRoomMessageMotion } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import { useComposerSlashCommands } from "../../../../../../../../shared/ui/useComposerSlashCommands";
 import { roomSearchCommandKey } from "../room-shell/useDesktopRoomSearch";
@@ -289,6 +293,7 @@ import { decideHostApproval, hostApprovalIdentity, hostApprovalRoom, refreshHost
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
+import RoomGifPicker from "./RoomGifPicker.vue";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
 import RoomPresenceChips from "./RoomPresenceChips.vue";
 import type { PresenceChip } from "../../../../domain/presence-chips";
@@ -333,6 +338,7 @@ const props = defineProps<{
   active?: boolean;
 }>();
 
+const selectedGif = ref<RoomGif | null>(null);
 const emit = defineEmits<{
   "clear-reply": [];
   "pick-attachments": [];
@@ -343,7 +349,7 @@ const emit = defineEmits<{
     approval: ManagedAgentPermissionApproval,
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
   ];
-  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
+  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "open-event-preview": [event: ComposerEventPreview];
   "dismiss-event-preview": [messageId: string];
   "stop-agent-turn": [agentId: string, approvalId: string];
@@ -525,12 +531,12 @@ watch(hostApprovals, (approvals) => {
 });
 
 const canSend = computed(() =>
-  Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0))
+  Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0))
 );
 // A correction is plain text for one agent's private session, so a reply,
 // a quote or attachments keep the message a room message.
 const correctionOffer = computed(() =>
-  props.correctableAgents?.length && !props.replyTo
+  props.correctableAgents?.length && !props.replyTo && !selectedGif.value
     && props.attachmentDrafts.length === 0 && props.pendingAttachmentDrafts.length === 0
     ? mentionedCorrectionTarget(draft.value, props.correctableAgents)
     : null);
@@ -562,7 +568,7 @@ const slash = useComposerSlashCommands({
   text: draft,
   platform: "desktop",
   scope: () => props.messageNamespace || props.roomIdentifier,
-  hasAttachments: () => props.attaching || props.attachmentDrafts.length > 0 || props.pendingAttachmentDrafts.length > 0,
+  hasAttachments: () => Boolean(selectedGif.value) || props.attaching || props.attachmentDrafts.length > 0 || props.pendingAttachmentDrafts.length > 0,
   isReply: () => Boolean(props.replyTo),
   focus: () => { void nextTick(() => textareaElement.value?.focus()); },
   onError: () => pushActionToast("Command could not be completed. Your draft is still here.", "error"),
@@ -641,10 +647,12 @@ async function submitMessage(): Promise<void> {
 }
 
 const messageMotion = injectRoomMessageMotion();
+watch(() => props.messageNamespace || props.roomIdentifier, () => { selectedGif.value = null; });
 
 function sendRoomMessage(): void {
   const text = draft.value.trim();
-  if ((!text && props.attachmentDrafts.length === 0) || props.sending) return;
+  if ((!text && !selectedGif.value && props.attachmentDrafts.length === 0) || props.sending) return;
+  const submittedGif = selectedGif.value;
   const replyTarget = props.replyTo;
   const messageText = replyTarget?.isSelection
     ? applySelectedTextQuoteToDraft(text, replyTarget.text, replyTarget.sourceMessageId)
@@ -661,8 +669,10 @@ function sendRoomMessage(): void {
       if (!sent) return;
       typing.stop();
       clearSubmittedText();
+      if (selectedGif.value === submittedGif) selectedGif.value = null;
       void nextTick(() => textareaElement.value?.focus());
     },
+    submittedGif,
   );
 }
 

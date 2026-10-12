@@ -57,6 +57,7 @@ export interface CreateMessageBody {
   reply_to: unknown;
   thread_root_id: unknown;
   attachments: unknown;
+  gif: unknown;
   agent_session_id: string | null;
   agent_session_token: string | null;
   client_message_id: string | null;
@@ -80,6 +81,7 @@ export function parseCreateMessageBody(body: unknown): CreateMessageBody {
     reply_to: record.reply_to,
     thread_root_id: record.thread_root_id,
     attachments: record.attachments,
+    gif: record.gif,
     agent_session_id: optionalStringField(record, "agent_session_id"),
     agent_session_token: optionalStringField(record, "agent_session_token"),
     client_message_id: clientMessageId,

@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../../../shared/room-expressions.mjs";
 import type { Request, Response } from "express";
 
 import type {
@@ -62,7 +63,8 @@ export interface RoomMessageRouteDeps {
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
       thread_root_id?: string | null;
-      attachments?: NormalizedMessageAttachmentReference[];
+      gif?: RoomGif | null;
+    attachments?: NormalizedMessageAttachmentReference[];
       client_message_id?: string | null;
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;

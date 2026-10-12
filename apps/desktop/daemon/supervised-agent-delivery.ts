@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../shared/room-expressions.mjs";
 import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
@@ -92,6 +93,7 @@ export interface SupervisedDeliveryHttp {
     bearer: string;
     text: string;
     clientMessageId: string;
+    gif?: RoomGif | null;
     replyTo: string | null;
     threadRootId: string | null;
     signal: AbortSignal;
@@ -2198,11 +2200,13 @@ export class SupervisedAgentDelivery {
         replyTarget.threadRootId = item.source_message_id;
       }
       if (!await this.hasLaneAuthority(agent, parent)) return false;
+      const gif = await this.inbox.replyGif(item.inbox_item_id);
       const publication = await this.track(controller, this.http.publish({
         roomId: agent.roomId,
         apiUrl: agent.apiUrl,
         bearer: agent.bearer,
         text,
+        ...(gif ? { gif } : {}),
         clientMessageId: item.reply_client_message_id,
         replyTo: replyTarget.replyTo,
         threadRootId: replyTarget.threadRootId,

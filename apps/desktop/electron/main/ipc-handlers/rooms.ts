@@ -1,5 +1,7 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../../../shared/room-expressions.mjs";
 import { createDesktopMessageReminder, getDesktopMessageReminders, deleteDesktopMessageReminder } from "../rooms/reminders.js";
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
+import { getDesktopExpressions, setDesktopExpressions, desktopGiphy } from "../rooms/expressions.js";
 import { getDesktopReplyOrder, setDesktopReplyOrder } from "../rooms/reply-order.js";
 import { getDesktopMessageLinkPreviews } from "../rooms/link-previews.js";
 import { getDesktopMessagePins, setDesktopMessagePin } from "../rooms/pins.js";
@@ -328,8 +330,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       threadRootId?: string | null,
       clientMessageId?: string | null,
       messageNamespace?: string | null,
+      gif?: RoomGif | null,
     ): Promise<DesktopSendRoomMessageResult> => {
-      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId, clientMessageId, messageNamespace);
+      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId, clientMessageId, messageNamespace, gif);
       // Local dispatch is secondary to the saved message acknowledgement.
       // Keep its routing/retry path running without making the user resend.
       void Promise.resolve().then(() =>
@@ -456,6 +459,10 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle("desktop:room:get-conversation-routing", (_event, roomIdentifier: string) => getDesktopConversationRouting(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
+  targetIpcMain.handle("desktop:room:get-expressions", (_event, room: string) => getDesktopExpressions(room));
+  targetIpcMain.handle("desktop:room:set-expressions", (_event, room: string, enabled: boolean) => setDesktopExpressions(room, enabled));
+  targetIpcMain.handle("desktop:room:search-gifs", (_event, room: string, query: string, offset?: number) => desktopGiphy(room, { query, offset }));
+  targetIpcMain.handle("desktop:room:resolve-gif", (_event, room: string, id: string) => desktopGiphy(room, { id }));
   targetIpcMain.handle("desktop:room:get-reply-order", (_event, roomIdentifier: string) => getDesktopReplyOrder(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-reply-order", (_event, roomIdentifier: string, enabled: boolean) => setDesktopReplyOrder(roomIdentifier, enabled));
   targetIpcMain.handle("desktop:room:get-message-link-previews", (_event, roomIdentifier: string, references) => getDesktopMessageLinkPreviews(roomIdentifier, references));

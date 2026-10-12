@@ -1,3 +1,4 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../shared/room-expressions.mjs";
 import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopApi } from "./ipc-types.js";
 
@@ -154,8 +155,9 @@ const api: DesktopApi = {
       threadRootId?: string | null,
       clientMessageId?: string | null,
       messageNamespace?: string | null,
+      gif?: RoomGif | null,
     ) =>
-      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null, clientMessageId ?? null, messageNamespace ?? null),
+      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null, clientMessageId ?? null, messageNamespace ?? null, gif ?? null),
     addTask: (roomIdentifier: string, input) =>
       ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, input),
     updateTask: (roomIdentifier: string, taskId: string, updates) =>
@@ -194,6 +196,10 @@ const api: DesktopApi = {
       };
     },
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-conversation-routing", roomIdentifier, enabled),
+    getExpressions: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-expressions", roomIdentifier),
+    setExpressions: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-expressions", roomIdentifier, enabled),
+    searchGifs: (roomIdentifier: string, query: string, offset?: number) => ipcRenderer.invoke("desktop:room:search-gifs", roomIdentifier, query, offset),
+    resolveGif: (roomIdentifier: string, id: string) => ipcRenderer.invoke("desktop:room:resolve-gif", roomIdentifier, id),
     getReplyOrder: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-reply-order", roomIdentifier),
     setReplyOrder: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-reply-order", roomIdentifier, enabled),
     getMessageLinkPreviews: (roomIdentifier, references) => ipcRenderer.invoke("desktop:room:get-message-link-previews", roomIdentifier, references),

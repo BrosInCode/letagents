@@ -1,3 +1,4 @@
+import { normalizeRoomGif } from "../../../../../shared/room-expressions.mjs";
 import { isHumanAppWrite } from "../../../request/app-session.js";
 import type { Express } from "express";
 
@@ -33,6 +34,8 @@ export function registerCreateMessageRoute(
       const replyToMessageId = deps.parseOptionalReplyToMessageId(body.reply_to);
       const threadRootMessageId = deps.parseOptionalThreadRootMessageId(body.thread_root_id);
       const attachments = normalizeMessageAttachmentReferences(body.attachments);
+      const gif = body.gif == null ? null : normalizeRoomGif(body.gif);
+      if (body.gif != null && !gif) { res.status(400).json({ error: "gif must contain a GIPHY provider and valid ID" }); return; }
       const desktopHumanWrite = isHumanAppWrite(req, sessionCredentials);
       const requiresWorkerSession = !desktopHumanWrite && (req.authKind === "owner_token"
         || req.authKind === "agent_session"
@@ -55,12 +58,12 @@ export function registerCreateMessageRoute(
       if (
         !normalizedSender ||
         typeof text !== "string" ||
-        (!text.trim() && attachments.length === 0 && (!promptKind || promptKind !== "auto"))
+        (!text.trim() && !gif && attachments.length === 0 && (!promptKind || promptKind !== "auto"))
       ) {
         res.status(400).json({ error: "sender and text or attachments are required" });
         return;
       }
-      if (promptKind === "auto" && attachments.length > 0) {
+      if (promptKind === "auto" && (attachments.length > 0 || gif)) {
         res.status(400).json({ error: "auto prompt messages cannot include attachments" });
         return;
       }
@@ -75,6 +78,7 @@ export function registerCreateMessageRoute(
         reply_to: replyToMessageId,
         thread_root_id: threadRootMessageId,
         attachments,
+        ...(gif ? { gif } : {}),
         ...(body.client_message_id ? { client_message_id: body.client_message_id } : {}),
         ...(workerIdentity ? {
           publisher_agent_key: workerIdentity.agent_key,

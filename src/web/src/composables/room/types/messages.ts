@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../../../../shared/room-expressions.mjs"
 export interface MessageReplyReference {
   id: string
   sender: string
@@ -51,6 +52,7 @@ export interface AttachmentUploadTarget {
 }
 
 export interface RoomMessage {
+  gif?: RoomGif | null
   sender_profile?: { login: string; avatar_url: string | null } | null
   id: string
   sender: string

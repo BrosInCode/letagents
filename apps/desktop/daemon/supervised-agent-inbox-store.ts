@@ -1,3 +1,4 @@
+import { normalizeRoomGif, validReplyGifIntent, type RoomGif } from "../../../shared/room-expressions.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { SUPERVISED_READ_ONLY_TOOLS } from "../../../shared/supervised-read-tools.mjs";
 import { PreparedReadStatements } from "./prepared-reads.js";
@@ -871,6 +872,19 @@ export class SupervisedAgentInboxStore {
           AND json_extract(e.request_json,'$.thread_parent_id')=i.source_message_id))
       LIMIT 1`).get(inboxItemId)));
   }
+  /** The last GIF choice for this exact bound turn, never a previous attempt. */
+  async replyGif(inboxItemId: string): Promise<RoomGif | null> {
+    return this.read(async (database) => {
+      const row = database.prepare(`SELECT e.request_json FROM supervised_agent_inbox i
+        JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
+          AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
+        JOIN supervised_agent_effects e ON e.agent_id=b.agent_id AND e.room_id=b.room_id
+          AND e.execution_generation_id=b.origin_execution_generation_id AND e.provider_turn_id=b.provider_turn_id
+        WHERE i.inbox_item_id=? AND e.state='completed' AND e.tool_name='set_reply_gif'
+        ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`).get(inboxItemId) as Row | undefined;
+      return row ? normalizeRoomGif(JSON.parse(String(row.request_json)).gif) : null;
+    });
+  }
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
   }
@@ -1445,6 +1459,7 @@ export class SupervisedAgentInboxStore {
     if (input.tool_name === "set_reply_thread" && requestJson !== "{}") {
       throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
     }
+    if (input.tool_name === "set_reply_gif" && !validReplyGifIntent(input.request)) throw new Error("Invalid GIF reply intent.");
     const expectedMutation = !SUPERVISED_READ_ONLY_TOOLS.has(input.tool_name);
     if (input.mutation !== undefined && input.mutation !== expectedMutation) {
       throw new Error("The supervised effect classification does not match the registered tool policy.");
@@ -1562,7 +1577,7 @@ export class SupervisedAgentInboxStore {
       const binding = this.assertActiveEffectAuthority(database, input);
       const timestamp = this.now();
       const effectId = randomUUID();
-      if (input.tool_name === "set_reply_thread") {
+      if (input.tool_name === "set_reply_thread" || input.tool_name === "set_reply_gif") {
         // Only an observed room message can select a thread. Synthetic initial
         // assignments, corrections and task continuations are not room messages.
         const source = database.prepare(`SELECT i.source_message_id FROM supervised_agent_inbox i
@@ -1570,9 +1585,11 @@ export class SupervisedAgentInboxStore {
             AND o.source_message_id=i.source_message_id
           WHERE i.inbox_item_id=? AND json_extract(i.source_message_json,'$.id')=i.source_message_id`)
           .get(binding.inbox_item_id) as Row | undefined;
-        if (!source) throw new Error("set_reply_thread requires an observed activating room message, not a synthetic turn.");
-        const payload = { code: "REPLY_THREAD_RECORDED", source_message_id: String(source.source_message_id),
-          instruction: "Thread choice recorded. Continue working and finish through your normal final completion; no message has been sent." };
+        if (!source) throw new Error(`${input.tool_name} requires an observed activating room message, not a synthetic turn.`);
+        const payload = { code: input.tool_name === "set_reply_gif" ? "REPLY_GIF_RECORDED" : "REPLY_THREAD_RECORDED", source_message_id: String(source.source_message_id),
+          instruction: input.tool_name === "set_reply_gif"
+            ? "GIF choice recorded. Continue working, then finish with an ordinary reply and meaningful fallback text. No message has been sent. A no_reply outcome sends nothing."
+            : "Thread choice recorded. Continue working and finish through your normal final completion; no message has been sent." };
         const result = serializeEffectJson({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload }, "result");
         // Keep a receipt per request id so reusing any id for a different tool
         // still fails. Existing admission limits bound repeated distinct calls.

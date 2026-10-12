@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../shared/room-expressions.mjs";
 import {
   addMessageWithCreateStatus,
   type AddMessageOptions,
@@ -117,6 +118,7 @@ export async function emitProjectMessage(
     agent_prompt_kind?: AgentPromptKind | null;
     reply_to?: string | null;
     thread_root_id?: string | null;
+    gif?: RoomGif | null;
     attachments?: NormalizedMessageAttachmentReference[];
     client_message_id?: string | null;
     publisher_agent_key?: string | null;
@@ -139,6 +141,7 @@ export async function emitProjectMessage(
     reply_to_message_id: options?.reply_to ?? null,
     thread_root_message_id: options?.thread_root_id ?? null,
     attachments: options?.attachments,
+    gif: options?.gif,
     client_message_id: options?.client_message_id ?? null,
     publisher_agent_key: options?.publisher_agent_key ?? null,
     publisher_agent_session_id: options?.publisher_agent_session_id ?? null,

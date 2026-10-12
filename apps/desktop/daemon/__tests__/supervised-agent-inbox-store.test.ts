@@ -4042,6 +4042,38 @@ test("formal bind and desktop credential installation serialize to the latest ex
   } finally { await env.cleanup(); }
 });
 
+test("GIF intent survives restart, can be replaced or cleared, and never completes a turn", async () => {
+  const env = await fixture();
+  let store = new SupervisedAgentInboxStore(env.database);
+  const authority = { agent_id: "gif-agent", room_id: "room", execution_generation_id: "generation",
+    provider_turn_id: "native-turn", work_attempt_id: "attempt", current_execution_generation_id: "generation",
+    provider_continuation_id: "continuation" };
+  try {
+    const [item] = await store.ingestPoll({ agent_id: authority.agent_id, room_id: "room", last_observed_message_id: "msg_1",
+      messages: [{ source_message_id: "msg_1", source_message: { id: "msg_1", text: "Good work" }, activation: {} }] });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, authority.provider_turn_id, TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, { agentId: authority.agent_id, roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation" });
+    const gif = { provider: "giphy", id: "abc123", title: "Nice work", text_fallback_only: true };
+    const request = { ...authority, mcp_request_id: "gif", tool_name: "set_reply_gif", request: { gif }, mutation: true };
+    await assert.rejects(store.prepareEffect(request, async () => { throw new Error("authority lost"); }), /authority lost/);
+    assert.equal(await store.replyGif(item!.inbox_item_id), null);
+    const first = await store.prepareEffect(request);
+    assert.equal(first.effect.state, "completed");
+    assert.deepEqual(await store.replyGif(item!.inbox_item_id), gif);
+    assert.equal((await store.get(item!.inbox_item_id))!.state, "dispatching");
+    await store.close(); store = new SupervisedAgentInboxStore(env.database);
+    assert.deepEqual(await store.prepareEffect(request), { created: false, effect: first.effect });
+    assert.deepEqual(await store.replyGif(item!.inbox_item_id), gif);
+    await store.prepareEffect({ ...request, mcp_request_id: "clear", request: { gif: null } });
+    assert.equal(await store.replyGif(item!.inbox_item_id), null);
+    await assert.rejects(store.prepareEffect({ ...request, mcp_request_id: "other-room", request: { gif, room_id: "different" } }), /Invalid GIF/);
+    await store.prepareEffect({ ...authority, mcp_request_id: "finish", tool_name: "complete_room_turn", request: { outcome: "no_reply" } });
+    await assert.rejects(store.prepareEffect({ ...request, mcp_request_id: "too-late" }), /already complete/);
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("reply-thread intent commits atomically, deduplicates exact requests and permits later work", async () => {
   const env = await fixture();
   let store = new SupervisedAgentInboxStore(env.database);

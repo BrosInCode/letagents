@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
@@ -37,6 +38,50 @@ async function roomWithMessage(text = 'Shall we ship it?') {
 
 // Twenty distinct emoji plus spares, to reach the per-message limit.
 const DISTINCT = [...MESSAGE_REACTION_QUICK_EMOJI, '🧪', '🧹'];
+
+test('agent reactions are opt-in, stable across sessions, and separate from the owner', options, async () => {
+  const settings = await import('../db/room-settings.js');
+  const { room, number } = await roomWithMessage();
+  const owner = await person('expression-owner', 'Owner');
+  const target = { roomId: room.id, messageNumber: number, accountId: owner.id, emoji: '👍' };
+  const agent = { key: `${owner.login}/worker-one`, name: 'Ada' };
+  assert.equal(await store!.addMessageReaction({ ...target, agent }), 'disabled');
+  assert.equal(await store!.addMessageReaction(target), 'added', 'human reactions keep working when off');
+  await settings.setRoomExpressionsEnabled(room.id, true);
+  assert.equal(await store!.addMessageReaction({ ...target, agent }), 'added');
+  assert.equal(await store!.addMessageReaction({ ...target, agent: { ...agent, name: 'Ada reconnected' } }), 'exists');
+  const reactions = await store!.getMessageReactions(room.id, number);
+  assert.equal(reactions[0].count, 2);
+  assert.deepEqual(reactions[0].reactors.map(r => r.login), [owner.login, `agent:${agent.key}`]);
+  assert.deepEqual(await store!.loadViewerMessageReactions(client!.db, room.id, owner.id, { first: number, last: number }), new Map([[number, ['👍']]]));
+  await store!.removeMessageReaction(target);
+  assert.deepEqual(await store!.loadViewerMessageReactions(client!.db, room.id, owner.id, { first: number, last: number }), new Map());
+  assert.equal((await store!.getMessageReactions(room.id, number))[0].count, 1);
+  await settings.setRoomExpressionsEnabled(room.id, false);
+  assert.equal(await store!.addMessageReaction({ ...target, emoji: '🎉', agent }), 'disabled');
+  assert.equal(await store!.removeMessageReaction({ ...target, agent }), true, 'an agent may remove its own old reaction when off');
+  assert.equal(await store!.removeMessageReaction({ ...target, agent }), false);
+});
+
+test('GIF history and acknowledged retries survive Off, while new GIFs are rejected', options, async () => {
+  const { randomUUID } = await import('node:crypto');
+  const settings = await import('../db/room-settings.js');
+  const { room } = await roomWithMessage();
+  const owner = await person('gif-owner');
+  const gif = { provider: 'giphy' as const, id: 'abc123', title: 'Small win' };
+  const input = { source: 'browser', account_id: owner.id, client_message_id: `desktop-send:${randomUUID()}`, gif };
+  await assert.rejects(rooms!.addMessage(room.id, 'Owner', '', input), /expressions_disabled/);
+  await settings.setRoomExpressionsEnabled(room.id, true);
+  const message = await rooms!.addMessage(room.id, 'Owner', '', input);
+  assert.deepEqual(message.gif, gif);
+  await settings.setRoomExpressionsEnabled(room.id, false);
+  assert.equal((await rooms!.addMessage(room.id, 'Owner', '', input)).id, message.id);
+  assert.deepEqual((await rooms!.getMessageById(room.id, message.id))?.gif, gif);
+  await assert.rejects(rooms!.addMessage(room.id, 'Owner', '', { ...input, client_message_id: `desktop-send:${randomUUID()}` }), /expressions_disabled/);
+  await assert.rejects(rooms!.addMessage(room.id, 'Owner', '', { ...input, gif: { ...gif, id: 'changed' } }), /different content/);
+  const text = await rooms!.addMessage(room.id, 'Owner', 'Still working');
+  assert.equal(text.text, 'Still working');
+});
 
 test('a reaction is added once, read back with the message, and removed', options, async () => {
   const { room, message, number } = await roomWithMessage();
@@ -297,4 +342,37 @@ test('message history and creation expose only the authenticated human publisher
   assert.equal(unknown.sender_profile, null);
   const system = await rooms!.addMessage(room.id, owner.login, 'System notification', { source: 'system', account_id: owner.id });
   assert.equal(system.sender_profile, undefined);
+});
+
+
+test('a GIF replay waiting behind Off returns the concurrently committed original', options, async () => {
+  const settings = await import('../db/room-settings.js');
+  const { room } = await roomWithMessage();
+  const owner = await person('gif-race');
+  await settings.setRoomExpressionsEnabled(room.id, true);
+  const gif = {provider:'giphy' as const,id:'abc123',title:'Small win'};
+  const key = `desktop-send:${randomUUID()}`;
+  let release!: () => void; let ready!: () => void;
+  const hold = new Promise<void>(resolve => {release=resolve;});
+  const locked = new Promise<void>(resolve => {ready=resolve;});
+  const write = client!.db.transaction(async tx => {
+    await tx.update(schema!.room_settings).set({expressions_enabled:false}).where(eq(schema!.room_settings.room_id,room.id));
+    await tx.insert(schema!.messages).values({room_id:room.id,number:2,sender:'Owner',text:'',source:'browser',client_message_id:key,publisher_account_id:owner.id,gif,timestamp:new Date().toISOString()});
+    ready(); await hold;
+  });
+  await locked;
+  const retry = rooms!.addMessage(room.id,'Owner','',{source:'browser',account_id:owner.id,client_message_id:key,gif});
+  try {
+    // Confirm the retry really reached the contested lock before allowing commit.
+    let waiting = false;
+    for (let i=0;i<100;i++) {
+      const result = await client!.pool.query("select 1 from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query like '%room_settings%' and pid<>pg_backend_pid()");
+      if (result.rowCount) {waiting=true;break;}
+      await new Promise(resolve => setTimeout(resolve,10));
+    }
+    assert.equal(waiting,true,'retry waited behind the setting transaction');
+  } finally {release();}
+  await write;
+  const saved=await retry;
+  assert.equal(saved.id,'msg_2'); assert.deepEqual(saved.gif,gif);
 });

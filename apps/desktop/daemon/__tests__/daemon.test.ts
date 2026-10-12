@@ -1373,6 +1373,31 @@ test("inspector snapshot runtime identity distinguishes reused PIDs and missing 
   }
 });
 
+test("GIF publication falls back to text only on a known pre-commit disabled response", async () => {
+  const previousFetch = globalThis.fetch;
+  const input = { roomId: "room_1", apiUrl: "https://letagents.test", bearer: "token", text: "Nice work!",
+    gif: { provider: "giphy" as const, id: "abc123", title: "Nice work" }, clientMessageId: "same-id",
+    replyTo: "msg_4", threadRootId: "msg_4", signal: new AbortController().signal };
+  try {
+    const sent: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      return sent.length === 1
+        ? new Response(JSON.stringify({ error: "expressions_disabled: GIF sending is disabled in this room. Send text instead." }), { status: 400 })
+        : new Response(JSON.stringify({ id: "msg_5", room_id: "room_1" }), { status: 200 });
+    }) as typeof fetch;
+    assert.deepEqual(await productionSupervisedDeliveryHttp.publish(input), { messageId: "msg_5", roomId: "room_1" });
+    assert.equal(sent.length, 2);
+    assert.deepEqual(sent[0].gif, input.gif); assert.equal(sent[1].gif, undefined);
+    assert.equal(sent[0].client_message_id, sent[1].client_message_id);
+    assert.equal(sent[1].text, input.text); assert.equal(sent[1].thread_root_id, "msg_4");
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; throw new Error("acknowledgment lost"); }) as typeof fetch;
+    await assert.rejects(productionSupervisedDeliveryHttp.publish(input), /acknowledgment lost/);
+    assert.equal(calls, 1, "ambiguous publication must not be retried with changed content");
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test("production publication requires a nonempty canonical id in the requested room", async () => {
   const previousFetch = globalThis.fetch;
   try {

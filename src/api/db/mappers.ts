@@ -227,6 +227,7 @@ export function toMessage(row: MessageRow): Message {
       : null,
     sender: row.sender,
     text: row.text,
+    ...(row.gif ? { gif: row.gif } : {}),
     ...(row.display_text ? { display_text: row.display_text } : {}),
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
     source: row.source ?? null,

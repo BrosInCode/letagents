@@ -105,6 +105,9 @@
           :event="linkPreviewPresentation(preview)"
           compact
         />
+        <p v-if="message.gif" class="message-gif-link">
+          <a :href="roomGifPageUrl(message.gif) ?? undefined" target="_blank" rel="noopener noreferrer">{{ message.gif.title || 'GIF' }} · View on GIPHY</a>
+        </p>
         <MessageAttachments
           v-if="attachments.length"
           :message-id="message.id"
@@ -181,6 +184,7 @@
 </template>
 
 <script setup lang="ts">
+import { roomGifPageUrl } from '../../../../../shared/room-expressions.mjs'
 import ChatAvatar from '../../../../../shared/ui/ChatAvatar.vue'
 import { chatSenderRole } from '../../../../../shared/chat-appearance'
 import '../../../../../shared/ui/chat-palette.css'

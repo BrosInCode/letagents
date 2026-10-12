@@ -29,6 +29,7 @@ function harness(options: { role?: Role; denied?: boolean; inherited?: string[];
   const none: Stored = { guidelines: null, updated_by: null, updated_at: null };
   const guidelinesByRoom = new Map<string, Stored>();
   const replyOrderByRoom = new Map<string, 'sequential' | 'parallel'>();
+  const expressions = new Map<string, boolean>();
   const published: string[] = [];
   let writes = 0;
   const app = Object.fromEntries(['get', 'put'].map(method => [method, (path: RegExp, handler: Function) => routes.push({ method, path, handler })])) as unknown as Express;
@@ -44,6 +45,8 @@ function harness(options: { role?: Role; denied?: boolean; inherited?: string[];
     resolveProjectRole: async () => role,
     resolveInheritedRoomIds: async () => options.inherited ?? [],
     store: {
+      getRoomExpressionsEnabled: async id => expressions.get(id) ?? false,
+      setRoomExpressionsEnabled: async (id, enabled) => { writes++; expressions.set(id, enabled); },
       resolveGitHubRoomChatEventKinds: async ids => {
         for (const id of ids) { const kinds = kindsByRoom.get(id); if (kinds) return { enabled_kinds: kinds, source_room_id: id }; }
         return { enabled_kinds: [...GITHUB_ROOM_CHAT_EVENT_KINDS], source_room_id: null };
@@ -75,7 +78,7 @@ function harness(options: { role?: Role; denied?: boolean; inherited?: string[];
     assert.ok(route, `${method} ${path} is routed`);
     const matches = path.match(route.path)!;
     const req = { params: Object.fromEntries(matches.slice(1).map((value, i) => [i, value])), body, authKind: auth, sessionAccount: auth === 'agent_session' ? null : { account_id: 'human-1', login: 'Emmy' }, headers: {} };
-    const res = { code: 200, body: null as any, status(code: number) { this.code = code; return this; }, json(body: any) { this.body = body; return this; } };
+    const res = { code: 200, body: null as any, status(code: number) { this.code = code; return this; }, setHeader(_key: string, _value: string) { return this; }, json(body: any) { this.body = body; return this; } };
     await route.handler(req, res); return res;
   }
   return {
@@ -331,4 +334,16 @@ test('reply order: invalid values, non-admins, agents and denied rooms cannot wr
   assert.equal((await denied.request('get', `/rooms/${room}/agent-reply-order`)).code, 403);
   assert.equal(participant.writes() + h.writes() + denied.writes(), 0);
   assert.equal(requiredAgentSessionRouteCapability('PUT', `/rooms/${room}/agent-reply-order`), null);
+});
+
+test('expressions default off, require a human admin, and do not wake agents', async () => {
+  const api = harness();
+  assert.equal((await api.request('get', `/rooms/${room}/expressions`)).body.enabled, false);
+  assert.equal((await api.request('put', `/rooms/${room}/expressions`, { enabled: true }, 'agent_session')).code, 403);
+  assert.equal((await harness({role:'participant'}).request('put', `/rooms/${room}/expressions`, {enabled:true})).code, 403);
+  assert.equal((await api.request('put', `/rooms/${room}/expressions`, {enabled:'true'})).code, 400);
+  assert.equal((await api.request('put', `/rooms/${room}/expressions`, {enabled:true})).body.enabled, true);
+  assert.equal((await api.request('put', `/rooms/${room}/expressions`, {enabled:false})).body.enabled, false);
+  assert.deepEqual(api.published, []);
+  assert.equal((await harness({denied:true}).request('get', `/rooms/${room}/gif-client-config`)).code, 403);
 });

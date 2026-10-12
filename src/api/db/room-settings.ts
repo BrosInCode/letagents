@@ -167,3 +167,16 @@ export async function setRoomAgentReplyOrder(roomId: string, order: RoomAgentRep
   });
   queueReplyTurnWakes(released);
 }
+
+/** Expressions are chosen per room and always default off. */
+export async function getRoomExpressionsEnabled(roomId: string): Promise<boolean> {
+  const [row] = await db.select({ enabled: room_settings.expressions_enabled })
+    .from(room_settings).where(eq(room_settings.room_id, roomId));
+  return row?.enabled === true;
+}
+
+export async function setRoomExpressionsEnabled(roomId: string, enabled: boolean): Promise<void> {
+  await db.insert(room_settings).values({ room_id: roomId, expressions_enabled: enabled })
+    .onConflictDoUpdate({ target: room_settings.room_id,
+      set: { expressions_enabled: enabled, updated_at: sql`now()` } });
+}
