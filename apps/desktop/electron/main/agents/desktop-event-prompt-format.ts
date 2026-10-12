@@ -1,4 +1,21 @@
 import type { DesktopTaskSummary } from "../../ipc-types.js";
+import type { ProviderRoomTurnRequest } from "./provider-adapter.js";
+
+/** Routing guidance belongs to this turn, not to every historical message.
+ * Leave the stored messages untouched; strip activation only in the prompt.
+ */
+export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "observedContext" | "sourceMessage" | "activation">): string[] {
+  const conversationMessage = (message: unknown): unknown => {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return message;
+    const { activation: _activation, ...context } = message as Record<string, unknown>;
+    return context;
+  };
+  return [
+    `Recent bounded room context: ${JSON.stringify((request.observedContext ?? []).map(conversationMessage))}`,
+    `Source message: ${JSON.stringify(conversationMessage(request.sourceMessage))}`,
+    `Activation: ${JSON.stringify(request.activation)}`,
+  ];
+}
 
 export const MANAGED_ROOM_WORK_INSTRUCTIONS = [
   "You are responding to a daemon-owned room inbox item. Carry out any work it assigns or continues.",

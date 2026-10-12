@@ -1,5 +1,5 @@
 import { ClaudeCompaction, type ClaudeStartupDeadline } from "./claude-compaction.js";
-import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -545,9 +545,7 @@ export function boundedClaudeRoomTurnPrompt(request: ProviderRoomTurnRequest): s
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     `If no response should be published, return exactly ${CLAUDE_NO_ROOM_REPLY_SENTINEL} with no other text.`,
     `Inbox item: ${request.inboxItemId}`,
-    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
-    `Source message: ${JSON.stringify(request.sourceMessage)}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    ...formatRoomTurnContext(request),
   ].join("\n");
 }
 

@@ -19,7 +19,7 @@ export declare function humanConversationFallback(input: {
  */
 export declare function isUntrustedExternalActivationSource(source: unknown): boolean;
 export interface AgentMessageReplyTurn {
-    /** 1-based position in the reply order; only positions 2 and later are sent. */
+    /** 1-based position in the reply order, including the opening participant. */
     position: number;
     count: number;
     /** Labels of the agents before this one that answered, in turn order. */
@@ -40,10 +40,10 @@ export type AgentMessageActivationReceipt = {
     turn_position?: number | null;
     turn_count?: number | null;
     prior_speakers?: readonly string[] | null;
-    /** Why the held turn was released: "turn", "deadline", "activation" or "skipped". */
+    /** Why the held turn was released: "turn", "deadline", "activation", "skipped" or "disabled". */
     hold_release_reason?: string | null;
 };
-/** The turn note for an agent that answers a shared message after others. */
+/** Equal-participant instructions for every agent answering in turns. */
 export declare function replyTurnGuidance(position: number, count: number, priorSpeakers?: readonly string[], releaseReason?: string | null): string;
 type MessageLike = {
     id?: unknown;

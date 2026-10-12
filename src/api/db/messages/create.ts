@@ -900,7 +900,7 @@ export async function addMessageWithCreateStatus(
         && routedReceipts.every((receipt) => SEQUENTIAL_REPLY_REASONS.has(receipt.activation_reason));
       const [replyOrder] = sequenceCandidate
         ? await tx.select({ order: room_settings.agent_reply_order })
-          .from(room_settings).where(eq(room_settings.room_id, roomId))
+          .from(room_settings).where(eq(room_settings.room_id, roomId)).for("share")
         : [];
       const receiptRowsToInsert = planReplyTurns(routedReceipts, {
         messageNumber: createdMessage.number,

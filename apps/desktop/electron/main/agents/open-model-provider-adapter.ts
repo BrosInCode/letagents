@@ -1,4 +1,4 @@
-import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -164,9 +164,7 @@ function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     `If no response should be published, return exactly ${NO_REPLY_SENTINEL} with no other text.`,
     `Inbox item: ${request.inboxItemId}`,
-    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
-    `Source message: ${JSON.stringify(request.sourceMessage)}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    ...formatRoomTurnContext(request),
   ].join("\n");
 }
 
