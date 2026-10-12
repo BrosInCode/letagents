@@ -350,7 +350,7 @@ function followLatestAfterLayout(): void {
     if (revision === scrollRevision && props.active && messagesElement.value?.scrollTop === top) jumpToBottom();
   });
 }
-let restoreRequestedBefore: string | undefined;
+let restoreRequestPending = false;
 let restorePagesRequested = 0;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
@@ -674,7 +674,7 @@ watch(
     isScrolledToBottom = false;
     hasAppliedInitialScroll = false;
     restorePagesRequested = 0;
-    restoreRequestedBefore = undefined;
+    restoreRequestPending = false;
     shouldRestoreInitialScroll = hasInitialScrollPosition();
     shouldJumpToLatestOnActivate = false;
     shouldRestoreKeepAliveScroll = false;
@@ -696,6 +696,9 @@ watch(
   },
 );
 
+watch(() => props.loadingOlderMessages, (loading, previous) => {
+  if (previous && !loading) restoreRequestPending = false;
+}, { flush: "sync" });
 watch(() => [props.roomLoading, props.loadingOlderMessages, props.olderMessagesError, props.messages.length],
   () => { if (shouldRestoreInitialScroll) void nextTick(restoreInitialScrollPosition); }, { flush: "post" });
 
@@ -960,8 +963,8 @@ function restoreInitialScrollPosition(): boolean {
   const bookmark = position;
   if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
     && props.hasOlderMessages && !props.olderMessagesError && restorePagesRequested < 20) {
-    if (!props.loadingOlderMessages && restoreRequestedBefore !== props.messages[0]?.id) {
-      restoreRequestedBefore = props.messages[0]?.id; restorePagesRequested++; emit("load-older");
+    if (!props.loadingOlderMessages && !restoreRequestPending) {
+      restoreRequestPending = true; restorePagesRequested++; emit("load-older");
     }
     return true;
   }

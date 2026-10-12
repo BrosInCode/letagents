@@ -199,7 +199,7 @@ const unreadCount = ref(0)
 const isScrolledFarUp = ref(false)
 const arrivingMessageIds = ref<ReadonlySet<string>>(new Set())
 let restoringPosition = true
-let restoreRequestedBefore: string | undefined
+let restoreRequestPending = false
 let restorePagesRequested = 0
 let isScrolledToBottom = !props.initialScrollPosition || props.initialScrollPosition.latest
 function roomAnchors() {
@@ -224,8 +224,8 @@ function restorePosition(): boolean {
   const saved = props.initialScrollPosition
   const anchor = saved?.anchor && findRoomAnchor(saved.anchor.messageId)
   if (saved && !saved.latest && saved.anchor && !anchor && props.hasOlderMessages && !props.olderMessagesError && restorePagesRequested < 20) {
-    if (!props.isLoadingOlderMessages && restoreRequestedBefore !== props.messages[0]?.id) {
-      restoreRequestedBefore = props.messages[0]?.id; restorePagesRequested++; emit('loadOlder')
+    if (!props.isLoadingOlderMessages && !restoreRequestPending) {
+      restoreRequestPending = true; restorePagesRequested++; emit('loadOlder')
     }
     return true
   }
@@ -521,7 +521,7 @@ watch(() => props.roomIdentifier, (nextRoomIdentifier, previousRoomIdentifier) =
   rememberPosition(previousRoomIdentifier)
   restoringPosition = true
   restorePagesRequested = 0
-  restoreRequestedBefore = undefined
+  restoreRequestPending = false
   isScrolledToBottom = !props.initialScrollPosition || props.initialScrollPosition.latest
   void nextTick(restorePosition)
   scrollRevision++
@@ -798,6 +798,9 @@ onMounted(() => {
   })
 })
 
+watch(() => props.isLoadingOlderMessages, (loading, previous) => {
+  if (previous && !loading) restoreRequestPending = false
+}, { flush: 'sync' })
 watch(() => [props.messagesLoaded, props.messages.length, props.isLoadingOlderMessages, props.olderMessagesError],
   () => { if (restoringPosition) void nextTick(restorePosition) }, { flush: 'post' })
 onBeforeUnmount(() => rememberPosition())

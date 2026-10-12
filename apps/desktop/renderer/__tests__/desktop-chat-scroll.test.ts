@@ -507,3 +507,23 @@ test('timeline: a bookmarked original inside a regrouped page restores its conta
     assert.ok(!s.calls.includes('load-older'), 'the original is loaded, despite the newer stable group anchor');
   } finally { s.close(); }
 });
+
+test('timeline: bookmark backfill continues after a page containing only thread replies', async () => {
+  const s = await scrollSurface();
+  try {
+    s.props.initialScrollPosition = { top: 900, latest: false, anchor: { messageId: 'msg_old', offsetTop: -20 } };
+    s.props.roomIdentifier = s.props.messageNamespace = 'thread-page-room'; s.props.hasOlderMessages = true;
+    await flush();
+    assert.equal(s.calls.filter(call => call === 'load-older').length, 1);
+    s.props.loadingOlderMessages = true; await flush();
+    s.props.threadMessages = [{ ...message('msg_reply'), threadRootId: 'msg_1' }];
+    s.props.loadingOlderMessages = false; await flush();
+    assert.equal(s.calls.filter(call => call === 'load-older').length, 2, 'the server cursor moved even though visible roots did not');
+    s.props.loadingOlderMessages = true; await flush();
+    const old = { dataset: { messageId: 'msg_old' }, getBoundingClientRect: () => ({ top: 700 - s.el.scrollTop, bottom: 800 - s.el.scrollTop }) };
+    s.el.querySelector = () => ({ closest: () => old }) as any;
+    s.props.messages = [message('msg_old'), ...s.props.messages]; s.props.loadingOlderMessages = false;
+    await flush();
+    assert.equal(s.el.scrollTop, 720);
+  } finally { s.close(); }
+});

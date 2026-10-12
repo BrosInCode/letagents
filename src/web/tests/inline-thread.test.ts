@@ -205,12 +205,16 @@ test('bookmark restore recognizes regrouped originals, and a failed page stops a
     await nextTick(); await nextTick()
     assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 1)
     surface.props.isLoadingOlderMessages = true; await nextTick()
+    surface.props.isLoadingOlderMessages = false
+    await nextTick(); await nextTick(); await nextTick()
+    assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 2, 'a filtered page must not stall restoration')
+    surface.props.isLoadingOlderMessages = true; await nextTick()
     surface.props.olderMessagesError = 'offline'; surface.props.isLoadingOlderMessages = false
     await nextTick(); await nextTick(); await nextTick()
-    assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 1, 'failed restore must not retry in a loop')
+    assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 2, 'failed restore must not retry in a loop')
     surface.props.roomIdentifier = 'regrouped-room'; found = true; surface.props.olderMessagesError = ''
     await nextTick(); await nextTick(); await nextTick()
     assert.equal(el.scrollTop, 420, 'resolve the original to its new containing group')
-    assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 1)
+    assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 2)
   } finally { surface.close(); globalThis.CSS = originalCSS }
 })
