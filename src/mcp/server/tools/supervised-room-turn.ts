@@ -5,6 +5,13 @@ const MAX_ROOM_REPLY_BYTES = 32 * 1024;
 
 /** Select routing only; the daemon remains the sole final-answer publisher. */
 export function registerReplyThreadTool(server: McpServer): void {
+  const gifTool = server.tool("set_reply_gif",
+    "Attach one GIF from search_gifs to your final room reply, or pass gif:null to clear it. This records an intent only, sends nothing, and does not complete the turn. Finish normally with a reply and meaningful text; that text is the fallback if the GIF is unavailable. For a GIF-only visual reply set text_fallback_only:true. A no_reply outcome always sends nothing, including no GIF. Use sparingly and never replace requested reasoning or work.",
+    { gif: z.object({ provider: z.literal("giphy"), id: z.string().regex(/^[a-zA-Z0-9]{1,128}$/), title: z.string().max(200), text_fallback_only: z.literal(true).optional() }).strict().nullable() },
+    async () => { throw new Error("set_reply_gif requires the active daemon-owned room turn."); },
+  );
+  // The local-room facade intentionally omits unsupported cloud-only tools.
+  if (gifTool) gifTool.inputSchema = z.object({ gif: z.object({ provider: z.literal("giphy"), id: z.string().regex(/^[a-zA-Z0-9]{1,128}$/), title: z.string().max(200), text_fallback_only: z.literal(true).optional() }).strict().nullable() }).strict();
   const tool = server.tool(
     "set_reply_thread",
     "Opt into a new thread for your final answer only when the user asks for one or a sustained side discussion would distract from the room. Answer ordinary top-level questions in the main room by default, without this tool; existing thread replies stay threaded automatically. Takes no arguments, sends no message, and does not finish the turn. Continue working and use your normal final completion when ready. Unavailable for synthetic task continuations or corrections.",

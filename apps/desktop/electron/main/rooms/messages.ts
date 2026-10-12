@@ -1,3 +1,4 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../../../shared/room-expressions.mjs";
 import type {
   DesktopLocalChatSyncResult,
   DesktopMessageInfo,
@@ -86,6 +87,7 @@ export async function sendDesktopRoomMessage(
   threadRootId?: string | null,
   clientMessageId?: string | null,
   messageNamespace?: string | null,
+  gif?: RoomGif | null,
 ): Promise<DesktopSendRoomMessageResult> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedText = text.trim();
@@ -96,7 +98,7 @@ export async function sendDesktopRoomMessage(
   if (!trimmedRoomIdentifier) {
     throw new Error("Choose a room before sending a message.");
   }
-  if (!trimmedText && attachments.length === 0) {
+  if (!trimmedText && !gif && attachments.length === 0) {
     throw new Error("Write a message before sending.");
   }
 
@@ -108,6 +110,7 @@ export async function sendDesktopRoomMessage(
     throw new Error("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
   }
   if (storage.effectiveMode === "local") {
+    if (gif) throw new Error("GIFs require a cloud room.");
     const localRoomIdentifier = localRoomIdentifierForStorage(
       storage,
       trimmedRoomIdentifier,
@@ -155,6 +158,7 @@ export async function sendDesktopRoomMessage(
       body: JSON.stringify({
         sender,
         text: trimmedText,
+        ...(gif ? { gif } : {}),
         reply_to: replyTo || null,
         thread_root_id: threadRootId || null,
         attachments,

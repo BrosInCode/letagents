@@ -103,6 +103,15 @@ async function standIn(t: TestContext): Promise<StandIn> {
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
       const url = String(request.url);
+      if (request.method === "GET" && url.endsWith("/api/codex/accounts/check")) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ accounts: [{
+          id: "made-up-account", name: "Synthetic workspace", plan_type: "plus",
+          workspace_backend_origin: "https://codex-check.letagents.invalid",
+          account_routing_override: "NO_CONSTRAINT",
+        }] }));
+        return;
+      }
       if (request.method === "POST" && url.endsWith("/oauth/token")) {
         service.refreshes += 1;
         response.writeHead(200, { "content-type": "application/json" });
@@ -695,6 +704,8 @@ test("a Read-only agent that the adapter itself starts has the profile in its la
   // what Codex signs a request to it with shows that Codex itself read the file its commands are refused.
   writeFileSync(join(owner.codexHome, "config.toml"), [
     'model = "stand-in"', 'model_provider = "standin"', 'cli_auth_credentials_store = "file"', "",
+    // account/read also discovers workspace routing on newer native Codex.
+    `chatgpt_base_url = "${model.origin}/"`, "",
     "[model_providers.standin]", 'name = "standin"', `base_url = "${model.origin}/v1"`,
     'wire_api = "responses"', "requires_openai_auth = true", "supports_websockets = false", "",
   ].join("\n"));

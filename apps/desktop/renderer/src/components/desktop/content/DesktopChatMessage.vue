@@ -114,8 +114,12 @@
 
       <div v-if="message.outgoing" class="room-message-outgoing" role="status" aria-live="polite">
         <span v-if="message.outgoing.attachmentCount">{{ message.outgoing.attachmentCount }} attachment{{ message.outgoing.attachmentCount === 1 ? "" : "s" }} · </span>
-        <span>{{ message.outgoing.status === "pending" ? "Sending…" : "Delivery not confirmed" }}</span>
+        <span>{{ message.outgoing.status === "pending" ? "Sending…" : message.outgoing.error?.includes('expressions_disabled:') ? "GIF sending is off in this room" : "Delivery not confirmed" }}</span>
         <button v-if="message.outgoing.status === 'uncertain'" type="button" :title="message.outgoing.error || undefined" @click="retryDesktopOutgoingMessage(message.clientMessageId || '')">Retry safely</button>
+        <template v-if="message.gif && message.outgoing.error?.includes('expressions_disabled:')">
+          <button v-if="message.text.trim() || message.outgoing.attachmentCount" type="button" @click="sendDesktopOutgoingWithoutGif(message.clientMessageId || '')">Send without GIF</button>
+          <button v-else type="button" @click="discardRefusedDesktopGif(message.clientMessageId || '')">Remove unsent GIF</button>
+        </template>
       </div>
       <div class="room-message-bubble">
         <button
@@ -141,7 +145,7 @@
         />
 
         <DesktopLongMessageContent
-          v-else
+          v-else-if="(!message.gif || visibleText) && !(message.gif?.text_fallback_only && gifAvailable)"
           :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
@@ -156,6 +160,7 @@
           :event="linkPreviewPresentation(preview)"
           compact
         />
+        <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @available="gifAvailable = $event" />
         <DesktopMessageAttachments
           v-if="message.attachments.length"
           :message-id="message.id"
@@ -388,10 +393,11 @@
 </template>
 
 <script setup lang="ts">
+import RoomGif from "./room-chat/RoomGif.vue";
 import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
 import MessageReminderMenu from "./MessageReminderMenu.vue";
 import { reminderAccount } from "../../../composables/useMessageReminders";
-import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
+import { discardRefusedDesktopGif, sendDesktopOutgoingWithoutGif, retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
 import { Check, ChevronDown, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
@@ -618,6 +624,7 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   return `Waiting for ${receipt.agentName}`;
 }
 
+const gifAvailable = ref(false);
 const remindable = computed(() => Boolean(reminderAccount.value && props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier) && isValidMessageId(props.message.id) && !props.message.outgoing));
 const { pushActionToast } = useDesktopActionToasts();
 function reminderScheduled(dueAt: string) {

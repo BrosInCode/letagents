@@ -1,3 +1,4 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../../shared/room-expressions.mjs";
 import type { DesktopActivityEntry, DesktopAgentPresence, DesktopParticipantSummary, DesktopReasoningSession } from "./activity.js";
 import type { RepoStatus } from "./core.js";
 import type { DesktopRentalActivityEvent, DesktopRentalOwnQuotaStatus, DesktopRentalRenterTriggerSignal } from "./rental.js";
@@ -311,6 +312,7 @@ export interface DesktopMessageInfo {
 }
 
 export interface DesktopRoomMessage {
+  gif?: RoomGif | null;
   senderProfile?: { login: string; avatarUrl: string | null } | null;
   id: string;
   /** Exact idempotency identity supplied by the message publisher. */

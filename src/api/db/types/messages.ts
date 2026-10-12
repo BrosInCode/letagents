@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
 
@@ -11,6 +12,7 @@ export interface Message {
   sender: string;
   text: string;
   /** Human-facing copy; canonical text remains the agent/routing input. */
+  gif?: RoomGif | null;
   display_text?: string | null;
   agent_prompt_kind: AgentPromptKind | null;
   source: string | null;
@@ -103,6 +105,7 @@ export interface MessageReplyReference {
   sender: string;
   text: string;
   /** Human-facing copy; canonical text remains the agent/routing input. */
+  gif?: RoomGif | null;
   display_text?: string | null;
   source: string | null;
   timestamp: string;
@@ -169,6 +172,7 @@ export interface MessageRow {
   sender: string;
   text: string;
   /** Human-facing copy; canonical text remains the agent/routing input. */
+  gif?: RoomGif | null;
   display_text?: string | null;
   agent_prompt_kind: string | null;
   source: string | null;

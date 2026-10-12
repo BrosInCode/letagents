@@ -1,3 +1,4 @@
+import { validReplyGifIntent } from "../../../shared/room-expressions.mjs";
 import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../shared/codex-read-only-room-tools.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
@@ -348,6 +349,7 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       && (!input.input || typeof input.input !== "object" || Array.isArray(input.input) || Object.keys(input.input).length !== 0)) {
       throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
     }
+    if (input.toolName === "set_reply_gif" && !validReplyGifIntent(input.input)) throw new Error("Invalid GIF reply intent.");
     if (input.toolName === "complete_room_turn") {
       if (context.entry.provider !== "cursor") {
         throw new Error("The structured room-turn completion channel is reserved for supervised Cursor turns.");

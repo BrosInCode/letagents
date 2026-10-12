@@ -1,3 +1,4 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../../shared/room-expressions.mjs";
 export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
 /** "Answer in turns": enabled is the room's sequential reply order; off (parallel) by default. */
 export interface DesktopReplyOrderSettings { enabled: boolean; can_manage: boolean; }
@@ -253,7 +254,8 @@ export interface DesktopApi {
       attachments?: Array<{ upload_id: string }>,
       threadRootId?: string | null,
       clientMessageId?: string | null,
-      messageNamespace?: string | null
+      messageNamespace?: string | null,
+      gif?: RoomGif | null
     ) => Promise<DesktopSendRoomMessageResult>;
     addTask: (roomIdentifier: string, input: DesktopTaskCreateInput) => Promise<DesktopTaskMutationResult>;
     updateTask: (
@@ -315,6 +317,10 @@ export interface DesktopApi {
     stopAccountActivity?: () => Promise<void>;
     onAccountActivity?: (callback: (state: DesktopAccountActivityState) => void) => () => void;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
+    getExpressions: (roomIdentifier: string) => Promise<RoomExpressionsSetting>;
+    setExpressions: (roomIdentifier: string, enabled: boolean) => Promise<RoomExpressionsSetting>;
+    searchGifs: (roomIdentifier: string, query: string, offset?: number) => Promise<import("../../../../shared/giphy-client.mjs").GiphyResult>;
+    resolveGif: (roomIdentifier: string, id: string) => Promise<import("../../../../shared/giphy-client.mjs").GiphyResult>;
     getReplyOrder: (roomIdentifier: string) => Promise<DesktopReplyOrderSettings>;
     setReplyOrder: (roomIdentifier: string, enabled: boolean) => Promise<DesktopReplyOrderSettings>;
     /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */

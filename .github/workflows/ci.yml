@@ -273,8 +273,8 @@ jobs:
       - name: Test message pins
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-pins-routes.test.ts src/api/__tests__/message-pin-store.test.ts src/api/__tests__/message-pins-db.test.ts
 
-      - name: Test message reactions
-        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
+      - name: Test message reactions and optional GIFs
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/giphy-client.test.ts src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
 
       - name: Test room message search
         run: node --import tsx --test src/api/__tests__/message-search-routes.test.ts src/api/__tests__/message-search-db.test.ts src/api/__tests__/message-search-controller.test.ts
@@ -574,6 +574,7 @@ jobs:
       contents: read
     env:
       GH_DEPLOY_TOKEN: ${{ github.token }}
+      GIPHY_API_KEY: ${{ secrets.GIPHY_API_KEY }}
     steps:
       - name: Deploy to production
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
@@ -581,13 +582,24 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: GH_DEPLOY_TOKEN
+          envs: GH_DEPLOY_TOKEN,GIPHY_API_KEY
           script: |
             set -e
 
             IMAGE_TAG="${{ needs.docker.outputs.image_tag }}"
 
             cd "${{ secrets.DEPLOY_PATH }}"
+
+            # Optional client-provider configuration; never print the key.
+            # An unset repository secret preserves the host's existing setting.
+            if [ -n "${GIPHY_API_KEY:-}" ]; then
+              umask 077
+              sed '/^GIPHY_API_KEY=/d' .env > .env.giphy-next
+              printf '\nGIPHY_API_KEY=%s\n' "$GIPHY_API_KEY" >> .env.giphy-next
+              chown --reference=.env .env.giphy-next
+              mv .env.giphy-next .env
+            fi
+            unset GIPHY_API_KEY
 
             # Keep enough room before Git and Docker writes on the deploy host.
             df -h || true

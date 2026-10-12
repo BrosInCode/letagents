@@ -2,7 +2,7 @@ import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/roo
 import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../../shared/codex-read-only-room-tools.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
-import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { ProviderUsageTracker, readCodexUsageTail } from "./provider-usage.js";
 import type { ProviderUsage } from "../../../shared/provider-usage.js";
@@ -1042,9 +1042,7 @@ function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     "If no response should be published, return exactly LETAGENTS_NO_ROOM_REPLY with no other text.",
     `Inbox item: ${request.inboxItemId}`,
-    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
-    `Source message: ${JSON.stringify(request.sourceMessage)}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    ...formatRoomTurnContext(request),
   ].join("\n");
 }
 

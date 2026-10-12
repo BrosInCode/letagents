@@ -41,6 +41,8 @@ test("message and status tool registration preserves the public surface", () => 
   assert.deepEqual(registrations.map((registration) => registration.name), [
     "post_status",
     "post_reasoning",
+    "search_gifs",
+    "react_to_message",
     "send_message",
     "send_thread_message",
     "read_messages",
@@ -54,6 +56,8 @@ test("worker-facing message tools keep registered worker-session inputs", () => 
   const workerToolNames = new Set([
     "post_status",
     "post_reasoning",
+    "search_gifs",
+    "react_to_message",
     "send_message",
     "send_thread_message",
     "wait_for_messages",

@@ -320,12 +320,13 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     return { roomId };
   },
   async publish(input) {
-    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages`, {
+    const send = (gif: typeof input.gif) => roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages`, {
       method: "POST",
       headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
       body: JSON.stringify({
         sender: "supervised-daemon",
         text: input.text,
+        ...(gif ? { gif } : {}),
         client_message_id: input.clientMessageId,
         ...(input.replyTo && input.threadRootId
           ? { reply_to: input.replyTo, thread_root_id: input.threadRootId }
@@ -333,6 +334,13 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
       }),
       signal: boundedCloudSignal(input.signal),
     });
+    let response = await send(input.gif);
+    if (input.gif && response.status === 400) {
+      const failure = await response.clone().json().catch(() => ({})) as { error?: unknown };
+      if (typeof failure.error === "string" && failure.error.startsWith("expressions_disabled:")) {
+        response = await send(null);
+      }
+    }
     if (!response.ok) throw new Error(`Supervised room publication failed with HTTP ${response.status}.`);
     const message = await response.json() as Record<string, unknown>;
     const messageId = typeof message.id === "string" && message.id.trim() ? message.id : null;

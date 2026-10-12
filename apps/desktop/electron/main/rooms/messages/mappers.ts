@@ -1,3 +1,4 @@
+import { normalizeRoomGif, type RoomGif } from "../../../../../../shared/room-expressions.mjs";
 import type { DesktopRoomMessage } from "../../../ipc-types.js";
 import { parseAccountAgentRoutingEnvelope } from "../../../../../../shared/message-contracts.mjs";
 import { normalizeMessageReactions } from "../../../../../../shared/message-reactions.mjs";
@@ -21,6 +22,7 @@ export type RoomMessageReplyPayload = {
 };
 
 export type RoomMessagePayload = {
+  gif?: RoomGif | null;
   sender_profile?: { login: string; avatar_url: string | null } | null;
   id: string;
   client_message_id?: string | null;
@@ -85,6 +87,7 @@ export function mapRoomMessagePayload(
     ...(message.sender_profile === undefined ? {} : { senderProfile: message.sender_profile
       ? { login: message.sender_profile.login, avatarUrl: message.sender_profile.avatar_url } : null }),
     text: message.text,
+    ...(message.gif ? { gif: normalizeRoomGif(message.gif) } : {}),
     ...(message.display_text ? { displayText: message.display_text } : {}),
     attachments: (message.attachments || []).map(
       mapRoomMessageAttachmentPayload,

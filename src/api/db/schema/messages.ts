@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
-import { boolean, check, foreignKey, index, integer, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, check, foreignKey, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
+import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import { accounts, rooms } from "./core.js";
 import { rentalVisibilityEnum } from "./rentals.js";
 
@@ -16,6 +17,7 @@ export const messages = pgTable(
     sender: text("sender").notNull(),
     text: text("text").notNull(),
     display_text: text("display_text"),
+    gif: jsonb("gif").$type<RoomGif>(),
     agent_prompt_kind: text("agent_prompt_kind"),
     source: text("source"),
     client_message_id: text("client_message_id"),
@@ -597,13 +599,15 @@ export const message_reactions = pgTable(
     account_id: text("account_id")
       .notNull()
       .references(() => accounts.id, { onDelete: "cascade", onUpdate: "cascade" }),
+    agent_key: text("agent_key").notNull().default(""),
+    agent_name: text("agent_name"),
     emoji: text("emoji").notNull(),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
     pk: primaryKey({
       name: "message_reactions_pk",
-      columns: [table.room_id, table.message_number, table.account_id, table.emoji],
+      columns: [table.room_id, table.message_number, table.account_id, table.agent_key, table.emoji],
     }),
     message_fk: foreignKey({
       name: "message_reactions_message_fk",

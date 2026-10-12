@@ -53,27 +53,33 @@ test("mentions, single receipts, mixed reasons and the parallel setting stay par
   assert.ok(parallel(receipts("recent_conversation")), "recent_conversation stays parallel");
 });
 
-test("guidance names who answered, or says the agent before ran out of time", () => {
-  assert.equal(
-    replyTurnGuidance(2, 3, ["Alice"]),
-    "Turn order: you answer this message in position 2 of 3. Alice answered before you; "
-      + "their reply is in the recent room context. Do not repeat their points. "
-      + "Add only new points, agree in one short line, or disagree and give the reason.",
-  );
-  assert.match(replyTurnGuidance(3, 3, ["Alice", "Bob"]), /Alice and Bob answered before you; their replies are/);
-  assert.equal(
-    replyTurnGuidance(2, 3, [], "deadline"),
-    "Turn order: you answer this message in position 2 of 3. The agent before you did not answer in time. Answer now.",
-  );
-  const notYet = "Turn order: you answer this message in position 2 of 3. "
-    + "The agents before you have not answered yet. Cover only what they are unlikely to say.";
-  for (const reason of ["activation", "turn", "skipped", null, undefined]) {
-    assert.equal(replyTurnGuidance(2, 3, [], reason), notYet, `no "did not answer in time" for ${reason}`);
+test("all speakers have equal standing and can give substantive agreement", () => {
+  for (const position of [1, 2, 3]) {
+    const guidance = replyTurnGuidance(position, 3, position > 1 ? ["Alice"] : []);
+    assert.match(guidance, /You are an equal participant/);
+    assert.match(guidance, /Give your own considered answer/);
+    assert.match(guidance, /later speakers are not limited to reviewing/);
+    assert.match(guidance, /Agreement can be substantive/);
+    assert.match(guidance, /does not require starting a thread/);
+    assert.match(guidance, /Silence is not a vote/);
+    assert.doesNotMatch(guidance, /Add only new points|agree in one short line|Cover only/);
   }
-  assert.match(replyTurnGuidance(2, 3, ["Alice"], "deadline"), /Alice answered before you/, "a real answer wins over the reason");
+  assert.match(replyTurnGuidance(1, 3), /opening this exchange/);
 });
 
-test("a receipt in a later position adds turn and guidance; position 1 adds nothing", () => {
+test("guidance distinguishes missing context from an expired wait without inventing agreement", () => {
+  assert.match(replyTurnGuidance(2, 3, ["Alice"]), /Alice answered before you/);
+  assert.match(replyTurnGuidance(3, 3, ["Alice", "Bob"]), /Alice and Bob answered before you/);
+  assert.match(replyTurnGuidance(2, 3, ["Alice"]), /if missing context matters, read the relevant room messages/);
+  assert.match(replyTurnGuidance(2, 3, [], "deadline"), /wait for earlier turns expired/);
+  assert.match(replyTurnGuidance(2, 3, [], "deadline"), /an earlier agent may still reply/);
+  for (const reason of ["activation", "turn", "skipped", null, undefined]) {
+    assert.match(replyTurnGuidance(2, 3, [], reason), /No earlier answer is recorded/);
+    assert.doesNotMatch(replyTurnGuidance(2, 3, [], reason), /expired/);
+  }
+});
+
+test("every sequenced receipt includes equal-participant guidance, including position 1", () => {
   const identity: ActivationIdentity = {
     actor_label: "Bob", agent_key: "owner/b", agent_instance_id: null,
     agent_session_id: "session-b", display_name: "Bob", session_kind: "worker",
@@ -88,7 +94,8 @@ test("a receipt in a later position adds turn and guidance; position 1 adds noth
     ]),
     new Set([1, 2, 3]),
   ) as Array<{ activation: { for_current_agent: Record<string, unknown> } }>;
-  assert.deepEqual(first!.activation.for_current_agent, { decision: "activate", reason: "broadcast", addressed: true });
+  assert.deepEqual(first!.activation.for_current_agent.turn, { position: 1, count: 2, prior_speakers: [] });
+  assert.equal(first!.activation.for_current_agent.guidance, replyTurnGuidance(1, 2));
   assert.deepEqual(second!.activation.for_current_agent.turn, { position: 2, count: 2, prior_speakers: ["Alice"] });
   assert.equal(second!.activation.for_current_agent.guidance, replyTurnGuidance(2, 2, ["Alice"]));
   assert.equal(third!.activation.for_current_agent.guidance, replyTurnGuidance(2, 2, [], "deadline"), "the receipt's release reason is used");
@@ -120,4 +127,21 @@ test("a reply-turn wake reaches only the released agent's worker subscription", 
   assert.equal(visible(null, wake), false, "people and the app stream already saw it");
   const { wakeAgentKeys: _omit, ...routingPass } = wake;
   assert.equal(visible(null, routingPass), true, "an ordinary routing pass still reaches everyone");
+});
+
+test("parallel, disabled and malformed turns do not add experimental guidance", () => {
+  const identity: ActivationIdentity = {
+    actor_label: "Bob", agent_key: "owner/b", agent_instance_id: null,
+    agent_session_id: "session-b", display_name: "Bob", session_kind: "worker",
+  };
+  for (const turn of [
+    {}, { turn_position: 1, turn_count: 1 }, { turn_position: 0, turn_count: 3 },
+    { turn_position: 3, turn_count: 2 },
+    ...[1, 2].map((position) => ({ turn_position: position, turn_count: 2, hold_release_reason: "disabled" })),
+  ]) {
+    const [message] = attachAgentMessageActivationsFromReceipts([{ id: "msg_1" }], identity,
+      new Map([[1, { activation_reason: "broadcast", ...turn }]]), new Set([1])) as
+      Array<{ activation: { for_current_agent: Record<string, unknown> } }>;
+    assert.deepEqual(message!.activation.for_current_agent, { decision: "activate", reason: "broadcast", addressed: true });
+  }
 });

@@ -25,6 +25,30 @@ function releasedRows(roomId: string | null, rows: readonly Record<string, unkno
   }));
 }
 
+/** Off releases waiting workers and removes guidance from unfinished turns.
+ * It does not cancel work already admitted by a worker or alter receipt state.
+ */
+export async function disableRoomReplyTurnsTx(tx: ReplyTurnExecutor, roomId: string): Promise<ReleasedReplyTurn[]> {
+  const changed = await tx.execute(sql`
+    WITH unfinished AS (
+      SELECT id, hold_released_at IS NULL AND hold_release_after IS NOT NULL AS was_held
+        FROM ${message_agent_receipts}
+       WHERE message_room_id = ${roomId}
+         AND turn_position IS NOT NULL AND turn_done_at IS NULL
+         AND hold_release_reason IS DISTINCT FROM 'disabled'
+       ORDER BY message_number, turn_position
+       FOR UPDATE
+    )
+    UPDATE ${message_agent_receipts} AS receipt
+       SET hold_released_at = COALESCE(receipt.hold_released_at, now()),
+           hold_release_reason = 'disabled'
+      FROM unfinished
+     WHERE receipt.id = unfinished.id
+    RETURNING receipt.message_number, receipt.agent_key, unfinished.was_held
+  `);
+  return releasedRows(roomId, changed.rows.filter((row) => row.was_held));
+}
+
 /**
  * Release the lowest held position of each message once every earlier
  * position has finished its turn (replied, left, or reported no reply,

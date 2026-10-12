@@ -314,7 +314,7 @@ export async function applyDeferredJevReceipts(
   // active pass reaches here; shadow mode compares and never writes receipts.
   const [replyOrder] = rows.length >= 2
     ? await tx.select({ order: room_settings.agent_reply_order })
-      .from(room_settings).where(eq(room_settings.room_id, plan.roomId))
+      .from(room_settings).where(eq(room_settings.room_id, plan.roomId)).for("share")
     : [];
   const planned = planReplyTurns(rows, {
     messageNumber: plan.message.number,

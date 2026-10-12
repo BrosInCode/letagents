@@ -202,6 +202,8 @@
 </template>
 
 <script setup lang="ts">
+import type { RoomGif } from "../../../../../../../shared/room-expressions.mjs";
+
 import type { ChatScrollPosition } from "../../../domain/chat-scroll";
 import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoomMessageMotion";
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
@@ -318,7 +320,7 @@ const roomSupervisorEntries = computed(() => {
 });
 
 const emit = defineEmits<{
-  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId: string | null, complete: (sent: boolean) => void];
+  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId: string | null, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "load-older": [];
   "discard-attachment": [uploadId: string];
   "open-reasoning": [sessionId: string];
@@ -535,13 +537,14 @@ function sendThreadMessage(
   replyToId: string | null,
   attachments: Array<{ upload_id: string }>,
   complete: (sent: boolean) => void,
+  gif?: RoomGif | null,
 ): void {
   const namespace = props.messageNamespace;
   emit("send-message", text, replyToId, attachments, threadRootId, (sent) => {
     if (namespace !== props.messageNamespace) return;
     if (sent) threadAttachmentDrafts.value = threadAttachmentDrafts.value.filter((draft) => !attachments.some((attachment) => attachment.upload_id === draft.uploadId));
     complete(sent);
-  });
+  }, gif);
 }
 
 async function loadThread(threadRootId: string): Promise<void> {
@@ -746,6 +749,7 @@ function handleComposerSend(
   replyToId: string | null,
   attachments: Array<{ upload_id: string }>,
   complete: (sent: boolean) => void,
+  gif?: RoomGif | null,
 ): void {
   const namespace = props.messageNamespace;
   const submittedReply = replyTarget.value;
@@ -756,7 +760,7 @@ function handleComposerSend(
       attachmentDrafts.value = attachmentDrafts.value.filter((draft) => !attachments.some((attachment) => attachment.upload_id === draft.uploadId));
     }
     complete(sent);
-  });
+  }, gif);
 }
 
 watch(toRef(props, "messageNamespace"), () => {

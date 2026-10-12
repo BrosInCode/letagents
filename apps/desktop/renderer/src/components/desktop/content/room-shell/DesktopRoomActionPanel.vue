@@ -116,6 +116,7 @@
         <h3 id="room-settings-heading-conversation">Conversation</h3>
         <div class="room-settings-list">
           <RoomConversationRouting :room-identifier="room.identifier" @summary="routingSummary = $event" />
+          <RoomExpressions :room-identifier="room.identifier" />
           <RoomReplyOrder :room-identifier="room.identifier" @summary="replyOrderSummary = $event" />
         </div>
       </section>
@@ -363,6 +364,7 @@ import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSqua
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
+import RoomExpressions from "./RoomExpressions.vue";
 import RoomReplyOrder from "./RoomReplyOrder.vue";
 import RoomGitHubEventFilter from "./RoomGitHubEventFilter.vue";
 import SmoothHeight from "./SmoothHeight.vue";

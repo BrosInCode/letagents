@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 import { EventEmitter } from "node:events";
+import { replyTurnGuidance } from "../../shared/activation-routing.js";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
 const url = process.env.TEST_DB_URL;
@@ -116,7 +117,8 @@ test("a broadcast to three agents is sequenced, rotated, and hidden from later p
 
   const firstRead = await a.read(first!, before.message.id);
   assert.deepEqual(firstRead.map((message) => message.id), [sent.message.id, later.message.id]);
-  assert.deepEqual(a.forAgent(firstRead, sent.message.id), { decision: "activate", reason: "broadcast", addressed: true });
+  assert.deepEqual(a.forAgent(firstRead, sent.message.id)?.turn, { position: 1, count: 3, prior_speakers: [] });
+  assert.equal(a.forAgent(firstRead, sent.message.id)?.guidance, replyTurnGuidance(1, 3));
   for (const held of [second!, third!]) {
     assert.deepEqual((await a.read(held, before.message.id)).map((message) => message.id), [], "held message and everything after it");
     assert.equal((await api!.getMessageStreamCheckpoint(a.room.id, { waitForRouting: true, holdAgentKey: a.sessions[held]!.agent_key })).checkpoint, before.message.id);
@@ -158,9 +160,9 @@ test("a supervised reply releases the next position, which sees who answered; th
       position: 2, count: 3, prior_speakers: [a.sessions[first!]!.actor_label],
     };
     assert.deepEqual(a.forAgent(secondRead, sent.message.id)?.turn, expected);
-    assert.match(a.forAgent(secondRead, sent.message.id)?.guidance ?? "", /answered before you; their reply is/);
+    assert.match(a.forAgent(secondRead, sent.message.id)?.guidance ?? "", /answered before you\. Use their replies where available/);
     assert.deepEqual((await a.live(second!, sent.message.id)).activation.for_current_agent.turn, expected, "live overlay agrees");
-    assert.equal((await a.live(first!, sent.message.id)).activation.for_current_agent.turn, undefined);
+    assert.deepEqual((await a.live(first!, sent.message.id)).activation.for_current_agent.turn, { position: 1, count: 3, prior_speakers: [] });
     assert.deepEqual((await a.read(third!, before.message.id)).map((message) => message.id), []);
   } finally {
     events!.messageEvents.off("message:routed", onRouted);
@@ -181,7 +183,7 @@ test("the deadline sweep releases a hold and the guidance says the agent before 
   const secondRead = await a.read(second!, before.message.id);
   const turn = a.forAgent(secondRead, sent.message.id);
   assert.deepEqual(turn?.turn, { position: 2, count: 3, prior_speakers: [] });
-  assert.equal(turn?.guidance, "Turn order: you answer this message in position 2 of 3. The agent before you did not answer in time. Answer now.");
+  assert.equal(turn?.guidance, replyTurnGuidance(2, 3, [], "deadline"));
   assert.equal((await a.live(second!, sent.message.id)).activation.for_current_agent.guidance, turn?.guidance);
   assert.deepEqual((await a.read(third!, before.message.id)).map((message) => message.id), []);
 });
@@ -251,7 +253,7 @@ test("a held agent that leaves is skipped; the next waits for the earlier positi
   assert.deepEqual(page.map((message) => message.id), [sent.message.id, answer.message.id]);
   const turn = a.forAgent(page, sent.message.id);
   assert.deepEqual(turn?.turn, { position: 3, count: 3, prior_speakers: [a.sessions[first!]!.actor_label] });
-  assert.match(turn?.guidance ?? "", new RegExp(`^Turn order: you answer this message in position 3 of 3\\. ${a.sessions[first!]!.actor_label} answered before you;`));
+  assert.match(turn?.guidance ?? "", new RegExp(`^Turn order: you answer this message in position 3 of 3\\. ${a.sessions[first!]!.actor_label} answered before you\\.`));
 });
 
 test("a mention to a held agent ends its holds at once and wakes only that agent", skip, async () => {
@@ -269,7 +271,7 @@ test("a mention to a held agent ends its holds at once and wakes only that agent
     assert.deepEqual(page.map((message) => message.id), [sent.message.id, mention.message.id]);
     assert.equal(a.forAgent(page, mention.message.id)?.reason, "explicit_mention");
     assert.equal(a.forAgent(page, sent.message.id)?.guidance,
-      "Turn order: you answer this message in position 3 of 3. The agents before you have not answered yet. Cover only what they are unlikely to say.",
+      replyTurnGuidance(3, 3, [], "activation"),
       "a turn opened by a direct activation does not claim the others ran out of time");
     assert.deepEqual((await a.read(second!, before.message.id)).map((message) => message.id), [], "others stay held");
     for (let i = 0; i < 50 && wakes.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
@@ -305,7 +307,7 @@ test("a hold ends at its deadline even when no sweep runs, and the frontier uses
   const page = await a.read(second!, before.message.id);
   assert.deepEqual(page.map((message) => message.id), [sent.message.id]);
   assert.equal(a.forAgent(page, sent.message.id)?.guidance,
-    "Turn order: you answer this message in position 2 of 3. The agent before you did not answer in time. Answer now.");
+    replyTurnGuidance(2, 3, [], "deadline"));
   assert.deepEqual((await a.turns(sent.message.id)).map((row) => row.released), [true, false, false], "no sweep has run");
 });
 
@@ -418,7 +420,7 @@ test("the poll route hides a held turn from its worker, then delivers it with tu
       "the cursor never passes the held message");
     const open = await route.poll(a.sessions[first!]!, a.ownerId, before.message.id, "2000");
     assert.deepEqual(open.body.messages.map((message) => message.id), [sent.message.id]);
-    assert.equal(open.body.messages[0]!.activation.for_current_agent.turn, undefined);
+    assert.deepEqual(open.body.messages[0]!.activation.for_current_agent.turn, { position: 1, count: 3, prior_speakers: [] });
 
     // A long-poll that is already waiting wakes when the predecessor replies.
     const waiting = route.poll(a.sessions[second!]!, a.ownerId, before.message.id, "5000");
@@ -428,7 +430,7 @@ test("the poll route hides a held turn from its worker, then delivers it with tu
     assert.deepEqual(woken.body.messages.map((message) => message.id), [sent.message.id, answer.message.id]);
     const activation = woken.body.messages[0]!.activation.for_current_agent;
     assert.deepEqual(activation.turn, { position: 2, count: 3, prior_speakers: [a.sessions[first!]!.actor_label] });
-    assert.match(activation.guidance, /answered before you; their reply is in the recent room context/);
+    assert.match(activation.guidance, /answered before you\. Use their replies where available/);
   } finally {
     route.close();
   }
@@ -486,4 +488,86 @@ test("a self-reported no_reply ends the turn and releases the next position", sk
   } finally {
     route.close();
   }
+});
+
+for (const off of ["parallel", null] as const) {
+  test(`switching off (${off}) releases waiting turns and removes guidance without cancelling work`, skip, async () => {
+    const a = await seed();
+    const sent = await a.send("@everyone compare approaches");
+    const [first, second] = await order(a, sent.message.id);
+    assert.equal((await a.read(second!)).length, 0);
+    const wakes: Set<string> = new Set();
+    const onRouted = (event: { wakeAgentKeys?: string[] }) => {
+      for (const key of event.wakeAgentKeys ?? []) wakes.add(key);
+    };
+    events!.messageEvents.on("message:routed", onRouted);
+    try {
+      await settings!.setRoomAgentReplyOrder(a.room.id, off);
+      assert.equal(await settings!.getRoomAgentReplyOrder(a.room.id), off);
+      assert.ok((await a.turns(sent.message.id)).every((row) => row.released));
+      for (let index = 0; index < 3; index++) {
+        assert.deepEqual(a.forAgent(await a.read(index), sent.message.id), {
+          decision: "activate", reason: "broadcast", addressed: true,
+        });
+        assert.equal((await a.live(index, sent.message.id)).activation.for_current_agent.guidance, undefined);
+      }
+      const state = await client!.pool.query(
+        "SELECT receipt_state, turn_done_at, hold_release_reason FROM message_agent_receipts WHERE message_room_id = $1",
+        [a.room.id]);
+      assert.ok(state.rows.every((row) => row.receipt_state === "queued" && row.turn_done_at === null && row.hold_release_reason === "disabled"));
+      for (let i = 0; i < 50 && wakes.size < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.deepEqual([...wakes].sort(), a.sessions.filter((_, index) => index !== first).map((session) => session.agent_key).sort());
+      await settings!.setRoomAgentReplyOrder(a.room.id, off); // idempotent
+      const next = await a.send("@everyone another question");
+      assert.ok((await a.turns(next.message.id)).every((row) => row.turn_position === null));
+      await settings!.setRoomAgentReplyOrder(a.room.id, "sequential");
+      assert.equal(a.forAgent(await a.read(second!), sent.message.id)?.guidance, undefined, "on again must not revive old turns");
+      const resumed = await a.send("@everyone a fresh exchange");
+      assert.ok((await a.turns(resumed.message.id)).some((row) => row.turn_position === 2 && !row.released));
+    } finally {
+      events!.messageEvents.off("message:routed", onRouted);
+    }
+  });
+}
+
+test("switching off waits for an in-flight receipt plan, then releases its holds", skip, async () => {
+  const a = await seed();
+  const gate = await client!.pool.connect();
+  const { rows: [{ pid }] } = await gate.query("SELECT pg_backend_pid() AS pid");
+  await gate.query("SELECT pg_advisory_lock(711028, 1)");
+  // Pause the real send after reading the setting, just before receipt insert.
+  await client!.pool.query(`
+    CREATE FUNCTION pause_reply_receipt_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN PERFORM pg_advisory_xact_lock(711028, 1); RETURN NEW; END $$;
+    CREATE TRIGGER pause_reply_receipt_insert BEFORE INSERT ON message_agent_receipts
+      FOR EACH ROW EXECUTE FUNCTION pause_reply_receipt_insert();
+  `);
+  const sending = a.send("@everyone race the off switch");
+  let disabling: Promise<void> | undefined;
+  try {
+    let writerPid: number | undefined;
+    for (let i = 0; i < 100 && !writerPid; i++) {
+      const blocked = await client!.pool.query("SELECT pid FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", [pid]);
+      writerPid = blocked.rows[0]?.pid;
+      if (!writerPid) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(writerPid, "the real message writer reached receipt insertion");
+    let disabled = false;
+    disabling = settings!.setRoomAgentReplyOrder(a.room.id, "parallel").then(() => { disabled = true; });
+    let blockedByWriter = false;
+    for (let i = 0; i < 100 && !disabled && !blockedByWriter; i++) {
+      const blocked = await client!.pool.query("SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", [writerPid]);
+      blockedByWriter = blocked.rows.length > 0;
+      if (!blockedByWriter) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(blockedByWriter && !disabled, "off waits for the sequence plan's shared setting lock");
+  } finally {
+    await gate.query("SELECT pg_advisory_unlock(711028, 1)");
+    gate.release();
+    await Promise.all([sending, disabling]);
+    await client!.pool.query("DROP TRIGGER pause_reply_receipt_insert ON message_agent_receipts; DROP FUNCTION pause_reply_receipt_insert()");
+  }
+  const sent = await sending;
+  assert.ok((await a.turns(sent.message.id)).every((row) => row.released));
+  for (let index = 0; index < 3; index++) assert.equal(a.forAgent(await a.read(index), sent.message.id)?.guidance, undefined);
 });

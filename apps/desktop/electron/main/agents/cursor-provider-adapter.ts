@@ -1,4 +1,4 @@
-import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants as fsConstants, fsyncSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -298,9 +298,7 @@ export function boundedCursorRoomTurnPrompt(
     "After complete_room_turn succeeds, end this provider turn without revising or repeating the proposal.",
     `Turn id: ${turnId}`,
     `Inbox item: ${request.inboxItemId}`,
-    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
-    `Source message: ${JSON.stringify(request.sourceMessage)}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    ...formatRoomTurnContext(request),
   ].join("\n");
 }
 

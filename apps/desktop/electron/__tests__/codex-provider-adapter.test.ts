@@ -2107,6 +2107,8 @@ const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused"> = {
   list_wake_rules: "approved",        // what agents in the room are waiting for
   get_room_artifacts: "approved",     // branches, pull requests and checks shared with the room
   get_room_events: "approved",        // GitHub events the room already holds
+  // Optional expression lookup, enabled by the Room's human-admin setting.
+  search_gifs: "approved",           // provider metadata; no repository writes
   // Saying something in the room.
   send_message: "approved",
   send_thread_message: "approved",
@@ -2114,6 +2116,8 @@ const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused"> = {
   post_reasoning: "approved",
   request_human_input: "approved",    // a question in a person's "Needs you" inbox
   set_reply_thread: "approved",       // where the final answer goes; approved at every access level
+  set_reply_gif: "approved",          // optional attachment to the same final answer
+  react_to_message: "approved",       // room communication under the agent's identity
   // Runs git in a folder the caller names, on this Mac and outside Codex's sandbox.
   check_repo: "refused",
   // Runs git, then asks GitHub, GitLab or Bitbucket about the repository: another machine.
@@ -2154,11 +2158,11 @@ test("a Read-only Codex agent's room tools are an exact named list, and every ot
   assert.deepEqual(approved, [
     "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events",
     "get_room_guidelines", "get_room_memory", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
-    "read_messages", "request_human_input", "send_message", "send_thread_message", "set_reply_thread",
+    "react_to_message", "read_messages", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_thread",
   ]);
   // An approved tool that is not chat or status is one the room server itself classes as a read,
   // and none of the three that touch this Mac's repository or another service is approved.
-  const speaks = ["send_message", "send_thread_message", "post_status", "post_reasoning", "request_human_input", "set_reply_thread"];
+  const speaks = ["send_message", "send_thread_message", "post_status", "post_reasoning", "request_human_input", "set_reply_thread", "set_reply_gif", "react_to_message"];
   assert.deepEqual(approved.filter((name) => !speaks.includes(name) && !SUPERVISED_READ_ONLY_TOOLS.has(name)), []);
   for (const name of ["check_repo", "check_repo_visibility", "initialize_repo"]) assert.equal(READ_ONLY_ROOM_TOOL_DECISIONS[name], "refused", name);
 

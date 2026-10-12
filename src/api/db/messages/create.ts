@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import { JEV_MAX_CANDIDATE_AGENTS } from "../../messages/jev-conversation-routing.js";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
@@ -150,6 +151,7 @@ export interface AddMessageOptions {
   reply_to_message_id?: string | null;
   thread_root_message_id?: string | null;
   attachments?: NormalizedMessageAttachmentReference[];
+  gif?: RoomGif | null;
   client_message_id?: string | null;
   publisher_agent_key?: string | null;
   publisher_agent_session_id?: string | null;
@@ -208,6 +210,9 @@ async function assertDesktopReplayMatches(
     || existing.publisher_agent_key !== (options?.publisher_agent_key?.trim() || null)
     || existing.publisher_agent_session_id !== (options?.publisher_agent_session_id?.trim() || null)
     || existing.source !== (options?.source || null) || existing.sender !== sender || existing.text !== text
+    || (existing.gif?.id ?? null) !== (options?.gif?.id ?? null)
+    || (existing.gif?.title ?? null) !== (options?.gif?.title ?? null)
+    || Boolean(existing.gif?.text_fallback_only) !== Boolean(options?.gif?.text_fallback_only)
     || existing.reply_to_number !== replyNumber
     || (existing.thread_root_number ?? existing.number) !== (rootNumber ?? existing.number)
     || existing.agent_prompt_kind !== (options?.agent_prompt_kind || null)) {
@@ -253,6 +258,12 @@ export async function addMessageWithCreateStatus(
         ? parseScopedId(options.thread_root_message_id, "msg")
         : null;
 
+    // Lock before looking up a replay: a previous attempt may commit while a
+    // concurrent Off update is ahead of us. Its saved message must still win.
+    const expressionSetting = options?.gif
+      ? (await tx.select({ enabled: room_settings.expressions_enabled }).from(room_settings)
+        .where(eq(room_settings.room_id, roomId)).for("share"))[0]
+      : null;
     if (clientMessageId) {
       const [existingMessage] = await tx
         .select(messageRowSelection)
@@ -271,6 +282,9 @@ export async function addMessageWithCreateStatus(
       }
     }
 
+    if (options?.gif) {
+      if (!expressionSetting?.enabled) throw new RequestValidationError("expressions_disabled: GIF sending is disabled in this room. Send text instead.");
+    }
     if (options?.reply_to_message_id && !replyToNumber) {
       throw new RequestValidationError("reply_to must be a valid message id");
     }
@@ -326,6 +340,7 @@ export async function addMessageWithCreateStatus(
       thread_root_number: threadRootNumber,
       sender,
       text,
+      gif: options?.gif ?? null,
       display_text: retainsDisplayText(options?.source) ? options?.display_text?.trim() || null : null,
       agent_prompt_kind: promptKind,
       source: options?.source ?? null,
@@ -900,7 +915,7 @@ export async function addMessageWithCreateStatus(
         && routedReceipts.every((receipt) => SEQUENTIAL_REPLY_REASONS.has(receipt.activation_reason));
       const [replyOrder] = sequenceCandidate
         ? await tx.select({ order: room_settings.agent_reply_order })
-          .from(room_settings).where(eq(room_settings.room_id, roomId))
+          .from(room_settings).where(eq(room_settings.room_id, roomId)).for("share")
         : [];
       const receiptRowsToInsert = planReplyTurns(routedReceipts, {
         messageNumber: createdMessage.number,

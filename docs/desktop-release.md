@@ -88,3 +88,50 @@ The updater downloads a newer signed ZIP in the background but never restarts th
 Update metadata must continue to use HTTPS and immutable versioned asset URLs. Do not rely on a normal quit as the user-controlled installation path: Squirrel.Mac may stage a downloaded replacement for the next launch. If that path applies an update, the new app's normal implementation-version handshake still retires an older serving daemon before reconciliation. **Restart & update** remains the preferred path because the current app proves the handoff first and can report a retryable failure without quitting.
 
 Do not replace an existing GitHub release asset with different bytes after it has been announced. If a release is faulty, publish a higher patch version; clients and Squirrel.Mac are designed to move forward to a newer version, not silently downgrade. Stable and beta channels should use separate feed locations so pre-release metadata cannot reach stable clients.
+
+
+## Room team and expression trial (desktop 0.1.119)
+
+Release the API/migration and MCP 0.12.37 before desktop 0.1.119. Keep both Room
+conversation switches off by default. **Answer in turns (Beta)** controls reply
+coordination; **GIFs and agent reactions (Beta)** independently enables optional
+expression tools. Neither switch gives an agent the authority of a human admin.
+
+Configure `GIPHY_API_KEY` as a repository Actions secret for the existing staging
+deployment. The deploy step writes it into the host's existing `.env` without
+printing it; an absent secret preserves an existing host value. Local development
+can set the same environment variable on the API process. Never commit a key.
+GIPHY requires direct client requests, so the authenticated client configuration
+route returns it only to room participants, with `Cache-Control: no-store`.
+It is an application client key, not a substitute for Room authentication. Agent
+tool results contain only provider IDs and titles, never the key or media URLs.
+
+The current beta key allows 100 API calls/hour across this integration. This is a
+small opt-in trial, not a production-scale quota. Review usage and GIPHY's
+production application/pricing before broad rollout. Search is explicit rather
+than firing on every keystroke. The client bounds requests, backs off after quota
+or provider failures, preserves result order/URLs and stores only IDs in Room
+messages. Official attribution artwork comes from
+https://media.giphy.com/giphy-attribution-marks.zip (GIPHY API attribution marks).
+
+Agents choose tools based on context. The router decides attention; it does not
+choose an emoji or GIF for the agent. `search_gifs` and `react_to_message` run
+through the existing tool execution path. A supervised `set_reply_gif` records a
+turn-scoped attachment intent; the normal final publisher remains the only
+publisher. `no_reply` still sends nothing. GIFs and reactions are sparse optional
+expressions, not work completion, approval, or agreement records.
+
+If GIPHY is unavailable, normal agent work and text replies continue. A lost
+reaction acknowledgment is reported as unconfirmed, never falsely as failure or
+success. Human drafts stay in the composer during search failure. After an
+explicit precommit flag refusal, an unsent GIF can be removed or its text sent;
+an uncertain network send retains its content and idempotency key for retry.
+Web clients show a GIF title and provider link; the searchable picker and inline
+play/pause display in this release are desktop features. Local-only Rooms and
+rental/internal-message agent reactions are not enabled by this trial.
+
+Rollback: turn off the relevant Room switch. Existing messages/reactions stay
+readable, human reactions continue, and ordinary text sends keep working. Do not
+drop migration 0113 or rewrite saved messages during a rollback. If rolling back
+the API binary, keep expressions off and verify reaction identity compatibility;
+the new composite reaction key distinguishes each agent from its human owner.

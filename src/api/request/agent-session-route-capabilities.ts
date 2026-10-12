@@ -8,6 +8,9 @@ import type { AgentSessionBearerCapability } from "../../shared/agent-session-be
 // old single-segment `[^/]+` every worker call in a Git room failed 403.
 const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSessionBearerCapability }> = [
   { method: "GET", path: /^\/rooms\/.+\/(?:memory|attention|memory\/[^/]+\/history)$/, capability: "coordination.read" },
+  { method: "GET", path: /^\/rooms\/.+\/(?:expressions|gif-client-config)$/, capability: "coordination.read" },
+  { method: "PUT", path: /^\/rooms\/.+\/messages\/msg_\d+\/reactions\/[^/]+$/, capability: "messages.write" },
+  { method: "DELETE", path: /^\/rooms\/.+\/messages\/msg_\d+\/reactions\/[^/]+$/, capability: "messages.write" },
   { method: "GET", path: /^\/rooms\/.+\/agent-guidelines$/, capability: "coordination.read" },
   { method: "GET", path: /^\/rooms\/.+\/wake-rules$/, capability: "coordination.read" },
   { method: "POST", path: /^\/rooms\/.+\/wake-rules(?:\/[^/]+\/(?:cancel|restore))?$/, capability: "coordination.self_write" },

@@ -1,6 +1,25 @@
 import type { DesktopTaskSummary } from "../../ipc-types.js";
+import type { ProviderRoomTurnRequest } from "./provider-adapter.js";
+import { ROOM_EXPRESSION_GUIDANCE } from "../../../../../shared/room-expressions.mjs";
+
+/** Routing guidance belongs to this turn, not to every historical message.
+ * Leave the stored messages untouched; strip activation only in the prompt.
+ */
+export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "observedContext" | "sourceMessage" | "activation">): string[] {
+  const conversationMessage = (message: unknown): unknown => {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return message;
+    const { activation: _activation, ...context } = message as Record<string, unknown>;
+    return context;
+  };
+  return [
+    `Recent bounded room context: ${JSON.stringify((request.observedContext ?? []).map(conversationMessage))}`,
+    `Source message: ${JSON.stringify(conversationMessage(request.sourceMessage))}`,
+    `Activation: ${JSON.stringify(request.activation)}`,
+  ];
+}
 
 export const MANAGED_ROOM_WORK_INSTRUCTIONS = [
+  ROOM_EXPRESSION_GUIDANCE,
   "You are responding to a daemon-owned room inbox item. Carry out any work it assigns or continues.",
   "The daemon owns room observation, worker credentials, delivery retries, and publication of your final chat reply. Do not register a session, authenticate LetAgents, poll, or manage runtime lifecycle.",
   "Answer ordinary top-level room questions in the main room by default; answering a specific message is not by itself a reason to start a thread. Existing thread replies stay in their thread automatically. Start a new thread only when the user asks for one or a sustained side discussion would distract from the room. In that case, call set_reply_thread with no arguments when available, then finish through your normal final completion. It records only the thread choice and does not send text or end the turn. Use message tools only for separate messages; synthetic corrections and task continuations have no new room thread to select.",
