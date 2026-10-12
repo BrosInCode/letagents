@@ -119,7 +119,6 @@ function createDeps() {
     requireAdmin: unused,
     requireParticipant: unused,
     rememberAgentRoomParticipant: unused,
-    maybeEmitStaleWorkPrompt: unused,
     emitProjectMessage: unused,
   };
 }

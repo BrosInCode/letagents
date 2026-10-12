@@ -1343,7 +1343,8 @@ test("externalMcpProviderInstruction does not imply the desktop starts bridge-on
   assert.match(repoPrompt, /Do not continue into the room loop until register_agent_session succeeds/);
   assert.match(repoPrompt, /Call post_status with \{"agent_session_id":"<returned agent_session_id>","status":"available in the room"\}/);
   assert.match(repoPrompt, /Call read_messages once, then call get_board once/);
-  assert.match(repoPrompt, /claim it with claim_task using the returned agent_session_id/);
+  assert.match(repoPrompt, /Do not claim unassigned tasks on your own/);
+  assert.doesNotMatch(repoPrompt, /claim it with claim_task/);
   assert.match(repoPrompt, /wait_for_messages with \{"agent_session_id":"<returned agent_session_id>","after_message_id":"<latest seen message id>","timeout":30000\} in a loop/);
   assert.match(repoPrompt, /send_message or send_thread_message with the same agent_session_id/);
 

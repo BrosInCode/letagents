@@ -37,7 +37,9 @@ export function summarizeTaskEvent(task: DesktopTaskSummary): string {
     "",
     "Active locks:",
     ...formatLocks(task),
-    task.stalePromptState?.isStale
+    // A stale "accepted_unclaimed" badge is board state for people. Showing it
+    // here would read as an invitation to pick the task up.
+    task.stalePromptState?.isStale && task.stalePromptState.reason !== "accepted_unclaimed"
       ? `Stale prompt: ${task.stalePromptState.reason || "stale"} for ${task.stalePromptState.staleForMs ?? "unknown"}ms`
       : null,
     "",

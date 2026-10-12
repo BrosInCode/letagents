@@ -52,7 +52,7 @@ export function buildAutoApproveAnnouncementText(input: {
   const minutes = Math.max(1, Math.floor(input.waited_for_ms / 60_000));
   const title = intentTitle(input.intent);
   const titled = title ? ` "${title}"` : " it";
-  return `[status] No Board Manager responded for ${minutes}m. The task proposed by ${proposerLabel(input.intent)}${titled} was approved automatically and is ready to claim on the board.`;
+  return `[status] No Board Manager responded for ${minutes}m. The task proposed by ${proposerLabel(input.intent)}${titled} was approved automatically and is on the board. A person or the Board Manager can assign it.`;
 }
 
 export function buildHumanEscalationText(input: {
