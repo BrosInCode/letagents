@@ -724,16 +724,21 @@ async function registeredRoomTools(): Promise<string[]> {
 }
 
 /** A call the coordinator accepts for the tool, as far as its own input checks go. */
-const roomToolCall = (toolName: string) => ({ toolName, input: toolName === "set_reply_thread" ? {} : toolName === "join_room" ? { name: "room-b" } : { text: "hello" } });
+const roomToolCall = (toolName: string) => ({
+  toolName,
+  input: toolName === "set_reply_thread" ? {}
+    : toolName === "set_reply_gif" ? { gif: { provider: "giphy", id: "example", title: "A small win" } }
+    : toolName === "join_room" ? { name: "room-b" } : { text: "hello" },
+});
 const READ_ONLY_REFUSAL = (toolName: string) => new RegExp(`^Error: Read-only access does not allow the room tool "${toolName}"\\. This agent can read the room and post in it\\. `
   + "It cannot change the task board, join rooms or submit reviews\\. Its owner can choose another access level\\.$");
 
-test("the daemon lets a Read-only Codex agent use the 17 named room tools and refuses every other one, before anything is journaled or run", { timeout: 30_000 }, async () => {
+test("the daemon lets a Read-only Codex agent use the named room tools and refuses every other one, before anything is journaled or run", { timeout: 30_000 }, async () => {
   const registered = await registeredRoomTools();
   const allowed = [
     "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events",
     "get_room_guidelines", "get_room_memory", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
-    "read_messages", "request_human_input", "send_message", "send_thread_message", "set_reply_thread",
+    "react_to_message", "read_messages", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_thread",
   ];
   // One list: the one Codex is told is the one the daemon keeps.
   assert.deepEqual([...CODEX_READ_ONLY_ROOM_TOOLS].sort(), allowed);
