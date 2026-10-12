@@ -124,3 +124,83 @@ test('the provider run conclusion wins over a failed continue-on-error job', () 
   const passed=event('run-passed',{event_type:'workflow_run',action:'completed',state:'success',metadata:{run_id:'90',run_attempt:1,status:'completed',conclusion:'success',pull_request_url:url,pull_request_head_sha:'sha'}})
   assert.equal(groupActivity([event('pr'),failedJob,passed])[0].attention,false)
 })
+
+import { createGitHubTimeline, githubArtifactKey, githubUpdateRows } from '../../../shared/grouped-github-updates'
+import { parseGitHubEventPresentation } from '../src/components/room/githubEventMessage'
+import { chatSenderRole, avatarInitials } from '../../../shared/chat-appearance'
+function roomUpdate(id: number, text: string, link = url) { return { id: `msg_${id}`, source: 'github', sender: 'github', timestamp: at(id), text: `${text} ${link}` } }
+const parseRoomEvent = (m: ReturnType<typeof roomUpdate>) => m.source === 'github' ? parseGitHubEventPresentation(m) : null
+const roomPR = (id: number) => roomUpdate(id, 'PR #42 opened in BrosInCode/letagents: Quiet room updates')
+
+test('room groups preserve history and row order, coalesce canonical artifact URLs, and end at conversation/day boundaries', () => {
+  const group = createGitHubTimeline<ReturnType<typeof roomUpdate>, ReturnType<typeof roomUpdate>>()
+  const first = roomPR(1), other = roomUpdate(2,'PR #9 opened in BrosInCode/other: Another task','https://github.com/BrosInCode/other/pull/9')
+  const merged = roomUpdate(3,'PR #42 merged by EmmyMay in BrosInCode/letagents', `${url.toLowerCase()}#event-1`)
+  const human = {...roomPR(4), source:'browser', sender:'github'}
+  const next = {...roomPR(6), timestamp:'2026-10-12T10:00:00Z'}
+  const entries = group([first,other,merged,human,roomPR(5),next], m=>m,parseRoomEvent,'room')
+  assert.equal(entries.length,4)
+  assert.equal(entries[1],human)
+  const rows = githubUpdateRows([first,other,merged],parseRoomEvent)
+  assert.equal(rows.length,2)
+  assert.deepEqual(rows[0].messages.map(m=>m.id),['msg_1','msg_3'])
+  assert.equal(rows[0].title,'Quiet room updates')
+  assert.equal(rows[0].event.statusLabel,'merged')
+  assert.equal(rows[1].title,'Another task')
+})
+
+test('pagination reuses the mounted group and anchor, while later block splits never duplicate keys', () => {
+  const group = createGitHubTimeline<ReturnType<typeof roomUpdate>, ReturnType<typeof roomUpdate>>()
+  const before = group([roomPR(3),roomPR(4)],m=>m,parseRoomEvent,'room') as any[]
+  const after = group([roomPR(1),roomPR(2),roomPR(3),roomPR(4),roomPR(5)],m=>m,parseRoomEvent,'room') as any[]
+  assert.equal(after[0].id,before[0].id)
+  assert.equal(after[0].anchorId,'msg_3')
+  const split = group([roomPR(1),{...roomPR(2),source:'browser'},roomPR(3),roomPR(4)],m=>m,parseRoomEvent,'room') as any[]
+  assert.equal(new Set(split.map(e=>e.id)).size,split.length)
+  assert.equal(split[2].id,before[0].id)
+  assert.equal(split[0].anchorId,'msg_1')
+  const otherRoom = group([roomPR(1),roomPR(3)],m=>m,parseRoomEvent,'other') as any[]
+  assert.equal(otherRoom[0].anchorId,'msg_1')
+})
+
+test('artifact grouping never merges an unrelated run, repository, unknown URL, or mismatched repository', () => {
+  const original = parseRoomEvent(roomPR(1))!
+  assert.notEqual(githubArtifactKey(original,'a'),githubArtifactKey({...original,url:'https://github.com/BrosInCode/letagents/actions/runs/42'},'b'))
+  assert.equal(githubArtifactKey({...original,url:'https://example.org/BrosInCode/letagents/pull/42'},'c'),'message:c')
+  assert.equal(githubArtifactKey({...original,repository:'other/repo'},'d'),'message:d')
+  assert.equal(githubArtifactKey({...original,url:null},'e'),'message:e')
+})
+
+test('a recovered run updates in place and a comment does not regress a merged PR', () => {
+  const run='https://github.com/BrosInCode/letagents/actions/runs/90'
+  const failed=roomUpdate(1,'Check "build" (GitHub Actions) failure in BrosInCode/letagents',run)
+  const passed=roomUpdate(2,'Check "build" (GitHub Actions) success in BrosInCode/letagents',run)
+  assert.equal(githubUpdateRows([failed,passed],parseRoomEvent)[0].event.statusLabel,'Success')
+  const merged=roomUpdate(3,'PR #42 merged in BrosInCode/letagents')
+  const comment=roomUpdate(4,'Willow commented on PR #42 in BrosInCode/letagents: "Looks good"')
+  assert.equal(githubUpdateRows([merged,comment],parseRoomEvent)[0].event.statusLabel,'merged')
+})
+
+test('sender palette uses authenticated ownership, keeps own agents incoming, and handles signed-out/unknown identities', () => {
+  assert.equal(chatSenderRole({human:true,agent:false,login:'EMMYMAY',viewerLogin:'EmmyMay'}),'self')
+  assert.equal(chatSenderRole({human:true,agent:false,login:'Willow',viewerLogin:'EmmyMay'}),'human')
+  assert.equal(chatSenderRole({human:true,agent:false,viewerLogin:'EmmyMay'}),'human')
+  assert.equal(chatSenderRole({human:true,agent:false,outgoing:true}),'self')
+  assert.equal(chatSenderRole({human:false,agent:true,agentKey:'EmmyMay/stone',viewerLogin:'emmymay'}),'own-agent')
+  assert.equal(chatSenderRole({human:false,agent:true,agentKey:'Willow/stone',viewerLogin:'EmmyMay'}),'other-agent')
+  assert.equal(chatSenderRole({human:false,agent:true,agentKey:'EmmyMay/stone'}),'other-agent')
+  assert.equal(avatarInitials('Willow May'),'WM')
+  assert.equal(avatarInitials('Willow'),'WI')
+})
+
+
+test('separate check jobs on the same workflow cannot overwrite each other', () => {
+  const events = [
+    { id: 'msg_1', timestamp: '2026-10-12T10:00:00Z', text: 'Check "build" failure in BrosInCode/letagents\nhttps://github.com/BrosInCode/letagents/actions/runs/10' },
+    { id: 'msg_2', timestamp: '2026-10-12T10:01:00Z', text: 'Check "integration-tests" success in BrosInCode/letagents\nhttps://github.com/BrosInCode/letagents/actions/runs/10' },
+  ];
+  const rows = githubUpdateRows(events, message => parseGitHubEventPresentation({ ...message, source: "github", sender: "github" }));
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].event.statusLabel, 'Failure');
+  assert.equal(rows[1].event.statusLabel, 'Success');
+});

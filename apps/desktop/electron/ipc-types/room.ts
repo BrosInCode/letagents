@@ -311,6 +311,7 @@ export interface DesktopMessageInfo {
 }
 
 export interface DesktopRoomMessage {
+  senderProfile?: { login: string; avatarUrl: string | null } | null;
   id: string;
   /** Exact idempotency identity supplied by the message publisher. */
   clientMessageId?: string | null;

@@ -2,7 +2,7 @@ import { replyTurnHoldCondition, settledRoutingCondition } from "../routing-fron
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../../client.js";
-import { message_attachments, messages } from "../../schema.js";
+import { accounts, message_attachments, messages } from "../../schema.js";
 import {
   toMessageAttachment,
   toMessageReplyReference,
@@ -259,6 +259,11 @@ export async function hydrateMessageReplies(
     }
   }
 
+  const publisherIds = [...new Set(bounded.filter((row) => row.source === "browser" && !row.publisher_agent_key)
+    .map((row) => row.publisher_account_id).filter((id): id is string => Boolean(id)))];
+  const profiles = publisherIds.length ? await executor.select({ id: accounts.id, login: accounts.login, avatar_url: accounts.avatar_url })
+    .from(accounts).where(inArray(accounts.id, publisherIds)) : [];
+  const profileById = new Map(profiles.map(({ id, login, avatar_url }) => [id, { login, avatar_url }]));
   const accountRouting = await accountRoutingPromise;
   return bounded.map((row) => {
     const threadRootNumber = row.thread_root_number ?? row.number;
@@ -270,6 +275,9 @@ export async function hydrateMessageReplies(
       threadSummary && (threadSummary.reply_count > 0 || row.thread_root_number) ? threadSummary : null,
       reactionMap.get(row.number) ?? [],
     );
+    if (row.source === "browser" && !row.publisher_agent_key) {
+      message.sender_profile = profileById.get(row.publisher_account_id ?? "") ?? null;
+    }
     return options?.accountId && options.accountAgentRouting
       ? { ...message, account_agent_routing: accountRouting.get(row.number) ?? null }
       : message;

@@ -19,6 +19,8 @@ export function invalidateRoomMessageReactions(roomIdentifier: string): void {
   if (key) revisions.set(key, (revisions.get(key) ?? 0) + 1);
 }
 
+export function useMessageViewer() { return computed(() => viewer.value); }
+
 // The signed-in person, set once by the app shell. Reactions carry a name, so
 // nobody signed in means nobody can react.
 const viewer = shallowRef<MessageReactor | null>(null);

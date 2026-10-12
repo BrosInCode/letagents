@@ -132,6 +132,7 @@ export async function sendDesktopRoomMessage(
       reply_to: replyTo || null,
       thread_root_id: threadRootId || null,
       source: "browser",
+      sender_profile: storedAuth.account?.login ? { login: storedAuth.account.login, avatar_url: storedAuth.account.avatarUrl || null } : null,
       attachments: localAttachments,
       readerKey,
       idempotency_key: clientId,

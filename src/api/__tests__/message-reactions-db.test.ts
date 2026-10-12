@@ -283,3 +283,18 @@ test('the migration times out behind a message writer and restores the connectio
     await client!.db.execute(sql`DROP SCHEMA ${identifier} CASCADE`);
   }
 });
+
+test('message history and creation expose only the authenticated human publisher profile', options, async () => {
+  const room = await rooms!.createProjectWithName(unique('publisher-profile'));
+  const owner = await rooms!.upsertAccount({ provider: 'github', provider_user_id: unique('profile'), login: 'profile-owner', display_name: 'Human name', avatar_url: 'https://avatars.githubusercontent.com/u/1' });
+  const published = await rooms!.addMessage(room.id, 'Unrelated display label', 'Hello', { source: 'browser', account_id: owner.id });
+  const expected = { login: owner.login, avatar_url: owner.avatar_url };
+  assert.deepEqual(published.sender_profile, expected);
+  assert.deepEqual((await rooms!.getMessageById(room.id, published.id))?.sender_profile, expected);
+  assert.deepEqual((await rooms!.getMessages(room.id)).messages.find(message => message.id === published.id)?.sender_profile, expected);
+  assert.equal('publisher_account_id' in published, false);
+  const unknown = await rooms!.addMessage(room.id, owner.login, 'No authenticated publisher', { source: 'browser' });
+  assert.equal(unknown.sender_profile, null);
+  const system = await rooms!.addMessage(room.id, owner.login, 'System notification', { source: 'system', account_id: owner.id });
+  assert.equal(system.sender_profile, undefined);
+});

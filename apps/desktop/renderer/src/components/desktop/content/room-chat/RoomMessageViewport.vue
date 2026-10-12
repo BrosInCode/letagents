@@ -14,7 +14,7 @@
         {{ loadingOlderMessages ? "Loading earlier messages..." : olderMessagesError ? "Retry loading earlier messages" : "Load earlier messages" }}
       </button>
 
-      <template v-for="entry in timelineEntries" :key="entry.type === 'message' ? entry.message.clientMessageId || entry.id : entry.id">
+      <template v-for="entry in timelineEntries" :key="`${messageNamespace}:${entry.type === 'message' ? entry.message.clientMessageId || entry.id : entry.id}`">
         <div
           v-if="entry.type === 'date'"
           class="room-date-separator"
@@ -25,27 +25,29 @@
         </div>
 
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
-        <template v-else>
-        <div v-if="entry.message.id === unreadTimeline.dividerId.value" class="room-explicit-unread" role="separator">New messages</div>
+        <RoomGitHubUpdates v-else :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
+        <template #default="{ message, history }">
+        <div v-if="message.id === unreadTimeline.dividerId.value" class="room-explicit-unread" role="separator">New messages</div>
         <DesktopChatMessage
-          :message="entry.message"
-          :compact-with-previous="entry.compactWithPrevious"
-          :thread-summary="threadIndicatorSummary(entry.message)"
-          :active-thread-root="entry.message.id === activeThreadParentId"
+          :message="message"
+          :github-history="history"
+          :compact-with-previous="entry.type === 'message' && entry.compactWithPrevious"
+          :thread-summary="threadIndicatorSummary(message)"
+          :active-thread-root="message.id === activeThreadParentId"
           :highlight-query="searchQuery"
           :room-identifier="roomIdentifier"
           :message-reference-ids="messageReferenceIds"
           :task-reference-ids="taskReferenceIds"
-          :search-active="entry.message.id === activeSearchMessageId"
-          :animate-arrival="arrivingMessageIds.has(entry.message.id)"
-          :delivery-receipts="deliveryReceiptsByMessage[entry.message.id] || []"
+          :search-active="message.id === activeSearchMessageId"
+          :animate-arrival="arrivingMessageIds.has(message.id)"
+          :delivery-receipts="deliveryReceiptsByMessage[message.id] || []"
           :delivery-recovery-available="deliveryRecoveryAvailable"
           :continuation-repair-available="continuationRepairAvailable"
           :room-delivery-skip-available="roomDeliverySkipAvailable"
           :delivery-retry-keys="deliveryRetryKeys"
           :continuation-repair-keys="continuationRepairKeys"
           :room-delivery-skip-keys="roomDeliverySkipKeys"
-          :provider-label="resolveProviderLabel(entry.message)"
+          :provider-label="resolveProviderLabel(message)"
           @quote-reply="$emit('quote-reply', $event)"
           @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
@@ -59,11 +61,12 @@
           @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
         >
-          <template v-if="entry.message.id === activeThreadParentId" #thread>
+          <template v-if="message.id === activeThreadParentId" #thread>
             <slot name="thread" />
           </template>
         </DesktopChatMessage>
         </template>
+        </RoomGitHubUpdates>
       </template>
 
       <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
@@ -176,6 +179,9 @@
 </template>
 
 <script setup lang="ts">
+import RoomGitHubUpdates from "../../../../../../../../shared/ui/RoomGitHubUpdates.vue";
+import { createGitHubTimeline } from "../../../../../../../../shared/grouped-github-updates";
+import { parseGitHubEvent } from "../desktop-chat-message/github-event";
 import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import { provide } from "vue";
 import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
@@ -212,7 +218,7 @@ import { compareRoomMessages } from "../room-shell/messages";
 import { createMessageProviderLabelResolver } from "../../../../domain/agent-provider";
 import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
-import { buildMessageTimelineEntries } from "./timeline";
+import { buildMessageTimelineEntries, type MessageTimelineEntry } from "./timeline";
 
 interface ThreadActivityNotice {
   parentId: string;
@@ -358,8 +364,8 @@ onUpdated(() => { anchorElements = null; });
 
 function getAnchorElements(): HTMLElement[] {
   if (!anchorElements) {
-    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>(".room-message-list > [data-message-id]") ?? []);
-    anchorElementsById = new Map(anchorElements.map(element => [element.dataset.messageId!, element]));
+    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>(".room-message-list > [data-message-id], .room-message-list > [data-scroll-anchor-id]") ?? []);
+    anchorElementsById = new Map(anchorElements.map(element => [(element.dataset.messageId || element.dataset.scrollAnchorId)!, element]));
   }
   return anchorElements;
 }
@@ -374,7 +380,9 @@ const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages
 const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
   props.participants, props.presence, props.supervisorEntries,
 ));
-const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages, props.roomAgentWork));
+const buildGroupedTimeline = createGitHubTimeline<MessageTimelineEntry, DesktopRoomMessage>();
+const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork),
+  entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
 const messageReferenceIds = computed(() =>
   new Set(props.messages.map((message) => message.id))
 );
@@ -1041,7 +1049,7 @@ function captureScrollAnchor(): ScrollAnchor | null {
     else low = middle + 1;
   }
   const anchorElement = messageElements[low];
-  const messageId = anchorElement?.dataset.messageId;
+  const messageId = anchorElement?.dataset.messageId || anchorElement?.dataset.scrollAnchorId;
   if (!anchorElement || !messageId) return null;
   return {
     messageId,
@@ -1096,12 +1104,18 @@ function revealOrScrollToMessage(messageId: string | null): void {
   if (!scrollToMessage(messageId)) emit("reveal-message", messageId);
 }
 
-function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "smooth"): boolean {
+function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "smooth", historyReady = false): boolean {
   messageMotion.cancel();
   unreadTimeline.programmaticScroll();
   if (!messageId || !messagesElement.value) return false;
   const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
   if (!target) return false;
+  const group = target.closest('.room-github-updates');
+  if (group && !historyReady) {
+    const namespace = props.messageNamespace, revision = scrollRevision;
+    group.dispatchEvent(new CustomEvent('reveal-github-message', { detail: { id: messageId, ready: () => { if (namespace === props.messageNamespace && revision === scrollRevision) scrollToMessage(messageId, behavior, true); } } }));
+    return true;
+  }
   scrollRevision++;
   cancelLayoutAnchorRestore();
   isScrolledToBottom = false;
