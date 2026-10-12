@@ -83,7 +83,7 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
     clientHeight: 400, scrollHeight: 2000, style: { scrollBehavior: "smooth" }, isConnected: true,
     getClientRects: () => [{}], getBoundingClientRect: () => ({ top: 0 }),
     querySelectorAll: () => thread ? [{ dataset: { threadMessageId: "msg_1" }, getBoundingClientRect: () => ({ top: (revealTop ?? top) + 12 - top }), scrollIntoView: reveal, classList: { add() {}, remove() {} } }] : [], focus() {},
-    querySelector: () => ({ scrollIntoView: reveal, classList: { add() {}, remove() {} } }),
+    querySelector: () => ({ closest: () => null, scrollIntoView: reveal, classList: { add() {}, remove() {} } }),
     scrollTo: ({ top: value }: { top: number }) => { el.scrollTop = value; },
     scrollTop: top,
   });

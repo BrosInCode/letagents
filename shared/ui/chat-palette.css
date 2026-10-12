@@ -1,0 +1,5 @@
+/* Two related families: warm human surfaces and cool agent surfaces. */
+[data-chat-role] { --chat-bubble: light-dark(#f0eeeb, #242322); --chat-border: light-dark(rgb(0 0 0 / 7%), rgb(255 255 255 / 7%)); }
+[data-chat-role="self"] { --chat-bubble: light-dark(#dfdad4, #383532); }
+[data-chat-role="own-agent"] { --chat-bubble: light-dark(#dfe6ee, #2b333d); }
+[data-chat-role="other-agent"] { --chat-bubble: light-dark(#edf1f6, #1b232d); }

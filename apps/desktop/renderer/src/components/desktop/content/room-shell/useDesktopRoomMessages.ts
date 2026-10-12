@@ -10,7 +10,6 @@ import {
 } from "./messages";
 import {
   isGitHubRoomMessage,
-  isLowSignalGitHubCheckMessage,
 } from "../desktop-chat-message/github-event";
 import { roomTimelineMessages } from "../room-chat/thread-utils";
 import { desktopIpc } from "../../../../ipc/index.js";
@@ -52,8 +51,7 @@ export function useDesktopRoomMessages(options: {
   const visibleMessages = computed(() => {
     return mergeRoomMessages(loadedServerMessages.value, localMessages.value)
       .filter((message) =>
-        !isLowSignalGitHubCheckMessage(message)
-        && (options.githubEventsVisible.value || !isGitHubRoomMessage(message))
+        options.githubEventsVisible.value || !isGitHubRoomMessage(message)
       );
   });
   const hasFilteredRoomActivity = computed(() => {
@@ -61,7 +59,6 @@ export function useDesktopRoomMessages(options: {
     return [...olderMessages.value, ...options.messages.value, ...localMessages.value]
       .some((message) =>
         isUserFacingFilteredMessage(message)
-        || isLowSignalGitHubCheckMessage(message)
         || (!options.githubEventsVisible.value && isGitHubRoomMessage(message))
       );
   });

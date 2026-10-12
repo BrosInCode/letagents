@@ -3,6 +3,7 @@
     class="desktop-github-event"
     :event="event"
     :compact="compact"
+    :history="history"
     :room="room"
     :task-link-enabled="taskLinkEnabled"
     show-event-link
@@ -24,6 +25,7 @@ defineProps<{
   event: GitHubEventPresentation;
   taskLinkEnabled?: boolean;
   room?: boolean
+  history?: boolean
   compact?: boolean;
 }>();
 

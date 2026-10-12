@@ -75,7 +75,7 @@ test("the actual web list reuses bounded reveal for an older bookmark and retain
     querySelectorAll: () => [],
     querySelector: (selector: string) => {
       const id = props.messages.find(row => selector.includes(row.id))?.id;
-      return id ? { scrollIntoView: () => { el.scrollTop = 100; }, classList: { add() {}, remove() {} } } : null;
+      return id ? { closest: () => null, scrollIntoView: () => { el.scrollTop = 100; }, classList: { add() {}, remove() {} } } : null;
     },
   });
   const app = renderer.createApp({ setup() {
@@ -247,7 +247,7 @@ async function webScrollSurface() {
   const el = Object.assign(new EventTarget(), { scrollHeight: 2000, clientHeight: 400, scrollTop: 1600,
     getBoundingClientRect: () => ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }),
     scrollTo: () => { el.scrollTop = el.scrollHeight - el.clientHeight; calls.push("bottom"); },
-    querySelectorAll: () => [], querySelector: () => ({ scrollIntoView: () => { if (revealTop !== null) el.scrollTop = revealTop; calls.push("reveal"); }, classList: { add() {}, remove() {} } }),
+    querySelectorAll: () => [], querySelector: () => ({ closest: () => null, scrollIntoView: () => { if (revealTop !== null) el.scrollTop = revealTop; calls.push("reveal"); }, classList: { add() {}, remove() {} } }),
   });
   const row = (id: string) => ({ id, sender: "Ada", source: "browser", text: id, timestamp: "2026-10-02T00:00:00Z" });
   const props = reactive<any>({ messages: [row("msg_1"), row("msg_2")], roomIdentifier: "room", messagesLoaded: true, hasOlderMessages: false, searchQuery: "" });

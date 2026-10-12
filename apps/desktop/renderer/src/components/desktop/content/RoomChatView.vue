@@ -231,7 +231,6 @@ import type { AgentModalTarget } from "./desktop-chat-message/types";
 import type { AgentCorrectionTarget, ComposerCorrectionHandoff } from "../../../domain/agent-inspector";
 import {
   isGitHubRoomMessage,
-  isLowSignalGitHubCheckMessage,
 } from "./desktop-chat-message/github-event";
 import { useDesktopMessageDraft } from "../../../domain/desktop-message-drafts";
 import { useAgentPresenceChips } from "../../../composables/useAgentPresenceChips";
@@ -617,8 +616,7 @@ async function markThreadRead(
 }
 
 function isThreadMessageVisible(message: DesktopRoomMessage): boolean {
-  return !isLowSignalGitHubCheckMessage(message)
-    && (props.githubEventsVisible || !isGitHubRoomMessage(message));
+  return props.githubEventsVisible || !isGitHubRoomMessage(message);
 }
 
 function isActiveThreadContext(

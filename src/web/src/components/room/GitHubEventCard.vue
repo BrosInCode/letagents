@@ -2,6 +2,7 @@
   <SharedGitHubEventCard
     :event="event"
     :compact="compact"
+    :history="history"
     :room="room"
     :task-link-enabled="taskLinkEnabled"
     @open-task="emit('openTask', $event)"
@@ -16,6 +17,7 @@ defineProps<{
   event: GitHubEventPresentation
   taskLinkEnabled?: boolean
   room?: boolean
+  history?: boolean
   compact?: boolean
 }>()
 

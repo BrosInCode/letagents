@@ -51,6 +51,7 @@ export interface AttachmentUploadTarget {
 }
 
 export interface RoomMessage {
+  sender_profile?: { login: string; avatar_url: string | null } | null
   id: string
   sender: string
   text: string

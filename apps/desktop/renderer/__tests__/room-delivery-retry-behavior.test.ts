@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { parse, compileScript, compileTemplate } from "@vue/compiler-sfc";
 import * as Vue from "vue";
 import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
-import { createServer, type ViteDevServer } from "vite";
+import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-retry";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
 import { HOST_APPROVAL_ARM_MS, hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
@@ -159,7 +159,8 @@ async function attachClientRender(component: object, modulePath: string): Promis
   const clientCode = compiled.code
     .replace(/^import \{([\s\S]*?)\} from "vue"\n/, (_match, bindings: string) => `const {${bindings.replace(/\s+as\s+/g, ": ")}} = vue\n`)
     .replace("export function render", "function render");
-  (component as { render?: unknown }).render = Function("vue", `${clientCode}\nreturn render;`)(Vue);
+  const transformed = await transformWithEsbuild(clientCode, `${modulePath}.ts`, { loader: "ts", target: "esnext" });
+  (component as { render?: unknown }).render = Function("vue", `${transformed.code}\nreturn render;`)(Vue);
 }
 
 before(async () => {
@@ -180,6 +181,10 @@ before(async () => {
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposer.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposerEventChips.vue").then((module) => module.default),
   ]);
+  // This test mounts client templates onto SSR-loaded components. Compile the
+  // timeline's transparent grouping wrapper too so ordinary message slots run.
+  const groupedUpdates = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/RoomGitHubUpdates.vue", import.meta.url)));
+  await attachClientRender(groupedUpdates.default, "../../../../shared/ui/RoomGitHubUpdates.vue");
   await Promise.all([
     attachClientRender(DesktopChatMessage, "components/desktop/content/DesktopChatMessage.vue"),
     attachClientRender(RoomMessageViewport, "components/desktop/content/room-chat/RoomMessageViewport.vue"),

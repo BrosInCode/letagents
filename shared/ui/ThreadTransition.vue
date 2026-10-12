@@ -5,11 +5,13 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount } from 'vue'
+import { onBeforeUnmount, watch } from 'vue'
+const props = defineProps<{ instant?: boolean }>()
+const emit = defineEmits<{ settled: [] }>()
 
 // An inline disclosure must move the following room messages with it. Measure
 // once, then animate only this bounded container; never scale the reply text.
-let running: { element: HTMLElement; animation: Animation; fromHeight: number; toHeight: number; fromOpacity: number; toOpacity: number } | null = null
+let running: { element: HTMLElement; animation: Animation; fromHeight: number; toHeight: number; fromOpacity: number; toOpacity: number; finish: () => void } | null = null
 let observer: ResizeObserver | null = null
 let interrupted: { height: number; opacity: string } | null = null
 
@@ -50,14 +52,15 @@ function animate(element: HTMLElement, open: boolean, done: () => void, duration
     element.style.overflow = ''
     element.inert = false
     done()
+    emit('settled')
   }
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) { finish(); return }
+  if (props.instant || matchMedia('(prefers-reduced-motion: reduce)').matches) { finish(); return }
 
   const animation = element.animate([
     { height: `${fromHeight}px`, opacity: fromOpacity },
     { height: `${toHeight}px`, opacity: open ? '1' : '0' },
   ], { duration, easing: 'cubic-bezier(.22, 1, .36, 1)', fill: 'both' })
-  running = { element, animation, fromHeight, toHeight, fromOpacity: Number(fromOpacity), toOpacity: open ? 1 : 0 }
+  running = { element, animation, fromHeight, toHeight, fromOpacity: Number(fromOpacity), toOpacity: open ? 1 : 0, finish }
   // Replies can arrive while an empty/loading thread is still opening.
   // Observe its content, not the animated wrapper, and continue from the
   // current frame if that content grows or shrinks.
@@ -80,6 +83,13 @@ function animate(element: HTMLElement, open: boolean, done: () => void, duration
     finish()
   }
 }
+watch(() => props.instant, value => {
+  if (!value || !running) return
+  const active = running
+  active.animation.cancel()
+  active.finish()
+  interrupted = null
+}, { flush: 'post' })
 function enter(element: Element, done: () => void) { animate(element as HTMLElement, true, done) }
 function leave(element: Element, done: () => void) { animate(element as HTMLElement, false, done) }
 onBeforeUnmount(() => { observer?.disconnect(); running?.animation.cancel(); running = null })

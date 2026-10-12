@@ -2063,3 +2063,18 @@ test("desktop outbox idempotency preserves attachments and rejects changed retry
   await assert.rejects(addLocalChatMessage(roomId, { ...input, text: "Changed" }), /different content/);
   await assert.rejects(addLocalChatMessage(roomId, { ...input, attachments: [] }), /different content/);
 });
+
+
+test("human publisher avatars and identity survive local acknowledgement, cloud import and refresh", async () => {
+  const profile = { login: "EmmyMay", avatar_url: "https://avatars.githubusercontent.com/u/1?v=4" };
+  const sent = await addLocalChatMessage("room_profile", { sender: "Emmy", text: "Hello", source: "browser", sender_profile: profile });
+  assert.deepEqual(sent.sender_profile, profile);
+  assert.deepEqual((await getLocalChatMessages("room_profile")).messages[0]?.sender_profile, profile);
+  const legacy = await addLocalChatMessage("room_profile", { sender: "EmmyMay", text: "Unknown publisher", source: "browser" });
+  assert.equal(legacy.sender_profile, null);
+  const imported = { id: "msg_400", sender: "Emmy", text: "Cloud", source: "browser", timestamp: "2026-10-12T10:00:00Z", sender_profile: profile };
+  await importLocalChatMessages("room_imported_profile", [imported]);
+  assert.deepEqual((await getLocalChatMessages("room_imported_profile")).messages[0]?.sender_profile, profile);
+  await importLocalChatMessages("room_imported_profile", [{ ...imported, sender_profile: { ...profile, avatar_url: null } }]);
+  assert.deepEqual((await getLocalChatMessages("room_imported_profile")).messages[0]?.sender_profile, { ...profile, avatar_url: null });
+});

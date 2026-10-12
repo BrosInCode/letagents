@@ -18,7 +18,7 @@ const roomPage = source('../src/pages/Room.vue')
 test('wake notices render as one quiet line with the shared crescent instead of the sender dot', () => {
   assert.match(chatMessage, /import WakeGlyph from '\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/shared\/ui\/WakeGlyph\.vue'/)
   assert.match(chatMessage, /props\.message\.source === WAKE_NOTICE_SOURCE/)
-  assert.match(chatMessage, /<WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" \/>\s*<div v-else class="message-avatar"/)
+  assert.match(chatMessage, /<WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" \/>\s*<ChatAvatar v-else-if="senderRole"[^>]*\/>\s*<div v-else class="message-avatar"/)
   // No meta row, bubble, or reply affordance: the line is the whole message.
   const wakeBody = chatMessage.slice(
     chatMessage.indexOf('<div v-if="isWakeNotice" class="message-body wake-notice-body">'),

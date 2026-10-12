@@ -13,10 +13,12 @@
         {{ isLoadingOlderMessages ? 'Loading older messages...' : 'Load older messages' }}
       </button>
 
-        <template v-for="msg in timelineMessages" :key="msg.id">
+        <RoomGitHubUpdates v-for="entry in timelineEntries" :key="`${roomIdentifier}:${entry.id}`" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEventPresentation" @rows-changed="observeMessageRows" @layout-start="beginGroupLayout" @layout-settled="measureGroupLayout">
+        <template #default="{ message: msg, history }">
         <div v-if="msg.id === unreadTimeline.dividerId.value" class="explicit-unread" role="separator">New messages</div>
         <ChatMessage
           :message="msg"
+          :github-history="history"
           :roomIdentifier="roomIdentifier"
           :thread="loadedThreadSummaries.get(msg.id) || threadSummaries.get(msg.id) || null"
           :thread-open="activeThreadId === msg.id"
@@ -53,6 +55,7 @@
           </template>
         </ChatMessage>
         </template>
+        </RoomGitHubUpdates>
 
     </div>
     <button
@@ -95,6 +98,10 @@
 </template>
 
 <script setup lang="ts">
+import RoomGitHubUpdates from '../../../../../shared/ui/RoomGitHubUpdates.vue'
+import { createGitHubTimeline } from '../../../../../shared/grouped-github-updates'
+import { parseGitHubEventPresentation } from './githubEventMessage'
+
 import "../../../../../shared/ui/room-agent-work.css";
 import { useRoomWorkIndicators } from "./roomWorkIndicators";
 import TypingIndicator from "../../../../../shared/ui/TypingIndicator.vue";
@@ -236,7 +243,20 @@ const timelineMessages = computed(() => {
     const parent = messageThreadParentId(message)
     return !parent || !loaded.has(parent)
   })
+
 })
+const buildGroupedTimeline = createGitHubTimeline<{ type: 'message'; id: string; message: RoomMessage }, RoomMessage>()
+const timelineEntries = computed(() => buildGroupedTimeline(timelineMessages.value.map(message => ({ type: 'message' as const, id: message.id, message })),
+  entry => entry.message, message => message.source === 'github' ? parseGitHubEventPresentation(message) : null, props.roomIdentifier))
+function measureGroupLayout() {
+  const el = messagesEl.value
+  if (el) isScrolledToBottom = !revealingMessage && el.scrollHeight - el.scrollTop - el.clientHeight < 60
+}
+function beginGroupLayout() {
+  scrollRevision++
+  isScrolledToBottom = false
+  messageMotion.cancel()
+}
 async function toggleThread(id: string) {
   const source = props.messages.find(message => message.id === id)
   const rootId = source && messageThreadParentId(source)
@@ -406,7 +426,7 @@ function findMessageElement(messageId: string): HTMLElement | null {
   return messagesEl.value.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(messageId)}"]`)
 }
 
-function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth') {
+function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth', historyReady = false) {
   const reply = [...props.messages, ...[...loadedThreadMessages.value.values()].flat()].find(message => message.id === messageId)
   const root = reply && messageThreadParentId(reply)
   if (root && !allRootMessages.value.some(message => message.id === root)) { void toggleThread(messageId); return }
@@ -421,6 +441,12 @@ function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth')
   unreadTimeline.programmaticScroll()
   const target = findMessageElement(messageId)
   if (!target) return
+  const group = target.closest('.room-github-updates')
+  if (group && !historyReady) {
+    const room = props.roomIdentifier, revision = scrollRevision
+    group.dispatchEvent(new CustomEvent('reveal-github-message', { detail: { id: messageId, ready: () => { if (room === props.roomIdentifier && revision === scrollRevision) scrollToMessage(messageId, behavior, true) } } }))
+    return
+  }
   scrollRevision++
   isScrolledToBottom = false
   if (behavior === 'instant') cancelMessageReveal()
@@ -437,14 +463,8 @@ watch(() => props.searchQuery, async () => {
   await nextTick()
   const matchingReply = props.messages.find(message => matchedIds.value.has(message.id) && messageThreadParentId(message))
   if (matchingReply) { scrollToMessage(matchingReply.id); return }
-  const firstMatch = messagesEl.value?.querySelector('.search-match')
-  if (firstMatch) {
-    unreadTimeline.programmaticScroll()
-    scrollRevision++
-    isScrolledToBottom = false
-    beginMessageReveal()
-    firstMatch.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
+  const firstMatch = timelineMessages.value.find(message => matchedIds.value.has(message.id))
+  if (firstMatch) scrollToMessage(firstMatch.id)
 })
 
 watch(() => props.roomIdentifier, (nextRoomIdentifier) => {

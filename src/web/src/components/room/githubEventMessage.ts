@@ -95,20 +95,21 @@ function reviewTone(actionText: string): GitHubEventTone {
 
 function checkTone(conclusion: string): GitHubEventTone {
   const normalized = conclusion.trim().toLowerCase()
+  if (normalized === 'success') return 'emerald'
   if (normalized === 'failure' || normalized === 'timed_out' || normalized === 'cancelled') return 'rose'
   if (normalized === 'action_required' || normalized === 'neutral') return 'amber'
   return 'sky'
 }
 
 function parsePullRequestOrIssueEvent(body: string, url: string | null): GitHubEventPresentation | null {
-  const match = /^(PR #\d+|Issue #\d+)\s+(.+?)\s+in\s+([^\s]+?)(?:\s+linked to\s+(task_\d+))?:\s+([\s\S]+)$/i.exec(body)
+  const match = /^(PR #\d+|Issue #\d+)\s+(.+?)\s+in\s+([^\s:]+)(?:\s+linked to\s+(task_\d+))?(?::\s*([\s\S]*))?$/i.exec(body)
   if (!match) return null
 
   const artifact = match[1]
   const actionText = match[2].trim()
   const repository = match[3]
   const taskId = match[4] || null
-  const detail = match[5].trim()
+  const detail = match[5]?.trim() || null
   const kind: 'pull-request' | 'issue' = artifact.startsWith('PR ') ? 'pull-request' : 'issue'
 
   return {

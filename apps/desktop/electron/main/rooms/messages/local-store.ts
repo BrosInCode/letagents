@@ -39,6 +39,7 @@ type LocalMessageRow = {
   source: string | null;
   publisher_agent_key: string | null;
   publisher_agent_session_id: string | null;
+  sender_profile_json: string | null;
   account_agent_routing_json: string | null;
   account_agent_routing_reader_key: string | null;
   control_authorized: number | null;
@@ -96,6 +97,7 @@ export type LocalChatMessageInput = {
   publisher_agent_key?: string | null;
   publisher_agent_session_id?: string | null;
   control_authorized?: boolean | null;
+  sender_profile?: RoomMessagePayload["sender_profile"];
 };
 
 export type LocalSyncMessagePayload = RoomMessagePayload & {
@@ -201,6 +203,7 @@ async function getDb(): Promise<SqliteDatabase> {
         addColumnIfMissing(database, "local_chat_messages", "account_agent_routing_json", "TEXT");
         addColumnIfMissing(database, "local_chat_messages", "account_agent_routing_reader_key", "TEXT");
         addColumnIfMissing(database, "local_chat_messages", "control_authorized", "INTEGER");
+        addColumnIfMissing(database, "local_chat_messages", "sender_profile_json", "TEXT");
         ensureLocalThreadReadsSchema(database);
         database.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS local_chat_messages_sync_key_idx
@@ -281,6 +284,7 @@ function mapRow(row: Record<string, unknown>): LocalMessageRow {
       typeof row.publisher_agent_key === "string" ? row.publisher_agent_key : null,
     publisher_agent_session_id:
       typeof row.publisher_agent_session_id === "string" ? row.publisher_agent_session_id : null,
+    sender_profile_json: typeof row.sender_profile_json === "string" ? row.sender_profile_json : null,
     account_agent_routing_json:
       typeof row.account_agent_routing_json === "string" ? row.account_agent_routing_json : null,
     account_agent_routing_reader_key:
@@ -333,6 +337,11 @@ function normalizeAttachmentPayload(
   };
 }
 
+function publicSenderProfile(value: unknown): RoomMessagePayload["sender_profile"] {
+  if (!value || typeof value !== "object" || !("login" in value) || typeof value.login !== "string" || !value.login.trim()) return null;
+  return { login: value.login, avatar_url: "avatar_url" in value && typeof value.avatar_url === "string" ? value.avatar_url : null };
+}
+
 function toMessagePayload(
   row: LocalMessageRow,
   replyTo?: LocalMessageRow | null,
@@ -364,7 +373,12 @@ function toMessagePayload(
     && row.account_agent_routing_reader_key
     && row.account_agent_routing_reader_key === normalizeReaderKey(readerKey),
   );
+  let senderProfile: RoomMessagePayload["sender_profile"];
+  if (row.source === "browser" && !row.publisher_agent_key && row.sender_profile_json) {
+    try { senderProfile = publicSenderProfile(JSON.parse(row.sender_profile_json)); } catch { senderProfile = null; }
+  }
   return {
+    ...(senderProfile === undefined ? {} : { sender_profile: senderProfile }),
     id: formatMessageId(row.number),
     ...(row.sync_key?.startsWith("desktop-send:") ? { client_message_id: row.sync_key } : {}),
     agent_identity: row.publisher_agent_key
@@ -726,6 +740,7 @@ export async function addLocalChatMessage(
       source: input.source || null,
       publisher_agent_key: input.publisher_agent_key?.trim() || null,
       publisher_agent_session_id: input.publisher_agent_session_id?.trim() || null,
+      sender_profile_json: input.source === "browser" && !input.publisher_agent_key ? JSON.stringify(publicSenderProfile(input.sender_profile)) : null,
       account_agent_routing_json: null,
       account_agent_routing_reader_key: null,
       control_authorized: input.control_authorized === undefined
@@ -766,6 +781,8 @@ export async function addLocalChatMessage(
         insertedRow.timestamp,
         insertedRow.sync_key,
       );
+    database.prepare("UPDATE local_chat_messages SET sender_profile_json = ? WHERE room_id = ? AND number = ?")
+      .run(insertedRow.sender_profile_json, trimmedRoomId, number);
     projectLocalThreadRoutingMessage(database, insertedRow);
     captureLocalSupervisedRouting(database, insertedRow);
     for (const attachment of attachmentRows) {
@@ -1418,6 +1435,8 @@ export async function importLocalChatMessages(
     for (const message of sortedMessages) {
       if (!message.id) continue;
       const publisherAgentKey = message.agent_identity?.agent_key?.trim() || null;
+      const senderProfileJson = message.source === "browser" && !publisherAgentKey && message.sender_profile !== undefined
+        ? JSON.stringify(publicSenderProfile(message.sender_profile)) : null;
       const publisherAgentSessionId = message.agent_identity?.agent_session_id?.trim() || null;
       const accountAgentRoutingJson = message.account_agent_routing
         ? JSON.stringify(message.account_agent_routing)
@@ -1462,6 +1481,7 @@ export async function importLocalChatMessages(
                      WHEN ? IS NOT NULL THEN ?
                      ELSE account_agent_routing_reader_key
                    END,
+                   sender_profile_json = COALESCE(?, sender_profile_json),
                    control_authorized = COALESCE(?, control_authorized)
              WHERE room_id = ? AND number = ?
           `).run(
@@ -1472,6 +1492,7 @@ export async function importLocalChatMessages(
             accountAgentRoutingJson,
             accountAgentRoutingJson,
             routingReaderKey,
+            senderProfileJson,
             importedControlAuthorized,
             trimmedRoomId,
             existingNumber,
@@ -1512,6 +1533,8 @@ export async function importLocalChatMessages(
           message.id,
           new Date().toISOString(),
         );
+      database.prepare("UPDATE local_chat_messages SET sender_profile_json = ? WHERE room_id = ? AND number = ?")
+        .run(senderProfileJson, trimmedRoomId, number);
       insertedNumbers.add(number);
       for (const attachment of message.attachments || []) {
         database
