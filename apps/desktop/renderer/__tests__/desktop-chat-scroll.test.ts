@@ -76,6 +76,7 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
     ResizeObserver: class { constructor(callback: () => void) { resize = callback; } observe() {} disconnect() {} },
   });
   const calls: string[] = [];
+  const positions: any[] = [];
   let top = 1600;
   let revealTop: number | null = 100;
   const reveal = () => { if (revealTop !== null) top = revealTop; calls.push("reveal"); };
@@ -91,6 +92,7 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
   const props = reactive<any>({
     active: true, messages: [message("msg_1"), message("msg_2")], threadMessages: [], localAgentWork: [],
     hasOlderMessages: false, loadingOlderMessages: false, roomLoading: false, roomIdentifier: "room", messageNamespace: "room", searchQuery: "", activeSearchMessageId: null,
+    initialScrollPosition: initialScrollTop === null ? null : { top: initialScrollTop, latest: false, anchor: null },
     initialScrollTop,
     parent: message("msg_1"), replies: [message("msg_2")], initialThreadSummary: null, participants: [], attachmentDrafts: [], pendingAttachmentDrafts: [], taskReferenceIds: new Set(), deliveryReceiptsByMessage: {},
   });
@@ -101,12 +103,14 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
     motion = provideMotion(() => props.messageNamespace);
     return () => h({ setup() {
       vm = (thread ? Thread : Viewport).setup(props, { expose() {}, emit(event: string, value: unknown) {
+        if (event === "load-older") calls.push("load-older");
         if (event === "read-message") reads.push(String(value));
         if (event === "reading-latest") reading.push(Boolean(value));
         // DesktopRoomShell stores each live report and passes it back through
         // initialChatScrollTop on the next parent render, including when the
         // room had no saved position.
-        if (rememberPosition && event === "scroll-position") void nextTick(() => { props.initialScrollTop = value; });
+        if (!thread && event === "scroll-position") positions.push(value);
+        if (rememberPosition && event === "scroll-position") void nextTick(() => { props.initialScrollPosition = value; });
       } });
       if (thread) { vm.bodyElement.value = el; vm.panelElement.value = el; }
       else vm.messagesElement.value = el;
@@ -116,7 +120,7 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
   app.provide(ssrContextKey, { modules: new Set() });
   app.mount({}); await flush(); calls.length = 0;
   el.addEventListener("scroll", () => vm.handleScroll?.());
-  return { vm, props, reactions, previews, el, calls, reads, reading,
+  return { vm, props, reactions, previews, el, calls, reads, reading, positions,
     visibleReply: (id: string, height: number) => intersect([{ target: { dataset: { threadMessageId: id } }, isIntersecting: height > 0, intersectionRect: { height }, boundingClientRect: { height: 160 } }]),
     resize: () => resize(),
     send: (number = 1) => {
@@ -423,5 +427,103 @@ test("thread: read evidence requires visible replies and never advances an offsc
     await flush();
     s.visibleReply("msg_3", 100);
     assert.equal(s.reading.at(-1), false);
+  } finally { s.close(); }
+});
+
+test("timeline: cached history mounts at latest when there is no saved reading position", async () => {
+  const s = await scrollSurface();
+  try { assert.equal(s.el.scrollTop, 1600); } finally { s.close(); }
+});
+
+test("timeline: detached and zero-height viewports cannot overwrite a saved room bookmark", async () => {
+  const s = await scrollSurface(false, true, 420);
+  try {
+    s.el.clientHeight = 0; s.el.isConnected = false; s.el.scrollTop = 0;
+    s.vm.emitScrollPosition(); s.vm.rememberScrollAnchor();
+    await flush();
+    assert.equal(s.positions.at(-1).top, 420);
+    assert.equal(s.props.initialScrollPosition.top, 420);
+  } finally { s.close(); }
+});
+
+test("timeline: a remembered latest position restores against the new page height", async () => {
+  const s = await scrollSurface(false, true, 420);
+  try {
+    s.props.initialScrollPosition = { top: 1600, latest: true, anchor: null };
+    s.el.scrollHeight = 2500;
+    s.props.roomIdentifier = 'return-room';
+    await flush();
+    assert.equal(s.el.scrollTop, 2100);
+    assert.equal(s.positions.at(-1).latest, true);
+  } finally { s.close(); }
+});
+
+test("timeline: returning during snapshot loading keeps the saved position until messages arrive", async () => {
+  const s = await scrollSurface(false, true, 420);
+  try {
+    s.props.roomLoading = true; s.props.messages = [];
+    s.props.roomIdentifier = 'loading-return';
+    s.props.initialScrollPosition = { top: 820, latest: false, anchor: null };
+    s.el.scrollTop = 0;
+    await flush(); s.vm.handleScroll(); s.vm.emitScrollPosition(); await flush();
+    assert.equal(s.props.initialScrollPosition.top, 820);
+    s.props.messages = [message('msg_1'), message('msg_2')]; s.props.roomLoading = false;
+    await flush();
+    assert.equal(s.el.scrollTop, 820);
+  } finally { s.close(); }
+});
+
+for (const navigation of ['reveal', 'send']) {
+  test(`timeline: explicit ${navigation} wins over pending bookmark backfill`, async () => {
+    const s = await scrollSurface();
+    try {
+      s.props.initialScrollPosition = { top: 900, latest: false, anchor: { messageId: 'msg_old', offsetTop: -20 } };
+      s.props.roomIdentifier = s.props.messageNamespace = 'restoring-room';
+      s.props.hasOlderMessages = true;
+      await flush();
+      assert.ok(s.calls.includes('load-older'));
+      s.props.loadingOlderMessages = true;
+      navigation === 'reveal' ? s.reveal() : s.send();
+      await flush();
+      assert.equal(s.el.scrollTop, navigation === 'reveal' ? 100 : 1600);
+      s.props.messages = [message('msg_old'), ...s.props.messages];
+      s.props.loadingOlderMessages = false;
+      await flush();
+      assert.equal(s.el.scrollTop, navigation === 'reveal' ? 100 : 1600, 'late backfill cannot replay the bookmark');
+    } finally { s.close(); }
+  });
+}
+test('timeline: a bookmarked original inside a regrouped page restores its containing group', async () => {
+  const s = await scrollSurface();
+  try {
+    const group = { dataset: { scrollAnchorId: 'msg_newer' }, getBoundingClientRect: () => ({ top: 700 - s.el.scrollTop, bottom: 1000 - s.el.scrollTop }) };
+    s.el.querySelectorAll = () => [group] as any;
+    s.el.querySelector = () => ({ closest: () => group }) as any;
+    s.props.initialScrollPosition = { top: 720, latest: false, anchor: { messageId: 'msg_old', offsetTop: -20 } };
+    s.props.roomIdentifier = s.props.messageNamespace = 'regrouped-room';
+    s.props.hasOlderMessages = true;
+    await flush();
+    assert.equal(s.el.scrollTop, 720);
+    assert.ok(!s.calls.includes('load-older'), 'the original is loaded, despite the newer stable group anchor');
+  } finally { s.close(); }
+});
+
+test('timeline: bookmark backfill continues after a page containing only thread replies', async () => {
+  const s = await scrollSurface();
+  try {
+    s.props.initialScrollPosition = { top: 900, latest: false, anchor: { messageId: 'msg_old', offsetTop: -20 } };
+    s.props.roomIdentifier = s.props.messageNamespace = 'thread-page-room'; s.props.hasOlderMessages = true;
+    await flush();
+    assert.equal(s.calls.filter(call => call === 'load-older').length, 1);
+    s.props.loadingOlderMessages = true; await flush();
+    s.props.threadMessages = [{ ...message('msg_reply'), threadRootId: 'msg_1' }];
+    s.props.loadingOlderMessages = false; await flush();
+    assert.equal(s.calls.filter(call => call === 'load-older').length, 2, 'the server cursor moved even though visible roots did not');
+    s.props.loadingOlderMessages = true; await flush();
+    const old = { dataset: { messageId: 'msg_old' }, getBoundingClientRect: () => ({ top: 700 - s.el.scrollTop, bottom: 800 - s.el.scrollTop }) };
+    s.el.querySelector = () => ({ closest: () => old }) as any;
+    s.props.messages = [message('msg_old'), ...s.props.messages]; s.props.loadingOlderMessages = false;
+    await flush();
+    assert.equal(s.el.scrollTop, 720);
   } finally { s.close(); }
 });

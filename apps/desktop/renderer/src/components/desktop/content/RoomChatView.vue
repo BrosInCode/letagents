@@ -51,7 +51,7 @@
           :room-loading="roomLoading"
           :search-query="searchQuery"
           :task-reference-ids="taskReferenceIds"
-          :initial-scroll-top="initialScrollTop"
+          :initial-scroll-position="initialScrollPosition"
           @load-older="emit('load-older')"
           @open-agent="openAgentModal"
           @post-agent-answer-now="(agentId, sourceMessageId) => emit('post-agent-answer-now', agentId, sourceMessageId)"
@@ -202,6 +202,7 @@
 </template>
 
 <script setup lang="ts">
+import type { ChatScrollPosition } from "../../../domain/chat-scroll";
 import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoomMessageMotion";
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
 import { computed, nextTick, onBeforeUnmount, provide, ref, toRef, watch } from "vue";
@@ -291,7 +292,7 @@ const props = defineProps<{
   tasks: DesktopTaskSummary[];
   searchQuery: string;
   activeSearchMessageId: string | null;
-  initialScrollTop?: number | null;
+  initialScrollPosition?: ChatScrollPosition | null;
 }>();
 
 const { pushActionToast } = useDesktopActionToasts();
@@ -326,7 +327,7 @@ const emit = defineEmits<{
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
   "open-add-agent": [];
   "open-permission-detail": [approval: ManagedAgentPermissionApproval];
-  "scroll-position": [scrollTop: number];
+  "scroll-position": [scrollTop: ChatScrollPosition];
   "open-github-event": [url: string];
   "open-events": [];
   "open-task": [taskId: string];

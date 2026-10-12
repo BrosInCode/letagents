@@ -1,13 +1,16 @@
 <template>
   <template v-if="!grouped"><slot :message="messages[0]" :history="false" /></template>
   <section v-else ref="element" class="room-github-updates" :data-scroll-anchor-id="anchorId || messages[0]?.id" aria-label="GitHub updates">
-    <header class="github-updates-heading">
+    <button type="button" class="github-updates-heading" :aria-expanded="!collapsed" :aria-controls="panelId('group')" @click="toggleGroup($event)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M9 19c-4 1-4-2-6-2m12 5v-4c0-1-.3-2-1-2 4-.5 6-2 6-6 0-2-.5-3-2-4 .3-1 .3-3-.2-4-2 0-3 1-4 2-2-.5-4-.5-6 0-1-1-2-2-4-2-.5 1-.5 3-.2 4C2 7 2 8 2 10c0 4 2 5.5 6 6-.7.5-1 1.5-1 2v4" /></svg>
       <strong>GitHub updates</strong><span v-if="repositories.length === 1">{{ repositories[0] }}</span>
-    </header>
-    <div class="github-update-rows">
+      <svg class="github-group-caret" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
+    </button>
+    <ThreadTransition :instant="instant" @settled="emit('layoutSettled')">
+    <div v-show="!collapsed" :id="panelId('group')" class="github-update-rows" :inert="collapsed">
+      <div class="github-update-list">
       <div v-for="row in rows" :key="row.key" class="github-update-row" :data-tone="row.event.tone">
-        <button type="button" class="github-update-toggle" :aria-expanded="open.has(row.key)" :aria-controls="panelId(row.key)" @click="toggle(row.key)">
+        <button type="button" class="github-update-toggle" :aria-expanded="open.has(row.key)" :aria-controls="panelId(row.key)" @click="toggle(row.key, $event)">
           <svg class="github-update-symbol" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="4" cy="3" r="1.5" /><circle cx="4" cy="13" r="1.5" /><circle cx="12" cy="13" r="1.5" /><path d="M4 4.5v7M12 11.5V6a3 3 0 0 0-3-3H8m2-2L8 3l2 2" /></svg>
           <span class="github-update-copy"><strong :title="row.title">{{ row.title }}</strong><span>{{ row.label }}<span v-if="repositories.length > 1"> · {{ row.event.repository }}</span> · {{ row.messages.length }} {{ row.messages.length === 1 ? 'update' : 'updates' }}</span></span>
           <span class="github-update-status">{{ row.event.statusLabel || row.event.kindLabel }}</span>
@@ -25,7 +28,9 @@
           </div>
         </ThreadTransition>
       </div>
+      </div>
     </div>
+    </ThreadTransition>
   </section>
 </template>
 <script setup lang="ts" generic="M extends { id: string; timestamp: string }">
@@ -37,6 +42,7 @@ defineSlots<{ default(props: { message: M; history: boolean }): unknown }>();
 const emit = defineEmits<{ rowsChanged: []; layoutStart: []; layoutSettled: [] }>();
 const element = ref<HTMLElement | null>(null);
 const instant = ref(false);
+const collapsed = ref(false);
 const open = ref(new Set<string>());
 const unseen = ref(new Set<string>());
 const scrollers = new Map<string, HTMLElement>();
@@ -48,29 +54,39 @@ function panelId(key: string) { return `${instanceId}-${encodeURIComponent(key)}
 function safeUrl(value: string | null) { try { const url = new URL(value || ''); return url.protocol === 'https:' && url.hostname === 'github.com' ? url.href : null; } catch { return null; } }
 function setScroller(key: string, el: unknown) { if (el instanceof HTMLElement) scrollers.set(key, el); else scrollers.delete(key); }
 function rememberScroll(key: string) {
-  const el = scrollers.get(key); if (!el) return;
+  const el = scrollers.get(key); if (!el || collapsed.value || !open.value.has(key) || el.clientHeight <= 0) return;
   const bottom = el.scrollHeight - el.clientHeight - el.scrollTop < 12;
   const top = el.getBoundingClientRect().top;
   const anchor = [...el.children].find(node => { const row = node as HTMLElement; return (row.dataset.messageId || row.dataset.msgId) && row.getBoundingClientRect().bottom > top; }) as HTMLElement | undefined;
   positions.set(key, { top: el.scrollTop, bottom, id: anchor?.dataset.messageId || anchor?.dataset.msgId, offset: anchor ? anchor.getBoundingClientRect().top - top : undefined });
   if (bottom) unseen.value.delete(key);
 }
-function latest(key: string) { const el = scrollers.get(key); if (el) { el.scrollTop = el.scrollHeight; rememberScroll(key); } }
-async function toggle(key: string) { emit('layoutStart'); const showing = !open.value.has(key); showing ? open.value.add(key) : open.value.delete(key); await nextTick(); if (showing && !positions.has(key)) latest(key); emit('rowsChanged'); }
-watch(() => rows.value.map(row => ({ key: row.key, last: row.messages.at(-1)?.id, count: row.messages.length })), async (next, before) => {
-  const previous = new Map(positions);
+function latest(key: string) { const el = scrollers.get(key); if (el && !collapsed.value && open.value.has(key)) { el.scrollTop = el.scrollHeight; rememberScroll(key); } }
+function restoreHistory(key: string) {
+  const el = scrollers.get(key), position = positions.get(key);
+  if (!el || collapsed.value || !open.value.has(key)) return;
+  if (!position || position.bottom) { latest(key); return; }
+  const anchor = position.id ? [...el.children].find(node => (node as HTMLElement).dataset.messageId === position.id || (node as HTMLElement).dataset.msgId === position.id) : undefined;
+  el.scrollTop = anchor && position.offset !== undefined ? el.scrollTop + anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - position.offset : position.top;
+  rememberScroll(key);
+}
+async function toggleGroup(event: MouseEvent) {
+  emit('layoutStart');
+  instant.value = event.detail === 0;
+  collapsed.value = !collapsed.value;
   await nextTick();
-  for (const row of rows.value) {
-    const el = scrollers.get(row.key); const position = previous.get(row.key);
-    if (!el || !open.value.has(row.key) || !position) continue;
-    if (position.bottom) latest(row.key);
-    else {
-      const anchor = position.id ? [...el.children].find(node => (node as HTMLElement).dataset.messageId === position.id || (node as HTMLElement).dataset.msgId === position.id) : undefined;
-      el.scrollTop = anchor && position.offset !== undefined ? el.scrollTop + anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - position.offset : position.top;
-      if (before?.find(item => item.key === row.key)?.last !== next.find(item => item.key === row.key)?.last) unseen.value.add(row.key);
-      rememberScroll(row.key);
-    }
+  if (!collapsed.value) for (const key of open.value) restoreHistory(key);
+  emit('rowsChanged');
+}
+async function toggle(key: string, event: MouseEvent) { instant.value = event.detail === 0; emit('layoutStart'); const showing = !open.value.has(key); showing ? open.value.add(key) : open.value.delete(key); await nextTick(); if (showing) restoreHistory(key); emit('rowsChanged'); }
+watch(() => rows.value.map(row => ({ key: row.key, last: row.messages.at(-1)?.id, count: row.messages.length })), async (next, before) => {
+  for (const row of next) {
+    const position = positions.get(row.key);
+    if (position && !position.bottom && before?.find(item => item.key === row.key)?.last !== row.last) unseen.value.add(row.key);
   }
+  await nextTick();
+  // Hidden elements report zero geometry. Keep their bookmark until reopened.
+  if (!collapsed.value) for (const key of open.value) restoreHistory(key);
   emit('rowsChanged');
 });
 // The owning timeline sends this before its existing reveal/scroll path. Keep
@@ -81,6 +97,7 @@ function reveal(event: Event) {
   if (!row) return;
   event.stopPropagation();
   instant.value = true;
+  collapsed.value = false;
   open.value.add(row.key);
   void nextTick(() => { instant.value = false; emit('rowsChanged'); detail.ready(); });
 }
@@ -89,8 +106,11 @@ onBeforeUnmount(() => element.value?.removeEventListener('reveal-github-message'
 </script>
 <style scoped>
 .room-github-updates { width: min(100%, var(--room-chat-content-max, 720px)); align-self: center; flex: 0 0 auto; box-sizing: border-box; margin: 20px auto; padding: 0 8px 8px; border: 1px solid var(--border, #242427); border-radius: 12px; background: light-dark(#fafafa, #0d0d0e); overflow: hidden; }
-.github-updates-heading { display: flex; align-items: center; gap: 9px; min-height: 52px; padding: 0 16px; font-size: 12px; color: var(--text-tertiary); }
+.github-updates-heading { display: flex; align-items: center; gap: 9px; min-height: 52px; width: 100%; padding: 0 16px; border: 0; background: transparent; text-align: left; font-family: inherit; cursor: pointer; font-size: 12px; color: var(--text-tertiary); }
 .github-updates-heading svg { width: 17px; height: 17px; flex-shrink: 0; }
+.github-updates-heading:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: -3px; border-radius: 8px; }
+.github-updates-heading .github-group-caret { width: 12px; height: 12px; margin-left: auto; transition: transform 180ms cubic-bezier(.22,1,.36,1); }
+.github-updates-heading[aria-expanded=true] .github-group-caret { transform: rotate(90deg); }
 .github-updates-heading strong { font-weight: 500; color: var(--text-secondary); }
 .github-updates-heading > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .github-update-row + .github-update-row { border-top: 1px solid var(--border, #242427); }
@@ -113,7 +133,7 @@ onBeforeUnmount(() => element.value?.removeEventListener('reveal-github-message'
 .github-history-bottom { display: flex; justify-content: flex-end; height: 29px; align-items: center; }
 .github-history-bottom button { visibility: hidden; border: 0; background: none; color: var(--text-secondary); font-size: 11px; cursor: pointer; }
 .github-history-bottom button.available { visibility: visible; }
-@media (hover: hover) and (pointer: fine) { .github-update-toggle:hover { background: light-dark(#f0f0f0, #18181a); } }
+@media (hover: hover) and (pointer: fine) { .github-update-toggle:hover, .github-updates-heading:hover { background: light-dark(#f0f0f0, #18181a); } }
 @media (max-width: 520px) { .github-update-toggle { grid-template-columns: 18px minmax(0, 1fr) 12px; gap: 4px 10px; padding: 13px; } .github-update-status { grid-column: 2; grid-row: 2; text-align: left; font-size: 11px; } .github-update-caret { grid-column: 3; grid-row: 1 / 3; } .github-history-inner { padding-left: 18px; padding-right: 10px; } .github-updates-heading > span { display: none; } }
-@media (prefers-reduced-motion: reduce) { .github-update-toggle, .github-update-caret { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .github-update-toggle, .github-update-caret, .github-updates-heading .github-group-caret { transition: none; } }
 </style>

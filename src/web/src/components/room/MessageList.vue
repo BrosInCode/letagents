@@ -2,7 +2,7 @@
   <div class="messages-wrap">
     <p v-if="openingThreadId || threadOpenError" class="thread-open-status" role="status">{{ threadOpenError || 'Loading thread…' }}</p>
     <div class="messages-scroll">
-    <div class="messages scroll-fade-y" ref="messagesEl" @scrollend="finishMessageReveal">
+    <div class="messages scroll-fade-y" ref="messagesEl" @wheel.passive="restoringPosition = false" @touchstart.passive="restoringPosition = false" @pointerdown="restoringPosition = false" @keydown="restoringPosition = false" @scrollend="finishMessageReveal">
       <button
         v-if="hasOlderMessages"
         class="load-older-btn"
@@ -10,7 +10,7 @@
         :disabled="isLoadingOlderMessages"
         @click="emit('loadOlder')"
       >
-        {{ isLoadingOlderMessages ? 'Loading older messages...' : 'Load older messages' }}
+        {{ isLoadingOlderMessages ? 'Loading older messages...' : olderMessagesError ? 'Retry loading older messages' : 'Load older messages' }}
       </button>
 
         <RoomGitHubUpdates v-for="entry in timelineEntries" :key="`${roomIdentifier}:${entry.id}`" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEventPresentation" @rows-changed="observeMessageRows" @layout-start="beginGroupLayout" @layout-settled="measureGroupLayout">
@@ -98,6 +98,7 @@
 </template>
 
 <script setup lang="ts">
+import type { ChatScrollPosition } from '../../../../../shared/chat-scroll-position'
 import RoomGitHubUpdates from '../../../../../shared/ui/RoomGitHubUpdates.vue'
 import { createGitHubTimeline } from '../../../../../shared/grouped-github-updates'
 import { parseGitHubEventPresentation } from './githubEventMessage'
@@ -108,7 +109,7 @@ import TypingIndicator from "../../../../../shared/ui/TypingIndicator.vue";
 import { useRoomTypingNames } from "@/composables/roomTyping";
 import { getSenderColor } from "@/composables/room/identity";
 import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../shared/ui/useRoomMessageMotion";
-import { provide, ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { provide, ref, computed, watch, nextTick, onMounted, onBeforeUnmount, onUnmounted } from 'vue'
 import { type RoomAgentPresence, type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
 import ThreadTransition from '../../../../../shared/ui/ThreadTransition.vue'
@@ -134,6 +135,7 @@ function handleOpenMessageInfo(msg: RoomMessage) {
 }
 
 const props = defineProps<{
+  initialScrollPosition?: ChatScrollPosition | null
   messages: readonly RoomMessage[]
   roomIdentifier?: string
   unreadRoomId?: string
@@ -142,6 +144,7 @@ const props = defineProps<{
   hasOlderMessages?: boolean
   messagesLoaded?: boolean
   isLoadingOlderMessages?: boolean
+  olderMessagesError?: string
   searchQuery?: string
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
   taskReferenceIds?: ReadonlySet<string>
@@ -150,6 +153,7 @@ const props = defineProps<{
   agentNames?: ReadonlyMap<string, string>
 }>()
 const emit = defineEmits<{
+  scrollPosition: [room: string, position: ChatScrollPosition]
   threadMessages: [messages: RoomMessage[]]
   loadOlder: []
   reply: [message: RoomMessage]
@@ -194,14 +198,55 @@ function completeUnreadReveal(found: boolean) {
 const unreadCount = ref(0)
 const isScrolledFarUp = ref(false)
 const arrivingMessageIds = ref<ReadonlySet<string>>(new Set())
-let isScrolledToBottom = true
+let restoringPosition = true
+let restoreRequestPending = false
+let restorePagesRequested = 0
+let isScrolledToBottom = !props.initialScrollPosition || props.initialScrollPosition.latest
+function roomAnchors() {
+  return Array.from(messagesEl.value?.querySelectorAll<HTMLElement>(':scope > [data-msg-id], :scope > [data-scroll-anchor-id]') || [])
+}
+function findRoomAnchor(messageId: string) {
+  return roomAnchors().find(row => (row.dataset.msgId || row.dataset.scrollAnchorId) === messageId)
+    || findMessageElement(messageId)?.closest<HTMLElement>('.room-github-updates')
+}
+function rememberPosition(room = props.roomIdentifier || '') {
+  const el = messagesEl.value
+  if (restoringPosition || !el || !el.isConnected || el.clientHeight <= 0 || props.messagesLoaded === false) return
+  const top = el.getBoundingClientRect().top
+  const anchor = roomAnchors().find(row => row.getBoundingClientRect().bottom > top)
+  emit('scrollPosition', room, { top: el.scrollTop, latest: isScrolledToBottom,
+    anchor: anchor ? { messageId: (anchor.dataset.msgId || anchor.dataset.scrollAnchorId)!, offsetTop: anchor.getBoundingClientRect().top - top } : null })
+}
+function restorePosition(): boolean {
+  if (!restoringPosition) return false
+  const el = messagesEl.value
+  if (!el || el.clientHeight <= 0 || props.messagesLoaded === false) return true
+  const saved = props.initialScrollPosition
+  const anchor = saved?.anchor && findRoomAnchor(saved.anchor.messageId)
+  if (saved && !saved.latest && saved.anchor && !anchor && props.hasOlderMessages && !props.olderMessagesError && restorePagesRequested < 20) {
+    if (!props.isLoadingOlderMessages && !restoreRequestPending) {
+      restoreRequestPending = true; restorePagesRequested++; emit('loadOlder')
+    }
+    return true
+  }
+  restoringPosition = false
+  if (!saved || saved.latest) scrollToBottom('instant')
+  else {
+    unreadTimeline.programmaticScroll()
+    el.scrollTo({ behavior: 'instant', top: anchor ? el.scrollTop + anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - saved.anchor!.offsetTop
+      : Math.min(saved.top, Math.max(0, el.scrollHeight - el.clientHeight)) })
+    measureGroupLayout()
+    rememberPosition()
+  }
+  return true
+}
 let scrollRevision = 0
 let revealingMessage = false
 let revealFrame: number | null = null
 let revealTimer: number | null = null
 let bottomFollowQueued = false
 function followLatestAfterLayout() {
-  if (!isScrolledToBottom || bottomFollowQueued) return
+  if (restoringPosition || !isScrolledToBottom || bottomFollowQueued) return
   const revision = scrollRevision
   const top = messagesEl.value?.scrollTop
   bottomFollowQueued = true
@@ -356,8 +401,10 @@ function clearArrivals() {
 }
 
 function handleScroll() {
+  if (restoringPosition) return
   cancelMessageRevealFrame()
   checkScroll()
+  rememberPosition()
 }
 
 function checkScroll() {
@@ -366,7 +413,7 @@ function checkScroll() {
   const el = messagesEl.value
   const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
   isScrolledToBottom = !revealingMessage && distanceToBottom < 60
-  if (el.scrollTop < 240 && props.hasOlderMessages && !props.isLoadingOlderMessages) {
+  if (el.scrollTop < 240 && props.hasOlderMessages && !props.isLoadingOlderMessages && !props.olderMessagesError) {
     emit('loadOlder')
   }
   
@@ -412,6 +459,7 @@ function finishMessageReveal() {
 }
 
 function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
+  restoringPosition = false
   unreadTimeline.programmaticScroll()
   if (!messagesEl.value) return
   cancelMessageReveal()
@@ -419,6 +467,7 @@ function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
   messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior })
   unreadCount.value = 0
   isScrolledFarUp.value = false
+  if (behavior === 'instant') rememberPosition()
 }
 
 function findMessageElement(messageId: string): HTMLElement | null {
@@ -427,6 +476,7 @@ function findMessageElement(messageId: string): HTMLElement | null {
 }
 
 function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth', historyReady = false) {
+  restoringPosition = false
   const reply = [...props.messages, ...[...loadedThreadMessages.value.values()].flat()].find(message => message.id === messageId)
   const root = reply && messageThreadParentId(reply)
   if (root && !allRootMessages.value.some(message => message.id === root)) { void toggleThread(messageId); return }
@@ -467,7 +517,13 @@ watch(() => props.searchQuery, async () => {
   if (firstMatch) scrollToMessage(firstMatch.id)
 })
 
-watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
+watch(() => props.roomIdentifier, (nextRoomIdentifier, previousRoomIdentifier) => {
+  rememberPosition(previousRoomIdentifier)
+  restoringPosition = true
+  restorePagesRequested = 0
+  restoreRequestPending = false
+  isScrolledToBottom = !props.initialScrollPosition || props.initialScrollPosition.latest
+  void nextTick(restorePosition)
   scrollRevision++
   cancelMessageReveal()
   clearArrivals()
@@ -504,6 +560,7 @@ function keepLatestInViewOnResize() {
 }
 
 watchMessageListGrowth(() => timelineMessages.value, async ({ prepended, appendedIds, addedCount }) => {
+  if (restoringPosition) { await nextTick(); restorePosition(); observeMessageRows(); return }
   if (prepended) {
     const el = messagesEl.value
     const previousScrollHeight = el?.scrollHeight || 0
@@ -734,12 +791,19 @@ onMounted(() => {
   window.addEventListener('focus', handleDocumentVisibilityChange)
   /* Use 'instant' so re-entering the chat tab doesn't visibly scroll from top */
   nextTick(() => {
-    scrollToBottom('instant')
+    restorePosition()
     setupReadObserver()
     initialScrollSettled = true
     revealRequestedMessage()
   })
 })
+
+watch(() => props.isLoadingOlderMessages, (loading, previous) => {
+  if (previous && !loading) restoreRequestPending = false
+}, { flush: 'sync' })
+watch(() => [props.messagesLoaded, props.messages.length, props.isLoadingOlderMessages, props.olderMessagesError],
+  () => { if (restoringPosition) void nextTick(restorePosition) }, { flush: 'post' })
+onBeforeUnmount(() => rememberPosition())
 
 onUnmounted(() => {
   clearArrivals()
