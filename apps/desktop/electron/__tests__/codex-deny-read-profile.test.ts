@@ -704,6 +704,8 @@ test("a Read-only agent that the adapter itself starts has the profile in its la
   // what Codex signs a request to it with shows that Codex itself read the file its commands are refused.
   writeFileSync(join(owner.codexHome, "config.toml"), [
     'model = "stand-in"', 'model_provider = "standin"', 'cli_auth_credentials_store = "file"', "",
+    // account/read also discovers workspace routing on newer native Codex.
+    `chatgpt_base_url = "${model.origin}/"`, "",
     "[model_providers.standin]", 'name = "standin"', `base_url = "${model.origin}/v1"`,
     'wire_api = "responses"', "requires_openai_auth = true", "supports_websockets = false", "",
   ].join("\n"));
