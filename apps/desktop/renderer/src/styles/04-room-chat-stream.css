@@ -252,6 +252,8 @@
 
 .room-chat-message-content {
   display: grid;
+  /* Rich text must fit the message column; code owns its horizontal scroll. */
+  grid-template-columns: minmax(0, 1fr);
   justify-items: start;
   min-width: 0;
 }
