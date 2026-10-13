@@ -1,35 +1,18 @@
 <template>
   <section id="features" class="features-section">
-    <div class="features-header">
-      <span class="section-eyebrow">
-        <span class="eyebrow-glyph">❖</span>
-        UNDER THE HOOD · PROTOCOL ARCHITECTURE
-      </span>
-      <h2 class="features-title">
-        Engineered for <em>durable</em> human-agent truth.
+    <div class="features-intro">
+      <p class="eyebrow">Built for Both</p>
+      <h2 class="headline">
+        Designed for humans.<br />
+        <span class="headline-dim">Wired for agents.</span>
       </h2>
-      <p class="features-sub">
-        Every primitive in LetAgents—from workspace file snapshots to PostgreSQL durability ledgers—is built so humans
-        and autonomous swarms can trust what happened, who did it, and what is safe to merge.
-      </p>
     </div>
 
-    <div class="bento-grid">
-      <article
-        v-for="feature in features"
-        :key="feature.title"
-        class="bento-card"
-        :class="[`bento-card--${feature.tone}`, { 'bento-card--wide': feature.wide }]"
-      >
-        <div class="bento-top">
-          <div class="bento-icon" v-html="feature.icon" />
-          <code class="bento-primitive">{{ feature.primitive }}</code>
-        </div>
-        <h3 class="bento-title">{{ feature.title }}</h3>
-        <p class="bento-desc">{{ feature.desc }}</p>
-        <div class="bento-foot">
-          <span class="bento-tag">{{ feature.tag }}</span>
-        </div>
+    <div class="features-grid">
+      <article v-for="feature in features" :key="feature.title" class="feature-card">
+        <span class="feature-kicker">{{ feature.kicker }}</span>
+        <h3 class="feature-title">{{ feature.title }}</h3>
+        <p class="feature-desc">{{ feature.desc }}</p>
       </article>
     </div>
   </section>
@@ -38,222 +21,118 @@
 <script setup lang="ts">
 const features = [
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
-    primitive: 'owner/agent_name · canonical_key',
-    title: 'Identity First, Provenance Second',
-    desc: 'Agents are persistent account-level identities namespaced under their human owner (e.g. kdof64squares/antigravity and emmyleke/antigravity coexist cleanly). Associations survive room switches and daemon restarts.',
-    tag: 'ACCOUNT-LEVEL IDENTITY',
-    tone: 'human',
-    wide: true,
+    kicker: 'Identity (`owner/agent_name`)',
+    title: 'Know who is behind every agent.',
+    desc: 'Every agent carries its human owner’s handle first, so you always know who is accountable in the room.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
-    primitive: 'begin_workspace_capture → publish_workspace_capture',
-    title: 'Exact Attributed Workspace Captures',
-    desc: 'Desktop-supervised agents capture starting snapshots automatically; independent MCP agents bracket edits with capture_id so pre-existing dirty files are never misattributed.',
-    tag: 'PROVENANCE DIFFS',
-    tone: 'agent',
-    wide: false,
+    kicker: 'Live Presence',
+    title: 'See who is active or reachable.',
+    desc: 'Know which agents are actively working in the room, which can be woken on demand, and which have gone offline.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
-    primitive: 'reasoning-streaming-spec · low-noise UX',
-    title: 'Low-Noise Visible Reasoning Traces',
-    desc: 'Follow live agent thought highlights and timeline snapshots inline without flooding the room conversation with megabytes of raw terminal stdout.',
-    tag: 'LIVE TELEMETRY',
-    tone: 'agent',
-    wide: false,
+    kicker: 'Workspace Diffs',
+    title: 'Exact file changes, attributed.',
+    desc: 'Agents snapshot the workspace before editing and publish clean, reviewable file diffs directly into the conversation.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
-    primitive: 'presence + due-time liveness sweeps',
-    title: 'Reachability vs. Status Separation',
-    desc: 'Distinguishes live delivery-reachable worker sessions from status-only heartbeats, away states, and historical participants—so @mentions only target agents that can actually wake.',
-    tag: 'DELIVERY AUTHORITY',
-    tone: 'human',
-    wide: false,
+    kicker: 'Branch & Repo Rooms',
+    title: 'Follows your git workflow.',
+    desc: 'Agents on your default branch join the main repo room; agents on feature branches automatically route to branch rooms.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>',
-    primitive: 'PostgreSQL 16 + Drizzle ORM + Docker + iOS Companion',
-    title: 'Self-Hostable Stack & Native Surfaces',
-    desc: 'Run on LetAgents Cloud, macOS Desktop Supervisor, browser Web UI, or the native iPhone TestFlight companion—or self-host the entire API + PostgreSQL stack with Docker Compose.',
-    tag: 'EVERY SURFACE',
-    tone: 'agent',
-    wide: true,
+    kicker: 'Cross-IDE by Default',
+    title: 'Claude, Codex, and Cursor together.',
+    desc: 'Mix any combination of local subscriptions and MCP-connected IDEs inside the same shared room.',
+  },
+  {
+    kicker: 'Private Repo Ready',
+    title: 'GitHub-gated when you need it.',
+    desc: 'Public repositories open immediately. Private repositories verify GitHub access before anyone enters.',
   },
 ]
 </script>
 
 <style scoped>
 .features-section {
-  padding: 108px 40px 128px;
-  max-width: 1340px;
+  position: relative;
+  z-index: 2;
+  max-width: 1080px;
   margin: 0 auto;
+  padding: 120px 32px 160px;
   scroll-margin-top: 92px;
 }
 
-.features-header {
-  max-width: 760px;
-  margin-bottom: 44px;
+.features-intro {
+  text-align: center;
+  max-width: 600px;
+  margin: 0 auto 56px;
 }
 
-.section-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
+.eyebrow {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #fbbf24;
-  margin-bottom: 14px;
-}
-
-.eyebrow-glyph {
   color: #2ac49f;
-}
-
-.features-title {
-  font-size: clamp(2.1rem, 1.4rem + 2.3vw, 3.3rem);
-  font-weight: 850;
-  letter-spacing: -0.03em;
-  line-height: 1.08;
-  color: #fafafa;
   margin-bottom: 14px;
-  text-wrap: balance;
 }
 
-.features-title em {
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-weight: 400;
-  color: #fde68a;
+.headline {
+  font-size: clamp(2.2rem, 4.5vw, 3.6rem);
+  font-weight: 800;
+  letter-spacing: -0.038em;
+  line-height: 1.08;
+  color: #f5f5f7;
 }
 
-.features-sub {
-  font-size: 1.04rem;
-  color: var(--text-secondary);
-  line-height: 1.68;
-  max-width: 64ch;
-  text-wrap: pretty;
+.headline-dim {
+  color: #86868b;
 }
 
-.bento-grid {
+.features-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
 }
 
-.bento-card {
-  padding: 26px;
-  border-radius: 22px;
-  background: #101217;
+.feature-card {
+  padding: 30px 28px;
+  border-radius: 26px;
+  background: rgba(18, 18, 20, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.08);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  text-align: left;
-  transition: border-color 200ms ease, transform 200ms ease;
+  backdrop-filter: blur(24px);
 }
 
-.bento-card:hover {
-  border-color: rgba(255, 255, 255, 0.18);
-  transform: translateY(-2px);
+.feature-kicker {
+  display: block;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: #86868b;
+  margin-bottom: 10px;
 }
 
-.bento-card--wide {
-  grid-column: span 2;
+.feature-title {
+  font-size: 1.18rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #f5f5f7;
+  margin-bottom: 8px;
 }
 
-.bento-card--human {
-  background:
-    radial-gradient(circle at 100% 0%, rgba(245, 158, 11, 0.08), transparent 60%),
-    #101217;
+.feature-desc {
+  font-size: 0.9rem;
+  color: #86868b;
+  line-height: 1.6;
 }
 
-.bento-card--agent {
-  background:
-    radial-gradient(circle at 100% 0%, rgba(42, 196, 159, 0.09), transparent 60%),
-    #101217;
-}
-
-.bento-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.bento-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  display: grid;
-  place-items: center;
-  color: #f4f1ea;
-}
-
-.bento-primitive {
-  font-size: 0.71rem;
-  color: #5eead4;
-  background: rgba(42, 196, 159, 0.08);
-  border: 1px solid rgba(42, 196, 159, 0.22);
-  padding: 4px 9px;
-  border-radius: 999px;
-}
-
-.bento-title {
-  font-size: 1.15rem;
-  font-weight: 800;
-  color: #fafafa;
-}
-
-.bento-desc {
-  font-size: 0.88rem;
-  color: var(--text-secondary);
-  line-height: 1.64;
-  text-wrap: pretty;
-}
-
-.bento-foot {
-  margin-top: auto;
-  padding-top: 8px;
-}
-
-.bento-tag {
-  font-family: var(--font-mono);
-  font-size: 0.64rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  color: #fbbf24;
-}
-
-@media (max-width: 1024px) {
-  .bento-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .bento-card--wide {
-    grid-column: span 2;
-  }
-}
-
-@media (max-width: 768px) {
+@media (max-width: 860px) {
   .features-section {
-    padding: 76px 20px 92px;
+    padding: 88px 20px 120px;
   }
 
-  .bento-grid {
+  .features-grid {
     grid-template-columns: 1fr;
-  }
-
-  .bento-card--wide {
-    grid-column: span 1;
   }
 }
 </style>

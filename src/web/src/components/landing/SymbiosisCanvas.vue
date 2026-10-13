@@ -1,350 +1,277 @@
 <template>
   <div
-    ref="stageRef"
-    class="symbiosis-stage"
-    :class="[`symbiosis-stage--${activeMode}`]"
-    @pointermove="onPointerMove"
-    @pointerleave="onPointerLeave"
-    @click="triggerSynapticPulse"
+    ref="stageEl"
+    class="symbiosis-canvas-stage"
+    aria-hidden="true"
   >
-    <canvas
-      ref="canvasRef"
-      class="symbiosis-canvas"
-      aria-label="Interactive 3D visualization of Human and AI Agent symbiosis in a LetAgents room"
-    />
-
-    <!-- Projected 3D Node Telemetry Callouts -->
-    <div class="node-labels-layer" aria-hidden="true">
-      <div
-        v-for="tag in projectedTags"
-        :key="tag.id"
-        class="node-tag"
-        :class="[`node-tag--${tag.kind}`, { 'node-tag--visible': tag.visible }]"
-        :style="{
-          transform: `translate3d(${tag.x}px, ${tag.y}px, 0) scale(${tag.scale})`,
-          opacity: tag.opacity,
-        }"
-      >
-        <span class="node-tag-dot" />
-        <span class="node-tag-id">{{ tag.label }}</span>
-        <span class="node-tag-meta">{{ tag.sub }}</span>
-      </div>
-    </div>
-
-    <!-- Top-Left Live Protocol Badge -->
-    <div class="stage-hud-top">
-      <div class="hud-legend">
-        <span class="legend-item legend-item--human">
-          <span class="legend-swatch" />
-          Human Judgment
-        </span>
-        <span class="legend-sep">×</span>
-        <span class="legend-item legend-item--agent">
-          <span class="legend-swatch" />
-          Agent Velocity
-        </span>
-      </div>
-
-      <button
-        type="button"
-        class="hud-pulse-btn"
-        title="Dispatch a live MCP protocol pulse across the 3D room lattice"
-        @click.stop="triggerSynapticPulse"
-      >
-        <span class="pulse-indicator" :class="{ 'pulse-indicator--active': pulseActive }" />
-        <span>{{ pulseLabel }}</span>
-      </button>
-    </div>
-
-    <!-- Bottom Interactive Mode Switcher & Live Telemetry -->
-    <div class="stage-hud-bottom" @click.stop>
-      <div class="mode-switcher" role="tablist" aria-label="3D Topology Modes">
-        <button
-          v-for="m in modes"
-          :key="m.id"
-          type="button"
-          role="tab"
-          :aria-selected="activeMode === m.id"
-          class="mode-btn"
-          :class="{ 'mode-btn--active': activeMode === m.id }"
-          @click="selectMode(m.id)"
-        >
-          <span class="mode-code">{{ m.code }}</span>
-          <span class="mode-label">{{ m.label }}</span>
-        </button>
-      </div>
-
-      <div class="telemetry-strip">
-        <div
-          v-for="item in currentModeSpec.telemetry"
-          :key="item.key"
-          class="telemetry-cell"
-          :class="`telemetry-cell--${item.tone}`"
-        >
-          <span class="telemetry-key">{{ item.key }}</span>
-          <span class="telemetry-val">{{ item.value }}</span>
-        </div>
-      </div>
-    </div>
+    <canvas ref="canvasEl" class="symbiosis-webgl" />
+    <div class="symbiosis-vignette" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import * as THREE from 'three'
-import { TOPOLOGY_MODES, type TopologyModeId } from './symbiosisData'
+import type { TopologyModeId } from './symbiosisData'
 
-const props = withDefaults(defineProps<{
-  modelValue?: TopologyModeId
-}>(), {
-  modelValue: 'symbiosis',
-})
+const props = withDefaults(
+  defineProps<{
+    mode?: TopologyModeId
+  }>(),
+  {
+    mode: 'symbiosis',
+  },
+)
 
-const emit = defineEmits<{
-  (e: 'update:modelValue', value: TopologyModeId): void
-}>()
+const stageEl = ref<HTMLDivElement | null>(null)
+const canvasEl = ref<HTMLCanvasElement | null>(null)
 
-const modes = TOPOLOGY_MODES
-const activeMode = ref<TopologyModeId>(props.modelValue)
-
-watch(() => props.modelValue, (val) => {
-  if (val && val !== activeMode.value) {
-    activeMode.value = val
-    updateTargetPositions(val)
-    triggerSynapticPulse()
-  }
-})
-
-function selectMode(id: TopologyModeId) {
-  activeMode.value = id
-  emit('update:modelValue', id)
-  updateTargetPositions(id)
-  triggerSynapticPulse()
-}
-
-const currentModeSpec = computed(() => {
-  return modes.find(m => m.id === activeMode.value) ?? modes[0]
-})
-
-const stageRef = ref<HTMLElement | null>(null)
-const canvasRef = ref<HTMLCanvasElement | null>(null)
-
-const pulseEvents = [
-  'MCP: claim_task("task_108")',
-  'CAPTURE: begin_workspace_capture()',
-  'RENTAL: lease 400 LRT → active',
-  'REVIEW: submit_review_verdict(SHA)',
-  'CHECK: letagents-lease ✓ PASSED',
-]
-const pulseIndex = ref(0)
-const pulseActive = ref(false)
-const pulseLabel = computed(() => pulseEvents[pulseIndex.value % pulseEvents.length])
-
-interface ProjectedTag {
-  id: string
-  label: string
-  sub: string
-  kind: 'human' | 'agent' | 'core'
-  anchorIndex: number
-  x: number
-  y: number
-  scale: number
-  opacity: number
-  visible: boolean
-}
-
-const projectedTags = ref<ProjectedTag[]>([
-  { id: 'h1', label: '@emmyleke', sub: 'Human Admin · Intent', kind: 'human', anchorIndex: 0, x: 0, y: 0, scale: 1, opacity: 0, visible: false },
-  { id: 'a1', label: 'emmyleke/claude-code', sub: 'Claude Opus · Local Daemon', kind: 'agent', anchorIndex: 1, x: 0, y: 0, scale: 1, opacity: 0, visible: false },
-  { id: 'a2', label: 'kdof64squares/codex', sub: 'Codex Pro · Lent 400 LRT', kind: 'agent', anchorIndex: 2, x: 0, y: 0, scale: 1, opacity: 0, visible: false },
-  { id: 'h2', label: '@kdof64squares', sub: 'Compute Provider', kind: 'human', anchorIndex: 3, x: 0, y: 0, scale: 1, opacity: 0, visible: false },
-  { id: 'a3', label: 'alex/antigravity', sub: 'SHA Verdict Reviewer', kind: 'agent', anchorIndex: 4, x: 0, y: 0, scale: 1, opacity: 0, visible: false },
-  { id: 'a4', label: 'maya/cursor', sub: 'Branch Worktree Lease', kind: 'agent', anchorIndex: 5, x: 0, y: 0, scale: 1, opacity: 0, visible: false },
-])
-
-// Three.js runtime references
 let renderer: THREE.WebGLRenderer | null = null
 let scene: THREE.Scene | null = null
 let camera: THREE.PerspectiveCamera | null = null
 let rootGroup: THREE.Group | null = null
-let coreShaderMat: THREE.ShaderMaterial | null = null
-let outerGateRing: THREE.Mesh | null = null
-let innerGateRing: THREE.Mesh | null = null
-let particleGeometry: THREE.BufferGeometry | null = null
-let bridgeLinesGeometry: THREE.BufferGeometry | null = null
-let actorMeshes: THREE.Mesh[] = []
+let particleMaterial: THREE.ShaderMaterial | null = null
+let ringLines: THREE.LineSegments | null = null
+let posAttrA: THREE.BufferAttribute | null = null
+let posAttrB: THREE.BufferAttribute | null = null
 
-const PARTICLE_COUNT = 1600
-const currentPositions = new Float32Array(PARTICLE_COUNT * 3)
-const targetPositions = new Float32Array(PARTICLE_COUNT * 3)
-const particleColors = new Float32Array(PARTICLE_COUNT * 3)
-const particlePhases = new Float32Array(PARTICLE_COUNT)
-
-const ACTOR_COUNT = 12
-const actorCurrentPos: THREE.Vector3[] = Array.from({ length: ACTOR_COUNT }, () => new THREE.Vector3())
-const actorTargetPos: THREE.Vector3[] = Array.from({ length: ACTOR_COUNT }, () => new THREE.Vector3())
-
-let pointerX = 0
-let pointerY = 0
-let targetRotX = 0.18
-let targetRotY = -0.25
-let pulseEnergy = 0
-let animationFrameId: number | null = null
-let isIntersecting = true
-let prefersReducedMotion = false
+let rafId: number | null = null
 let resizeObserver: ResizeObserver | null = null
 let intersectionObserver: IntersectionObserver | null = null
-let motionQuery: MediaQueryList | null = null
-let pulseResetTimer: ReturnType<typeof setTimeout> | null = null
+let motionMedia: MediaQueryList | null = null
 
-function triggerSynapticPulse() {
-  pulseEnergy = 1.35
-  pulseIndex.value = (pulseIndex.value + 1) % pulseEvents.length
-  pulseActive.value = true
-  if (pulseResetTimer) clearTimeout(pulseResetTimer)
-  pulseResetTimer = setTimeout(() => {
-    pulseActive.value = false
-  }, 650)
-  if (prefersReducedMotion) {
-    renderSingleFrame(performance.now() * 0.001)
-  }
+let isInViewport = true
+let prefersReducedMotion = false
+
+let pointerTargetX = 0
+let pointerTargetY = 0
+let pointerCurrentX = 0
+let pointerCurrentY = 0
+
+let scrollTarget = 0
+let scrollCurrent = 0
+let manualModeOffset = 0
+let manualModeTarget = 0
+
+const PARTICLE_COUNT = 4800
+
+// 4 sculptural chapters driven by scroll or mode pill:
+// 0: Symbiosis Fusion (Two hemispheres weaving into a central torus)
+// 1: Double Helix Bridge (Human & Agent dialogue)
+// 2: Sovereign Compute Lending (Protected core beaming to a satellite node)
+// 3: Public Swarm Constellation (Geodesic multi-ring sphere)
+const chapters: Float32Array[] = [
+  new Float32Array(PARTICLE_COUNT * 3),
+  new Float32Array(PARTICLE_COUNT * 3),
+  new Float32Array(PARTICLE_COUNT * 3),
+  new Float32Array(PARTICLE_COUNT * 3),
+]
+
+const speciesArray = new Float32Array(PARTICLE_COUNT)
+const scaleArray = new Float32Array(PARTICLE_COUNT)
+const phaseArray = new Float32Array(PARTICLE_COUNT)
+
+function hash(n: number): number {
+  const x = Math.sin(n * 12.9898 + 78.233) * 43758.5453
+  return x - Math.floor(x)
 }
 
-function onPointerMove(e: PointerEvent) {
-  const el = stageRef.value
-  if (!el) return
-  const rect = el.getBoundingClientRect()
-  const nx = ((e.clientX - rect.left) / Math.max(rect.width, 1)) * 2 - 1
-  const ny = ((e.clientY - rect.top) / Math.max(rect.height, 1)) * 2 - 1
-  pointerX = nx
-  pointerY = ny
-  targetRotY = nx * 0.55
-  targetRotX = -ny * 0.35 + 0.14
-}
-
-function onPointerLeave() {
-  pointerX = 0
-  pointerY = 0
-  targetRotY = -0.25
-  targetRotX = 0.18
-}
-
-function computeSymbiosisPosition(i: number, total: number): [number, number, number] {
-  const isHuman = i % 2 === 0
-  const t = (i / total) * Math.PI * 8
-  const majorR = 2.55 + Math.sin(t * 0.5) * 0.35
-  const minorR = 0.82
-  const strandOffset = isHuman ? 0 : Math.PI
-  const u = t * 0.25
-  const v = t * 1.5 + strandOffset
-
-  const x = (majorR + minorR * Math.cos(v)) * Math.cos(u)
-  const y = minorR * Math.sin(v) * 1.35 + Math.sin(u * 2) * 0.32
-  const z = (majorR + minorR * Math.cos(v)) * Math.sin(u)
-  return [x, y, z]
-}
-
-function computeLendingPosition(i: number, total: number): [number, number, number] {
-  const norm = i / total
-  if (norm < 0.36) {
-    // Provider Host cluster (Left hemisphere — warm amber & teal)
-    const idx = norm / 0.36
-    const phi = Math.acos(1 - 2 * idx)
-    const theta = Math.PI * (1 + Math.sqrt(5)) * i
-    const r = 1.45
-    return [
-      -2.65 + r * Math.sin(phi) * Math.cos(theta) * 0.85,
-      r * Math.sin(phi) * Math.sin(theta),
-      r * Math.cos(phi),
-    ]
-  } else if (norm < 0.64) {
-    // Collimated LRT Compute Lease Conduit through the central Handoff Gate
-    const streamT = (norm - 0.36) / 0.28
-    const lane = i % 6
-    const angle = (lane / 6) * Math.PI * 2 + streamT * Math.PI * 4
-    const tubeR = 0.28 + Math.sin(streamT * Math.PI) * 0.36
-    const x = (streamT - 0.5) * 5.2
-    const y = Math.cos(angle) * tubeR
-    const z = Math.sin(angle) * tubeR
-    return [x, y, z]
-  } else {
-    // Renter Room cluster (Right hemisphere — active swarm execution)
-    const idx = (norm - 0.64) / 0.36
-    const phi = Math.acos(1 - 2 * idx)
-    const theta = Math.PI * (1 + Math.sqrt(5)) * i
-    const r = 1.65
-    return [
-      2.65 + r * Math.sin(phi) * Math.cos(theta) * 0.85,
-      r * Math.sin(phi) * Math.sin(theta),
-      r * Math.cos(phi),
-    ]
-  }
-}
-
-function computeSwarmPosition(i: number, total: number): [number, number, number] {
-  const ringIdx = i % 4
-  const ringProgress = (i / total) * Math.PI * 2 * 3
-  const radii = [1.45, 2.35, 3.15, 3.85]
-  const tilts = [0.22, -0.48, 0.62, -0.28]
-  const r = radii[ringIdx]
-  const tilt = tilts[ringIdx]
-
-  const bx = Math.cos(ringProgress) * r
-  const bz = Math.sin(ringProgress) * r
-  const by = Math.sin(ringProgress * 3 + ringIdx) * 0.28
-
-  // Rotate around Z/X for orbital focus rooms
-  const y = by * Math.cos(tilt) - bz * Math.sin(tilt)
-  const z = by * Math.sin(tilt) + bz * Math.cos(tilt)
-  return [bx, y, z]
-}
-
-function updateTargetPositions(mode: TopologyModeId) {
+function generateSculptures() {
   for (let i = 0; i < PARTICLE_COUNT; i++) {
-    let pos: [number, number, number]
-    if (mode === 'symbiosis') {
-      pos = computeSymbiosisPosition(i, PARTICLE_COUNT)
-    } else if (mode === 'lending') {
-      pos = computeLendingPosition(i, PARTICLE_COUNT)
-    } else {
-      pos = computeSwarmPosition(i, PARTICLE_COUNT)
-    }
-    const i3 = i * 3
-    targetPositions[i3] = pos[0]
-    targetPositions[i3 + 1] = pos[1]
-    targetPositions[i3 + 2] = pos[2]
-  }
+    const isAgent = i % 2 === 1
+    speciesArray[i] = isAgent ? 1.0 : 0.0
 
-  // Update 12 distinct actor nodes
-  for (let a = 0; a < ACTOR_COUNT; a++) {
-    const sampleIdx = Math.floor((a / ACTOR_COUNT) * PARTICLE_COUNT)
-    let pos: [number, number, number]
-    if (mode === 'symbiosis') {
-      const angle = (a / ACTOR_COUNT) * Math.PI * 2
-      const isHuman = a % 2 === 0
-      const radius = isHuman ? 2.35 : 3.05
-      const y = isHuman ? Math.sin(angle * 2) * 0.95 : -Math.sin(angle * 2) * 1.05
-      pos = [Math.cos(angle) * radius, y, Math.sin(angle) * radius]
-    } else if (mode === 'lending') {
-      const isProviderSide = a < 6
-      const subAngle = ((a % 6) / 6) * Math.PI * 2
-      const xBase = isProviderSide ? -2.55 : 2.55
-      pos = [
-        xBase + Math.cos(subAngle) * 0.65,
-        Math.sin(subAngle) * 1.25,
-        Math.cos(subAngle * 2) * 1.1,
-      ]
+    const r1 = hash(i * 1.17 + 0.3)
+    const r2 = hash(i * 2.63 + 1.9)
+    const r3 = hash(i * 4.91 + 5.7)
+
+    // Varied optical bokeh sizes: mostly fine stardust with occasional bright focal stars
+    scaleArray[i] = 0.55 + Math.pow(r1, 3.2) * 2.8
+    phaseArray[i] = r2 * Math.PI * 2
+
+    const i3 = i * 3
+    const t = i / PARTICLE_COUNT
+
+    // ─── CHAPTER 0: HERO — Two streams converging into one luminous ring ───
+    if (i < PARTICLE_COUNT * 0.62) {
+      const u = t * Math.PI * 2 * 6
+      const strandOffset = isAgent ? Math.PI : 0
+      const majorR = 2.35 + (r3 - 0.5) * 0.36
+      const minorR = 0.52 + (r1 - 0.5) * 0.18
+      const rRing = majorR + minorR * Math.cos(3 * u + strandOffset)
+      chapters[0][i3] = rRing * Math.cos(2 * u) * 1.28
+      chapters[0][i3 + 1] = rRing * Math.sin(2 * u) * 0.78
+      chapters[0][i3 + 2] = minorR * Math.sin(3 * u + strandOffset) * 1.6
     } else {
-      pos = computeSwarmPosition(sampleIdx, PARTICLE_COUNT)
+      const wt = (i - PARTICLE_COUNT * 0.62) / (PARTICLE_COUNT * 0.38)
+      const side = isAgent ? 1 : -1
+      const spread = Math.pow(wt, 0.85)
+      chapters[0][i3] = side * (2.0 + spread * 5.8)
+      chapters[0][i3 + 1] = Math.sin(spread * 4.5 + (isAgent ? 1.2 : 0)) * (0.65 + spread * 0.9) + (r1 - 0.5) * 0.55
+      chapters[0][i3 + 2] = Math.cos(spread * 3.5) * (0.7 + spread * 0.8) + (r2 - 0.5) * 0.55
     }
-    actorTargetPos[a].set(pos[0], pos[1], pos[2])
+
+    // ─── CHAPTER 1: SYMBIOSIS — Interwoven horizontal double-helix wave ───
+    {
+      const x = (t - 0.5) * 10.5
+      const twist = x * 0.85 + (isAgent ? Math.PI : 0)
+      const radius = 1.15 * (1.0 - Math.abs(t - 0.5) * 0.75) + (r1 - 0.5) * 0.25
+      chapters[1][i3] = x
+      chapters[1][i3 + 1] = Math.sin(twist) * radius + (r2 - 0.5) * 0.18
+      chapters[1][i3 + 2] = Math.cos(twist) * radius + (r3 - 0.5) * 0.18
+    }
+
+    // ─── CHAPTER 2: LENDING — Sovereign left sphere beaming a bounded arc to right sphere ───
+    if (!isAgent && i < PARTICLE_COUNT * 0.44) {
+      // Left sovereign host sphere
+      const idx = i / (PARTICLE_COUNT * 0.44)
+      const phi = Math.acos(1 - 2 * (idx % 1))
+      const theta = Math.PI * (1 + Math.sqrt(5)) * i
+      const rad = 1.35 + (r1 - 0.5) * 0.12
+      chapters[2][i3] = -2.45 + rad * Math.sin(phi) * Math.cos(theta)
+      chapters[2][i3 + 1] = rad * Math.cos(phi)
+      chapters[2][i3 + 2] = rad * Math.sin(phi) * Math.sin(theta)
+    } else if (isAgent && i < PARTICLE_COUNT * 0.72) {
+      // Right recipient room sphere
+      const idx = (i - PARTICLE_COUNT * 0.44) / (PARTICLE_COUNT * 0.28)
+      const phi = Math.acos(1 - 2 * Math.abs(idx % 1))
+      const theta = Math.PI * (1 + Math.sqrt(5)) * i
+      const rad = 1.15 + (r2 - 0.5) * 0.14
+      chapters[2][i3] = 2.45 + rad * Math.sin(phi) * Math.cos(theta)
+      chapters[2][i3 + 1] = rad * Math.cos(phi)
+      chapters[2][i3 + 2] = rad * Math.sin(phi) * Math.sin(theta)
+    } else {
+      // Graceful arched bridge between the two spheres
+      const bt = (i - PARTICLE_COUNT * 0.72) / (PARTICLE_COUNT * 0.28)
+      const bx = (bt - 0.5) * 4.9
+      const arch = Math.cos((bt - 0.5) * Math.PI) * 1.15
+      const lane = (i % 2 === 0 ? 1 : -1) * arch
+      chapters[2][i3] = bx
+      chapters[2][i3 + 1] = lane * 0.65 + (r1 - 0.5) * 0.16
+      chapters[2][i3 + 2] = Math.sin(bt * Math.PI * 2) * 0.55 + (r3 - 0.5) * 0.16
+    }
+
+    // ─── CHAPTER 3: SWARM — Synchronized Fibonacci constellation + orbital rings ───
+    if (i < PARTICLE_COUNT * 0.68) {
+      const idx = i / (PARTICLE_COUNT * 0.68)
+      const phi = Math.acos(1 - 2 * idx)
+      const theta = Math.PI * (1 + Math.sqrt(5)) * i
+      const rad = (isAgent ? 2.85 : 1.95) + (r1 - 0.5) * 0.18
+      chapters[3][i3] = rad * Math.sin(phi) * Math.cos(theta) * 1.15
+      chapters[3][i3 + 1] = rad * Math.cos(phi) * 0.92
+      chapters[3][i3 + 2] = rad * Math.sin(phi) * Math.sin(theta)
+    } else {
+      const ringA = t * Math.PI * 30
+      const ringR = 3.85 + (r2 - 0.5) * 0.35
+      chapters[3][i3] = Math.cos(ringA) * ringR * 1.18
+      chapters[3][i3 + 1] = Math.sin(ringA) * 0.45 + (r3 - 0.5) * 0.18
+      chapters[3][i3 + 2] = Math.sin(ringA) * ringR * 0.82
+    }
   }
 }
 
-function initThreeScene() {
-  const canvas = canvasRef.value
-  const stage = stageRef.value
-  if (!canvas || !stage) return
+const VERTEX_SHADER = `
+  uniform float uTime;
+  uniform float uBlend;
+  uniform vec2 uPointer;
+  attribute vec3 aNextPosition;
+  attribute float aSpecies;
+  attribute float aScale;
+  attribute float aPhase;
+
+  varying float vSpecies;
+  varying float vAlpha;
+
+  float smoothBlend(float x) {
+    return x * x * (3.0 - 2.0 * x);
+  }
+
+  void main() {
+    float b = smoothBlend(clamp(uBlend, 0.0, 1.0));
+    vec3 pos = mix(position, aNextPosition, b);
+
+    // Weightless fluid breathing
+    float t = uTime * 0.75;
+    pos.x += sin(t + aPhase + pos.y * 0.5) * 0.06;
+    pos.y += cos(t * 1.1 + aPhase + pos.x * 0.4) * 0.07;
+    pos.z += sin(t * 0.9 + aPhase) * 0.06;
+
+    // Gentle magnetic response to cursor
+    vec2 cursorWorld = uPointer * vec2(4.0, 2.4);
+    float dist = length(pos.xy - cursorWorld);
+    float influence = smoothstep(2.8, 0.0, dist);
+    pos.xy += normalize(pos.xy - cursorWorld + vec2(0.0001)) * influence * -0.18;
+    pos.z += influence * 0.32;
+
+    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+
+    float depth = clamp((-mvPosition.z - 3.5) / 11.0, 0.0, 1.0);
+    gl_PointSize = aScale * (22.0 / -mvPosition.z);
+
+    vSpecies = aSpecies;
+    vAlpha = (1.0 - depth * 0.65) * (0.58 + 0.32 * sin(uTime * 1.3 + aPhase));
+  }
+`
+
+const FRAGMENT_SHADER = `
+  varying float vSpecies;
+  varying float vAlpha;
+
+  void main() {
+    vec2 uv = gl_PointCoord - vec2(0.5);
+    float d = length(uv);
+    if (d > 0.5) discard;
+
+    // Optical Gaussian glow falloff for silky Apple-like light points
+    float glow = exp(-d * d * 15.0);
+    float core = smoothstep(0.22, 0.0, d);
+
+    // Human: Warm Alabaster / Pearl White (#F5F5F7)
+    // Agent: LetAgents Brand Mint (#2AC49F) with pure white core
+    vec3 humanColor = vec3(0.96, 0.96, 0.98);
+    vec3 agentMint = vec3(0.165, 0.769, 0.624);
+    vec3 agentColor = mix(agentMint, vec3(0.94, 1.0, 0.98), core * 0.72);
+
+    vec3 col = mix(humanColor, agentColor, vSpecies);
+    gl_FragColor = vec4(col, glow * vAlpha * 0.85);
+  }
+`
+
+let activeChapterPair = -1
+
+function updateChapterBuffers(continuousStage: number) {
+  if (!posAttrA || !posAttrB || !particleMaterial) return
+  const clamped = Math.max(0, Math.min(2.999, continuousStage))
+  const idxA = Math.floor(clamped)
+  const idxB = Math.min(3, idxA + 1)
+  const frac = clamped - idxA
+
+  if (idxA !== activeChapterPair) {
+    ;(posAttrA.array as Float32Array).set(chapters[idxA])
+    ;(posAttrB.array as Float32Array).set(chapters[idxB])
+    posAttrA.needsUpdate = true
+    posAttrB.needsUpdate = true
+    activeChapterPair = idxA
+  }
+
+  particleMaterial.uniforms.uBlend.value = frac
+}
+
+function initScene() {
+  const stage = stageEl.value
+  const canvas = canvasEl.value
+  if (!stage || !canvas) return
+
+  generateSculptures()
+
+  scene = new THREE.Scene()
+  const rect = stage.getBoundingClientRect()
+  const width = Math.max(rect.width, 320)
+  const height = Math.max(rect.height, 360)
+
+  camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 60)
+  camera.position.set(0, 0, 9.8)
 
   try {
     renderer = new THREE.WebGLRenderer({
@@ -354,761 +281,230 @@ function initThreeScene() {
       powerPreference: 'high-performance',
     })
   } catch {
-    // Graceful fallback in headless or WebGL-disabled environments
     return
   }
 
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+  renderer.setSize(width, height, false)
   renderer.setClearColor(0x000000, 0)
-  scene = new THREE.Scene()
-  scene.fog = new THREE.FogExp2(0x08090c, 0.068)
-
-  const width = Math.max(stage.clientWidth, 320)
-  const height = Math.max(stage.clientHeight, 320)
-  camera = new THREE.PerspectiveCamera(46, width / height, 0.1, 100)
-  camera.position.set(0, 0.35, 8.2)
 
   rootGroup = new THREE.Group()
   scene.add(rootGroup)
 
-  // Lights
-  const ambient = new THREE.AmbientLight(0xf4f1ea, 0.7)
-  scene.add(ambient)
+  const geo = new THREE.BufferGeometry()
+  posAttrA = new THREE.BufferAttribute(new Float32Array(chapters[0]), 3)
+  posAttrB = new THREE.BufferAttribute(new Float32Array(chapters[1]), 3)
 
-  const humanLight = new THREE.PointLight(0xf59e0b, 3.2, 16, 1.5)
-  humanLight.position.set(-3.5, 2.4, 3.2)
-  scene.add(humanLight)
+  geo.setAttribute('position', posAttrA)
+  geo.setAttribute('aNextPosition', posAttrB)
+  geo.setAttribute('aSpecies', new THREE.BufferAttribute(speciesArray, 1))
+  geo.setAttribute('aScale', new THREE.BufferAttribute(scaleArray, 1))
+  geo.setAttribute('aPhase', new THREE.BufferAttribute(phaseArray, 1))
 
-  const agentLight = new THREE.PointLight(0x2ac49f, 3.6, 16, 1.5)
-  agentLight.position.set(3.5, -2.0, 3.2)
-  scene.add(agentLight)
-
-  // 1. Central Symbiotic Singularity Core (Custom GLSL Shader)
-  const coreGeo = new THREE.IcosahedronGeometry(0.92, 5)
-  coreShaderMat = new THREE.ShaderMaterial({
+  particleMaterial = new THREE.ShaderMaterial({
+    vertexShader: VERTEX_SHADER,
+    fragmentShader: FRAGMENT_SHADER,
     transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
     uniforms: {
       uTime: { value: 0 },
-      uPulse: { value: 0 },
-      uMode: { value: 0 },
-      uColorHuman: { value: new THREE.Color('#f59e0b') },
-      uColorAgent: { value: new THREE.Color('#2ac49f') },
-      uColorIvory: { value: new THREE.Color('#f4f1ea') },
+      uBlend: { value: 0 },
+      uPointer: { value: new THREE.Vector2(0, 0) },
     },
-    vertexShader: `
-      uniform float uTime;
-      uniform float uPulse;
-      varying vec3 vNormal;
-      varying vec3 vPosition;
-      varying float vDisplacement;
-
-      void main() {
-        vNormal = normalize(normalMatrix * normal);
-        float wave1 = sin(position.x * 3.4 + uTime * 1.8) * cos(position.y * 3.1 - uTime * 1.4);
-        float wave2 = sin(position.z * 4.2 + uTime * 2.2) * 0.5;
-        float disp = (wave1 + wave2) * (0.065 + uPulse * 0.08);
-        vDisplacement = disp;
-        vec3 newPos = position + normal * disp;
-        vPosition = (modelViewMatrix * vec4(newPos, 1.0)).xyz;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(newPos, 1.0);
-      }
-    `,
-    fragmentShader: `
-      uniform float uTime;
-      uniform float uPulse;
-      uniform vec3 uColorHuman;
-      uniform vec3 uColorAgent;
-      uniform vec3 uColorIvory;
-      varying vec3 vNormal;
-      varying vec3 vPosition;
-      varying float vDisplacement;
-
-      void main() {
-        vec3 viewDir = normalize(-vPosition);
-        float fresnel = pow(1.0 - max(dot(viewDir, normalize(vNormal)), 0.0), 2.4);
-        float mixFactor = smoothstep(-0.12, 0.12, vDisplacement + sin(uTime + vNormal.x * 2.0) * 0.05);
-        vec3 baseColor = mix(uColorHuman, uColorAgent, mixFactor);
-        vec3 finalColor = mix(baseColor * 0.38, uColorIvory, fresnel * (0.75 + uPulse * 0.35));
-        finalColor += uColorAgent * fresnel * 0.55;
-        float alpha = 0.72 + fresnel * 0.28;
-        gl_FragColor = vec4(finalColor, alpha);
-      }
-    `,
   })
-  const coreMesh = new THREE.Mesh(coreGeo, coreShaderMat)
-  rootGroup.add(coreMesh)
 
-  // Architectural Open-Room Portal Rings around the Core
-  const outerRingGeo = new THREE.TorusGeometry(1.38, 0.022, 16, 96, Math.PI * 1.72)
-  const outerRingMat = new THREE.MeshBasicMaterial({
-    color: 0xf4f1ea,
-    transparent: true,
-    opacity: 0.45,
-  })
-  outerGateRing = new THREE.Mesh(outerRingGeo, outerRingMat)
-  rootGroup.add(outerGateRing)
+  const points = new THREE.Points(geo, particleMaterial)
+  rootGroup.add(points)
 
-  const innerRingGeo = new THREE.TorusGeometry(1.68, 0.018, 16, 96, Math.PI * 1.45)
-  const innerRingMat = new THREE.MeshBasicMaterial({
-    color: 0x2ac49f,
-    transparent: true,
-    opacity: 0.55,
-  })
-  innerGateRing = new THREE.Mesh(innerRingGeo, innerRingMat)
-  innerGateRing.rotation.x = Math.PI * 0.35
-  rootGroup.add(innerGateRing)
-
-  // 2. Dual-Species Particle Field (Humans = Warm Amber/Ivory, Agents = Brand Teal/Cyan)
-  const colorHuman = new THREE.Color('#f59e0b')
-  const colorIvory = new THREE.Color('#f4f1ea')
-  const colorAgent = new THREE.Color('#2ac49f')
-  const colorCyan = new THREE.Color('#38bdf8')
-
-  updateTargetPositions(activeMode.value)
-
-  for (let i = 0; i < PARTICLE_COUNT; i++) {
-    const i3 = i * 3
-    currentPositions[i3] = targetPositions[i3]
-    currentPositions[i3 + 1] = targetPositions[i3 + 1]
-    currentPositions[i3 + 2] = targetPositions[i3 + 2]
-    particlePhases[i] = Math.random() * Math.PI * 2
-
-    const isHuman = i % 2 === 0
-    const c = isHuman
-      ? colorHuman.clone().lerp(colorIvory, (i % 7) / 10)
-      : colorAgent.clone().lerp(colorCyan, (i % 5) / 10)
-    particleColors[i3] = c.r
-    particleColors[i3 + 1] = c.g
-    particleColors[i3 + 2] = c.b
+  // Subtle geometric orbital ring trace
+  const ringSegments = 120
+  const ringVerts = new Float32Array(ringSegments * 6)
+  for (let i = 0; i < ringSegments; i++) {
+    const a1 = (i / ringSegments) * Math.PI * 2
+    const a2 = ((i + 1) / ringSegments) * Math.PI * 2
+    const r = 2.65
+    const idx = i * 6
+    ringVerts[idx] = Math.cos(a1) * r * 1.25
+    ringVerts[idx + 1] = Math.sin(a1) * r * 0.72
+    ringVerts[idx + 2] = 0
+    ringVerts[idx + 3] = Math.cos(a2) * r * 1.25
+    ringVerts[idx + 4] = Math.sin(a2) * r * 0.72
+    ringVerts[idx + 5] = 0
   }
-
-  particleGeometry = new THREE.BufferGeometry()
-  particleGeometry.setAttribute('position', new THREE.Float32BufferAttribute(currentPositions, 3))
-  particleGeometry.setAttribute('color', new THREE.Float32BufferAttribute(particleColors, 3))
-
-  const particleMaterial = new THREE.PointsMaterial({
-    size: 0.055,
-    vertexColors: true,
+  const ringGeo = new THREE.BufferGeometry()
+  ringGeo.setAttribute('position', new THREE.BufferAttribute(ringVerts, 3))
+  const ringMat = new THREE.LineBasicMaterial({
+    color: 0xffffff,
     transparent: true,
-    opacity: 0.88,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-  })
-
-  const particleSystem = new THREE.Points(particleGeometry, particleMaterial)
-  rootGroup.add(particleSystem)
-
-  // 3. Sculpted 3D Actor Nodes (Human Spheres & Agent Octahedrons)
-  const humanNodeGeo = new THREE.SphereGeometry(0.13, 20, 20)
-  const agentNodeGeo = new THREE.OctahedronGeometry(0.15, 0)
-
-  actorMeshes = []
-  for (let a = 0; a < ACTOR_COUNT; a++) {
-    const isHuman = a % 2 === 0
-    const mat = new THREE.MeshStandardMaterial({
-      color: isHuman ? 0xfbbf24 : 0x2ac49f,
-      emissive: isHuman ? 0xf59e0b : 0x2ac49f,
-      emissiveIntensity: 0.75,
-      roughness: 0.2,
-      metalness: 0.6,
-    })
-    const mesh = new THREE.Mesh(isHuman ? humanNodeGeo : agentNodeGeo, mat)
-    actorCurrentPos[a].copy(actorTargetPos[a])
-    mesh.position.copy(actorCurrentPos[a])
-    rootGroup.add(mesh)
-    actorMeshes.push(mesh)
-  }
-
-  // 4. Synaptic Bridge Filaments connecting Human ↔ Agent ↔ Core
-  const bridgePositions = new Float32Array(ACTOR_COUNT * 2 * 3 * 2)
-  bridgeLinesGeometry = new THREE.BufferGeometry()
-  bridgeLinesGeometry.setAttribute('position', new THREE.Float32BufferAttribute(bridgePositions, 3))
-  const bridgeMat = new THREE.LineBasicMaterial({
-    color: 0x5eead4,
-    transparent: true,
-    opacity: 0.28,
+    opacity: 0.045,
     blending: THREE.AdditiveBlending,
   })
-  const bridgeLines = new THREE.Line(bridgeLinesGeometry, bridgeMat)
-  rootGroup.add(bridgeLines)
+  ringLines = new THREE.LineSegments(ringGeo, ringMat)
+  rootGroup.add(ringLines)
+
+  updateChapterBuffers(0)
+  renderFrame(performance.now() * 0.001)
 }
 
-function updateCanvasSize(widthCss: number, heightCss: number, dprWidth?: number, dprHeight?: number) {
-  if (!renderer || !camera) return
-  const dpr = Math.min(window.devicePixelRatio || 1, 2)
-  const finalW = dprWidth ? Math.round(dprWidth / dpr) : Math.max(widthCss, 1)
-  const finalH = dprHeight ? Math.round(dprHeight / dpr) : Math.max(heightCss, 1)
-  renderer.setPixelRatio(dpr)
-  renderer.setSize(finalW, finalH, false)
-  camera.aspect = finalW / finalH
-  camera.updateProjectionMatrix()
-}
-
-function renderSingleFrame(timeSec: number) {
-  if (!renderer || !scene || !camera || !rootGroup) return
-
-  // Smoothly decay pulse energy
-  pulseEnergy *= 0.94
-
-  // Smoothly rotate root group toward pointer + orbital drift
-  const autoSpin = prefersReducedMotion ? 0 : timeSec * 0.16
-  rootGroup.rotation.y += (targetRotY + autoSpin - rootGroup.rotation.y) * 0.06
-  rootGroup.rotation.x += (targetRotX - rootGroup.rotation.x) * 0.06
-
-  if (coreShaderMat) {
-    coreShaderMat.uniforms.uTime.value = timeSec
-    coreShaderMat.uniforms.uPulse.value = pulseEnergy
-  }
-
-  if (outerGateRing && innerGateRing) {
-    outerGateRing.rotation.z = timeSec * 0.32
-    outerGateRing.rotation.y = Math.sin(timeSec * 0.4) * 0.35
-    innerGateRing.rotation.z = -timeSec * 0.45
-    const ringScale = 1 + pulseEnergy * 0.08
-    outerGateRing.scale.set(ringScale, ringScale, ringScale)
-  }
-
-  // Morph particle positions toward active topology targets
-  if (particleGeometry) {
-    const posAttr = particleGeometry.attributes.position
-    const arr = posAttr.array as Float32Array
-    const lerpSpeed = prefersReducedMotion ? 0.35 : 0.065
-
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      const i3 = i * 3
-      const phase = particlePhases[i]
-      const breath = prefersReducedMotion ? 0 : Math.sin(timeSec * 1.7 + phase) * (0.04 + pulseEnergy * 0.05)
-
-      arr[i3] += (targetPositions[i3] * (1 + breath) - arr[i3]) * lerpSpeed
-      arr[i3 + 1] += (targetPositions[i3 + 1] * (1 + breath) - arr[i3 + 1]) * lerpSpeed
-      arr[i3 + 2] += (targetPositions[i3 + 2] * (1 + breath) - arr[i3 + 2]) * lerpSpeed
+watch(
+  () => props.mode,
+  (mode) => {
+    manualModeTarget = mode === 'symbiosis' ? 0 : mode === 'lending' ? 2 : 3
+    if (prefersReducedMotion) {
+      manualModeOffset = manualModeTarget
+      updateChapterBuffers(manualModeOffset)
+      renderFrame(performance.now() * 0.001)
     }
-    posAttr.needsUpdate = true
-  }
+  },
+)
 
-  // Morph actor nodes & update synaptic bridge lines
-  if (bridgeLinesGeometry) {
-    const lineAttr = bridgeLinesGeometry.attributes.position
-    const lineArr = lineAttr.array as Float32Array
-    let ptr = 0
+function renderFrame(nowSec: number) {
+  if (!renderer || !scene || !camera || !rootGroup || !particleMaterial) return
 
-    for (let a = 0; a < ACTOR_COUNT; a++) {
-      actorCurrentPos[a].lerp(actorTargetPos[a], prefersReducedMotion ? 0.35 : 0.075)
-      const mesh = actorMeshes[a]
-      if (mesh) {
-        mesh.position.copy(actorCurrentPos[a])
-        mesh.rotation.y = timeSec * 0.9 + a
-        mesh.rotation.x = timeSec * 0.6 + a
-        const s = 1 + pulseEnergy * 0.22
-        mesh.scale.set(s, s, s)
-      }
+  scrollCurrent += (scrollTarget - scrollCurrent) * 0.06
+  manualModeOffset += (manualModeTarget - manualModeOffset) * 0.06
 
-      // Segment 1: Actor to Core (0,0,0)
-      lineArr[ptr++] = actorCurrentPos[a].x
-      lineArr[ptr++] = actorCurrentPos[a].y
-      lineArr[ptr++] = actorCurrentPos[a].z
-      lineArr[ptr++] = 0
-      lineArr[ptr++] = 0
-      lineArr[ptr++] = 0
+  // Blend scroll-driven progression with manual mode selection when near the top
+  const heroWeight = Math.max(0, 1 - scrollCurrent * 2.2)
+  const stageValue = scrollCurrent * 3.0 * (1 - heroWeight) + manualModeOffset * heroWeight
+  updateChapterBuffers(stageValue)
 
-      // Segment 2: Actor to Next Partner Actor (Human ↔ Agent pair)
-      const nextA = (a + 1) % ACTOR_COUNT
-      lineArr[ptr++] = actorCurrentPos[a].x
-      lineArr[ptr++] = actorCurrentPos[a].y
-      lineArr[ptr++] = actorCurrentPos[a].z
-      lineArr[ptr++] = actorCurrentPos[nextA].x
-      lineArr[ptr++] = actorCurrentPos[nextA].y
-      lineArr[ptr++] = actorCurrentPos[nextA].z
-    }
-    lineAttr.needsUpdate = true
-  }
+  pointerCurrentX += (pointerTargetX - pointerCurrentX) * 0.045
+  pointerCurrentY += (pointerTargetY - pointerCurrentY) * 0.045
+
+  particleMaterial.uniforms.uTime.value = prefersReducedMotion ? 0 : nowSec
+  particleMaterial.uniforms.uPointer.value.set(pointerCurrentX, pointerCurrentY)
+
+  const baseSpin = prefersReducedMotion ? 0 : nowSec * 0.065
+  rootGroup.rotation.y = baseSpin + pointerCurrentX * 0.18 + scrollCurrent * 0.65
+  rootGroup.rotation.x = pointerCurrentY * -0.12 + Math.sin(scrollCurrent * Math.PI) * 0.18
 
   renderer.render(scene, camera)
+}
 
-  // Project 6 primary actor nodes into 2D overlay coordinates for HTML telemetry tags
-  const stage = stageRef.value
-  if (stage) {
-    const w = stage.clientWidth
-    const h = stage.clientHeight
-    const tempV = new THREE.Vector3()
-    rootGroup.updateMatrix()
+function tick(nowMs: number) {
+  rafId = null
+  if (!isInViewport || document.hidden || prefersReducedMotion) return
+  renderFrame(nowMs * 0.001)
+  rafId = window.requestAnimationFrame(tick)
+}
 
-    for (const tag of projectedTags.value) {
-      const node = actorMeshes[tag.anchorIndex]
-      if (!node) continue
-      tempV.copy(node.position)
-      // Apply rootGroup rotation roughly
-      const cosY = Math.cos(rootGroup.rotation.y)
-      const sinY = Math.sin(rootGroup.rotation.y)
-      const rx = tempV.x * cosY + tempV.z * sinY
-      const rz = -tempV.x * sinY + tempV.z * cosY
-      const ry = tempV.y
-
-      // Perspective projection approximation
-      const depth = camera.position.z - rz
-      if (depth <= 1.0) {
-        tag.visible = false
-        continue
-      }
-      const fovScale = 1 / Math.tan((camera.fov * Math.PI) / 360)
-      const ndcX = (rx / (depth * camera.aspect)) * fovScale
-      const ndcY = ((ry - camera.position.y * 0.35) / depth) * fovScale
-
-      const screenX = (ndcX * 0.5 + 0.5) * w
-      const screenY = (-ndcY * 0.5 + 0.5) * h
-
-      const inBounds = screenX > 56 && screenX < w - 150 && screenY > 56 && screenY < h - 110
-      tag.visible = inBounds
-      tag.x = Math.round(screenX)
-      tag.y = Math.round(screenY)
-      const depthFactor = Math.max(0.65, Math.min(1.05, 6.8 / depth))
-      tag.scale = Number(depthFactor.toFixed(2))
-      tag.opacity = inBounds ? Number(Math.min(0.95, depthFactor * 0.9).toFixed(2)) : 0
+function syncLoop() {
+  if (isInViewport && !document.hidden && !prefersReducedMotion) {
+    if (rafId === null) {
+      rafId = window.requestAnimationFrame(tick)
     }
+  } else if (rafId !== null) {
+    window.cancelAnimationFrame(rafId)
+    rafId = null
   }
 }
 
-function animateLoop(nowMs: number) {
-  if (!isIntersecting || document.hidden || prefersReducedMotion) {
-    animationFrameId = null
-    return
-  }
-  renderSingleFrame(nowMs * 0.001)
-  animationFrameId = requestAnimationFrame(animateLoop)
+function onPointerMove(e: PointerEvent) {
+  const nx = (e.clientX / Math.max(window.innerWidth, 1)) * 2 - 1
+  const ny = -((e.clientY / Math.max(window.innerHeight, 1)) * 2 - 1)
+  pointerTargetX = Math.max(-1, Math.min(1, nx))
+  pointerTargetY = Math.max(-1, Math.min(1, ny))
 }
 
-function startLoopIfNeeded() {
-  if (!renderer) return
+function onScroll() {
+  const maxScroll = Math.max(document.documentElement.scrollHeight - window.innerHeight, 1)
+  scrollTarget = Math.max(0, Math.min(1, window.scrollY / maxScroll))
   if (prefersReducedMotion) {
-    renderSingleFrame(performance.now() * 0.001)
-    return
-  }
-  if (!animationFrameId && isIntersecting && !document.hidden) {
-    animationFrameId = requestAnimationFrame(animateLoop)
+    scrollCurrent = scrollTarget
+    renderFrame(performance.now() * 0.001)
   }
 }
 
-function stopLoop() {
-  if (animationFrameId !== null) {
-    cancelAnimationFrame(animationFrameId)
-    animationFrameId = null
-  }
-}
+function handleResize(entries: ResizeObserverEntry[]) {
+  const entry = entries[0]
+  if (!entry || !renderer || !camera) return
+  const dpr = Math.min(window.devicePixelRatio || 1, 2)
+  const cssWidth = Math.max(entry.contentRect.width, 1)
+  const cssHeight = Math.max(entry.contentRect.height, 1)
 
-function onVisibilityChange() {
-  if (document.hidden) {
-    stopLoop()
-  } else {
-    startLoopIfNeeded()
-  }
-}
-
-function onMotionPreferenceChange() {
-  prefersReducedMotion = Boolean(motionQuery?.matches)
-  if (prefersReducedMotion) {
-    stopLoop()
-    renderSingleFrame(performance.now() * 0.001)
-  } else {
-    startLoopIfNeeded()
-  }
+  camera.aspect = cssWidth / cssHeight
+  camera.updateProjectionMatrix()
+  renderer.setPixelRatio(dpr)
+  renderer.setSize(cssWidth, cssHeight, false)
+  renderFrame(performance.now() * 0.001)
 }
 
 onMounted(() => {
-  motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
-  prefersReducedMotion = motionQuery.matches
-  motionQuery.addEventListener('change', onMotionPreferenceChange)
+  motionMedia = window.matchMedia('(prefers-reduced-motion: reduce)')
+  prefersReducedMotion = motionMedia.matches
+  motionMedia.addEventListener('change', (ev) => {
+    prefersReducedMotion = ev.matches
+    syncLoop()
+  })
 
-  initThreeScene()
+  initScene()
 
-  const stage = stageRef.value
-  if (stage && typeof ResizeObserver !== 'undefined') {
-    resizeObserver = new ResizeObserver(([entry]) => {
-      if (!entry) return
-      const dpc = entry.devicePixelContentBoxSize
-      updateCanvasSize(
-        entry.contentRect.width,
-        entry.contentRect.height,
-        dpc ? dpc[0]?.inlineSize : undefined,
-        dpc ? dpc[0]?.blockSize : undefined,
-      )
-      if (prefersReducedMotion) {
-        renderSingleFrame(performance.now() * 0.001)
-      }
-    })
-    const supportsDevicePixelBox =
-      typeof ResizeObserverEntry !== 'undefined' &&
-      'devicePixelContentBoxSize' in ResizeObserverEntry.prototype
-    resizeObserver.observe(stage, supportsDevicePixelBox ? { box: 'device-pixel-content-box' } : undefined)
-    updateCanvasSize(stage.clientWidth, stage.clientHeight)
+  if (stageEl.value && typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(handleResize)
+    resizeObserver.observe(stageEl.value)
   }
 
-  if (stage && typeof IntersectionObserver !== 'undefined') {
-    intersectionObserver = new IntersectionObserver(([entry]) => {
-      isIntersecting = Boolean(entry?.isIntersecting)
-      if (isIntersecting) startLoopIfNeeded()
-      else stopLoop()
-    }, { threshold: 0.05 })
-    intersectionObserver.observe(stage)
+  if (stageEl.value && typeof IntersectionObserver !== 'undefined') {
+    intersectionObserver = new IntersectionObserver(
+      (entries) => {
+        isInViewport = entries[0]?.isIntersecting ?? true
+        syncLoop()
+      },
+      { threshold: 0.01 },
+    )
+    intersectionObserver.observe(stageEl.value)
   }
 
-  document.addEventListener('visibilitychange', onVisibilityChange)
-  renderSingleFrame(0.5)
-  startLoopIfNeeded()
+  window.addEventListener('pointermove', onPointerMove, { passive: true })
+  window.addEventListener('scroll', onScroll, { passive: true })
+  document.addEventListener('visibilitychange', syncLoop)
+  onScroll()
+  syncLoop()
 })
 
 onUnmounted(() => {
-  stopLoop()
-  if (pulseResetTimer) clearTimeout(pulseResetTimer)
+  if (rafId !== null) window.cancelAnimationFrame(rafId)
   resizeObserver?.disconnect()
   intersectionObserver?.disconnect()
-  motionQuery?.removeEventListener('change', onMotionPreferenceChange)
-  document.removeEventListener('visibilitychange', onVisibilityChange)
-  particleGeometry?.dispose()
-  bridgeLinesGeometry?.dispose()
-  coreShaderMat?.dispose()
+  window.removeEventListener('pointermove', onPointerMove)
+  window.removeEventListener('scroll', onScroll)
+  document.removeEventListener('visibilitychange', syncLoop)
+  particleMaterial?.dispose()
+  ringLines?.geometry.dispose()
   renderer?.dispose()
 })
 </script>
 
 <style scoped>
-.symbiosis-stage {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  min-height: 540px;
-  border-radius: 28px;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.11);
-  background:
-    radial-gradient(circle at 22% 24%, rgba(245, 158, 11, 0.14), transparent 52%),
-    radial-gradient(circle at 78% 72%, rgba(42, 196, 159, 0.16), transparent 56%),
-    linear-gradient(165deg, #090a0f 0%, #0d1117 52%, #080a0e 100%);
-  box-shadow:
-    0 28px 80px rgba(0, 0, 0, 0.65),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
-  cursor: grab;
-  user-select: none;
-  isolation: isolate;
-}
-
-.symbiosis-stage:active {
-  cursor: grabbing;
-}
-
-/* Architectural grid overlay */
-.symbiosis-stage::before {
-  content: '';
-  position: absolute;
+.symbiosis-canvas-stage {
+  position: fixed;
   inset: 0;
-  background-image:
-    linear-gradient(to right, rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
-  background-size: 44px 44px;
-  mask-image: radial-gradient(circle at 50% 48%, black 30%, transparent 85%);
+  width: 100vw;
+  height: 100vh;
+  z-index: 0;
   pointer-events: none;
-  z-index: 1;
+  overflow: hidden;
 }
 
-.symbiosis-canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+.symbiosis-webgl {
   display: block;
-  z-index: 2;
+  width: 100%;
+  height: 100%;
+  opacity: 0.72;
 }
 
-/* Floating Projected 3D Telemetry Callouts */
-.node-labels-layer {
+.symbiosis-vignette {
   position: absolute;
   inset: 0;
-  pointer-events: none;
-  z-index: 3;
-  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(10, 10, 10, 0.35) 0%, rgba(10, 10, 10, 0.78) 68%, #0a0a0a 100%);
 }
 
-.node-tag {
-  position: absolute;
-  top: 0;
-  left: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(10, 12, 16, 0.78);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  white-space: nowrap;
-  transform-origin: center center;
-  transition: opacity 220ms ease;
-}
-
-.node-tag--human {
-  border-color: rgba(245, 158, 11, 0.38);
-}
-
-.node-tag--agent {
-  border-color: rgba(42, 196, 159, 0.42);
-}
-
-.node-tag-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.node-tag--human .node-tag-dot {
-  background: #fbbf24;
-  box-shadow: 0 0 8px #f59e0b;
-}
-
-.node-tag--agent .node-tag-dot {
-  background: #2ac49f;
-  box-shadow: 0 0 8px #2ac49f;
-}
-
-.node-tag-id {
-  color: #f8fafc;
-  font-weight: 600;
-}
-
-.node-tag-meta {
-  color: rgba(226, 232, 240, 0.64);
-  padding-left: 6px;
-  border-left: 1px solid rgba(255, 255, 255, 0.12);
-}
-
-/* HUD Top Bar */
-.stage-hud-top {
-  position: relative;
-  z-index: 4;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 18px 22px;
-  flex-wrap: wrap;
-}
-
-.hud-legend {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 13px;
-  border-radius: 999px;
-  background: rgba(10, 12, 18, 0.72);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  font-size: 0.74rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: #f4f1ea;
-}
-
-.legend-swatch {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.legend-item--human .legend-swatch {
-  background: #f59e0b;
-  box-shadow: 0 0 10px rgba(245, 158, 11, 0.8);
-}
-
-.legend-item--agent .legend-swatch {
-  background: #2ac49f;
-  box-shadow: 0 0 10px rgba(42, 196, 159, 0.8);
-}
-
-.legend-sep {
-  color: rgba(255, 255, 255, 0.35);
-  font-family: var(--font-mono);
-}
-
-.hud-pulse-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 13px;
-  border-radius: 999px;
-  background: rgba(10, 12, 18, 0.75);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(42, 196, 159, 0.32);
-  color: #e2e8f0;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  font-weight: 500;
-  transition: border-color 180ms ease, transform 180ms ease, background 180ms ease;
-}
-
-.hud-pulse-btn:hover {
-  border-color: rgba(42, 196, 159, 0.72);
-  background: rgba(42, 196, 159, 0.12);
-  transform: translateY(-1px);
-}
-
-.pulse-indicator {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #2ac49f;
-  box-shadow: 0 0 8px #2ac49f;
-  transition: transform 200ms ease, background 200ms ease;
-}
-
-.pulse-indicator--active {
-  background: #fbbf24;
-  box-shadow: 0 0 14px #fbbf24;
-  transform: scale(1.45);
-}
-
-/* HUD Bottom Controls */
-.stage-hud-bottom {
-  position: absolute;
-  left: 18px;
-  right: 18px;
-  bottom: 18px;
-  z-index: 4;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.mode-switcher {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  padding: 6px;
-  border-radius: 16px;
-  background: rgba(10, 12, 18, 0.82);
-  backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.mode-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  padding: 9px 12px;
-  border-radius: 11px;
-  text-align: left;
-  border: 1px solid transparent;
-  background: transparent;
-  color: rgba(226, 232, 240, 0.68);
-  transition: all 180ms ease;
-}
-
-.mode-btn:hover {
-  color: #f8fafc;
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.mode-btn--active {
-  color: #ffffff;
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.14), rgba(42, 196, 159, 0.16));
-  border-color: rgba(42, 196, 159, 0.45);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12);
-}
-
-.mode-code {
-  font-family: var(--font-mono);
-  font-size: 0.64rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: #2ac49f;
-}
-
-.mode-btn--active .mode-code {
-  color: #fbbf24;
-}
-
-.mode-label {
-  font-size: 0.8rem;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.telemetry-strip {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.telemetry-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 8px 11px;
-  border-radius: 11px;
-  background: rgba(10, 12, 18, 0.76);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  min-width: 0;
-}
-
-.telemetry-key {
-  font-family: var(--font-mono);
-  font-size: 0.6rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: rgba(161, 161, 170, 0.85);
-}
-
-.telemetry-val {
-  font-family: var(--font-mono);
-  font-size: 0.71rem;
-  font-weight: 700;
-  color: #f4f1ea;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.telemetry-cell--human .telemetry-val {
-  color: #fde68a;
-}
-
-.telemetry-cell--agent .telemetry-val {
-  color: #5eead4;
-}
-
-@media (max-width: 900px) {
-  .symbiosis-stage {
-    min-height: 480px;
-  }
-
-  .telemetry-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .node-tag-meta {
-    display: none;
-  }
-}
-
-@media (max-width: 600px) {
-  .symbiosis-stage {
-    min-height: 440px;
-    border-radius: 20px;
-  }
-
-  .mode-switcher {
-    grid-template-columns: 1fr;
-  }
-
-  .telemetry-strip {
-    display: none;
+@media (prefers-reduced-motion: reduce) {
+  .symbiosis-webgl {
+    opacity: 0.45;
   }
 }
 </style>

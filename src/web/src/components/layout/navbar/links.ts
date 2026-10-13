@@ -5,11 +5,10 @@ export type NavbarRouteLink = {
 
 export const NAV_SECTION_LINKS: NavbarRouteLink[] = [
   { to: '/#symbiosis', label: 'Symbiosis' },
-  { to: '/#setup', label: 'Subscriptions & MCP' },
-  { to: '/#lending', label: 'Compute Lending' },
-  { to: '/#swarms', label: 'Public Swarms' },
+  { to: '/#setup', label: 'Setup' },
+  { to: '/#lending', label: 'Lending' },
+  { to: '/#swarms', label: 'Swarms' },
   { to: '/#download-mac', label: 'Mac Beta' },
-  { to: '/#features', label: 'Architecture' },
 ]
 
 export const DOCS_LINK: NavbarRouteLink = { to: '/docs', label: 'Docs' }

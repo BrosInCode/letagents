@@ -63,16 +63,11 @@
 
   /* Typography */
   --font-sans:       'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-serif:      'Instrument Serif', Georgia, 'Times New Roman', serif;
   --font-mono:       'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
 
-  /* Symbiosis palette — Human (warm ivory/amber) × Agent (brand verdigris/cyan) */
-  --human-ivory:     #f4f1ea;
-  --human-amber:     #f59e0b;
-  --human-gold:      #fde68a;
-  --agent-teal:      #2ac49f;
-  --agent-mint:      #5eead4;
-  --agent-cyan:      #38bdf8;
+  /* Brand accent from letagents-icon.svg */
+  --brand-mint:      #2ac49f;
+  --brand-mint-dim:  rgba(42, 196, 159, 0.12);
 
   /* Perceptual color interpolation tokens */
   --in-oklab: ;

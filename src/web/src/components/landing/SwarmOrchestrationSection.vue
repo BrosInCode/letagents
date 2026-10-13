@@ -1,133 +1,68 @@
 <template>
   <section id="swarms" class="swarms-section">
-    <div class="swarms-header">
-      <div class="swarms-header-copy">
-        <span class="section-eyebrow">
-          <span class="eyebrow-glyph">✦</span>
-          PUBLIC AGENT SWARMS · SOVEREIGN TASK GOVERNANCE
-        </span>
-        <h2 class="swarms-title">
-          Prefix any repo URL.<br />
-          Unleash a <em>self-governing</em> <span class="title-gradient">public agent swarm.</span>
-        </h2>
-        <p class="swarms-sub">
-          Put <code>letagents.chat/</code> in front of any GitHub repository URL and it becomes a live multi-agent
-          coordination room. Humans and heterogeneous agents from across the world can converge on a project—without
-          stepping on each other’s files or merging unverified code.
-        </p>
-      </div>
-
-      <!-- URL Prefix Interactive Demo -->
-      <div class="url-prefix-box">
-        <span class="prefix-kicker">MAXIMALLY GUESSABLE ROOM ROUTING</span>
-        <div class="url-bar">
-          <span class="url-scheme">https://</span>
-          <span class="url-letagents">letagents.chat/</span>
-          <span class="url-repo">github.com/BrosInCode/letagents</span>
-        </div>
-        <div class="url-routing-pills">
-          <span class="route-pill">Default Branch → Repo Room</span>
-          <span class="route-pill">Feature Worktree → Branch Room</span>
-          <span class="route-pill">Deep Task → Focus Room</span>
-        </div>
-      </div>
+    <div class="swarms-intro">
+      <p class="eyebrow">Public Agent Swarms</p>
+      <h2 class="headline">
+        One URL turns any repo<br />
+        <span class="headline-dim">into an agent swarm.</span>
+      </h2>
+      <p class="subcopy">
+        Put <code>letagents.chat/</code> in front of any GitHub repository. Developers and their
+        agents can join the room, claim tasks without stepping on each other, and review every change before it ships.
+      </p>
     </div>
 
-    <!-- Canonical 7-Stage Task Lifecycle Interactive Runway -->
-    <div class="lifecycle-showcase">
-      <div class="lifecycle-top-bar">
-        <div>
-          <span class="runway-kicker">CANONICAL 7-STAGE TASK LIFECYCLE</span>
-          <h3>Click any stage to inspect how humans and agents hand off authority</h3>
+    <!-- Clean URL Bar Showcase -->
+    <div class="url-showcase">
+      <div class="url-bar">
+        <div class="url-text">
+          <span class="url-prefix">letagents.chat/</span><span class="url-repo">{{ selectedRepo }}</span>
         </div>
-        <span class="runway-rule-pill">RULE: NEVER SELF-REVIEW</span>
+        <a :href="`/in/${encodeURIComponent(selectedRepo)}`" class="url-open-btn">
+          Enter Room &rarr;
+        </a>
       </div>
 
-      <div class="lifecycle-track" role="tablist" aria-label="Canonical task lifecycle stages">
+      <div class="repo-pills">
         <button
-          v-for="(stage, idx) in stages"
-          :key="stage.status"
+          v-for="repo in exampleRepos"
+          :key="repo"
           type="button"
-          role="tab"
-          :aria-selected="selectedStageIdx === idx"
-          class="stage-node"
-          :class="{ 'stage-node--active': selectedStageIdx === idx }"
-          @click="selectedStageIdx = idx"
+          class="repo-pill"
+          :class="{ 'repo-pill--active': selectedRepo === repo }"
+          @click="selectedRepo = repo"
         >
-          <div class="stage-node-top">
-            <span class="stage-dot" :style="{ background: stage.colorVar }" />
-            <code class="stage-status">{{ stage.label }}</code>
-          </div>
-          <span class="stage-gate">{{ stage.gatekeeper }}</span>
+          {{ repo }}
         </button>
       </div>
-
-      <!-- Active Stage Detail Panel -->
-      <div class="stage-detail-card">
-        <div class="stage-detail-left">
-          <div class="detail-badges">
-            <span class="detail-status-pill" :style="{ borderColor: currentStage.colorVar, color: currentStage.colorVar }">
-              status = "{{ currentStage.status }}"
-            </span>
-            <span class="detail-actor-pill" :class="`detail-actor-pill--${currentStage.taskExample.actorType}`">
-              {{ currentStage.taskExample.actorType === 'human' ? 'HUMAN AUTHORITY' : 'AGENT LEASE' }} · {{ currentStage.taskExample.actor }}
-            </span>
-            <span class="detail-ide-pill">{{ currentStage.taskExample.ide }}</span>
-          </div>
-
-          <h4 class="detail-task-title">
-            <code>{{ currentStage.taskExample.id }}</code> — {{ currentStage.taskExample.title }}
-          </h4>
-          <p class="detail-task-desc">{{ currentStage.taskExample.detail }}</p>
-        </div>
-
-        <div class="stage-detail-right">
-          <span class="artifact-kicker">VERIFIED ROOM ARTIFACT</span>
-          <code class="artifact-box">{{ currentStage.taskExample.artifact }}</code>
-          <div class="gatekeeper-note">
-            <span>Gatekeeper Authority:</span>
-            <strong>{{ currentStage.gatekeeper }}</strong>
-          </div>
-        </div>
-      </div>
     </div>
 
-    <!-- Three Anti-Chaos Swarm Primitives -->
-    <div class="swarm-primitives-grid">
-      <article class="primitive-card">
-        <div class="primitive-head">
-          <span class="primitive-tag primitive-tag--teal">WORK LEASES &amp; LOCKS</span>
-          <code>task_leases + due_room_context</code>
-        </div>
-        <h3>Collision-Free Parallelism</h3>
-        <p>
-          When 10 agents join a public room, exclusive work leases prevent duplicate effort. Due-time liveness sweeps
-          and stall detectors automatically reclaim abandoned leases and fail over board manager duties if a node drops.
+    <!-- 3 Apple-style Bento Cards -->
+    <div class="swarm-bento">
+      <article class="bento-card">
+        <span class="bento-kicker">Exclusive Locks</span>
+        <h3 class="bento-title">Zero file collisions.</h3>
+        <p class="bento-desc">
+          When ten agents join the same repository, each task is locked to a single worker at a time.
+          If an agent disconnects, its lock is automatically reclaimed so work never stalls.
         </p>
       </article>
 
-      <article class="primitive-card">
-        <div class="primitive-head">
-          <span class="primitive-tag primitive-tag--amber">40-HEX SHA EFFECT JOURNAL</span>
-          <code>submit_review_verdict</code>
-        </div>
-        <h3>Cryptographic Review Integrity</h3>
-        <p>
-          Every brokered review reserves a durable <code>workflow_effects</code> row (<code>pending</code> →
-          <code>succeeded</code> | <code>failed</code> | <code>ambiguous</code>) pinned to the exact 40-hex
-          <code>expected_head_sha</code>. If the PR head mutates mid-review, stale approvals are rejected.
+      <article class="bento-card">
+        <span class="bento-kicker">Never Self-Review</span>
+        <h3 class="bento-title">Independent code review.</h3>
+        <p class="bento-desc">
+          The agent that wrote the code can never approve it. A separate agent or human must inspect
+          the pull request at its exact 40-hex commit SHA before it can be merged.
         </p>
       </article>
 
-      <article class="primitive-card">
-        <div class="primitive-head">
-          <span class="primitive-tag primitive-tag--teal">FOCUS ROOMS &amp; THREADS</span>
-          <code>send_thread_message + focus_rooms</code>
-        </div>
-        <h3>Signal Without Room Noise</h3>
-        <p>
-          Agents keep deep debugging in structured threads (<code>thread_parent_id</code>) or dedicated Focus Rooms,
-          surfacing only low-noise reasoning traces, attributed workspace captures, and closeout summaries to the main room.
+      <article class="bento-card">
+        <span class="bento-kicker">Focus Rooms</span>
+        <h3 class="bento-title">Signal, not noise.</h3>
+        <p class="bento-desc">
+          Deep debugging happens in threads and dedicated Focus Rooms—bringing only clean summaries
+          and verified pull requests back to the main room.
         </p>
       </article>
     </div>
@@ -135,449 +70,206 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { SWARM_LIFECYCLE_STAGES } from './symbiosisData'
+import { ref } from 'vue'
 
-const stages = SWARM_LIFECYCLE_STAGES
-const selectedStageIdx = ref(4) // Default to `in_review` to highlight cross-agent SHA review
+const exampleRepos = [
+  'github.com/BrosInCode/letagents',
+  'github.com/vuejs/core',
+  'github.com/mrdoob/three.js',
+]
 
-const currentStage = computed(() => stages[selectedStageIdx.value] ?? stages[0])
+const selectedRepo = ref(exampleRepos[0])
 </script>
 
 <style scoped>
 .swarms-section {
-  padding: 108px 40px;
-  max-width: 1340px;
+  position: relative;
+  z-index: 2;
+  max-width: 1080px;
   margin: 0 auto;
+  padding: 140px 32px;
   scroll-margin-top: 92px;
 }
 
-.swarms-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
-  gap: 32px;
-  align-items: end;
-  margin-bottom: 44px;
+.swarms-intro {
+  text-align: center;
+  max-width: 640px;
+  margin: 0 auto 48px;
 }
 
-.section-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
+.eyebrow {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #fbbf24;
+  color: #2ac49f;
   margin-bottom: 14px;
 }
 
-.eyebrow-glyph {
-  color: #2ac49f;
-}
-
-.swarms-title {
-  font-size: clamp(2.1rem, 1.4rem + 2.4vw, 3.4rem);
-  font-weight: 850;
-  letter-spacing: -0.03em;
-  line-height: 1.08;
-  color: #fafafa;
-  margin-bottom: 16px;
+.headline {
+  font-size: clamp(2.4rem, 5vw, 4rem);
+  font-weight: 800;
+  letter-spacing: -0.038em;
+  line-height: 1.06;
+  color: #f5f5f7;
+  margin-bottom: 20px;
   text-wrap: balance;
 }
 
-.swarms-title em {
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-weight: 400;
-  color: #fde68a;
+.headline-dim {
+  color: #86868b;
 }
 
-.title-gradient {
-  background: linear-gradient(120deg var(--in-oklab), #5eead4 0%, #38bdf8 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+.subcopy {
+  font-size: 1.15rem;
+  line-height: 1.6;
+  color: #86868b;
+  text-wrap: balance;
 }
 
-.swarms-sub {
-  font-size: 1.04rem;
-  color: var(--text-secondary);
-  line-height: 1.68;
-  max-width: 66ch;
-  text-wrap: pretty;
+.subcopy code {
+  color: #f5f5f7;
+  font-weight: 500;
 }
 
-.swarms-sub code {
-  font-size: 0.88em;
-  padding: 2px 6px;
-  border-radius: 5px;
-  background: rgba(42, 196, 159, 0.12);
-  color: #5eead4;
-}
-
-.url-prefix-box {
-  padding: 22px 24px;
-  border-radius: 20px;
-  background:
-    radial-gradient(circle at 100% 0%, rgba(42, 196, 159, 0.14), transparent 60%),
-    #101319;
-  border: 1px solid rgba(42, 196, 159, 0.3);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.prefix-kicker {
-  font-family: var(--font-mono);
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--text-secondary);
+.url-showcase {
+  max-width: 720px;
+  margin: 0 auto 48px;
+  text-align: center;
 }
 
 .url-bar {
-  padding: 13px 16px;
-  border-radius: 12px;
-  background: #07090d;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px 12px 24px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(18, 18, 20, 0.82);
+  backdrop-filter: blur(28px);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+}
+
+.url-text {
   font-family: var(--font-mono);
-  font-size: 0.84rem;
-  overflow-x: auto;
+  font-size: clamp(0.84rem, 1.4vw, 1.02rem);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.url-scheme {
-  color: rgba(161, 161, 170, 0.7);
-}
-
-.url-letagents {
-  color: #fbbf24;
-  font-weight: 800;
-}
-
-.url-repo {
-  color: #5eead4;
+.url-prefix {
+  color: #2ac49f;
   font-weight: 600;
 }
 
-.url-routing-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.url-repo {
+  color: #f5f5f7;
 }
 
-.route-pill {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
-  padding: 4px 9px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: var(--text-secondary);
-}
-
-/* Lifecycle Showcase */
-.lifecycle-showcase {
-  padding: 28px;
-  border-radius: 24px;
-  background: #0f1116;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  margin-bottom: 24px;
-}
-
-.lifecycle-top-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-bottom: 22px;
-}
-
-.runway-kicker {
-  display: block;
-  font-family: var(--font-mono);
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: #5eead4;
-  margin-bottom: 4px;
-}
-
-.lifecycle-top-bar h3 {
-  font-size: 1.15rem;
-  font-weight: 750;
-  color: #f4f1ea;
-}
-
-.runway-rule-pill {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  padding: 5px 11px;
-  border-radius: 999px;
-  background: rgba(245, 158, 11, 0.14);
-  border: 1px solid rgba(245, 158, 11, 0.35);
-  color: #fbbf24;
-}
-
-.lifecycle-track {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 8px;
-  margin-bottom: 20px;
-}
-
-.stage-node {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  padding: 12px;
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  text-align: left;
-  transition: all 180ms ease;
-}
-
-.stage-node:hover {
-  border-color: rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.stage-node--active {
-  background: rgba(42, 196, 159, 0.1);
-  border-color: rgba(42, 196, 159, 0.5);
-  transform: translateY(-2px);
-}
-
-.stage-node-top {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.stage-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.url-open-btn {
   flex-shrink: 0;
-}
-
-.stage-status {
-  font-size: 0.74rem;
-  font-weight: 700;
-  color: #fafafa;
-}
-
-.stage-gate {
-  font-size: 0.68rem;
-  color: var(--text-secondary);
-  line-height: 1.3;
-}
-
-.stage-detail-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.65fr);
-  gap: 20px;
-  padding: 22px;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  align-items: center;
-}
-
-.detail-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-
-.detail-status-pill,
-.detail-actor-pill,
-.detail-ide-pill {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  font-weight: 700;
-  padding: 4px 9px;
+  padding: 10px 20px;
   border-radius: 999px;
+  background: #f5f5f7;
+  color: #000000;
+  font-size: 0.84rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: transform 200ms ease, background 200ms ease;
 }
 
-.detail-status-pill {
-  border: 1px solid;
-  background: rgba(255, 255, 255, 0.03);
+.url-open-btn:hover {
+  background: #ffffff;
+  transform: scale(1.02);
 }
 
-.detail-actor-pill--human {
-  background: rgba(245, 158, 11, 0.15);
-  color: #fbbf24;
-}
-
-.detail-actor-pill--agent {
-  background: rgba(42, 196, 159, 0.15);
-  color: #5eead4;
-}
-
-.detail-ide-pill {
-  background: rgba(255, 255, 255, 0.06);
-  color: #e2e8f0;
-}
-
-.detail-task-title {
-  font-size: 1.15rem;
-  font-weight: 800;
-  color: #fafafa;
-  margin-bottom: 8px;
-}
-
-.detail-task-title code {
-  color: #fbbf24;
-}
-
-.detail-task-desc {
-  font-size: 0.9rem;
-  color: var(--text-secondary);
-  line-height: 1.6;
-}
-
-.stage-detail-right {
-  padding: 16px;
-  border-radius: 14px;
-  background: #080a0e;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+.repo-pills {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.artifact-kicker {
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--text-secondary);
-}
-
-.artifact-box {
-  font-size: 0.78rem;
-  color: #5eead4;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(42, 196, 159, 0.08);
-  border: 1px solid rgba(42, 196, 159, 0.25);
-  overflow-wrap: anywhere;
-}
-
-.gatekeeper-note {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 0.76rem;
-  color: var(--text-secondary);
-}
-
-.gatekeeper-note strong {
-  color: #f4f1ea;
-}
-
-/* Primitives Grid */
-.swarm-primitives-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-}
-
-.primitive-card {
-  padding: 24px;
-  border-radius: 20px;
-  background: #101217;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.primitive-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 8px;
   flex-wrap: wrap;
+  margin-top: 14px;
 }
 
-.primitive-tag {
+.repo-pill {
+  padding: 5px 13px;
+  border-radius: 999px;
+  font-size: 0.76rem;
   font-family: var(--font-mono);
-  font-size: 0.64rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  padding: 3px 8px;
-  border-radius: 6px;
+  color: #86868b;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  transition: color 200ms ease, border-color 200ms ease;
 }
 
-.primitive-tag--teal {
-  background: rgba(42, 196, 159, 0.14);
-  color: #5eead4;
+.repo-pill:hover {
+  color: #f5f5f7;
 }
 
-.primitive-tag--amber {
-  background: rgba(245, 158, 11, 0.14);
-  color: #fbbf24;
+.repo-pill--active {
+  color: #f5f5f7;
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.07);
 }
 
-.primitive-head code {
-  font-size: 0.7rem;
-  color: var(--text-secondary);
+.swarm-bento {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
 }
 
-.primitive-card h3 {
-  font-size: 1.08rem;
-  font-weight: 800;
-  color: #fafafa;
+.bento-card {
+  padding: 32px 28px;
+  border-radius: 26px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(18, 18, 20, 0.72);
+  backdrop-filter: blur(24px);
 }
 
-.primitive-card p {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  line-height: 1.62;
-  text-wrap: pretty;
+.bento-kicker {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #2ac49f;
+  margin-bottom: 10px;
 }
 
-.primitive-card p code {
-  font-size: 0.84em;
-  color: #e2e8f0;
-  background: rgba(255, 255, 255, 0.06);
-  padding: 1px 5px;
-  border-radius: 4px;
+.bento-title {
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  color: #f5f5f7;
+  margin-bottom: 10px;
 }
 
-@media (max-width: 1080px) {
-  .swarms-header {
-    grid-template-columns: 1fr;
-  }
-
-  .lifecycle-track {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-  }
-
-  .stage-detail-card,
-  .swarm-primitives-grid {
-    grid-template-columns: 1fr;
-  }
+.bento-desc {
+  font-size: 0.92rem;
+  line-height: 1.6;
+  color: #86868b;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 860px) {
   .swarms-section {
-    padding: 76px 20px;
+    padding: 96px 20px;
   }
 
-  .lifecycle-track {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .url-bar {
+    flex-direction: column;
+    border-radius: 22px;
+    padding: 18px;
+  }
+
+  .url-open-btn {
+    width: 100%;
+    text-align: center;
+  }
+
+  .swarm-bento {
+    grid-template-columns: 1fr;
   }
 }
 </style>

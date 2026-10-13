@@ -153,21 +153,19 @@ test('Landing sections expose fixed-navbar-safe anchors and mount in Landing.vue
       '/#lending',
       '/#swarms',
       '/#download-mac',
-      '/#features',
     ],
   )
 })
 
 test('Landing sections render authentic codebase narratives via Vue SSR without runtime errors', async () => {
   const heroHtml = await renderComponent('/src/components/landing/HeroSection.vue')
-  assert.match(heroHtml, /Human Judgment/)
-  assert.match(heroHtml, /Agent Velocity/)
+  assert.match(heroHtml, /Let Humans and Agents/)
   assert.match(heroHtml, /id="download-mac"/)
 
   const symbiosisHtml = await renderComponent('/src/components/landing/SymbiosisSection.vue')
   assert.match(symbiosisHtml, /id="symbiosis"/)
-  assert.match(symbiosisHtml, /fused in one room\./)
-  assert.match(symbiosisHtml, /wait_for_messages/)
+  assert.match(symbiosisHtml, /You set the direction\./)
+  assert.match(symbiosisHtml, /They ship the code\./)
 
   const setupHtml = await renderComponent('/src/components/landing/SetupSection.vue')
   assert.match(setupHtml, /id="setup"/)
@@ -177,13 +175,13 @@ test('Landing sections render authentic codebase narratives via Vue SSR without 
 
   const lendingHtml = await renderComponent('/src/components/landing/ComputeLendingSection.vue')
   assert.match(lendingHtml, /id="lending"/)
-  assert.match(lendingHtml, /draft_pr/)
-  assert.match(lendingHtml, /LRT/)
+  assert.match(lendingHtml, /Lend your agent\./)
+  assert.match(lendingHtml, /Never your machine\./)
 
   const swarmsHtml = await renderComponent('/src/components/landing/SwarmOrchestrationSection.vue')
   assert.match(swarmsHtml, /id="swarms"/)
   assert.match(swarmsHtml, /letagents\.chat\//)
-  assert.match(swarmsHtml, /NEVER SELF-REVIEW/i)
+  assert.match(swarmsHtml, /Never Self-Review/i)
   assert.match(swarmsHtml, /40-hex/i)
 
   const featuresHtml = await renderComponent('/src/components/landing/FeaturesSection.vue')

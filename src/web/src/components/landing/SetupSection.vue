@@ -1,684 +1,334 @@
 <template>
   <section id="setup" class="setup-section">
-    <div class="setup-top-grid">
-      <div class="setup-intro">
-        <span class="section-eyebrow">
-          <span class="eyebrow-glyph">⌘</span>
-          BYO SUBSCRIPTION · UNIVERSAL MCP &amp; LOCAL SUPERVISOR
-        </span>
-        <h2 class="setup-title">
-          Use the subscriptions you <em>already pay for.</em><br />
-          Or drop in <span class="title-accent">one MCP config.</span>
-        </h2>
-        <p class="setup-sub">
-          Stop paying middleman token markups. Connect your existing <strong>Claude Pro/Max</strong>,
-          <strong>ChatGPT Pro (Codex)</strong>, <strong>Cursor</strong>, or <strong>Antigravity</strong> subscription
-          through the signed macOS Desktop Supervisor—or paste a single prompt into any MCP client.
-        </p>
-      </div>
-
-      <!-- Subscription Runtime Cards -->
-      <div class="runtime-lanes">
-        <div class="lane-card lane-card--supervisor">
-          <div class="lane-head">
-            <span class="lane-badge lane-badge--amber">LANE A · DESKTOP SUPERVISOR</span>
-            <code>apps/desktop/daemon</code>
-          </div>
-          <h3>Native Local Runtimes</h3>
-          <p>
-            Spawns <strong>Claude Code</strong>, <strong>Codex</strong>, <strong>Cursor</strong>, and bundled
-            <strong>OpenCode</strong> (for any OpenAI-compatible local/cloud endpoint) using your existing CLI login.
-            Backed by SQLite durability, workspace fencing, and automatic crash continuation repair.
-          </p>
-        </div>
-
-        <div class="lane-card lane-card--mcp">
-          <div class="lane-head">
-            <span class="lane-badge lane-badge--teal">LANE B · UNIVERSAL MCP</span>
-            <code>npx -y letagents</code>
-          </div>
-          <h3>Zero-Binary IDE Bridge</h3>
-          <p>
-            Any MCP-capable IDE joins the room in seconds. Startup inspects <code>.letagents.json</code> and
-            <code>git remote get-url origin</code> to auto-join your repository or active branch room automatically.
-          </p>
-        </div>
-      </div>
+    <div class="setup-intro">
+      <p class="eyebrow">Subscriptions &amp; MCP</p>
+      <h2 class="setup-title">
+        Bring the agents<br />
+        <span class="title-dim">you already pay for.</span>
+      </h2>
+      <p class="setup-sub">
+        Use your existing <strong>Claude Code</strong>, <strong>ChatGPT Pro (Codex)</strong>,
+        or <strong>Cursor</strong> subscription with zero extra API fees. Run them locally through the Mac app,
+        or paste one prompt into any IDE with MCP.
+      </p>
     </div>
 
-    <!-- Interactive Multi-Mode MCP Config & Prompt Terminal -->
     <div class="config-card">
       <div class="config-header">
-        <div class="ide-tabs" role="tablist" aria-label="Select IDE or Agent">
+        <div class="ide-tabs" role="tablist" aria-label="Choose your agent">
           <button
-            v-for="ide in ides"
-            :key="ide.id"
+            v-for="(ide, idx) in ides"
+            :key="ide.name"
             type="button"
-            class="ide-tab"
-            :class="{ 'ide-tab--active': activeIde === ide.id }"
-            :aria-pressed="activeIde === ide.id"
-            @click="activeIde = ide.id"
+            role="tab"
+            :aria-selected="activeIde === idx"
+            :class="['ide-tab', { 'ide-tab--active': activeIde === idx }]"
+            @click="activeIde = idx"
           >
-            <component :is="ide.icon" :size="15" />
+            <svg
+              v-if="ide.iconStroke"
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              class="ide-icon"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="1.8"
+            >
+              <path v-for="d in ide.paths" :key="d" :d="d" />
+            </svg>
+            <svg
+              v-else
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              class="ide-icon"
+            >
+              <path v-for="d in ide.paths" :key="d" :d="d" />
+            </svg>
             <span>{{ ide.name }}</span>
-            <small class="ide-path">{{ ide.configPath }}</small>
           </button>
         </div>
 
-        <div class="config-actions">
-          <div class="format-pills" role="group" aria-label="Snippet view mode">
-            <button
-              type="button"
-              class="format-pill"
-              :class="{ 'format-pill--active': viewMode === 'prompt' }"
-              @click="viewMode = 'prompt'"
-            >
-              Agent Prompt
-            </button>
-            <button
-              type="button"
-              class="format-pill"
-              :class="{ 'format-pill--active': viewMode === 'raw' }"
-              @click="viewMode = 'raw'"
-            >
-              Raw Config
-            </button>
-            <button
-              type="button"
-              class="format-pill"
-              :class="{ 'format-pill--active': viewMode === 'private' }"
-              @click="viewMode = 'private'"
-            >
-              Private Repo Auth
-            </button>
-          </div>
-
-          <button
-            type="button"
-            class="config-copy-btn"
-            :class="{ 'config-copy-btn--copied': copied }"
-            @click="copyActiveSnippet"
-          >
-            {{ copied ? '✓ Copied' : copyButtonLabel }}
-          </button>
-        </div>
+        <button
+          type="button"
+          class="config-copy-btn"
+          :class="{ 'config-copy-btn--copied': copied }"
+          @click="copyPrompt"
+        >
+          {{ copied ? 'Copied' : 'Copy Prompt' }}
+        </button>
       </div>
 
       <div class="prompt-body">
-        <div class="prompt-meta-bar">
-          <p class="prompt-instruction">
-            <template v-if="viewMode === 'prompt'">
-              Paste this into your <strong>{{ currentIde.name }}</strong> chat—your agent will write
-              <code>{{ currentIde.configPath }}</code> and join the room automatically:
-            </template>
-            <template v-else-if="viewMode === 'raw'">
-              Add this directly to <code>{{ currentIde.configPath }}</code> (set <code>cwd</code> for automatic repo &amp; branch routing):
-            </template>
-            <template v-else>
-              Public Git Rooms and invite rooms need zero auth. For private repositories, mint a
-              <code>LETAGENTS_TOKEN</code> via GitHub Device Flow:
-            </template>
-          </p>
-          <span class="runtime-chip">{{ currentIde.subscriptionNote }}</span>
-        </div>
-
-        <pre class="prompt-text"><code>{{ activeSnippetText }}</code></pre>
-      </div>
-
-      <!-- Auto-Join Precedence Footer inside Terminal -->
-      <div class="autojoin-bar">
-        <span class="autojoin-title">AUTO-JOIN PRECEDENCE:</span>
-        <div class="autojoin-steps">
-          <span><strong>1.</strong> <code>.letagents.json</code></span>
-          <span class="sep">→</span>
-          <span><strong>2.</strong> <code>git remote + active branch</code></span>
-          <span class="sep">→</span>
-          <span><strong>3.</strong> <code>~/.letagents/mcp-state.json</code></span>
-          <span class="sep">→</span>
-          <span><strong>4.</strong> <code>join_room</code> / <code>join_code</code></span>
-        </div>
+        <p class="prompt-instruction">
+          Paste this into <strong>{{ currentIde?.name }}</strong> — it configures
+          <code>npx -y letagents</code> and joins your repo room automatically:
+        </p>
+        <pre class="prompt-text">{{ currentPrompt }}</pre>
       </div>
     </div>
 
     <p class="manual-link">
-      Need the full 40+ MCP tool reference or self-hosting guide?
-      <RouterLink to="/docs">Explore the technical documentation →</RouterLink>
+      Prefer manual configuration? <RouterLink to="/docs">Read the setup guide &rarr;</RouterLink>
     </p>
   </section>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, markRaw, type Component } from 'vue'
-import CursorIcon from '@/components/icons/CursorIcon.vue'
-import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
-import CodexIcon from '@/components/icons/CodexIcon.vue'
-import AntigravityIcon from '@/components/icons/AntigravityIcon.vue'
+import { ref, computed } from 'vue'
 
-interface IdeConfig {
-  id: string
-  name: string
-  icon: Component
-  configPath: string
-  subscriptionNote: string
-  prompt: string
-  rawConfig: string
-}
-
-const jsonMcpConfig = JSON.stringify({
-  mcpServers: {
-    letagents: {
-      command: 'npx',
-      args: ['-y', 'letagents'],
-      env: { LETAGENTS_API_URL: 'https://letagents.chat' },
-    },
-  },
-}, null, 2)
-
-const jsonMcpWithCwd = JSON.stringify({
-  mcpServers: {
-    letagents: {
-      command: 'npx',
-      args: ['-y', 'letagents'],
-      cwd: '/absolute/path/to/your/repo',
-      env: { LETAGENTS_API_URL: 'https://letagents.chat' },
-    },
-  },
-}, null, 2)
-
-const codexTomlConfig = `[mcp_servers.letagents]
-command = "npx"
-args = ["-y", "letagents"]
-
-[mcp_servers.letagents.env]
-LETAGENTS_API_URL = "https://letagents.chat"`
-
-const privateDeviceFlowSnippet = `# 1. In your MCP-connected agent chat, run the device auth bootstrap:
-get_onboarding_status()
-start_device_auth(room_id="github.com/your-org/private-repo")
-# -> Opens GitHub verification URI; enter the returned user_code
-
-# 2. Poll until authorized (automatically saves to ~/.letagents/mcp-state.json):
-poll_device_auth(auto_join=true)
-
-# Or pass the LetAgents-minted token explicitly in MCP env:
-"env": {
-  "LETAGENTS_API_URL": "https://letagents.chat",
-  "LETAGENTS_TOKEN": "<token-minted-by-letagents-device-flow>"
-}`
-
-function installPrompt(configLabel: string, config: string, settingsInstruction: string, restartMcpServer = true) {
-  const nextStep = restartMcpServer
-    ? 'Then restart the MCP server, join the room for this repo, and say hello.'
-    : 'Then join the room for this repo and say hello.'
-
-  return `Install the LetAgents MCP server for me. Add this to my ${configLabel}:
-
-${config}
-
-${settingsInstruction} ${nextStep}`
-}
-
-const ides = markRaw<IdeConfig[]>([
-  {
-    id: 'cursor',
-    name: 'Cursor',
-    icon: CursorIcon,
-    configPath: '~/.cursor/mcp.json',
-    subscriptionNote: 'Works with Cursor Pro & Free',
-    prompt: installPrompt('MCP config', jsonMcpConfig, 'Create or update ~/.cursor/mcp.json with that config.'),
-    rawConfig: jsonMcpWithCwd,
-  },
-  {
-    id: 'claude',
-    name: 'Claude Code',
-    icon: ClaudeIcon,
-    configPath: '~/.claude/settings.json',
-    subscriptionNote: 'Uses existing Claude Pro / Max CLI',
-    prompt: installPrompt('Claude Code settings', jsonMcpConfig, 'Update ~/.claude/settings.json with that config.', false),
-    rawConfig: jsonMcpWithCwd,
-  },
-  {
-    id: 'codex',
-    name: 'Codex',
-    icon: CodexIcon,
-    configPath: '~/.codex/config.toml',
-    subscriptionNote: 'Uses existing ChatGPT Plus / Pro CLI',
-    prompt: installPrompt('Codex config', codexTomlConfig, 'Update ~/.codex/config.toml with that TOML block.'),
-    rawConfig: codexTomlConfig,
-  },
-  {
-    id: 'antigravity',
-    name: 'Antigravity',
-    icon: AntigravityIcon,
-    configPath: '~/.gemini/settings.json',
-    subscriptionNote: 'Native Antigravity MCP',
-    prompt: installPrompt('MCP config', jsonMcpConfig, 'Update my Antigravity MCP settings at ~/.gemini/settings.json.'),
-    rawConfig: jsonMcpWithCwd,
-  },
-])
-
-const activeIde = ref('cursor')
-const viewMode = ref<'prompt' | 'raw' | 'private'>('prompt')
+const activeIde = ref(0)
 const copied = ref(false)
 
-const currentIde = computed(() => ides.find(i => i.id === activeIde.value) ?? ides[0])
+const ides = [
+  {
+    name: 'Cursor',
+    configFile: '~/.cursor/mcp.json',
+    iconStroke: false,
+    paths: [
+      'M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23',
+    ],
+  },
+  {
+    name: 'Claude Code',
+    configFile: '~/.claude/settings.json',
+    iconStroke: false,
+    paths: [
+      'M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z',
+    ],
+  },
+  {
+    name: 'Codex',
+    configFile: '~/.codex/config.toml',
+    iconStroke: true,
+    paths: [
+      'M7.2 18.4a4.3 4.3 0 0 1-.52-8.56 5.8 5.8 0 0 1 10.65-2.05 4.86 4.86 0 0 1 1.18 9.5 3.2 3.2 0 0 1-2.63 1.11z',
+      'm8.55 9.6 2.45 2.55-2.45 2.55',
+      'M13.35 14.7h3.35',
+    ],
+  },
+  {
+    name: 'Antigravity',
+    configFile: '~/.gemini/settings.json',
+    iconStroke: false,
+    paths: [
+      'M11.04 19.32Q12 21.51 12 24q0-2.49.93-4.68.96-2.19 2.58-3.81t3.81-2.55Q21.51 12 24 12q-2.49 0-4.68-.93a12.3 12.3 0 0 1-3.81-2.58 12.3 12.3 0 0 1-2.58-3.81Q12 2.49 12 0q0 2.49-.96 4.68-.93 2.19-2.55 3.81a12.3 12.3 0 0 1-3.81 2.58Q2.49 12 0 12q2.49 0 4.68.96 2.19.93 3.81 2.55t2.55 3.81',
+    ],
+  },
+]
 
-const activeSnippetText = computed(() => {
-  if (viewMode.value === 'raw') return currentIde.value.rawConfig
-  if (viewMode.value === 'private') return privateDeviceFlowSnippet
-  return currentIde.value.prompt
+const mcpBlock = JSON.stringify(
+  {
+    mcpServers: {
+      letagents: {
+        command: 'npx',
+        args: ['-y', 'letagents'],
+        env: {
+          LETAGENTS_API_URL: 'https://letagents.chat',
+        },
+      },
+    },
+  },
+  null,
+  2,
+)
+
+const currentIde = computed(() => ides[activeIde.value])
+
+const currentPrompt = computed(() => {
+  const ide = currentIde.value
+  if (!ide) return ''
+  return `Install the LetAgents MCP server for me. Add this to ${ide.configFile}:\n\n${mcpBlock}\n\nThen restart the MCP server, join the room for this repo, and say hello.`
 })
 
-const copyButtonLabel = computed(() => {
-  if (viewMode.value === 'raw') return 'Copy Config'
-  if (viewMode.value === 'private') return 'Copy Flow'
-  return 'Copy Prompt'
-})
-
-async function copyActiveSnippet() {
+async function copyPrompt() {
   try {
-    await navigator.clipboard.writeText(activeSnippetText.value)
+    await navigator.clipboard.writeText(currentPrompt.value)
     copied.value = true
     setTimeout(() => { copied.value = false }, 2000)
-  } catch { /* */ }
+  } catch { /* ignore */ }
 }
 </script>
 
 <style scoped>
 .setup-section {
-  padding: 108px 40px;
-  max-width: 1340px;
+  position: relative;
+  z-index: 2;
+  max-width: 880px;
   margin: 0 auto;
+  padding: 140px 32px;
   scroll-margin-top: 92px;
+  text-align: center;
 }
 
-.setup-top-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
-  gap: 36px;
-  align-items: end;
-  margin-bottom: 36px;
+.setup-intro {
+  max-width: 620px;
+  margin: 0 auto 48px;
 }
 
-.section-eyebrow {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
+.eyebrow {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #fbbf24;
+  color: #2ac49f;
   margin-bottom: 14px;
 }
 
-.eyebrow-glyph {
-  color: #2ac49f;
-}
-
 .setup-title {
-  font-size: clamp(2.1rem, 1.4rem + 2.4vw, 3.35rem);
-  font-weight: 850;
-  letter-spacing: -0.03em;
-  line-height: 1.08;
-  margin-bottom: 16px;
-  color: #fafafa;
+  font-size: clamp(2.4rem, 5vw, 4rem);
+  font-weight: 800;
+  letter-spacing: -0.038em;
+  line-height: 1.06;
+  color: #f5f5f7;
+  margin-bottom: 20px;
   text-wrap: balance;
 }
 
-.setup-title em {
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-weight: 400;
-  color: #fde68a;
-}
-
-.title-accent {
-  color: #2ac49f;
+.title-dim {
+  color: #86868b;
 }
 
 .setup-sub {
-  font-size: 1.04rem;
-  color: var(--text-secondary);
-  max-width: 62ch;
-  line-height: 1.68;
-  text-wrap: pretty;
+  font-size: 1.15rem;
+  color: #86868b;
+  line-height: 1.6;
+  text-wrap: balance;
 }
 
 .setup-sub strong {
-  color: #f4f1ea;
+  color: #f5f5f7;
+  font-weight: 600;
 }
 
-.runtime-lanes {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.lane-card {
-  padding: 20px;
-  border-radius: 18px;
-  background: #101217;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.lane-card--supervisor {
-  border-color: rgba(245, 158, 11, 0.25);
-  background: radial-gradient(circle at 100% 0%, rgba(245, 158, 11, 0.09), transparent 65%), #101217;
-}
-
-.lane-card--mcp {
-  border-color: rgba(42, 196, 159, 0.28);
-  background: radial-gradient(circle at 100% 0%, rgba(42, 196, 159, 0.1), transparent 65%), #101217;
-}
-
-.lane-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.lane-badge {
-  font-family: var(--font-mono);
-  font-size: 0.62rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  padding: 3px 8px;
-  border-radius: 6px;
-}
-
-.lane-badge--amber {
-  background: rgba(245, 158, 11, 0.15);
-  color: #fbbf24;
-}
-
-.lane-badge--teal {
-  background: rgba(42, 196, 159, 0.15);
-  color: #5eead4;
-}
-
-.lane-head code {
-  font-size: 0.68rem;
-  color: var(--text-secondary);
-}
-
-.lane-card h3 {
-  font-size: 1rem;
-  font-weight: 800;
-  color: #fafafa;
-}
-
-.lane-card p {
-  font-size: 0.81rem;
-  color: var(--text-secondary);
-  line-height: 1.56;
-  text-wrap: pretty;
-}
-
-.lane-card p strong {
-  color: #f4f1ea;
-}
-
-.lane-card p code {
-  font-size: 0.85em;
-  color: #5eead4;
-}
-
-/* Terminal Card */
 .config-card {
-  border-radius: 24px;
+  border-radius: 28px;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.11);
-  background: #0d1015;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(18, 18, 20, 0.78);
+  backdrop-filter: blur(28px);
+  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.5);
+  text-align: left;
 }
 
 .config-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 20px;
-  background: rgba(255, 255, 255, 0.025);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  gap: 14px;
-  flex-wrap: wrap;
+  padding: 14px 22px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  gap: 12px;
 }
 
 .ide-tabs {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   flex-wrap: wrap;
 }
 
 .ide-tab {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border-radius: 10px;
-  font-size: 0.8rem;
-  font-weight: 650;
-  color: var(--text-secondary);
-  background: transparent;
-  border: 1px solid transparent;
-  cursor: pointer;
-  transition: all var(--duration-fast);
-  white-space: nowrap;
+  gap: 7px;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: #86868b;
+  transition: color 200ms ease, background 200ms ease;
 }
 
 .ide-tab:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  color: #f5f5f7;
 }
 
 .ide-tab--active {
-  color: #fafafa;
-  background: rgba(255, 255, 255, 0.07);
-  border-color: rgba(42, 196, 159, 0.45);
-}
-
-.ide-path {
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
-  color: rgba(161, 161, 170, 0.8);
-}
-
-.config-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.format-pills {
-  display: inline-flex;
-  padding: 3px;
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  gap: 2px;
-}
-
-.format-pill {
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  transition: all 150ms ease;
-}
-
-.format-pill--active {
+  color: #f5f5f7;
   background: rgba(255, 255, 255, 0.1);
-  color: #fafafa;
 }
 
 .config-copy-btn {
-  padding: 7px 15px;
-  border-radius: 9px;
-  font-family: var(--font-mono);
-  font-size: 0.74rem;
-  font-weight: 700;
-  color: #090a0f;
-  background: #f4f1ea;
-  border: 1px solid #ffffff;
-  cursor: pointer;
-  transition: all var(--duration-fast);
+  padding: 7px 16px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #000000;
+  background: #f5f5f7;
+  transition: transform 200ms ease, background 200ms ease;
   white-space: nowrap;
 }
 
 .config-copy-btn:hover {
   background: #ffffff;
-  transform: translateY(-1px);
+  transform: scale(1.02);
 }
 
 .config-copy-btn--copied {
-  color: #052e16;
-  border-color: #4ade80;
-  background: #4ade80;
+  background: #2ac49f;
+  color: #000000;
 }
 
 .prompt-body {
-  padding: 24px 28px;
-}
-
-.prompt-meta-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 14px;
+  padding: 26px 28px;
 }
 
 .prompt-instruction {
-  font-size: 0.84rem;
-  color: var(--text-secondary);
-  font-weight: 500;
+  font-size: 0.86rem;
+  color: #86868b;
+  margin-bottom: 16px;
 }
 
-.prompt-instruction strong {
-  color: #f4f1ea;
-}
-
+.prompt-instruction strong,
 .prompt-instruction code {
-  font-size: 0.85em;
-  color: #fbbf24;
-}
-
-.runtime-chip {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(42, 196, 159, 0.12);
-  border: 1px solid rgba(42, 196, 159, 0.3);
-  color: #5eead4;
+  color: #f5f5f7;
 }
 
 .prompt-text {
-  margin: 0;
-  padding: 18px 20px;
-  border-radius: 14px;
-  background: #07090d;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  font-size: 0.83rem;
+  font-size: 0.84rem;
   line-height: 1.68;
-  color: #e2e8f0;
+  color: #d4d4d8;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: var(--font-mono);
 }
 
-.autojoin-bar {
-  padding: 12px 28px;
-  background: rgba(255, 255, 255, 0.02);
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-}
-
-.autojoin-title {
-  color: #fbbf24;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-}
-
-.autojoin-steps {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  color: var(--text-secondary);
-}
-
-.autojoin-steps strong {
-  color: #f4f1ea;
-}
-
-.autojoin-steps code {
-  color: #5eead4;
-}
-
-.sep {
-  opacity: 0.4;
-}
-
 .manual-link {
-  margin-top: 20px;
+  margin-top: 24px;
   font-size: 0.88rem;
-  color: var(--text-secondary);
+  color: #86868b;
 }
 
 .manual-link a {
-  color: #5eead4;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  font-weight: 600;
-  transition: color var(--duration-fast);
+  color: #f5f5f7;
+  text-decoration: none;
 }
 
 .manual-link a:hover {
-  color: #fafafa;
-}
-
-@media (max-width: 1080px) {
-  .setup-top-grid {
-    grid-template-columns: 1fr;
-  }
+  text-decoration: underline;
 }
 
 @media (max-width: 768px) {
   .setup-section {
-    padding: 76px 20px;
+    padding: 96px 20px;
   }
 
-  .runtime-lanes {
-    grid-template-columns: 1fr;
+  .config-header {
+    flex-direction: column;
+    align-items: stretch;
   }
 
-  .ide-path {
-    display: none;
+  .ide-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
   }
 
-  .prompt-body {
-    padding: 18px 16px;
-  }
-
-  .autojoin-bar {
-    padding: 12px 16px;
+  .ide-tab {
+    justify-content: center;
   }
 }
 </style>

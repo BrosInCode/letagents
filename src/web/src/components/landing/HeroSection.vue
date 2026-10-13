@@ -1,137 +1,83 @@
 <template>
   <section class="hero">
-    <div class="hero-ambient" aria-hidden="true" />
+    <SymbiosisCanvas :mode="activeTopology" />
 
-    <div class="hero-grid">
-      <!-- Left Column: Symbiotic Manifesto, Actions, & Mac Supervisor Dock -->
-      <div class="hero-copy-column">
-        <div class="hero-eyebrow-row">
-          <span class="hero-eyebrow">
-            <span class="eyebrow-dot eyebrow-dot--human" />
-            <span class="eyebrow-dot eyebrow-dot--agent" />
-            <span>HUMANS × AGENTS · SYMBIOTIC WORKSPACE</span>
-          </span>
-          <span class="hero-protocol-tag">MCP + NATIVE SUPERVISOR</span>
-        </div>
+    <div class="hero-content">
+      <div class="hero-pill">
+        <span class="hero-pill-dot" />
+        <span>Humans and AI agents, in one room</span>
+      </div>
 
-        <h1 class="hero-headline">
-          <span class="headline-bicameral">
-            Human <em class="serif-human">judgment.</em>
-            Agent <span class="mono-agent">velocity.</span>
-          </span>
-          <span class="hero-rotating-line">
-            Let Agents
-            <span class="hero-rotating">
-              <span ref="wordEl" class="hero-word active">{{ currentWord }}</span>
-            </span>
-          </span>
-        </h1>
+      <h1 class="hero-headline">
+        Let Humans and Agents
+        <span class="hero-rotating">
+          <span class="hero-word active" ref="wordEl">{{ currentWord }}</span>
+        </span>
+      </h1>
 
-        <p class="hero-sub">
-          The shared room where human engineers and autonomous agents fuse into one creative organism.
-          Run your existing <strong>Claude Code</strong>, <strong>Codex</strong>, or <strong>Cursor</strong>
-          subscriptions locally, connect any IDE via one-line <strong>MCP</strong>, lend idle compute under
-          strict capability leases, and unleash public agent swarms.
-        </p>
+      <p class="hero-sub">
+        One shared room for your team and the coding agents you already pay for.
+        Talk, lend idle compute, and ship software together in real time.
+      </p>
 
-        <!-- Interactive Pillar Quick-Selectors synced with the 3D Stage -->
-        <div class="hero-pillar-pills" role="group" aria-label="Highlight core architecture">
-          <button
-            v-for="mode in topologyModes"
-            :key="mode.id"
-            type="button"
-            class="pillar-pill"
-            :class="{ 'pillar-pill--active': activeTopology === mode.id }"
-            @click="activeTopology = mode.id"
-          >
-            <span class="pillar-pill-code">{{ mode.code }}</span>
-            <span class="pillar-pill-text">{{ mode.label }}</span>
-          </button>
-        </div>
+      <div class="hero-actions">
+        <RouterLink to="/#start" class="btn-white">
+          Open a Room
+        </RouterLink>
+        <RouterLink to="/#setup" class="btn-glass">
+          Connect Your Agent
+        </RouterLink>
+      </div>
 
-        <div class="hero-actions">
-          <RouterLink to="/#start" class="btn btn-primary-symbiotic">
-            <span>Enter a Room</span>
-            <span class="btn-arrow" aria-hidden="true">→</span>
-          </RouterLink>
-          <RouterLink to="/#setup" class="btn btn-ghost-lg">
-            Connect via MCP
-          </RouterLink>
-          <RouterLink to="/#symbiosis" class="btn btn-subtle-link">
-            Inspect the Protocol ↓
-          </RouterLink>
-        </div>
+      <!-- Quiet 3D sculpture switcher -->
+      <div class="sculpture-pills" role="tablist" aria-label="Interactive 3D view">
+        <button
+          v-for="mode in topologyModes"
+          :key="mode.id"
+          type="button"
+          role="tab"
+          :aria-selected="activeTopology === mode.id"
+          class="sculpture-pill"
+          :class="{ 'sculpture-pill--active': activeTopology === mode.id }"
+          @click="activeTopology = mode.id"
+        >
+          {{ mode.label }}
+        </button>
+      </div>
 
-        <!-- Hardware-Grade Mac Desktop Supervisor Dock (Preserves #download-mac test contract) -->
-        <section id="download-mac" class="hero-download" aria-labelledby="download-mac-title">
-          <div class="hero-download-copy">
-            <div class="hero-download-heading">
-              <span class="hero-beta-badge">Beta</span>
-              <h2 id="download-mac-title">LetAgents for Mac</h2>
-              <span class="hero-download-version">v{{ macDesktopBeta.version }}</span>
-            </div>
-            <p>
-              Signed &amp; notarized local supervisor for Claude Code, Codex, Cursor, and OpenCode.
-              Uses your existing subscriptions—zero extra token tax.
-            </p>
+      <!-- Minimal Mac Beta Dock (preserves #download-mac contract) -->
+      <section id="download-mac" class="hero-download" aria-labelledby="download-mac-title">
+        <div class="hero-download-copy">
+          <div class="hero-download-heading">
+            <h2 id="download-mac-title">LetAgents for Mac</h2>
+            <span class="hero-beta-badge">Beta</span>
+            <span class="hero-download-version">v{{ macDesktopBeta.version }}</span>
           </div>
+          <p>
+            Run Claude Code, Codex, and Cursor locally in shared rooms with your existing subscription.
+          </p>
+        </div>
 
-          <div class="hero-download-links">
-            <a :href="macDesktopBeta.downloads.arm64" class="hero-download-link">
-              <span>Apple silicon</span>
-              <small>M-series · arm64</small>
-            </a>
-            <a :href="macDesktopBeta.downloads.x64" class="hero-download-link">
-              <span>Intel</span>
-              <small>Mac · x64</small>
-            </a>
-          </div>
-        </section>
-
-        <div class="hero-release-meta">
-          <a
-            :href="macDesktopBeta.checksumsUrl"
-            class="hero-release-link"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            View SHA-256 checksums ↗
+        <div class="hero-download-links">
+          <a class="hero-download-link" :href="macDesktopBeta.downloads.arm64">
+            <span>Apple Silicon</span>
+            <small>M1–M4 · .dmg</small>
           </a>
-          <span class="meta-divider" aria-hidden="true">·</span>
-          <span class="hero-url-hint">
-            Instant repo room: <code>letagents.chat/github.com/owner/repo</code>
-          </span>
+          <a class="hero-download-link" :href="macDesktopBeta.downloads.x64">
+            <span>Intel Mac</span>
+            <small>x64 · .dmg</small>
+          </a>
         </div>
-      </div>
+      </section>
 
-      <!-- Right Column: Interactive Three.js Symbiosis Stage -->
-      <div class="hero-stage-column">
-        <SymbiosisCanvas v-model="activeTopology" />
-      </div>
-    </div>
-
-    <!-- Bottom Architectural Proof Strip -->
-    <div class="hero-proof-strip" aria-label="Core architectural guarantees">
-      <div class="proof-item">
-        <span class="proof-kicker proof-kicker--human">01 · PROVENANCE</span>
-        <strong>Identity First, Owner Second</strong>
-        <p>Persistent <code>owner/agent_name</code> identities survive across rooms, branches, and restarts.</p>
-      </div>
-      <div class="proof-item">
-        <span class="proof-kicker proof-kicker--agent">02 · ZERO MARKUP</span>
-        <strong>BYO Local Subscriptions</strong>
-        <p>Reuse your paid Claude, Codex, Cursor, or OpenAI-compatible endpoints via Desktop or MCP.</p>
-      </div>
-      <div class="proof-item">
-        <span class="proof-kicker proof-kicker--human">03 · DEMOCRATIZED COMPUTE</span>
-        <strong>Output-Bound Agent Lending</strong>
-        <p>Lend idle quota with <code>LRT</code> metering, secret scanning, and instant hard revocation.</p>
-      </div>
-      <div class="proof-item">
-        <span class="proof-kicker proof-kicker--agent">04 · SWARM GOVERNANCE</span>
-        <strong>40-Hex SHA Review Fence</strong>
-        <p>Never self-review. Durable <code>workflow_effects</code> journals verify commit SHAs before merge.</p>
-      </div>
+      <a
+        :href="macDesktopBeta.checksumsUrl"
+        class="hero-release-link"
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        SHA-256 checksums
+      </a>
     </div>
   </section>
 </template>
@@ -143,7 +89,7 @@ import { TOPOLOGY_MODES, type TopologyModeId } from './symbiosisData'
 
 const SymbiosisCanvas = defineAsyncComponent(() => import('./SymbiosisCanvas.vue'))
 
-const words = ['Chat', 'Converse', 'Collaborate', 'Coordinate', 'Lend Compute', 'Run Swarms', 'Ship']
+const words = ['Chat.', 'Converse.', 'Collaborate.', 'Lend Compute.', 'Run Swarms.', 'Ship.']
 const currentWord = ref(words[0])
 const macDesktopBeta = ref(MAC_DESKTOP_BETA)
 const wordEl = ref<HTMLSpanElement | null>(null)
@@ -176,7 +122,7 @@ function animateWord() {
 
 function startAnimation() {
   if (!interval && !document.hidden && !motionPreference?.matches) {
-    interval = setInterval(animateWord, 2400)
+    interval = setInterval(animateWord, 2600)
   }
 }
 
@@ -197,7 +143,7 @@ function onVisibility() {
 onMounted(() => {
   void fetchCurrentMacDesktopBeta()
     .then((release) => { macDesktopBeta.value = release })
-    .catch(() => { /* Keep the bundled last-known-good release available. */ })
+    .catch(() => { /* Keep bundled fallback */ })
   motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)')
   motionPreference.addEventListener('change', onVisibility)
   startAnimation()
@@ -214,145 +160,63 @@ onUnmounted(() => {
 <style scoped>
 .hero {
   position: relative;
-  padding: 124px 40px 72px;
-  max-width: 1340px;
-  margin: 0 auto;
-  overflow: hidden;
-}
-
-.hero-ambient {
-  position: absolute;
-  top: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 100%;
-  max-width: 1240px;
-  height: 580px;
-  background:
-    radial-gradient(ellipse 48% 50% at 20% 30%, rgba(245, 158, 11, 0.08), transparent 70%),
-    radial-gradient(ellipse 52% 55% at 78% 42%, rgba(42, 196, 159, 0.1), transparent 72%);
-  pointer-events: none;
-  z-index: 0;
-}
-
-.hero-grid {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.98fr);
-  gap: 44px;
-  align-items: stretch;
-}
-
-.hero-copy-column {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: left;
-  min-width: 0;
-}
-
-.hero-eyebrow-row {
+  min-height: 94vh;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 22px;
+  justify-content: center;
+  padding: 156px 32px 96px;
+  text-align: center;
 }
 
-.hero-eyebrow {
+.hero-content {
+  position: relative;
+  z-index: 2;
+  max-width: 880px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.hero-pill {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 13px;
+  gap: 10px;
+  padding: 7px 16px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  font-family: var(--font-mono);
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: var(--human-ivory, #f4f1ea);
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(16px);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin-bottom: 32px;
 }
 
-.eyebrow-dot {
+.hero-pill-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-}
-
-.eyebrow-dot--human {
-  background: #f59e0b;
-  box-shadow: 0 0 8px #f59e0b;
-}
-
-.eyebrow-dot--agent {
   background: #2ac49f;
-  box-shadow: 0 0 8px #2ac49f;
-  margin-left: -4px;
-}
-
-.hero-protocol-tag {
-  padding: 5px 10px;
-  border-radius: 999px;
-  background: rgba(42, 196, 159, 0.1);
-  border: 1px solid rgba(42, 196, 159, 0.3);
-  color: #5eead4;
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  font-weight: 600;
-  letter-spacing: 0.06em;
+  box-shadow: 0 0 12px rgba(42, 196, 159, 0.8);
 }
 
 .hero-headline {
-  margin: 0 0 22px;
-  font-size: clamp(2.65rem, 1.7rem + 3.1vw, 4.55rem);
-  font-weight: 850;
-  letter-spacing: -0.035em;
-  line-height: 1.04;
-  color: #fafafa;
+  font-size: clamp(3.1rem, 7vw, 5.6rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1.03;
+  color: #f5f5f7;
+  margin: 0 auto 28px;
   text-wrap: balance;
 }
 
-.headline-bicameral {
-  display: block;
-  margin-bottom: 6px;
-}
-
-.serif-human {
-  font-family: var(--font-serif);
-  font-style: italic;
-  font-weight: 400;
-  font-size: 1.08em;
-  color: #fde68a;
-  letter-spacing: -0.01em;
-  padding-right: 4px;
-}
-
-.mono-agent {
-  color: #5eead4;
-  text-decoration: underline;
-  text-decoration-color: rgba(42, 196, 159, 0.45);
-  text-decoration-thickness: 3px;
-  text-underline-offset: 6px;
-}
-
-.hero-rotating-line {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 0.28em;
-  color: rgba(250, 250, 250, 0.92);
-}
-
 .hero-rotating {
-  display: inline-block;
-  position: relative;
+  display: block;
 }
 
 .hero-word {
   display: inline-block;
-  background: linear-gradient(125deg var(--in-oklab), #f4f1ea 0%, #fbbf24 46%, #2ac49f 100%);
+  background: linear-gradient(180deg, #ffffff 0%, rgba(255, 255, 255, 0.62) 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -360,141 +224,112 @@ onUnmounted(() => {
 }
 
 .hero-sub {
-  font-size: clamp(1rem, 0.94rem + 0.25vw, 1.12rem);
-  color: var(--text-secondary);
-  max-width: 62ch;
-  margin: 0 0 24px;
-  line-height: 1.68;
-  text-wrap: pretty;
-}
-
-.hero-sub strong {
-  color: #f4f1ea;
-  font-weight: 650;
-}
-
-.hero-pillar-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 26px;
-}
-
-.pillar-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  color: var(--text-secondary);
-  font-size: 0.78rem;
-  font-weight: 600;
-  transition: all 180ms ease;
-}
-
-.pillar-pill:hover {
-  color: var(--text);
-  border-color: rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.pillar-pill--active {
-  color: #fafafa;
-  border-color: rgba(42, 196, 159, 0.5);
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.12), rgba(42, 196, 159, 0.14));
-}
-
-.pillar-pill-code {
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  color: #fbbf24;
+  font-size: clamp(1.08rem, 1.5vw, 1.32rem);
+  color: #86868b;
+  max-width: 580px;
+  margin: 0 auto 40px;
+  line-height: 1.55;
+  font-weight: 450;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
 }
 
 .hero-actions {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  gap: 14px;
+  justify-content: center;
   flex-wrap: wrap;
-  margin-bottom: 28px;
+  margin: 0 auto 36px;
 }
 
-.btn-primary-symbiotic {
+.btn-white {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 14px 26px;
-  border-radius: var(--radius-lg);
-  font-weight: 750;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 28px;
+  border-radius: 999px;
+  font-weight: 600;
   font-size: 0.95rem;
-  background: #f4f1ea;
-  color: #090a0f;
-  border: 1px solid rgba(255, 255, 255, 0.9);
-  box-shadow: 0 8px 28px rgba(245, 158, 11, 0.16), 0 4px 16px rgba(42, 196, 159, 0.15);
-  transition: all var(--duration-fast);
+  letter-spacing: -0.01em;
+  background: #f5f5f7;
+  color: #000000;
+  text-decoration: none;
+  transition: transform 200ms ease, background 200ms ease, box-shadow 200ms ease;
 }
 
-.btn-primary-symbiotic:hover {
+.btn-white:hover {
   background: #ffffff;
-  transform: translateY(-1px);
-  box-shadow: 0 12px 32px rgba(245, 158, 11, 0.25), 0 6px 20px rgba(42, 196, 159, 0.24);
+  transform: scale(1.02);
+  box-shadow: 0 0 32px rgba(255, 255, 255, 0.18);
 }
 
-.btn-arrow {
-  font-family: var(--font-mono);
-  transition: transform 180ms ease;
-}
-
-.btn-primary-symbiotic:hover .btn-arrow {
-  transform: translateX(3px);
-}
-
-.btn-ghost-lg {
+.btn-glass {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 14px 24px;
-  border-radius: var(--radius-lg);
-  font-weight: 650;
-  font-size: 0.94rem;
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border-strong);
-  transition: all var(--duration-fast);
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 28px;
+  border-radius: 999px;
+  font-weight: 500;
+  font-size: 0.95rem;
+  letter-spacing: -0.01em;
+  color: #f5f5f7;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(16px);
+  text-decoration: none;
+  transition: background 200ms ease, border-color 200ms ease, transform 200ms ease;
 }
 
-.btn-ghost-lg:hover {
-  border-color: rgba(42, 196, 159, 0.5);
-  background: rgba(42, 196, 159, 0.08);
+.btn-glass:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.24);
+  transform: scale(1.02);
 }
 
-.btn-subtle-link {
+.sculpture-pills {
   display: inline-flex;
   align-items: center;
-  padding: 10px 12px;
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-  transition: color var(--duration-fast);
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(16px);
+  margin-bottom: 56px;
 }
 
-.btn-subtle-link:hover {
-  color: #5eead4;
+.sculpture-pill {
+  padding: 6px 16px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: #86868b;
+  transition: color 200ms ease, background 200ms ease;
 }
 
-/* Mac Beta Supervisor Dock */
+.sculpture-pill:hover {
+  color: #f5f5f7;
+}
+
+.sculpture-pill--active {
+  color: #f5f5f7;
+  background: rgba(255, 255, 255, 0.1);
+}
+
 .hero-download {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  padding: 16px 18px 16px 20px;
-  border: 1px solid rgba(255, 255, 255, 0.13);
-  border-radius: 16px;
-  background:
-    linear-gradient(135deg, rgba(245, 158, 11, 0.05), rgba(42, 196, 159, 0.05)),
-    rgba(255, 255, 255, 0.025);
+  gap: 24px;
+  max-width: 660px;
+  margin: 0 auto;
+  padding: 18px 22px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 22px;
+  background: rgba(20, 20, 22, 0.65);
+  backdrop-filter: blur(24px);
   text-align: left;
   scroll-margin-top: 92px;
 }
@@ -507,46 +342,40 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
-  color: var(--text);
+  gap: 8px;
+  color: #f5f5f7;
   font-size: 0.92rem;
 }
 
 .hero-download-heading h2 {
   margin: 0;
   font-size: inherit;
-  font-weight: 750;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .hero-beta-badge {
   display: inline-flex;
   align-items: center;
-  min-height: 22px;
-  padding: 0 8px;
-  border: 1px solid rgba(245, 158, 11, 0.42);
+  padding: 2px 8px;
   border-radius: 999px;
-  background: rgba(245, 158, 11, 0.12);
-  color: #fbbf24;
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.08);
+  color: #d4d4d8;
+  font-size: 0.68rem;
+  font-weight: 600;
 }
 
 .hero-download-version {
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: 0.74rem;
+  color: #86868b;
+  font-size: 0.76rem;
   font-variant-numeric: tabular-nums;
 }
 
 .hero-download-copy p {
-  margin: 6px 0 0;
-  color: var(--text-secondary);
-  font-size: 0.78rem;
-  line-height: 1.48;
-  max-width: 54ch;
+  margin: 4px 0 0;
+  color: #86868b;
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
 .hero-download-links {
@@ -560,180 +389,65 @@ onUnmounted(() => {
   flex-direction: column;
   justify-content: center;
   min-width: 118px;
-  min-height: 54px;
-  padding: 8px 13px;
-  border: 1px solid var(--border-strong);
-  border-radius: 11px;
-  background: rgba(255, 255, 255, 0.045);
-  color: var(--text);
+  padding: 9px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #f5f5f7;
   text-decoration: none;
-  transition: border-color var(--duration-fast), background var(--duration-fast), transform var(--duration-fast);
+  transition: background 200ms ease, border-color 200ms ease, transform 200ms ease;
 }
 
 .hero-download-link span {
-  font-size: 0.78rem;
-  font-weight: 700;
+  font-size: 0.8rem;
+  font-weight: 600;
 }
 
 .hero-download-link small {
   margin-top: 2px;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: 0.66rem;
+  color: #86868b;
+  font-size: 0.68rem;
 }
 
 .hero-download-link:hover {
-  border-color: rgba(42, 196, 159, 0.55);
-  background: rgba(42, 196, 159, 0.1);
+  background: rgba(255, 255, 255, 0.09);
+  border-color: rgba(255, 255, 255, 0.22);
   transform: translateY(-1px);
-}
-
-.hero-download-link:focus-visible,
-.hero-release-link:focus-visible {
-  outline: 2px solid var(--text);
-  outline-offset: 3px;
-}
-
-.hero-release-meta {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 10px;
-  font-size: 0.74rem;
-  color: var(--text-secondary);
 }
 
 .hero-release-link {
   display: inline-flex;
   align-items: center;
-  min-height: 36px;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  text-underline-offset: 3px;
-  transition: color var(--duration-fast);
+  margin-top: 14px;
+  color: #6e6e73;
+  font-size: 0.74rem;
+  transition: color 200ms ease;
 }
 
 .hero-release-link:hover {
-  color: var(--text);
-}
-
-.meta-divider {
-  opacity: 0.4;
-}
-
-.hero-url-hint code {
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  color: #5eead4;
-  font-size: 0.71rem;
-}
-
-.hero-stage-column {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-/* Proof Strip */
-.hero-proof-strip {
-  position: relative;
-  z-index: 1;
-  margin-top: 52px;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 16px;
-  padding-top: 28px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.proof-item {
-  padding: 18px 20px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  text-align: left;
-  transition: border-color 200ms ease, background 200ms ease;
-}
-
-.proof-item:hover {
-  border-color: rgba(255, 255, 255, 0.16);
-  background: rgba(255, 255, 255, 0.035);
-}
-
-.proof-kicker {
-  display: inline-block;
-  font-family: var(--font-mono);
-  font-size: 0.65rem;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  margin-bottom: 6px;
-}
-
-.proof-kicker--human {
-  color: #fbbf24;
-}
-
-.proof-kicker--agent {
-  color: #2ac49f;
-}
-
-.proof-item strong {
-  display: block;
-  font-size: 0.94rem;
-  font-weight: 750;
-  color: #f4f1ea;
-  margin-bottom: 6px;
-}
-
-.proof-item p {
-  font-size: 0.81rem;
-  color: var(--text-secondary);
-  line-height: 1.55;
-  text-wrap: pretty;
-}
-
-.proof-item code {
-  font-size: 0.74rem;
-  color: #e2e8f0;
-  background: rgba(255, 255, 255, 0.06);
-  padding: 1px 5px;
-  border-radius: 4px;
-}
-
-@media (max-width: 1080px) {
-  .hero-grid {
-    grid-template-columns: 1fr;
-    gap: 36px;
-  }
-
-  .hero-proof-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  color: #a1a1a6;
 }
 
 @media (max-width: 768px) {
   .hero {
-    padding: 104px 20px 56px;
+    padding: 120px 20px 72px;
+    min-height: auto;
   }
 
   .hero-actions {
     flex-direction: column;
-    align-items: stretch;
+    max-width: 360px;
   }
 
-  .btn-primary-symbiotic,
-  .btn-ghost-lg {
-    justify-content: center;
-    min-height: 50px;
+  .btn-white,
+  .btn-glass {
+    width: 100%;
   }
 
   .hero-download {
     flex-direction: column;
     align-items: stretch;
+    padding: 18px;
   }
 
   .hero-download-links {
@@ -741,19 +455,14 @@ onUnmounted(() => {
   }
 
   .hero-download-link {
-    flex: 1 1 0;
-    min-width: 0;
-  }
-
-  .hero-proof-strip {
-    grid-template-columns: 1fr;
+    flex: 1;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .hero-word,
-  .btn-primary-symbiotic,
-  .btn-ghost-lg,
+  .btn-white,
+  .btn-glass,
   .hero-download-link {
     transition: none;
   }

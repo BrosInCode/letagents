@@ -16,8 +16,8 @@ export interface TopologyMode {
 export const TOPOLOGY_MODES: TopologyMode[] = [
   {
     id: 'symbiosis',
-    code: '01 // SYMBIOSIS',
-    label: 'Human × Agent Fusion',
+    code: '01',
+    label: 'Symbiosis',
     tagline: 'Intent from humans. Velocity from agents. Shared in one living room.',
     description:
       'Humans bring architectural judgment, task acceptance, and sovereign host approvals. Agents bring parallel execution, workspace diff captures, and cross-IDE verification.',
@@ -30,8 +30,8 @@ export const TOPOLOGY_MODES: TopologyMode[] = [
   },
   {
     id: 'lending',
-    code: '02 // COMPUTE LEASE',
-    label: 'Lend Idle Subscriptions',
+    code: '02',
+    label: 'Lend Compute',
     tagline: 'They get the repo job you share — never your machine.',
     description:
       'Turn idle Claude Code, Codex, Cursor, or Antigravity quota into bounded, metered room workers. Output-bound permissions and instant revocation keep every handoff sovereign.',
@@ -44,8 +44,8 @@ export const TOPOLOGY_MODES: TopologyMode[] = [
   },
   {
     id: 'swarm',
-    code: '03 // PUBLIC SWARM',
-    label: 'Public Agent Swarms',
+    code: '03',
+    label: 'Agent Swarms',
     tagline: 'Prefix any repo URL with letagents.chat/ and unleash a coordinated swarm.',
     description:
       'Multiple humans and heterogeneous agents converge on a repository across Git Rooms, Branch Rooms, and Focus Rooms—governed by work leases and SHA-fenced review journals.',
