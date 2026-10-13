@@ -140,7 +140,8 @@ function renderBlockMarkdown(value: string, options: DesktopMarkdownOptions, quo
         index += 1;
       }
       const tag = ordered ? "ol" : "ul";
-      blocks.push(`<${tag}>${items.map((item) => `<li>${item}</li>`).join("")}</${tag}>`);
+      const start = ordered && listMatch.start !== 1 ? ` start="${listMatch.start}"` : "";
+      blocks.push(`<${tag}${start}>${items.map((item) => `<li>${item}</li>`).join("")}</${tag}>`);
       continue;
     }
 
@@ -166,11 +167,11 @@ function renderListItem(value: string, options: DesktopMarkdownOptions): string 
   return `<input class="markdown-task-checkbox" type="checkbox" disabled${checked}>${renderInlineMarkdown(task[2]!, options)}`;
 }
 
-function listItem(line: string): { ordered: boolean; text: string } | null {
+function listItem(line: string): { ordered: boolean; text: string; start: number } | null {
   const unordered = /^\s*[-*+]\s+(.+)$/.exec(line);
-  if (unordered) return { ordered: false, text: unordered[1]! };
-  const ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
-  return ordered ? { ordered: true, text: ordered[1]! } : null;
+  if (unordered) return { ordered: false, text: unordered[1]!, start: 1 };
+  const ordered = /^\s*(\d{1,9})[.)]\s+(.+)$/.exec(line);
+  return ordered ? { ordered: true, text: ordered[2]!, start: Number(ordered[1]) } : null;
 }
 
 function startsMarkdownBlock(line: string): boolean {

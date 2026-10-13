@@ -7780,6 +7780,53 @@ test("resume capability fails honestly when app-server lacks thread/resume", asy
   assert.equal(adapter.capabilities().resume, false);
 });
 
+test("cold resume explains an exact saved-thread writer conflict without replacing or interrupting its owner", async () => {
+  for (const exact of [true, false]) {
+    const harness = createHarness({ exitOnSignal: true });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const request = spawnRequest();
+    const first = await adapter.spawn(request);
+    harness.launches[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await flush();
+    const nativeError = new Error(`thread ${exact ? first.providerContinuationId : "another-thread"} already has an active writer`);
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (...args) => {
+      const client = createRpcClient(...args) as FakeRpc;
+      const original = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        if (method === "thread/resume") {
+          client.requests.push({ method, params });
+          throw nativeError;
+        }
+        return original<T>(method, params);
+      };
+      return client;
+    };
+    const resumedAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    await assert.rejects(resumedAdapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: first.providerContinuationId!,
+    }, request), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      if (exact) {
+        assert.match(error.message, /saved Codex conversation is being used by another running Codex session/);
+        assert.match(error.message, /Resume this agent after that session has stopped/);
+        assert.equal(error.cause, undefined, "raw provider errors must not leak back into the UI");
+        assert.equal("transientProviderStart" in error, false);
+        assert.equal("providerRuntimeGone" in error, false);
+      } else assert.equal(error, nativeError, "an unrelated thread error keeps its original meaning");
+      return true;
+    });
+    assert.equal(resumedAdapter.capabilities().resume, true);
+    assert.equal(harness.launches.length, 2, "no fallback or replacement runtime is launched");
+    assert.deepEqual(harness.signals, [{ pid: 4101, signal: "SIGTERM" }], "only the failed new launch is stopped");
+    assert.equal(harness.clients[1]!.closed, true);
+    assert.deepEqual(harness.clients[1]!.requests.filter(({ method }) => /^(thread|turn)\/(start|resume)$/.test(method))
+      .map(({ method }) => method), ["thread/resume"], "no new thread or model turn starts");
+    assert.equal((requestByMethod(harness.clients[1]!, "thread/resume").params as { threadId: string }).threadId, first.providerContinuationId);
+  }
+});
+
 test("spawn fails clearly when the configured LetAgents MCP workplace is absent", async () => {
   const harness = createHarness({ workplacePresent: false });
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
