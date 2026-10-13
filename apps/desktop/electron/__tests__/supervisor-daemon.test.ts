@@ -3939,3 +3939,62 @@ test("force maintenance held service suppresses ordinary generation wakes and re
     await assert.rejects(client.ensureRunning(), /maintenance/, "old Electron stays fenced until relaunch");
   } finally { if (!dead) await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
+
+for (const transient of ["unverifiable", "changed"] as const) {
+  test(`maintenance resume waits through ${transient} identity until confirmed absence`, async () => {
+    const env = await fixture();
+    const hold = await createDaemonMaintenance(daemonMaintenancePath(env.root));
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 20);
+    wire.maintenance.id = hold.id;
+    let prepared = false; let dead = false; let observations = 0;
+    let closing: Promise<void> | undefined;
+    wire.handoff.prepare = async () => { prepared = true; };
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+      inspectDaemonProcess: () => {
+        if (!prepared) return fakeDaemonProcessIdentity();
+        if (dead) return null;
+        observations++;
+        if (observations === 2) closing = closeServer(wire.server, env.socketPath).then(() => { dead = true; });
+        return transient === "unverifiable" ? undefined : { ...fakeDaemonProcessIdentity(), command: "exiting" };
+      },
+      signalDaemon: () => assert.fail("resume cannot signal any process"),
+      spawnDaemon: () => assert.fail("resume cannot start a replacement"),
+      terminateTimeoutMs: 1_000, processPollIntervalMs: 5 });
+    try {
+      await client.stopForMaintenance(true);
+      assert.ok(observations >= 2, "transient identity loss must not end the wait");
+      assert.equal(dead, true);
+      assert.equal(await readDaemonMaintenance(daemonMaintenancePath(env.root)), null);
+      assert.ok(wire.requests.every(r => ["daemon.negotiate", "daemon.prepare_handoff"].includes(r.method)));
+    } finally { if (closing) await closing; else await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+  });
+}
+
+for (const outcome of ["live", "unverifiable", "changed", "match-after-loss", "zombie-after-loss", "socket-owned"] as const) {
+  test(`maintenance resume keeps its hold when exit proof is ${outcome}`, async () => {
+    const env = await fixture();
+    const hold = await createDaemonMaintenance(daemonMaintenancePath(env.root));
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 20);
+    wire.maintenance.id = hold.id;
+    let prepared = false; let observations = 0;
+    wire.handoff.prepare = async () => { prepared = true; };
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+      inspectDaemonProcess: () => {
+        if (!prepared) return fakeDaemonProcessIdentity();
+        observations++;
+        if (outcome === "socket-owned") return null;
+        if (outcome === "unverifiable" || (outcome.endsWith("after-loss") && observations === 1)) return undefined;
+        if (outcome === "changed") return { ...fakeDaemonProcessIdentity(), command: "different" };
+        if (outcome === "zombie-after-loss") return { ...fakeDaemonProcessIdentity(), state: "zombie" };
+        return fakeDaemonProcessIdentity();
+      },
+      signalDaemon: () => assert.fail("uncertain resume cannot signal any process"),
+      spawnDaemon: () => assert.fail("uncertain resume cannot start a replacement"),
+      terminateTimeoutMs: 60, processPollIntervalMs: 5 });
+    try {
+      await assert.rejects(client.stopForMaintenance(true), /maintenance service has not stopped/);
+      assert.equal((await readDaemonMaintenance(daemonMaintenancePath(env.root)))?.id, hold.id);
+      assert.ok(wire.requests.every(r => ["daemon.negotiate", "daemon.prepare_handoff"].includes(r.method)));
+    } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+  });
+}
