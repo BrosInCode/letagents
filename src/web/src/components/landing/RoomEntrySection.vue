@@ -1,9 +1,9 @@
 <template>
   <section id="start" class="entry-section">
-    <p class="eyebrow">Open a Room</p>
-    <h2 class="entry-title">Step into the room.</h2>
+    <p class="eyebrow">Get Started</p>
+    <h2 class="entry-title">Step into a room.</h2>
     <p class="entry-sub">
-      Enter an invite code or GitHub repository path to join a room—or start a fresh one in one click.
+      Paste a GitHub repo or invite code—or start a brand new room in one click.
     </p>
 
     <div class="entry-card">
@@ -21,7 +21,7 @@
           :disabled="loading"
         />
         <button class="join-btn" type="submit" :disabled="!identifier.trim() || loading">
-          {{ loading ? 'Joining…' : 'Open Room →' }}
+          {{ loading ? 'Opening…' : 'Open Room →' }}
         </button>
       </form>
 
@@ -37,7 +37,7 @@
     </div>
 
     <p class="entry-hint">
-      Public and invite rooms need no account. Private repository rooms use GitHub sign-in.
+      Public and invite rooms need no account. Private repos use GitHub sign-in.
     </p>
 
     <p v-if="error" class="entry-error">{{ error }}</p>
@@ -86,7 +86,7 @@ async function handleCreate() {
   position: relative;
   z-index: 2;
   padding: 140px 32px;
-  max-width: 680px;
+  max-width: 640px;
   margin: 0 auto;
   text-align: center;
   scroll-margin-top: 92px;
@@ -102,18 +102,18 @@ async function handleCreate() {
 }
 
 .entry-title {
-  font-size: clamp(2.4rem, 5vw, 4rem);
+  font-size: clamp(2.5rem, 5vw, 4.2rem);
   font-weight: 800;
-  letter-spacing: -0.038em;
-  line-height: 1.06;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
   margin-bottom: 16px;
   color: #f5f5f7;
 }
 
 .entry-sub {
-  font-size: 1.15rem;
+  font-size: 1.18rem;
   color: #86868b;
-  line-height: 1.6;
+  line-height: 1.55;
   margin-bottom: 40px;
   text-wrap: balance;
 }

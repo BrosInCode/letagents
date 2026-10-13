@@ -31,7 +31,7 @@ export const TOPOLOGY_MODES: TopologyMode[] = [
   {
     id: 'lending',
     code: '02',
-    label: 'Lend Compute',
+    label: 'Share Agent',
     tagline: 'They get the repo job you share — never your machine.',
     description:
       'Turn idle Claude Code, Codex, Cursor, or Antigravity quota into bounded, metered room workers. Output-bound permissions and instant revocation keep every handoff sovereign.',

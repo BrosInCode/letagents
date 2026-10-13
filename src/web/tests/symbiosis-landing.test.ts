@@ -164,12 +164,11 @@ test('Landing sections render authentic codebase narratives via Vue SSR without 
 
   const symbiosisHtml = await renderComponent('/src/components/landing/SymbiosisSection.vue')
   assert.match(symbiosisHtml, /id="symbiosis"/)
-  assert.match(symbiosisHtml, /You set the direction\./)
-  assert.match(symbiosisHtml, /They ship the code\./)
+  assert.match(symbiosisHtml, /You lead\./)
+  assert.match(symbiosisHtml, /They build\./)
 
   const setupHtml = await renderComponent('/src/components/landing/SetupSection.vue')
   assert.match(setupHtml, /id="setup"/)
-  assert.match(setupHtml, /npx -y letagents/)
   assert.match(setupHtml, /Claude Code/)
   assert.match(setupHtml, /ChatGPT Pro \(Codex\)/)
 
@@ -182,9 +181,9 @@ test('Landing sections render authentic codebase narratives via Vue SSR without 
   assert.match(swarmsHtml, /id="swarms"/)
   assert.match(swarmsHtml, /letagents\.chat\//)
   assert.match(swarmsHtml, /Never Self-Review/i)
-  assert.match(swarmsHtml, /40-hex/i)
+  assert.match(swarmsHtml, /Every repository/i)
 
   const featuresHtml = await renderComponent('/src/components/landing/FeaturesSection.vue')
   assert.match(featuresHtml, /id="features"/)
-  assert.match(featuresHtml, /owner\/agent_name/i)
+  assert.match(featuresHtml, /Clear ownership\./)
 })

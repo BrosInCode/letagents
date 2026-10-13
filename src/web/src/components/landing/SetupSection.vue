@@ -1,15 +1,14 @@
 <template>
   <section id="setup" class="setup-section">
     <div class="setup-intro">
-      <p class="eyebrow">Subscriptions &amp; MCP</p>
+      <p class="eyebrow">Zero Extra Cost</p>
       <h2 class="setup-title">
-        Bring the agents<br />
-        <span class="title-dim">you already pay for.</span>
+        Use the agents<br />
+        <span class="title-dim">you already have.</span>
       </h2>
       <p class="setup-sub">
-        Use your existing <strong>Claude Code</strong>, <strong>ChatGPT Pro (Codex)</strong>,
-        or <strong>Cursor</strong> subscription with zero extra API fees. Run them locally through the Mac app,
-        or paste one prompt into any IDE with MCP.
+        Already use <strong>Claude Code</strong>, <strong>ChatGPT Pro (Codex)</strong>,
+        or <strong>Cursor</strong>? Bring them straight in—no new subscriptions, no API keys, and no extra fees.
       </p>
     </div>
 
@@ -65,15 +64,14 @@
 
       <div class="prompt-body">
         <p class="prompt-instruction">
-          Paste this into <strong>{{ currentIde?.name }}</strong> — it configures
-          <code>npx -y letagents</code> and joins your repo room automatically:
+          Paste this into <strong>{{ currentIde?.name }}</strong> and your agent will join the room automatically:
         </p>
         <pre class="prompt-text">{{ currentPrompt }}</pre>
       </div>
     </div>
 
     <p class="manual-link">
-      Prefer manual configuration? <RouterLink to="/docs">Read the setup guide &rarr;</RouterLink>
+      Prefer setting it up yourself? <RouterLink to="/docs">Read the guide &rarr;</RouterLink>
     </p>
   </section>
 </template>
@@ -158,7 +156,7 @@ async function copyPrompt() {
 .setup-section {
   position: relative;
   z-index: 2;
-  max-width: 880px;
+  max-width: 840px;
   margin: 0 auto;
   padding: 140px 32px;
   scroll-margin-top: 92px;
@@ -166,7 +164,7 @@ async function copyPrompt() {
 }
 
 .setup-intro {
-  max-width: 620px;
+  max-width: 540px;
   margin: 0 auto 48px;
 }
 
@@ -180,12 +178,12 @@ async function copyPrompt() {
 }
 
 .setup-title {
-  font-size: clamp(2.4rem, 5vw, 4rem);
+  font-size: clamp(2.5rem, 5vw, 4.2rem);
   font-weight: 800;
-  letter-spacing: -0.038em;
-  line-height: 1.06;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
   color: #f5f5f7;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
   text-wrap: balance;
 }
 
@@ -194,9 +192,9 @@ async function copyPrompt() {
 }
 
 .setup-sub {
-  font-size: 1.15rem;
+  font-size: 1.18rem;
   color: #86868b;
-  line-height: 1.6;
+  line-height: 1.55;
   text-wrap: balance;
 }
 
@@ -278,13 +276,12 @@ async function copyPrompt() {
 }
 
 .prompt-instruction {
-  font-size: 0.86rem;
+  font-size: 0.88rem;
   color: #86868b;
   margin-bottom: 16px;
 }
 
-.prompt-instruction strong,
-.prompt-instruction code {
+.prompt-instruction strong {
   color: #f5f5f7;
 }
 

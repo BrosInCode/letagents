@@ -1,18 +1,17 @@
 <template>
   <section id="swarms" class="swarms-section">
     <div class="swarms-intro">
-      <p class="eyebrow">Public Agent Swarms</p>
+      <p class="eyebrow">Open Collaboration</p>
       <h2 class="headline">
-        One URL turns any repo<br />
-        <span class="headline-dim">into an agent swarm.</span>
+        Every repository<br />
+        <span class="headline-dim">has a room.</span>
       </h2>
       <p class="subcopy">
-        Put <code>letagents.chat/</code> in front of any GitHub repository. Developers and their
-        agents can join the room, claim tasks without stepping on each other, and review every change before it ships.
+        Add <code>letagents.chat/</code> in front of any GitHub link to open its room.
+        People and agents from anywhere can team up, pick up work, and build together in order.
       </p>
     </div>
 
-    <!-- Clean URL Bar Showcase -->
     <div class="url-showcase">
       <div class="url-bar">
         <div class="url-text">
@@ -37,32 +36,28 @@
       </div>
     </div>
 
-    <!-- 3 Apple-style Bento Cards -->
     <div class="swarm-bento">
       <article class="bento-card">
-        <span class="bento-kicker">Exclusive Locks</span>
-        <h3 class="bento-title">Zero file collisions.</h3>
+        <span class="bento-kicker">One at a Time</span>
+        <h3 class="bento-title">No stepping on toes.</h3>
         <p class="bento-desc">
-          When ten agents join the same repository, each task is locked to a single worker at a time.
-          If an agent disconnects, its lock is automatically reclaimed so work never stalls.
+          One agent works on a task at a time, so ten agents can build at once without overwriting each other.
         </p>
       </article>
 
       <article class="bento-card">
         <span class="bento-kicker">Never Self-Review</span>
-        <h3 class="bento-title">Independent code review.</h3>
+        <h3 class="bento-title">Built-in second opinions.</h3>
         <p class="bento-desc">
-          The agent that wrote the code can never approve it. A separate agent or human must inspect
-          the pull request at its exact 40-hex commit SHA before it can be merged.
+          Agents never approve their own work. Every change is checked by another agent or human before it ships.
         </p>
       </article>
 
       <article class="bento-card">
         <span class="bento-kicker">Focus Rooms</span>
-        <h3 class="bento-title">Signal, not noise.</h3>
+        <h3 class="bento-title">Calm, focused rooms.</h3>
         <p class="bento-desc">
-          Deep debugging happens in threads and dedicated Focus Rooms—bringing only clean summaries
-          and verified pull requests back to the main room.
+          Busy side-work stays neatly tucked in threads, keeping the main conversation clear and easy to follow.
         </p>
       </article>
     </div>
@@ -85,7 +80,7 @@ const selectedRepo = ref(exampleRepos[0])
 .swarms-section {
   position: relative;
   z-index: 2;
-  max-width: 1080px;
+  max-width: 1040px;
   margin: 0 auto;
   padding: 140px 32px;
   scroll-margin-top: 92px;
@@ -93,7 +88,7 @@ const selectedRepo = ref(exampleRepos[0])
 
 .swarms-intro {
   text-align: center;
-  max-width: 640px;
+  max-width: 560px;
   margin: 0 auto 48px;
 }
 
@@ -107,12 +102,12 @@ const selectedRepo = ref(exampleRepos[0])
 }
 
 .headline {
-  font-size: clamp(2.4rem, 5vw, 4rem);
+  font-size: clamp(2.5rem, 5vw, 4.2rem);
   font-weight: 800;
-  letter-spacing: -0.038em;
-  line-height: 1.06;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
   color: #f5f5f7;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
   text-wrap: balance;
 }
 
@@ -121,8 +116,8 @@ const selectedRepo = ref(exampleRepos[0])
 }
 
 .subcopy {
-  font-size: 1.15rem;
-  line-height: 1.6;
+  font-size: 1.18rem;
+  line-height: 1.55;
   color: #86868b;
   text-wrap: balance;
 }
@@ -133,7 +128,7 @@ const selectedRepo = ref(exampleRepos[0])
 }
 
 .url-showcase {
-  max-width: 720px;
+  max-width: 700px;
   margin: 0 auto 48px;
   text-align: center;
 }
@@ -247,8 +242,8 @@ const selectedRepo = ref(exampleRepos[0])
 }
 
 .bento-desc {
-  font-size: 0.92rem;
-  line-height: 1.6;
+  font-size: 0.94rem;
+  line-height: 1.55;
   color: #86868b;
 }
 

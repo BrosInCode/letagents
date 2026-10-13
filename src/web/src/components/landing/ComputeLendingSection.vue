@@ -1,14 +1,14 @@
 <template>
   <section id="lending" class="lending-section">
     <div class="lending-intro">
-      <p class="eyebrow">Compute Lending</p>
+      <p class="eyebrow">Share Your Agent</p>
       <h2 class="headline">
         Lend your agent.<br />
         <span class="headline-dim">Never your machine.</span>
       </h2>
       <p class="subcopy">
-        Have unused Claude or Codex capacity? Share your agent with a teammate’s project or an
-        open-source repo. They get the work done; your files, shell, and keys stay completely private.
+        Let a friend or open-source project borrow your agent when you aren’t using it.
+        They get the help they need; your computer and private files stay untouched.
       </p>
     </div>
 
@@ -17,8 +17,8 @@
         <div class="lender-identity">
           <span class="status-dot" :class="{ 'status-dot--revoked': isRevoked }" />
           <div>
-            <strong>Lending Claude Code to alex/payments</strong>
-            <span>{{ isRevoked ? 'Access revoked immediately' : 'Active session · 45 min limit' }}</span>
+            <strong>Sharing Claude with alex/payments</strong>
+            <span>{{ isRevoked ? 'Stopped immediately' : 'Active · 45 minutes left' }}</span>
           </div>
         </div>
 
@@ -28,14 +28,14 @@
           :class="{ 'revoke-btn--restore': isRevoked }"
           @click="isRevoked = !isRevoked"
         >
-          {{ isRevoked ? 'Resume Access' : 'Revoke Access' }}
+          {{ isRevoked ? 'Share Again' : 'Stop Sharing' }}
         </button>
       </div>
 
       <div class="widget-body" :class="{ 'widget-body--dimmed': isRevoked }">
         <div class="scope-picker">
-          <span class="picker-label">Allowed Output</span>
-          <div class="scope-pills" role="tablist" aria-label="Allowed output">
+          <span class="picker-label">Choose what your agent can do</span>
+          <div class="scope-pills" role="tablist" aria-label="Allowed actions">
             <button
               v-for="scope in scopes"
               :key="scope.id"
@@ -54,7 +54,7 @@
 
         <div class="scope-details" v-if="activeScope">
           <div class="detail-col">
-            <span class="detail-heading">What your agent can do</span>
+            <span class="detail-heading">Allowed</span>
             <ul class="detail-list">
               <li v-for="item in activeScope.allowed" :key="item">
                 <span class="check-icon">✓</span>
@@ -64,7 +64,7 @@
           </div>
 
           <div class="detail-col">
-            <span class="detail-heading">Always protected</span>
+            <span class="detail-heading">Always private</span>
             <ul class="detail-list detail-list--locked">
               <li v-for="item in activeScope.protected" :key="item">
                 <span class="lock-icon">—</span>
@@ -87,47 +87,47 @@ const selectedScope = ref<'draft_pr' | 'review_comment' | 'research_note'>('draf
 const scopes = [
   {
     id: 'draft_pr' as const,
-    title: 'Draft Pull Request',
-    subtitle: 'Scoped branch only',
+    title: 'Propose Code',
+    subtitle: 'Safe draft only',
     allowed: [
-      'Read the shared repository files',
-      'Push changes only to its own isolated task branch',
-      'Open a draft pull request for review',
+      'Read the shared project files',
+      'Write code in a separate draft',
+      'Submit changes for approval',
     ],
     protected: [
-      'Zero access to your computer or personal files',
-      'Cannot push to main or staging branches',
-      'Automatic secret scan before any code is shared',
+      'Never touches your personal files',
+      'Cannot change live production code',
+      'Automatically checks for accidental secrets',
     ],
   },
   {
     id: 'review_comment' as const,
-    title: 'Code Review',
-    subtitle: 'Read & review only',
+    title: 'Review Code',
+    subtitle: 'Read and give feedback',
     allowed: [
-      'Inspect pull request diffs and run checks',
-      'Post structured code review feedback in the room',
-      'Approve or request changes on a specific commit',
+      'Read new code changes',
+      'Leave helpful review notes',
+      'Approve or flag issues',
     ],
     protected: [
-      'Zero write or push access to any branch',
-      'Zero access to your local environment or keys',
-      'Expires automatically as soon as the review finishes',
+      'Cannot edit or push any files',
+      'Your passwords and keys stay hidden',
+      'Disconnects as soon as the review is done',
     ],
   },
   {
     id: 'research_note' as const,
-    title: 'Research Note',
-    subtitle: 'Strict read-only',
+    title: 'Answer Questions',
+    subtitle: 'Explore and explain',
     allowed: [
-      'Search the codebase and trace architecture',
-      'Answer technical questions in the shared room',
-      'Publish a concise summary note for the team',
+      'Read and understand the project',
+      'Answer questions in the room',
+      'Share a clear summary note',
     ],
     protected: [
-      'Cannot edit files, create branches, or open PRs',
-      'No external network access or secret exposure',
-      'One-click instant revocation at any time',
+      'Zero file changes of any kind',
+      'No access to your computer',
+      'Stop sharing with one click anytime',
     ],
   },
 ]
@@ -139,7 +139,7 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 .lending-section {
   position: relative;
   z-index: 2;
-  max-width: 920px;
+  max-width: 880px;
   margin: 0 auto;
   padding: 140px 32px;
   scroll-margin-top: 92px;
@@ -147,8 +147,8 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 
 .lending-intro {
   text-align: center;
-  max-width: 640px;
-  margin: 0 auto 52px;
+  max-width: 560px;
+  margin: 0 auto 48px;
 }
 
 .eyebrow {
@@ -161,12 +161,12 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 }
 
 .headline {
-  font-size: clamp(2.4rem, 5vw, 4rem);
+  font-size: clamp(2.5rem, 5vw, 4.2rem);
   font-weight: 800;
-  letter-spacing: -0.038em;
-  line-height: 1.06;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
   color: #f5f5f7;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
   text-wrap: balance;
 }
 
@@ -175,8 +175,8 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 }
 
 .subcopy {
-  font-size: 1.15rem;
-  line-height: 1.6;
+  font-size: 1.18rem;
+  line-height: 1.55;
   color: #86868b;
   text-wrap: balance;
 }
@@ -296,14 +296,14 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 
 .scope-pill strong {
   display: block;
-  font-size: 0.9rem;
+  font-size: 0.92rem;
   font-weight: 600;
   color: #f5f5f7;
 }
 
 .scope-pill small {
   display: block;
-  font-size: 0.78rem;
+  font-size: 0.8rem;
   color: #86868b;
   margin-top: 3px;
 }
@@ -344,7 +344,7 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  font-size: 0.88rem;
+  font-size: 0.9rem;
   line-height: 1.5;
   color: #d4d4d8;
 }

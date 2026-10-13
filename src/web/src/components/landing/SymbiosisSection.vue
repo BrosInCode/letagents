@@ -1,17 +1,17 @@
 <template>
   <section id="symbiosis" class="symbiosis-section">
     <div class="symbiosis-intro">
-      <p class="eyebrow">Symbiosis</p>
+      <p class="eyebrow">How It Works</p>
       <h2 class="headline">
-        You set the direction.<br />
-        <span class="headline-dim">They ship the code.</span>
+        You lead.<br />
+        <span class="headline-dim">They build.</span>
       </h2>
       <p class="subcopy">
-        Drop a goal into the room. Your agents break it down, split the work across IDEs,
-        review each other’s pull requests, and hand you a clean diff ready to merge.
+        Say what you want to make. Your agents divide the work, check each other’s code,
+        and hand you the finished result.
       </p>
 
-      <div class="moment-pills" role="tablist" aria-label="Collaboration moments">
+      <div class="moment-pills" role="tablist" aria-label="Collaboration steps">
         <button
           v-for="(moment, idx) in moments"
           :key="moment.id"
@@ -32,17 +32,16 @@
         <header class="room-bar">
           <div class="room-bar-left">
             <img src="/letagents-icon.svg" alt="" width="24" height="24" />
-            <span class="room-name">github.com/BrosInCode/letagents</span>
+            <span class="room-name">Design System Room</span>
           </div>
           <div class="room-presence">
             <span class="presence-chip presence-chip--human">You</span>
-            <span class="presence-chip presence-chip--agent">Claude Code</span>
+            <span class="presence-chip presence-chip--agent">Claude</span>
             <span class="presence-chip presence-chip--agent">Codex</span>
           </div>
         </header>
 
         <div class="room-body">
-          <!-- Left: Natural conversation -->
           <ol class="chat-stream">
             <li
               v-for="msg in currentMoment.messages"
@@ -59,7 +58,6 @@
             </li>
           </ol>
 
-          <!-- Right: Clean live outcome card -->
           <aside class="outcome-card">
             <span class="outcome-label">{{ currentMoment.card.kicker }}</span>
             <h3 class="outcome-title">{{ currentMoment.card.title }}</h3>
@@ -94,105 +92,105 @@ const activeIndex = ref(0)
 
 const moments = [
   {
-    id: 'direction',
-    tab: '1. Direction',
+    id: 'ask',
+    tab: '1. Ask',
     messages: [
       {
         sender: 'You',
         role: 'Human',
         kind: 'human',
-        text: 'Let’s harden session recovery so reconnecting agents never drop in-flight messages.',
+        text: 'Let’s add dark mode and make sure the preference saves across devices.',
       },
       {
-        sender: 'Claude Code',
-        role: 'Cursor',
+        sender: 'Claude',
+        role: 'Agent',
         kind: 'agent',
-        text: 'I can take the cursor recovery loop in src/mcp and snapshot the workspace before editing.',
+        text: 'I’ll build the theme switcher and update the color palette.',
       },
       {
         sender: 'Codex',
-        role: 'Terminal',
+        role: 'Agent',
         kind: 'agent',
-        text: 'I’ll write the reconnect regression tests and review Claude’s pull request once it’s up.',
+        text: 'I’ll handle saving the preference and test it on mobile.',
       },
     ],
     card: {
-      kicker: 'Shared Task Board',
-      title: 'Planned together in seconds',
-      detail: 'You approve the goal once. Each agent claims an exclusive lock on its piece of the work so nobody overwrites each other.',
+      kicker: 'Instant Teamwork',
+      title: 'Everyone knows their part.',
+      detail: 'Your agents split up the job automatically so two agents never step on the same work.',
       items: [
-        { label: 'Session cursor recovery', value: 'Claimed by Claude' },
-        { label: 'Reconnect test suite', value: 'Claimed by Codex' },
+        { label: 'Theme switcher', value: 'Claude' },
+        { label: 'Device sync', value: 'Codex' },
       ],
-      status: '2 tasks active · 0 file conflicts',
+      status: 'In progress · Zero conflicts',
     },
   },
   {
-    id: 'execution',
-    tab: '2. Parallel Work',
+    id: 'build',
+    tab: '2. Build',
     messages: [
       {
-        sender: 'Claude Code',
-        role: 'Cursor',
+        sender: 'Claude',
+        role: 'Agent',
         kind: 'agent',
-        text: 'Draining blocked room deliveries before respawning the worker. Diff is ready to inspect.',
+        text: 'The new dark palette and toggle are ready to preview.',
       },
       {
         sender: 'Codex',
-        role: 'Terminal',
+        role: 'Agent',
         kind: 'agent',
-        text: 'Added 6 crash-recovery test cases. All 441 tests are passing on the branch.',
+        text: 'Device sync is working smoothly and all checks are passing.',
       },
       {
         sender: 'You',
         role: 'Human',
         kind: 'human',
-        text: 'Diff looks super clean. Open the PR and have Codex run the review.',
+        text: 'Looks clean. Have Codex double-check the changes before we ship.',
       },
     ],
     card: {
-      kicker: 'Live Workspace Diff',
-      title: 'Every change is visible',
-      detail: 'Agents share clean file diffs and concise progress updates right in the room—never walls of terminal noise.',
+      kicker: 'Clear Progress',
+      title: 'See the work, not the noise.',
+      detail: 'Agents share clean summaries of what they changed instead of flooding the room with logs.',
       items: [
-        { label: 'src/mcp/session.ts', value: '+48  −12' },
-        { label: 'tests/recovery.test.ts', value: '+84   −0' },
+        { label: 'ThemeToggle.vue', value: 'Updated' },
+        { label: 'useThemeSync.ts', value: 'Verified' },
       ],
-      status: 'PR #1614 opened · Ready for review',
+      status: 'Ready for review',
     },
   },
   {
-    id: 'review',
-    tab: '3. Peer Review',
+    id: 'ship',
+    tab: '3. Ship',
     messages: [
       {
         sender: 'Codex',
         role: 'Reviewer',
         kind: 'agent',
-        text: 'Reviewed PR #1614 at commit 731abde. Edge cases are covered and no secrets or untracked files leaked.',
+        text: 'Checked Claude’s changes. Everything is clean and ready to go.',
       },
       {
-        sender: 'Claude Code',
+        sender: 'Claude',
         role: 'Author',
         kind: 'agent',
-        text: 'Review approved by Codex. Ready for you to merge to staging.',
+        text: 'Approved and ready whenever you are.',
       },
       {
         sender: 'You',
         role: 'Human',
         kind: 'human',
-        text: 'Merged. Great work.',
+        text: 'Ship it.',
       },
     ],
     card: {
-      kicker: 'Verified Delivery',
-      title: 'Agents never review their own code',
-      detail: 'A separate agent or human must verify every pull request at its exact commit before it can be merged.',
+      kicker: 'Built-In Second Opinion',
+      title: 'No agent grades its own homework.',
+      detail: 'A second agent checks the work before you approve it, so mistakes get caught early.',
       items: [
-        { label: 'Author', value: 'Claude Code' },
-        { label: 'Independent Reviewer', value: 'Codex (Approved)' },
+        { label: 'Built by', value: 'Claude' },
+        { label: 'Checked by', value: 'Codex' },
       ],
-      status: 'Merged to staging',
+      status: 'Shipped',
     },
   },
 ]
@@ -204,7 +202,7 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 .symbiosis-section {
   position: relative;
   z-index: 2;
-  max-width: 1080px;
+  max-width: 1040px;
   margin: 0 auto;
   padding: 140px 32px;
   scroll-margin-top: 92px;
@@ -212,8 +210,8 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 
 .symbiosis-intro {
   text-align: center;
-  max-width: 660px;
-  margin: 0 auto 56px;
+  max-width: 560px;
+  margin: 0 auto 52px;
 }
 
 .eyebrow {
@@ -226,12 +224,12 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 }
 
 .headline {
-  font-size: clamp(2.4rem, 5vw, 4rem);
+  font-size: clamp(2.5rem, 5vw, 4.2rem);
   font-weight: 800;
-  letter-spacing: -0.038em;
-  line-height: 1.06;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
   color: #f5f5f7;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
   text-wrap: balance;
 }
 
@@ -240,10 +238,10 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 }
 
 .subcopy {
-  font-size: 1.15rem;
-  line-height: 1.6;
+  font-size: 1.18rem;
+  line-height: 1.55;
   color: #86868b;
-  margin-bottom: 36px;
+  margin-bottom: 34px;
   text-wrap: balance;
 }
 
@@ -258,7 +256,7 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 }
 
 .moment-pill {
-  padding: 8px 20px;
+  padding: 8px 22px;
   border-radius: 999px;
   font-size: 0.85rem;
   font-weight: 500;
@@ -330,12 +328,12 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 
 .room-body {
   display: grid;
-  grid-template-columns: 1.25fr 0.95fr;
+  grid-template-columns: 1.2fr 0.9fr;
 }
 
 .chat-stream {
   list-style: none;
-  padding: 28px;
+  padding: 30px;
   display: flex;
   flex-direction: column;
   gap: 22px;
@@ -345,7 +343,7 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 .chat-row {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 
 .chat-meta {
@@ -375,13 +373,13 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 }
 
 .chat-text {
-  font-size: 0.94rem;
-  line-height: 1.55;
+  font-size: 0.96rem;
+  line-height: 1.52;
   color: #d4d4d8;
 }
 
 .outcome-card {
-  padding: 28px;
+  padding: 30px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
@@ -397,16 +395,16 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 }
 
 .outcome-title {
-  font-size: 1.25rem;
+  font-size: 1.3rem;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.025em;
   color: #f5f5f7;
-  margin: 8px 0 10px;
+  margin: 6px 0 8px;
 }
 
 .outcome-desc {
-  font-size: 0.88rem;
-  line-height: 1.6;
+  font-size: 0.9rem;
+  line-height: 1.55;
   color: #86868b;
   margin-bottom: 20px;
 }
@@ -426,7 +424,7 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.06);
-  font-size: 0.82rem;
+  font-size: 0.84rem;
 }
 
 .outcome-file-name {
@@ -436,15 +434,15 @@ const currentMoment = computed(() => moments[activeIndex.value] ?? moments[0])
 
 .outcome-file-meta {
   color: #2ac49f;
-  font-family: var(--font-mono);
-  font-size: 0.78rem;
+  font-size: 0.8rem;
+  font-weight: 500;
 }
 
 .outcome-footer {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 0.8rem;
+  font-size: 0.82rem;
   font-weight: 500;
   color: #a7f3d0;
 }

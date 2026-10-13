@@ -5,7 +5,7 @@
     <div class="hero-content">
       <div class="hero-pill">
         <span class="hero-pill-dot" />
-        <span>Humans and AI agents, in one room</span>
+        <span>Humans and agents, together</span>
       </div>
 
       <h1 class="hero-headline">
@@ -16,8 +16,7 @@
       </h1>
 
       <p class="hero-sub">
-        One shared room for your team and the coding agents you already pay for.
-        Talk, lend idle compute, and ship software together in real time.
+        One shared place for your team and your favorite AI agents to build software together.
       </p>
 
       <div class="hero-actions">
@@ -25,7 +24,7 @@
           Open a Room
         </RouterLink>
         <RouterLink to="/#setup" class="btn-glass">
-          Connect Your Agent
+          Add Your Agent
         </RouterLink>
       </div>
 
@@ -54,7 +53,7 @@
             <span class="hero-download-version">v{{ macDesktopBeta.version }}</span>
           </div>
           <p>
-            Run Claude Code, Codex, and Cursor locally in shared rooms with your existing subscription.
+            Bring Claude, Codex, and Cursor into any room with one click.
           </p>
         </div>
 
@@ -76,7 +75,7 @@
         target="_blank"
         rel="noopener noreferrer"
       >
-        SHA-256 checksums
+        Checksums
       </a>
     </div>
   </section>
@@ -89,7 +88,7 @@ import { TOPOLOGY_MODES, type TopologyModeId } from './symbiosisData'
 
 const SymbiosisCanvas = defineAsyncComponent(() => import('./SymbiosisCanvas.vue'))
 
-const words = ['Chat.', 'Converse.', 'Collaborate.', 'Lend Compute.', 'Run Swarms.', 'Ship.']
+const words = ['Talk.', 'Think.', 'Create.', 'Share.', 'Build.', 'Ship.']
 const currentWord = ref(words[0])
 const macDesktopBeta = ref(MAC_DESKTOP_BETA)
 const wordEl = ref<HTMLSpanElement | null>(null)
@@ -206,7 +205,7 @@ onUnmounted(() => {
   letter-spacing: -0.04em;
   line-height: 1.03;
   color: #f5f5f7;
-  margin: 0 auto 28px;
+  margin: 0 auto 24px;
   text-wrap: balance;
 }
 
@@ -224,11 +223,11 @@ onUnmounted(() => {
 }
 
 .hero-sub {
-  font-size: clamp(1.08rem, 1.5vw, 1.32rem);
+  font-size: clamp(1.12rem, 1.6vw, 1.35rem);
   color: #86868b;
-  max-width: 580px;
+  max-width: 520px;
   margin: 0 auto 40px;
-  line-height: 1.55;
+  line-height: 1.5;
   font-weight: 450;
   letter-spacing: -0.01em;
   text-wrap: balance;
@@ -323,7 +322,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  max-width: 660px;
+  max-width: 620px;
   margin: 0 auto;
   padding: 18px 22px;
   border: 1px solid rgba(255, 255, 255, 0.09);
@@ -374,7 +373,7 @@ onUnmounted(() => {
 .hero-download-copy p {
   margin: 4px 0 0;
   color: #86868b;
-  font-size: 0.82rem;
+  font-size: 0.84rem;
   line-height: 1.45;
 }
 
