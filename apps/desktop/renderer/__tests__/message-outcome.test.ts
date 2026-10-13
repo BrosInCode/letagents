@@ -23,7 +23,7 @@ test("message activity targets exact local agent identity and preserves the trig
 
 test("message info shows exact terminal work without inventing observation or successful silence", () => {
   const work = { sourceMessageId: "msg_1", agentKey: "owner/stone", summary: { recorded_state: "completed_no_reply" } } as any;
-  assert.equal(messageWorkOutcome([work], "msg_1", "owner/stone"), "Turn completed without a written reply");
+  assert.equal(messageWorkOutcome([work], "msg_1", "owner/stone"), "Turn completed without a final reply");
   assert.equal(messageWorkOutcome([work], "msg_2", "owner/stone"), null);
   assert.equal(messageWorkOutcome([work], "msg_1", "other/stone"), null);
   assert.equal(messageWorkOutcome([work, work], "msg_1", "owner/stone"), null);
