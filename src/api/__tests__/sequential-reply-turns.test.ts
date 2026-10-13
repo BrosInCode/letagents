@@ -53,13 +53,16 @@ test("mentions, single receipts, mixed reasons and the parallel setting stay par
   assert.ok(parallel(receipts("recent_conversation")), "recent_conversation stays parallel");
 });
 
-test("all speakers have equal standing and can give substantive agreement", () => {
+test("all speakers can express a complete viewpoint without a prescribed conversational formula", () => {
   for (const position of [1, 2, 3]) {
     const guidance = replyTurnGuidance(position, 3, position > 1 ? ["Alice"] : []);
     assert.match(guidance, /You are an equal participant/);
-    assert.match(guidance, /Give your own considered answer/);
+    assert.match(guidance, /Express a complete point of view/);
     assert.match(guidance, /later speakers are not limited to reviewing/);
+    assert.match(guidance, /Speaking later does not require a shorter answer/);
+    assert.match(guidance, /no required agreement preface/);
     assert.match(guidance, /Agreement can be substantive/);
+    assert.match(guidance, /Useful overlap is welcome/);
     assert.match(guidance, /does not require starting a thread/);
     assert.match(guidance, /Silence is not a vote/);
     assert.doesNotMatch(guidance, /Add only new points|agree in one short line|Cover only/);
