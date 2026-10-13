@@ -1,19 +1,71 @@
 import type { DesktopTaskSummary } from "../../ipc-types.js";
 import type { ProviderRoomTurnRequest } from "./provider-adapter.js";
 import { ROOM_EXPRESSION_GUIDANCE } from "../../../../../shared/room-expressions.mjs";
+import { isDeepStrictEqual } from "node:util";
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function isRoomMessage(value: Record<string, unknown>): boolean {
+  return typeof value.id === "string" && /^msg_[1-9]\d*$/.test(value.id) && typeof value.text === "string";
+}
+
+/** Preserve conversation content and unknown fields; omit only known UI summaries. */
+function conversationMessage(message: unknown): unknown {
+  const value = record(message);
+  if (!value) return message;
+  const { activation: _activation, ...context } = value;
+  if (!isRoomMessage(context)) return context;
+  if (context.display_text === context.text) delete context.display_text;
+  const profile = record(context.sender_profile);
+  if (profile) {
+    const { avatar_url: _avatar, ...identity } = profile;
+    context.sender_profile = identity;
+  }
+  const thread = record(context.thread);
+  if (thread) {
+    const { reply_count: _count, unread_count: _unread, has_unread: _hasUnread,
+      participants: _participants, participant_count: _participantsCount,
+      participants_truncated: _truncated, last_read_message_id: _lastRead, ...reference } = thread;
+    context.thread = reference;
+  }
+  return context;
+}
 
 /** Routing guidance belongs to this turn, not to every historical message.
- * Leave the stored messages untouched; strip activation only in the prompt.
+ * This compacts one prompt, never assumes that an earlier turn retained context.
  */
 export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "observedContext" | "sourceMessage" | "activation">): string[] {
-  const conversationMessage = (message: unknown): unknown => {
-    if (!message || typeof message !== "object" || Array.isArray(message)) return message;
-    const { activation: _activation, ...context } = message as Record<string, unknown>;
-    return context;
+  const source = conversationMessage(request.sourceMessage);
+  const sourceRecord = record(source);
+  const context = (request.observedContext ?? []).map(conversationMessage).filter(message =>
+    !sourceRecord || !isRoomMessage(sourceRecord) || !isDeepStrictEqual(message, source));
+  const supplied = [...context, source].map(record).filter((value): value is Record<string, unknown> => value !== null && isRoomMessage(value));
+  const reference = (value: unknown): unknown => {
+    const quote = record(conversationMessage(value));
+    if (!quote || !isRoomMessage(quote)) return value;
+    // A reference may contain fewer fields than a full message. Do not erase
+    // a different edit, author, GIF, attachment or other substantive field.
+    const candidates = supplied.filter(message => message.id === quote.id);
+    if (candidates.length && candidates.every(message => Object.entries(quote).every(([key, field]) =>
+      isDeepStrictEqual(field, message[key])))) return { id: quote.id };
+    supplied.push(quote); // Keep an outside-history quote in full once.
+    return quote;
+  };
+  const compact = (value: unknown): unknown => {
+    const message = record(value);
+    if (!message || !isRoomMessage(message)) return value;
+    const thread = record(message.thread);
+    return {
+      ...message,
+      ...(message.reply_to === undefined ? {} : { reply_to: reference(message.reply_to) }),
+      ...(thread?.latest_reply === undefined ? {} : { thread: { ...thread, latest_reply: reference(thread.latest_reply) } }),
+    };
   };
   return [
-    `Recent bounded room context: ${JSON.stringify((request.observedContext ?? []).map(conversationMessage))}`,
-    `Source message: ${JSON.stringify(conversationMessage(request.sourceMessage))}`,
+    `Recent bounded room context: ${JSON.stringify(context.map(compact))}`,
+    `Source message: ${JSON.stringify(compact(source))}`,
     `Activation: ${JSON.stringify(request.activation)}`,
   ];
 }
