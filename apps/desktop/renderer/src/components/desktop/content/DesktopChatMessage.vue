@@ -10,6 +10,7 @@
       'has-reply': Boolean(message.replyTo),
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
+      'has-thread': context === 'timeline' && (threadIndicatorVisible || activeThreadRoot),
       'is-compact-continuation': compactWithPrevious,
       'is-ambient-system-message': isAmbientSystem || isWakeNotice,
       'is-wake-notice': isWakeNotice,

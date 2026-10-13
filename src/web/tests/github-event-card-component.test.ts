@@ -8,6 +8,8 @@ import { createServer, type ViteDevServer } from 'vite'
 let vite: ViteDevServer
 let GitHubEventCard: unknown
 let Group: any
+let Disclosure: any
+let ThreadTransition: any
 
 before(async () => {
   vite = await createServer({
@@ -17,6 +19,8 @@ before(async () => {
     server: { middlewareMode: true },
   })
   GitHubEventCard = (await vite.ssrLoadModule('/src/components/room/GitHubEventCard.vue')).default
+  Disclosure = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/DisclosurePanel.vue', import.meta.url)))).default
+  ThreadTransition = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/ThreadTransition.vue', import.meta.url)))).default
   Group = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/RoomGitHubUpdates.vue', import.meta.url)))).default
 })
 
@@ -68,7 +72,7 @@ test('whole-group collapse retains individual history state; revealing a hidden 
   const messages = [{ id: 'msg_1', timestamp: '2026-10-12T02:41:15Z' }]
   const props = { grouped: true, messages, parseEvent: () => historyEvent }
   const html = await renderToString(createSSRApp({ render: () => h(Group, props) }))
-  assert.match(html, /<button[^>]*class="github-updates-heading"[^>]*aria-expanded="true"[^>]*aria-controls=/)
+  assert.match(html, /<button[^>]*class="[^"]*github-updates-heading[^"]*"[^>]*aria-expanded="true"[^>]*aria-controls=/)
   let vm: any
   const events: string[] = []
   const app = renderer.createApp({ setup() {
@@ -121,3 +125,64 @@ for (const atBottom of [false, true]) {
     } finally { app.unmount() }
   })
 }
+
+
+test('shared disclosures give each trigger a unique controlled panel and hide collapsed actions', async () => {
+  const html = await renderToString(createSSRApp({ render: () => h('div', [false, true].map(open =>
+    h(Disclosure, { open }, { summary: () => 'Updates', default: () => h('button', 'View history') }),
+  )) }))
+  const controls = [...html.matchAll(/aria-controls="([^"]+)"/g)].map(match => match[1])
+  assert.equal(controls.length, 2)
+  assert.notEqual(controls[0], controls[1])
+  assert.match(html, new RegExp(`id="${controls[0]}"[^>]*inert[^>]*aria-hidden="true"[^>]*display:none`))
+  assert.match(html, new RegExp(`id="${controls[1]}"[^>]*aria-hidden="false"`))
+})
+
+test('disclosure transition preserves collapsed inertness, reverses from current progress, and settles keyboard changes immediately', async () => {
+  const props = reactive({ instant: false })
+  let vm: any
+  let settled = 0, measurements = 0
+  const app = renderer.createApp({ setup() {
+    vm = ThreadTransition.setup(props, { expose() {}, emit: () => settled++ })
+    return () => h('div')
+  } })
+  app.provide(ssrContextKey, { modules: new Set() }); app.mount({})
+  const originalStyle = Object.getOwnPropertyDescriptor(globalThis, 'getComputedStyle')
+  const originalMedia = Object.getOwnPropertyDescriptor(globalThis, 'matchMedia')
+  Object.defineProperty(globalThis, 'getComputedStyle', { configurable: true, value: () => ({ opacity: '1' }) })
+  Object.defineProperty(globalThis, 'matchMedia', { configurable: true, value: () => ({ matches: false }) })
+  const animations: any[] = []
+  const element: any = { style: {}, inert: false, firstElementChild: null,
+    getBoundingClientRect: () => { measurements++; return { height: 100 } },
+    animate(frames: unknown) {
+      const animation = { frames, effect: { getComputedTiming: () => ({ progress: .5 }) }, cancel() {}, onfinish: null }
+      animations.push(animation); return animation
+    },
+  }
+  try {
+    vm.leave(element, () => {})
+    assert.equal(element.inert, true)
+    vm.interrupt(element)
+    vm.enter(element, () => {})
+    assert.equal(animations[1].frames[0].height, '50px', 'reopening starts at the interrupted visual height')
+    animations[1].onfinish()
+    assert.equal(element.inert, false)
+    vm.leave(element, () => {})
+    animations[2].onfinish()
+    assert.equal(element.inert, true, 'a retained v-show panel stays inert after closing')
+    props.instant = true
+    await nextTick()
+    const before = measurements
+    vm.enter(element, () => {})
+    assert.equal(element.inert, false)
+    assert.equal(animations.length, 3)
+    assert.equal(measurements, before, 'keyboard opening needs no layout measurement or animation')
+    assert.equal(settled, 3)
+  } finally {
+    app.unmount()
+    for (const [key, descriptor] of [['getComputedStyle', originalStyle], ['matchMedia', originalMedia]] as const) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else Reflect.deleteProperty(globalThis, key)
+    }
+  }
+})

@@ -918,9 +918,12 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 .message[data-chat-role="self"] { flex-direction: row-reverse; }
 .message[data-chat-role="self"] > .message-body > .message-bubble { margin-left: auto; border-radius: 13px 4px 13px 13px; }
 .message[data-chat-role="self"] :deep(.message-meta) { justify-content: flex-end; }
-.message[data-chat-role].is-thread-open > .message-body { flex: 1; max-width: 100%; }
+.message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: min(78%, 68ch); }
 .message[data-chat-role].is-inline-reply > .message-body { max-width: calc(100% - 56px); }
-@media (max-width: 760px) { .message[data-chat-role] > .message-body { max-width: calc(100% - 64px); } }
+@media (max-width: 760px) {
+  .message[data-chat-role] > .message-body { max-width: calc(100% - 64px); }
+  .message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: calc(100% - 64px); }
+}
 </style>
 
 <style scoped>
