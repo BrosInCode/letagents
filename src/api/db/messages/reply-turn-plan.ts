@@ -21,7 +21,7 @@ export const REPLY_TURN_HOLD_STEP_MS = 90_000;
 // the deferred pass, after commit. recent_conversation is always one agent.
 export const SEQUENTIAL_REPLY_REASONS: ReadonlySet<string> = new Set(["broadcast", "small_room", "jev_routed"]);
 /**
- * Above this many agents a broadcast stays parallel: the last position would
+ * Above this many ready agents a broadcast stays parallel: the last position would
  * wait (count - 1) × the step, which stops being a conversation turn.
  */
 export const MAX_SEQUENTIAL_REPLY_AGENTS = 8;
@@ -46,14 +46,18 @@ const PARALLEL: ReplyTurnFields = {
  * when every receipt is a broadcast or small-room activation: explicit
  * mentions, replies, threads and task owners asked particular agents and
  * stay parallel, and so does a broadcast to more than
- * MAX_SEQUENTIAL_REPLY_AGENTS agents. The order is the agent keys sorted, rotated by the message
+ * MAX_SEQUENTIAL_REPLY_AGENTS ready agents. The order is the agent keys sorted, rotated by the message
  * number so the first speaker changes from message to message.
  */
-export function planReplyTurns<T extends { agent_key: string; activation_reason: string }>(
+export function planReplyTurns<T extends { agent_key: string; activation_reason: string; agent_session_id?: string }>(
   receipts: readonly T[],
-  input: { messageNumber: number; timestamp: string; sequential: boolean },
+  input: { messageNumber: number; timestamp: string; sequential: boolean; readySessionIds?: ReadonlySet<string> },
 ): Array<T & ReplyTurnFields> {
-  const count = receipts.length;
+  // Keep every routing receipt; unavailable workers must not hold up the live team.
+  const eligible = input.readySessionIds
+    ? receipts.filter(receipt => receipt.agent_session_id && input.readySessionIds!.has(receipt.agent_session_id))
+    : receipts;
+  const count = eligible.length;
   if (
     !input.sequential
     || count < 2
@@ -62,11 +66,11 @@ export function planReplyTurns<T extends { agent_key: string; activation_reason:
   ) {
     return receipts.map((receipt) => ({ ...receipt, ...PARALLEL }));
   }
-  const sorted = [...receipts].sort((left, right) =>
+  const sorted = [...eligible].sort((left, right) =>
     left.agent_key < right.agent_key ? -1 : left.agent_key > right.agent_key ? 1 : 0);
   const offset = input.messageNumber % count;
   const sentAtMs = Date.parse(input.timestamp);
-  return sorted.map((_, index) => {
+  const planned = sorted.map((_, index) => {
     const receipt = sorted[(index + offset) % count]!;
     const position = index + 1;
     return {
@@ -79,6 +83,7 @@ export function planReplyTurns<T extends { agent_key: string; activation_reason:
       hold_released_at: position === 1 ? input.timestamp : null,
     };
   });
+  return [...planned, ...receipts.filter(receipt => !eligible.includes(receipt)).map(receipt => ({ ...receipt, ...PARALLEL }))];
 }
 
 export function priorSpeakersBefore(

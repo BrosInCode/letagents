@@ -6241,7 +6241,8 @@ test("Codex custodial polling reads the selected built executable contract witho
     assert.equal(harness.launches.length, 0);
     await writeFile(entry, "throw new Error('contract-probe-owner-canary');");
     await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) => error instanceof Error
-      && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
+      && /contract could not be read/.test(error.message) && /Exit: 1; signal: none; killed: false; elapsed: \d+ms; output: 0 bytes\./.test(error.message)
+      && !error.message.includes("contract-probe-owner-canary") && !error.message.includes(entry));
     await assert.rejects(adapter.spawn(request), (error: unknown) => error instanceof Error
       && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
     await writeFile(entry, [

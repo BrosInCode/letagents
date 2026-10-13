@@ -676,13 +676,19 @@ export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
 }
 
 function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unknown> {
+  const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     const child = execFile(process.execPath, [entryPath, "--letagents-runtime-contract"], {
       encoding: "utf8", timeout: 8_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
       // The read-only contract probe needs neither user auth nor daemon authority.
       env: { ELECTRON_RUN_AS_NODE: "1", ...(isLocalRoomApi(apiUrl) ? { LETAGENTS_API_URL: LOCAL_ROOM_API_ORIGIN } : {}) },
     }, (error, stdout) => {
-      if (error) return reject(new Error("The verified LetAgents MCP runtime contract could not be read."));
+      if (error) {
+        // Never expose stderr, paths, environment or the child-process Error message.
+        const code = typeof error.code === "number" ? error.code : "unavailable";
+        const signal = error.signal === "SIGKILL" ? "SIGKILL" : error.signal ? "other" : "none";
+        return reject(new Error(`The verified LetAgents MCP runtime contract could not be read. Exit: ${code}; signal: ${signal}; killed: ${Boolean(error.killed)}; elapsed: ${Date.now() - startedAt}ms; output: ${Buffer.byteLength(stdout)} bytes.`));
+      }
       try { resolve(JSON.parse(stdout)); }
       catch { reject(new Error("The verified LetAgents MCP runtime contract is malformed.")); }
     });

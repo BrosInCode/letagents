@@ -1,6 +1,19 @@
-import type { DesktopMessageInfo, DesktopSupervisorAgentInspectorDetail, DesktopSupervisorManifestEntry } from "../../../electron/ipc-types";
+import type { DesktopMessageInfo, DesktopRoomAgentWork, DesktopSupervisorAgentInspectorDetail, DesktopSupervisorManifestEntry } from "../../../electron/ipc-types";
 import type { AgentModalTarget } from "../components/desktop/content/desktop-chat-message/types";
 import type { MessageIntervention } from "../../../shared/message-outcome";
+
+/** Execution evidence is separate from routing and observation. Work is already scoped to the open room. */
+export function messageWorkOutcome(work: readonly DesktopRoomAgentWork[], sourceMessageId: string, agentKey: string): string | null {
+  const matches = work.filter(item => item.sourceMessageId === sourceMessageId && item.agentKey === agentKey);
+  if (matches.length !== 1 || !("recorded_state" in matches[0]!.summary)) return null;
+  const state = matches[0]!.summary.recorded_state;
+  if (state === "completed_no_reply") return "Turn completed without a written reply";
+  if (state === "completed") return "Turn completed";
+  if (state === "failed") return "Turn failed";
+  if (state === "interrupted") return "Turn interrupted";
+  if (state === "lost") return "Turn outcome unavailable";
+  return null;
+}
 
 /** A receipt's durable key can select only one agent in this room, never a matching display name. */
 export function messageOutcomeTarget(agent: DesktopMessageInfo["agentsAsked"][number], messageId: string,

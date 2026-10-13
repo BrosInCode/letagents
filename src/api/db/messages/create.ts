@@ -32,7 +32,7 @@ import {
 import { WAKE_NOTICE_SOURCE } from "../../../../shared/wake-rules.mjs";
 import { RequestValidationError } from "../../validation-error.js";
 import { chooseAnsweringSession, chooseSessionForReply } from "../../rooms/answering-session.js";
-import { getSessionConnections } from "./session-connections.js";
+import { getReplyTurnReadySessions, getSessionConnections } from "./session-connections.js";
 import { db } from "../client.js";
 import { rooms, room_settings, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
@@ -70,7 +70,6 @@ import {
 import { enqueueDesktopPushNotifications } from "../../notifications/enqueue.js";
 import {
   finishReplyTurnsTx,
-  MAX_SEQUENTIAL_REPLY_AGENTS,
   planReplyTurns,
   queueReplyTurnWakes,
   releaseAgentReplyTurnHoldsTx,
@@ -911,7 +910,6 @@ export async function addMessageWithCreateStatus(
       // on (NULL is parallel). The setting is read only when the receipts
       // could be sequenced at all.
       const sequenceCandidate = routedReceipts.length >= 2
-        && routedReceipts.length <= MAX_SEQUENTIAL_REPLY_AGENTS
         && routedReceipts.every((receipt) => SEQUENTIAL_REPLY_REASONS.has(receipt.activation_reason));
       const [replyOrder] = sequenceCandidate
         ? await tx.select({ order: room_settings.agent_reply_order })
@@ -921,6 +919,9 @@ export async function addMessageWithCreateStatus(
         messageNumber: createdMessage.number,
         timestamp: createdMessage.timestamp,
         sequential: sequenceCandidate && replyOrder?.order === "sequential",
+        readySessionIds: replyOrder?.order === "sequential"
+          ? await getReplyTurnReadySessions(tx, roomId, routedReceipts.map(receipt => receipt.agent_session_id))
+          : undefined,
       });
       if (receiptRowsToInsert.length > MAX_ACCOUNT_ROUTING_TARGETS) {
         throw new RequestValidationError("Message fanout exceeds the bounded desktop routing contract.");

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { createSSRApp } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer } from "vite";
-import { messageInterventionLabel, messageOutcomeTarget, messageOutcomeDuration, messageTriggerLabel } from "../src/domain/message-outcome";
+import { messageInterventionLabel, messageOutcomeTarget, messageOutcomeDuration, messageTriggerLabel, messageWorkOutcome } from "../src/domain/message-outcome";
 import { resolveSupervisorEntryId } from "../src/domain/agent-inspector-identity";
 
 test("message activity targets exact local agent identity and preserves the triggering message", () => {
@@ -19,6 +19,18 @@ test("message activity targets exact local agent identity and preserves the trig
   assert.equal(messageOutcomeTarget({ ...receipt, agentKey: "Stone" }, "human-message", "room", [entry]), null);
   assert.equal(messageOutcomeTarget({ ...receipt, agentKey: "Stone" }, "human-message", "room", [{ ...entry, agentKey: "Stone" }]), null);
   assert.equal(messageOutcomeTarget(receipt, "", "room", [entry]), null);
+});
+
+test("message info shows exact terminal work without inventing observation or successful silence", () => {
+  const work = { sourceMessageId: "msg_1", agentKey: "owner/stone", summary: { recorded_state: "completed_no_reply" } } as any;
+  assert.equal(messageWorkOutcome([work], "msg_1", "owner/stone"), "Turn completed without a written reply");
+  assert.equal(messageWorkOutcome([work], "msg_2", "owner/stone"), null);
+  assert.equal(messageWorkOutcome([work], "msg_1", "other/stone"), null);
+  assert.equal(messageWorkOutcome([work, work], "msg_1", "owner/stone"), null);
+  for (const recorded_state of ["failed", "interrupted", "lost"]) {
+    assert.doesNotMatch(messageWorkOutcome([{ ...work, summary: { recorded_state } }], "msg_1", "owner/stone")!, /completed/);
+  }
+  assert.equal(messageWorkOutcome([{ ...work, summary: { version: 1, availability: "cleared" } }], "msg_1", "owner/stone"), null);
 });
 
 test("duration requires both valid work boundaries and unknown triggers remain unknown", () => {

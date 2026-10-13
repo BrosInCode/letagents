@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
@@ -44,6 +45,18 @@ async function seed(name = "routing-room", count = 4) {
   });
   const enable = (enabled: boolean) => client!.pool.query("UPDATE rooms SET jev_routing_enabled = $2 WHERE id = $1", [room.id, enabled]);
   return { room, ownerId, sessions, send, enable };
+}
+
+async function connect(a: Awaited<ReturnType<typeof seed>>, indices = a.sessions.map((_, i) => i)) {
+  for (const i of indices) {
+    const session = a.sessions[i]!;
+    await api!.markRoomAgentDeliveryConnected({
+      room_id: a.room.id, actor_label: session.actor_label, display_name: session.display_name,
+      agent_key: session.agent_key, agent_session_id: session.session_id, session_kind: "worker",
+      transport: "long_poll", delivery_instance_id: `poll-${session.session_id}`,
+      credential_fence: { kind: "session_token", token_hash: createHash("sha256").update(session.session_token).digest("hex") },
+    });
+  }
 }
 
 function hint(keys: string[]): import("../db/messages/jev-routing-hint.js").JevConversationRoutingHint {
@@ -236,6 +249,7 @@ test("a Jev election answers in turns only in a room set to sequential", skip, a
   for (const order of ["sequential", null] as const) {
     const a = await seed(`turns-${order ?? "default"}`);
     if (order) await settings.setRoomAgentReplyOrder(a.room.id, order);
+    await connect(a);
     const before = await a.send("@Agent0 hello");
     await a.enable(true);
     const asked = await a.send("Which agents can review the design?");
@@ -275,9 +289,27 @@ test("a Jev election answers in turns only in a room set to sequential", skip, a
   }
 });
 
+test("deferred Jev sequencing checks current worker delivery without dropping offline recipients", skip, async () => {
+  const settings = await import("../db/room-settings.js");
+  const a = await seed("turns-offline");
+  await settings.setRoomAgentReplyOrder(a.room.id, "sequential");
+  await a.enable(true);
+  await connect(a, [1, 2, 3]);
+  const asked = await a.send("Which agents can review the design?");
+  // A worker pauses after send but before Jev finishes.
+  await client!.pool.query("UPDATE room_agent_delivery_sessions SET active_connection_count=0 WHERE agent_session_id=$1", [a.sessions[1]!.session_id]);
+  const [job] = await worker!.claimJevRoutingJobs();
+  await worker!.completeJevRoutingJob(job!, hint(a.sessions.map(s => s.agent_key)));
+  const rows = (await client!.pool.query("SELECT agent_key, turn_position, turn_count FROM message_agent_receipts WHERE message_room_id=$1 AND message_number=$2 ORDER BY turn_position NULLS LAST", [a.room.id, Number(asked.message.id.slice(4))])).rows;
+  assert.equal(rows.length, 4);
+  assert.deepEqual(rows.map(row => row.turn_position), [1, 2, null, null]);
+  assert.ok(rows.slice(0, 2).every(row => row.turn_count === 2 && a.sessions.slice(2).some(s => s.agent_key === row.agent_key)));
+});
+
 test("a mention sent while Jev is still deciding is not hidden behind the Jev turn", skip, async () => {
   const settings = await import("../db/room-settings.js");
   const a = await seed("turns-mention");
+  await connect(a);
   await settings.setRoomAgentReplyOrder(a.room.id, "sequential");
   const before = await a.send("@Agent0 hello");
   await a.enable(true);
