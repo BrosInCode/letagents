@@ -9,7 +9,7 @@ import { EventEmitter } from "node:events";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { withDaemonMaintenanceOperation, readDaemonMaintenance, daemonMaintenancePath, DAEMON_MAINTENANCE_MESSAGE } from "../../../../shared/daemon-maintenance.mjs";
-import { forceStopDaemon } from "./force-daemon-restart.js";
+import { forceStopDaemon, waitForConfirmedDaemonExit } from "./force-daemon-restart.js";
 
 import type {
   DesktopSupervisorActivityEvent,
@@ -533,7 +533,12 @@ export class SupervisorDaemonClient {
         }
         await this.request("daemon.prepare_handoff", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION,
           this.requestTimeoutMs, false, undefined, undefined, true);
-        const stopped = await this.waitForRetiredProcessChange(target, this.terminateTimeoutMs);
+        // macOS may briefly lose process identity during clean exit. Wait for
+        // positive exit evidence without signalling or accepting a later match.
+        const stopped = await waitForConfirmedDaemonExit({
+          observe: identity => this.observeRetiredDaemon(identity), now: Date.now,
+          delay, pollIntervalMs: this.processPollIntervalMs,
+        }, target, this.observeRetiredDaemon(target), this.terminateTimeoutMs);
         if (!["absent", "zombie"].includes(stopped.kind) || !await this.isSocketReleased(SUPERVISOR_DAEMON_PROTOCOL_VERSION, true)) {
           throw new Error("The maintenance service has not stopped. Supervision remains paused.");
         }
