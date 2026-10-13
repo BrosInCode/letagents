@@ -622,6 +622,48 @@ test("activation routing leaves unaddressed messages unclear in the advisory sli
   );
 });
 
+test("agent explanations and quoted broadcast examples do not address the whole room", () => {
+  const resolve = createGlobalAgentAddressResolver([worker, otherWorker]);
+  for (const text of [
+    "I'd pay that cost so we don't have to migrate everyone's notes later.",
+    "Everyone’s notes should remain recoverable.",
+    'A human writes "Everyone," names one agent, or replies inside a thread.',
+    'Test “Everyone,” a named recipient, an existing thread, and duplicate delivery.',
+    "Separately, ask everyone for five explained scenarios.",
+    "All agents receive shared context.",
+    '"Everyone, please review this." is an example message.',
+    '> Everyone, please review this.\nThat is a quoted example.',
+    '```text\nEveryone, please review this.\n```',
+    "Everyone else stay quiet. I am documenting the result.",
+  ]) {
+    const message = { id: "msg_explanation", source: "agent", sender: otherWorker.actor_label, text };
+    assert.equal(resolve(message).broadcast, false, text);
+    assert.deepEqual(decideAgentMessageActivation(message, worker), {
+      decision: "unclear", reason: "unaddressed", addressed: false,
+    }, text);
+  }
+});
+
+test("agents can still deliberately address the room and humans keep natural broadcast routing", () => {
+  const resolve = createGlobalAgentAddressResolver([worker, otherWorker]);
+  for (const text of [
+    "Everyone, please review the new evidence.",
+    "All agents: what risk have we missed?",
+    "Hey everyone, can you help?",
+    "Both of you please share your views.",
+    "The evidence is ready. @everyone please review it.",
+    "@agents what do you think?",
+    "@room please check the proposal.",
+  ]) {
+    const message = { id: "msg_address", source: "agent", sender: otherWorker.actor_label, text };
+    assert.equal(resolve(message).broadcast, true, text);
+    assert.equal(decideAgentMessageActivation(message, worker).reason, "broadcast", text);
+  }
+  const human = { id: "msg_human", source: "browser", sender: "EmmyMay", text: "I'd like everyone to explain their priorities." };
+  assert.equal(resolve(human).broadcast, true);
+  assert.equal(decideAgentMessageActivation(human, worker).reason, "broadcast");
+});
+
 test("activation routing sends unaddressed work follow-ups to the active task owner", () => {
   for (const text of ["okay try again", "update it", "run tests", "fix tests"]) {
     assert.deepEqual(
