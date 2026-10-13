@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { EventEmitter } from "node:events";
 import { replyTurnGuidance } from "../../shared/activation-routing.js";
@@ -54,6 +55,12 @@ async function seed(count = 3, replyOrder: "sequential" | null = "sequential") {
     actor_label: `Agent${i}`, agent_key: `${ownerId}/agent${i}`, display_name: `Agent${i}`,
     owner_account_id: ownerId, owner_label: ownerId, ide_label: "Agent",
   }));
+  for (const session of sessions) await api!.markRoomAgentDeliveryConnected({
+    room_id: room.id, actor_label: session.actor_label, display_name: session.display_name,
+    agent_key: session.agent_key, agent_session_id: session.session_id, session_kind: "worker",
+    transport: "long_poll", delivery_instance_id: `poll-${session.session_id}`,
+    credential_fence: { kind: "session_token", token_hash: createHash("sha256").update(session.session_token).digest("hex") },
+  });
   const send = (text: string, extra = {}) => api!.addMessageWithCreateStatus(room.id, ownerId, text, {
     source: "browser", account_id: ownerId, ...extra,
   });
@@ -102,6 +109,56 @@ async function seed(count = 3, replyOrder: "sequential" | null = "sequential") {
 async function order(a: Awaited<ReturnType<typeof seed>>, messageId: string): Promise<number[]> {
   return (await a.turns(messageId)).map((row) => a.sessions.findIndex((session) => session.agent_key === row.agent_key));
 }
+
+test("paused, desktop-only, stale and retired delivery credentials cannot block live reply turns", skip, async () => {
+  const a = await seed(7);
+  const ids = a.sessions.map(s => s.session_id);
+  await client!.pool.query("UPDATE room_agent_delivery_sessions SET active_connection_count=0 WHERE agent_session_id=$1", [ids[0]]);
+  // A room window can keep its summary fresh without a worker poll.
+  await client!.pool.query("DELETE FROM room_agent_delivery_instances WHERE delivery_key=$1", [`agent_session:${ids[1]}`]);
+  await client!.pool.query("UPDATE room_agent_delivery_instances SET updated_at=now()-interval '2 minutes' WHERE delivery_key=$1", [`agent_session:${ids[2]}`]);
+  await client!.pool.query("UPDATE room_agent_delivery_instances SET credential_fingerprint='retired' WHERE delivery_key=$1", [`agent_session:${ids[3]}`]);
+  await client!.pool.query("UPDATE room_agent_sessions SET token_hash='rotated' WHERE session_id=$1", [ids[4]]);
+  const sent = await a.send("@everyone what is our next step?");
+  const rows = await a.turns(sent.message.id);
+  assert.equal(rows.length, 7, "all routing receipts survive");
+  assert.deepEqual(rows.slice(0, 2).map(row => [row.turn_position, row.turn_count, row.released]), [[1, 2, true], [2, 2, false]]);
+  assert.deepEqual(new Set(rows.slice(0, 2).map(row => row.agent_key)), new Set(a.sessions.slice(5).map(s => s.agent_key)));
+  assert.ok(rows.slice(2).every(row => row.turn_position === null));
+  const first = a.sessions.findIndex(s => s.agent_key === rows[0]!.agent_key);
+  assert.ok((await a.read(first)).some(message => message.id === sent.message.id), "first live worker sees the message immediately");
+});
+
+test("offline room history does not push a small live team past the turn limit", skip, async () => {
+  const a = await seed(10);
+  await client!.pool.query("UPDATE room_agent_delivery_sessions SET active_connection_count=0 WHERE agent_session_id=ANY($1::text[])", [a.sessions.slice(0, 8).map(s => s.session_id)]);
+  const sent = await a.send("@everyone what should we do next?");
+  const rows = await a.turns(sent.message.id);
+  assert.equal(rows.length, 10);
+  assert.deepEqual(rows.filter(row => row.turn_position !== null).map(row => row.turn_count), [2, 2]);
+});
+
+test("a live bearer poll stays ready after a desktop token heartbeat, but revoked credentials do not", skip, async () => {
+  const { getReplyTurnReadySessions } = await import("../db/messages/session-connections.js");
+  const a = await seed(2);
+  const session = a.sessions[0]!;
+  const tokenFence = { kind: "session_token" as const, token_hash: createHash("sha256").update(session.session_token).digest("hex") };
+  const fields = { room_id: a.room.id, actor_label: session.actor_label, display_name: session.display_name,
+    agent_key: session.agent_key, agent_session_id: session.session_id, session_kind: "worker" as const };
+  const now = new Date().toISOString();
+  await client!.db.insert(schema!.room_agent_session_bearers).values({
+    bearer_id: "trial-bearer", session_id: session.session_id, room_id: a.room.id,
+    token_hash: "trial-bearer-token", generation: 77, capabilities: [], issued_at: now, created_at: now,
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  await client!.pool.query("DELETE FROM room_agent_delivery_instances WHERE delivery_key=$1", [`agent_session:${session.session_id}`]);
+  await api!.markRoomAgentDeliveryConnected({ ...fields, transport: "long_poll", delivery_instance_id: "bearer-poll",
+    credential_fence: { kind: "bearer", bearer_id: "trial-bearer", generation: 77 } });
+  await api!.upsertDesktopRoomAgentDeliveryHeartbeat({ ...fields, credential_fence: tokenFence });
+  assert.ok((await getReplyTurnReadySessions(client!.db, a.room.id, [session.session_id])).has(session.session_id));
+  await client!.pool.query("UPDATE room_agent_session_bearers SET revoked_at=now() WHERE bearer_id='trial-bearer'");
+  assert.equal((await getReplyTurnReadySessions(client!.db, a.room.id, [session.session_id])).size, 0);
+});
 
 test("a broadcast to three agents is sequenced, rotated, and hidden from later positions", skip, async () => {
   const a = await seed();

@@ -499,7 +499,10 @@ function isLikelyAgentMentionHandle(handle) {
     return !NON_AGENT_AT_HANDLES.has(firstSegment);
 }
 function hasBroadcastAddress(text) {
-    const raw = typeof text === "string" ? text.toLowerCase() : "";
+    // Excluding the rest of the room is not addressing it. Keep genuine
+    // invitations elsewhere in the message, including "or any agent".
+    const raw = (typeof text === "string" ? text.toLowerCase() : "")
+        .replace(/\b(?:everyone else|all other agents|the other agents)[,\s]+(?:please\s+)?(?:(?:(?:can|may|should)\s+)?(?:just\s+)?(?:stay|remain|keep)\s+(?:quiet|silent)|(?:should not|shouldn't|does not|doesn't|need not|needn't|do not|don't)\s+(?:need to\s+)?(?:reply|respond)|(?:can\s+)?(?:sit this out|skip this|wait))\b/g, "");
     return /\b(everyone|all agents|you guys|both of you|any agent|whoever owns this)\b/.test(raw);
 }
 function isTaskOwnerFollowUp(text) {

@@ -594,6 +594,19 @@ test("activation routing marks broadcasts as fan-out activations", () => {
   );
 });
 
+test("quiet instructions for everyone else do not broadcast a directed request", () => {
+  const resolve = createGlobalAgentAddressResolver([worker, otherWorker]);
+  for (const ending of ["Everyone else can stay quiet.", "Everyone else should remain silent.", "Everyone else doesn't need to reply.", "Everyone else can sit this out.", "Everyone else stay quiet.", "Everyone else, please stay quiet.", "Everyone else should not reply."]) {
+    const message = { id: "msg_1", sender: "EmmyMay", text: `@CometLively please share your view. ${ending}` };
+    assert.equal(resolve(message).broadcast, false);
+    assert.deepEqual([...resolve(message).explicitMentionKeys], [worker.agent_key]);
+    assert.equal(decideAgentMessageActivation(message, worker).reason, "explicit_mention");
+    assert.equal(decideAgentMessageActivation(message, otherWorker).reason, "explicit_other_mention");
+  }
+  assert.equal(resolve({ text: "@everyone first read the context. Everyone else can stay quiet." }).broadcast, true);
+  assert.equal(resolve({ text: "@CometLively or any agent can help. Everyone else can stay quiet." }).broadcast, true);
+});
+
 test("activation routing leaves unaddressed messages unclear in the advisory slice", () => {
   assert.deepEqual(
     decideAgentMessageActivation({

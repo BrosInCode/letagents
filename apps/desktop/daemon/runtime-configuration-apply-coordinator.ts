@@ -112,6 +112,7 @@ export type RuntimeConfigurationApplyCoordinatorOptions = {
 /** Applies a saved configuration only by replacing a provably idle runtime. */
 export class RuntimeConfigurationApplyCoordinator {
   private readonly desiredContracts = new Map<string, string>();
+  private readonly pendingDesiredContracts = new Map<string, Promise<string | null>>();
   private readonly admissionRefreshRequested = new WeakMap<object, ProviderInstallationToken>();
   private readonly ownerSetupEndTries = new WeakMap<ProviderInstallationToken, { all: number; unexplained: number }>();
   /** Since when each runtime's delivery has been blocked by its record, and how often it could not be replaced yet. */
@@ -335,11 +336,23 @@ export class RuntimeConfigurationApplyCoordinator {
   }
 
   private async desiredContract(apiUrl: string): Promise<string | null> {
-    const contract = this.desiredContracts.get(apiUrl) ?? await this.options.provider!.describeManagedLaunchContract!({
+    const cached = this.desiredContracts.get(apiUrl);
+    if (cached) return cached;
+    const pending = this.pendingDesiredContracts.get(apiUrl);
+    if (pending) return pending;
+    // Cold delivery/convergence checks can arrive together. Share their read-only
+    // probe; each actual replacement still verifies its sealed runtime afresh.
+    const reading = Promise.resolve().then(() => this.options.provider!.describeManagedLaunchContract!({
       provider: "codex", apiUrl, devMcpServerEntryPath: devMcpServerEntryFromEnv() ?? undefined,
-    });
-    if (contract) this.desiredContracts.set(apiUrl, contract);
-    return contract;
+    }));
+    this.pendingDesiredContracts.set(apiUrl, reading);
+    try {
+      const contract = await reading;
+      if (contract) this.desiredContracts.set(apiUrl, contract);
+      return contract;
+    } finally {
+      this.pendingDesiredContracts.delete(apiUrl);
+    }
   }
 
   async refreshManaged(entryId: string): Promise<void | ManagedRefreshRetry> {

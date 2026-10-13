@@ -194,6 +194,7 @@
       :message-id="messageInfoTargetId ?? ''"
       :invoker-context="messageInfoInvokerContext"
       :supervisor-entries="roomSupervisorEntries"
+      :room-agent-work="roomAgentWorkStatus === 'ready' ? roomAgentWork : []"
       @close="messageInfoTargetId = null"
       @scroll-to-message="revealMessageFromInfo"
       @inspect-agent="emit('open-agent-detail', $event)"

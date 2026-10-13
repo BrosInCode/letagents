@@ -1771,6 +1771,50 @@ test("managed delivery admission coalesces one demand but permits later wakes on
   assert.equal(env.convergenceLifecycleStates.length, 2);
 });
 
+test("concurrent cold admissions share one desired contract probe and retry after failure", async () => {
+  const env = managedHarness();
+  env.state.receipt = "a".repeat(64);
+  let release!: (contract: string) => void;
+  let fail!: (error: Error) => void;
+  env.options.provider!.describeManagedLaunchContract = () => {
+    env.state.desiredReads++;
+    return new Promise<string>((resolve, reject) => { release = resolve; fail = reject; });
+  };
+  const agent = deliveryAgentFor(installation);
+  const first = env.coordinator.canAdmitManagedDelivery(agent, {});
+  const second = env.coordinator.canAdmitManagedDelivery(agent, {});
+  const failed = Promise.allSettled([first, second]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(env.state.desiredReads, 1);
+  fail(new Error("probe unavailable"));
+  assert.ok((await failed).every(result => result.status === "rejected"));
+  const retry = env.coordinator.canAdmitManagedDelivery(agent, {});
+  const sharedRetry = env.coordinator.canAdmitManagedDelivery(agent, {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(env.state.desiredReads, 2);
+  release("a".repeat(64));
+  assert.deepEqual(await Promise.all([retry, sharedRetry]), [true, true]);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, {}), true);
+  assert.equal(env.state.desiredReads, 2);
+});
+
+test("desired contract probes stay separate for local and hosted Room routes", async () => {
+  const env = managedHarness();
+  env.state.receipt = "a".repeat(64);
+  const routes: string[] = [];
+  const releases: Array<() => void> = [];
+  env.options.provider!.describeManagedLaunchContract = ({ apiUrl }) => {
+    routes.push(apiUrl);
+    return new Promise(resolve => releases.push(() => resolve("a".repeat(64))));
+  };
+  const agent = deliveryAgentFor(installation);
+  const reads = ["https://letagents.chat", "letagents-local://rooms"].map(apiUrl => env.coordinator.canAdmitManagedDelivery({ ...agent, apiUrl }, {}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(routes, ["https://letagents.chat", "letagents-local://rooms"]);
+  releases.forEach(release => release());
+  assert.deepEqual(await Promise.all(reads), [true, true]);
+});
+
 test("an older admission read cannot overwrite or consume a newer delivery demand", async () => {
   const env = managedHarness();
   const agent = deliveryAgentFor(installation);

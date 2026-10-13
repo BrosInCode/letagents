@@ -19,7 +19,7 @@ import { message_agent_receipts, messages, room_agent_sessions, room_settings, r
 import type { MessageRecipientAgentTarget } from "../types.js";
 import { MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { chooseAnsweringSession } from "../../rooms/answering-session.js";
-import { getSessionConnections } from "./session-connections.js";
+import { getReplyTurnReadySessions, getSessionConnections } from "./session-connections.js";
 import { planReplyTurns, releaseAgentReplyTurnHoldsTx } from "./reply-turns.js";
 
 /** Rooms above this size fall back to deterministic routing rather than ship a huge state. */
@@ -320,6 +320,9 @@ export async function applyDeferredJevReceipts(
     messageNumber: plan.message.number,
     timestamp: visible.sent_at,
     sequential: replyOrder?.order === "sequential",
+    readySessionIds: replyOrder?.order === "sequential"
+      ? await getReplyTurnReadySessions(tx, plan.roomId, rows.map(row => row.agent_session_id))
+      : undefined,
   });
   const inserted = await tx
     .insert(message_agent_receipts)

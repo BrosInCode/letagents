@@ -1,8 +1,9 @@
 import { and, eq, sql } from "drizzle-orm";
 
-import { getAgentPresenceFreshness, isAgentDeliverySessionReachable } from "../../../shared/agent-presence.js";
-import { room_agent_delivery_sessions } from "../schema.js";
+import { ACTIVE_AGENT_DELIVERY_WINDOW_MS, getAgentPresenceFreshness, isAgentDeliverySessionReachable } from "../../../shared/agent-presence.js";
+import { room_agent_delivery_instances, room_agent_delivery_sessions, room_agent_session_bearers, room_agent_sessions } from "../schema.js";
 import type { db } from "../client.js";
+import { bearerDeliveryCredentialFingerprint, sessionTokenDeliveryCredentialFingerprint } from "../../rooms/agent-credential-events.js";
 
 type Executor = Pick<typeof db, "select">;
 
@@ -52,4 +53,44 @@ export async function getSessionConnections(
     }
   }
   return { reachable, connected };
+}
+
+/** A blocking turn needs a current worker poll/SSE lease, not just an open desktop window. */
+export async function getReplyTurnReadySessions(
+  executor: Executor, roomId: string, sessionIds: readonly string[], nowMs = Date.now(),
+): Promise<Set<string>> {
+  if (sessionIds.length === 0) return new Set();
+  const delivery = room_agent_delivery_sessions;
+  const instance = room_agent_delivery_instances;
+  const session = room_agent_sessions;
+  const bearer = room_agent_session_bearers;
+  const now = new Date(nowMs).toISOString();
+  const cutoff = new Date(nowMs - ACTIVE_AGENT_DELIVERY_WINDOW_MS).toISOString();
+  const deliveryKeys = JSON.stringify(sessionIds.map(id => `agent_session:${id}`));
+  const rows = await executor.select({
+    session_id: session.session_id, token_hash: session.token_hash,
+    fingerprint: instance.credential_fingerprint,
+    bearer_id: bearer.bearer_id, generation: bearer.generation,
+  }).from(delivery)
+    .innerJoin(session, and(eq(session.room_id, delivery.room_id), eq(session.session_id, delivery.agent_session_id)))
+    .innerJoin(instance, and(
+      eq(instance.room_id, delivery.room_id), eq(instance.delivery_key, delivery.delivery_key),
+      sql`${instance.transport} IN ('long_poll', 'sse')`, sql`${instance.updated_at} >= ${cutoff}::timestamptz`,
+    ))
+    .leftJoin(bearer, and(
+      eq(bearer.session_id, session.session_id),
+      sql`${bearer.revoked_at} IS NULL`, sql`${bearer.expires_at} > ${now}::timestamptz`,
+    ))
+    .where(and(
+      eq(delivery.room_id, roomId),
+      sql`${delivery.delivery_key} IN (SELECT value FROM jsonb_array_elements_text(${deliveryKeys}::jsonb))`,
+      eq(session.session_kind, "worker"), sql`${session.ended_at} IS NULL`,
+      sql`${delivery.active_connection_count} > 0`, sql`${delivery.updated_at} >= ${cutoff}::timestamptz`,
+    ));
+  // Desktop heartbeats and worker polls may use different current credentials.
+  // Validate the actual connection, not whichever credential last wrote the summary.
+  return new Set(rows.filter(row => row.fingerprint === sessionTokenDeliveryCredentialFingerprint(row.token_hash)
+    || (row.bearer_id !== null && row.generation !== null
+      && row.fingerprint === bearerDeliveryCredentialFingerprint(row.bearer_id, row.generation)))
+    .map(row => row.session_id));
 }
