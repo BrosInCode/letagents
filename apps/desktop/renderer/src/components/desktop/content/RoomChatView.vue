@@ -54,6 +54,7 @@
           :initial-scroll-position="initialScrollPosition"
           @load-older="emit('load-older')"
           @open-agent="openAgentModal"
+          @open-person="(target, position) => emit('open-person', target, position)"
           @post-agent-answer-now="(agentId, sourceMessageId) => emit('post-agent-answer-now', agentId, sourceMessageId)"
           @open-image="openImageViewer"
           @open-thread="toggleThread"
@@ -111,6 +112,7 @@
               @close="closeThread"
               @open-image="openImageViewer"
               @open-agent="openAgentModal"
+              @open-person="(target, position) => emit('open-person', target, position)"
               @open-github-event="emit('open-github-event', $event)"
               @open-task="emit('open-task', $event)"
               @jump-message="jumpToMessage"
@@ -232,6 +234,8 @@ import {
   type ManagedAgentWorkIndicator,
 } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
+import type { PersonTarget } from "../../../domain/person-target";
+import type { PersonMenuPosition } from "../../../domain/person-context-menu";
 import type { AgentCorrectionTarget, ComposerCorrectionHandoff } from "../../../domain/agent-inspector";
 import {
   isGitHubRoomMessage,
@@ -327,6 +331,7 @@ const emit = defineEmits<{
   "open-reasoning": [sessionId: string];
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
   "open-agent-detail": [target: AgentModalTarget];
+  "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
   "open-add-agent": [];
   "open-permission-detail": [approval: ManagedAgentPermissionApproval];

@@ -55,6 +55,7 @@
           @scroll-to-message="revealOrScrollToMessage"
           @open-image="$emit('open-image', $event)"
           @open-agent="$emit('open-agent', $event)"
+          @open-person="(target, position) => $emit('open-person', target, position)"
           @open-github-event="$emit('open-github-event', $event)"
           @open-task="$emit('open-task', $event)"
           @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
@@ -215,6 +216,8 @@ import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { getSenderColor, parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
+import type { PersonTarget } from "../../../../domain/person-target";
+import type { PersonMenuPosition } from "../../../../domain/person-context-menu";
 import { compareRoomMessages } from "../room-shell/messages";
 import { createMessageProviderLabelResolver } from "../../../../domain/agent-provider";
 import { getAppendedMessageIds } from "./message-arrival";
@@ -275,6 +278,7 @@ const emit = defineEmits<{
   "load-older": [];
   "open-workspace": [work: DesktopRoomAgentWork];
   "open-agent": [target: AgentModalTarget];
+  "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];
   "open-image": [imageId: string];
   "open-thread": [messageId: string];

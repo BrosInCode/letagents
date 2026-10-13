@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mapRoomArtifactPayload, mapRoomArtifacts, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
+import { mapRecentActivity, mapRoomArtifactPayload, mapRoomArtifacts, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
 import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
 import { readySourceStates } from "../main/rooms/snapshot/snapshots.js";
 import { canonicalJoinedRoomIdentifier, roomInfoCacheKey, roomInfoCacheKeys } from "../main/rooms/room-info.js";
@@ -426,4 +426,24 @@ test("mapSnapshotData carries per-source states through unchanged", () => {
   assert.equal(snapshot.sourceStates.githubEvents.status, "error");
   assert.equal(snapshot.sourceStates.messages.status, "ready");
   assert.equal(snapshot.sourceStates.messages.error, null);
+});
+
+test("mapRecentActivity maps the participant GitHub login and leaves it null when absent", () => {
+  const entries = mapRecentActivity({
+    entries: [
+      {
+        id: "with_login",
+        participant: { kind: "human", display_name: "Ana", github_login: "ana-lee" },
+        first_seen_at: "2026-05-12T10:00:00.000Z",
+      },
+      {
+        id: "without_login",
+        participant: { kind: "agent", display_name: "Owl" },
+        first_seen_at: "2026-05-12T10:05:00.000Z",
+      },
+    ],
+  } as never);
+
+  assert.equal(entries[0]?.participantGithubLogin, "ana-lee");
+  assert.equal(entries[1]?.participantGithubLogin, null);
 });

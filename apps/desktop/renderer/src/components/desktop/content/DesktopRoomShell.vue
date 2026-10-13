@@ -142,7 +142,7 @@
       @stop-agent-turn="stopAgentTurnForApproval"
       @post-agent-answer-now="postAgentAnswerNow"
       @open-events="openEventsTab"
-      @open-github-event="openGitHubEventFromChat"
+      @open-github-event="openGitHubEventFromChat" @open-person="(target, position) => personActions?.open(target, position)"
       @open-task="openBoardTask"
       @dismiss-event-preview="dismissComposerGitHubEventPreview"
       @scroll-position="rememberChatScrollPosition"
@@ -218,7 +218,7 @@
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetailRequest"
-        @open-agent-correction="openAgentCorrectionOrInspector"
+        @open-agent-correction="openAgentCorrectionOrInspector" @open-person="(target, position, action) => personActions?.open(target, position, action)" :viewer-login="viewerLogin"
         @refresh-room="emit('refresh-room')"
         @reveal-message="revealRecordedWorkMessage"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
@@ -301,6 +301,7 @@
       @purge="purgeAgentInspectorAgent"
     />
 
+    <PersonActionsHost ref="personActions" :viewer-login="viewerLogin" :room-identifier="room.identifier" @open-messages-with="emit('open-messages-with', $event)" @work-open="selectedAgentDetailRequest && closeAgentDetail(); selectedReasoningSessionId && closeReasoningInspector()" />
     <AddAgentModal
       :room-storage-mode="storage.effectiveMode"
       :open="addAgentModalOpen"
@@ -455,6 +456,7 @@ import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
+import PersonActionsHost from "./PersonActionsHost.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import { canManageRoomBoard } from "./room-board/board-presentation";
@@ -533,6 +535,7 @@ const props = defineProps<{
 }>();
 const { pushActionToast } = useDesktopActionToasts();
 const notifiedManagedAgentFailures = new Set<string>();
+const personActions = ref<InstanceType<typeof PersonActionsHost> | null>(null);
 
 const emit = defineEmits<{
   "attention-opened": [];
@@ -551,7 +554,7 @@ const emit = defineEmits<{
   /** Placeholder until the daemon exposes a receipt retry control endpoint. */
   "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
   "message-reveal-unavailable": [messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"];
-  "open-inbox": [];
+  "open-inbox": []; "open-messages-with": [target: { login: string; displayName: string; avatarUrl: string | null }];
 }>();
 
 const roomRef = toRef(props, "room");
@@ -1941,7 +1944,7 @@ async function openAgentDetailFromParticipant(target: AgentModalTarget): Promise
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
   agentInspectorInitialTab.value = inspectorInitialTab(request.target);
   selectedAgentDetailRequestVersion.value += 1;
-  selectedAgentDetailRequest.value = request;
+  selectedAgentDetailRequest.value = request; personActions.value?.close();
   agentInspectorActionState.value = null;
   releaseAgentCorrectionRequest({ restoreComposerText: true });
   agentInspectorWorkRequestToken += 1;
