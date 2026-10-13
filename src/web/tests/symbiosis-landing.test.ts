@@ -109,11 +109,14 @@ test('Swarm lifecycle stages mirror the 7 canonical task board statuses', () => 
   )
 })
 
-test('Three.js SymbiosisCanvas implements custom GLSL shaders, observer lifecycle, and reduced-motion support', () => {
+test('Three.js SymbiosisCanvas implements dual-hemisphere symbiote core, custom GLSL shaders, observer lifecycle, and reduced-motion support', () => {
   const canvasSource = readLandingFile('../src/components/landing/SymbiosisCanvas.vue')
   assert.match(canvasSource, /import \* as THREE from 'three'/)
   assert.match(canvasSource, /new THREE\.WebGLRenderer/)
+  assert.match(canvasSource, /new THREE\.IcosahedronGeometry/)
   assert.match(canvasSource, /new THREE\.ShaderMaterial/)
+  assert.match(canvasSource, /CORE_VERTEX_SHADER/)
+  assert.match(canvasSource, /CORE_FRAGMENT_SHADER/)
   assert.match(canvasSource, /ResizeObserver/)
   assert.match(canvasSource, /IntersectionObserver/)
   assert.match(canvasSource, /prefers-reduced-motion:\s*reduce/)
@@ -121,6 +124,7 @@ test('Three.js SymbiosisCanvas implements custom GLSL shaders, observer lifecycl
 
 test('Landing sections expose fixed-navbar-safe anchors and mount in Landing.vue', () => {
   const landingSource = readLandingFile('../src/pages/Landing.vue')
+  assert.match(landingSource, /class="journey-rail"/)
   assert.match(landingSource, /<HeroSection \/>/)
   assert.match(landingSource, /<SymbiosisSection \/>/)
   assert.match(landingSource, /<SetupSection \/>/)
@@ -157,15 +161,19 @@ test('Landing sections expose fixed-navbar-safe anchors and mount in Landing.vue
   )
 })
 
-test('Landing sections render authentic codebase narratives via Vue SSR without runtime errors', async () => {
+test('Landing sections render authentic codebase narratives and dual-hemisphere human/agent copy via Vue SSR without runtime errors', async () => {
   const heroHtml = await renderComponent('/src/components/landing/HeroSection.vue')
   assert.match(heroHtml, /Let Humans and Agents/)
+  assert.match(heroHtml, /Organic Side · For Humans/)
+  assert.match(heroHtml, /Symbiote Side · For Agents/)
   assert.match(heroHtml, /id="download-mac"/)
 
   const symbiosisHtml = await renderComponent('/src/components/landing/SymbiosisSection.vue')
   assert.match(symbiosisHtml, /id="symbiosis"/)
   assert.match(symbiosisHtml, /You lead\./)
   assert.match(symbiosisHtml, /They build\./)
+  assert.match(symbiosisHtml, /Good for Humans/)
+  assert.match(symbiosisHtml, /Good for Agents/)
 
   const setupHtml = await renderComponent('/src/components/landing/SetupSection.vue')
   assert.match(setupHtml, /id="setup"/)
@@ -186,4 +194,6 @@ test('Landing sections render authentic codebase narratives via Vue SSR without 
   const featuresHtml = await renderComponent('/src/components/landing/FeaturesSection.vue')
   assert.match(featuresHtml, /id="features"/)
   assert.match(featuresHtml, /Clear ownership\./)
+  assert.match(featuresHtml, /Why Humans Love It/)
+  assert.match(featuresHtml, /Why Agents Thrive/)
 })

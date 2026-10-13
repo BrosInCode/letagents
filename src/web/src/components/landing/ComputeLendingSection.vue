@@ -1,5 +1,5 @@
 <template>
-  <section id="lending" class="lending-section">
+  <section id="lending" class="lending-section" @pointerleave="setHemisphereFocus('fused')">
     <div class="lending-intro">
       <p class="eyebrow">Share Your Agent</p>
       <h2 class="headline">
@@ -53,8 +53,14 @@
         </div>
 
         <div class="scope-details" v-if="activeScope">
-          <div class="detail-col">
-            <span class="detail-heading">Allowed</span>
+          <div
+            class="detail-col detail-col--agent"
+            @pointerenter="setHemisphereFocus('agent')"
+          >
+            <div class="detail-header">
+              <span class="detail-dot detail-dot--agent" />
+              <span class="detail-heading">For the Borrowed Agent · Allowed</span>
+            </div>
             <ul class="detail-list">
               <li v-for="item in activeScope.allowed" :key="item">
                 <span class="check-icon">✓</span>
@@ -63,8 +69,14 @@
             </ul>
           </div>
 
-          <div class="detail-col">
-            <span class="detail-heading">Always private</span>
+          <div
+            class="detail-col detail-col--human"
+            @pointerenter="setHemisphereFocus('human')"
+          >
+            <div class="detail-header">
+              <span class="detail-dot detail-dot--human" />
+              <span class="detail-heading">For You (The Human) · Always Private</span>
+            </div>
             <ul class="detail-list detail-list--locked">
               <li v-for="item in activeScope.protected" :key="item">
                 <span class="lock-icon">—</span>
@@ -80,6 +92,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { setHemisphereFocus } from './symbiosisData'
 
 const isRevoked = ref(false)
 const selectedScope = ref<'draft_pr' | 'review_comment' | 'research_note'>('draft_pr')
@@ -139,7 +152,7 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 .lending-section {
   position: relative;
   z-index: 2;
-  max-width: 880px;
+  max-width: 920px;
   margin: 0 auto;
   padding: 140px 32px;
   scroll-margin-top: 92px;
@@ -282,7 +295,7 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 10px;
-  margin-bottom: 28px;
+  margin-bottom: 24px;
 }
 
 .scope-pill {
@@ -320,17 +333,60 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 .scope-details {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 24px;
-  padding-top: 24px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  gap: 18px;
+}
+
+.detail-col {
+  padding: 22px;
+  border-radius: 20px;
+  transition: border-color 250ms ease, transform 250ms ease;
+}
+
+.detail-col--agent {
+  background: rgba(42, 196, 159, 0.045);
+  border: 1px solid rgba(42, 196, 159, 0.16);
+}
+
+.detail-col--agent:hover {
+  border-color: rgba(42, 196, 159, 0.42);
+  transform: translateY(-2px);
+}
+
+.detail-col--human {
+  background: rgba(245, 245, 247, 0.035);
+  border: 1px solid rgba(245, 245, 247, 0.11);
+}
+
+.detail-col--human:hover {
+  border-color: rgba(245, 245, 247, 0.32);
+  transform: translateY(-2px);
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.detail-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.detail-dot--agent {
+  background: #2ac49f;
+}
+
+.detail-dot--human {
+  background: #f5f5f7;
 }
 
 .detail-heading {
-  display: block;
   font-size: 0.78rem;
   font-weight: 600;
-  color: #86868b;
-  margin-bottom: 14px;
+  color: #f5f5f7;
 }
 
 .detail-list {

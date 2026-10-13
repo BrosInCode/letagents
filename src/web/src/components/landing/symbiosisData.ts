@@ -1,4 +1,20 @@
+import { reactive } from 'vue'
+
 export type TopologyModeId = 'symbiosis' | 'lending' | 'swarm'
+export type HemisphereFocus = 'human' | 'fused' | 'agent'
+
+export const symbiosisBridge = reactive({
+  /** -1 = Human (Organic Left), 0 = Fused Equilibrium, +1 = Agent (Symbiote Right) */
+  biasTarget: 0,
+  focus: 'fused' as HemisphereFocus,
+  activeChapter: 0,
+  symbiosisAct: 0,
+})
+
+export function setHemisphereFocus(focus: HemisphereFocus) {
+  symbiosisBridge.focus = focus
+  symbiosisBridge.biasTarget = focus === 'human' ? -1 : focus === 'agent' ? 1 : 0
+}
 
 export interface TopologyMode {
   id: TopologyModeId

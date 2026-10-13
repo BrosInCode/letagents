@@ -1,82 +1,152 @@
 <template>
-  <section class="hero">
+  <section class="hero" @pointerleave="resetFocusIfHero">
     <SymbiosisCanvas :mode="activeTopology" />
 
-    <div class="hero-content">
-      <div class="hero-pill">
-        <span class="hero-pill-dot" />
-        <span>Humans and agents, together</span>
-      </div>
-
-      <h1 class="hero-headline">
-        Let Humans and Agents
-        <span class="hero-rotating">
-          <span class="hero-word active" ref="wordEl">{{ currentWord }}</span>
-        </span>
-      </h1>
-
-      <p class="hero-sub">
-        One shared place for your team and your favorite AI agents to build software together.
-      </p>
-
-      <div class="hero-actions">
-        <RouterLink to="/#start" class="btn-white">
-          Open a Room
-        </RouterLink>
-        <RouterLink to="/#setup" class="btn-glass">
-          Add Your Agent
-        </RouterLink>
-      </div>
-
-      <!-- Quiet 3D sculpture switcher -->
-      <div class="sculpture-pills" role="tablist" aria-label="Interactive 3D view">
-        <button
-          v-for="mode in topologyModes"
-          :key="mode.id"
-          type="button"
-          role="tab"
-          :aria-selected="activeTopology === mode.id"
-          class="sculpture-pill"
-          :class="{ 'sculpture-pill--active': activeTopology === mode.id }"
-          @click="activeTopology = mode.id"
-        >
-          {{ mode.label }}
-        </button>
-      </div>
-
-      <!-- Minimal Mac Beta Dock (preserves #download-mac contract) -->
-      <section id="download-mac" class="hero-download" aria-labelledby="download-mac-title">
-        <div class="hero-download-copy">
-          <div class="hero-download-heading">
-            <h2 id="download-mac-title">LetAgents for Mac</h2>
-            <span class="hero-beta-badge">Beta</span>
-            <span class="hero-download-version">v{{ macDesktopBeta.version }}</span>
-          </div>
-          <p>
-            Bring Claude, Codex, and Cursor into any room with one click.
-          </p>
-        </div>
-
-        <div class="hero-download-links">
-          <a class="hero-download-link" :href="macDesktopBeta.downloads.arm64">
-            <span>Apple Silicon</span>
-            <small>M1–M4 · .dmg</small>
-          </a>
-          <a class="hero-download-link" :href="macDesktopBeta.downloads.x64">
-            <span>Intel Mac</span>
-            <small>x64 · .dmg</small>
-          </a>
-        </div>
-      </section>
-
-      <a
-        :href="macDesktopBeta.checksumsUrl"
-        class="hero-release-link"
-        target="_blank"
-        rel="noopener noreferrer"
+    <div class="hero-stage-grid">
+      <!-- Left Wing: Organic / Human Hemisphere Callout -->
+      <aside
+        class="hemisphere-wing hemisphere-wing--human"
+        :class="{ 'hemisphere-wing--active': symbiosisBridge.focus === 'human' }"
+        @pointerenter="setHemisphereFocus('human')"
+        @click="setHemisphereFocus('human')"
       >
-        Checksums
-      </a>
+        <div class="wing-header">
+          <span class="wing-dot wing-dot--human" />
+          <span class="wing-kicker">Organic Side · For Humans</span>
+        </div>
+        <h3 class="wing-title">Your taste. Your final word.</h3>
+        <p class="wing-desc">
+          Guide the work in plain English. Your private files, keys, and approvals stay yours.
+        </p>
+        <span class="wing-tag">Calm direction</span>
+      </aside>
+
+      <!-- Center Stage -->
+      <div class="hero-content">
+        <div class="hero-pill">
+          <span class="hero-pill-dot" />
+          <span>Half human intuition · Half agentic speed</span>
+        </div>
+
+        <h1 class="hero-headline">
+          Let Humans and Agents
+          <span class="hero-rotating">
+            <span class="hero-word active" ref="wordEl">{{ currentWord }}</span>
+          </span>
+        </h1>
+
+        <p class="hero-sub">
+          One shared place where human taste and AI speed fuse to build software together.
+        </p>
+
+        <div class="hero-actions">
+          <RouterLink to="/#start" class="btn-white">
+            Open a Room
+          </RouterLink>
+          <RouterLink to="/#setup" class="btn-glass">
+            Add Your Agent
+          </RouterLink>
+        </div>
+
+        <!-- Dual-Hemisphere Symbiote Lens Switcher + 3D Chapter Switcher -->
+        <div class="hero-controls">
+          <div class="hemisphere-pills" role="group" aria-label="Symbiote hemisphere focus">
+            <button
+              type="button"
+              class="hemi-pill"
+              :class="{ 'hemi-pill--human-active': symbiosisBridge.focus === 'human' }"
+              @click="setHemisphereFocus('human')"
+            >
+              <span class="hemi-indicator hemi-indicator--human" />
+              For Humans
+            </button>
+            <button
+              type="button"
+              class="hemi-pill"
+              :class="{ 'hemi-pill--fused-active': symbiosisBridge.focus === 'fused' }"
+              @click="setHemisphereFocus('fused')"
+            >
+              Fused
+            </button>
+            <button
+              type="button"
+              class="hemi-pill"
+              :class="{ 'hemi-pill--agent-active': symbiosisBridge.focus === 'agent' }"
+              @click="setHemisphereFocus('agent')"
+            >
+              <span class="hemi-indicator hemi-indicator--agent" />
+              For Agents
+            </button>
+          </div>
+
+          <div class="sculpture-pills" role="tablist" aria-label="Interactive 3D view">
+            <button
+              v-for="mode in topologyModes"
+              :key="mode.id"
+              type="button"
+              role="tab"
+              :aria-selected="activeTopology === mode.id"
+              class="sculpture-pill"
+              :class="{ 'sculpture-pill--active': activeTopology === mode.id }"
+              @click="activeTopology = mode.id"
+            >
+              {{ mode.label }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Minimal Mac Beta Dock (preserves #download-mac contract) -->
+        <section id="download-mac" class="hero-download" aria-labelledby="download-mac-title">
+          <div class="hero-download-copy">
+            <div class="hero-download-heading">
+              <h2 id="download-mac-title">LetAgents for Mac</h2>
+              <span class="hero-beta-badge">Beta</span>
+              <span class="hero-download-version">v{{ macDesktopBeta.version }}</span>
+            </div>
+            <p>
+              Bring Claude, Codex, and Cursor into any room with one click.
+            </p>
+          </div>
+
+          <div class="hero-download-links">
+            <a class="hero-download-link" :href="macDesktopBeta.downloads.arm64">
+              <span>Apple Silicon</span>
+              <small>M1–M4 · .dmg</small>
+            </a>
+            <a class="hero-download-link" :href="macDesktopBeta.downloads.x64">
+              <span>Intel Mac</span>
+              <small>x64 · .dmg</small>
+            </a>
+          </div>
+        </section>
+
+        <a
+          :href="macDesktopBeta.checksumsUrl"
+          class="hero-release-link"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Checksums
+        </a>
+      </div>
+
+      <!-- Right Wing: Agentic / Venom Symbiote Hemisphere Callout -->
+      <aside
+        class="hemisphere-wing hemisphere-wing--agent"
+        :class="{ 'hemisphere-wing--active': symbiosisBridge.focus === 'agent' }"
+        @pointerenter="setHemisphereFocus('agent')"
+        @click="setHemisphereFocus('agent')"
+      >
+        <div class="wing-header">
+          <span class="wing-dot wing-dot--agent" />
+          <span class="wing-kicker">Symbiote Side · For Agents</span>
+        </div>
+        <h3 class="wing-title">Their speed. Their shared mind.</h3>
+        <p class="wing-desc">
+          Agents step into the room with full context, split up the tasks, and check each other’s work.
+        </p>
+        <span class="wing-tag wing-tag--agent">Parallel velocity</span>
+      </aside>
     </div>
   </section>
 </template>
@@ -84,7 +154,12 @@
 <script setup lang="ts">
 import { defineAsyncComponent, ref, onMounted, onUnmounted } from 'vue'
 import { fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA } from '@/domain/desktopRelease'
-import { TOPOLOGY_MODES, type TopologyModeId } from './symbiosisData'
+import {
+  TOPOLOGY_MODES,
+  symbiosisBridge,
+  setHemisphereFocus,
+  type TopologyModeId,
+} from './symbiosisData'
 
 const SymbiosisCanvas = defineAsyncComponent(() => import('./SymbiosisCanvas.vue'))
 
@@ -99,6 +174,12 @@ let wordIndex = 0
 let interval: ReturnType<typeof setInterval> | null = null
 let transitionTimeout: ReturnType<typeof setTimeout> | null = null
 let motionPreference: MediaQueryList | null = null
+
+function resetFocusIfHero() {
+  if (window.scrollY < window.innerHeight * 0.4) {
+    setHemisphereFocus('fused')
+  }
+}
 
 function animateWord() {
   const el = wordEl.value
@@ -159,18 +240,127 @@ onUnmounted(() => {
 <style scoped>
 .hero {
   position: relative;
-  min-height: 94vh;
+  min-height: 96vh;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 156px 32px 96px;
+  padding: 148px 32px 88px;
   text-align: center;
 }
 
-.hero-content {
+.hero-stage-grid {
   position: relative;
   z-index: 2;
-  max-width: 880px;
+  width: 100%;
+  max-width: 1380px;
+  margin: 0 auto;
+  display: grid;
+  grid-template-columns: 270px minmax(0, 1fr) 270px;
+  align-items: center;
+  gap: 28px;
+}
+
+.hemisphere-wing {
+  text-align: left;
+  padding: 24px 22px;
+  border-radius: 24px;
+  backdrop-filter: blur(24px);
+  cursor: pointer;
+  transition:
+    transform 320ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 320ms ease,
+    background 320ms ease,
+    box-shadow 320ms ease;
+}
+
+.hemisphere-wing--human {
+  background: linear-gradient(155deg, rgba(245, 245, 247, 0.065) 0%, rgba(20, 20, 22, 0.55) 100%);
+  border: 1px solid rgba(245, 245, 247, 0.12);
+}
+
+.hemisphere-wing--human:hover,
+.hemisphere-wing--human.hemisphere-wing--active {
+  transform: translateY(-4px) scale(1.015);
+  border-color: rgba(245, 245, 247, 0.34);
+  box-shadow: 0 24px 60px rgba(245, 245, 247, 0.08);
+}
+
+.hemisphere-wing--agent {
+  background: linear-gradient(205deg, rgba(42, 196, 159, 0.09) 0%, rgba(12, 18, 16, 0.65) 100%);
+  border: 1px solid rgba(42, 196, 159, 0.18);
+}
+
+.hemisphere-wing--agent:hover,
+.hemisphere-wing--agent.hemisphere-wing--active {
+  transform: translateY(-4px) scale(1.015);
+  border-color: rgba(42, 196, 159, 0.48);
+  box-shadow: 0 24px 60px rgba(42, 196, 159, 0.14);
+}
+
+.wing-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.wing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.wing-dot--human {
+  background: #f5f5f7;
+  box-shadow: 0 0 10px rgba(245, 245, 247, 0.8);
+}
+
+.wing-dot--agent {
+  background: #2ac49f;
+  box-shadow: 0 0 12px rgba(42, 196, 159, 0.9);
+}
+
+.wing-kicker {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #86868b;
+}
+
+.wing-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.2;
+  color: #f5f5f7;
+  margin-bottom: 8px;
+}
+
+.wing-desc {
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: #86868b;
+  margin-bottom: 14px;
+}
+
+.wing-tag {
+  display: inline-flex;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  background: rgba(245, 245, 247, 0.08);
+  color: #f5f5f7;
+}
+
+.wing-tag--agent {
+  background: rgba(42, 196, 159, 0.14);
+  color: #2ac49f;
+}
+
+.hero-content {
+  max-width: 780px;
   width: 100%;
   margin: 0 auto;
 }
@@ -184,28 +374,28 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.1);
   backdrop-filter: blur(16px);
-  color: rgba(255, 255, 255, 0.82);
+  color: rgba(255, 255, 255, 0.84);
   font-size: 0.82rem;
   font-weight: 500;
   letter-spacing: -0.01em;
-  margin-bottom: 32px;
+  margin-bottom: 28px;
 }
 
 .hero-pill-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: #2ac49f;
+  background: linear-gradient(90deg, #f5f5f7 0%, #2ac49f 100%);
   box-shadow: 0 0 12px rgba(42, 196, 159, 0.8);
 }
 
 .hero-headline {
-  font-size: clamp(3.1rem, 7vw, 5.6rem);
+  font-size: clamp(3rem, 6.2vw, 5.3rem);
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.03;
   color: #f5f5f7;
-  margin: 0 auto 24px;
+  margin: 0 auto 22px;
   text-wrap: balance;
 }
 
@@ -215,7 +405,7 @@ onUnmounted(() => {
 
 .hero-word {
   display: inline-block;
-  background: linear-gradient(180deg, #ffffff 0%, rgba(255, 255, 255, 0.62) 100%);
+  background: linear-gradient(95deg, #ffffff 15%, #a7f3d0 55%, #2ac49f 95%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -223,10 +413,10 @@ onUnmounted(() => {
 }
 
 .hero-sub {
-  font-size: clamp(1.12rem, 1.6vw, 1.35rem);
+  font-size: clamp(1.1rem, 1.5vw, 1.32rem);
   color: #86868b;
   max-width: 520px;
-  margin: 0 auto 40px;
+  margin: 0 auto 36px;
   line-height: 1.5;
   font-weight: 450;
   letter-spacing: -0.01em;
@@ -238,7 +428,7 @@ onUnmounted(() => {
   gap: 14px;
   justify-content: center;
   flex-wrap: wrap;
-  margin: 0 auto 36px;
+  margin: 0 auto 28px;
 }
 
 .btn-white {
@@ -287,6 +477,16 @@ onUnmounted(() => {
   transform: scale(1.02);
 }
 
+.hero-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 48px;
+}
+
+.hemisphere-pills,
 .sculpture-pills {
   display: inline-flex;
   align-items: center;
@@ -294,27 +494,66 @@ onUnmounted(() => {
   padding: 4px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.035);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.075);
   backdrop-filter: blur(16px);
-  margin-bottom: 56px;
 }
 
+.hemi-pill,
 .sculpture-pill {
-  padding: 6px 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
   border-radius: 999px;
-  font-size: 0.78rem;
+  font-size: 0.77rem;
   font-weight: 500;
   color: #86868b;
   transition: color 200ms ease, background 200ms ease;
 }
 
+.hemi-pill:hover,
 .sculpture-pill:hover {
   color: #f5f5f7;
 }
 
+.hemi-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.hemi-indicator--human {
+  background: #f5f5f7;
+}
+
+.hemi-indicator--agent {
+  background: #2ac49f;
+}
+
+.hemi-pill--human-active {
+  color: #000000;
+  background: #f5f5f7;
+  font-weight: 600;
+}
+
+.hemi-pill--human-active .hemi-indicator--human {
+  background: #000000;
+}
+
+.hemi-pill--fused-active,
 .sculpture-pill--active {
   color: #f5f5f7;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.hemi-pill--agent-active {
+  color: #04130f;
+  background: #2ac49f;
+  font-weight: 600;
+}
+
+.hemi-pill--agent-active .hemi-indicator--agent {
+  background: #04130f;
 }
 
 .hero-download {
@@ -427,6 +666,17 @@ onUnmounted(() => {
   color: #a1a1a6;
 }
 
+@media (max-width: 1120px) {
+  .hero-stage-grid {
+    grid-template-columns: 1fr;
+    max-width: 760px;
+  }
+
+  .hemisphere-wing {
+    display: none;
+  }
+}
+
 @media (max-width: 768px) {
   .hero {
     padding: 120px 20px 72px;
@@ -462,7 +712,8 @@ onUnmounted(() => {
   .hero-word,
   .btn-white,
   .btn-glass,
-  .hero-download-link {
+  .hero-download-link,
+  .hemisphere-wing {
     transition: none;
   }
 }

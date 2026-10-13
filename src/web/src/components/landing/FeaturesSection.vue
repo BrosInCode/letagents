@@ -1,25 +1,66 @@
 <template>
-  <section id="features" class="features-section">
+  <section id="features" class="features-section" @pointerleave="setHemisphereFocus('fused')">
     <div class="features-intro">
-      <p class="eyebrow">Made for Both</p>
+      <p class="eyebrow">Made for Both Sides</p>
       <h2 class="headline">
         Simple on the surface.<br />
         <span class="headline-dim">Powerful underneath.</span>
       </h2>
+      <p class="subcopy">
+        Built so humans stay calm and in control on one side, while agents move at full speed on the other.
+      </p>
     </div>
 
-    <div class="features-grid">
-      <article v-for="feature in features" :key="feature.title" class="feature-card">
-        <span class="feature-kicker">{{ feature.kicker }}</span>
-        <h3 class="feature-title">{{ feature.title }}</h3>
-        <p class="feature-desc">{{ feature.desc }}</p>
-      </article>
+    <div class="features-duality-columns">
+      <!-- Left Column: Good for Humans -->
+      <div
+        class="feature-column feature-column--human"
+        @pointerenter="setHemisphereFocus('human')"
+      >
+        <header class="column-header">
+          <span class="column-dot column-dot--human" />
+          <span class="column-label">Organic Side · Why Humans Love It</span>
+        </header>
+
+        <article
+          v-for="feature in humanFeatures"
+          :key="feature.title"
+          class="feature-card feature-card--human"
+        >
+          <span class="feature-kicker feature-kicker--human">{{ feature.kicker }}</span>
+          <h3 class="feature-title">{{ feature.title }}</h3>
+          <p class="feature-desc">{{ feature.desc }}</p>
+        </article>
+      </div>
+
+      <!-- Right Column: Good for Agents -->
+      <div
+        class="feature-column feature-column--agent"
+        @pointerenter="setHemisphereFocus('agent')"
+      >
+        <header class="column-header">
+          <span class="column-dot column-dot--agent" />
+          <span class="column-label column-label--agent">Symbiote Side · Why Agents Thrive</span>
+        </header>
+
+        <article
+          v-for="feature in agentFeatures"
+          :key="feature.title"
+          class="feature-card feature-card--agent"
+        >
+          <span class="feature-kicker">{{ feature.kicker }}</span>
+          <h3 class="feature-title">{{ feature.title }}</h3>
+          <p class="feature-desc">{{ feature.desc }}</p>
+        </article>
+      </div>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-const features = [
+import { setHemisphereFocus } from './symbiosisData'
+
+const humanFeatures = [
   {
     kicker: 'Identity',
     title: 'Clear ownership.',
@@ -35,6 +76,9 @@ const features = [
     title: 'Clean code previews.',
     desc: 'Inspect exact file changes right inside the conversation without digging through logs.',
   },
+]
+
+const agentFeatures = [
   {
     kicker: 'Branches',
     title: 'Follows your workflow.',
@@ -57,7 +101,7 @@ const features = [
 .features-section {
   position: relative;
   z-index: 2;
-  max-width: 1040px;
+  max-width: 1080px;
   margin: 0 auto;
   padding: 120px 32px 160px;
   scroll-margin-top: 92px;
@@ -65,8 +109,8 @@ const features = [
 
 .features-intro {
   text-align: center;
-  max-width: 560px;
-  margin: 0 auto 52px;
+  max-width: 580px;
+  margin: 0 auto 56px;
 }
 
 .eyebrow {
@@ -84,42 +128,122 @@ const features = [
   letter-spacing: -0.04em;
   line-height: 1.06;
   color: #f5f5f7;
+  margin-bottom: 16px;
 }
 
 .headline-dim {
   color: #86868b;
 }
 
-.features-grid {
+.subcopy {
+  font-size: 1.12rem;
+  line-height: 1.55;
+  color: #86868b;
+  text-wrap: balance;
+}
+
+.features-duality-columns {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 20px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 24px;
+}
+
+.feature-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+  border-radius: 30px;
+  backdrop-filter: blur(24px);
+  transition: border-color 300ms ease, transform 300ms ease;
+}
+
+.feature-column--human {
+  background: linear-gradient(165deg, rgba(245, 245, 247, 0.045) 0%, rgba(18, 18, 20, 0.65) 100%);
+  border: 1px solid rgba(245, 245, 247, 0.11);
+}
+
+.feature-column--human:hover {
+  border-color: rgba(245, 245, 247, 0.28);
+  transform: translateY(-2px);
+}
+
+.feature-column--agent {
+  background: linear-gradient(195deg, rgba(42, 196, 159, 0.065) 0%, rgba(12, 18, 16, 0.72) 100%);
+  border: 1px solid rgba(42, 196, 159, 0.16);
+}
+
+.feature-column--agent:hover {
+  border-color: rgba(42, 196, 159, 0.42);
+  transform: translateY(-2px);
+}
+
+.column-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px 8px;
+}
+
+.column-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.column-dot--human {
+  background: #f5f5f7;
+  box-shadow: 0 0 10px rgba(245, 245, 247, 0.8);
+}
+
+.column-dot--agent {
+  background: #2ac49f;
+  box-shadow: 0 0 10px rgba(42, 196, 159, 0.85);
+}
+
+.column-label {
+  font-size: 0.76rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #f5f5f7;
+}
+
+.column-label--agent {
+  color: #6ee7b7;
 }
 
 .feature-card {
-  padding: 30px 28px;
-  border-radius: 26px;
-  background: rgba(18, 18, 20, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(24px);
+  padding: 26px 24px;
+  border-radius: 22px;
+  background: rgba(18, 18, 20, 0.74);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.feature-card--agent {
+  border-color: rgba(42, 196, 159, 0.12);
 }
 
 .feature-kicker {
   display: block;
-  font-size: 0.74rem;
+  font-size: 0.72rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #2ac49f;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
+}
+
+.feature-kicker--human {
+  color: #d4d4d8;
 }
 
 .feature-title {
-  font-size: 1.22rem;
+  font-size: 1.2rem;
   font-weight: 700;
   letter-spacing: -0.02em;
   color: #f5f5f7;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .feature-desc {
@@ -133,7 +257,7 @@ const features = [
     padding: 88px 20px 120px;
   }
 
-  .features-grid {
+  .features-duality-columns {
     grid-template-columns: 1fr;
   }
 }
