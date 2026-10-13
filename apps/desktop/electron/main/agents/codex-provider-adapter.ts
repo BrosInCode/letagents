@@ -2774,6 +2774,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
             ...codexThreadConfig(readOnlyLevel, effort),
           });
         } catch (error) {
+          if (errorMessage(error) === `thread ${resumeRef.providerContinuationId} already has an active writer`) {
+            throw new Error(
+              "This agent's saved Codex conversation is being used by another running Codex session. "
+              + "Resume this agent after that session has stopped using the conversation. LetAgents will not interrupt it.",
+            );
+          }
           if (!isMethodNotFound(error)) throw error;
           this.resumeSupported = false;
           throw new Error(

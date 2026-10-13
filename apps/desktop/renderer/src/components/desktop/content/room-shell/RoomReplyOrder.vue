@@ -51,7 +51,7 @@ const description = computed(() => {
   if (error.value) return error.value;
   if (!settings.value) return "Loading reply order…";
   if (!settings.value.can_manage) return "Only room admins can change this setting.";
-  return "Agents take turns on shared questions, each giving their own view with the earlier replies in mind. Turning this off releases waiting turns; work already picked up can finish.";
+  return "For broad room questions, small groups of available agents take turns with earlier replies in mind. Direct @mentions, replies, and threads can still get answers at the same time. Turning this off releases waiting turns; work already started can finish.";
 });
 
 async function load(): Promise<void> {
