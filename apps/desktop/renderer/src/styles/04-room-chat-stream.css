@@ -507,10 +507,12 @@
 .room-chat-message[data-chat-role="self"] > .room-chat-message-content > .room-message-meta { justify-content: flex-end; }
 .room-chat-message[data-chat-role="self"] > .room-chat-message-content > .room-message-bubble { border-radius: 13px 4px 13px 13px; }
 .room-chat-message.is-compact-continuation > .chat-avatar { visibility: hidden; }
-.room-chat-message[data-chat-role].is-active-thread-root > .room-chat-message-content,
-.room-chat-message[data-chat-role].is-thread-root-context > .room-chat-message-content { width: 100%; max-width: 100%; }
+.room-chat-message[data-chat-role].has-thread > .room-chat-message-content { width: min(78%, 68ch); }
 .room-chat-message[data-chat-role].is-thread-reply-context > .room-chat-message-content { max-width: calc(100% - 12px); }
-@media (max-width: 760px) { .room-chat-message[data-chat-role] > .room-chat-message-content { max-width: calc(100% - 20px); } }
+@media (max-width: 760px) {
+  .room-chat-message[data-chat-role] > .room-chat-message-content { max-width: calc(100% - 20px); }
+  .room-chat-message[data-chat-role].has-thread > .room-chat-message-content { width: calc(100% - 20px); }
+}
 
 .room-chat-message.is-github-history { display: block; width: 100%; padding: 0 4px 0 0; border-bottom: 1px solid var(--border); }
 .room-chat-message.is-github-history > .room-chat-avatar { display: none; }

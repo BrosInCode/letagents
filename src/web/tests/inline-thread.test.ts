@@ -39,6 +39,7 @@ test('inline replies omit the implicit root quote but retain explicit reply refe
   assert.equal((html.match(/class="reply-preview"/g) || []).length, 1)
   assert.match(html, /Quoted reply/)
   assert.match(html, /aria-label="Reply to Ada"/)
+  assert.match(html, /class="inline-thread-latest"[^>]*disabled[^>]*aria-hidden="true"/, "the unavailable latest control keeps its layout footprint but is inaccessible")
 })
 
 test('a delayed thread send stays routed to its original room and does not insert into a different room', async () => {

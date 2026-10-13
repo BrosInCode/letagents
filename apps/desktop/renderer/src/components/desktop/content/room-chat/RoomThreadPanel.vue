@@ -142,7 +142,7 @@
       </div>
       <div v-if="selectedGif">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
       <div class="room-thread-composer-footer">
-        <button v-if="isScrolledUp" type="button" class="room-thread-latest" aria-label="Latest replies" @click="scrollToLatest">Latest ↓</button>
+        <button type="button" class="room-thread-latest" :class="{ available: isScrolledUp }" :disabled="!isScrolledUp" :aria-hidden="!isScrolledUp" aria-label="Latest replies" @click="scrollToLatest">Latest ↓</button>
         <p v-if="sendError || attachmentError" class="room-thread-composer-error" data-testid="room-thread-send-error">
           {{ sendError || attachmentError }}
         </p>

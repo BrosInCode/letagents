@@ -36,13 +36,6 @@ function interrupt(target?: Element) {
 function animate(element: HTMLElement, open: boolean, done: () => void, duration = open ? 240 : 180) {
   const previous = interrupted
   interrupted = null
-  const fromHeight = open ? previous?.height ?? 0 : element.getBoundingClientRect().height
-  const fromOpacity = open ? previous?.opacity ?? '0' : getComputedStyle(element).opacity
-  element.style.height = 'auto'
-  const toHeight = open ? element.getBoundingClientRect().height : 0
-  element.style.overflow = 'hidden'
-  element.inert = !open
-
   const finish = () => {
     observer?.disconnect()
     observer = null
@@ -50,11 +43,18 @@ function animate(element: HTMLElement, open: boolean, done: () => void, duration
     element.style.height = ''
     element.style.opacity = ''
     element.style.overflow = ''
-    element.inert = false
+    element.inert = !open
     done()
     emit('settled')
   }
   if (props.instant || matchMedia('(prefers-reduced-motion: reduce)').matches) { finish(); return }
+
+  const fromHeight = open ? previous?.height ?? 0 : element.getBoundingClientRect().height
+  const fromOpacity = open ? previous?.opacity ?? '0' : getComputedStyle(element).opacity
+  element.style.height = 'auto'
+  const toHeight = open ? element.getBoundingClientRect().height : 0
+  element.style.overflow = 'hidden'
+  element.inert = !open
 
   const animation = element.animate([
     { height: `${fromHeight}px`, opacity: fromOpacity },

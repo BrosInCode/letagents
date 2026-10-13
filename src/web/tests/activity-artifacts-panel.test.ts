@@ -29,6 +29,8 @@ before(async () => {
     fileURLToPath(new URL('../src/components/room/activity/ActivityArtifactsPanel.vue', import.meta.url)),
     fileURLToPath(new URL('../../../shared/ui/agents/AgentChanges.vue', import.meta.url)),
     fileURLToPath(new URL('../../../shared/ui/agents/AgentDisclosure.vue', import.meta.url)),
+    fileURLToPath(new URL('../../../shared/ui/DisclosurePanel.vue', import.meta.url)),
+    fileURLToPath(new URL('../../../shared/ui/ThreadTransition.vue', import.meta.url)),
   ]) {
     const component = (await vite.ssrLoadModule(path)).default;
     const descriptor = parse(await readFile(path, 'utf8')).descriptor;
@@ -125,8 +127,8 @@ type PrRepoScope = { host: string; owner: string; name: string } | null
 // Exercise the real disclosure before checking its file/PR contents. Closed
 // Changes rows intentionally mount their details only on first expansion.
 async function render(artifacts: unknown[], prRepo: PrRepoScope = null): Promise<string> {
-  type Node = { tag: string; props: Record<string, any>; children: Node[]; text?: string; parent?: Node };
-  const node = (tag = ''): Node => ({ tag, props: {}, children: [] });
+  type Node = { style: Record<string, string>; tag: string; props: Record<string, any>; children: Node[]; text?: string; parent?: Node };
+  const node = (tag = ''): Node => ({ tag, style: {}, props: {}, children: [] });
   const renderer = createRenderer<Node, Node>({
     createElement: tag => node(tag), createText: text => ({ ...node(), text }), createComment: () => node(),
     setText(n, text) { n.text = text; }, setElementText(n, text) { n.children = []; n.text = text; },
@@ -141,7 +143,7 @@ async function render(artifacts: unknown[], prRepo: PrRepoScope = null): Promise
   app.mount(root);
   function all(n: Node): Node[] { return [n, ...n.children.flatMap(all)]; }
   try {
-    for (const trigger of all(root).filter(n => n.props.class === 'agent-disclosure-trigger')) trigger.props.onClick({ detail: 0 });
+    for (const trigger of all(root).filter(n => String(n.props.class).split(' ').includes('agent-disclosure-trigger'))) trigger.props.onClick({ detail: 0 });
     await nextTick();
     const escape = (value: unknown) => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
     function html(n: Node): string {

@@ -46,8 +46,7 @@
 .room-thread-conversation { min-width: 0; }
 .room-thread-panel .room-chat-message.is-thread-context {
   display: grid;
-  grid-template-columns: 10px minmax(0, 1fr);
-  gap: 9px;
+  gap: 12px;
   width: 100%;
   max-width: none;
   margin: 0;
@@ -56,20 +55,10 @@
   background: transparent;
   box-shadow: none;
 }
-.room-thread-panel .room-chat-message.is-thread-context .room-chat-avatar {
-  width: 6px; height: 6px; margin: 6px 0 0; box-shadow: none;
-}
-.room-thread-panel .room-chat-message.is-thread-context .room-chat-message-content {
-  grid-template-columns: minmax(0, 1fr); width: 100%; min-width: 0;
-}
 .room-thread-panel .room-chat-message.is-thread-context .room-message-author-block {
   min-width: 0; max-width: 100%;
 }
 .room-thread-panel .room-message-owner { font-size: 0.7rem; }
-.room-thread-panel .room-chat-message.is-thread-context .room-message-bubble {
-  display: block; width: 100%; max-width: 100%; margin-top: 6px; padding: 0;
-  border: 0; border-radius: 0; background: transparent; box-shadow: none;
-}
 .room-thread-panel .room-chat-message.is-thread-context .desktop-long-message-html {
   max-width: 68ch; font-size: 0.875rem; line-height: 1.6;
 }
@@ -89,12 +78,15 @@
 .room-thread-empty div { display: grid; gap: 4px; }
 .room-thread-new-divider { display: flex; align-items: center; gap: 10px; margin: 4px 0 16px; color: var(--text-tertiary); font-size: 0.72rem; }
 .room-thread-new-divider::after { content: ''; flex: 1; height: 1px; background: var(--border, rgba(127,127,127,.18)); }
+/* Keep the composer width stable when scrolling reveals the latest control. */
 .room-thread-latest {
+  visibility: hidden;
   flex: 0 0 auto; align-self: center; margin-right: 8px;
   padding: 6px 0; border: 0;
   background: transparent; color: var(--text-secondary);
   font-size: 0.72rem; cursor: pointer;
 }
+.room-thread-latest.available { visibility: visible; }
 .room-thread-composer {
   position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto;
   align-items: end; gap: 8px; margin-top: 0; padding-top: 10px;

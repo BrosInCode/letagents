@@ -16,7 +16,7 @@
     </div>
     <div class="inline-thread-footer">
       <slot name="composer" :parent="parent" :quote="quote" :clear-quote="clearQuote" :sent="sent" />
-      <button v-if="scrolledUp" type="button" class="inline-thread-latest" aria-label="Latest replies" @click="latest">Latest ↓</button>
+      <button type="button" class="inline-thread-latest" :class="{ available: scrolledUp }" :disabled="!scrolledUp" :aria-hidden="!scrolledUp" aria-label="Latest replies" @click="latest">Latest ↓</button>
     </div>
   </section>
 </template>
@@ -163,7 +163,9 @@ onBeforeUnmount(() => { sizeObserver?.disconnect(); disposed = true; if (highlig
 .inline-thread-empty { color: var(--muted); font-size: .85rem; padding: 16px 0; }
 .inline-thread-footer { display: flex; align-items: flex-end; gap: 10px; padding-top: 10px; border-top: 1px solid var(--line, #27272a); }
 .web-inline-thread .inline-thread-footer :deep(.composer.inline-thread-composer) { flex: 1; min-width: 0; padding: 0; border: 0; }
-.inline-thread-latest { flex: 0 0 auto; padding: 8px 0; border: 0; background: transparent; color: var(--muted, #a1a1aa); font: inherit; font-size: .72rem; cursor: pointer; }
+/* Reserve the control footprint so scrolling never rewraps the draft. */
+.inline-thread-latest { visibility: hidden; flex: 0 0 auto; padding: 8px 0; border: 0; background: transparent; color: var(--muted, #a1a1aa); font: inherit; font-size: .72rem; cursor: pointer; }
+.inline-thread-latest.available { visibility: visible; }
 .inline-thread-latest:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
 .web-inline-thread :deep(.message.is-inline-reply:last-child) { padding-bottom: 0; }
 .web-inline-thread :deep(.message-meta) { position: relative; min-height: 22px; }
@@ -175,12 +177,7 @@ onBeforeUnmount(() => { sizeObserver?.disconnect(); disposed = true; if (highlig
   }
   .web-inline-thread :deep(.is-inline-reply:is(:hover, :focus-within) .message-actions) { opacity: 1; pointer-events: auto; }
 }
-.web-inline-thread :deep(.message.is-inline-reply) { width: 100%; max-width: none; padding: 0 0 22px; gap: 9px; }
-.web-inline-thread :deep(.is-inline-reply > .message-avatar) { width: 10px; flex-basis: 10px; padding-top: 6px; }
-.web-inline-thread :deep(.is-inline-reply > .message-avatar::before) { width: 6px; height: 6px; box-shadow: none; }
-.web-inline-thread :deep(.is-inline-reply > .message-body) { width: 100%; max-width: 100%; min-width: 0; flex: 1; }
-.web-inline-thread :deep(.is-inline-reply .message-bubble) { display: block; width: 100%; max-width: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-.web-inline-thread :deep(.is-inline-reply .message-bubble::before) { display: none; }
+.web-inline-thread :deep(.message.is-inline-reply) { width: 100%; max-width: none; padding: 0 0 22px; gap: 12px; }
 .web-inline-thread :deep(.is-inline-reply .md-content) { max-width: 68ch; font-size: .875rem; line-height: 1.6; }
 .web-inline-thread :deep(.reply-preview) { display: flex; flex-direction: row; align-items: baseline; gap: 6px; padding: 0; margin-bottom: 8px; border: 0; background: transparent; }
 .web-inline-thread :deep(.reply-preview-label) { flex: 0 0 auto; font-weight: 500; }
