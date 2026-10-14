@@ -243,7 +243,7 @@
         :workers="workers"
         :update-status="updateStatus"
         @back-mcp="goBackMcpOnboarding"
-        @back-to-app="activeEntry = currentParentRoom"
+        @back-to-app="returnFromSettings"
         @clear-mcp-target-selection="clearMcpTargetSelection"
         @continue-mcp="continueMcpOnboarding"
         @delete-room="deleteAccountRoom"
@@ -661,6 +661,7 @@ const {
   repoName,
   resolveSelectedRoomIdentifier,
   roomsCollapsed,
+  returnFromSettings,
   selectSidebarEntry,
   selectedAccess,
   selectedFocusRooms,
@@ -1083,7 +1084,12 @@ function handleRepoStatusChanged(nextStatus: RepoStatus): void {
 }
 
 function refreshForegroundData(): void {
-  if (!authStatus.value?.authenticated || authSessionLocked.value) return;
+  if (authSessionLocked.value) return;
+  if (!authStatus.value?.authenticated) {
+    // A locked OS credential store at startup is retryable on foreground return.
+    if (!loading.value && !authBusy.value) void refresh();
+    return;
+  }
   if (activeEntry.value.type === "inbox") void refreshMessageReminders();
   // The main-process Git watcher retains invalidations while hidden and drains
   // them on BrowserWindow focus/show. Avoid racing it with a second full status

@@ -85,7 +85,8 @@ export class RoomWorkPublisher {
   private scheduled: NodeJS.Timeout | null = null;
   private scheduledFor = Infinity;
   private running = false;
-  private pendingWake = false;
+  private readonly changedAgents = new Set<string>();
+  private sweepNext = false;
   private closed = false;
   private scanAfter = "";
 
@@ -200,9 +201,9 @@ export class RoomWorkPublisher {
   }
 
   /** Capture supplies only a postcommit hint; no SQL or HTTP runs on its stack. */
-  changed(_agentId: string): void {
+  changed(agentId: string): void {
     if (this.unavailable()) return;
-    this.pendingWake = true;
+    this.changedAgents.add(agentId);
     this.schedule(COALESCE_MS);
   }
 
@@ -213,6 +214,7 @@ export class RoomWorkPublisher {
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduled = null;
     this.scheduledFor = Infinity;
+    this.changedAgents.clear();
     this.stamps.clear(); this.attemptedAt.clear(); this.stagingAttemptedAt.clear(); this.turnStarts.clear(); this.remoteAnswers.clear();
     // Never drain capture or upload a shutdown tail. Late responses are fenced.
     try { this.database.close(); } catch { this.report("storage_unavailable"); }
@@ -355,23 +357,34 @@ export class RoomWorkPublisher {
   /** Separable from the timer for deterministic real-store tests. No caller awaits this to run an agent. */
   async flush(): Promise<void> {
     if (this.unavailable() || this.running) return;
-    this.pendingWake = false;
     this.running = true;
     let more = false;
     try {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
-      // One agent (at most 10k pins/facts) per pass. Cursor-based sweeping also
-      // repairs missed/failed staging hints and catches up after restart, without
-      // ever materializing all historical agents' pending bodies at once.
+      // Give changed agents the next pass, alternating with the recovery sweep
+      // so continuous live output cannot starve missed hints or retry work.
+      // Still only one agent (at most 10k pins/facts) per pass.
       const nextAgent = () => this.database.prepare(`SELECT agent_id FROM room_work_publications
         WHERE state='open' AND agent_id>? ORDER BY agent_id LIMIT 1`).get(this.scanAfter);
-      let row = nextAgent();
-      if (!row) { this.scanAfter = ""; row = nextAgent(); }
-      if (!row) return;
-      const agentId = String(row.agent_id);
-      this.scanAfter = agentId;
-      more = !!nextAgent();
+      const changedAgent = this.changedAgents.values().next().value;
+      let agentId: string;
+      if (changedAgent && !this.sweepNext) {
+        agentId = changedAgent;
+        this.sweepNext = true;
+        more = true;
+      } else {
+        let row = nextAgent();
+        if (!row) { this.scanAfter = ""; row = nextAgent(); }
+        if (!row && !changedAgent) return;
+        agentId = row ? String(row.agent_id) : changedAgent!;
+        if (row) this.scanAfter = agentId;
+        this.sweepNext = false;
+        more = !!nextAgent();
+      }
+      // Consume before awaiting: a hint arriving during staging/upload must
+      // remain queued for another pass, including a terminal no-reply update.
+      this.changedAgents.delete(agentId);
       try { more = await this.stageChanged(agentId) || more; }
       catch { this.report("storage_unavailable"); }
       if (this.unavailable()) return;
@@ -417,7 +430,7 @@ export class RoomWorkPublisher {
     } catch { if (!this.unavailable()) this.report("authority_unavailable"); }
     finally {
       this.running = false;
-      this.schedule(more || this.pendingWake ? COALESCE_MS : RETRY_MS);
+      this.schedule(more || this.changedAgents.size ? COALESCE_MS : RETRY_MS);
     }
   }
 }

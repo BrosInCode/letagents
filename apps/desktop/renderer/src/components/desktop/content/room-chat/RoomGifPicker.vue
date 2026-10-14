@@ -63,7 +63,7 @@ onMounted(() => { window.addEventListener("focus", load); window.addEventListene
 onBeforeUnmount(() => { generation++; clearTimeout(cooldownTimer); window.removeEventListener("focus", load); window.removeEventListener("letagents:expressions-changed", load); });
 </script>
 <style scoped>
-.giphy-attribution { width: 100px; height: auto; border-radius: 0; object-fit: contain; }
+.giphy-attribution { width: 100px; height: auto; padding: 2px 4px; border-radius: 3px; background: #202126; object-fit: contain; }
 .room-gif-trigger { border: 1px solid currentColor; border-radius: 5px; background: transparent; color: inherit; font-size: 10px; font-weight: 700; padding: 4px; margin: 0 5px; }
 .room-gif-picker { color: var(--text-primary, #e9e9ee); background: var(--bg-panel, #202126); border: 1px solid #7775; border-radius: 14px; width: min(470px, calc(100vw - 32px)); max-height: min(650px, 85vh); padding: 18px; box-shadow: 0 20px 80px #0006; }
 .room-gif-picker::backdrop { background: #0006; }

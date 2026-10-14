@@ -1912,7 +1912,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // A cached handle state or an active thread with no visible turn cannot
       // certify idle. Even a valid empty list requires the thread itself to
       // be between turns.
-      if (!isCodexThreadBetweenTurns(extractThreadStatus(read.thread))) return { state: "unknown" };
+      const status = extractThreadStatus(read.thread);
+      if (status === "notLoaded") {
+        // A handoff may find the saved thread unloaded. Do not cold-resume it
+        // with process defaults just to stop the old runtime. Prove the exact
+        // app-server has no loaded threads, in addition to terminal history.
+        const loaded = recordValue(await handle.client.request<unknown>(
+          "thread/loaded/list", { limit: 1 }, { timeoutMs: 2_000 },
+        ));
+        if (!current() || !Array.isArray(loaded?.data) || loaded.data.length !== 0
+          || loaded.nextCursor !== null) return { state: "unknown" };
+      } else if (!isCodexThreadBetweenTurns(status)) return { state: "unknown" };
       return { state: "idle", providerContinuationId: continuation, nativeProcessIdentity: identity, latestProviderTurnId: latest };
     } catch {
       // Timeouts and unavailable snapshots are uncertainty, not runtime failure.

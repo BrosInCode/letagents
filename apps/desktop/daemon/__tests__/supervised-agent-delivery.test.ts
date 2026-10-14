@@ -5535,9 +5535,9 @@ test("a credential-only rebind clears recovery ownership for the successor conte
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     let normalizations = 0;
     const normalize = store.normalizeStartupRecovery.bind(store);
-    (store as unknown as { normalizeStartupRecovery(agentId: string): Promise<void> }).normalizeStartupRecovery = async (agentId) => {
+    store.normalizeStartupRecovery = async (agentId) => {
       normalizations += 1;
-      await normalize(agentId);
+      return normalize(agentId);
     };
     const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
       poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
@@ -6271,7 +6271,7 @@ test("retry acknowledges durable scheduling without waiting for a long provider 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("daemon socket retry accepts only the exact blocked binding and leaves other rows isolated", async () => {
+test("daemon socket retry accepts only the exact blocked binding and reports committed no-reply settlement", async t => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-socket-"));
   let daemon: SupervisorDaemon | null = null;
   let release: ReturnType<typeof deferred<{ turnId: string; outcome: "no_reply"; text: null }>> | null = null;
@@ -6290,9 +6290,19 @@ test("daemon socket retry accepts only the exact blocked binding and leaves othe
     const internals = daemon as unknown as {
       liveHandles: Map<string, typeof agent.handle>;
       supervisedInbox: SupervisedAgentInboxStore;
+      roomWorkPublisher: { changed(agentId: string): void };
       workerBindings: { bind(input: Record<string, string>): Promise<unknown>; unbind(entryId: string): Promise<void> };
     };
     await daemon.start();
+    const observed = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    t.after(() => observed.close());
+    const completionHints: string[] = [];
+    const changed = internals.roomWorkPublisher.changed.bind(internals.roomWorkPublisher);
+    t.mock.method(internals.roomWorkPublisher, "changed", (agentId: string) => {
+      const row = observed.prepare("SELECT state FROM supervised_agent_inbox WHERE agent_id=? AND source_message_id='msg_1'").get(agentId);
+      if (row?.state === "acknowledged_no_reply") completionHints.push(agentId);
+      changed(agentId);
+    });
     const identities = {
       stone: { attempt: "00000000-0000-4000-8000-000000000001", execution: "00000000-0000-4000-8000-000000000011", session: "00000000-0000-4000-8000-000000000021" },
       other: { attempt: "00000000-0000-4000-8000-000000000002", execution: "00000000-0000-4000-8000-000000000012", session: "00000000-0000-4000-8000-000000000022" },
@@ -6347,6 +6357,8 @@ test("daemon socket retry accepts only the exact blocked binding and leaves othe
     assert.equal((otherReceipts[1] as { blocked_by_message_id?: string }).blocked_by_message_id, "msg_1", "projection exposes the public source ID, not a private inbox ID");
     release.resolve({ turnId: "turn", outcome: "no_reply", text: null });
     await waitForAsync(async () => (await internals.supervisedInbox.receipts("stone"))[0]?.state === "acknowledged_no_reply");
+    await waitForAsync(async () => completionHints.includes("stone"));
+    assert.deepEqual([...new Set(completionHints)], ["stone"], "the publisher is notified after the real terminal commit, without another native event");
     const completed = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{ id: string; delivery_receipts?: Array<{ state: string; timeline?: Array<{ phase: string }> }> }>;
     assert.equal(completed.find((entry) => entry.id === "stone")?.delivery_receipts?.[0]?.state, "acknowledged_no_reply");
     assert.equal(completed.find((entry) => entry.id === "stone")?.delivery_receipts?.[0]?.timeline?.at(-1)?.phase, "no_reply");
@@ -6774,6 +6786,31 @@ test("startup recovery treats a dispatching durable terminal outcome as republis
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("startup recovery reports a saved no-reply completion without running the provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-no-reply-report-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery: SupervisedAgentDelivery | undefined;
+  try {
+    const item = await enqueue(store);
+    await store.checkpointTerminalOutcome(item.inbox_item_id, JSON.stringify({ kind: "no_reply", text: null }));
+    const hints: string[] = [];
+    const unexpected = async (): Promise<never> => { assert.fail("saved no-reply must not run, recover or publish a model reply"); };
+    delivery = new SupervisedAgentDelivery(store, provider(unexpected, unexpected),
+      { poll: async () => ({}), publish: unexpected }, currentAuthority,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, id => { hints.push(id); });
+    await delivery.pump(agent);
+    assert.equal((await store.get(item.inbox_item_id))?.state, "acknowledged_no_reply");
+    assert.deepEqual(hints, [agent.agentId]);
+    await delivery.pump(agent);
+    assert.deepEqual(hints, [agent.agentId], "unchanged idle pumping does not repeat the hint");
+  } finally {
+    await delivery?.fenceAndDrain();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("startup recovery blocks ambiguous awaiting and retryable work instead of acknowledging it", async () => {
