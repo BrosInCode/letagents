@@ -74,7 +74,7 @@ const agentFeatures = [
   },
   {
     title: 'Mix any agent.',
-    desc: 'Claude, Codex, Cursor, and Antigravity work side by side.',
+    desc: 'Claude, ChatGPT, Cursor, and Antigravity work side by side.',
   },
   {
     title: 'Private when it matters.',

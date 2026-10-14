@@ -50,7 +50,7 @@ const agents = [
   },
   {
     id: 'codex',
-    name: 'ChatGPT Pro (Codex)',
+    name: 'ChatGPT',
     configFile: '~/.codex/config.toml',
     icon: codexIcon,
   },
@@ -151,13 +151,13 @@ async function copyForAgent(idx: number) {
   gap: 16px;
   padding: 16px;
   border-radius: 32px;
-  background: rgba(18, 18, 22, 0.38);
-  backdrop-filter: blur(28px) saturate(150%);
-  -webkit-backdrop-filter: blur(28px) saturate(150%);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 24px 64px rgba(0, 0, 0, 0.45);
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 24px 64px rgba(0, 0, 0, 0.4);
 }
 
 .dock-item {
@@ -172,25 +172,25 @@ async function copyForAgent(idx: number) {
 }
 
 .dock-item:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.14);
   transform: translateY(-2px);
 }
 
 .dock-item--copied {
-  background: rgba(42, 196, 159, 0.1);
-  border-color: rgba(42, 196, 159, 0.38);
+  background: rgba(42, 196, 159, 0.12);
+  border-color: rgba(42, 196, 159, 0.4);
 }
 
 .dock-squircle {
   width: 64px;
   height: 64px;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.06);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
   display: flex;
   align-items: center;
   justify-content: center;

@@ -170,12 +170,12 @@ test('Landing sections render authentic codebase narratives and dual-hemisphere 
   assert.match(symbiosisHtml, /You lead\./)
   assert.match(symbiosisHtml, /They build\./)
   assert.match(symbiosisHtml, /Claude Code/)
-  assert.match(symbiosisHtml, /Codex/)
+  assert.match(symbiosisHtml, /ChatGPT/)
 
   const setupHtml = await renderComponent('/src/components/landing/SetupSection.vue')
   assert.match(setupHtml, /id="setup"/)
   assert.match(setupHtml, /Claude Code/)
-  assert.match(setupHtml, /ChatGPT Pro \(Codex\)/)
+  assert.match(setupHtml, /ChatGPT/)
 
   const lendingHtml = await renderComponent('/src/components/landing/ComputeLendingSection.vue')
   assert.match(lendingHtml, /id="lending"/)
