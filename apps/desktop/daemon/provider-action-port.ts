@@ -156,6 +156,7 @@ export type ProviderRoomTurnRequest = {
   activation: Record<string, unknown>;
   actionId: string;
   observedContext?: unknown[];
+  roomId?: string;
 };
 export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }

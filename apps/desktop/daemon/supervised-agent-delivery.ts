@@ -1877,6 +1877,7 @@ export class SupervisedAgentDelivery {
           ...(item.state === "result_recovery" ? { savedAsUnreadable: true } : {}),
         }, { detachSignal: turnController.signal, checkpointProviderState, settleLifecycleBeforeIdle, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
+        roomId: agent.roomId,
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
         activation: item.activation,

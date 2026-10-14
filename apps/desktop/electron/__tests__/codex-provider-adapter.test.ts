@@ -10202,3 +10202,42 @@ test("inspector reads idle Codex account limits without opening Live and fences 
   finish({ rateLimits: { primary: { usedPercent: 99 } } });
   assert.equal(await pending, null, "old connection response is never presented as current");
 });
+
+test("bounded Codex context reuse resets on exact compaction, failure and reconnect", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client); let turn = 0; let compact = false; let fail = false;
+  const prompts: string[] = [];
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") {
+      prompts.push((params as { input: Array<{ text: string }> }).input[0]!.text);
+      turn++;
+      if (fail) throw new Error("ambiguous native dispatch");
+      if (compact) client.emit({ method: "item/started", params: { threadId: handle.providerContinuationId,
+        turnId: `turn-cache-${turn}`, item: { type: "contextCompaction", id: "compact" } } });
+      client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: `turn-cache-${turn}` } });
+      return { turn: { id: `turn-cache-${turn}` } } as T;
+    }
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{
+      id: `turn-cache-${turn}`, status: "completed", items: [{ type: "agentMessage", phase: "final", text: "LETAGENTS_NO_ROOM_REPLY" }],
+    }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const request = { roomId: "focus_95", inboxItemId: "cache-inbox", actionId: "cache-action", activation: {},
+    sourceMessage: { id: "msg_20", source: "browser", text: "Thanks" },
+    observedContext: Array.from({ length: 8 }, (_, i) => ({ id: `msg_${i + 1}`, source: "agent", text: `Perspective ${i}` })),
+  };
+  const run = () => adapter.runRoomTurn(handle, request);
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  client.emit({ method: "thread/compacted", params: { threadId: "unrelated-thread" } });
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  compact = true; await run(); compact = false;
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/, "mid-turn compaction invalidates even a successful pending commit");
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  fail = true; await assert.rejects(run(), /ambiguous native dispatch/); fail = false;
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  client.disconnect();
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
+});

@@ -2,7 +2,7 @@ import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/roo
 import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../../shared/codex-read-only-room-tools.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
-import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS, RoomTurnContextCache } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
 import { ProviderUsageTracker, readCodexUsageTail } from "./provider-usage.js";
 import type { ProviderUsage } from "../../../shared/provider-usage.js";
@@ -1041,14 +1041,14 @@ function exactPermissionItemKey(threadId: string, turnId: string, itemId: string
   return JSON.stringify([threadId, turnId, itemId]);
 }
 
-function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
+function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest, context = formatRoomTurnContext(request)): string {
   return [
     ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     "If no response should be published, return exactly LETAGENTS_NO_ROOM_REPLY with no other text.",
     `Inbox item: ${request.inboxItemId}`,
-    ...formatRoomTurnContext(request),
+    ...context,
   ].join("\n");
 }
 
@@ -1265,6 +1265,7 @@ class CodexProviderHandle implements ProviderHandle {
   /** The one pending read after the thread reported `systemError`. */
   systemErrorReconciliation: Promise<void> | null = null;
   readonly roomTurnResults = new CodexTurnResultAccumulator();
+  readonly roomContext = new RoomTurnContextCache();
   providerContinuationId: string;
 
   constructor(
@@ -1282,6 +1283,7 @@ class CodexProviderHandle implements ProviderHandle {
     this.usage = new ProviderUsageTracker(providerContinuationId);
     this.execution = new ProviderExecutionObserver(now);
     client.onDisconnect(() => {
+      this.roomContext.reset();
       this.permissionFileChangeProposals.clear();
       if (this.nativeRuntimeUnavailable) return;
       this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
@@ -1373,6 +1375,7 @@ class CodexProviderHandle implements ProviderHandle {
     }
     this.terminalTurns.clear();
     this.roomTurnResults.clearAll();
+    this.roomContext.reset();
     this.providerContinuationId = providerContinuationId;
     this.invalidatePermissions();
   }
@@ -2102,15 +2105,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
     await options.beforeNativeDispatch?.();
     assertRuntimeAvailable();
     handle.roomTurnResults.beginTurnStart(handle.providerContinuationId);
+    const context = handle.roomContext.prepare(request, continuation);
     let started: TurnStartResult;
     try {
       started = await handle.client.request<TurnStartResult>("turn/start", {
         ...turnPolicy,
         threadId: handle.providerContinuationId,
-        input: [{ type: "text", text: boundedRoomTurnPrompt(request), text_elements: [] }],
+        input: [{ type: "text", text: boundedRoomTurnPrompt(request, context.lines), text_elements: [] }],
       });
     } catch (error) {
       handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
+      handle.roomContext.reset();
       if (isMissingContinuation(error, handle.providerContinuationId)) {
         throw new ProviderContinuationMissingError(handle.providerContinuationId);
       }
@@ -2119,6 +2124,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const turnId = started.turn?.id?.trim();
     if (!turnId) {
       handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
+      handle.roomContext.reset();
       throw new Error("Codex did not acknowledge the bounded room turn.");
     }
     handle.roomTurnResults.bindTurnStart(handle.providerContinuationId, turnId);
@@ -2130,11 +2136,22 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // not retain that completed turn for a later unrelated invocation.
       handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
+      handle.roomContext.reset();
       throw error;
     }
     handle.setLiveState("working");
-    const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
-    return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
+    try {
+      const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
+      const result = await this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
+      if ((result.outcome === "reply" || result.outcome === "no_reply")
+        && handle.providerContinuationId === continuation && handle.client.currentConnectionId() === rpcConnection
+        && sameProviderConnectionIdentity(handle.providerConnection, connection) && !options.detachSignal?.aborted) context.commit();
+      else handle.roomContext.reset();
+      return result;
+    } catch (error) {
+      handle.roomContext.reset();
+      throw error;
+    }
   }
 
   /** Reattach only the durable exact turn; never issue a second turn/start. */
@@ -2144,6 +2161,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     options: Pick<ProviderRoomTurnOptions, "detachSignal" | "checkpointTerminalResult"> = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
+    handle.roomContext.reset();
     const turnId = request.providerTurnId.trim();
     if (!turnId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery requires an exact persisted turn id.");
     handle.roomTurnResults.track(handle.providerContinuationId, turnId);
@@ -3311,6 +3329,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle.usage.codex(notification.method, notification.params, this.deps.now());
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
+    if (exactThreadId === handle.providerContinuationId && (
+      notification.method === "thread/compacted"
+      || (["item/started", "item/completed"].includes(notification.method)
+        && recordValue(recordValue(notification.params)?.item)?.type === "contextCompaction")
+    )) handle.roomContext.reset();
     const terminalMatch = /^turn\/(completed|interrupted|failed|cancelled|stopped)$/i.exec(notification.method);
     this.observePermissionFileChangeProposal(handle, notification);
     const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);

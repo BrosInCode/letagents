@@ -70,6 +70,63 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
   ];
 }
 
+/** Optional optimization for a continuously observed native conversation.
+ * Keep only the previous bounded window; never persist this across reconnects.
+ */
+export class RoomTurnContextCache {
+  private scope = "";
+  private revision = 0;
+  private messages = new Map<string, unknown>();
+
+  reset(): void {
+    this.scope = "";
+    this.messages.clear();
+    this.revision++;
+  }
+
+  prepare(request: ProviderRoomTurnRequest, continuationId: string): { lines: string[]; commit: () => void } {
+    const source = record(conversationMessage(request.sourceMessage));
+    const roomId = request.roomId;
+    // Synthetic tasks and messages without an exact room identity stay self-contained.
+    if (typeof roomId !== "string" || !roomId || !source || !isRoomMessage(source)
+      || (source.room_id !== undefined && source.room_id !== roomId)) {
+      this.reset();
+      return { lines: formatRoomTurnContext(request), commit: () => {} };
+    }
+    const scope = JSON.stringify([continuationId, roomId]);
+    if (scope !== this.scope) { this.reset(); this.scope = scope; }
+    const revision = this.revision;
+    const context = (request.observedContext ?? []).map(conversationMessage);
+    const next = new Map<string, unknown>();
+    const ambiguous = new Set<string>();
+    for (const value of [...context, source]) {
+      const message = record(value);
+      if (!message || !isRoomMessage(message) || (message.room_id !== undefined && message.room_id !== roomId)) continue;
+      const id = String(message.id);
+      if (next.has(id) && !isDeepStrictEqual(next.get(id), message)) ambiguous.add(id);
+      next.set(id, structuredClone(message));
+    }
+    for (const id of ambiguous) next.delete(id);
+    let reused = false;
+    const incremental = context.map((value, index) => {
+      const message = record(value);
+      // Always repeat human instructions, the immediate exchange and the source.
+      // Only older unchanged agent messages can refer back to retained history.
+      if (!message || !isRoomMessage(message) || (message.room_id !== undefined && message.room_id !== roomId) || message.source !== "agent"
+        || message.id === source.id || index >= context.length - 3 || ambiguous.has(String(message.id))
+        || !isDeepStrictEqual(this.messages.get(String(message.id)), message)) return value;
+      reused = true;
+      return { id: message.id, room_id: roomId, previously_supplied: true };
+    });
+    const lines = formatRoomTurnContext({ ...request, observedContext: incremental });
+    if (reused) lines.unshift("Room messages marked previously_supplied are unchanged messages already supplied in this native conversation, in their original room order. Use that retained context; retrieve the message with room context tools if its details are missing. New or edited messages, human instructions, and the immediate exchange are included in full below.");
+    return { lines, commit: () => {
+      // Compaction or disconnect during the turn invalidates its assumptions.
+      if (this.revision === revision && this.scope === scope) this.messages = next;
+    } };
+  }
+}
+
 export const MANAGED_ROOM_WORK_INSTRUCTIONS = [
   ROOM_EXPRESSION_GUIDANCE,
   "You are responding to a daemon-owned room inbox item. Carry out any work it assigns or continues.",
