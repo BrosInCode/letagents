@@ -169,8 +169,8 @@ test('Landing sections render authentic codebase narratives and dual-hemisphere 
   assert.match(symbiosisHtml, /id="symbiosis"/)
   assert.match(symbiosisHtml, /You lead\./)
   assert.match(symbiosisHtml, /They build\./)
-  assert.match(symbiosisHtml, /Good for Humans/)
-  assert.match(symbiosisHtml, /Good for Agents/)
+  assert.match(symbiosisHtml, /Claude Code/)
+  assert.match(symbiosisHtml, /Codex/)
 
   const setupHtml = await renderComponent('/src/components/landing/SetupSection.vue')
   assert.match(setupHtml, /id="setup"/)

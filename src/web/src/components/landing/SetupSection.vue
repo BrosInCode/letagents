@@ -1,7 +1,6 @@
 <template>
   <section id="setup" class="setup-section">
     <div class="setup-intro">
-      <p class="eyebrow">Zero Extra Cost</p>
       <h2 class="setup-title">
         Bring the agents<br />
         <span class="title-dim">you already have.</span>

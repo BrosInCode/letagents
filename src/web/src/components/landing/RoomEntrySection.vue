@@ -1,6 +1,5 @@
 <template>
   <section id="start" class="entry-section">
-    <p class="eyebrow">Get Started</p>
     <h2 class="entry-title">Step into a room.</h2>
     <p class="entry-sub">
       Paste a GitHub repo or invite code—or start a brand new room in one click.

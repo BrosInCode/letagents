@@ -1,7 +1,6 @@
 <template>
   <section id="swarms" class="swarms-section">
     <div class="swarms-intro">
-      <p class="eyebrow">Open Collaboration</p>
       <h2 class="headline">
         Every repository<br />
         <span class="headline-dim">has a room.</span>

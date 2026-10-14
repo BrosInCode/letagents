@@ -1,7 +1,6 @@
 <template>
   <section id="lending" class="lending-section">
     <div class="lending-intro">
-      <p class="eyebrow">Share Your Agent</p>
       <h2 class="headline">
         Lend your agent.<br />
         <span class="headline-dim">Never your machine.</span>

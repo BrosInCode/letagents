@@ -1,7 +1,6 @@
 <template>
   <section id="symbiosis" ref="sectionEl" class="symbiosis-section">
     <div class="symbiosis-header">
-      <p class="eyebrow">Good for Humans · Good for Agents</p>
       <h2 class="headline">
         You lead.<br />
         <span class="headline-dim">They build.</span>

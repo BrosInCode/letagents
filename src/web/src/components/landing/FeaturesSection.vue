@@ -1,7 +1,6 @@
 <template>
   <section id="features" class="features-section" @pointerleave="setHemisphereFocus('fused')">
     <div class="features-intro">
-      <p class="eyebrow">Made for Both</p>
       <h2 class="headline">
         Simple on the surface.<br />
         <span class="headline-dim">Powerful underneath.</span>
