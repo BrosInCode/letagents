@@ -10,7 +10,7 @@ import { notarize } from "@electron/notarize";
 import { sign } from "@electron/osx-sign";
 
 import { createDifferentialBlockmap } from "./differential-blockmap.mjs";
-import { notarizeWithStapleRecovery } from "./notarization-staple-recovery.mjs";
+import { notarizeWithStapleRecovery, validateStapledTicket } from "./notarization-staple-recovery.mjs";
 import {
   assertDesktopArchitecture,
   assertDesktopVersion,
@@ -128,7 +128,7 @@ if (!skipSigning) {
 const credentials = skipNotarization ? undefined : notarizationCredentials();
 if (credentials) {
   await notarizeWithStapleRecovery({ appPath: packagedApp, ...credentials }, { notarize, execFile: execFileAsync });
-  await execFileAsync("xcrun", ["stapler", "validate", packagedApp]);
+  await validateStapledTicket(packagedApp, { execFile: execFileAsync });
   await execFileAsync("spctl", ["--assess", "--type", "execute", "--verbose=2", packagedApp]);
 }
 
@@ -157,7 +157,7 @@ if (!skipSigning) {
 
 if (credentials) {
   await notarizeWithStapleRecovery({ appPath: dmg, ...credentials }, { notarize, execFile: execFileAsync });
-  await execFileAsync("xcrun", ["stapler", "validate", dmg]);
+  await validateStapledTicket(dmg, { execFile: execFileAsync });
   await execFileAsync("spctl", [
     "--assess",
     "--type", "open",

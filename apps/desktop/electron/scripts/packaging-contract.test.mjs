@@ -99,7 +99,7 @@ test("release DMGs are signed before notarization and Gatekeeper assessment", as
   const signDmg = packager.indexOf('await execFileAsync("codesign", ["--sign", identity, "--force", "--timestamp", dmg]);');
   const verifyDmg = packager.indexOf('await execFileAsync("codesign", ["--verify", "--verbose=2", dmg]);');
   const notarizeDmg = packager.indexOf("await notarizeWithStapleRecovery({ appPath: dmg, ...credentials }, { notarize, execFile: execFileAsync });");
-  const validateDmg = packager.indexOf('await execFileAsync("xcrun", ["stapler", "validate", dmg]);');
+  const validateDmg = packager.indexOf('await validateStapledTicket(dmg, { execFile: execFileAsync });');
   const assessDmg = packager.indexOf('"context:primary-signature"');
 
   assert.ok(signDmg >= 0, "the DMG must receive a Developer ID signature");

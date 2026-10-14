@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { notarizeWithStapleRecovery } from "./notarization-staple-recovery.mjs";
+import { notarizeWithStapleRecovery, validateStapledTicket } from "./notarization-staple-recovery.mjs";
 
 const options = { appPath: "/tmp/Let Agents.dmg", appleApiKey: "/private/key.p8" };
 const networkError = () => new Error('Failed to staple your application with code: 68\nNSURLErrorDomain Code=-1005 "The network connection was lost."');
@@ -79,3 +79,47 @@ for (const failure of [
     assert.equal(calls.exec.length, 1);
   });
 }
+
+test("ticket validation succeeds without retrying or notarizing", async () => {
+  const { calls, deps } = harness();
+  await validateStapledTicket(options.appPath, deps);
+  assert.equal(calls.notarize.length, 0);
+  assert.equal(calls.exec.length, 1);
+  assert.deepEqual(calls.exec[0], ["xcrun", ["stapler", "validate", options.appPath], {
+    timeout: 120000, maxBuffer: 1048576,
+  }]);
+  assert.deepEqual(calls.waits, []);
+});
+
+test("ticket validation retries network loss and timeout, then requires successful validation", async () => {
+  const timeout = Object.assign(new Error("network timeout"), { code: 68, stderr: "NSURLErrorDomain Code=-1001" });
+  const { calls, deps } = harness(undefined, [commandNetworkError(), timeout]);
+  await validateStapledTicket(options.appPath, deps);
+  assert.equal(calls.notarize.length, 0);
+  assert.equal(calls.exec.length, 3);
+  assert.ok(calls.exec.every(([, args]) => args[1] === "validate"));
+  assert.deepEqual(calls.waits, [5000, 15000]);
+});
+
+test("ticket validation fails when all network retries fail", async () => {
+  const finalError = commandNetworkError();
+  const { calls, deps } = harness(undefined, [commandNetworkError(), commandNetworkError(), commandNetworkError(), finalError]);
+  await assert.rejects(validateStapledTicket(options.appPath, deps), error => error === finalError);
+  assert.equal(calls.exec.length, 4);
+  assert.deepEqual(calls.waits, [5000, 15000, 30000]);
+});
+
+test("a missing or invalid ticket is never treated as a network failure", async () => {
+  const failure = Object.assign(new Error("invalid ticket"), { code: 68, stdout: "The ticket is not valid." });
+  const { calls, deps } = harness(undefined, [failure]);
+  await assert.rejects(validateStapledTicket(options.appPath, deps), error => error === failure);
+  assert.equal(calls.exec.length, 1);
+  assert.deepEqual(calls.waits, []);
+});
+
+test("validation stops immediately if a network retry reveals an invalid ticket", async () => {
+  const failure = Object.assign(new Error("invalid ticket"), { code: 65 });
+  const { calls, deps } = harness(undefined, [commandNetworkError(), failure]);
+  await assert.rejects(validateStapledTicket(options.appPath, deps), error => error === failure);
+  assert.equal(calls.exec.length, 2);
+});
