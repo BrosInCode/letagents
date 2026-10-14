@@ -818,6 +818,7 @@ export async function addMessageWithCreateStatus(
         agent_session_id: string; agent_key: string; actor_label: string;
         activation_reason: string; receipt_state: string; created_at: string; updated_at: string;
       }>();
+      const taskOwnerThreadRecipients = new Set<string>();
 
       for (const [agentKey, group] of ownedSessionGroups) {
         if (
@@ -891,6 +892,21 @@ export async function addMessageWithCreateStatus(
         }
 
         if (selectedActivation) {
+          // Thread membership wins the receipt reason above, but a genuine
+          // task follow-up must still reach its existing lease owner promptly.
+          // Reuse the task routing check: expired or ambiguous owners do not
+          // gain priority merely because the text says "continue".
+          if (createdMessage.source === "agent"
+            && selectedActivation.activation.reason === "thread_participant"
+            && taskOwnerFollowUp
+            && group.identities.some(identity => {
+              const ownerActivation = decideAgentMessageActivation(messageForRouting, identity, {
+                activeTaskLeases: leases, threadParticipantRootIds: new Set<string>(),
+              });
+              return ownerActivation.reason === "task_owner" && ownerActivation.decision === "activate";
+            })) {
+            taskOwnerThreadRecipients.add(agentKey);
+          }
           const receiptSession = selectedActivation.activation.reason === "task_owner"
             ? selectedActivation.session
             : selectedActivation.activation.reason === "reply_target"
@@ -968,15 +984,20 @@ export async function addMessageWithCreateStatus(
           .find((session) => session.session_id === receipt.agent_session_id)!.owner_account_id,
       }));
       await insertMessageReceiptRows(tx, receiptRowsToInsert);
-      // A direct activation (mention, reply target, thread, task owner) must
-      // not stay behind an earlier held turn: the frontier would hide it too.
+      // A direct activation (mention, reply target, human thread, task owner)
+      // must not stay behind an earlier held turn: the frontier would hide it
+      // too. Automatic participation in a peer's thread reply is different:
+      // keep that receipt, but do not let it release unrelated queued turns.
       // Sequenced receipts never release, not even position 1: a quick
       // follow-up broadcast must not let an agent answer the previous message
       // out of turn. It waits behind that hold like everything else.
       releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
         tx,
         roomId,
-        receiptRowsToInsert.filter((receipt) => receipt.turn_position === null).map((receipt) => receipt.agent_key),
+        receiptRowsToInsert.filter((receipt) => receipt.turn_position === null
+          && (!(createdMessage.source === "agent" && receipt.activation_reason === "thread_participant")
+            || taskOwnerThreadRecipients.has(receipt.agent_key)))
+          .map((receipt) => receipt.agent_key),
       ));
     }
 
