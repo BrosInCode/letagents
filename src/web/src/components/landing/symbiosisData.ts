@@ -10,7 +10,7 @@ export const symbiosisBridge = reactive({
   focus: 'fused' as HemisphereFocus,
   activeChapter: 0,
   symbiosisAct: 0,
-  theme: 'dark' as SiteTheme,
+  theme: 'light' as SiteTheme,
 })
 
 export function setHemisphereFocus(focus: HemisphereFocus) {
@@ -25,7 +25,8 @@ export function syncThemeFromDom(): SiteTheme {
   try {
     stored = typeof localStorage !== 'undefined' ? localStorage.getItem('lac-theme') : null
   } catch { /* ignore */ }
-  const resolved: SiteTheme = attr === 'light' || (!attr && stored === 'light') ? 'light' : 'dark'
+  const resolved: SiteTheme =
+    attr === 'dark' || (!attr && stored === 'dark') ? 'dark' : 'light'
   symbiosisBridge.theme = resolved
   document.documentElement.setAttribute('data-theme', resolved)
   return resolved

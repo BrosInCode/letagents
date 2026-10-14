@@ -437,7 +437,7 @@ onUnmounted(() => {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #2ac49f;
+  color: var(--l-mint);
   margin-bottom: 14px;
 }
 
@@ -612,7 +612,7 @@ onUnmounted(() => {
 }
 
 .agent-node--done {
-  border-color: rgba(42, 196, 159, 0.42);
+  border-color: var(--l-mint-border);
 }
 
 .squircle-wrap {

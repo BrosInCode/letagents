@@ -26,7 +26,12 @@ import GitHubIcon from '@/components/icons/GitHubIcon.vue'
 
 <style scoped>
 .footer {
-  border-top: 1px solid var(--border);
+  position: relative;
+  z-index: 2;
+  border-top: 1px solid var(--l-border, var(--border));
+  background: var(--l-glass-bg, transparent);
+  backdrop-filter: blur(22px) saturate(140%);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
   padding: var(--space-3xl) var(--space-xl);
   text-align: center;
 }

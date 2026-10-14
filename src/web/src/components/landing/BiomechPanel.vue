@@ -1,17 +1,16 @@
 <template>
-  <section
+  <div
     ref="panelRoot"
     class="biomech-stage"
-    aria-label="Half artistic organic grass and half matte-white mechanical panel"
-    @pointermove="onPointerMove"
-    @pointerleave="onPointerLeave"
+    aria-hidden="true"
   >
     <canvas ref="canvasEl" class="biomech-canvas" />
-  </section>
+  </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
+import { symbiosisBridge, syncThemeFromDom } from './symbiosisData'
 
 const panelRoot = ref<HTMLElement | null>(null)
 const canvasEl = ref<HTMLCanvasElement | null>(null)
@@ -30,14 +29,14 @@ const pointer = {
 
 interface ArtisticGrassBlade {
   cluster: 'left' | 'seam'
-  baseXOffset: number // px offset relative to cluster anchor
-  heightRatio: number // fraction of viewport height
+  baseXOffset: number
+  heightRatio: number
   baseWidth: number
-  archDir: number // -1 left, +1 right
-  archAmount: number // horizontal sweep ratio
+  archDir: number
+  archAmount: number
   midControlBias: number
   tipCurl: number
-  twistAt: number // 0 = no twist, 0.45..0.75 = subtle botanical ribbon twist
+  twistAt: number
   tone: 'deep-sage' | 'mid-olive' | 'soft-sage' | 'pale-moss'
   opacity: number
   swaySpeed: number
@@ -279,8 +278,28 @@ let reducedMotion = false
 let startTime = 0
 let lastFrameTime = 0
 let mechPhase = 0
+let darkMix = 0 // 0 = Ceramic Alabaster (Light), 1 = Obsidian Titanium (Dark)
+let lastScrollY = 0
+let scrollVelocity = 0
 
-function onPointerMove(e: PointerEvent) {
+function mixHex(lightHex: string, darkHex: string, t: number): string {
+  if (t <= 0.001) return lightHex
+  if (t >= 0.999) return darkHex
+  const l = parseInt(lightHex.slice(1), 16)
+  const d = parseInt(darkHex.slice(1), 16)
+  const lr = (l >> 16) & 255
+  const lg = (l >> 8) & 255
+  const lb = l & 255
+  const dr = (d >> 16) & 255
+  const dg = (d >> 8) & 255
+  const db = d & 255
+  const r = Math.round(lr + (dr - lr) * t)
+  const g = Math.round(lg + (dg - lg) * t)
+  const b = Math.round(lb + (db - lb) * t)
+  return `rgb(${r}, ${g}, ${b})`
+}
+
+function onWindowPointerMove(e: PointerEvent) {
   if (!canvasEl.value) return
   const rect = canvasEl.value.getBoundingClientRect()
   const px = e.clientX - rect.left
@@ -296,27 +315,34 @@ function onPointerMove(e: PointerEvent) {
   pointer.active = true
 }
 
-function onPointerLeave() {
-  pointer.active = false
+function onWindowScroll() {
+  const sy = window.scrollY || 0
+  const delta = sy - lastScrollY
+  lastScrollY = sy
+  scrollVelocity = Math.max(-45, Math.min(45, scrollVelocity + delta * 0.25))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. LEFT SIDE: SERENE ALABASTER CANVAS & ARTISTIC HAND-DRAWN GRASS
 // ─────────────────────────────────────────────────────────────────────────────
-function drawLeftOrganicCanvas(ctx: CanvasRenderingContext2D, splitX: number, h: number) {
-  // Warm editorial ivory/alabaster paper wash
+function drawLeftOrganicCanvas(
+  ctx: CanvasRenderingContext2D,
+  splitX: number,
+  h: number,
+  dm: number,
+) {
   const bgGrad = ctx.createLinearGradient(0, 0, splitX, h)
-  bgGrad.addColorStop(0, '#fdfdfb')
-  bgGrad.addColorStop(0.65, '#fafaf7')
-  bgGrad.addColorStop(1, '#f3f5f0')
+  bgGrad.addColorStop(0, mixHex('#fdfdfb', '#0b100d', dm))
+  bgGrad.addColorStop(0.65, mixHex('#fafaf7', '#0e1511', dm))
+  bgGrad.addColorStop(1, mixHex('#f3f5f0', '#121b16', dm))
   ctx.fillStyle = bgGrad
   ctx.fillRect(0, 0, splitX, h)
 
   // Subtle ambient shadow cast leftward by the central vertical mechanical wall
   const wallShadow = ctx.createLinearGradient(splitX - 54, 0, splitX, 0)
-  wallShadow.addColorStop(0, 'rgba(148, 163, 156, 0)')
-  wallShadow.addColorStop(0.7, 'rgba(148, 163, 156, 0.06)')
-  wallShadow.addColorStop(1, 'rgba(100, 116, 109, 0.16)')
+  wallShadow.addColorStop(0, 'rgba(0, 0, 0, 0)')
+  wallShadow.addColorStop(0.7, `rgba(40, 56, 48, ${0.05 + dm * 0.14})`)
+  wallShadow.addColorStop(1, `rgba(25, 38, 32, ${0.14 + dm * 0.28})`)
   ctx.fillStyle = wallShadow
   ctx.fillRect(splitX - 54, 0, 54, h)
 }
@@ -371,6 +397,7 @@ function drawArtisticGrassBlades(
   splitX: number,
   t: number,
   dt: number,
+  dm: number,
 ) {
   const leftClusterAnchorX = Math.max(42, splitX * 0.11)
   const seamClusterAnchorX = splitX - 8
@@ -381,14 +408,14 @@ function drawArtisticGrassBlades(
     const y0 = h + 4
     const bladeH = blade.heightRatio * h
 
-    // Gentle poetic breeze
+    // Gentle poetic breeze + subtle scroll breeze
     const breeze =
       Math.sin(t * blade.swaySpeed + blade.swayPhase) * 0.045 +
-      Math.cos(t * (blade.swaySpeed * 0.6) + blade.swayPhase * 1.4) * 0.02
+      Math.cos(t * (blade.swaySpeed * 0.6) + blade.swayPhase * 1.4) * 0.02 +
+      scrollVelocity * 0.0018
 
     let targetBend = breeze
 
-    // Subtle cursor brush interaction
     if (pointer.active) {
       const sampleX = x0 + blade.archDir * bladeH * blade.archAmount * 0.45
       const sampleY = y0 - bladeH * 0.55
@@ -401,7 +428,6 @@ function drawArtisticGrassBlades(
       }
     }
 
-    // Smooth damped spring
     const accel = (targetBend - blade.currentBend) * 9.5
     blade.bendVelocity = (blade.bendVelocity + accel * dt) * 0.86
     blade.currentBend += blade.bendVelocity
@@ -412,9 +438,8 @@ function drawArtisticGrassBlades(
     const x2 = x0 + totalArch * bladeH * 0.68
     const y2 = y0 - bladeH * 0.78
     const x3 = x0 + totalArch * bladeH + blade.tipCurl * bladeH * 0.42
-    const y3 = y0 - bladeH + Math.abs( totalArch ) * bladeH * 0.18
+    const y3 = y0 - bladeH + Math.abs(totalArch) * bladeH * 0.18
 
-    // Sample ribbon polygon along the cubic bezier spine
     const segments = 32
     const leftPts: [number, number][] = []
     const rightPts: [number, number][] = []
@@ -427,10 +452,8 @@ function drawArtisticGrassBlades(
       const nx = -ty
       const ny = tx
 
-      // Botanical taper profile: swells slightly above base, then tapers to a razor-sharp tip
       let taper = Math.pow(1 - u, 0.82) * (0.85 + 0.25 * Math.sin(u * Math.PI))
       if (blade.twistAt > 0) {
-        // Subtle 3D leaf ribbon twist pinch
         const twistDist = Math.abs(u - blade.twistAt)
         if (twistDist < 0.16) {
           taper *= 0.38 + 0.62 * (twistDist / 0.16)
@@ -446,24 +469,23 @@ function drawArtisticGrassBlades(
     ctx.save()
     ctx.globalAlpha = blade.opacity
 
-    // Painterly botanical watercolor/ink gradient along the blade
     const grad = ctx.createLinearGradient(x0, y0, x3, y3)
     if (blade.tone === 'deep-sage') {
-      grad.addColorStop(0, '#44633b')
-      grad.addColorStop(0.55, '#648757')
-      grad.addColorStop(1, '#8eab80')
+      grad.addColorStop(0, mixHex('#44633b', '#36542e', dm))
+      grad.addColorStop(0.55, mixHex('#648757', '#6c965d', dm))
+      grad.addColorStop(1, mixHex('#8eab80', '#9ec290', dm))
     } else if (blade.tone === 'mid-olive') {
-      grad.addColorStop(0, '#557549')
-      grad.addColorStop(0.5, '#789a6a')
-      grad.addColorStop(1, '#a4be96')
+      grad.addColorStop(0, mixHex('#557549', '#45663b', dm))
+      grad.addColorStop(0.5, mixHex('#789a6a', '#82a973', dm))
+      grad.addColorStop(1, mixHex('#a4be96', '#b2d1a3', dm))
     } else if (blade.tone === 'soft-sage') {
-      grad.addColorStop(0, '#68895c')
-      grad.addColorStop(0.55, '#8bab7d')
-      grad.addColorStop(1, '#b6cca9')
+      grad.addColorStop(0, mixHex('#68895c', '#547549', dm))
+      grad.addColorStop(0.55, mixHex('#8bab7d', '#94b885', dm))
+      grad.addColorStop(1, mixHex('#b6cca9', '#c3ddb6', dm))
     } else {
-      grad.addColorStop(0, '#7c9c70')
-      grad.addColorStop(0.6, '#9cb98f')
-      grad.addColorStop(1, '#c5d7ba')
+      grad.addColorStop(0, mixHex('#7c9c70', '#628357', dm))
+      grad.addColorStop(0.6, mixHex('#9cb98f', '#a6c698', dm))
+      grad.addColorStop(1, mixHex('#c5d7ba', '#d2e6c7', dm))
     }
 
     ctx.fillStyle = grad
@@ -479,7 +501,8 @@ function drawArtisticGrassBlades(
     ctx.fill()
 
     // Delicate hand-drawn botanical ink edge & center midrib vein
-    ctx.strokeStyle = 'rgba(54, 78, 45, 0.42)'
+    ctx.strokeStyle =
+      dm > 0.5 ? 'rgba(20, 34, 18, 0.52)' : 'rgba(54, 78, 45, 0.42)'
     ctx.lineWidth = 0.75
     ctx.beginPath()
     ctx.moveTo(leftPts[0][0], leftPts[0][1])
@@ -488,8 +511,8 @@ function drawArtisticGrassBlades(
     }
     ctx.stroke()
 
-    // Fine pale midrib highlight line along the spine
-    ctx.strokeStyle = 'rgba(242, 247, 238, 0.55)'
+    ctx.strokeStyle =
+      dm > 0.5 ? 'rgba(216, 236, 206, 0.42)' : 'rgba(242, 247, 238, 0.55)'
     ctx.lineWidth = 0.65
     ctx.beginPath()
     ctx.moveTo(spinePts[0][0], spinePts[0][1])
@@ -513,6 +536,7 @@ function drawRightMechanicalPanel(
   h: number,
   splitX: number,
   phase: number,
+  dm: number,
 ) {
   const wallW = Math.max(36, Math.min(54, w * 0.036))
   const bayX = splitX + wallW
@@ -521,25 +545,25 @@ function drawRightMechanicalPanel(
 
   ctx.save()
 
-  // ── A. Recessed Machined Satin-Alabaster / Anodized Silver Backplate ──
+  // ── A. Recessed Machined Satin-Alabaster / Anodized Titanium Backplate ──
   const trayGrad = ctx.createLinearGradient(bayX, 0, w, h)
-  trayGrad.addColorStop(0, '#d2dad7')
-  trayGrad.addColorStop(0.5, '#dce3e0')
-  trayGrad.addColorStop(1, '#c9d2cf')
+  trayGrad.addColorStop(0, mixHex('#d2dad7', '#131917', dm))
+  trayGrad.addColorStop(0.5, mixHex('#dce3e0', '#18201d', dm))
+  trayGrad.addColorStop(1, mixHex('#c9d2cf', '#101614', dm))
   ctx.fillStyle = trayGrad
   ctx.fillRect(bayX, 0, bayW, h)
 
-  // Subtle recessed architectural panel seams in the backplate
-  ctx.strokeStyle = 'rgba(100, 114, 110, 0.18)'
+  ctx.strokeStyle =
+    dm > 0.5 ? 'rgba(148, 168, 158, 0.12)' : 'rgba(100, 114, 110, 0.18)'
   ctx.lineWidth = 1
   const pad = 24 * s
   ctx.strokeRect(bayX + pad, pad, bayW - pad * 2, h - pad * 2)
 
   // ── B. Clean Parallel Sage-Green Conduit Ribbons (Background Bus) ──
-  drawSageConduitRibbons(ctx, bayX, bayW, h, s, phase)
+  drawSageConduitRibbons(ctx, bayX, bayW, h, s, phase, dm)
 
   // ── C. 1. Upper-Left Horizontal Brushed-Metal Roller / Damper Cylinder ──
-  drawUpperRollerCylinder(ctx, bayX + bayW * 0.25, h * 0.125, s, phase)
+  drawUpperRollerCylinder(ctx, bayX + bayW * 0.25, h * 0.125, s, phase, dm)
 
   // ── D. 2. Upper-Right Clean Matte-White Manifold Module ──
   drawMatteWhiteModule(
@@ -550,6 +574,7 @@ function drawRightMechanicalPanel(
     h * 0.175,
     s,
     true,
+    dm,
   )
 
   // ── E. 3. Lower-Left & Mid-Right Clean Matte-White Manifold Modules ──
@@ -561,6 +586,7 @@ function drawRightMechanicalPanel(
     h * 0.12,
     s,
     false,
+    dm,
   )
   drawMatteWhiteModule(
     ctx,
@@ -570,6 +596,7 @@ function drawRightMechanicalPanel(
     h * 0.135,
     s,
     false,
+    dm,
   )
   drawMatteWhiteModule(
     ctx,
@@ -579,19 +606,20 @@ function drawRightMechanicalPanel(
     h * 0.19,
     s,
     false,
+    dm,
   )
 
   // ── F. 4. Lower-Left Horizontal Sage-Fluid Damper Capsule ──
-  drawLowerFluidDamper(ctx, bayX + bayW * 0.15, h * 0.915, s, phase)
+  drawLowerFluidDamper(ctx, bayX + bayW * 0.15, h * 0.915, s, phase, dm)
 
-  // ── G. 5. ICONIC CENTERPIECE: Large Matte-White Rotary Hub + Articulated Dual-Link Arm & Telescopic Piston ──
-  drawCentralArticulatedMechanism(ctx, bayX, bayW, h, s, phase)
+  // ── G. 5. ICONIC CENTERPIECE: Large Rotary Hub + Articulated Dual-Link Arm & Telescopic Piston ──
+  drawCentralArticulatedMechanism(ctx, bayX, bayW, h, s, phase, dm)
 
-  // ── H. Sculpted Matte-White Vertical Divider Bulkhead (with Stepped Sage Notch) ──
-  drawSteppedDividerBulkhead(ctx, splitX, wallW, w, h, s)
+  // ── H. Sculpted Vertical Divider Bulkhead (with Stepped Sage Notch) ──
+  drawSteppedDividerBulkhead(ctx, splitX, wallW, w, h, s, dm)
 
   // ── I. Flush Protective Glass Cover Plate & Diagonal Specular Reflections ──
-  drawGlassCoverReflections(ctx, bayX, bayW, h, s)
+  drawGlassCoverReflections(ctx, bayX, bayW, h, s, dm)
 
   ctx.restore()
 }
@@ -603,13 +631,14 @@ function drawSageConduitRibbons(
   h: number,
   s: number,
   phase: number,
+  dm: number,
 ) {
   ctx.save()
 
-  // Neat parallel 4-line sage-green conduit tracks like the reference image
   const trackOffsets = [-9, -3, 3, 9].map((o) => o * s)
+  const colEven = mixHex('#749468', '#5e8252', dm)
+  const colOdd = mixHex('#8fad82', '#7ca16f', dm)
 
-  // Ribbon Group 1: From under the Upper-Right Module curving into the mid bay
   for (let i = 0; i < trackOffsets.length; i++) {
     const off = trackOffsets[i]
     const sx = bayX + bayW * 0.56 + off
@@ -617,7 +646,7 @@ function drawSageConduitRibbons(
     const turnY = h * 0.265 + off
     const ex = bayX + bayW * 0.82
 
-    ctx.strokeStyle = i % 2 === 0 ? '#749468' : '#8fad82'
+    ctx.strokeStyle = i % 2 === 0 ? colEven : colOdd
     ctx.lineWidth = 3.2 * s
     ctx.lineCap = 'round'
     ctx.lineJoin = 'round'
@@ -629,7 +658,6 @@ function drawSageConduitRibbons(
     ctx.stroke()
   }
 
-  // Ribbon Group 2: Below the Main Rotary Hub sweeping right and down
   for (let i = 0; i < trackOffsets.length; i++) {
     const off = trackOffsets[i]
     const sx = bayX + bayW * 0.19 + off
@@ -638,7 +666,7 @@ function drawSageConduitRibbons(
     const turnX = bayX + bayW * 0.66 + off
     const ey = h * 0.88
 
-    ctx.strokeStyle = i % 2 === 0 ? '#749468' : '#94b088'
+    ctx.strokeStyle = i % 2 === 0 ? colEven : colOdd
     ctx.lineWidth = 3.2 * s
     ctx.beginPath()
     ctx.moveTo(sx, sy)
@@ -649,7 +677,6 @@ function drawSageConduitRibbons(
     ctx.lineTo(turnX, ey)
     ctx.stroke()
 
-    // Subtle moving sage-mint telemetry pulse along the middle track
     if (i === 1) {
       const p = (phase * 0.28) % 1
       const pulseX = sx + p * (turnX - sx)
@@ -672,6 +699,7 @@ function drawUpperRollerCylinder(
   cy: number,
   s: number,
   phase: number,
+  dm: number,
 ) {
   ctx.save()
   ctx.translate(cx, cy)
@@ -679,13 +707,11 @@ function drawUpperRollerCylinder(
   const totalW = 195 * s
   const cylH = 66 * s
 
-  // Ambient shadow
-  ctx.fillStyle = 'rgba(71, 85, 82, 0.22)'
+  ctx.fillStyle = `rgba(15, 22, 19, ${0.18 + dm * 0.25})`
   ctx.beginPath()
   ctx.roundRect(-totalW * 0.5 + 4 * s, -cylH * 0.5 + 6 * s, totalW, cylH, 10 * s)
   ctx.fill()
 
-  // Dark brushed-steel roller barrel (right half of cylinder)
   const darkGrad = ctx.createLinearGradient(0, -cylH * 0.44, 0, cylH * 0.44)
   darkGrad.addColorStop(0, '#374146')
   darkGrad.addColorStop(0.32, '#79848a')
@@ -696,27 +722,25 @@ function drawUpperRollerCylinder(
   ctx.roundRect(-12 * s, -cylH * 0.44, totalW * 0.5, cylH * 0.88, 6 * s)
   ctx.fill()
 
-  // Matte-white left cylinder housing cap
   const whiteGrad = ctx.createLinearGradient(0, -cylH * 0.5, 0, cylH * 0.5)
-  whiteGrad.addColorStop(0, '#f8faf9')
-  whiteGrad.addColorStop(0.55, '#e6ecea')
-  whiteGrad.addColorStop(1, '#c8d1ce')
+  whiteGrad.addColorStop(0, mixHex('#f8faf9', '#25302c', dm))
+  whiteGrad.addColorStop(0.55, mixHex('#e6ecea', '#1d2623', dm))
+  whiteGrad.addColorStop(1, mixHex('#c8d1ce', '#141b19', dm))
   ctx.fillStyle = whiteGrad
   ctx.beginPath()
   ctx.roundRect(-totalW * 0.36, -cylH * 0.5, totalW * 0.34, cylH, 7 * s)
   ctx.fill()
-  ctx.strokeStyle = 'rgba(148, 163, 158, 0.45)'
+  ctx.strokeStyle = 'rgba(148, 163, 158, 0.35)'
   ctx.lineWidth = 1
   ctx.stroke()
 
-  // Rotating vertical knurled collar lines to show subtle continuous rotation
   ctx.save()
   ctx.beginPath()
   ctx.rect(-12 * s, -cylH * 0.44, totalW * 0.5, cylH * 0.88)
   ctx.clip()
 
   const stripeSpacing = 9 * s
-  const offset = ((phase * 14 * s) % stripeSpacing + stripeSpacing) % stripeSpacing
+  const offset = (((phase * 14 * s) % stripeSpacing) + stripeSpacing) % stripeSpacing
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)'
   ctx.lineWidth = 1.5 * s
   for (let y = -cylH * 0.5 + offset; y <= cylH * 0.5; y += stripeSpacing) {
@@ -727,8 +751,7 @@ function drawUpperRollerCylinder(
   }
   ctx.restore()
 
-  // End shaft mounts
-  ctx.fillStyle = '#aeb8b5'
+  ctx.fillStyle = mixHex('#aeb8b5', '#333f3b', dm)
   ctx.fillRect(-totalW * 0.52, -cylH * 0.22, totalW * 0.16, cylH * 0.44)
   ctx.fillRect(totalW * 0.38, -cylH * 0.22, totalW * 0.16, cylH * 0.44)
 
@@ -741,6 +764,7 @@ function drawLowerFluidDamper(
   cy: number,
   s: number,
   phase: number,
+  dm: number,
 ) {
   ctx.save()
   ctx.translate(cx, cy)
@@ -748,7 +772,6 @@ function drawLowerFluidDamper(
   const w = 128 * s
   const h = 48 * s
 
-  // Sage-green glass fluid tube in the middle
   const fluidGrad = ctx.createLinearGradient(0, -h * 0.38, 0, h * 0.38)
   fluidGrad.addColorStop(0, '#6a8a5e')
   fluidGrad.addColorStop(0.4, '#a6c49a')
@@ -756,16 +779,14 @@ function drawLowerFluidDamper(
   ctx.fillStyle = fluidGrad
   ctx.fillRect(-w * 0.38, -h * 0.36, w * 0.76, h * 0.72)
 
-  // Moving internal metering ring inside the sage tube
   const ringX = Math.sin(phase * 1.1) * (w * 0.16)
-  ctx.fillStyle = '#e6ecea'
+  ctx.fillStyle = mixHex('#e6ecea', '#283430', dm)
   ctx.fillRect(ringX - 4 * s, -h * 0.36, 8 * s, h * 0.72)
 
-  // Brushed aluminum left & right end caps
   const capGrad = ctx.createLinearGradient(0, -h * 0.5, 0, h * 0.5)
-  capGrad.addColorStop(0, '#f4f7f6')
-  capGrad.addColorStop(0.5, '#d0d8d5')
-  capGrad.addColorStop(1, '#98a39f')
+  capGrad.addColorStop(0, mixHex('#f4f7f6', '#2a3632', dm))
+  capGrad.addColorStop(0.5, mixHex('#d0d8d5', '#1d2623', dm))
+  capGrad.addColorStop(1, mixHex('#98a39f', '#131917', dm))
   ctx.fillStyle = capGrad
   ctx.beginPath()
   ctx.roundRect(-w * 0.5, -h * 0.48, w * 0.22, h * 0.96, 5 * s)
@@ -783,41 +804,38 @@ function drawMatteWhiteModule(
   h: number,
   s: number,
   hasBottomPorts: boolean,
+  dm: number,
 ) {
   ctx.save()
 
-  // Soft cast drop shadow
-  ctx.fillStyle = 'rgba(75, 88, 84, 0.18)'
+  ctx.fillStyle = `rgba(18, 26, 22, ${0.16 + dm * 0.28})`
   ctx.beginPath()
   ctx.roundRect(x + 4 * s, y + 6 * s, w, h, 14 * s)
   ctx.fill()
 
-  // Matte-white ceramic/polymer body
   const bodyGrad = ctx.createLinearGradient(x, y, x, y + h)
-  bodyGrad.addColorStop(0, '#f9fbfa')
-  bodyGrad.addColorStop(0.65, '#edf1ef')
-  bodyGrad.addColorStop(1, '#dde3e0')
+  bodyGrad.addColorStop(0, mixHex('#f9fbfa', '#242f2b', dm))
+  bodyGrad.addColorStop(0.65, mixHex('#edf1ef', '#1c2522', dm))
+  bodyGrad.addColorStop(1, mixHex('#dde3e0', '#151c19', dm))
   ctx.fillStyle = bodyGrad
   ctx.beginPath()
   ctx.roundRect(x, y, w, h, 14 * s)
   ctx.fill()
 
-  // Subtle top specular highlight & crisp border
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)'
+  ctx.strokeStyle =
+    dm > 0.5 ? 'rgba(255, 255, 255, 0.14)' : 'rgba(255, 255, 255, 0.85)'
   ctx.lineWidth = 1.4
   ctx.stroke()
-  ctx.strokeStyle = 'rgba(138, 152, 147, 0.38)'
+  ctx.strokeStyle = 'rgba(138, 152, 147, 0.32)'
   ctx.lineWidth = 1
   ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1)
 
-  // Subtle panel seam line
-  ctx.strokeStyle = 'rgba(148, 163, 158, 0.32)'
+  ctx.strokeStyle = 'rgba(148, 163, 158, 0.26)'
   ctx.beginPath()
   ctx.moveTo(x + 14 * s, y + h * 0.72)
   ctx.lineTo(x + w - 14 * s, y + h * 0.72)
   ctx.stroke()
 
-  // 4 corner countersunk micro-screws
   const inset = 13 * s
   for (const [bx, by] of [
     [x + inset, y + inset],
@@ -825,16 +843,15 @@ function drawMatteWhiteModule(
     [x + inset, y + h - inset],
     [x + w - inset, y + h - inset],
   ] as const) {
-    drawCountersunkScrew(ctx, bx, by, 3.8 * s)
+    drawCountersunkScrew(ctx, bx, by, 3.8 * s, dm)
   }
 
-  // Optional 3 cable gland ports underneath (like the upper-right module in the reference image)
   if (hasBottomPorts) {
     for (let i = 0; i < 3; i++) {
       const px = x + 26 * s + i * 24 * s
       const py = y + h
-      ctx.fillStyle = '#dfe5e3'
-      ctx.strokeStyle = '#9aa6a2'
+      ctx.fillStyle = mixHex('#dfe5e3', '#1e2724', dm)
+      ctx.strokeStyle = 'rgba(148, 163, 158, 0.42)'
       ctx.lineWidth = 1
       ctx.beginPath()
       ctx.roundRect(px, py - 2 * s, 16 * s, 22 * s, 3 * s)
@@ -852,39 +869,36 @@ function drawBearingNode(
   y: number,
   outerR: number,
   angle: number,
+  dm: number,
 ) {
   ctx.save()
   ctx.translate(x, y)
 
-  // Outer matte-white boss
   const bossGrad = ctx.createRadialGradient(-outerR * 0.25, -outerR * 0.25, 2, 0, 0, outerR)
-  bossGrad.addColorStop(0, '#fafcfb')
-  bossGrad.addColorStop(0.7, '#e4eae8')
-  bossGrad.addColorStop(1, '#bcc6c3')
+  bossGrad.addColorStop(0, mixHex('#fafcfb', '#283430', dm))
+  bossGrad.addColorStop(0.7, mixHex('#e4eae8', '#1d2623', dm))
+  bossGrad.addColorStop(1, mixHex('#bcc6c3', '#121816', dm))
   ctx.fillStyle = bossGrad
   ctx.beginPath()
   ctx.arc(0, 0, outerR, 0, Math.PI * 2)
   ctx.fill()
-  ctx.strokeStyle = 'rgba(130, 144, 140, 0.45)'
+  ctx.strokeStyle = 'rgba(130, 144, 140, 0.4)'
   ctx.lineWidth = 1.2
   ctx.stroke()
 
-  // Recessed dark bearing race
-  ctx.fillStyle = '#475256'
+  ctx.fillStyle = mixHex('#475256', '#0e1312', dm)
   ctx.beginPath()
   ctx.arc(0, 0, outerR * 0.62, 0, Math.PI * 2)
   ctx.fill()
 
-  // Sage-green seal ring
   ctx.strokeStyle = '#84a478'
   ctx.lineWidth = outerR * 0.11
   ctx.beginPath()
   ctx.arc(0, 0, outerR * 0.48, 0, Math.PI * 2)
   ctx.stroke()
 
-  // Rotating inner steel hub with 2 pin holes
   ctx.rotate(angle)
-  ctx.fillStyle = '#cfd7d4'
+  ctx.fillStyle = mixHex('#cfd7d4', '#33403c', dm)
   ctx.beginPath()
   ctx.arc(0, 0, outerR * 0.34, 0, Math.PI * 2)
   ctx.fill()
@@ -905,46 +919,35 @@ function drawCentralArticulatedMechanism(
   h: number,
   s: number,
   phase: number,
+  dm: number,
 ) {
-  // 1. Main Rotary Hub Center (Center-Left of bay, matching the reference image)
   const hubX = bayX + bayW * 0.24
   const hubY = h * 0.365
   const hubOuterR = 114 * s
 
-  // Upper-Right Joint (J1) & Lower-Right Joint (J3)
   const j1X = bayX + bayW * 0.85
   const j1Y = h * 0.305
   const j3X = bayX + bayW * 0.83
   const j3Y = h * 0.785
 
-  // Smooth, slow harmonic articulation of the central knuckle joint (J2)
   const strokeOsc = Math.sin(phase * 0.95)
   const j2X = bayX + bayW * (0.405 + strokeOsc * 0.042)
   const j2Y = h * (0.555 - strokeOsc * 0.032)
 
-  // Mid-link elbow bearing between J2 and J3
   const elbowX = bayX + bayW * (0.625 + strokeOsc * 0.024)
   const elbowY = h * (0.595 + strokeOsc * 0.022)
 
   ctx.save()
 
-  // ── A. Lower Articulated Link Arm (Elbow <-> J3) ──
-  drawSculptedWhiteLink(ctx, elbowX, elbowY, j3X, j3Y, 44 * s, s, true)
+  drawSculptedWhiteLink(ctx, elbowX, elbowY, j3X, j3Y, 44 * s, s, true, dm)
+  drawSculptedWhiteLink(ctx, j2X, j2Y, elbowX, elbowY, 48 * s, s, false, dm)
+  drawTelescopicActuatorArm(ctx, j2X, j2Y, j1X, j1Y, s, strokeOsc, dm)
+  drawLargeRotaryHub(ctx, hubX, hubY, hubOuterR, s, phase, dm)
 
-  // ── B. Mid Horizontal Link Bridge (J2 <-> Elbow) ──
-  drawSculptedWhiteLink(ctx, j2X, j2Y, elbowX, elbowY, 48 * s, s, false)
-
-  // ── C. Telescopic Hydraulic Cylinder + Matte-White Upper Arm Shroud (J2 <-> J1) ──
-  drawTelescopicActuatorArm(ctx, j2X, j2Y, j1X, j1Y, s, strokeOsc)
-
-  // ── D. Iconic Large Matte-White C-Shroud & Rotating Concentric Hub ──
-  drawLargeRotaryHub(ctx, hubX, hubY, hubOuterR, s, phase)
-
-  // ── E. Precision Bearing Joints at J1, J2, Elbow, J3 ──
-  drawBearingNode(ctx, j1X, j1Y, 38 * s, -phase * 0.9)
-  drawBearingNode(ctx, j2X, j2Y, 34 * s, phase * 1.1)
-  drawBearingNode(ctx, elbowX, elbowY, 32 * s, -phase * 0.8)
-  drawBearingNode(ctx, j3X, j3Y, 34 * s, phase * 0.7)
+  drawBearingNode(ctx, j1X, j1Y, 38 * s, -phase * 0.9, dm)
+  drawBearingNode(ctx, j2X, j2Y, 34 * s, phase * 1.1, dm)
+  drawBearingNode(ctx, elbowX, elbowY, 32 * s, -phase * 0.8, dm)
+  drawBearingNode(ctx, j3X, j3Y, 34 * s, phase * 0.7, dm)
 
   ctx.restore()
 }
@@ -958,6 +961,7 @@ function drawSculptedWhiteLink(
   thickness: number,
   s: number,
   hasInnerSlot: boolean,
+  dm: number,
 ) {
   const dx = x2 - x1
   const dy = y2 - y1
@@ -968,29 +972,33 @@ function drawSculptedWhiteLink(
   ctx.translate(x1, y1)
   ctx.rotate(angle)
 
-  // Soft drop shadow
-  ctx.fillStyle = 'rgba(62, 74, 70, 0.22)'
+  ctx.fillStyle = `rgba(18, 26, 22, ${0.2 + dm * 0.28})`
   ctx.beginPath()
-  ctx.roundRect(-thickness * 0.45 + 3 * s, -thickness * 0.5 + 6 * s, len + thickness * 0.9, thickness, thickness * 0.5)
+  ctx.roundRect(
+    -thickness * 0.45 + 3 * s,
+    -thickness * 0.5 + 6 * s,
+    len + thickness * 0.9,
+    thickness,
+    thickness * 0.5,
+  )
   ctx.fill()
 
-  // Matte-white link body
   const grad = ctx.createLinearGradient(0, -thickness * 0.5, 0, thickness * 0.5)
-  grad.addColorStop(0, '#fafcfb')
-  grad.addColorStop(0.55, '#eaefed')
-  grad.addColorStop(1, '#cfd7d4')
+  grad.addColorStop(0, mixHex('#fafcfb', '#283430', dm))
+  grad.addColorStop(0.55, mixHex('#eaefed', '#1e2724', dm))
+  grad.addColorStop(1, mixHex('#cfd7d4', '#141b19', dm))
   ctx.fillStyle = grad
   ctx.beginPath()
   ctx.roundRect(-thickness * 0.45, -thickness * 0.5, len + thickness * 0.9, thickness, thickness * 0.5)
   ctx.fill()
 
-  ctx.strokeStyle = 'rgba(136, 150, 146, 0.48)'
+  ctx.strokeStyle = 'rgba(136, 150, 146, 0.42)'
   ctx.lineWidth = 1.1
   ctx.stroke()
 
   if (hasInnerSlot) {
-    ctx.strokeStyle = 'rgba(136, 150, 146, 0.38)'
-    ctx.fillStyle = '#dde4e2'
+    ctx.strokeStyle = 'rgba(136, 150, 146, 0.34)'
+    ctx.fillStyle = mixHex('#dde4e2', '#151c19', dm)
     ctx.beginPath()
     ctx.roundRect(len * 0.22, -thickness * 0.22, len * 0.56, thickness * 0.44, thickness * 0.18)
     ctx.fill()
@@ -1008,6 +1016,7 @@ function drawTelescopicActuatorArm(
   j1Y: number,
   s: number,
   strokeOsc: number,
+  dm: number,
 ) {
   const dx = j1X - j2X
   const dy = j1Y - j2Y
@@ -1019,11 +1028,9 @@ function drawTelescopicActuatorArm(
   ctx.translate(j2X, j2Y)
   ctx.rotate(angle)
 
-  // 1. Exposed Telescopic Chrome & Sage-Green Hydraulic Cylinder (Left Half of Span)
   const pistonSpan = totalLen * 0.54
   const halfH = armH * 0.42
 
-  // Brushed dark-steel & sage-tinted central cylinder barrel
   const cylGrad = ctx.createLinearGradient(0, -halfH, 0, halfH)
   cylGrad.addColorStop(0, '#3f494d')
   cylGrad.addColorStop(0.28, '#9eb596')
@@ -1033,7 +1040,6 @@ function drawTelescopicActuatorArm(
   ctx.fillStyle = cylGrad
   ctx.fillRect(24 * s, -halfH * 0.72, pistonSpan, halfH * 1.44)
 
-  // Twin polished chrome guide rods top & bottom of the barrel
   const rodGrad = ctx.createLinearGradient(0, -halfH, 0, -halfH + 10 * s)
   rodGrad.addColorStop(0, '#ffffff')
   rodGrad.addColorStop(0.5, '#cbd5d2')
@@ -1042,9 +1048,8 @@ function drawTelescopicActuatorArm(
   ctx.fillRect(24 * s, -halfH, pistonSpan, 9 * s)
   ctx.fillRect(24 * s, halfH - 9 * s, pistonSpan, 9 * s)
 
-  // Sliding chrome collar ring that moves along the piston rods with strokeOsc
   const collarX = totalLen * (0.26 + strokeOsc * 0.045)
-  ctx.fillStyle = '#eef2f0'
+  ctx.fillStyle = mixHex('#eef2f0', '#25302c', dm)
   ctx.strokeStyle = '#8b9995'
   ctx.lineWidth = 1
   ctx.beginPath()
@@ -1052,34 +1057,30 @@ function drawTelescopicActuatorArm(
   ctx.fill()
   ctx.stroke()
 
-  // 2. Sculpted Matte-White Upper Arm Shroud (Right Half of Span toward J1)
   const shroudStart = totalLen * 0.44
   const shroudLen = totalLen - shroudStart + 36 * s
 
-  // Drop shadow under shroud
-  ctx.fillStyle = 'rgba(58, 70, 66, 0.24)'
+  ctx.fillStyle = `rgba(18, 26, 22, ${0.22 + dm * 0.3})`
   ctx.beginPath()
   ctx.roundRect(shroudStart + 4 * s, -armH * 0.5 + 7 * s, shroudLen, armH, 14 * s)
   ctx.fill()
 
   const shroudGrad = ctx.createLinearGradient(0, -armH * 0.5, 0, armH * 0.5)
-  shroudGrad.addColorStop(0, '#fbfdfc')
-  shroudGrad.addColorStop(0.55, '#ebefed')
-  shroudGrad.addColorStop(1, '#cdd6d3')
+  shroudGrad.addColorStop(0, mixHex('#fbfdfc', '#2a3632', dm))
+  shroudGrad.addColorStop(0.55, mixHex('#ebefed', '#1e2724', dm))
+  shroudGrad.addColorStop(1, mixHex('#cdd6d3', '#151c19', dm))
   ctx.fillStyle = shroudGrad
   ctx.beginPath()
   ctx.roundRect(shroudStart, -armH * 0.5, shroudLen, armH, 14 * s)
   ctx.fill()
 
-  ctx.strokeStyle = 'rgba(132, 146, 142, 0.48)'
+  ctx.strokeStyle = 'rgba(132, 146, 142, 0.42)'
   ctx.lineWidth = 1.2
   ctx.stroke()
 
-  // Countersunk bolts on the white arm shroud
-  drawCountersunkScrew(ctx, shroudStart + 16 * s, -armH * 0.28, 3.4 * s)
-  drawCountersunkScrew(ctx, shroudStart + 16 * s, armH * 0.28, 3.4 * s)
+  drawCountersunkScrew(ctx, shroudStart + 16 * s, -armH * 0.28, 3.4 * s, dm)
+  drawCountersunkScrew(ctx, shroudStart + 16 * s, armH * 0.28, 3.4 * s, dm)
 
-  // 3. Sculpted Matte-White Knuckle Clevis around J2
   ctx.fillStyle = shroudGrad
   ctx.beginPath()
   ctx.roundRect(-36 * s, -armH * 0.52, 72 * s, armH * 1.04, 22 * s)
@@ -1096,38 +1097,39 @@ function drawLargeRotaryHub(
   outerR: number,
   s: number,
   phase: number,
+  dm: number,
 ) {
   ctx.save()
   ctx.translate(cx, cy)
 
-  // 1. Rotating Inner Brushed-Steel & Sage-Green Concentric Rotor
   ctx.save()
   ctx.rotate(phase * 0.42)
 
-  // Dark recessed rotor well
-  ctx.fillStyle = '#394246'
+  ctx.fillStyle = mixHex('#394246', '#0e1312', dm)
   ctx.beginPath()
   ctx.arc(0, 0, outerR * 0.62, 0, Math.PI * 2)
   ctx.fill()
 
-  // Sage-green precision elastomeric ring
   ctx.strokeStyle = '#89a87d'
   ctx.lineWidth = outerR * 0.08
   ctx.beginPath()
   ctx.arc(0, 0, outerR * 0.52, 0, Math.PI * 2)
   ctx.stroke()
 
-  // Brushed aluminum rotor ring
-  const rotorGrad = ctx.createLinearGradient(-outerR * 0.45, -outerR * 0.45, outerR * 0.45, outerR * 0.45)
-  rotorGrad.addColorStop(0, '#f1f5f3')
-  rotorGrad.addColorStop(0.5, '#b8c3c0')
-  rotorGrad.addColorStop(1, '#798582')
+  const rotorGrad = ctx.createLinearGradient(
+    -outerR * 0.45,
+    -outerR * 0.45,
+    outerR * 0.45,
+    outerR * 0.45,
+  )
+  rotorGrad.addColorStop(0, mixHex('#f1f5f3', '#35423e', dm))
+  rotorGrad.addColorStop(0.5, mixHex('#b8c3c0', '#242e2b', dm))
+  rotorGrad.addColorStop(1, mixHex('#798582', '#171f1c', dm))
   ctx.fillStyle = rotorGrad
   ctx.beginPath()
   ctx.arc(0, 0, outerR * 0.44, 0, Math.PI * 2)
   ctx.fill()
 
-  // Precision radial index notches on rotor
   ctx.strokeStyle = 'rgba(55, 65, 68, 0.55)'
   ctx.lineWidth = 1.4 * s
   for (let i = 0; i < 12; i++) {
@@ -1138,61 +1140,55 @@ function drawLargeRotaryHub(
     ctx.stroke()
   }
 
-  // Center bearing cap
   ctx.fillStyle = '#5c676b'
   ctx.beginPath()
   ctx.arc(0, 0, outerR * 0.22, 0, Math.PI * 2)
   ctx.fill()
-  ctx.strokeStyle = '#e2e8e6'
+  ctx.strokeStyle = mixHex('#e2e8e6', '#45544f', dm)
   ctx.lineWidth = 2 * s
   ctx.stroke()
 
   ctx.restore()
 
-  // 2. Sculpted Matte-White C-Shaped Outer Stator Housing (with sweeping lower tail arm)
   ctx.save()
-  ctx.shadowColor = 'rgba(52, 64, 60, 0.26)'
+  ctx.shadowColor = `rgba(18, 26, 22, ${0.24 + dm * 0.35})`
   ctx.shadowBlur = 18 * s
   ctx.shadowOffsetX = 4 * s
   ctx.shadowOffsetY = 8 * s
 
   const shroudGrad = ctx.createLinearGradient(-outerR, -outerR, outerR, outerR * 1.6)
-  shroudGrad.addColorStop(0, '#fbfdfc')
-  shroudGrad.addColorStop(0.5, '#ecf0ee')
-  shroudGrad.addColorStop(1, '#cfd7d4')
+  shroudGrad.addColorStop(0, mixHex('#fbfdfc', '#2a3632', dm))
+  shroudGrad.addColorStop(0.5, mixHex('#ecf0ee', '#1f2825', dm))
+  shroudGrad.addColorStop(1, mixHex('#cfd7d4', '#151c19', dm))
 
   ctx.fillStyle = shroudGrad
   ctx.beginPath()
-  // Outer C-arc from +0.25 rad clockwise around to -0.35 rad
   ctx.arc(0, 0, outerR, -0.22, Math.PI * 1.42, true)
-  // Sweeping lower tail extension (like the reference image!)
   ctx.lineTo(outerR * 1.15, outerR * 1.95)
   ctx.lineTo(outerR * 1.38, outerR * 1.78)
   ctx.lineTo(outerR * 0.22, outerR * 0.62)
-  // Inner bore arc
   ctx.arc(0, 0, outerR * 0.58, Math.PI * 0.58, -0.22, false)
   ctx.closePath()
   ctx.fill()
 
   ctx.shadowColor = 'transparent'
-  ctx.strokeStyle = 'rgba(136, 150, 146, 0.48)'
+  ctx.strokeStyle = 'rgba(136, 150, 146, 0.44)'
   ctx.lineWidth = 1.2
   ctx.stroke()
 
-  // Subtle recessed arc seam line on the white C-shroud
-  ctx.strokeStyle = 'rgba(148, 163, 158, 0.38)'
+  ctx.strokeStyle = 'rgba(148, 163, 158, 0.34)'
   ctx.lineWidth = 1
   ctx.beginPath()
   ctx.arc(0, 0, outerR * 0.79, Math.PI * 0.65, Math.PI * 1.88)
   ctx.stroke()
 
-  // Countersunk mounting screws on the white C-shroud
   for (const a of [2.1, 3.05, 4.15, 5.15]) {
     drawCountersunkScrew(
       ctx,
       Math.cos(a) * outerR * 0.79,
       Math.sin(a) * outerR * 0.79,
       3.8 * s,
+      dm,
     )
   }
 
@@ -1205,24 +1201,22 @@ function drawCountersunkScrew(
   x: number,
   y: number,
   r: number,
+  dm: number,
 ) {
   ctx.save()
   ctx.translate(x, y)
 
-  // Countersunk recess ring
-  ctx.fillStyle = '#b8c2bf'
+  ctx.fillStyle = mixHex('#b8c2bf', '#101513', dm)
   ctx.beginPath()
   ctx.arc(0, 0, r * 1.35, 0, Math.PI * 2)
   ctx.fill()
 
-  // Brushed steel screw head
-  ctx.fillStyle = '#e4eae8'
+  ctx.fillStyle = mixHex('#e4eae8', '#33403c', dm)
   ctx.beginPath()
   ctx.arc(0, 0, r, 0, Math.PI * 2)
   ctx.fill()
 
-  // Dark hex/torx socket
-  ctx.fillStyle = '#475256'
+  ctx.fillStyle = mixHex('#475256', '#0a0e0d', dm)
   ctx.beginPath()
   ctx.arc(0, 0, r * 0.48, 0, Math.PI * 2)
   ctx.fill()
@@ -1237,6 +1231,7 @@ function drawSteppedDividerBulkhead(
   w: number,
   h: number,
   s: number,
+  dm: number,
 ) {
   ctx.save()
 
@@ -1245,7 +1240,6 @@ function drawSteppedDividerBulkhead(
   const chamfer = 14 * s
   const stepIn = 9 * s
 
-  // 1. Recessed Sage-Green Elastomeric Accent Strip inside the Stepped Notch
   const sageGrad = ctx.createLinearGradient(splitX, notchTop, splitX + stepIn + 8 * s, notchTop)
   sageGrad.addColorStop(0, '#6e8f62')
   sageGrad.addColorStop(0.6, '#95b389')
@@ -1259,12 +1253,11 @@ function drawSteppedDividerBulkhead(
   ctx.closePath()
   ctx.fill()
 
-  // 2. Main Sculpted Matte-White Vertical Bulkhead Wall
   const wallGrad = ctx.createLinearGradient(splitX, 0, splitX + wallW, 0)
-  wallGrad.addColorStop(0, '#fbfdfc')
-  wallGrad.addColorStop(0.55, '#eef2f0')
-  wallGrad.addColorStop(0.88, '#dce2e0')
-  wallGrad.addColorStop(1, '#b9c3c0')
+  wallGrad.addColorStop(0, mixHex('#fbfdfc', '#25302c', dm))
+  wallGrad.addColorStop(0.55, mixHex('#eef2f0', '#1d2623', dm))
+  wallGrad.addColorStop(0.88, mixHex('#dce2e0', '#161d1b', dm))
+  wallGrad.addColorStop(1, mixHex('#b9c3c0', '#101513', dm))
 
   ctx.fillStyle = wallGrad
   ctx.beginPath()
@@ -1283,24 +1276,21 @@ function drawSteppedDividerBulkhead(
   ctx.closePath()
   ctx.fill()
 
-  // Crisp left architectural edge line
-  ctx.strokeStyle = 'rgba(160, 174, 169, 0.55)'
+  ctx.strokeStyle = 'rgba(160, 174, 169, 0.45)'
   ctx.lineWidth = 1.2
   ctx.stroke()
 
-  // Inner subtle contour line along the bulkhead
-  ctx.strokeStyle = 'rgba(148, 163, 158, 0.42)'
+  ctx.strokeStyle = 'rgba(148, 163, 158, 0.32)'
   ctx.lineWidth = 1
   ctx.beginPath()
   ctx.moveTo(splitX + wallW * 0.42, 0)
   ctx.lineTo(splitX + wallW * 0.42, h)
   ctx.stroke()
 
-  // Precision countersunk screws along the vertical bulkhead
   const screwX = splitX + wallW * 0.68
-  const screwYs = [0.025, 0.11, 0.25, 0.52, 0.80, 0.825, 0.935]
+  const screwYs = [0.025, 0.11, 0.25, 0.52, 0.8, 0.825, 0.935]
   for (const sy of screwYs) {
-    drawCountersunkScrew(ctx, screwX, h * sy, 4.4 * s)
+    drawCountersunkScrew(ctx, screwX, h * sy, 4.4 * s, dm)
   }
 
   ctx.restore()
@@ -1312,17 +1302,19 @@ function drawGlassCoverReflections(
   bayW: number,
   h: number,
   s: number,
+  dm: number,
 ) {
   ctx.save()
   ctx.beginPath()
   ctx.rect(bayX, 0, bayW, h)
   ctx.clip()
 
-  // Diagonal Specular Glass Reflection Band 1 (Upper-Left to Mid-Right, matching reference image!)
+  const reflAlpha = 1 - dm * 0.62
+
   const band1Grad = ctx.createLinearGradient(bayX + bayW * 0.2, 0, bayX + bayW * 0.95, h * 0.75)
-  band1Grad.addColorStop(0, 'rgba(255, 255, 255, 0.36)')
-  band1Grad.addColorStop(0.5, 'rgba(255, 255, 255, 0.22)')
-  band1Grad.addColorStop(1, 'rgba(255, 255, 255, 0.04)')
+  band1Grad.addColorStop(0, `rgba(255, 255, 255, ${0.36 * reflAlpha})`)
+  band1Grad.addColorStop(0.5, `rgba(255, 255, 255, ${0.22 * reflAlpha})`)
+  band1Grad.addColorStop(1, `rgba(255, 255, 255, ${0.04 * reflAlpha})`)
   ctx.fillStyle = band1Grad
   ctx.beginPath()
   ctx.moveTo(bayX + bayW * 0.22, 0)
@@ -1332,11 +1324,10 @@ function drawGlassCoverReflections(
   ctx.closePath()
   ctx.fill()
 
-  // Diagonal Specular Glass Reflection Band 2 (Mid-Left to Bottom-Right)
   const band2Grad = ctx.createLinearGradient(bayX, h * 0.25, bayX + bayW * 0.75, h)
-  band2Grad.addColorStop(0, 'rgba(255, 255, 255, 0.28)')
-  band2Grad.addColorStop(0.6, 'rgba(255, 255, 255, 0.18)')
-  band2Grad.addColorStop(1, 'rgba(255, 255, 255, 0.05)')
+  band2Grad.addColorStop(0, `rgba(255, 255, 255, ${0.28 * reflAlpha})`)
+  band2Grad.addColorStop(0.6, `rgba(255, 255, 255, ${0.18 * reflAlpha})`)
+  band2Grad.addColorStop(1, `rgba(255, 255, 255, ${0.05 * reflAlpha})`)
   ctx.fillStyle = band2Grad
   ctx.beginPath()
   ctx.moveTo(bayX, h * 0.24)
@@ -1346,9 +1337,8 @@ function drawGlassCoverReflections(
   ctx.closePath()
   ctx.fill()
 
-  // Flush Glass Perimeter Bevel Line
   const glassInset = 10 * s
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.62)'
+  ctx.strokeStyle = `rgba(255, 255, 255, ${0.62 * reflAlpha})`
   ctx.lineWidth = 1.5
   ctx.beginPath()
   ctx.roundRect(
@@ -1383,9 +1373,14 @@ function renderFrame(now: number) {
 
   pointer.vx *= 0.85
   pointer.vy *= 0.85
+  scrollVelocity *= 0.88
 
-  // Gentle, unhurried mechanical motion; slightly responsive when hovering the right half
-  const speedMult = pointer.active && pointer.x > 0.5 ? 1.35 : 1.0
+  // Smoothly interpolate dark mode mix [0..1]
+  const targetDark = symbiosisBridge.theme === 'dark' ? 1 : 0
+  darkMix += (targetDark - darkMix) * 0.09
+
+  const speedMult =
+    (pointer.active && pointer.x > 0.5 ? 1.35 : 1.0) + Math.abs(scrollVelocity) * 0.06
   if (!reducedMotion) {
     mechPhase += dt * speedMult
   }
@@ -1399,14 +1394,9 @@ function renderFrame(now: number) {
   ctx.scale(dpr, dpr)
   ctx.clearRect(0, 0, w, h)
 
-  // 1. Clean Alabaster Left Canvas
-  drawLeftOrganicCanvas(ctx, splitX, h)
-
-  // 2. Clean Matte-White & Silver Mechanical Right Panel (under flush glass)
-  drawRightMechanicalPanel(ctx, w, h, splitX, mechPhase)
-
-  // 3. Artistic Hand-Drawn Botanical Grass Blades (drawn last so tall tips can gracefully overlap the white seam!)
-  drawArtisticGrassBlades(ctx, w, h, splitX, elapsed, dt)
+  drawLeftOrganicCanvas(ctx, splitX, h, darkMix)
+  drawRightMechanicalPanel(ctx, w, h, splitX, mechPhase, darkMix)
+  drawArtisticGrassBlades(ctx, w, h, splitX, elapsed, dt, darkMix)
 
   ctx.restore()
 
@@ -1426,8 +1416,13 @@ function syncCanvasSize() {
 
 onMounted(() => {
   if (typeof window === 'undefined') return
+  syncThemeFromDom()
+  darkMix = symbiosisBridge.theme === 'dark' ? 1 : 0
   reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
   syncCanvasSize()
+
+  window.addEventListener('pointermove', onWindowPointerMove, { passive: true })
+  window.addEventListener('scroll', onWindowScroll, { passive: true })
 
   if (typeof ResizeObserver !== 'undefined' && canvasEl.value) {
     resizeObserver = new ResizeObserver(() => {
@@ -1441,8 +1436,10 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  if (rafId && typeof window !== 'undefined') {
-    window.cancelAnimationFrame(rafId)
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('pointermove', onWindowPointerMove)
+    window.removeEventListener('scroll', onWindowScroll)
+    if (rafId) window.cancelAnimationFrame(rafId)
   }
   resizeObserver?.disconnect()
 })
@@ -1450,11 +1447,12 @@ onUnmounted(() => {
 
 <style scoped>
 .biomech-stage {
-  position: relative;
+  position: fixed;
+  inset: 0;
   width: 100vw;
   height: 100vh;
-  min-height: 560px;
-  background: #fbfbfa;
+  z-index: 0;
+  pointer-events: none;
   overflow: hidden;
   user-select: none;
 }

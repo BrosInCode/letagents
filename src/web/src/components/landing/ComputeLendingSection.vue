@@ -92,7 +92,7 @@ const isRevoked = ref(false)
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #2ac49f;
+  color: var(--l-mint);
   margin-bottom: 14px;
 }
 
@@ -168,7 +168,7 @@ const isRevoked = ref(false)
 
 .node-box--agent {
   background: var(--l-glass-bg-elevated);
-  border: 1px solid rgba(42, 196, 159, 0.38);
+  border: 1px solid var(--l-mint-border);
 }
 
 .node-box--agent img {
@@ -200,7 +200,7 @@ const isRevoked = ref(false)
   position: relative;
   width: 100%;
   height: 2px;
-  background: rgba(42, 196, 159, 0.35);
+  background: var(--l-mint-glow);
   overflow: hidden;
   transition: background 250ms ease;
 }

@@ -125,14 +125,14 @@ test('Three.js SymbiosisCanvas implements dual-hemisphere symbiote core, custom 
   assert.match(canvasSource, /prefers-reduced-motion:\s*reduce/)
 })
 
-test('Light and dark mode toggle switches reactive theme and coordinates CSS + WebGL transition tokens', () => {
-  assert.equal(symbiosisBridge.theme, 'dark')
-  const switched = toggleTheme()
-  assert.equal(switched, 'light')
+test('Light and dark mode toggle switches reactive theme and coordinates CSS + canvas transition tokens', () => {
   assert.equal(symbiosisBridge.theme, 'light')
-  const restored = toggleTheme()
-  assert.equal(restored, 'dark')
+  const switched = toggleTheme()
+  assert.equal(switched, 'dark')
   assert.equal(symbiosisBridge.theme, 'dark')
+  const restored = toggleTheme()
+  assert.equal(restored, 'light')
+  assert.equal(symbiosisBridge.theme, 'light')
 
   const globalCss = readLandingFile('../src/styles/global.css')
   assert.match(globalCss, /\[data-theme="light"\]/)
@@ -140,9 +140,18 @@ test('Light and dark mode toggle switches reactive theme and coordinates CSS + W
   assert.match(globalCss, /html\.theme-transitioning/)
 })
 
-test('Landing v3 mounts BiomechPanel with half-organic grass and half-metallic moving parts', async () => {
+test('Landing v3 mounts full content stack over BiomechPanel with half-organic grass and half-metallic moving parts', async () => {
   const landingSource = readLandingFile('../src/pages/Landing.vue')
-  assert.match(landingSource, /<BiomechPanel \/>/)
+  assert.match(landingSource, /<HeroSection \/>/)
+  assert.match(landingSource, /<SymbiosisSection \/>/)
+  assert.match(landingSource, /<SetupSection \/>/)
+  assert.match(landingSource, /<ComputeLendingSection \/>/)
+  assert.match(landingSource, /<SwarmOrchestrationSection \/>/)
+  assert.match(landingSource, /<RoomEntrySection \/>/)
+  assert.match(landingSource, /<FeaturesSection \/>/)
+
+  const heroSource = readLandingFile('../src/components/landing/HeroSection.vue')
+  assert.match(heroSource, /<BiomechPanel \/>/)
 
   const biomechSource = readLandingFile('../src/components/landing/BiomechPanel.vue')
   assert.match(biomechSource, /drawLeftOrganicCanvas/)

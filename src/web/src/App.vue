@@ -18,13 +18,9 @@ import ToastContainer from '@/components/ui/ToastContainer.vue'
 
 const route = useRoute()
 
-// Show navbar/footer on docs, hide in room, messages, and the full-viewport v3 biomech panel landing
-const showNavbar = computed(
-  () => route.name !== 'room' && route.name !== 'messages' && route.name !== 'landing',
-)
-const showFooter = computed(
-  () => route.name !== 'room' && route.name !== 'messages' && route.name !== 'landing',
-)
+// Show navbar/footer on landing and docs, hide in room view
+const showNavbar = computed(() => route.name !== 'room' && route.name !== 'messages')
+const showFooter = computed(() => route.name !== 'room' && route.name !== 'messages')
 </script>
 
 <style>

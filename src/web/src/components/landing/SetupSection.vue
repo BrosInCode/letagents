@@ -120,7 +120,7 @@ async function copyForAgent(idx: number) {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #2ac49f;
+  color: var(--l-mint);
   margin-bottom: 14px;
 }
 
@@ -176,8 +176,8 @@ async function copyForAgent(idx: number) {
 }
 
 .dock-item--copied {
-  background: rgba(42, 196, 159, 0.12);
-  border-color: rgba(42, 196, 159, 0.4);
+  background: var(--l-mint-soft);
+  border-color: var(--l-mint-border);
 }
 
 .dock-squircle {

@@ -96,7 +96,7 @@ async function handleCreate() {
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #2ac49f;
+  color: var(--l-mint);
   margin-bottom: 14px;
 }
 
