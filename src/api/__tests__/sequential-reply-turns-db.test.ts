@@ -542,14 +542,14 @@ function pollRoute(roomId: string) {
       handler(req, res).catch(reject);
     });
   const selfReceipt = [...putHandlers].find(([path]) => path.includes("agent-receipts"))![1];
-  const reportSelf = (session: { session_id: string; session_token: string }, ownerId: string, messageId: string, state: string) =>
+  const reportSelf = (session: { session_id: string; session_token: string }, ownerId: string, messageId: string, state: string | Record<string, unknown>) =>
     new Promise<{ statusCode: number; body: Record<string, unknown> }>((resolve, reject) => {
       const headers = new Map([
         [headerNames!.LETAGENTS_AGENT_SESSION_ID_HEADER.toLowerCase(), session.session_id],
         [headerNames!.LETAGENTS_AGENT_SESSION_TOKEN_HEADER.toLowerCase(), session.session_token],
       ]);
       const req = {
-        params: { 0: roomId, 1: messageId }, query: {}, body: { receipt_state: state, agent_session_id: session.session_id, agent_session_token: session.session_token },
+        params: { 0: roomId, 1: messageId }, query: {}, body: { ...(typeof state === "string" ? { receipt_state: state } : state), agent_session_id: session.session_id, agent_session_token: session.session_token },
         authKind: "owner_token",
         sessionAccount: { account_id: ownerId, login: ownerId },
         get: (name: string) => headers.get(name.toLowerCase()) ?? "",
@@ -664,6 +664,70 @@ test("a self-reported no_reply ends the turn and releases the next position", sk
   } finally {
     route.close();
   }
+});
+
+for (const state of ["queued", "responding", "blocked"]) {
+  test(`yielding a speaking position preserves ${state}, retry and later reply semantics`, skip, async () => {
+    const a = await seed();
+    const sent = await a.send("@everyone compare the options");
+    const [first, second] = await order(a, sent.message.id);
+    const route = pollRoute(a.room.id);
+    const session = a.sessions[first!]!;
+    const states = async () => (await client!.pool.query(
+      "SELECT receipt_state FROM message_agent_receipts WHERE message_room_id=$1 AND message_number=$2 AND agent_key=$3",
+      [a.room.id, Number(sent.message.id.slice(4)), session.agent_key],
+    )).rows[0].receipt_state;
+    try {
+      if (state !== "queued") assert.equal((await route.reportSelf(session, a.ownerId, sent.message.id, state)).statusCode, 200);
+      const yielded = await route.reportSelf(session, a.ownerId, sent.message.id, { yield_reply_turn: true });
+      assert.equal(yielded.statusCode, 200, JSON.stringify(yielded.body));
+      assert.equal(yielded.body.reply_turn_yielded, true);
+      assert.equal(await states(), state, "yield does not claim silence, failure or completion");
+      assert.deepEqual((await a.turns(sent.message.id)).map(row => row.released), [true, true, false]);
+      assert.equal((await route.reportSelf(session, a.ownerId, sent.message.id, { yield_reply_turn: true })).statusCode, 200);
+      assert.deepEqual((await a.turns(sent.message.id)).map(row => row.released), [true, true, false]);
+      await a.reply(first!, sent.message.id);
+      assert.equal(await states(), "replied", "the yielded agent may later recover and answer");
+      assert.equal((await route.reportSelf(session, a.ownerId, sent.message.id, { yield_reply_turn: true })).statusCode, 200);
+      assert.equal(await states(), "replied", "a delayed yield cannot regress completion");
+      assert.deepEqual((await a.turns(sent.message.id)).map(row => row.released), [true, true, false], "neither late reply nor duplicate yield skips the active second position");
+      await a.reply(second!, sent.message.id);
+      assert.deepEqual((await a.turns(sent.message.id)).map(row => row.released), [true, true, true]);
+    } finally { route.close(); }
+  });
+}
+
+test("speaking-position yields require the current routed identity and an exclusive operation", skip, async () => {
+  const a = await seed();
+  const sent = await a.send("@everyone compare the options");
+  const [first] = await order(a, sent.message.id);
+  const session = a.sessions[first!]!;
+  const outsider = await api!.createRoomAgentSession({
+    room_id: a.room.id, session_kind: "worker", runtime: "claude-code", actor_label: "Other",
+    agent_key: `${a.ownerId}/unrouted`, display_name: "Other", owner_account_id: a.ownerId,
+    owner_label: a.ownerId, ide_label: "Agent",
+  });
+  const route = pollRoute(a.room.id);
+  try {
+    for (const body of [{ yield_reply_turn: false }, { yield_reply_turn: true, receipt_state: "no_reply" }]) {
+      assert.equal((await route.reportSelf(session, a.ownerId, sent.message.id, body)).statusCode, 400);
+    }
+    assert.equal((await route.reportSelf(outsider, a.ownerId, sent.message.id, { yield_reply_turn: true })).statusCode, 404);
+    assert.deepEqual((await a.turns(sent.message.id)).map(row => row.released), [true, false, false]);
+    await api!.endRoomAgentSession({ session_id: session.session_id, room_id: a.room.id });
+    assert.equal((await route.reportSelf(session, a.ownerId, sent.message.id, { yield_reply_turn: true })).statusCode, 401);
+  } finally { route.close(); }
+});
+
+test("speaking-position yield does not invent an order for an unsequenced receipt", skip, async () => {
+  const a = await seed(3, null);
+  const sent = await a.send("@everyone compare the options");
+  const route = pollRoute(a.room.id);
+  try {
+    assert.equal((await route.reportSelf(a.sessions[0]!, a.ownerId, sent.message.id, { yield_reply_turn: true })).statusCode, 409);
+    const rows = await client!.pool.query("SELECT receipt_state,turn_done_at FROM message_agent_receipts WHERE message_room_id=$1", [a.room.id]);
+    assert.ok(rows.rows.every(row => row.receipt_state === "queued" && row.turn_done_at === null));
+  } finally { route.close(); }
 });
 
 test("a successor can settle its retired session's silent outcome without reviving another turn", skip, async () => {
