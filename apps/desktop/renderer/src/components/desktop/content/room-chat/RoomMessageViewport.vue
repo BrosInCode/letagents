@@ -130,7 +130,32 @@
         data-testid="room-local-agent-work-list"
       >
         <div v-for="work in collapsedAgentWork.visible" :key="work.id" class="room-local-agent-work-group">
+          <!-- Another member's agent, known from room presence only: a label, since this desktop has no live stream to open. -->
+          <div
+            v-if="work.remote"
+            data-motion-work=""
+            :data-motion-session="work.agentSessionId"
+            :data-motion-agent="work.agentKey"
+            data-remote="true"
+            role="group"
+            class="room-local-agent-work"
+            :aria-label="`${work.displayName} is working: ${work.summary}`"
+            data-testid="room-local-agent-work"
+          >
+            <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+            <span class="room-local-agent-work-copy" aria-hidden="true">
+              <strong>{{ work.displayName }}</strong>
+              <span>·</span>
+              <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
+            </span>
+            <span class="room-local-agent-work-dots" aria-hidden="true">
+              <i></i>
+              <i></i>
+              <i></i>
+            </span>
+          </div>
           <button
+            v-else
             :data-motion-work="work.awaitingRoomTurn ? undefined : ''"
             :data-motion-session="work.agentSessionId"
             :data-motion-agent="work.agentKey"

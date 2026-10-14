@@ -690,6 +690,8 @@ export async function publishWorkerNativeActivity(input: {
   method: string;
   status: "working" | "idle";
   operation: string;
+  /** What the working agent does, in one public line; null clears it. Older servers ignore the field. */
+  activitySummary?: string | null;
 }): Promise<boolean> {
   const roomPath = supervisedRoomPath(input.roomId);
   const endpoint = `${input.apiUrl}/rooms/${roomPath}/agent-sessions/${encodeURIComponent(input.agentSessionId)}/native-activity`;
@@ -701,6 +703,7 @@ export async function publishWorkerNativeActivity(input: {
       sequence: input.sequence,
       method: input.method,
       status: input.status,
+      activity_summary: input.status === "working" ? input.activitySummary ?? null : null,
     }),
     signal: AbortSignal.timeout(10_000),
   });

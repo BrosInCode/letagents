@@ -4454,10 +4454,11 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
         await agent.eventually(() => !terminals.settling(agent.id), "the daemon stops waiting for the exit", 5_000);
       }
       await agent.eventually(() => unended() === 0, "the ended process has a saved terminal");
-      // In this fixture a purge after retirement stops at its next step for
-      // every agent, with or without a fault in the exit's recording: the
-      // fake server keeps no record of the ended session. Removal has got
-      // past the process's exit once it answers that, as it does for both.
+      // The agent's first working event published its live activity line,
+      // so the daemon holds a native publication that names its worker
+      // session: that is the exact evidence a purge needs, and the purge
+      // completes for both. Removal has got past the process's exit once it
+      // answers that.
       let answer: { outcome: string; error?: string } = { outcome: "" };
       await agent.eventually(async () => {
         answer = (await purge()).result as typeof answer;
@@ -4465,8 +4466,7 @@ for (const exit of ["cannot be recorded", "is recorded as usual"] as const) {
       }, "removal is no longer refused for a process that looks alive").catch((error) => {
         throw new Error(`${(error as Error).message}: ${JSON.stringify(answer)}`);
       });
-      assert.deepEqual(answer, { outcome: "invalid",
-        error: "Purge credential recovery needs an exact retained worker session or durable proof that no worker session was minted." });
+      assert.equal(answer.outcome, "purged", answer.error);
       assert.equal(agent.harness.launches.length, 1, "an agent being removed is not started again");
     } finally {
       endFault();
