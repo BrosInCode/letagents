@@ -178,10 +178,7 @@ onUnmounted(() => {
 
 .hero-word {
   display: inline-block;
-  background: linear-gradient(180deg, #ffffff 0%, rgba(255, 255, 255, 0.65) 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: #86868b;
   transition: opacity 300ms ease, transform 300ms ease;
 }
 
