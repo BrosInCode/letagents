@@ -1307,6 +1307,11 @@ test('a second dispatch never reuses an ambiguous first baseline', async t => {
 test('authority replacement during a workspace read cannot attribute successor edits', async t => {
   const f = await fixture(t);
   f.captureMessage();
+  // Stage ordinary execution evidence explicitly: slow Git capture can allow
+  // the background timer to do this too, before authority is replaced.
+  await f.publisher.flush();
+  const before = f.row().summary;
+  assert.equal(before?.recorded_state, 'active');
   f.options.workspaceLocation = async () => f.location;
   await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
   f.options.workspaceLocation = async () => {
@@ -1314,7 +1319,9 @@ test('authority replacement during a workspace read cannot attribute successor e
     return f.location;
   };
   await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
-  assert.equal(f.row().summary, null);
+  assert.deepEqual(f.row().summary, before, 'replacement cannot add workspace attribution');
+  assert.equal(f.db.prepare('SELECT settled_json FROM room_workspace_captures').get()?.settled_json, null);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM room_workspace_reviews').get()?.count, 0);
 });
 
 test('failed retry invalidation cannot revive a baseline from an earlier invocation', async t => {

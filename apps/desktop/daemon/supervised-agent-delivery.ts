@@ -1963,45 +1963,53 @@ export class SupervisedAgentDelivery {
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
       const { acceptedResult: result } = await checkpointTerminalResult(providerResult);
-      // Optional review evidence is captured before another turn can mutate this workspace.
-      // Failure must not change the provider result or cause the turn to be rerun.
-      await observeWorkspace(result.text);
-      const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
-      const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
-      if (!await hasTerminalAuthority(result)) return;
-      if (result.outcome === "failed" || result.outcome === "interrupted") {
-        await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
-        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
-        return;
-      }
-      if (item.state !== "result_recovery") {
-        await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
-      }
-      if (result.outcome === "unreadable") {
-        if (item.state === "result_recovery") {
-          await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
-        } else {
-          await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The provider completed, but its final answer could not be read. Re-reading the same completed turn." });
+      // Review capture and a successful reply may travel together. Keep this
+      // lane occupied until capture finishes, before ACK or another local turn.
+      const workspaceCapture = observeWorkspace(result.text);
+      try {
+        if (result.outcome !== "reply") await workspaceCapture;
+        const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
+        const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
+        if (!await hasTerminalAuthority(result)) return;
+        if (result.outcome === "failed" || result.outcome === "interrupted") {
+          await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
+          await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+          return;
         }
-        return;
-      }
-      if (result.outcome === "no_reply") {
-        if (!await this.hasExecutionAuthority(agent, turnController)) return;
-        await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
-        void this.reportNoReply(agent, item, controller).catch(() => {});
+        if (item.state !== "result_recovery") {
+          await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
+        }
+        if (result.outcome === "unreadable") {
+          if (item.state === "result_recovery") {
+            await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
+          } else {
+            await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The provider completed, but its final answer could not be read. Re-reading the same completed turn." });
+          }
+          return;
+        }
+        if (result.outcome === "no_reply") {
+          if (!await this.hasExecutionAuthority(agent, turnController)) return;
+          await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
+          void this.reportNoReply(agent, item, controller).catch(() => {});
+          await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+          return;
+        }
+        const text = result.text?.trim();
+        if (!text) throw new Error("Provider returned an empty room answer without the no-reply outcome.");
+        // The terminal payload is checkpointed before the external publication.
+        // A crash after this point retries the same client id without rerunning the provider.
+        await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
+        setActive("publishing");
+        if (!await this.publish(agent, item, text, controller)) return;
+        await workspaceCapture;
+        if (!await this.hasExecutionAuthority(agent, controller)) return;
+        await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
-        return;
+      } finally {
+        // HTTP failure, Stop or authority loss must join before catch/recovery
+        // and before releaseWorkspace can remove the capture worker's refs.
+        await workspaceCapture;
       }
-      const text = result.text?.trim();
-      if (!text) throw new Error("Provider returned an empty room answer without the no-reply outcome.");
-      // The terminal payload is checkpointed before the external publication.
-      // A crash after this point retries the same client id without rerunning the provider.
-      await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
-      setActive("publishing");
-      if (!await this.publish(agent, item, text, controller)) return;
-      if (!await this.hasExecutionAuthority(agent, controller)) return;
-      await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
-      await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
     } catch (error) {
       // A turn-scoped abort (Stop / stop-then-resend) is a clean interruption,
       // not a delivery failure: the item is settled `cancelled_by_user` by

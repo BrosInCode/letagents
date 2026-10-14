@@ -8268,6 +8268,101 @@ test('every provider waits for the workspace snapshot before advancing to its ne
 });
 
 
+for (const variant of ['success', 'capture_failure', 'http_failure', 'stop', 'authority_loss', 'handoff'] as const) {
+  test(`reply publication overlaps capture but joins its boundary on ${variant}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'letagents-capture-publication-'));
+    const store = new SupervisedAgentInboxStore(join(root, 'state.sqlite'));
+    const captureStarted = deferred<void>(), captureRelease = deferred<void>();
+    const publishStarted = deferred<void>(), publishRelease = deferred<void>();
+    const events: string[] = [];
+    let ownsLane = true, nativeCalls = 0, publications = 0, finished = false;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.();
+      nativeCalls++;
+      await options?.checkpointTurnStarted?.(request.inboxItemId);
+      return { turnId: request.inboxItemId, outcome: 'reply', text: `answer ${request.sourceMessage.id}`,
+        publicationContract: 'legacy_cursor_aggregate_v0' };
+    }), {
+      poll: async () => ({}),
+      publish: async input => {
+        publications++;
+        events.push(`publish:${publications}`);
+        if (publications === 1) {
+          publishStarted.resolve();
+          await publishRelease.promise;
+          if (variant === 'http_failure') throw new Error('temporary publication failure');
+        }
+        return { messageId: `published-${input.clientMessageId}`, roomId: agent.roomId };
+      },
+    }, async () => ownsLane, 0,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    async (_agent, source) => {
+      events.push(`capture:${source}`);
+      if (source === '1') {
+        captureStarted.resolve(); await captureRelease.promise;
+        if (variant === 'capture_failure') throw new Error('optional capture unavailable');
+      }
+    }, undefined, async (_agent, source) => { events.push(`release:${source}`); });
+    let draining: Promise<void> | undefined;
+    try {
+      await delivery.pump(agent);
+      await ingest(store, '1'); await ingest(store, '2');
+      const pumping = delivery.pump(agent).finally(() => { finished = true; });
+      await captureStarted.promise;
+      await publishStarted.promise;
+      assert.equal(nativeCalls, 1, 'posting does not start a successor native turn');
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, 'publishing');
+      if (variant === 'stop') {
+        assert.equal(await delivery.interruptActiveDelivery(agent), 'published', 'Stop honestly loses after publishing owns the result');
+      }
+      if (variant === 'authority_loss') ownsLane = false;
+      if (variant === 'handoff') draining = delivery.fenceAndDrain();
+      publishRelease.resolve();
+      // Let HTTP resolve/reject while capture remains deliberately held.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(finished, false, 'delivery still owns capture');
+      assert.equal(publications, 1, 'HTTP failure cannot retry before capture joins');
+      assert.equal(nativeCalls, 1);
+      assert.ok(!events.includes('release:1'), 'capture refs remain retained');
+      assert.notEqual((await store.receipts(agent.agentId))[0]?.state, 'acknowledged');
+      captureRelease.resolve();
+      await pumping; await draining;
+      assert.ok(events.indexOf('release:1') > events.indexOf('publish:1'));
+      const receipts = await store.receipts(agent.agentId);
+      if (variant === 'authority_loss' || variant === 'handoff') {
+        assert.equal(nativeCalls, 1);
+        assert.notEqual(receipts[0]?.state, 'acknowledged', 'lost authority cannot ACK the posted result');
+        const recoveryCalls: string[] = [], recoveryCaptures: string[] = [], recoveryIds: string[] = [];
+        const restored = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+          recoveryCalls.push(String(request.sourceMessage.id));
+          await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+          return { turnId: request.inboxItemId, outcome: 'reply', text: 'second answer' };
+        }), { poll: async () => ({}), publish: async input => {
+          recoveryIds.push(input.clientMessageId);
+          return { messageId: `published-${input.clientMessageId}`, roomId: agent.roomId };
+        } }, currentAuthority, 0,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        async (_agent, source) => { recoveryCaptures.push(source); });
+        try {
+          await restored.pump(agent);
+          assert.deepEqual(recoveryCalls, ['2'], 'recover the saved first answer without rerunning its model');
+          assert.deepEqual(recoveryCaptures, ['2'], 'never reconstruct the old filesystem snapshot');
+          assert.equal(recoveryIds[0], receipts[0]!.reply_client_message_id, 'retry the exact published message identity');
+          assert.deepEqual((await store.receipts(agent.agentId)).map(row => row.state), ['acknowledged', 'acknowledged']);
+        } finally { await restored.fenceAndDrain(); }
+      } else {
+        assert.equal(nativeCalls, 2, 'publication retry never repeats the first native turn');
+        assert.deepEqual(receipts.map(row => row.state), ['acknowledged', 'acknowledged']);
+        assert.equal(publications, variant === 'http_failure' ? 3 : 2);
+      }
+    } finally {
+      captureRelease.resolve(); publishRelease.resolve();
+      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("recorded reply-thread intent cannot publish a stopped, failed, silent or authority-lost turn", async () => {
   for (const outcome of ["stop", "failed", "no_reply", "authority_lost"] as const) {
     const root = await mkdtemp(join(tmpdir(), "letagents-thread-no-publish-"));
