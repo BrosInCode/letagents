@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { productionSupervisedDeliveryHttp } from "../cloud-http.js";
+import { SupervisedRoomAuthorizationError } from "../supervised-agent-delivery.js";
 
 const input = { apiUrl: "https://letagents.test", roomId: "room_1", bearer: "worker-only",
   signal: new AbortController().signal };
@@ -32,11 +33,33 @@ test("context reads use the exact worker and reject activation authority, wrong 
     }
     for (const code of [401, 403, 500]) {
       status = code;
-      await assert.rejects(productionSupervisedDeliveryHttp.context!(input), new RegExp(`HTTP ${code}`));
+      await assert.rejects(productionSupervisedDeliveryHttp.context!(input), error => {
+        assert.match(String(error), new RegExp(`HTTP ${code}`));
+        if (code !== 500) {
+          assert.ok(error instanceof SupervisedRoomAuthorizationError);
+          assert.equal(error.status, code);
+        }
+        return true;
+      });
     }
     const before = calls;
     assert.equal(await productionSupervisedDeliveryHttp.context!({ ...input, apiUrl: "letagents-local://rooms" }), null);
     assert.equal(calls, before);
+  } finally { globalThis.fetch = prior; }
+});
+
+test("context accepts a slow successful connection within the normal cloud budget", async () => {
+  const prior = globalThis.fetch;
+  globalThis.fetch = (async (_url, init) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      init!.signal!.removeEventListener("abort", abort);
+      resolve(new Response(JSON.stringify({ room_id: "room_1", context_only: true, messages: [] })));
+    }, 6_000);
+    const abort = () => { clearTimeout(timer); reject(init!.signal!.reason); };
+    init!.signal!.addEventListener("abort", abort, { once: true });
+  })) as typeof fetch;
+  try {
+    assert.deepEqual(await productionSupervisedDeliveryHttp.context!(input), []);
   } finally { globalThis.fetch = prior; }
 });
 
@@ -52,7 +75,32 @@ test("context requests are cancelled by Stop and their own bounded deadline", as
     const pending = productionSupervisedDeliveryHttp.context!({ ...input, signal: stop.signal });
     stop.abort(new Error("Stopped"));
     await assert.rejects(pending, /Stopped/);
-    await assert.rejects(productionSupervisedDeliveryHttp.context!(input), /timeout|timed out/i);
+    await assert.rejects(productionSupervisedDeliveryHttp.context!(input), /Room context read.*TimeoutError/);
     assert.equal(aborts, 2);
   } finally { clearInterval(keepAlive); globalThis.fetch = prior; }
+});
+
+test("context body reads retain Stop cancellation and omit response text from errors", async () => {
+  const prior = globalThis.fetch;
+  let opened!: () => void;
+  const bodyOpened = new Promise<void>(resolve => { opened = resolve; });
+  globalThis.fetch = (async (_url, init) => new Response(new ReadableStream({
+    start(controller) {
+      init!.signal!.addEventListener("abort", () => controller.error(init!.signal!.reason), { once: true });
+      opened();
+    },
+  }))) as typeof fetch;
+  try {
+    const stop = new AbortController();
+    const pending = productionSupervisedDeliveryHttp.context!({ ...input, signal: stop.signal });
+    await bodyOpened;
+    stop.abort(new Error("Stopped during body"));
+    await assert.rejects(pending, /Stopped during body/);
+    globalThis.fetch = (async () => new Response("not-json-private-response")) as typeof fetch;
+    await assert.rejects(productionSupervisedDeliveryHttp.context!(input), error => {
+      assert.match(String(error), /Room context read failed during response/);
+      assert.doesNotMatch(String(error), /private-response/);
+      return true;
+    });
+  } finally { globalThis.fetch = prior; }
 });

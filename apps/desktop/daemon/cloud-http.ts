@@ -239,15 +239,26 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
   async context(input) {
     if (isLocalRoomApi(input.apiUrl)) return null;
+    // Use the same bounded network allowance as other cloud reads. A separate
+    // five-second deadline exhausted preparation retries on slow connections
+    // before any model work could start. Stop still cancels immediately.
     const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages?before=latest&limit=30&context_only=true`, {
       headers: { authorization: `Bearer ${input.bearer}` }, redirect: "error",
-      signal: boundedCloudSignal(input.signal, 5_000),
+      signal: boundedCloudSignal(input.signal),
+    }).catch((error: unknown) => {
+      if (input.signal.aborted) throw input.signal.reason;
+      throw new Error(`Room context read failed during request (${error instanceof Error ? error.name : "transport error"}).`, { cause: error });
     });
     if (response.status === 401 || response.status === 403) {
       throw new SupervisedRoomAuthorizationError(`Room context read failed with HTTP ${response.status}.`, response.status);
     }
     if (!response.ok) throw new Error(`Room context read failed with HTTP ${response.status}.`);
-    const body = await response.json() as Record<string, unknown>;
+    const body = await response.json().catch((error: unknown) => {
+      if (input.signal.aborted) throw input.signal.reason;
+      // JSON parser messages can contain response text; keep it out of the
+      // user-visible diagnostic while retaining the cause for debugging.
+      throw new Error(`Room context read failed during response (${error instanceof Error ? error.name : "body error"}).`, { cause: error });
+    }) as Record<string, unknown>;
     if (body?.room_id !== input.roomId) throw new Error("Room context response belongs to another room.");
     // Older history routes ignore the optional query. Their held result is
     // not fresh awareness; retain legacy behavior during server-first rollout.
