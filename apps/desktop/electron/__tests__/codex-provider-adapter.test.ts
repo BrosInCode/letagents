@@ -6245,6 +6245,30 @@ test("Codex custodial polling reads the selected built executable contract witho
       && !error.message.includes("contract-probe-owner-canary") && !error.message.includes(entry));
     await assert.rejects(adapter.spawn(request), (error: unknown) => error instanceof Error
       && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
+    for (const source of ["process.exit(1)", "process.stdout.write('not JSON')", "process.stdout.write('x'.repeat(70000))", "process.kill(process.pid, 'SIGKILL')"]) {
+      await writeFile(entry, source);
+      await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
+        error instanceof Error && !(error as Error & { transientProviderStart?: boolean }).transientProviderStart);
+    }
+    const descendantPidFile = join(directory, "probe-child.pid");
+    await writeFile(entry, `import { spawn } from 'node:child_process';
+      import { writeFileSync } from 'node:fs';
+      const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: ['ignore', 1, 2] });
+      writeFileSync(${JSON.stringify(descendantPidFile)}, String(child.pid));
+      setInterval(() => {}, 1000);`);
+    const probeStartedAt = Date.now();
+    try {
+      await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
+        error instanceof Error && (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
+        && /signal: SIGKILL/.test(error.message) && !error.message.includes(entry));
+      assert.ok(Date.now() - probeStartedAt < 15_000, "inherited output pipes must not extend the eight-second probe deadline to the descendant's lifetime");
+    } finally {
+      const descendantPid = Number(await readFile(descendantPidFile, "utf8").catch(() => "0"));
+      if (Number.isSafeInteger(descendantPid) && descendantPid > 1) {
+        try { process.kill(descendantPid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      }
+    }
+    // A fresh probe must actually read the repaired executable after timeout.
     await writeFile(entry, [
       "if (process.argv[2] !== '--letagents-runtime-contract' || process.env.LETAGENTS_TOKEN) process.exit(2);",
       `process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))});`,

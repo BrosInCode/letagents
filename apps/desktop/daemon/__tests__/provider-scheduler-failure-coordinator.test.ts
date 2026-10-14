@@ -103,3 +103,14 @@ test("an unclassified bootstrap failure still schedules no automatic retry", asy
   await coordinator.record("agent-1", new Error("Claude CLI did not complete its daemon-safe bootstrap turn (deadline)."), "test");
   assert.deepEqual(scheduled, []);
 });
+
+
+test("owned contract-probe deadlines use the bounded existing provider-start recovery budget", async () => {
+  const { coordinator, scheduled } = harness();
+  const deadline = Object.assign(new Error("contract probe exceeded its owned deadline"), { transientProviderStart: true });
+  for (let i = 0; i < 5; i++) await coordinator.record("agent-1", new Error("convergence failed", { cause: deadline }), "test");
+  assert.deepEqual(scheduled, [15_000, 15_000, 15_000]);
+  coordinator.clearSuccessfulRecovery("agent-1");
+  await coordinator.record("agent-1", deadline, "test");
+  assert.deepEqual(scheduled, [15_000, 15_000, 15_000, 15_000]);
+});
