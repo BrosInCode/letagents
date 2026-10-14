@@ -45,7 +45,7 @@ test("evaluation distinguishes synthetic provider errors, unsafe classifications
     assert.equal(requests, 0);
     assert.equal(dry.report.measured, 0);
     for (const args of [["--json"], ["--json", "--runs", "1"], ["--unknown"],
-      ["--runs", "1", "--runs", "2"], ["--runs", "0"], ["--runs", "1.5"]]) {
+      ["--runs", "1", "--runs", "2"], ["--runs", "0"], ["--runs", "1.5"], ["--suite"], ["--suite", "../secret"]]) {
       assert.equal((await run(false, args)).code, 2);
       assert.equal(requests, 0);
     }

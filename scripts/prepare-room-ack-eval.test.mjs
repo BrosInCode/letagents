@@ -32,6 +32,14 @@ test("standalone package needs no dependencies or keys for dry-run; preserves me
     const dry = await run(script, ["--dry-run", "--json", reportFile], env);
     assert.equal(dry.code, 0, dry.output);
     assert.equal(JSON.parse(await readFile(reportFile, "utf8")).measured, 0);
+    const holdout = await run(script, ["--suite", "holdout", "--dry-run", "--json", reportFile], env);
+    assert.equal(holdout.code, 0, holdout.output);
+    const holdoutReport = JSON.parse(await readFile(reportFile, "utf8"));
+    assert.equal(holdoutReport.suite, "holdout");
+    assert.equal(holdoutReport.results.length, 36);
+    assert.ok(holdoutReport.results.every(row => row.id.startsWith("holdout-")));
+    assert.equal(holdoutReport.results.filter(row => row.status === "ineligible").length, 4);
+    assert.equal(holdoutReport.results.filter(row => row.expected === "independent_acknowledgment").length, 12);
     assert.equal((await run(script, [], env)).code, 2, "missing credentials fail closed");
 
     let count = 0;
@@ -70,6 +78,8 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
   const workflow = parse(await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8"));
   assert.equal(workflow.on.workflow_dispatch.inputs.purpose.default, "checks");
   assert.deepEqual(workflow.on.workflow_dispatch.inputs.purpose.options, ["checks", "room-ack-evaluation"]);
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.ack_suite.options, ["baseline", "holdout"]);
+  assert.equal(workflow.on.workflow_dispatch.inputs.ack_suite.default, "baseline");
   for (const name of ["build", "integration-tests", "npm-publish", "docker", "deploy"]) {
     assert.equal(workflow.jobs[name].if, ["build", "integration-tests"].includes(name)
       ? "inputs.purpose != 'room-ack-evaluation'"
@@ -80,8 +90,8 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
   assert.deepEqual(job.permissions, { contents: "read" });
   assert.equal(job.steps[0].with.ref, "${{ github.sha }}");
   const remote = job.steps.find(step => step.uses?.startsWith("appleboy/ssh-action@"));
-  assert.deepEqual(Object.keys(remote.env), ["ROOM_ACK_EVAL_PAYLOAD"]);
-  assert.equal(remote.with.envs, "ROOM_ACK_EVAL_PAYLOAD");
+  assert.deepEqual(Object.keys(remote.env), ["ROOM_ACK_EVAL_PAYLOAD", "ROOM_ACK_EVAL_SUITE"]);
+  assert.equal(remote.with.envs, "ROOM_ACK_EVAL_PAYLOAD,ROOM_ACK_EVAL_SUITE");
   assert.match(remote.with.script, /timeout -s KILL 480 node .* --runs 3 --json/);
   assert.match(remote.with.script, /trap cleanup EXIT/);
   assert.match(remote.with.script, /exit "\$status"/);
@@ -119,7 +129,7 @@ test("remote command retains provider failures, fails missing reports, and clean
       await writeFile(log, "");
       const result = spawnSync("/bin/sh", ["-c", script], { encoding: "utf8", env: {
         PATH: `${bin}:${process.env.PATH}`, CALL_LOG: log, EVAL_STATUS: String(evaluation), REPORT_MISSING: String(missing),
-        ROOM_ACK_EVAL_PAYLOAD: archive.stdout.toString("base64"),
+        ROOM_ACK_EVAL_PAYLOAD: archive.stdout.toString("base64"), ROOM_ACK_EVAL_SUITE: "holdout",
       } });
       assert.equal(result.status, expected, result.stderr);
       const calls = (await readFile(log, "utf8")).trim().split("\n").map(JSON.parse);
@@ -129,6 +139,11 @@ test("remote command retains provider failures, fails missing reports, and clean
       await assert.rejects(access(copied), /ENOENT/, "host temporary directory was removed");
       const timeout = calls.find(args => args[2] === "timeout");
       assert.deepEqual(timeout.slice(0, 7), ["exec", "fixed-container-id", "timeout", "-s", "KILL", "480", "node"]);
+      assert.deepEqual(timeout.slice(8, 12), ["--suite", "holdout", "--runs", "3"]);
     }
+    const invalid = spawnSync("/bin/sh", ["-c", script], { encoding: "utf8", env: {
+      PATH: `${bin}:${process.env.PATH}`, ROOM_ACK_EVAL_SUITE: "holdout; exit 0",
+    } });
+    assert.equal(invalid.status, 2, "only the fixed suite choices can reach the server command");
   } finally { await rm(temp, { recursive: true, force: true }); }
 });

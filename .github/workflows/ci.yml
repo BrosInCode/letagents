@@ -12,6 +12,13 @@ on:
         options:
           - checks
           - room-ack-evaluation
+      ack_suite:
+        description: Synthetic suite for the isolated Jev evaluation
+        type: choice
+        default: baseline
+        options:
+          - baseline
+          - holdout
   pull_request:
     branches:
       - dev
@@ -719,15 +726,17 @@ jobs:
         uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
         env:
           ROOM_ACK_EVAL_PAYLOAD: ${{ steps.evaluator.outputs.payload }}
+          ROOM_ACK_EVAL_SUITE: ${{ inputs.ack_suite }}
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
-          envs: ROOM_ACK_EVAL_PAYLOAD
+          envs: ROOM_ACK_EVAL_PAYLOAD,ROOM_ACK_EVAL_SUITE
           command_timeout: 10m
           script: |
             set -eu
             umask 077
+            case "$ROOM_ACK_EVAL_SUITE" in baseline|holdout) ;; *) exit 2 ;; esac
             task_dir=$(mktemp -d /tmp/letagents-ack-eval.XXXXXXXX)
             container_id=""
             cleanup() {
@@ -748,7 +757,7 @@ jobs:
             # This watchdog runs INSIDE the container. An SSH disconnect cannot
             # leave an unbounded paid evaluation running in the background.
             status=0
-            docker exec "$container_id" timeout -s KILL 480 node "$task_dir/scripts/room-acknowledgment-eval.js" --runs 3 --json "$task_dir/result.json" || status=$?
+            docker exec "$container_id" timeout -s KILL 480 node "$task_dir/scripts/room-acknowledgment-eval.js" --suite "$ROOM_ACK_EVAL_SUITE" --runs 3 --json "$task_dir/result.json" || status=$?
             if ! docker exec "$container_id" cat "$task_dir/result.json"; then
               if [ "$status" -eq 0 ]; then status=3; fi
             fi

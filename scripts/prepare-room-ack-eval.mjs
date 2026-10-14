@@ -41,9 +41,12 @@ export async function prepareEvaluator(destination) {
     await mkdir(dirname(output), { recursive: true, mode: 0o700 });
     await writeFile(output, compiled, { mode: 0o600 });
   }
-  const cases = await readFile(join(root, "scripts/room-acknowledgment-eval.cases.json"), "utf8");
-  if (JSON.parse(cases).length !== 36) throw new Error("Review the evaluation budget when changing its 36 cases.");
-  await writeFile(join(destination, "scripts/room-acknowledgment-eval.cases.json"), cases, { mode: 0o600 });
+  for (const fixture of ["cases", "holdout"]) {
+    const relative = `scripts/room-acknowledgment-eval.${fixture}.json`;
+    const cases = await readFile(join(root, relative), "utf8");
+    if (JSON.parse(cases).length !== 36) throw new Error("Review the evaluation budget when changing its 36 cases per suite.");
+    await writeFile(join(destination, relative), cases, { mode: 0o600 });
+  }
   await writeFile(join(destination, "package.json"), '{"type":"module"}\n', { mode: 0o600 });
 }
 
