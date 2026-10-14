@@ -635,7 +635,7 @@ export class SupervisorDaemon {
         async (agent, source, inbox) => this.roomWorkPublisher?.beginWorkspace(agent, source, inbox),
         async (agent, source, inbox) => { await this.roomWorkPublisher?.releaseWorkspace(agent, source, inbox); },
         (agentId) => {
-          this.roomWorkPublisher?.changed(agentId);
+          this.roomWorkPublisher?.settled(agentId);
           this.requestConvergence(agentId);
         },
         (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),

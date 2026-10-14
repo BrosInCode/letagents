@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatRoomTurnContext } from "../main/agents/desktop-event-prompt-format.js";
+import { formatRoomTurnContext, RoomTurnContextCache } from "../main/agents/desktop-event-prompt-format.js";
 
 test("current guidance appears once; historical guidance cannot become a new instruction", () => {
   const activation = { decision: "activate", guidance: "You are an equal participant." };
@@ -131,6 +131,59 @@ test("UI summaries and repeated bodies shrink while media, identities and source
   assert.deepEqual({ source, history }, before, "durable data is never mutated");
 });
 
+test("null identity enrichment does not repeat full reply previews already supplied in this prompt", () => {
+  const identity = { agent_key: "agent-a", actor_label: "Peer | Owner | Codex", agent_session_id: "session-a" };
+  const full = { id: "msg_1", sender: "Peer", source: "agent", timestamp: "2026-10-14T17:00:00Z",
+    text: "A complete independent perspective. ".repeat(100), agent_identity: identity,
+    attachments: [], gif: null };
+  const preview = { ...full, agent_identity: null };
+  const source = { id: "msg_2", room_id: "room-a", source: "human", text: "Keep this full human correction.",
+    reply_to: preview, thread: { root_message_id: "msg_1", latest_reply: preview } };
+  const before = structuredClone({ full, source });
+  const result = formatted(source, [full]);
+  assert.deepEqual(result.context, [full]);
+  assert.deepEqual(result.source.reply_to, { id: "msg_1" });
+  assert.deepEqual(result.source.thread.latest_reply, { id: "msg_1" });
+  assert.equal(result.source.text, source.text);
+  assert.equal(result.text.split(full.text).length - 1, 1);
+  assert.deepEqual({ full, source }, before);
+  const cache = new RoomTurnContextCache();
+  const request = { roomId: "room-a", sourceMessage: source, observedContext: [full], activation: {} } as any;
+  cache.prepare(request, "native-a").commit();
+  cache.reset();
+  assert.deepEqual(cache.prepare(request, "native-a").lines, formatRoomTurnContext(request), "reset still supplies every full message once");
+  const outside = formatted(source);
+  assert.deepEqual(outside.source.reply_to, preview, "outside-window context is still supplied in full");
+  assert.deepEqual(outside.source.thread.latest_reply, { id: "msg_1" });
+});
+
+test("null identity previews preserve edits, author conflicts, malformed identities and substantive differences", () => {
+  const identity = { agent_key: "agent-a", actor_label: "Peer | Owner | Codex", agent_session_id: "session-a" };
+  const full = { id: "msg_1", sender: "Peer", source: "agent", timestamp: "2026-10-14T17:00:00Z",
+    text: "A complete perspective", agent_identity: identity, gif: null, attachments: [] };
+  const preview = { ...full, agent_identity: null };
+  const changedPreviews = [
+    { ...preview, text: "Earlier edit" }, { ...preview, sender: "Other" },
+    { ...preview, source: "human" }, { ...preview, timestamp: "2026-10-14T16:00:00Z" },
+    { ...preview, gif: { id: "different-gif" } }, { ...preview, attachments: [{ id: "new-file" }] },
+    { ...preview, future_constraint: "Must remain complete" },
+    { ...preview, agent_identity: { ...identity, agent_key: "other-agent" } },
+    { ...preview, agent_identity: [] },
+  ];
+  for (const quote of changedPreviews) {
+    const result = formatted({ id: "msg_2", text: "Respond", reply_to: quote, thread: { latest_reply: quote } }, [full]);
+    assert.deepEqual(result.source.reply_to, quote);
+    assert.deepEqual(result.source.thread.latest_reply, quote);
+  }
+  for (const identityOrEdit of [
+    { agent_identity: { ...identity, agent_key: "other-agent" } },
+    { text: "Changed full message" }, { agent_identity: "malformed" }, { agent_identity: {} },
+  ]) {
+    const result = formatted({ id: "msg_2", text: "Respond", reply_to: preview }, [full, { ...full, ...identityOrEdit }]);
+    assert.deepEqual(result.source.reply_to, preview, "a null identity cannot collapse ambiguous full candidates");
+  }
+});
+
 test("unknown synthetic payloads, null source and distinct display text retain their content", () => {
   const synthetic = { id: "task-continuation:example", text: "Continue work", thread: { participants: ["Required participant"] },
     sender_profile: { avatar_url: "synthetic-data" }, custom: { required: true } };
@@ -139,4 +192,68 @@ test("unknown synthetic payloads, null source and distinct display text retain t
   const result = formatted(null, [message]);
   assert.deepEqual(result.context, [message]);
   assert.equal(result.source, null);
+});
+
+function cacheFixture() {
+  return {
+    roomId: "focus_95", inboxItemId: "inbox", actionId: "action", activation: { guidance: "Keep your own voice" },
+    sourceMessage: { id: "msg_20", source: "browser", text: "What do you think?" },
+    observedContext: Array.from({ length: 12 }, (_, i) => ({ id: `msg_${i + 1}`,
+      source: i === 1 ? "browser" : "agent", text: `Perspective ${i}: ${"Full useful detail. ".repeat(60)}` })),
+  };
+}
+function cachedContext(lines: string[]) {
+  return JSON.parse(lines.find(line => line.startsWith("Recent bounded room context: "))!.slice("Recent bounded room context: ".length));
+}
+
+test("native context reuse keeps humans, recent voices, source and changed media in full", () => {
+  const cache = new RoomTurnContextCache(); const request = cacheFixture(); const before = structuredClone(request);
+  const cold = cache.prepare(request, "native-1");
+  assert.deepEqual(cold.lines, formatRoomTurnContext(request));
+  assert.deepEqual(cache.prepare(request, "native-1").lines, cold.lines, "uncommitted inputs are not assumed retained");
+  cold.commit();
+  const warm = cache.prepare(request, "native-1"); const context = cachedContext(warm.lines);
+  assert.deepEqual(context[0], { id: "msg_1", room_id: "focus_95", previously_supplied: true });
+  assert.deepEqual(context[1], request.observedContext[1], "human instructions always stay full");
+  assert.deepEqual(context.slice(-3), request.observedContext.slice(-3));
+  assert.ok(warm.lines.includes(`Source message: ${JSON.stringify(request.sourceMessage)}`));
+  assert.ok(warm.lines.includes(`Activation: ${JSON.stringify(request.activation)}`));
+  assert.ok(warm.lines.join("\n").length < cold.lines.join("\n").length / 2);
+  for (const change of [{ text: "An edited position" }, { gif: { id: "gif-2" } }, { reactions: [{ emoji: "👍" }] },
+    { attachments: [{ id: "file-2" }] }, { future_constraint: "Must survive" }, { sender: "Changed author" }]) {
+    const changed = structuredClone(request);
+    Object.assign(changed.observedContext[0]!, change);
+    assert.deepEqual(cachedContext(cache.prepare(changed, "native-1").lines)[0], changed.observedContext[0]);
+  }
+  assert.deepEqual(request, before, "never mutate durable context");
+});
+
+test("context invalidation fences in-flight commits and every scope change restores full input", () => {
+  const cache = new RoomTurnContextCache(); const request = cacheFixture();
+  cache.prepare(request, "native-1").commit();
+  const racing = cache.prepare(request, "native-1");
+  cache.reset(); racing.commit();
+  assert.deepEqual(cache.prepare(request, "native-1").lines, formatRoomTurnContext(request));
+  cache.prepare(request, "native-1").commit();
+  assert.deepEqual(cache.prepare(request, "native-2").lines, formatRoomTurnContext(request));
+  cache.prepare(request, "native-2").commit();
+  const moved = { ...request, roomId: "focus_96" };
+  assert.deepEqual(cache.prepare(moved, "native-2").lines, formatRoomTurnContext(moved));
+  const synthetic = { ...request, sourceMessage: { text: "Task continuation" } };
+  assert.deepEqual(cache.prepare(synthetic, "native-2").lines, formatRoomTurnContext(synthetic));
+  assert.deepEqual(cache.prepare(request, "native-2").lines, formatRoomTurnContext(request));
+  assert.deepEqual(new RoomTurnContextCache().prepare(request, "native-1").lines, formatRoomTurnContext(request));
+});
+
+test("reused context preserves quoted bodies, ambiguous edits, and bounds its history", () => {
+  const cache = new RoomTurnContextCache(); const request = cacheFixture();
+  cache.prepare(request, "native-1").commit();
+  const quoted = { ...request, sourceMessage: { ...request.sourceMessage, reply_to: request.observedContext[0] } };
+  const lines = cache.prepare(quoted, "native-1").lines;
+  assert.ok(lines.includes(`Source message: ${JSON.stringify(quoted.sourceMessage)}`), "a quote of an omitted message must remain full");
+  const edited = { ...request, sourceMessage: { ...request.observedContext[0]!, text: "Earlier version" } };
+  assert.deepEqual(cachedContext(cache.prepare(edited, "native-1").lines)[0], request.observedContext[0]);
+  const smaller = { ...request, observedContext: request.observedContext.slice(-3) };
+  cache.prepare(smaller, "native-1").commit();
+  assert.deepEqual(cache.prepare(request, "native-1").lines, formatRoomTurnContext(request), "messages outside the previous window are supplied again");
 });

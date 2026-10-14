@@ -1245,6 +1245,70 @@ test("diagnostic verification survives live projection updates and waits for a f
   mounted.app.unmount();
 });
 
+test("runtime recovery refusal can be superseded only by fresh provider and room verification", async () => {
+  const state = Vue.ref(troubleshootingProps());
+  state.value.daemonStatus.capabilities.agentRuntimeRecoveryV2 = true;
+  state.value.projection.entry.runtimeGenerationId = "runtime_a";
+  state.value.projection.actions = [{ kind: "reconnect_runtime", label: "Reconnect", available: true }];
+  const actions: unknown[] = [];
+  let finish: (fresh: boolean) => void = () => undefined;
+  let refreshes = 0;
+  const mounted = mount({ setup: () => () => Vue.h(AgentInspectorDiagnostics, {
+    ...state.value,
+    onAction: (intent: unknown) => actions.push(intent),
+    refreshDiagnostics: () => { refreshes++; return new Promise<boolean>(resolve => { finish = resolve; }); },
+  }) }, {});
+  (buttonByText(mounted.root, "Agent runtime").props.onClick as () => void)();
+  await nextTick();
+  (buttonByText(mounted.root, "Reconnect now").props.onClick as () => void)();
+  await nextTick();
+  assert.deepEqual(actions, [{ entryId: "diagnostic_a", roomId: "room_a", kind: "reconnect_runtime" }]);
+  assert.equal(descendants(mounted.root).filter(node => node.props["data-check"]).length, 4, "all connection checks stay visible during recovery");
+  assert.match(textContent(mounted.root), /accepted request alone does not confirm/);
+  state.value = { ...state.value, actionState: { status: "error", message: "This supervised entry already has an in-flight lifecycle or turn-control action." } };
+  await nextTick();
+  assert.match(textContent(mounted.root), /Recovery needs attention/);
+  const pending = (buttonByText(mounted.root, "Check again").props.onClick as () => Promise<void>)();
+  await nextTick();
+  await nextTick();
+  state.value = { ...state.value, projection: { ...state.value.projection, entry: {
+    ...state.value.projection.entry,
+    roomAgentState: { ...state.value.projection.entry.roomAgentState,
+      connection: { state: "connected" }, ingress: { state: "observing" } },
+  } } };
+  await nextTick();
+  assert.match(textContent(mounted.root), /Recovery needs attention/);
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/);
+  assert.equal(refreshes, 1);
+  finish(true);
+  await pending;
+  await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/, "room connectivity alone cannot verify runtime recovery");
+  const verified = (buttonByText(mounted.root, "Check again").props.onClick as () => Promise<void>)();
+  await nextTick();
+  state.value.workResource = { ...state.value.workResource, detail: {
+    availability: "not_loaded", entry_id: "diagnostic_a", room_id: "room_a", requested_source_message_id: null,
+    inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null,
+    continuation_repair: null, timeline: [], items: [], uncertain_effects: [], history_boundary: null,
+    runtime_control: { control_state: "responsive", runtime_state: "ready", observed_at: "2026-10-14T16:30:00.000Z",
+      execution_generation_id: "generation_a", daemon_generation_id: "1", runtime_generation_id: "runtime_a" },
+  } };
+  await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/, "verification must await the fresh read");
+  finish(true);
+  await verified;
+  await nextTick();
+  assert.match(textContent(mounted.root), /Check confirmed/);
+  assert.doesNotMatch(textContent(mounted.root), /Recovery needs attention|in-flight lifecycle/);
+  assert.match(textContent(mounted.root), /agent is reachable and its room connection is clear/);
+  assert.ok(buttonByText(mounted.root, "Back to all checks"));
+  state.value = troubleshootingProps();
+  await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/);
+  assert.match(textContent(mounted.root), /state changed after verification/);
+  mounted.app.unmount();
+});
+
 test("diagnostics never confirms recovery after a failed refresh or an agent switch", async () => {
   const state = Vue.ref(troubleshootingProps());
   let finish: (fresh: boolean) => void = () => undefined;

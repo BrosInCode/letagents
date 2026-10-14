@@ -411,6 +411,8 @@ export interface ProviderStreamEvent {
 
 /** A single daemon-owned inbox item executed on an existing provider thread. */
 export interface ProviderRoomTurnRequest {
+  /** Authoritative inbox scope; message IDs alone are only unique within a Room. */
+  roomId?: string;
   inboxItemId: string;
   sourceMessage: unknown;
   activation: Record<string, unknown>;

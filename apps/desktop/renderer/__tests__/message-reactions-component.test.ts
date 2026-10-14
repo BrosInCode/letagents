@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 import { computed, createSSRApp, h, shallowRef } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
+import * as Vue from "vue";
+import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
+import { transpileModule, ModuleKind } from "typescript";
 import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { RoomMessageReactionContext } from "../src/composables/useRoomMessageReactions";
 
@@ -164,6 +167,67 @@ test("the shared add button exposes the open and closed picker state", async () 
     }) }));
     assert.match(html, new RegExp(`class="message-reaction message-reaction-add"[^>]*aria-expanded="${pickerOpen}"`));
   }
+});
+
+test("hover anywhere on a reaction or focus it to see every supplied name; Escape and unmount dismiss details", async () => {
+  class Host {
+    children: Host[] = []; parent: Host | null = null; props: Record<string, any> = {}; text = ""; isConnected = true;
+    constructor(public type = "") { Vue.markRaw(this); }
+    contains(other: Host): boolean { return this === other || this.children.some(child => child.contains(other)); }
+    getBoundingClientRect() { return { left: 20, right: 220, top: 300, bottom: 324, width: 200, height: 80 }; }
+  }
+  const root = new Host("root"), body = new Host("body"), listeners = new Map<string, Function>();
+  const priorWindow = globalThis.window;
+  Object.assign(globalThis, { window: { innerWidth: 1000, innerHeight: 800,
+    addEventListener: (name: string, fn: Function) => listeners.set(name, fn),
+    removeEventListener: (name: string) => listeners.delete(name) } });
+  const renderer = Vue.createRenderer<Host, Host>({
+    patchProp: (node, key, _old, value) => { node.props[key] = value; },
+    insert(child, parent, anchor) { if (child.parent) child.parent.children.splice(child.parent.children.indexOf(child), 1);
+      const at = anchor ? parent.children.indexOf(anchor) : -1;
+      if (at < 0) parent.children.push(child); else parent.children.splice(at, 0, child); child.parent = parent; },
+    remove(child) { child.parent?.children.splice(child.parent.children.indexOf(child), 1); child.parent = null; },
+    createElement: tag => new Host(tag), createText: text => Object.assign(new Host(), { text }),
+    createComment: text => Object.assign(new Host(), { text }), setText: (node, text) => { node.text = text; },
+    setElementText: (node, text) => { node.text = text; }, parentNode: node => node.parent,
+    nextSibling: node => node.parent?.children[node.parent.children.indexOf(node) + 1] ?? null, querySelector: () => body,
+    insertStaticContent(content, parent, anchor) {
+      const node = Object.assign(new Host("static"), { text: content, parent });
+      const at = anchor ? parent.children.indexOf(anchor) : -1;
+      if (at < 0) parent.children.push(node); else parent.children.splice(at, 0, node);
+      return [node, node];
+    },
+  });
+  const path = fileURLToPath(new URL("../../../../shared/ui/MessageReactionBar.vue", import.meta.url));
+  const Bar = (await vite.ssrLoadModule(path)).default;
+  const descriptor = parse(readFileSync(path, "utf8")).descriptor;
+  const bindings = compileScript(descriptor, { id: "reaction-hover" }).bindings;
+  const template = compileTemplate({ source: descriptor.template!.content, filename: path, id: "reaction-hover", compilerOptions: { bindingMetadata: bindings } });
+  assert.deepEqual(template.errors, []);
+  const code = transpileModule(template.code, { compilerOptions: { module: ModuleKind.ESNext } }).outputText
+    .replace(/import \{([\s\S]*?)\} from "vue";/g, (_all, names: string) => `const {${names.replace(/\s+as\s+/g, ": ")}} = vue;`)
+    .replace("export function render", "function render");
+  const ClientBar = { ...Bar, render: Function("vue", code + "\nreturn render;")(Vue) };
+  const names = Array.from({ length: 8 }, (_, index) => ({ login: `agent-${index}`, name: `Agent ${index}`, avatar_url: null }));
+  const app = renderer.createApp(ClientBar, { reactions: [{ emoji: "👍", count: 9, reactors: [...names, emmy] }],
+    viewerLogin: "emmy", viewerReacted: () => true, canReact: true });
+  app.provide(Vue.ssrContextKey, { modules: new Set() });
+  const descendants = (node: Host): Host[] => [node, ...node.children.flatMap(descendants)];
+  const tooltip = () => descendants(body).find(node => node.props.role === "tooltip");
+  try {
+    app.mount(root); await Vue.nextTick();
+    const chip = descendants(root).find(node => node.props.class === "message-reaction")!;
+    // Handler is on the full chip, even when the actual pointer target is its emoji child.
+    await chip.props.onPointerenter({ currentTarget: chip, target: chip.children[0] }); await Vue.nextTick();
+    for (const person of names) assert.ok(tooltip()!.text.includes(person.name));
+    assert.ok(tooltip()!.text.includes("You"));
+    assert.equal(tooltip()!.props.style.visibility, "visible");
+    listeners.get("keydown")!({ key: "Escape" }); await Vue.nextTick(); assert.equal(tooltip(), undefined);
+    await chip.props.onFocus({ currentTarget: chip }); await Vue.nextTick(); assert.ok(tooltip());
+    listeners.get("scroll")!({ target: body }); await Vue.nextTick(); assert.equal(tooltip(), undefined);
+    await chip.props.onFocus({ currentTarget: chip }); await Vue.nextTick();
+  } finally { app.unmount(); Object.assign(globalThis, { window: priorWindow }); }
+  assert.equal(tooltip(), undefined); assert.equal(listeners.size, 0);
 });
 
 test("picker source keeps scroll placement in a cancellable animation frame and restores focus on Tab exit", () => {

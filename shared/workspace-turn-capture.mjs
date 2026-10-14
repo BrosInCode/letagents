@@ -66,6 +66,9 @@ export async function captureWorkspaceTree(workspace, identity) {
             return null;
         const entries = [];
         let bytesRead = 0;
+        // Each file is consumed (including hash-object's stdin) before advancing.
+        // Reuse the bounded read buffer instead of allocating 8 MiB per file.
+        let readBuffer;
         for (const path of paths) {
             // Parent symlinks must not redirect an observation outside the managed workspace.
             const parent = await realpath(dirname(join(root, path))).catch(() => null);
@@ -88,7 +91,7 @@ export async function captureWorkspaceTree(workspace, identity) {
             else if (stat.isFile() && stat.size <= 8 * 1024 * 1024) {
                 const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
                 try {
-                    const buffer = Buffer.alloc(8 * 1024 * 1024 + 1);
+                    const buffer = readBuffer ??= Buffer.alloc(8 * 1024 * 1024 + 1);
                     const read = await handle.read(buffer, 0, buffer.length, 0);
                     bytes = buffer.subarray(0, read.bytesRead);
                 }

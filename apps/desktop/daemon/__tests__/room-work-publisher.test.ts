@@ -542,6 +542,136 @@ test("capture hints expedite an existing retry timer and singleton loss never di
   await f.publisher.flush(); assert.equal(f.sent.length, 1); assert.equal(f.row().revision, 1);
 });
 
+test("settled delivery hints publish promptly without accelerating ordinary progress", async t => {
+  const f = await fixture(t); const attempt = f.captureMessage(); f.restart(); await f.publisher.flush();
+  const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+  const realTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
+  });
+  f.publisher.changed("agent");
+  assert.deepEqual(timers.map(timer => timer.delay), [1000]);
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  f.publisher.settled("agent");
+  assert.deepEqual(timers.map(timer => timer.delay), [1000, 0]);
+  clearTimeout(timers[1].timer); timers[1].fire();
+  for (let i = 0; i < 30 && f.row().acknowledgedRevision < 2; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.row().acknowledgedRevision, 2);
+  assert.equal(f.sent[1].summary.recorded_state, "completed_no_reply");
+  assert.equal(timers.at(-1)!.delay, 1000, "normal recovery sweep keeps its batching interval");
+});
+
+test("a settled hint survives its timer firing during an existing upload", async t => {
+  const f = await fixture(t); const attempt = f.captureMessage(); f.restart();
+  let release!: (result: RoomWorkPublishResult) => void;
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  f.options.publish = async input => { f.sent.push(input); started(); return new Promise(resolve => { release = resolve; }); };
+  const uploading = f.publisher.flush(); await ready;
+  const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+  const realTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
+  });
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  f.publisher.settled("agent");
+  clearTimeout(timers[0].timer); timers[0].fire();
+  release("acknowledged"); await uploading;
+  assert.deepEqual(timers.map(timer => timer.delay), [0, 0], "the busy flush preserves an immediate next wake");
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  clearTimeout(timers[1].timer); timers[1].fire();
+  for (let i = 0; i < 30 && f.row().acknowledgedRevision < 2; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.row().acknowledgedRevision, 2);
+  assert.equal(f.sent[1].summary.recorded_state, "completed_no_reply");
+});
+
+for (const provider of ["codex", "claude-code"] as const) {
+  test(`${provider} completed silence is published ahead of the same agent's history after restart`, async t => {
+    const f = await fixture(t, provider);
+    for (let id = 1; id <= 12; id++) {
+      const oldAttempt = f.captureMessage(id);
+      f.fact(id, { state: "terminal", turnOutcome: "completed" });
+      f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(oldAttempt);
+      f.receipts.stage(f.row(id), f.summary(id));
+      f.receipts.acknowledge(f.row(id));
+    }
+    const attempt = f.captureMessage(99);
+    // The server already knows the live turn is active. Older records still
+    // need recovery work, as on a busy Room with many prior thread messages.
+    f.receipts.stage(f.row(99), f.summary(99));
+    f.receipts.acknowledge(f.row(99));
+    f.restart();
+    f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+    f.publisher.settled("agent");
+    await f.publisher.flush();
+    assert.equal(f.sent[0]?.sourceMessageId, "msg_99", "completed silence must not sit behind older records of the same agent");
+    assert.equal(f.sent[0]?.summary.recorded_state, "completed_no_reply");
+    assert.equal(f.row(99).acknowledgedRevision, 2);
+    assert.equal(f.sent.length, 1, "unchanged historical evidence does not get re-uploaded");
+  });
+}
+
+test("completion reserves one bounded upload slot without skipping retry backoff or starving older progress", async t => {
+  const f = await fixture(t);
+  let now = Date.parse("2026-08-31T00:00:00Z"); f.options.now = () => now;
+  for (let id = 1; id <= 8; id++) {
+    f.captureMessage(id);
+    f.fact(id, { state: "terminal", turnOutcome: "completed" });
+    // A native terminal alone does not authorize delivery completion.
+    f.receipts.stage(f.row(id), f.summary(id));
+  }
+  const attempt = f.captureMessage(99);
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  f.receipts.stage(f.row(99), f.summary(99));
+  f.restart();
+  f.options.publish = async input => {
+    f.sent.push(input);
+    if (input.sourceMessageId === "msg_99") throw new Error("temporary offline");
+    return "acknowledged";
+  };
+  f.publisher.settled("agent"); await f.publisher.flush();
+  assert.deepEqual(f.sent.map(item => item.sourceMessageId), ["msg_99", "msg_1", "msg_2", "msg_3"]);
+  assert.equal(f.row(99).acknowledgedRevision, 0);
+  await f.publisher.flush();
+  assert.deepEqual(f.sent.slice(4).map(item => item.sourceMessageId), ["msg_4", "msg_5", "msg_6", "msg_7"]);
+  assert.equal(f.sent.filter(item => item.sourceMessageId === "msg_99").length, 1, "a completion hint does not waive failed-publication backoff");
+  now += 30_000;
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  await f.publisher.flush();
+  assert.deepEqual(f.sent.slice(8).map(item => item.sourceMessageId), ["msg_99", "msg_8"]);
+  assert.equal(f.row(99).acknowledgedRevision, 1);
+});
+
+test("settled hints retain bounded retries when authority fails before consumption", async t => {
+  const f = await fixture(t); f.captureMessage(); f.restart();
+  const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+  const cleared = new Set<ReturnType<typeof setTimeout>>();
+  const realTimeout = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
+  });
+  t.mock.method(globalThis, "clearTimeout", (timer: ReturnType<typeof setTimeout>) => {
+    cleared.add(timer); realClear(timer);
+  });
+  f.options.assertCurrent = async () => {
+    f.publisher.settled("agent"); // A fresh hint can arrive while the pass awaits authority.
+    throw new Error("singleton lost");
+  };
+  f.publisher.settled("agent");
+  clearTimeout(timers[0].timer); timers[0].fire();
+  for (let i = 0; i < 10; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(timers.map(timer => timer.delay), [0, 0, 30_000]);
+  assert.ok(cleared.has(timers[1].timer), "the failure replaces the in-flight immediate wake");
+  assert.equal(f.sent.length, 0);
+  clearTimeout(timers[2].timer); timers[2].fire();
+  for (let i = 0; i < 10; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(timers.at(-1)!.delay, 30_000, "persistent loss never creates an immediate retry loop");
+  f.options.assertCurrent = async () => {};
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1, "the retained hint is recoverable when authority returns");
+});
+
 for (const provider of ["codex", "claude-code"] as const) {
   test(`${provider} no-reply completion bypasses historical agents in the recovery sweep`, async t => {
     const f = await fixture(t, provider);
@@ -1177,6 +1307,11 @@ test('a second dispatch never reuses an ambiguous first baseline', async t => {
 test('authority replacement during a workspace read cannot attribute successor edits', async t => {
   const f = await fixture(t);
   f.captureMessage();
+  // Stage ordinary execution evidence explicitly: slow Git capture can allow
+  // the background timer to do this too, before authority is replaced.
+  await f.publisher.flush();
+  const before = f.row().summary;
+  assert.equal(before?.recorded_state, 'active');
   f.options.workspaceLocation = async () => f.location;
   await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
   f.options.workspaceLocation = async () => {
@@ -1184,7 +1319,9 @@ test('authority replacement during a workspace read cannot attribute successor e
     return f.location;
   };
   await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
-  assert.equal(f.row().summary, null);
+  assert.deepEqual(f.row().summary, before, 'replacement cannot add workspace attribution');
+  assert.equal(f.db.prepare('SELECT settled_json FROM room_workspace_captures').get()?.settled_json, null);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM room_workspace_reviews').get()?.count, 0);
 });
 
 test('failed retry invalidation cannot revive a baseline from an earlier invocation', async t => {

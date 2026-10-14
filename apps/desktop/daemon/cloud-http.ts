@@ -237,6 +237,72 @@ export async function publishRoomWork(input: RoomWorkPublishInput): Promise<Room
 /** The daemon talks to the room API only through the live worker bearer. */
 export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
+  async context(input) {
+    if (isLocalRoomApi(input.apiUrl)) return null;
+    // Use the same bounded network allowance as other cloud reads. A separate
+    // five-second deadline exhausted preparation retries on slow connections
+    // before any model work could start. Stop still cancels immediately.
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages?before=latest&limit=30&context_only=true`, {
+      headers: { authorization: `Bearer ${input.bearer}` }, redirect: "error",
+      signal: boundedCloudSignal(input.signal),
+    }).catch((error: unknown) => {
+      if (input.signal.aborted) throw input.signal.reason;
+      throw new Error(`Room context read failed during request (${error instanceof Error ? error.name : "transport error"}).`, { cause: error });
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new SupervisedRoomAuthorizationError(`Room context read failed with HTTP ${response.status}.`, response.status);
+    }
+    if (!response.ok) throw new Error(`Room context read failed with HTTP ${response.status}.`);
+    const body = await response.json().catch((error: unknown) => {
+      if (input.signal.aborted) throw input.signal.reason;
+      // JSON parser messages can contain response text; keep it out of the
+      // user-visible diagnostic while retaining the cause for debugging.
+      throw new Error(`Room context read failed during response (${error instanceof Error ? error.name : "body error"}).`, { cause: error });
+    }) as Record<string, unknown>;
+    if (body?.room_id !== input.roomId) throw new Error("Room context response belongs to another room.");
+    // Older history routes ignore the optional query. Their held result is
+    // not fresh awareness; retain legacy behavior during server-first rollout.
+    if (body.context_only === undefined && Array.isArray(body.messages)) return null;
+    if (body.context_only !== true || !Array.isArray(body.messages) || body.messages.length > 30
+      || body.messages.some(value => !value || typeof value !== "object" || Array.isArray(value)
+        || typeof value.id !== "string" || !/^msg_[1-9]\d*$/.test(value.id)
+        || typeof value.text !== "string" || value.activation !== undefined)) {
+      throw new Error("Room context response is invalid.");
+    }
+    return body.messages;
+  },
+  async reportNoReply(input) {
+    // The local adapter has no self-receipt PUT route. Never interpret its
+    // fallback history response as an acknowledgment.
+    if (isLocalRoomApi(input.apiUrl) || !/^msg_[1-9]\d*$/.test(input.sourceMessageId)) return;
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.sourceMessageId}/agent-receipts/self`, {
+      method: "PUT", redirect: "error",
+      headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({ receipt_state: "no_reply" }),
+      signal: AbortSignal.any([input.signal, AbortSignal.timeout(2_000)]),
+    });
+    if (!response.ok) throw new Error(`No-reply receipt failed with HTTP ${response.status}.`);
+    const body = await response.json() as Record<string, unknown>;
+    if (body?.success !== true || body.receipt_state !== "no_reply"
+      || typeof body.receipt_id !== "string" || !body.receipt_id.trim()) {
+      throw new Error("No-reply receipt was not acknowledged.");
+    }
+  },
+  async yieldReplyTurn(input) {
+    if (isLocalRoomApi(input.apiUrl) || !/^msg_[1-9]\d*$/.test(input.sourceMessageId)) return;
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.sourceMessageId}/agent-receipts/self`, {
+      method: "PUT", redirect: "error",
+      headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({ yield_reply_turn: true }),
+      signal: AbortSignal.any([input.signal, AbortSignal.timeout(2_000)]),
+    });
+    if (!response.ok) throw new Error(`Reply-turn yield failed with HTTP ${response.status}.`);
+    const body = await response.json() as Record<string, unknown>;
+    if (body?.success !== true || body.reply_turn_yielded !== true
+      || typeof body.receipt_id !== "string" || !body.receipt_id.trim()) {
+      throw new Error("Reply-turn yield was not acknowledged.");
+    }
+  },
   async ownedTasks(input) {
     const tasks: Array<{ id: string; title: string; leaseId: string; epoch: number }> = [];
     const read = async (suffix: string) => {

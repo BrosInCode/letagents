@@ -6245,6 +6245,30 @@ test("Codex custodial polling reads the selected built executable contract witho
       && !error.message.includes("contract-probe-owner-canary") && !error.message.includes(entry));
     await assert.rejects(adapter.spawn(request), (error: unknown) => error instanceof Error
       && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
+    for (const source of ["process.exit(1)", "process.stdout.write('not JSON')", "process.stdout.write('x'.repeat(70000))", "process.kill(process.pid, 'SIGKILL')"]) {
+      await writeFile(entry, source);
+      await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
+        error instanceof Error && !(error as Error & { transientProviderStart?: boolean }).transientProviderStart);
+    }
+    const descendantPidFile = join(directory, "probe-child.pid");
+    await writeFile(entry, `import { spawn } from 'node:child_process';
+      import { writeFileSync } from 'node:fs';
+      const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: ['ignore', 1, 2] });
+      writeFileSync(${JSON.stringify(descendantPidFile)}, String(child.pid));
+      setInterval(() => {}, 1000);`);
+    const probeStartedAt = Date.now();
+    try {
+      await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
+        error instanceof Error && (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
+        && /signal: SIGKILL/.test(error.message) && !error.message.includes(entry));
+      assert.ok(Date.now() - probeStartedAt < 15_000, "inherited output pipes must not extend the eight-second probe deadline to the descendant's lifetime");
+    } finally {
+      const descendantPid = Number(await readFile(descendantPidFile, "utf8").catch(() => "0"));
+      if (Number.isSafeInteger(descendantPid) && descendantPid > 1) {
+        try { process.kill(descendantPid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      }
+    }
+    // A fresh probe must actually read the repaired executable after timeout.
     await writeFile(entry, [
       "if (process.argv[2] !== '--letagents-runtime-contract' || process.env.LETAGENTS_TOKEN) process.exit(2);",
       `process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))});`,
@@ -10201,4 +10225,43 @@ test("inspector reads idle Codex account limits without opening Live and fences 
   client.connectionEpoch = "reconnected";
   finish({ rateLimits: { primary: { usedPercent: 99 } } });
   assert.equal(await pending, null, "old connection response is never presented as current");
+});
+
+test("bounded Codex context reuse resets on exact compaction, failure and reconnect", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client); let turn = 0; let compact = false; let fail = false;
+  const prompts: string[] = [];
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") {
+      prompts.push((params as { input: Array<{ text: string }> }).input[0]!.text);
+      turn++;
+      if (fail) throw new Error("ambiguous native dispatch");
+      if (compact) client.emit({ method: "item/started", params: { threadId: handle.providerContinuationId,
+        turnId: `turn-cache-${turn}`, item: { type: "contextCompaction", id: "compact" } } });
+      client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: `turn-cache-${turn}` } });
+      return { turn: { id: `turn-cache-${turn}` } } as T;
+    }
+    if (method === "thread/read") return { thread: { id: handle.providerContinuationId, turns: [{
+      id: `turn-cache-${turn}`, status: "completed", items: [{ type: "agentMessage", phase: "final", text: "LETAGENTS_NO_ROOM_REPLY" }],
+    }] } } as T;
+    return originalRequest<T>(method, params);
+  };
+  const request = { roomId: "focus_95", inboxItemId: "cache-inbox", actionId: "cache-action", activation: {},
+    sourceMessage: { id: "msg_20", source: "browser", text: "Thanks" },
+    observedContext: Array.from({ length: 8 }, (_, i) => ({ id: `msg_${i + 1}`, source: "agent", text: `Perspective ${i}` })),
+  };
+  const run = () => adapter.runRoomTurn(handle, request);
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  client.emit({ method: "thread/compacted", params: { threadId: "unrelated-thread" } });
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  compact = true; await run(); compact = false;
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/, "mid-turn compaction invalidates even a successful pending commit");
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  fail = true; await assert.rejects(run(), /ambiguous native dispatch/); fail = false;
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
+  await run(); assert.match(prompts.at(-1)!, /previously_supplied/);
+  client.disconnect();
+  await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
 });

@@ -1,4 +1,5 @@
 import type { RoomGif } from "../../../shared/room-expressions.mjs";
+import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
@@ -73,6 +74,16 @@ export type SupervisedPollResponse = {
 };
 
 export interface SupervisedDeliveryHttp {
+  /** Fresh public awareness only; never an activation, receipt or poll cursor. Null means an older/local server. */
+  context?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<Array<Record<string, unknown>> | null>;
+  /** Optional latency hint after durable no-reply settlement. Work publication remains the reply-order recovery path. */
+  reportNoReply?(input: {
+    roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
+  }): Promise<void>;
+  /** Relinquish only the reserved speaking position after unstarted preparation is blocked. */
+  yieldReplyTurn?(input: {
+    roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
+  }): Promise<void>;
   /** Existing task GETs, filtered to this exact worker's active work leases. */
   ownedTasks?(input: { roomId: string; apiUrl: string; bearer: string; agentSessionId: string;
     taskIds?: readonly string[]; heldBefore?: string; signal: AbortSignal }): Promise<ContinuityTask[]>;
@@ -199,7 +210,7 @@ export class SupervisedAgentDelivery {
   /** The wait of each agent's scheduled follow-up. Its owner ends it early with Try now or Stop trying. */
   private readonly followUpWaits = new Map<string, AbortController>();
   private readonly retries = new Map<string, Set<Promise<void>>>();
-  private readonly retryControllers = new Map<string, Set<AbortController>>();
+  private readonly auxiliaryControllers = new Map<string, Set<AbortController>>();
   private readonly agentWork = new Map<string, Set<Promise<void>>>();
   private readonly stoppingAgents = new Set<string>();
   private readonly idleReservations = new Set<string>();
@@ -625,7 +636,7 @@ export class SupervisedAgentDelivery {
     this.polling.get(agentId)?.abort();
     this.pumpControllers.get(agentId)?.abort();
     this.loopControllers.get(agentId)?.abort();
-    for (const controller of this.retryControllers.get(agentId) ?? []) controller.abort();
+    for (const controller of this.auxiliaryControllers.get(agentId) ?? []) controller.abort();
     // New work is barred before aborting. Re-check the registry until it is
     // empty so a child that was registered while its parent settled is joined.
     for (;;) {
@@ -774,13 +785,13 @@ export class SupervisedAgentDelivery {
     const controller = new AbortController();
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.retryOperation(agent, sourceMessageId, controller)));
     const retries = this.retries.get(agent.agentId) ?? new Set<Promise<void>>();
-    const controllers = this.retryControllers.get(agent.agentId) ?? new Set<AbortController>();
+    const controllers = this.auxiliaryControllers.get(agent.agentId) ?? new Set<AbortController>();
     retries.add(operation); controllers.add(controller);
-    this.retries.set(agent.agentId, retries); this.retryControllers.set(agent.agentId, controllers);
+    this.retries.set(agent.agentId, retries); this.auxiliaryControllers.set(agent.agentId, controllers);
     const cleanup = () => {
       retries.delete(operation); controllers.delete(controller);
       if (this.retries.get(agent.agentId) === retries && retries.size === 0) this.retries.delete(agent.agentId);
-      if (this.retryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.retryControllers.delete(agent.agentId);
+      if (this.auxiliaryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.auxiliaryControllers.delete(agent.agentId);
     };
     void operation.then(cleanup, cleanup);
     return operation;
@@ -1548,7 +1559,12 @@ export class SupervisedAgentDelivery {
     const retryFailure = async (failure: Parameters<SupervisedAgentInboxStore["recordRetryFailure"]>[1]): Promise<void> => {
       if (!await this.hasLaneAuthority(agent, turnController)) return;
       const { item: recorded, attempt } = await this.inbox.recordRetryFailure(item.inbox_item_id, failure);
-      if (recorded.state === "blocked") return;
+      if (recorded.state === "blocked") {
+        if (failure.domain === "pre_dispatch" && !recorded.provider_turn_id && !recorded.outcome) {
+          void this.reportReplyTurnReceipt(agent, recorded, controller, "yield").catch(() => {});
+        }
+        return;
+      }
       await this.sleep(failure.domain === "publication" ? this.retryDelayMs
         : Math.min(2_000, this.retryDelayMs * (2 ** (attempt - 1))));
       const retryable = await this.inbox.get(item.inbox_item_id);
@@ -1598,6 +1614,7 @@ export class SupervisedAgentDelivery {
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome: item.outcome });
+        void this.reportNoReply(agent, item, controller).catch(() => {});
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
@@ -1644,9 +1661,19 @@ export class SupervisedAgentDelivery {
         if (!await hasProviderAuthority()) return;
         setActive("dispatching");
       }
-      const observedContext = recovering
+      let observedContext = recovering
         ? []
         : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
+      if (!recovering && item.activation.turn && /^msg_[1-9]\d*$/.test(item.source_message_id) && this.http.context) {
+        const bearer = agent.bearer;
+        const owner = this.loopOwners.get(agent.agentId);
+        const fresh = await this.http.context({ roomId: agent.roomId, apiUrl: agent.apiUrl,
+          bearer, signal: turnController.signal }).catch((error: unknown) => {
+          if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer) owner.roomRefused = true;
+          throw error;
+        });
+        if (fresh !== null) observedContext = fresh;
+      }
       if (!await hasProviderAuthority()) return;
       // A runtime can itself have ended by the time it reports its turn's
       // exact ending: a crashed Cursor lane, or any provider whose handle
@@ -1877,6 +1904,7 @@ export class SupervisedAgentDelivery {
           ...(item.state === "result_recovery" ? { savedAsUnreadable: true } : {}),
         }, { detachSignal: turnController.signal, checkpointProviderState, settleLifecycleBeforeIdle, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
+        roomId: agent.roomId,
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
         activation: item.activation,
@@ -1944,44 +1972,53 @@ export class SupervisedAgentDelivery {
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
       const { acceptedResult: result } = await checkpointTerminalResult(providerResult);
-      // Optional review evidence is captured before another turn can mutate this workspace.
-      // Failure must not change the provider result or cause the turn to be rerun.
-      await observeWorkspace(result.text);
-      const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
-      const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
-      if (!await hasTerminalAuthority(result)) return;
-      if (result.outcome === "failed" || result.outcome === "interrupted") {
-        await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
-        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
-        return;
-      }
-      if (item.state !== "result_recovery") {
-        await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
-      }
-      if (result.outcome === "unreadable") {
-        if (item.state === "result_recovery") {
-          await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
-        } else {
-          await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The provider completed, but its final answer could not be read. Re-reading the same completed turn." });
+      // Review capture and a successful reply may travel together. Keep this
+      // lane occupied until capture finishes, before ACK or another local turn.
+      const workspaceCapture = observeWorkspace(result.text);
+      try {
+        if (result.outcome !== "reply") await workspaceCapture;
+        const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
+        const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
+        if (!await hasTerminalAuthority(result)) return;
+        if (result.outcome === "failed" || result.outcome === "interrupted") {
+          await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
+          await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+          return;
         }
-        return;
-      }
-      if (result.outcome === "no_reply") {
-        if (!await this.hasExecutionAuthority(agent, turnController)) return;
-        await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
+        if (item.state !== "result_recovery") {
+          await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
+        }
+        if (result.outcome === "unreadable") {
+          if (item.state === "result_recovery") {
+            await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
+          } else {
+            await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The provider completed, but its final answer could not be read. Re-reading the same completed turn." });
+          }
+          return;
+        }
+        if (result.outcome === "no_reply") {
+          if (!await this.hasExecutionAuthority(agent, turnController)) return;
+          await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
+          void this.reportNoReply(agent, item, controller).catch(() => {});
+          await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+          return;
+        }
+        const text = result.text?.trim();
+        if (!text) throw new Error("Provider returned an empty room answer without the no-reply outcome.");
+        // The terminal payload is checkpointed before the external publication.
+        // A crash after this point retries the same client id without rerunning the provider.
+        await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
+        setActive("publishing");
+        if (!await this.publish(agent, item, text, controller)) return;
+        await workspaceCapture;
+        if (!await this.hasExecutionAuthority(agent, controller)) return;
+        await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
-        return;
+      } finally {
+        // HTTP failure, Stop or authority loss must join before catch/recovery
+        // and before releaseWorkspace can remove the capture worker's refs.
+        await workspaceCapture;
       }
-      const text = result.text?.trim();
-      if (!text) throw new Error("Provider returned an empty room answer without the no-reply outcome.");
-      // The terminal payload is checkpointed before the external publication.
-      // A crash after this point retries the same client id without rerunning the provider.
-      await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
-      setActive("publishing");
-      if (!await this.publish(agent, item, text, controller)) return;
-      if (!await this.hasExecutionAuthority(agent, controller)) return;
-      await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
-      await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
     } catch (error) {
       // A turn-scoped abort (Stop / stop-then-resend) is a clean interruption,
       // not a delivery failure: the item is settled `cancelled_by_user` by
@@ -2041,6 +2078,7 @@ export class SupervisedAgentDelivery {
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome: current.outcome });
+        void this.reportNoReply(agent, item, controller).catch(() => {});
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
@@ -2191,6 +2229,42 @@ export class SupervisedAgentDelivery {
   }
 
   private readonly publishedIds = new Map<string, string>();
+  /** No new journal or retry loop: this only gets a settled silence to the
+   * room sooner. Failed/lost hints leave the existing work publisher to
+   * release reply order. Never send before capture/Stop arbitration settles. */
+  private reportNoReply(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController): Promise<void> {
+    return this.reportReplyTurnReceipt(agent, item, parent, "no_reply");
+  }
+
+  private reportReplyTurnReceipt(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController, kind: "no_reply" | "yield"): Promise<void> {
+    const report = kind === "no_reply" ? this.http.reportNoReply : this.http.yieldReplyTurn;
+    if (kind === "yield" && !item.activation.turn) return Promise.resolve();
+    if (!report || this.fenced || this.isStopping(agent.agentId) || parent.signal.aborted
+      || isLocalRoomApi(agent.apiUrl) || item.room_id !== agent.roomId
+      || !/^msg_[1-9]\d*$/.test(item.source_message_id)) return Promise.resolve();
+    // The pump can finish before this optional request. Give it its own
+    // tracked lifetime so Stop and service handoff still cancel and join it.
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort();
+    parent.signal.addEventListener("abort", relayAbort, { once: true });
+    const controllers = this.auxiliaryControllers.get(agent.agentId) ?? new Set<AbortController>();
+    controllers.add(controller);
+    this.auxiliaryControllers.set(agent.agentId, controllers);
+    const operation = Promise.resolve().then(async () => {
+      const settled = await this.inbox.get(item.inbox_item_id);
+      const eligible = kind === "no_reply" ? settled?.state === "acknowledged_no_reply"
+        : settled?.state === "blocked" && !settled.provider_turn_id && !settled.outcome;
+      if (!eligible || !await this.hasLaneAuthority(agent, controller)) return;
+      await report.call(this.http, { apiUrl: agent.apiUrl, roomId: agent.roomId, bearer: agent.bearer,
+        sourceMessageId: item.source_message_id, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(2_000)]) });
+    }).finally(() => {
+      parent.signal.removeEventListener("abort", relayAbort);
+      controllers.delete(controller);
+      if (this.auxiliaryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.auxiliaryControllers.delete(agent.agentId);
+    });
+    return this.trackAgentWork(agent.agentId, this.track(controller, operation));
+  }
+
   private async publish(agent: SupervisedIngressAgent, item: SupervisedInboxItem, text: string, parent: AbortController): Promise<boolean> {
     if (!await this.hasLaneAuthority(agent, parent)) return false;
     const controller = new AbortController();

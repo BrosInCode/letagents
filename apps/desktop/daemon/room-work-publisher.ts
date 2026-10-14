@@ -1,7 +1,8 @@
 import { readableContributionText } from "../../../shared/contribution-text.mjs";
 import { hasReviewableRoomContribution } from "../../../shared/room-agent-work.mjs";
 import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
-import { captureRecordedRemoteTips, captureWorkspaceHead, captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
+import { captureRecordedRemoteTips, captureWorkspaceHead, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
+import { WorkspaceCapture } from "./workspace-capture.js";
 import type { DatabaseSync } from "node:sqlite";
 import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
@@ -34,6 +35,15 @@ const FAILED_RECEIPTS_PER_PASS = 4;
 const canonicalSource = (id: string) => /^msg_[1-9]\d{0,9}$/.test(id) && Number(id.slice(4)) <= 2147483647;
 const key = (record: Pick<RoomWorkPublication, "agentId" | "roomId" | "sourceMessageId">) =>
   JSON.stringify([record.agentId, record.roomId, record.sourceMessageId]);
+const terminalState = (state: unknown) => ["completed", "completed_no_reply", "failed", "interrupted"].includes(String(state));
+
+/** Reserve one place for completion; the other three keep recovery moving.
+ * This changes queue order only, never evidence, authority or retry eligibility. */
+function completionFirst<T>(items: T[], pendingCompletion: (item: T) => boolean): T[] {
+  const index = items.findIndex(pendingCompletion);
+  if (index > 0) items.unshift(...items.splice(index, 1));
+  return items;
+}
 
 /**
  * The remote to ask what a workspace's upstream held: the one the daemon recorded when it
@@ -82,10 +92,12 @@ export class RoomWorkPublisher {
   private readonly remoteAnswers = new RecordedRemoteAnswers(
     (remote) => (this.options.askRemote ?? captureRecordedRemoteTips)(remote), () => this.now());
   private readonly cancellation = new AbortController();
+  private readonly workspaceCapture = new WorkspaceCapture();
   private scheduled: NodeJS.Timeout | null = null;
   private scheduledFor = Infinity;
   private running = false;
   private readonly changedAgents = new Set<string>();
+  private readonly settledAgents = new Set<string>();
   private sweepNext = false;
   private closed = false;
   private scanAfter = "";
@@ -143,7 +155,7 @@ export class RoomWorkPublisher {
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
       // Decided now, before the agent runs, and not awaited: a slow remote must not delay the turn.
       const remoteTips = location.remote ? this.remoteAnswers.forTurn(location.remote) : Promise.resolve(null);
-      const tree = await captureWorkspaceTree(location.path, ref);
+      const tree = await this.workspaceCapture.begin(location.path, ref);
       const head = tree ? await captureWorkspaceHead(location.path) : null;
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
@@ -164,7 +176,7 @@ export class RoomWorkPublisher {
       const location = await this.options.workspaceLocation(agent.workAttemptId);
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
       const start = this.turnStarts.get(ref);
-      const pair = await captureWorkspacePair(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref, start?.head, start?.remoteTips);
+      const pair = await this.workspaceCapture.settle(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref, start?.head, start?.remoteTips);
       pair.contribution.summary = readableContributionText(summaryText);
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
@@ -207,14 +219,25 @@ export class RoomWorkPublisher {
     this.schedule(COALESCE_MS);
   }
 
+  /** Delivery released its lane. This is only a prompt hint: durable evidence
+   * and the usual authority checks still decide what can be published. */
+  settled(agentId: string): void {
+    if (this.unavailable()) return;
+    this.changedAgents.add(agentId);
+    this.settledAgents.add(agentId);
+    this.schedule(0);
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.workspaceCapture.close();
     this.cancellation.abort();
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduled = null;
     this.scheduledFor = Infinity;
     this.changedAgents.clear();
+    this.settledAgents.clear();
     this.stamps.clear(); this.attemptedAt.clear(); this.stagingAttemptedAt.clear(); this.turnStarts.clear(); this.remoteAnswers.clear();
     // Never drain capture or upload a shutdown tail. Late responses are fenced.
     try { this.database.close(); } catch { this.report("storage_unavailable"); }
@@ -225,10 +248,10 @@ export class RoomWorkPublisher {
   private report(code: Parameters<NonNullable<Options["diagnostic"]>>[0]): void {
     try { if (this.options.diagnostic) this.options.diagnostic(code); else console.warn(`[room_work_publication] ${code}`); } catch { /* optional diagnostics */ }
   }
-  private schedule(delay: number): void {
+  private schedule(delay: number, replace = false): void {
     if (this.unavailable()) return;
     const due = Date.now() + delay;
-    if (this.scheduled && this.scheduledFor <= due) return;
+    if (!replace && this.scheduled && this.scheduledFor <= due) return;
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduledFor = due;
     this.scheduled = setTimeout(() => {
@@ -292,7 +315,7 @@ export class RoomWorkPublisher {
       || archived.size > 0;
     const previous = this.stamps.get(agentId) ?? new Map<string, string>();
     this.stamps.set(agentId, previous);
-    const candidates: Array<{ record: RoomWorkPublication; stamp: string }> = [];
+    const candidates: Array<{ record: RoomWorkPublication; stamp: string; pendingCompletion: boolean }> = [];
     let scanned = 0;
     for (const record of records) {
       if (++scanned % 64 === 0) {
@@ -310,7 +333,10 @@ export class RoomWorkPublisher {
       const boundaries = [...evidence.runtimes].filter(runtime => archived.has(runtime)).sort();
       const stamp = JSON.stringify([attempt.attempt_id, attempt.state, attempt.conclusion, sequence, incomplete, boundaries]);
       const recordKey = key(record);
-      if (previous.get(recordKey) !== stamp) candidates.push({ record, stamp });
+      const state = attempt.state === "cleanly_concluded"
+        ? attempt.conclusion === "replied" ? "completed" : "completed_no_reply" : attempt.state;
+      if (previous.get(recordKey) !== stamp) candidates.push({ record, stamp,
+        pendingCompletion: terminalState(state) && record.summary?.recorded_state !== state });
     }
     // A capture gap means a message's turn was never recorded and never will
     // be. Its delivery receipt still says whether it failed. A few per pass;
@@ -329,7 +355,7 @@ export class RoomWorkPublisher {
       return prior === undefined || this.now() - prior >= RETRY_MS;
     }).sort((a, b) => (this.stagingAttemptedAt.get(key(a.record)) ?? -Infinity)
       - (this.stagingAttemptedAt.get(key(b.record)) ?? -Infinity));
-    for (const { record, stamp } of eligible.slice(0, 4)) {
+    for (const { record, stamp } of completionFirst(eligible, item => item.pendingCompletion).slice(0, 4)) {
       await new Promise<void>(resolve => setImmediate(resolve));
       await this.options.assertCurrent();
       if (this.unavailable()) return false;
@@ -359,6 +385,7 @@ export class RoomWorkPublisher {
     if (this.unavailable() || this.running) return;
     this.running = true;
     let more = false;
+    let failed = false;
     try {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
@@ -367,7 +394,7 @@ export class RoomWorkPublisher {
       // Still only one agent (at most 10k pins/facts) per pass.
       const nextAgent = () => this.database.prepare(`SELECT agent_id FROM room_work_publications
         WHERE state='open' AND agent_id>? ORDER BY agent_id LIMIT 1`).get(this.scanAfter);
-      const changedAgent = this.changedAgents.values().next().value;
+      const changedAgent = this.settledAgents.values().next().value ?? this.changedAgents.values().next().value;
       let agentId: string;
       if (changedAgent && !this.sweepNext) {
         agentId = changedAgent;
@@ -385,6 +412,7 @@ export class RoomWorkPublisher {
       // Consume before awaiting: a hint arriving during staging/upload must
       // remain queued for another pass, including a terminal no-reply update.
       this.changedAgents.delete(agentId);
+      this.settledAgents.delete(agentId);
       try { more = await this.stageChanged(agentId) || more; }
       catch { this.report("storage_unavailable"); }
       if (this.unavailable()) return;
@@ -399,7 +427,8 @@ export class RoomWorkPublisher {
         if (authority && this.sameOrigin(authority.origin, record)) eligible.push({ record, authority });
       }
       more = eligible.length > 4 || more;
-      for (const { record, authority } of eligible.slice(0, 4)) {
+      for (const { record, authority } of completionFirst(eligible,
+        ({ record }) => record.revision > record.acknowledgedRevision && terminalState(record.summary?.recorded_state)).slice(0, 4)) {
         await this.options.assertCurrent();
         const current = this.authority(record.agentId);
         if (this.unavailable() || current?.grant !== authority.grant || current?.worker !== authority.worker) continue;
@@ -427,10 +456,12 @@ export class RoomWorkPublisher {
           }
         } catch { if (!this.unavailable()) this.report("publication_unavailable"); }
       }
-    } catch { if (!this.unavailable()) this.report("authority_unavailable"); }
+    } catch { failed = true; if (!this.unavailable()) this.report("authority_unavailable"); }
     finally {
       this.running = false;
-      this.schedule(more || this.changedAgents.size ? COALESCE_MS : RETRY_MS);
+      // A failed pass may not have consumed its hint. Preserve it, but replace
+      // even a wake queued during the failure so lost authority cannot spin.
+      this.schedule(failed ? RETRY_MS : this.settledAgents.size ? 0 : more || this.changedAgents.size ? COALESCE_MS : RETRY_MS, failed);
     }
   }
 }

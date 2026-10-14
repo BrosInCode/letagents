@@ -48,8 +48,21 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
     // A reference may contain fewer fields than a full message. Do not erase
     // a different edit, author, GIF, attachment or other substantive field.
     const candidates = supplied.filter(message => message.id === quote.id);
+    // Thread/reply previews can omit identity enrichment while the complete
+    // message in this same prompt has it. A null preview is not a competing
+    // author; conflicting or malformed identities must still stay explicit.
+    const identities = candidates.map(message => message.agent_identity).filter(value => value != null);
+    const identityEnrichment = quote.agent_identity === null && quote.source === "agent"
+      && typeof quote.sender === "string" && typeof quote.timestamp === "string"
+      && identities.length > 0 && identities.every(value => {
+        const identity = record(value);
+        return identity && typeof identity.agent_key === "string" && identity.agent_key.trim()
+          && typeof identity.actor_label === "string" && identity.actor_label.trim()
+          && (identity.agent_session_id == null || (typeof identity.agent_session_id === "string" && identity.agent_session_id.trim()))
+          && isDeepStrictEqual(value, identities[0]);
+      });
     if (candidates.length && candidates.every(message => Object.entries(quote).every(([key, field]) =>
-      isDeepStrictEqual(field, message[key])))) return { id: quote.id };
+      (key === "agent_identity" && identityEnrichment) || isDeepStrictEqual(field, message[key])))) return { id: quote.id };
     supplied.push(quote); // Keep an outside-history quote in full once.
     return quote;
   };
@@ -70,10 +83,68 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
   ];
 }
 
+/** Optional optimization for a continuously observed native conversation.
+ * Keep only the previous bounded window; never persist this across reconnects.
+ */
+export class RoomTurnContextCache {
+  private scope = "";
+  private revision = 0;
+  private messages = new Map<string, unknown>();
+
+  reset(): void {
+    this.scope = "";
+    this.messages.clear();
+    this.revision++;
+  }
+
+  prepare(request: ProviderRoomTurnRequest, continuationId: string): { lines: string[]; commit: () => void } {
+    const source = record(conversationMessage(request.sourceMessage));
+    const roomId = request.roomId;
+    // Synthetic tasks and messages without an exact room identity stay self-contained.
+    if (typeof roomId !== "string" || !roomId || !source || !isRoomMessage(source)
+      || (source.room_id !== undefined && source.room_id !== roomId)) {
+      this.reset();
+      return { lines: formatRoomTurnContext(request), commit: () => {} };
+    }
+    const scope = JSON.stringify([continuationId, roomId]);
+    if (scope !== this.scope) { this.reset(); this.scope = scope; }
+    const revision = this.revision;
+    const context = (request.observedContext ?? []).map(conversationMessage);
+    const next = new Map<string, unknown>();
+    const ambiguous = new Set<string>();
+    for (const value of [...context, source]) {
+      const message = record(value);
+      if (!message || !isRoomMessage(message) || (message.room_id !== undefined && message.room_id !== roomId)) continue;
+      const id = String(message.id);
+      if (next.has(id) && !isDeepStrictEqual(next.get(id), message)) ambiguous.add(id);
+      next.set(id, structuredClone(message));
+    }
+    for (const id of ambiguous) next.delete(id);
+    let reused = false;
+    const incremental = context.map((value, index) => {
+      const message = record(value);
+      // Always repeat human instructions, the immediate exchange and the source.
+      // Only older unchanged agent messages can refer back to retained history.
+      if (!message || !isRoomMessage(message) || (message.room_id !== undefined && message.room_id !== roomId) || message.source !== "agent"
+        || message.id === source.id || index >= context.length - 3 || ambiguous.has(String(message.id))
+        || !isDeepStrictEqual(this.messages.get(String(message.id)), message)) return value;
+      reused = true;
+      return { id: message.id, room_id: roomId, previously_supplied: true };
+    });
+    const lines = formatRoomTurnContext({ ...request, observedContext: incremental });
+    if (reused) lines.unshift("Room messages marked previously_supplied are unchanged messages already supplied in this native conversation, in their original room order. Use that retained context; retrieve the message with room context tools if its details are missing. New or edited messages, human instructions, and the immediate exchange are included in full below.");
+    return { lines, commit: () => {
+      // Compaction or disconnect during the turn invalidates its assumptions.
+      if (this.revision === revision && this.scope === scope) this.messages = next;
+    } };
+  }
+}
+
 export const MANAGED_ROOM_WORK_INSTRUCTIONS = [
   ROOM_EXPRESSION_GUIDANCE,
   "You are responding to a daemon-owned room inbox item. Carry out any work it assigns or continues.",
   "The source message triggered this turn; it may not be the latest instruction. Read the supplied room context in order. Newer human corrections on the same topic amend the earlier request. Do not repeat an outdated plan or invent a correction you have not seen; unrelated newer topics do not cancel this work.",
+  "Recent context is shared awareness, not an assignment to answer every visible message or take over another participant's work. Respond to this turn's request in light of that context.",
   "The daemon owns room observation, worker credentials, delivery retries, and publication of your final chat reply. Do not register a session, authenticate LetAgents, poll, or manage runtime lifecycle.",
   "Answer ordinary top-level room questions in the main room by default; answering a specific message is not by itself a reason to start a thread. Existing thread replies stay in their thread automatically. Start a new thread only when the user asks for one or a sustained side discussion would distract from the room. In that case, call set_reply_thread with no arguments when available, then finish through your normal final completion. It records only the thread choice and does not send text or end the turn. Use message tools only for separate messages; synthetic corrections and task continuations have no new room thread to select.",
   "Continue authorized work through implementation, verification, code publication, and review handoff before ending your turn. A progress report or a promise to continue is not completion. If a real dependency blocks you, complete the available steps and identify the specific blocker and who can resolve it.",
