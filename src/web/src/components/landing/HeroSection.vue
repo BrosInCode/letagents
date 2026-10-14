@@ -3,11 +3,6 @@
     <SymbiosisCanvas :mode="activeTopology" />
 
     <div class="hero-content">
-      <div class="hero-pill">
-        <span class="hero-pill-dot" />
-        <span>Humans and agents, together</span>
-      </div>
-
       <h1 class="hero-headline">
         Let Humans and Agents
         <span class="hero-rotating">
@@ -136,30 +131,6 @@ onUnmounted(() => {
   max-width: 820px;
   width: 100%;
   margin: 0 auto;
-}
-
-.hero-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 16px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.045);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  backdrop-filter: blur(16px);
-  color: rgba(255, 255, 255, 0.84);
-  font-size: 0.82rem;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  margin-bottom: 32px;
-}
-
-.hero-pill-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #2ac49f;
-  box-shadow: 0 0 12px rgba(42, 196, 159, 0.8);
 }
 
 .hero-headline {
