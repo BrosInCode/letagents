@@ -1,3 +1,4 @@
+import { RoomLatencyTrace } from "./room-latency-trace.js";
 import { roomApiOrigin, isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, link, open, readFile, readdir, rename, unlink } from "node:fs/promises";
@@ -624,7 +625,23 @@ export class WorkerBindingStore {
     } : null;
   }
   private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); if (input.credential_ref !== undefined && !input.credential_ref.trim()) throw new Error("Worker binding credential_ref is required when supplied."); const url = new URL(input.api_url); if (!isLocalRoomApi(input.api_url) && url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
-  private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> { const previous = this.mutations; let release!: () => void; this.mutations = new Promise((resolve) => { release = resolve; }); await previous; try { return await operation(await this.getDatabase()); } finally { release(); } }
+  private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> {
+    const timing = new RoomLatencyTrace("worker_binding_store");
+    const previous = this.mutations;
+    let release!: () => void;
+    this.mutations = new Promise((resolve) => { release = resolve; });
+    await previous;
+    timing.mark("queue_wait");
+    try {
+      const database = await this.getDatabase();
+      timing.mark("database");
+      return await operation(database);
+    } finally {
+      release();
+      timing.mark("operation");
+      timing.finish();
+    }
+  }
   private async transaction<T>(database: DatabaseSync, operation: () => T, notification?: DaemonCommitNotification): Promise<T> {
     let open = false; let committed = false; let result!: T;
     const commit = async () => {
