@@ -28,39 +28,19 @@
         </RouterLink>
       </div>
 
-      <!-- Minimal Mac Beta Dock (preserves #download-mac contract) -->
-      <section id="download-mac" class="hero-download" aria-labelledby="download-mac-title">
-        <div class="hero-download-copy">
-          <div class="hero-download-heading">
-            <h2 id="download-mac-title">LetAgents for Mac</h2>
-            <span class="hero-beta-badge">Beta</span>
-            <span class="hero-download-version">v{{ macDesktopBeta.version }}</span>
-          </div>
-          <p>
-            Bring Claude, Codex, and Cursor into any room with one click.
-          </p>
-        </div>
-
-        <div class="hero-download-links">
-          <a class="hero-download-link" :href="macDesktopBeta.downloads.arm64">
-            <span>Apple Silicon</span>
-            <small>M1–M4 · .dmg</small>
-          </a>
-          <a class="hero-download-link" :href="macDesktopBeta.downloads.x64">
-            <span>Intel Mac</span>
-            <small>x64 · .dmg</small>
-          </a>
-        </div>
-      </section>
-
-      <a
-        :href="macDesktopBeta.checksumsUrl"
-        class="hero-release-link"
-        target="_blank"
-        rel="noopener noreferrer"
-      >
-        Checksums
-      </a>
+      <!-- Whisper-clean Mac download line (preserves #download-mac & scroll-margin-top: 92px) -->
+      <div id="download-mac" class="hero-mac-line">
+        <a class="mac-primary-link" :href="macDesktopBeta.downloads.arm64">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.33c.64-.78 1.08-1.86.96-2.94-.93.04-2.06.62-2.72 1.4-.58.68-1.1 1.79-.96 2.84 1.04.08 2.08-.52 2.72-1.3" />
+          </svg>
+          <span>Download for Mac</span>
+        </a>
+        <span class="mac-divider" aria-hidden="true">·</span>
+        <a class="mac-secondary-link" :href="macDesktopBeta.downloads.x64">
+          Intel Mac
+        </a>
+      </div>
     </div>
   </section>
 </template>
@@ -142,7 +122,7 @@ onUnmounted(() => {
 <style scoped>
 .hero {
   position: relative;
-  min-height: 94vh;
+  min-height: 92vh;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -221,7 +201,7 @@ onUnmounted(() => {
   gap: 14px;
   justify-content: center;
   flex-wrap: wrap;
-  margin: 0 auto 64px;
+  margin: 0 auto 28px;
 }
 
 .btn-white {
@@ -270,114 +250,42 @@ onUnmounted(() => {
   transform: scale(1.02);
 }
 
-.hero-download {
-  display: flex;
+.hero-mac-line {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  max-width: 620px;
-  margin: 0 auto;
-  padding: 18px 22px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  border-radius: 22px;
-  background: rgba(18, 18, 20, 0.72);
-  backdrop-filter: blur(24px);
-  text-align: left;
+  justify-content: center;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: #86868b;
   scroll-margin-top: 92px;
 }
 
-.hero-download-copy {
-  min-width: 0;
-}
-
-.hero-download-heading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  color: #f5f5f7;
-  font-size: 0.92rem;
-}
-
-.hero-download-heading h2 {
-  margin: 0;
-  font-size: inherit;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-
-.hero-beta-badge {
+.mac-primary-link {
   display: inline-flex;
   align-items: center;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  gap: 7px;
   color: #d4d4d8;
-  font-size: 0.68rem;
-  font-weight: 600;
-}
-
-.hero-download-version {
-  color: #86868b;
-  font-size: 0.76rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.hero-download-copy p {
-  margin: 4px 0 0;
-  color: #86868b;
-  font-size: 0.84rem;
-  line-height: 1.45;
-}
-
-.hero-download-links {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 8px;
-}
-
-.hero-download-link {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-width: 118px;
-  padding: 9px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.04);
-  color: #f5f5f7;
+  font-weight: 500;
   text-decoration: none;
-  transition: background 200ms ease, border-color 200ms ease, transform 200ms ease;
-}
-
-.hero-download-link span {
-  font-size: 0.8rem;
-  font-weight: 600;
-}
-
-.hero-download-link small {
-  margin-top: 2px;
-  color: #86868b;
-  font-size: 0.68rem;
-}
-
-.hero-download-link:hover {
-  background: rgba(255, 255, 255, 0.09);
-  border-color: rgba(255, 255, 255, 0.22);
-  transform: translateY(-1px);
-}
-
-.hero-release-link {
-  display: inline-flex;
-  align-items: center;
-  margin-top: 14px;
-  color: #6e6e73;
-  font-size: 0.74rem;
   transition: color 200ms ease;
 }
 
-.hero-release-link:hover {
-  color: #a1a1a6;
+.mac-primary-link:hover {
+  color: #ffffff;
+}
+
+.mac-divider {
+  color: rgba(255, 255, 255, 0.2);
+}
+
+.mac-secondary-link {
+  color: #86868b;
+  text-decoration: none;
+  transition: color 200ms ease;
+}
+
+.mac-secondary-link:hover {
+  color: #d4d4d8;
 }
 
 @media (max-width: 768px) {
@@ -395,27 +303,14 @@ onUnmounted(() => {
   .btn-glass {
     width: 100%;
   }
-
-  .hero-download {
-    flex-direction: column;
-    align-items: stretch;
-    padding: 18px;
-  }
-
-  .hero-download-links {
-    width: 100%;
-  }
-
-  .hero-download-link {
-    flex: 1;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .hero-word,
   .btn-white,
   .btn-glass,
-  .hero-download-link {
+  .mac-primary-link,
+  .mac-secondary-link {
     transition: none;
   }
 }
