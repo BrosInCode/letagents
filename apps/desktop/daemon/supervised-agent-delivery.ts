@@ -74,6 +74,8 @@ export type SupervisedPollResponse = {
 };
 
 export interface SupervisedDeliveryHttp {
+  /** Fresh public awareness only; never an activation, receipt or poll cursor. Null means an older/local server. */
+  context?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<Array<Record<string, unknown>> | null>;
   /** Optional latency hint after durable no-reply settlement. Work publication remains the reply-order recovery path. */
   reportNoReply?(input: {
     roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
@@ -1650,9 +1652,19 @@ export class SupervisedAgentDelivery {
         if (!await hasProviderAuthority()) return;
         setActive("dispatching");
       }
-      const observedContext = recovering
+      let observedContext = recovering
         ? []
         : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
+      if (!recovering && item.activation.turn && /^msg_[1-9]\d*$/.test(item.source_message_id) && this.http.context) {
+        const bearer = agent.bearer;
+        const owner = this.loopOwners.get(agent.agentId);
+        const fresh = await this.http.context({ roomId: agent.roomId, apiUrl: agent.apiUrl,
+          bearer, signal: turnController.signal }).catch((error: unknown) => {
+          if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer) owner.roomRefused = true;
+          throw error;
+        });
+        if (fresh !== null) observedContext = fresh;
+      }
       if (!await hasProviderAuthority()) return;
       // A runtime can itself have ended by the time it reports its turn's
       // exact ending: a crashed Cursor lane, or any provider whose handle

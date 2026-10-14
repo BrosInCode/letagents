@@ -4005,6 +4005,120 @@ test("a fresh agent observes history at the tail, advances across silent message
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a sequenced turn sees a held correction as context without consuming its later activation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-fresh-context-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const source = { id: "msg_183", text: "Original borrowing proposal", activation: { for_current_agent: {
+    decision: "activate", reason: "broadcast", turn: { position: 2, count: 2, prior_speakers: [] } } } };
+  const correction = { id: "msg_189", text: "Browse only. Do not collect contact details." };
+  const fresh = [{ id: "msg_183", text: "Edited original question" }, correction];
+  const dispatched: string[] = [];
+  let released = false;
+  let reads = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    dispatched.push(request.sourceMessage.id as string);
+    if (request.sourceMessage.id === "msg_183") {
+      assert.equal(request.sourceMessage.text, source.text, "the admitted source remains immutable");
+      assert.deepEqual(request.observedContext, fresh, "fresh context retains the newer edit and correction");
+      assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "msg_183");
+      assert.deepEqual((await store.receipts(agent.agentId)).map(row => row.source_message_id), ["msg_183"]);
+    }
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), {
+    context: async () => { reads++; return fresh; },
+    poll: async ({ afterMessageId }) => ({ messages: !afterMessageId ? [source]
+      : released && afterMessageId === "msg_183" ? [{ ...correction, activation: source.activation }] : [] }),
+    publish: async () => { throw new Error("no reply expected"); },
+  }, currentAuthority, 0);
+  try {
+    await delivery.poll(agent);
+    assert.deepEqual(dispatched, ["msg_183"]);
+    assert.equal(reads, 1);
+    assert.deepEqual((await store.detail(agent.agentId, agent.roomId, "msg_183")).prepared_context?.messages.map(row => row.id), ["msg_183", "msg_189"]);
+    await delivery.poll(agent);
+    assert.deepEqual(dispatched, ["msg_183"], "observation did not authorize another turn");
+    released = true;
+    await delivery.poll(agent);
+    await delivery.poll(agent);
+    assert.deepEqual(dispatched, ["msg_183", "msg_189"], "normal activation still runs exactly once");
+    assert.equal(reads, 2);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("fresh context is not fetched again while recovering an existing native result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-context-recovery-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let reads = 0;
+  let runs = 0;
+  let recoveries = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs++;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("saved-turn");
+    return { turnId: "saved-turn", outcome: "unreadable", text: null, evidence: "none" };
+  }, async () => {
+    recoveries++;
+    return { turnId: "saved-turn", outcome: "no_reply", text: null, evidence: "transcript" };
+  }), {
+    context: async () => { reads++; assert.equal(reads, 1); return [{ id: "msg_189", text: "A correction" }]; },
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [{ id: "msg_183", text: "Question",
+      activation: { for_current_agent: { decision: "activate", reason: "broadcast",
+        turn: { position: 1, count: 2, prior_speakers: [] } } } }] }),
+    publish: async () => { throw new Error("no reply expected"); },
+  }, currentAuthority, 0);
+  try {
+    await delivery.poll(agent);
+    assert.equal(reads, 1);
+    assert.equal(runs, 1);
+    assert.equal(recoveries, 1);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const mode of ["failure", "authority-lost", "stop", "unsupported", "independent"] as const) test(`fresh context: ${mode} before provider admission`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-context-boundary-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let allowed = true;
+  let runs = 0;
+  let reads = 0;
+  const entered = deferred<void>();
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    runs++;
+    assert.equal(request.observedContext?.[0]?.text, "Existing observation");
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), {
+    context: async ({ signal }) => {
+      reads++;
+      if (mode === "failure") throw new Error("Context temporarily unavailable");
+      if (mode === "authority-lost") allowed = false;
+      if (mode === "stop") {
+        entered.resolve();
+        await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      }
+      return mode === "unsupported" ? null : [];
+    },
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [{ id: "msg_183", text: "Existing observation",
+      activation: { for_current_agent: { decision: "activate", reason: "broadcast",
+        ...(mode === "independent" ? {} : { turn: { position: 1, count: 2, prior_speakers: [] } }) } } }] }),
+    publish: async () => { throw new Error("no reply expected"); },
+  }, async () => allowed, 60_000);
+  try {
+    const pending = delivery.poll(agent);
+    if (mode === "stop") { await entered.promise; await delivery.fenceAndDrain(); }
+    await pending;
+    assert.equal(reads, mode === "independent" ? 0 : mode === "failure" ? 3 : 1, "uses the existing bounded pre-dispatch retry budget");
+    assert.equal(runs, mode === "unsupported" || mode === "independent" ? 1 : 0);
+    if (mode === "failure") {
+      const row = (await store.receipts(agent.agentId))[0]!;
+      assert.equal(row.provider_turn_id, null);
+      assert.equal(row.attempt_count, 0, "a failed read did not spend a model attempt");
+      assert.match(row.last_error ?? "", /Context temporarily unavailable/);
+    }
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("production delivery never establishes a first cursor lazily after activation", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-admission-cursor-"));
   try {

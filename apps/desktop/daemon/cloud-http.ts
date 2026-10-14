@@ -237,6 +237,29 @@ export async function publishRoomWork(input: RoomWorkPublishInput): Promise<Room
 /** The daemon talks to the room API only through the live worker bearer. */
 export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
+  async context(input) {
+    if (isLocalRoomApi(input.apiUrl)) return null;
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages?before=latest&limit=30&context_only=true`, {
+      headers: { authorization: `Bearer ${input.bearer}` }, redirect: "error",
+      signal: boundedCloudSignal(input.signal, 5_000),
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new SupervisedRoomAuthorizationError(`Room context read failed with HTTP ${response.status}.`, response.status);
+    }
+    if (!response.ok) throw new Error(`Room context read failed with HTTP ${response.status}.`);
+    const body = await response.json() as Record<string, unknown>;
+    if (body?.room_id !== input.roomId) throw new Error("Room context response belongs to another room.");
+    // Older history routes ignore the optional query. Their held result is
+    // not fresh awareness; retain legacy behavior during server-first rollout.
+    if (body.context_only === undefined && Array.isArray(body.messages)) return null;
+    if (body.context_only !== true || !Array.isArray(body.messages) || body.messages.length > 30
+      || body.messages.some(value => !value || typeof value !== "object" || Array.isArray(value)
+        || typeof value.id !== "string" || !/^msg_[1-9]\d*$/.test(value.id)
+        || typeof value.text !== "string" || value.activation !== undefined)) {
+      throw new Error("Room context response is invalid.");
+    }
+    return body.messages;
+  },
   async reportNoReply(input) {
     // The local adapter has no self-receipt PUT route. Never interpret its
     // fallback history response as an acknowledgment.
