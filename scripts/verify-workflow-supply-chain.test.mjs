@@ -184,7 +184,12 @@ function assertAuditStepsAreMandatory(jobs, workflowPath) {
     const publishJob = job.name === "npm-publish";
     assert.equal(
       job.condition,
-      publishJob ? "github.ref == 'refs/heads/staging'" : null,
+      workflowPath === ".github/workflows/ci.yml"
+        ? publishJob ? "github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'"
+          : job.name === "room-ack-evaluation"
+            ? "github.event_name == 'workflow_dispatch' && inputs.purpose == 'room-ack-evaluation'"
+            : "inputs.purpose != 'room-ack-evaluation'"
+        : publishJob ? "github.ref == 'refs/heads/staging'" : null,
       `${workflowPath}:${job.name} must not skip dependency gates`,
     );
     assert.ok(
@@ -362,8 +367,8 @@ test("dependency advisory checks use the pinned supported audit client", () => {
         script ===
         'npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2\necho "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"',
     ).length,
-    2,
-    "build and integration jobs must install isolated pinned audit clients",
+    3,
+    "build, integration and evaluator jobs must install isolated pinned audit clients",
   );
   assert.equal(
     releaseScripts.filter(
@@ -382,6 +387,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs .",
   ];
+  expectedCiAudits.push("node scripts/verify-dependency-advisories.mjs .");
   const actualCiAudits = ciScripts.filter((script) =>
     script.startsWith("node scripts/verify-dependency-advisories.mjs"),
   );
@@ -399,6 +405,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "npm audit signatures --prefix apps/desktop",
     "npm audit signatures",
     "npm audit signatures",
+    "npm audit signatures",
   ]);
   assert.deepEqual(releaseScripts.filter(containsDirectNpmAudit), [
     "npm audit signatures\nnpm audit signatures --prefix apps/desktop",
@@ -410,6 +417,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
       "npm ci --ignore-scripts --no-audit",
       "cd src/web && npm ci --ignore-scripts --no-audit",
       "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "npm ci --ignore-scripts --no-audit",
       "npm ci --ignore-scripts --no-audit",
       "npm ci --ignore-scripts --no-audit",
     ],
@@ -475,6 +483,6 @@ test("the OpenCode runtime contract steps are exactly the reviewed ones", () => 
     assert.equal(candidate.continueOnError, null, `"${candidate.name}" must fail the job when it fails`);
     assert.equal(candidate.shell, null, `"${candidate.name}" must use the default shell`);
   }
-  assert.equal(build.condition, null);
+  assert.equal(build.condition, "inputs.purpose != 'room-ack-evaluation'");
   assert.equal(build.continueOnError, null);
 });

@@ -4,6 +4,14 @@ on:
   # Recovery path when GitHub drops a push webhook during an Actions outage.
   # Dispatch on staging preserves the same publish/deploy branch gates below.
   workflow_dispatch:
+    inputs:
+      purpose:
+        description: Checks, or a synthetic Jev measurement using existing server credentials (no deployment)
+        type: choice
+        default: checks
+        options:
+          - checks
+          - room-ack-evaluation
   pull_request:
     branches:
       - dev
@@ -22,6 +30,7 @@ concurrency:
 
 jobs:
   build:
+    if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -62,6 +71,9 @@ jobs:
 
       - name: Type check (server)
         run: npx tsc --noEmit
+
+      - name: Test standalone Room evaluator
+        run: node --test scripts/prepare-room-ack-eval.test.mjs
 
       - name: Test desktop notification server helpers
         run: npm run test:notifications
@@ -202,6 +214,7 @@ jobs:
 
   # ── DB-backed integration tests ──
   integration-tests:
+    if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     services:
@@ -466,7 +479,7 @@ jobs:
   # this workflow is registered as a trusted publisher for the package.
   npm-publish:
     needs: [build, integration-tests]
-    if: github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -525,7 +538,7 @@ jobs:
   # ── Build and push Docker images to GHCR ──
   docker:
     needs: [build, integration-tests]
-    if: github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -571,7 +584,7 @@ jobs:
   # ── Deploy to production server ──
   deploy:
     needs: docker
-    if: github.ref == 'refs/heads/staging'
+    if: github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -664,3 +677,79 @@ jobs:
             fi
 
             echo "Deploy successful (${IMAGE_TAG})"
+
+  # Manual synthetic measurement only. No room data, deploy token, service
+  # restart or configuration write. Jev credentials never leave the container.
+  room-ack-evaluation:
+    if: github.event_name == 'workflow_dispatch' && inputs.purpose == 'room-ack-evaluation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Enforce dependency cooldown
+        run: npm run verify:dependency-age
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit
+      - name: Verify dependency signatures
+        run: npm audit signatures
+      - name: Install pinned dependency audit client
+        run: |
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+      - name: Audit dependency advisories
+        run: node scripts/verify-dependency-advisories.mjs .
+      # TypeScript's transpiler needs no dependency lifecycle scripts.
+      - name: Test and prepare the standalone evaluator
+        id: evaluator
+        run: |
+          node --test scripts/prepare-room-ack-eval.test.mjs
+          node scripts/prepare-room-ack-eval.mjs "${RUNNER_TEMP}/room-ack-eval"
+          tar -czf "${RUNNER_TEMP}/room-ack-eval.tgz" -C "${RUNNER_TEMP}/room-ack-eval" .
+          echo "Reviewed source: ${GITHUB_SHA}"
+          sha256sum "${RUNNER_TEMP}/room-ack-eval.tgz"
+          echo "payload=$(base64 -w0 "${RUNNER_TEMP}/room-ack-eval.tgz")" >> "${GITHUB_OUTPUT}"
+      - name: Measure on the existing server without deploying
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        env:
+          ROOM_ACK_EVAL_PAYLOAD: ${{ steps.evaluator.outputs.payload }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: ROOM_ACK_EVAL_PAYLOAD
+          command_timeout: 10m
+          script: |
+            set -eu
+            umask 077
+            task_dir=$(mktemp -d /tmp/letagents-ack-eval.XXXXXXXX)
+            container_id=""
+            cleanup() {
+              if [ -n "$container_id" ]; then
+                docker exec "$container_id" rm -rf "$task_dir" >/dev/null 2>&1 || true
+              fi
+              rm -rf "$task_dir"
+            }
+            trap cleanup EXIT
+            printf '%s' "$ROOM_ACK_EVAL_PAYLOAD" | base64 -d > "$task_dir/payload.tgz"
+            unset ROOM_ACK_EVAL_PAYLOAD
+            sha256sum "$task_dir/payload.tgz"
+            tar -xzf "$task_dir/payload.tgz" -C "$task_dir"
+            rm "$task_dir/payload.tgz"
+            container_id=$(docker inspect --format '{{.Id}}' letagents-api)
+            test "$(docker inspect --format '{{.State.Running}}' "$container_id")" = true
+            docker cp "$task_dir" "$container_id:$task_dir"
+            # This watchdog runs INSIDE the container. An SSH disconnect cannot
+            # leave an unbounded paid evaluation running in the background.
+            status=0
+            docker exec "$container_id" timeout -s KILL 480 node "$task_dir/scripts/room-acknowledgment-eval.js" --runs 3 --json "$task_dir/result.json" || status=$?
+            if ! docker exec "$container_id" cat "$task_dir/result.json"; then
+              if [ "$status" -eq 0 ]; then status=3; fi
+            fi
+            exit "$status"
