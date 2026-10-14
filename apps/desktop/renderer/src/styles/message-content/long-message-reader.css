@@ -4,7 +4,6 @@
   font-weight: 430;
   line-height: 1.62;
   letter-spacing: -0.006em;
-  white-space: pre-wrap;
   word-break: normal;
   overflow-wrap: anywhere;
 }
@@ -40,6 +39,14 @@
 
 .desktop-long-message-html :is(li + li) {
   margin-top: 0.3em;
+}
+
+.desktop-long-message-html :is(li > ul, li > ol) {
+  margin: 0.3em 0 0;
+}
+
+.desktop-long-message-html :is(li > p) {
+  margin: 0 0 0.45em;
 }
 
 .desktop-long-message-html :is(blockquote) {
