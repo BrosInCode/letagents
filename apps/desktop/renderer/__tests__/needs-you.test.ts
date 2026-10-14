@@ -186,6 +186,23 @@ test('answered requests move out of Needs you and remain attached to their room'
   assert.equal(filterUniversalInbox(items, 'answered', ['room'], {})[0].record?.response?.body, 'Start with product teams');
 });
 
+test('a request closed without an answer reads as Closed in Answered, keeping its row identity', async () => {
+  const { buildUniversalInbox, filterUniversalInbox, inboxCategoryLabel } = await import('../src/components/desktop/content/room-inbox/universal');
+  const closed = { ...record, version: record.version + 1, response: { body: 'Agent retired.', actor: { id: 'human', label: 'Emmy', kind: 'human' as const }, at: '2026-09-14T14:00:00Z', closed: true as const } };
+  const [open] = buildUniversalInbox(data);
+  const [item] = filterUniversalInbox(buildUniversalInbox({ ...data, rooms: [{ ...data.rooms[0], records: [closed] }] }), 'answered', [], {});
+  assert.equal(item.category, 'closed'); assert.equal(inboxCategoryLabel(item.category), 'Closed');
+  assert.equal(item.key, open.key); assert.equal(item.fingerprint, String(closed.version));
+  const vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/InboxView.vue')).default;
+    const html = await renderToString(createSSRApp(component, { data: { ...data, rooms: [{ ...data.rooms[0], records: [closed] }] }, section: 'answered', loading: false, error: '' }));
+    assert.match(html, /<\/svg> Closed<\/span>/); assert.doesNotMatch(html, /Answer recorded/); assert.match(html, /Agent retired\./);
+    const openHtml = await renderToString(createSSRApp(component, { data, loading: false, error: '' }));
+    assert.match(openHtml, /Close without answering/);
+  } finally { await vite.close(); }
+});
+
 test('bulk read clears a large backlog, preserves requests, and allows new activity to return', async () => {
   const { buildUniversalInbox, filterUniversalInbox, markInboxUpdatesRead, undoInboxRead } = await import('../src/components/desktop/content/room-inbox/universal');
   const backlog = { ...data, rooms: [{ ...data.rooms[0], tasks: Array.from({ length: 1400 }, (_, i) => ({ id: `task_${i}`, title: `Completed work ${i}`, status: 'done', description: null, updated_at: '2026-09-14T12:00:00Z' })) }] };

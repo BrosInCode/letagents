@@ -40,6 +40,21 @@ export async function createRoomKnowledge(record: KnowledgeRecord) {
     return record;
   });
 }
+/**
+ * Insert a new record inside a message transaction. A record already there
+ * was created without this message, so the caller retries and replays it.
+ */
+export async function createRoomKnowledgeInTransaction(tx: MessageCreateTransaction, record: KnowledgeRecord) {
+  const inserted = await tx.insert(records).values({ room_id: record.room_id, id: record.id, type: record.type, version: record.version, value: record }).onConflictDoNothing().returning();
+  if (!inserted.length) throw new RoomKnowledgeError('This record is being created. Retry with the same client ID.', 409);
+  await tx.insert(revisions).values({ room_id: record.room_id, id: record.id, version: record.version, value: record });
+}
+/** The id of the room message an internal publisher wrote under this client ID, if any. */
+export async function roomMessageIdForClientId(roomId: string, clientMessageId: string): Promise<string | null> {
+  const row = (await db.select({ number: messages.number }).from(messages)
+    .where(and(eq(messages.room_id, roomId), eq(messages.client_message_id, clientMessageId))).limit(1))[0];
+  return row ? `msg_${row.number}` : null;
+}
 export async function reviseRoomKnowledgeInTransaction(tx: MessageCreateTransaction, record: KnowledgeRecord, expectedVersion: number) {
   const changed = await tx.update(records).set({ value: record, version: record.version })
     .where(and(eq(records.room_id, record.room_id), eq(records.id, record.id), eq(records.version, expectedVersion))).returning();

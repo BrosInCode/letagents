@@ -650,6 +650,8 @@ async function ensureExactWorkerSessionAndGrantRevoked(input: {
   agentKey: string;
   grant: NonNullable<Awaited<ReturnType<typeof readDesktopSupervisorGrantForAgent>>>;
   agentSessionId: string;
+  /** The owner retires the agent; the server closes its open requests. */
+  retiring?: boolean;
 }, options: GrantStorageOptions): Promise<{
   agentKey: string;
   grantId: string;
@@ -719,7 +721,7 @@ async function ensureExactWorkerSessionAndGrantRevoked(input: {
         {
           method: "POST",
           headers: { Authorization: `Bearer ${input.grant.token}` },
-          body: JSON.stringify({ generation: input.grant.metadata.generation }),
+          body: JSON.stringify({ generation: input.grant.metadata.generation, ...(input.retiring ? { retired: true } : {}) }),
         },
       );
       if (ended.session_id !== agentSessionId || typeof ended.ended_at !== "string" || !ended.ended_at.trim()) {
@@ -1045,6 +1047,7 @@ export async function revokeDesktopSupervisorGrantForEntry(
         lastInstalledDaemonGeneration: stored.lastInstalledDaemonGeneration ?? null,
       },
       agentSessionId: normalizedSessionId,
+      retiring: true,
     }, options);
     await withRegistryMutation(async () => {
       const current = await readRegistry();

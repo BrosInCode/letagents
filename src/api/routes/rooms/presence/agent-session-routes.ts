@@ -35,6 +35,7 @@ import {
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { disconnectRoomAgentDeliverySession } from "../../../rooms/agent-delivery.js";
+import { closeRequestsOfRetiredAgent } from "../../../rooms/attention-answers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import {
   requireWorkerRequestAgentIdentity,
@@ -888,6 +889,16 @@ export function registerAgentSessionRoutes(
         room_id: project.id,
         agent_session_id: targetSessionId,
       });
+      // The agent will not read answers to its open requests, so the admin
+      // closes them. An agent leaving by itself keeps them for its return.
+      if (!hasSelfCredentials && req.sessionAccount) {
+        await closeRequestsOfRetiredAgent({
+          room_id: project.id,
+          agent_key: endedSession.agent_key,
+          session_id: endedSession.session_id,
+          person: { id: req.sessionAccount.account_id, label: req.sessionAccount.login, kind: "human" },
+        });
+      }
 
       res.json({
         room_id: project.id,

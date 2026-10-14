@@ -47,13 +47,25 @@ export function createKnowledgeRecord(room_id, type, input, author, now = new Da
     archived: false, response: null };
 }
 
+/** What a request closed without an answer records as its response. */
+export const ATTENTION_CLOSED_RESPONSE = 'Closed without an answer.';
+
+/**
+ * A person answers an open request, or closes it (`close: true`) without a
+ * decision. A closed request keeps `response`, marked `closed: true`, so it
+ * leaves Needs you like an answered one and the agent that asked stops
+ * waiting. A close records ATTENTION_CLOSED_RESPONSE unless the caller gives
+ * the reason as `response`.
+ */
 export function reviseKnowledgeRecord(record, input, actor, now = new Date().toISOString()) {
   if (input.expected_version !== record.version) throw new RoomKnowledgeError('This changed since you opened it. Refresh to see the latest version.', 409);
   if (actor.kind !== 'human') throw new RoomKnowledgeError('Only a human can revise shared memory or answer a request.', 403);
   if (record.type === 'attention') {
-    if (record.response) throw new RoomKnowledgeError('This request has already been answered.', 409);
-    return { ...record, version: record.version + 1, updated_at: now, updated_by: actor,
-      response: { body: text(input.response, 'Response', 8000, true), actor, at: now } };
+    if (record.response) throw new RoomKnowledgeError(record.response.closed ? 'This request has already been closed.' : 'This request has already been answered.', 409);
+    const response = input.close === true
+      ? { body: input.response === undefined ? ATTENTION_CLOSED_RESPONSE : text(input.response, 'Response', 8000, true), actor, at: now, closed: true }
+      : { body: text(input.response, 'Response', 8000, true), actor, at: now };
+    return { ...record, version: record.version + 1, updated_at: now, updated_by: actor, response };
   }
   if (input.archived !== undefined && typeof input.archived !== 'boolean') throw new RoomKnowledgeError('Archived must be true or false.');
   const content = input.archived !== undefined ? {} : parseKnowledgeInput('memory', input);
@@ -66,6 +78,19 @@ export function assertKnowledgeReplay(existing, candidate) {
   if (existing.author.id !== candidate.author.id || existing.author.kind !== candidate.author.kind || keys.some(key => existing[key] !== candidate[key])) {
     throw new RoomKnowledgeError('This client ID was already used for different content. Use a new ID for a new record.', 409);
   }
+}
+
+const REQUEST_NOTICE_BODY_LIMIT = 400;
+const ATTENTION_CATEGORY_LABELS = { question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review' };
+
+/**
+ * The room message that shows a new request where it was asked. People and
+ * other agents read it in the room; the answer is given in Inbox.
+ */
+export function formatAttentionRequest(record) {
+  const body = Array.from(record.body);
+  const shown = body.length > REQUEST_NOTICE_BODY_LIMIT ? `${body.slice(0, REQUEST_NOTICE_BODY_LIMIT).join('').trimEnd()}…` : record.body;
+  return `Needs you · ${ATTENTION_CATEGORY_LABELS[record.category] ?? record.category}: ${record.title}\n\n${shown}\n\nWaiting for an answer in Inbox (${record.id}).`;
 }
 
 /** The `@agent:` handle an answer uses to wake the agent that asked. */

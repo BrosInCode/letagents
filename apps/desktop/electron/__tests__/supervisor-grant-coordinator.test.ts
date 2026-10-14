@@ -2322,6 +2322,7 @@ test("destination-save followed by acknowledgement failure rolls back through gr
           /^\/supervisor-host-grants\/grant_(?:source|source_recovered)\/worker-sessions\/session_1\/end$/,
           "only an installed source grant may own the reactivated exact session",
         );
+        assert.equal((JSON.parse(init?.body ?? "{}") as { retired?: unknown }).retired, undefined, "a move keeps the agent's open requests");
         return { session_id: "session_1", ended_at: "2026-01-01T00:00:02.000Z" } as T;
       }
       if (path !== "/supervisor-host-grants") {

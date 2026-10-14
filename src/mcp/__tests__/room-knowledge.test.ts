@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { attentionResponseDisplayText, attentionResponseHandle, createKnowledgeRecord, formatAttentionResponse, parseKnowledgeInput, reviseKnowledgeRecord } from '../../../shared/room-knowledge.mjs';
+import { attentionResponseDisplayText, attentionResponseHandle, createKnowledgeRecord, formatAttentionRequest, formatAttentionResponse, parseKnowledgeInput, reviseKnowledgeRecord } from '../../../shared/room-knowledge.mjs';
 import { getLocalKnowledge, listLocalKnowledge, localKnowledgeHistory, saveLocalKnowledge } from '../../../shared/local-room-knowledge.mjs';
 import { resolveGloballyAddressedAgentKeys } from '../../shared/activation-routing.js';
 
@@ -134,4 +134,39 @@ test('unsafe sources, excessive content, malformed message IDs and empty answers
   assert.throws(() => parseKnowledgeInput('memory', { ...input, source_message_id: 'msg_9999999999' }), /source message/);
   assert.throws(() => parseKnowledgeInput('memory', { ...input, body: 'x'.repeat(8001) }), /8000/);
   assert.throws(() => reviseKnowledgeRecord(createKnowledgeRecord('room', 'attention', input, agent), { expected_version: 1, response: ' ' }, human), /Response/);
+});
+test('a person can close a request once without a decision; agents cannot', () => {
+  const request = createKnowledgeRecord('room', 'attention', input, agent);
+  assert.throws(() => reviseKnowledgeRecord(request, { expected_version: 1, close: true }, agent), /Only a human/);
+  assert.throws(() => reviseKnowledgeRecord(request, { expected_version: 2, close: true }, human), /changed since/);
+  const closed = reviseKnowledgeRecord(request, { expected_version: 1, close: true }, human);
+  assert.deepEqual(closed.response, { body: 'Closed without an answer.', actor: human, at: closed.response!.at, closed: true });
+  assert.equal(closed.version, 2);
+  assert.equal(formatAttentionResponse(closed), '@agent:owner/worker-b\n\nHuman response (record-0001):\n\nClosed without an answer.');
+  assert.throws(() => reviseKnowledgeRecord(closed, { expected_version: 2, close: true }, human), /already been closed/);
+  assert.throws(() => reviseKnowledgeRecord(closed, { expected_version: 2, response: 'Late' }, human), /already been closed/);
+  assert.equal(reviseKnowledgeRecord(request, { expected_version: 1, close: true, response: 'Agent retired.' }, human).response?.body, 'Agent retired.');
+});
+test('the room notice for a request names its kind and title and keeps a long body short', () => {
+  const request = createKnowledgeRecord('room', 'attention', { ...input, category: 'approval', body: `${'word '.repeat(150)}end` }, agent);
+  const [first, body, last] = formatAttentionRequest(request).split('\n\n');
+  assert.equal(first, 'Needs you · Approval: Keep the current API');
+  assert.equal(body, `${'word '.repeat(80).trimEnd()}…`, 'cut at 400 characters, without trailing space');
+  assert.equal(last, 'Waiting for an answer in Inbox (record-0001).');
+  assert.equal(formatAttentionRequest(createKnowledgeRecord('room', 'attention', input, agent)).split('\n\n')[1], input.body);
+});
+test('an agent request waits once in the local request outbox; retries, answers and people add none', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const count = () => db.prepare('SELECT count(*) AS n FROM local_room_knowledge_request_outbox').get()?.n;
+    const request = saveLocalKnowledge(db, createKnowledgeRecord('room', 'attention', input, agent));
+    assert.equal(count(), 1);
+    saveLocalKnowledge(db, createKnowledgeRecord('room', 'attention', input, agent));
+    assert.equal(count(), 1, 'a retry posts nothing more');
+    saveLocalKnowledge(db, reviseKnowledgeRecord(request, { expected_version: 1, close: true }, human), 1);
+    saveLocalKnowledge(db, createKnowledgeRecord('room', 'attention', { ...input, client_id: 'human-0001' }, human));
+    saveLocalKnowledge(db, createKnowledgeRecord('room', 'memory', { ...input, client_id: 'memory-0001' }, agent));
+    assert.equal(count(), 1);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM local_room_knowledge_outbox').get()?.n, 1, 'the close is delivered like an answer');
+  } finally { db.close(); }
 });
