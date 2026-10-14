@@ -1316,11 +1316,14 @@ export class SupervisedAgentDelivery {
       if (!agent.handle || !await this.hasLaneAuthority(agent, controller)) return;
       const recoveryContext = this.recoveryContext(agent);
       if (this.startupRecovered.get(agent.agentId) !== recoveryContext) {
-        await this.inbox.normalizeStartupRecovery(agent.agentId, {
+        const recovered = await this.inbox.normalizeStartupRecovery(agent.agentId, {
           resetCheckpointGatedUnstartedDispatch: agent.provider === "cursor",
         });
         if (!await this.hasLaneAuthority(agent, controller)) return;
         this.startupRecovered.set(agent.agentId, recoveryContext);
+        if (recovered.some(item => item.state === "acknowledged_no_reply" || item.state === "acknowledged_failed")) {
+          this.onDeliverySettled?.(agent.agentId);
+        }
       }
       for (;;) {
         if (this.dispatchIsPaused(agent)) return;
