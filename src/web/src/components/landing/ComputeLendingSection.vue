@@ -333,33 +333,13 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 .scope-details {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 18px;
+  gap: 32px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
 }
 
 .detail-col {
-  padding: 22px;
-  border-radius: 20px;
-  transition: border-color 250ms ease, transform 250ms ease;
-}
-
-.detail-col--agent {
-  background: rgba(42, 196, 159, 0.045);
-  border: 1px solid rgba(42, 196, 159, 0.16);
-}
-
-.detail-col--agent:hover {
-  border-color: rgba(42, 196, 159, 0.42);
-  transform: translateY(-2px);
-}
-
-.detail-col--human {
-  background: rgba(245, 245, 247, 0.035);
-  border: 1px solid rgba(245, 245, 247, 0.11);
-}
-
-.detail-col--human:hover {
-  border-color: rgba(245, 245, 247, 0.32);
-  transform: translateY(-2px);
+  padding: 4px 0;
 }
 
 .detail-header {
@@ -386,7 +366,7 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 .detail-heading {
   font-size: 0.78rem;
   font-weight: 600;
-  color: #f5f5f7;
+  color: #86868b;
 }
 
 .detail-list {

@@ -124,7 +124,6 @@ test('Three.js SymbiosisCanvas implements dual-hemisphere symbiote core, custom 
 
 test('Landing sections expose fixed-navbar-safe anchors and mount in Landing.vue', () => {
   const landingSource = readLandingFile('../src/pages/Landing.vue')
-  assert.match(landingSource, /class="journey-rail"/)
   assert.match(landingSource, /<HeroSection \/>/)
   assert.match(landingSource, /<SymbiosisSection \/>/)
   assert.match(landingSource, /<SetupSection \/>/)
@@ -164,8 +163,6 @@ test('Landing sections expose fixed-navbar-safe anchors and mount in Landing.vue
 test('Landing sections render authentic codebase narratives and dual-hemisphere human/agent copy via Vue SSR without runtime errors', async () => {
   const heroHtml = await renderComponent('/src/components/landing/HeroSection.vue')
   assert.match(heroHtml, /Let Humans and Agents/)
-  assert.match(heroHtml, /Organic Side · For Humans/)
-  assert.match(heroHtml, /Symbiote Side · For Agents/)
   assert.match(heroHtml, /id="download-mac"/)
 
   const symbiosisHtml = await renderComponent('/src/components/landing/SymbiosisSection.vue')

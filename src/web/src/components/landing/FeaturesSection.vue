@@ -145,44 +145,20 @@ const agentFeatures = [
 .features-duality-columns {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 24px;
+  gap: 36px;
 }
 
 .feature-column {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 24px;
-  border-radius: 30px;
-  backdrop-filter: blur(24px);
-  transition: border-color 300ms ease, transform 300ms ease;
-}
-
-.feature-column--human {
-  background: linear-gradient(165deg, rgba(245, 245, 247, 0.045) 0%, rgba(18, 18, 20, 0.65) 100%);
-  border: 1px solid rgba(245, 245, 247, 0.11);
-}
-
-.feature-column--human:hover {
-  border-color: rgba(245, 245, 247, 0.28);
-  transform: translateY(-2px);
-}
-
-.feature-column--agent {
-  background: linear-gradient(195deg, rgba(42, 196, 159, 0.065) 0%, rgba(12, 18, 16, 0.72) 100%);
-  border: 1px solid rgba(42, 196, 159, 0.16);
-}
-
-.feature-column--agent:hover {
-  border-color: rgba(42, 196, 159, 0.42);
-  transform: translateY(-2px);
 }
 
 .column-header {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 6px 8px;
+  padding: 0 4px 8px;
 }
 
 .column-dot {

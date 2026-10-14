@@ -1,44 +1,5 @@
 <template>
   <div class="landing" :data-focus="symbiosisBridge.focus">
-    <!-- Awwwards-style Fixed Chapter Progress Rail (inspired by morphowater.com) -->
-    <nav class="journey-rail" aria-label="Page chapters">
-      <div class="rail-counter">
-        <span class="rail-current">0{{ symbiosisBridge.activeChapter + 1 }}</span>
-        <span class="rail-sep">/</span>
-        <span class="rail-total">06</span>
-      </div>
-
-      <div class="rail-ticks">
-        <a
-          v-for="(item, idx) in railChapters"
-          :key="item.id"
-          :href="item.href"
-          class="rail-tick-link"
-          :class="{ 'rail-tick-link--active': symbiosisBridge.activeChapter === idx }"
-          :title="item.label"
-        >
-          <span class="rail-tick-bar" />
-          <span class="rail-tick-label">{{ item.label }}</span>
-        </a>
-      </div>
-
-      <div class="rail-hemisphere-status">
-        <span
-          class="rail-hemi-dot"
-          :class="`rail-hemi-dot--${symbiosisBridge.focus}`"
-        />
-        <span class="rail-hemi-text">
-          {{
-            symbiosisBridge.focus === 'human'
-              ? 'Human Side'
-              : symbiosisBridge.focus === 'agent'
-                ? 'Agent Side'
-                : 'Fused'
-          }}
-        </span>
-      </div>
-    </nav>
-
     <section v-if="repoAccessBanner" class="repo-access-banner" :class="repoAccessBanner.kind">
       <div class="repo-access-copy">
         <span class="repo-access-eyebrow">Repo Room Access</span>
@@ -88,15 +49,6 @@ import { symbiosisBridge } from '@/components/landing/symbiosisData'
 
 const auth = useAuth()
 const route = useRoute()
-
-const railChapters = [
-  { id: 'hero', label: 'Origin', href: '#' },
-  { id: 'symbiosis', label: 'Two Sides', href: '#symbiosis' },
-  { id: 'setup', label: 'Your Agents', href: '#setup' },
-  { id: 'lending', label: 'Share Agent', href: '#lending' },
-  { id: 'swarms', label: 'Open Rooms', href: '#swarms' },
-  { id: 'start', label: 'Enter Room', href: '#start' },
-]
 
 let revealObserver: IntersectionObserver | null = null
 
@@ -149,7 +101,7 @@ onMounted(() => {
           }
         }
       },
-      { threshold: 0.12, rootMargin: '0px 0px -8% 0px' },
+      { threshold: 0.1, rootMargin: '0px 0px -6% 0px' },
     )
     sections.forEach((sec) => {
       sec.classList.add('section-scroll-reveal')
@@ -174,131 +126,19 @@ function retryRepoRoom(room: string) {
   min-height: 100vh;
 }
 
-/* ─── Awwwards Fixed Left Chapter Rail ─── */
-.journey-rail {
-  position: fixed;
-  left: 24px;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-  padding: 14px 12px;
-  border-radius: 20px;
-  background: rgba(14, 14, 16, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  backdrop-filter: blur(20px);
-}
-
-.rail-counter {
-  display: flex;
-  align-items: baseline;
-  gap: 3px;
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-  font-variant-numeric: tabular-nums;
-  color: #6e6e73;
-}
-
-.rail-current {
-  color: #f5f5f7;
-  font-weight: 700;
-}
-
-.rail-ticks {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.rail-tick-link {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  text-decoration: none;
-  color: #6e6e73;
-  transition: color 200ms ease;
-}
-
-.rail-tick-bar {
-  width: 12px;
-  height: 1.5px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.2);
-  transition: width 260ms cubic-bezier(0.16, 1, 0.3, 1), background 260ms ease;
-}
-
-.rail-tick-label {
-  font-size: 0.68rem;
-  font-weight: 500;
-  letter-spacing: 0.01em;
-  opacity: 0.65;
-  transition: opacity 200ms ease, color 200ms ease;
-}
-
-.rail-tick-link:hover .rail-tick-label,
-.rail-tick-link--active .rail-tick-label {
-  opacity: 1;
-  color: #f5f5f7;
-}
-
-.rail-tick-link--active .rail-tick-bar {
-  width: 24px;
-  background: #2ac49f;
-  box-shadow: 0 0 10px rgba(42, 196, 159, 0.8);
-}
-
-.rail-hemisphere-status {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-}
-
-.rail-hemi-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  transition: background 250ms ease, box-shadow 250ms ease;
-}
-
-.rail-hemi-dot--human {
-  background: #f5f5f7;
-  box-shadow: 0 0 8px rgba(245, 245, 247, 0.9);
-}
-
-.rail-hemi-dot--agent {
-  background: #2ac49f;
-  box-shadow: 0 0 8px rgba(42, 196, 159, 0.9);
-}
-
-.rail-hemi-dot--fused {
-  background: linear-gradient(135deg, #f5f5f7 0%, #2ac49f 100%);
-}
-
-.rail-hemi-text {
-  font-size: 0.66rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: #86868b;
-}
-
 /* ─── Scroll-Triggered Section Reveal Choreography ─── */
 :deep(.section-scroll-reveal) {
   opacity: 0;
-  transform: translateY(34px) scale(0.985);
+  transform: translateY(28px);
   transition:
-    opacity 820ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 820ms cubic-bezier(0.16, 1, 0.3, 1);
+    opacity 900ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 900ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 :deep(.section-scroll-reveal.section-revealed),
 :deep(.hero.section-scroll-reveal) {
   opacity: 1;
-  transform: translateY(0) scale(1);
+  transform: translateY(0);
 }
 
 .repo-access-banner {
@@ -360,12 +200,6 @@ function retryRepoRoom(room: string) {
   background: rgba(255, 255, 255, 0.06);
   color: var(--text, #fafafa);
   border: 1px solid var(--border, #27272a);
-}
-
-@media (max-width: 1280px) {
-  .journey-rail {
-    display: none;
-  }
 }
 
 @media (max-width: 820px) {
