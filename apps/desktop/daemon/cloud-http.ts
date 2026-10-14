@@ -237,6 +237,23 @@ export async function publishRoomWork(input: RoomWorkPublishInput): Promise<Room
 /** The daemon talks to the room API only through the live worker bearer. */
 export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
+  async reportNoReply(input) {
+    // The local adapter has no self-receipt PUT route. Never interpret its
+    // fallback history response as an acknowledgment.
+    if (isLocalRoomApi(input.apiUrl) || !/^msg_[1-9]\d*$/.test(input.sourceMessageId)) return;
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.sourceMessageId}/agent-receipts/self`, {
+      method: "PUT", redirect: "error",
+      headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({ receipt_state: "no_reply" }),
+      signal: AbortSignal.any([input.signal, AbortSignal.timeout(2_000)]),
+    });
+    if (!response.ok) throw new Error(`No-reply receipt failed with HTTP ${response.status}.`);
+    const body = await response.json() as Record<string, unknown>;
+    if (body?.success !== true || body.receipt_state !== "no_reply"
+      || typeof body.receipt_id !== "string" || !body.receipt_id.trim()) {
+      throw new Error("No-reply receipt was not acknowledged.");
+    }
+  },
   async ownedTasks(input) {
     const tasks: Array<{ id: string; title: string; leaseId: string; epoch: number }> = [];
     const read = async (suffix: string) => {

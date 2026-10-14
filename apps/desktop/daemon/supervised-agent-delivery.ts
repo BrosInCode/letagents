@@ -1,4 +1,5 @@
 import type { RoomGif } from "../../../shared/room-expressions.mjs";
+import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
@@ -73,6 +74,10 @@ export type SupervisedPollResponse = {
 };
 
 export interface SupervisedDeliveryHttp {
+  /** Optional latency hint after durable no-reply settlement. Work publication remains the reply-order recovery path. */
+  reportNoReply?(input: {
+    roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
+  }): Promise<void>;
   /** Existing task GETs, filtered to this exact worker's active work leases. */
   ownedTasks?(input: { roomId: string; apiUrl: string; bearer: string; agentSessionId: string;
     taskIds?: readonly string[]; heldBefore?: string; signal: AbortSignal }): Promise<ContinuityTask[]>;
@@ -199,7 +204,7 @@ export class SupervisedAgentDelivery {
   /** The wait of each agent's scheduled follow-up. Its owner ends it early with Try now or Stop trying. */
   private readonly followUpWaits = new Map<string, AbortController>();
   private readonly retries = new Map<string, Set<Promise<void>>>();
-  private readonly retryControllers = new Map<string, Set<AbortController>>();
+  private readonly auxiliaryControllers = new Map<string, Set<AbortController>>();
   private readonly agentWork = new Map<string, Set<Promise<void>>>();
   private readonly stoppingAgents = new Set<string>();
   private readonly idleReservations = new Set<string>();
@@ -625,7 +630,7 @@ export class SupervisedAgentDelivery {
     this.polling.get(agentId)?.abort();
     this.pumpControllers.get(agentId)?.abort();
     this.loopControllers.get(agentId)?.abort();
-    for (const controller of this.retryControllers.get(agentId) ?? []) controller.abort();
+    for (const controller of this.auxiliaryControllers.get(agentId) ?? []) controller.abort();
     // New work is barred before aborting. Re-check the registry until it is
     // empty so a child that was registered while its parent settled is joined.
     for (;;) {
@@ -774,13 +779,13 @@ export class SupervisedAgentDelivery {
     const controller = new AbortController();
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.retryOperation(agent, sourceMessageId, controller)));
     const retries = this.retries.get(agent.agentId) ?? new Set<Promise<void>>();
-    const controllers = this.retryControllers.get(agent.agentId) ?? new Set<AbortController>();
+    const controllers = this.auxiliaryControllers.get(agent.agentId) ?? new Set<AbortController>();
     retries.add(operation); controllers.add(controller);
-    this.retries.set(agent.agentId, retries); this.retryControllers.set(agent.agentId, controllers);
+    this.retries.set(agent.agentId, retries); this.auxiliaryControllers.set(agent.agentId, controllers);
     const cleanup = () => {
       retries.delete(operation); controllers.delete(controller);
       if (this.retries.get(agent.agentId) === retries && retries.size === 0) this.retries.delete(agent.agentId);
-      if (this.retryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.retryControllers.delete(agent.agentId);
+      if (this.auxiliaryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.auxiliaryControllers.delete(agent.agentId);
     };
     void operation.then(cleanup, cleanup);
     return operation;
@@ -1598,6 +1603,7 @@ export class SupervisedAgentDelivery {
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome: item.outcome });
+        void this.reportNoReply(agent, item, controller).catch(() => {});
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
@@ -1970,6 +1976,7 @@ export class SupervisedAgentDelivery {
       if (result.outcome === "no_reply") {
         if (!await this.hasExecutionAuthority(agent, turnController)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
+        void this.reportNoReply(agent, item, controller).catch(() => {});
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
@@ -2042,6 +2049,7 @@ export class SupervisedAgentDelivery {
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome: current.outcome });
+        void this.reportNoReply(agent, item, controller).catch(() => {});
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
@@ -2192,6 +2200,34 @@ export class SupervisedAgentDelivery {
   }
 
   private readonly publishedIds = new Map<string, string>();
+  /** No new journal or retry loop: this only gets a settled silence to the
+   * room sooner. Failed/lost hints leave the existing work publisher to
+   * release reply order. Never send before capture/Stop arbitration settles. */
+  private reportNoReply(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController): Promise<void> {
+    if (!this.http.reportNoReply || this.fenced || this.isStopping(agent.agentId) || parent.signal.aborted
+      || isLocalRoomApi(agent.apiUrl) || item.room_id !== agent.roomId
+      || !/^msg_[1-9]\d*$/.test(item.source_message_id)) return Promise.resolve();
+    // The pump can finish before this optional request. Give it its own
+    // tracked lifetime so Stop and service handoff still cancel and join it.
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort();
+    parent.signal.addEventListener("abort", relayAbort, { once: true });
+    const controllers = this.auxiliaryControllers.get(agent.agentId) ?? new Set<AbortController>();
+    controllers.add(controller);
+    this.auxiliaryControllers.set(agent.agentId, controllers);
+    const operation = Promise.resolve().then(async () => {
+      const settled = await this.inbox.get(item.inbox_item_id);
+      if (settled?.state !== "acknowledged_no_reply" || !await this.hasLaneAuthority(agent, controller)) return;
+      await this.http.reportNoReply!({ apiUrl: agent.apiUrl, roomId: agent.roomId, bearer: agent.bearer,
+        sourceMessageId: item.source_message_id, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(2_000)]) });
+    }).finally(() => {
+      parent.signal.removeEventListener("abort", relayAbort);
+      controllers.delete(controller);
+      if (this.auxiliaryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.auxiliaryControllers.delete(agent.agentId);
+    });
+    return this.trackAgentWork(agent.agentId, this.track(controller, operation));
+  }
+
   private async publish(agent: SupervisedIngressAgent, item: SupervisedInboxItem, text: string, parent: AbortController): Promise<boolean> {
     if (!await this.hasLaneAuthority(agent, parent)) return false;
     const controller = new AbortController();
