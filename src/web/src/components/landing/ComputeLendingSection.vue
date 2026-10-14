@@ -1,5 +1,5 @@
 <template>
-  <section id="lending" class="lending-section" @pointerleave="setHemisphereFocus('fused')">
+  <section id="lending" class="lending-section">
     <div class="lending-intro">
       <p class="eyebrow">Share Your Agent</p>
       <h2 class="headline">
@@ -8,151 +8,75 @@
       </h2>
       <p class="subcopy">
         Let a friend or open-source project borrow your agent when you aren’t using it.
-        They get the help they need; your computer and private files stay untouched.
+        Your computer and private files stay untouched.
       </p>
     </div>
 
-    <div class="lending-widget">
-      <div class="widget-top">
-        <div class="lender-identity">
-          <span class="status-dot" :class="{ 'status-dot--revoked': isRevoked }" />
-          <div>
-            <strong>Sharing Claude with alex/payments</strong>
-            <span>{{ isRevoked ? 'Stopped immediately' : 'Active · 45 minutes left' }}</span>
+    <div class="lending-card">
+      <div class="bridge-visual">
+        <!-- Left: Your Machine (Always Locked) -->
+        <div class="bridge-node">
+          <div class="node-box node-box--locked">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
           </div>
+          <strong class="node-label">Your Mac</strong>
+          <span class="node-meta">Files &amp; keys locked</span>
+        </div>
+
+        <!-- Center: One-Way Safe Bridge -->
+        <div class="bridge-connector" aria-hidden="true">
+          <div class="connector-line" :class="{ 'connector-line--paused': isRevoked }">
+            <span v-if="!isRevoked" class="connector-dot" />
+          </div>
+          <span class="connector-tag">
+            {{ isRevoked ? 'Disconnected' : 'Only the agent crosses over' }}
+          </span>
+        </div>
+
+        <!-- Right: Shared Room -->
+        <div class="bridge-node" :class="{ 'bridge-node--dim': isRevoked }">
+          <div class="node-box node-box--agent">
+            <img :src="claudeIcon" alt="Claude" width="28" height="28" />
+          </div>
+          <strong class="node-label">Teammate’s Room</strong>
+          <span class="node-meta">{{ isRevoked ? 'Access ended' : 'Helps in a safe draft' }}</span>
+        </div>
+      </div>
+
+      <div class="card-footer">
+        <div class="footer-status">
+          <span class="status-dot" :class="{ 'status-dot--revoked': isRevoked }" />
+          <span>{{ isRevoked ? 'Sharing stopped' : 'Sharing Claude · Safe draft mode' }}</span>
         </div>
 
         <button
           type="button"
-          class="revoke-btn"
-          :class="{ 'revoke-btn--restore': isRevoked }"
+          class="toggle-btn"
+          :class="{ 'toggle-btn--restore': isRevoked }"
           @click="isRevoked = !isRevoked"
         >
           {{ isRevoked ? 'Share Again' : 'Stop Sharing' }}
         </button>
-      </div>
-
-      <div class="widget-body" :class="{ 'widget-body--dimmed': isRevoked }">
-        <div class="scope-picker">
-          <span class="picker-label">Choose what your agent can do</span>
-          <div class="scope-pills" role="tablist" aria-label="Allowed actions">
-            <button
-              v-for="scope in scopes"
-              :key="scope.id"
-              type="button"
-              role="tab"
-              :aria-selected="selectedScope === scope.id"
-              class="scope-pill"
-              :class="{ 'scope-pill--active': selectedScope === scope.id }"
-              @click="selectedScope = scope.id"
-            >
-              <strong>{{ scope.title }}</strong>
-              <small>{{ scope.subtitle }}</small>
-            </button>
-          </div>
-        </div>
-
-        <div class="scope-details" v-if="activeScope">
-          <div
-            class="detail-col detail-col--agent"
-            @pointerenter="setHemisphereFocus('agent')"
-          >
-            <div class="detail-header">
-              <span class="detail-dot detail-dot--agent" />
-              <span class="detail-heading">For the Borrowed Agent · Allowed</span>
-            </div>
-            <ul class="detail-list">
-              <li v-for="item in activeScope.allowed" :key="item">
-                <span class="check-icon">✓</span>
-                <span>{{ item }}</span>
-              </li>
-            </ul>
-          </div>
-
-          <div
-            class="detail-col detail-col--human"
-            @pointerenter="setHemisphereFocus('human')"
-          >
-            <div class="detail-header">
-              <span class="detail-dot detail-dot--human" />
-              <span class="detail-heading">For You (The Human) · Always Private</span>
-            </div>
-            <ul class="detail-list detail-list--locked">
-              <li v-for="item in activeScope.protected" :key="item">
-                <span class="lock-icon">—</span>
-                <span>{{ item }}</span>
-              </li>
-            </ul>
-          </div>
-        </div>
       </div>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { setHemisphereFocus } from './symbiosisData'
+import { ref } from 'vue'
+import claudeIcon from '../../../../../apps/desktop/renderer/src/assets/harness-icons/claude-code.png'
 
 const isRevoked = ref(false)
-const selectedScope = ref<'draft_pr' | 'review_comment' | 'research_note'>('draft_pr')
-
-const scopes = [
-  {
-    id: 'draft_pr' as const,
-    title: 'Propose Code',
-    subtitle: 'Safe draft only',
-    allowed: [
-      'Read the shared project files',
-      'Write code in a separate draft',
-      'Submit changes for approval',
-    ],
-    protected: [
-      'Never touches your personal files',
-      'Cannot change live production code',
-      'Automatically checks for accidental secrets',
-    ],
-  },
-  {
-    id: 'review_comment' as const,
-    title: 'Review Code',
-    subtitle: 'Read and give feedback',
-    allowed: [
-      'Read new code changes',
-      'Leave helpful review notes',
-      'Approve or flag issues',
-    ],
-    protected: [
-      'Cannot edit or push any files',
-      'Your passwords and keys stay hidden',
-      'Disconnects as soon as the review is done',
-    ],
-  },
-  {
-    id: 'research_note' as const,
-    title: 'Answer Questions',
-    subtitle: 'Explore and explain',
-    allowed: [
-      'Read and understand the project',
-      'Answer questions in the room',
-      'Share a clear summary note',
-    ],
-    protected: [
-      'Zero file changes of any kind',
-      'No access to your computer',
-      'Stop sharing with one click anytime',
-    ],
-  },
-]
-
-const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.value) ?? scopes[0])
 </script>
 
 <style scoped>
 .lending-section {
   position: relative;
   z-index: 2;
-  max-width: 920px;
+  max-width: 780px;
   margin: 0 auto;
   padding: 140px 32px;
   scroll-margin-top: 92px;
@@ -160,7 +84,7 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 
 .lending-intro {
   text-align: center;
-  max-width: 560px;
+  max-width: 520px;
   margin: 0 auto 48px;
 }
 
@@ -179,7 +103,7 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
   letter-spacing: -0.04em;
   line-height: 1.05;
   color: #f5f5f7;
-  margin-bottom: 18px;
+  margin-bottom: 16px;
   text-wrap: balance;
 }
 
@@ -188,65 +112,151 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
 }
 
 .subcopy {
-  font-size: 1.18rem;
-  line-height: 1.55;
+  font-size: 1.14rem;
+  line-height: 1.5;
   color: #86868b;
   text-wrap: balance;
 }
 
-.lending-widget {
+.lending-card {
   border-radius: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(18, 18, 20, 0.78);
-  backdrop-filter: blur(28px);
-  box-shadow: 0 32px 80px rgba(0, 0, 0, 0.52);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #111113;
   overflow: hidden;
 }
 
-.widget-top {
+.bridge-visual {
+  display: grid;
+  grid-template-columns: 150px 1fr 150px;
+  align-items: center;
+  gap: 24px;
+  padding: 48px 40px;
+}
+
+.bridge-node {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  transition: opacity 250ms ease;
+}
+
+.bridge-node--dim {
+  opacity: 0.38;
+}
+
+.node-box {
+  width: 60px;
+  height: 60px;
+  border-radius: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+
+.node-box--locked {
+  background: #18181b;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #f5f5f7;
+}
+
+.node-box--agent {
+  background: #18181b;
+  border: 1px solid rgba(42, 196, 159, 0.35);
+}
+
+.node-box--agent img {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+}
+
+.node-label {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: #f5f5f7;
+  margin-bottom: 3px;
+}
+
+.node-meta {
+  font-size: 0.78rem;
+  color: #86868b;
+}
+
+.bridge-connector {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.connector-line {
+  position: relative;
+  width: 100%;
+  height: 2px;
+  background: rgba(42, 196, 159, 0.35);
+  overflow: hidden;
+  transition: background 250ms ease;
+}
+
+.connector-line--paused {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.connector-dot {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2ac49f;
+  animation: bridgeFlow 2.2s infinite cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes bridgeFlow {
+  0% { left: 0%; opacity: 0; }
+  15% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { left: calc(100% - 8px); opacity: 0; }
+}
+
+.connector-tag {
+  font-size: 0.78rem;
+  color: #86868b;
+}
+
+.card-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 22px 28px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 18px 28px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: #0d0d0f;
 }
 
-.lender-identity {
+.footer-status {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
+  font-size: 0.86rem;
+  color: #d4d4d8;
 }
 
 .status-dot {
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: #2ac49f;
-  box-shadow: 0 0 12px rgba(42, 196, 159, 0.8);
-  flex-shrink: 0;
 }
 
 .status-dot--revoked {
   background: #ef4444;
-  box-shadow: 0 0 12px rgba(239, 68, 68, 0.7);
 }
 
-.lender-identity strong {
-  display: block;
-  font-size: 0.94rem;
-  font-weight: 600;
-  color: #f5f5f7;
-}
-
-.lender-identity span {
-  display: block;
-  font-size: 0.8rem;
-  color: #86868b;
-  margin-top: 2px;
-}
-
-.revoke-btn {
+.toggle-btn {
   padding: 8px 18px;
   border-radius: 999px;
   font-size: 0.8rem;
@@ -254,159 +264,48 @@ const activeScope = computed(() => scopes.find((s) => s.id === selectedScope.val
   color: #f87171;
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(239, 68, 68, 0.25);
-  transition: background 200ms ease, transform 200ms ease;
+  transition: background 200ms ease;
 }
 
-.revoke-btn:hover {
+.toggle-btn:hover {
   background: rgba(239, 68, 68, 0.18);
-  transform: scale(1.02);
 }
 
-.revoke-btn--restore {
+.toggle-btn--restore {
   color: #000000;
   background: #f5f5f7;
   border-color: transparent;
 }
 
-.revoke-btn--restore:hover {
+.toggle-btn--restore:hover {
   background: #ffffff;
 }
 
-.widget-body {
-  padding: 28px;
-  transition: opacity 250ms ease;
-}
-
-.widget-body--dimmed {
-  opacity: 0.4;
-}
-
-.picker-label {
-  display: block;
-  font-size: 0.76rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #86868b;
-  margin-bottom: 12px;
-}
-
-.scope-pills {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  margin-bottom: 24px;
-}
-
-.scope-pill {
-  text-align: left;
-  padding: 16px 18px;
-  border-radius: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.025);
-  transition: border-color 200ms ease, background 200ms ease;
-}
-
-.scope-pill strong {
-  display: block;
-  font-size: 0.92rem;
-  font-weight: 600;
-  color: #f5f5f7;
-}
-
-.scope-pill small {
-  display: block;
-  font-size: 0.8rem;
-  color: #86868b;
-  margin-top: 3px;
-}
-
-.scope-pill:hover {
-  border-color: rgba(255, 255, 255, 0.18);
-}
-
-.scope-pill--active {
-  border-color: rgba(42, 196, 159, 0.5);
-  background: rgba(42, 196, 159, 0.07);
-}
-
-.scope-details {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 32px;
-  padding-top: 24px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-}
-
-.detail-col {
-  padding: 4px 0;
-}
-
-.detail-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 14px;
-}
-
-.detail-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-}
-
-.detail-dot--agent {
-  background: #2ac49f;
-}
-
-.detail-dot--human {
-  background: #f5f5f7;
-}
-
-.detail-heading {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: #86868b;
-}
-
-.detail-list {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.detail-list li {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  font-size: 0.9rem;
-  line-height: 1.5;
-  color: #d4d4d8;
-}
-
-.check-icon {
-  color: #2ac49f;
-  font-weight: 700;
-}
-
-.lock-icon {
-  color: #86868b;
-}
-
-@media (max-width: 768px) {
+@media (max-width: 640px) {
   .lending-section {
     padding: 96px 20px;
   }
 
-  .widget-top {
-    flex-direction: column;
-    align-items: flex-start;
+  .bridge-visual {
+    grid-template-columns: 1fr;
+    padding: 32px 20px;
   }
 
-  .scope-pills,
-  .scope-details {
-    grid-template-columns: 1fr;
+  .card-footer {
+    flex-direction: column;
+    align-items: stretch;
+    text-align: center;
+  }
+
+  .footer-status {
+    justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connector-dot {
+    animation: none;
+    left: 50%;
   }
 }
 </style>
