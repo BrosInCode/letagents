@@ -1,4 +1,4 @@
-import { computed, ref, type Ref } from "vue";
+import { computed, ref, watch, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
@@ -264,6 +264,12 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   }));
 
   const activeEntry = ref<SidebarEntry>(pinnedRoom.value);
+  let settingsReturnEntry: SidebarEntry | null = null;
+  watch(activeEntry, (entry, previous) => {
+    if (entry.type === "system" && previous.type !== "system") {
+      settingsReturnEntry = previous;
+    }
+  }, { flush: "sync" });
   const sidebarMode = ref<SidebarMode>("expanded");
   const pinnedCollapsed = ref(false);
   const roomsCollapsed = ref(false);
@@ -295,6 +301,15 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
   function selectSidebarEntry(entry: SidebarEntry): void {
     activeEntry.value = entry;
+  }
+
+  function returnFromSettings(): void {
+    const previous = settingsReturnEntry;
+    settingsReturnEntry = null;
+    // Resolve rooms again: one may have been removed while Settings was open.
+    activeEntry.value = previous?.type === "room"
+      ? findSidebarEntryById(previous.id) || currentParentRoom.value
+      : previous || currentParentRoom.value;
   }
 
   function cycleSidebar() {
@@ -378,6 +393,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     repoName,
     resolveSelectedRoomIdentifier,
     roomsCollapsed,
+    returnFromSettings,
     selectSidebarEntry,
     selectedAccess,
     selectedFocusRooms,

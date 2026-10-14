@@ -243,7 +243,7 @@
         :workers="workers"
         :update-status="updateStatus"
         @back-mcp="goBackMcpOnboarding"
-        @back-to-app="activeEntry = currentParentRoom"
+        @back-to-app="returnFromSettings"
         @clear-mcp-target-selection="clearMcpTargetSelection"
         @continue-mcp="continueMcpOnboarding"
         @delete-room="deleteAccountRoom"
@@ -661,6 +661,7 @@ const {
   repoName,
   resolveSelectedRoomIdentifier,
   roomsCollapsed,
+  returnFromSettings,
   selectSidebarEntry,
   selectedAccess,
   selectedFocusRooms,

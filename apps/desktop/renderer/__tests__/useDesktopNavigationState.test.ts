@@ -10,12 +10,53 @@ import type {
   RepoStatus,
 } from "../../electron/ipc-types";
 import { useDesktopNavigationState } from "../src/composables/useDesktopNavigationState";
+import { appAgentEntry, rentMarketplaceEntry, settingsEntry } from "../src/domain/desktop-navigation";
 import {
   resolveAccountRoomAliasIdentifier,
   type RecentRootRoom,
 } from "../src/domain/sidebar-rooms";
 
 describe("useDesktopNavigationState", () => {
+  it("returns from Settings to the focus room, even after changing settings sections", () => {
+    withLocalStorage(() => {
+      const { state, selectedSnapshot } = settingsNavigationFixture();
+      const focus = state.projectEntries.value.flatMap(group => group.focusRooms)[0];
+      assert.ok(focus);
+      state.selectSidebarEntry(focus);
+      state.activeEntry.value = settingsEntry;
+      // App data displays the root snapshot while the settings surface is open.
+      selectedSnapshot.value = roomSnapshot("parent");
+      state.activeEntry.value = appAgentEntry;
+      state.returnFromSettings();
+      assert.equal(state.activeEntry.value.id, focus.id);
+      assert.equal(state.resolveSelectedRoomIdentifier(roomSnapshot("parent")), "focus_trial");
+    });
+  });
+
+  it("falls back to the parent when the saved focus room was removed", () => {
+    withLocalStorage(() => {
+      const { state, accountRooms } = settingsNavigationFixture();
+      state.selectSidebarEntry(state.projectEntries.value.flatMap(group => group.focusRooms)[0]);
+      state.activeEntry.value = settingsEntry;
+      accountRooms.value[0].focusRooms = [];
+      state.returnFromSettings();
+      assert.equal(state.activeEntry.value.id, state.currentParentRoom.value.id);
+    });
+  });
+
+  it("returns to ordinary rooms and non-room surfaces without reusing an older target", () => {
+    withLocalStorage(() => {
+      const { state } = settingsNavigationFixture();
+      state.activeEntry.value = settingsEntry;
+      state.returnFromSettings();
+      assert.equal(state.activeEntry.value.id, state.currentParentRoom.value.id);
+      state.activeEntry.value = rentMarketplaceEntry;
+      state.activeEntry.value = appAgentEntry;
+      state.returnFromSettings();
+      assert.equal(state.activeEntry.value.id, rentMarketplaceEntry.id);
+    });
+  });
+
   it("does not let temporary rooms inherit the active repo branch label", () => {
     withLocalStorage(() => {
       const recentRootRooms = ref<RecentRootRoom[]>([]);
@@ -937,6 +978,25 @@ describe("useDesktopNavigationState", () => {
     });
   });
 });
+
+function settingsNavigationFixture() {
+  const accountRooms = ref<DesktopAccountRoomEntry[]>([accountRoom("parent", "Parent", {
+    focusRooms: [{
+      roomIdentifier: "focus_trial", displayName: "Trial", name: "Trial", kind: "focus",
+      parentRoomId: "parent", focusKey: "trial", sourceTaskId: null, focusStatus: "active",
+      role: "participant", source: "join", firstOpenedAt: null, lastOpenedAt: null,
+      latestMessageId: null, latestMessageAt: null, gitRoom: null,
+    }],
+  })]);
+  const selectedSnapshot = ref<DesktopRoomSnapshot | null>(roomSnapshot("parent"));
+  const state = useDesktopNavigationState({
+    accountRooms, selectedSnapshot, activeEntryStorageKey: "active-entry",
+    appInfo: ref(null), recentRootRooms: ref([]), recentRootRoomsStorageKey: "recent-root-rooms",
+    repoStatus: ref(null), rootRoomSnapshot: ref(roomSnapshot("parent")),
+    selectedRootRoomIdentifier: ref("parent"),
+  });
+  return { state, accountRooms, selectedSnapshot };
+}
 
 function roomSnapshot(
   identifier: string,
