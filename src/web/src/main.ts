@@ -7,7 +7,7 @@ import { copyTextToClipboard } from './domain/clipboard'
 
 setupCodeBlockCopyListener(copyTextToClipboard)
 
-const savedTheme = localStorage.getItem('lac-theme') === 'light' ? 'light' : 'dark'
+const savedTheme = localStorage.getItem('lac-theme') === 'dark' ? 'dark' : 'light'
 document.documentElement.setAttribute('data-theme', savedTheme)
 
 const app = createApp(App)
