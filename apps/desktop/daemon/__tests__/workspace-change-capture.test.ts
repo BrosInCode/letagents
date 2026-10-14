@@ -105,6 +105,32 @@ test('turn snapshots separate consecutive turns, preserve staged work, and never
 });
 
 
+test('turn capture reuses one bounded buffer without mixing file contents', async (t) => {
+  const { captureWorkspaceTree, releaseWorkspaceTree } = await import('../../../../shared/workspace-turn-capture.mjs');
+  const directory = mkdtempSync(join(tmpdir(), 'workspace-buffer-'));
+  try {
+    git(directory, 'init', '-q'); git(directory, 'config', 'user.name', 'Test'); git(directory, 'config', 'user.email', 'test@example.com');
+    writeFileSync(join(directory, 'base.txt'), 'original\n'); git(directory, 'add', '.'); git(directory, 'commit', '-qm', 'base');
+    const files = new Map([
+      ['a-large.bin', Buffer.alloc(512 * 1024, 0xab)],
+      ['b-short.txt', Buffer.from('only this text\n')],
+      ['c-empty.txt', Buffer.alloc(0)],
+      ['d-large.bin', Buffer.alloc(256 * 1024, 0xcd)],
+    ]);
+    for (const [path, bytes] of files) writeFileSync(join(directory, path), bytes);
+    const allocations = t.mock.method(Buffer, 'alloc');
+    const tree = await captureWorkspaceTree(directory, 'buffer-lifetime');
+    assert.ok(tree);
+    assert.equal(allocations.mock.calls.filter(call => call.arguments[0] === 8 * 1024 * 1024 + 1).length, 1);
+    for (const [path, bytes] of files) {
+      assert.deepEqual(execFileSync('git', ['cat-file', 'blob', `${tree}:${path}`], { cwd: directory }), bytes, path);
+    }
+    await releaseWorkspaceTree(directory, 'buffer-lifetime');
+    writeFileSync(join(directory, 'too-large.bin'), Buffer.alloc(8 * 1024 * 1024 + 1));
+    assert.equal(await captureWorkspaceTree(directory, 'oversized'), null, 'oversized files still fail closed');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('full review retains the last line beyond the room preview and survives workspace deletion', async () => {
   const { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } = await import('../../../../shared/workspace-turn-capture.mjs');
   const { encodeWorkspaceReview, decodeWorkspaceReview } = await import('../../../../shared/workspace-review.mjs');
