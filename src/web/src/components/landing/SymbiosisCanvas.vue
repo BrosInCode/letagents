@@ -228,24 +228,25 @@ const CORE_FRAGMENT_SHADER = `
     vec3 viewDir = vec3(0.0, 0.0, 1.0);
     float ndotv = abs(dot(normalize(vNormal), viewDir));
 
-    // Pure optical Fresnel rim: interior stays dark so foreground typography is never muddied
-    float rim = pow(1.0 - ndotv, 3.0);
+    // Luminous Fresnel rim + soft subsurface glow so the symbiote orb glows vividly behind frosted glass
+    float rim = pow(1.0 - ndotv, 2.15);
+    float subsurface = pow(1.0 - ndotv, 1.1) * 0.28;
 
-    // Human Organic side: warm pearl ivory rim
-    vec3 humanCol = vec3(0.96, 0.95, 0.93);
+    // Human Organic side: warm pearl ivory glow
+    vec3 humanCol = vec3(0.97, 0.96, 0.94);
 
-    // Agent Symbiote side: deep liquid emerald-mint rim
-    vec3 symbioteMint = vec3(0.165, 0.769, 0.624);
-    vec3 symbioteBright = vec3(0.68, 0.98, 0.89);
-    vec3 agentCol = mix(symbioteMint, symbioteBright, vTendrilCrest * 0.5);
+    // Agent Symbiote side: electric emerald-mint glow with bright tendril crests
+    vec3 symbioteMint = vec3(0.165, 0.78, 0.63);
+    vec3 symbioteBright = vec3(0.74, 1.0, 0.91);
+    vec3 agentCol = mix(symbioteMint, symbioteBright, vTendrilCrest * 0.65);
 
+    vec3 seamHot = vec3(0.86, 1.0, 0.95);
     vec3 col = mix(humanCol, agentCol, vSymbiote);
+    col = mix(col, seamHot, vSeamGlow * 0.45);
 
-    // Subtle visibility: quieter in the Hero (so headline pops), fuller during scroll chapters
-    float scrollReveal = 0.42 + 0.58 * smoothstep(0.04, 0.22, uScroll);
-    float alpha = (rim * 0.52 + vSeamGlow * rim * 0.28) * scrollReveal;
+    float alpha = rim * 0.74 + subsurface + vSeamGlow * 0.36 + vTendrilCrest * vSymbiote * 0.22;
 
-    gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.48));
+    gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.84));
   }
 `
 
@@ -613,19 +614,19 @@ onUnmounted(() => {
   display: block;
   width: 100%;
   height: 100%;
-  opacity: 0.72;
+  opacity: 0.92;
 }
 
 .symbiosis-vignette {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 50% 42%, rgba(10, 10, 10, 0.42) 0%, rgba(10, 10, 10, 0.8) 68%, #0a0a0a 100%);
+    radial-gradient(circle at 50% 45%, rgba(10, 10, 10, 0.16) 0%, rgba(10, 10, 10, 0.64) 72%, #0a0a0a 100%);
 }
 
 @media (prefers-reduced-motion: reduce) {
   .symbiosis-webgl {
-    opacity: 0.45;
+    opacity: 0.6;
   }
 }
 </style>

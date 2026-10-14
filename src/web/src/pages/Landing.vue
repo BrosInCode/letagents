@@ -92,7 +92,7 @@ onMounted(() => {
   auth.checkSession()
 
   if (typeof IntersectionObserver !== 'undefined') {
-    const sections = document.querySelectorAll('.landing > section')
+    const sections = document.querySelectorAll('.landing > section:not(.hero)')
     revealObserver = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -135,10 +135,9 @@ function retryRepoRoom(room: string) {
     transform 900ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-:deep(.section-scroll-reveal.section-revealed),
-:deep(.hero.section-scroll-reveal) {
+:deep(.section-scroll-reveal.section-revealed) {
   opacity: 1;
-  transform: translateY(0);
+  transform: none;
 }
 
 .repo-access-banner {
