@@ -1,5 +1,6 @@
 import { NativeActivityRejectedError, publishWorkerNativeActivity } from "./cloud-http.js";
 import { redactCredentialText } from "./credential-redaction.js";
+import { LiveActivitySummaryRelay, type LiveActivitySummaryRelayOptions, type LiveActivitySummaryStatus } from "./live-activity-summary-relay.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import type { DaemonManifestEntry } from "./types.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
@@ -19,7 +20,26 @@ export type NativeActivityPublicationPorts = {
  * committed only after the exact binding publication succeeds.
  */
 export class NativeActivityPublicationCoordinator {
-  constructor(private readonly ports: NativeActivityPublicationPorts) {}
+  private readonly summaries: LiveActivitySummaryRelay;
+
+  constructor(
+    private readonly ports: NativeActivityPublicationPorts,
+    summaryClock: Omit<LiveActivitySummaryRelayOptions, "publish"> = {},
+  ) {
+    this.summaries = new LiveActivitySummaryRelay({
+      ...summaryClock,
+      publish: (entryId, status) => this.publish(entryId, "native_harness.activity_summary", status),
+    });
+  }
+
+  /**
+   * Record what the agent does now, in the words its owner sees. The room
+   * receives a change within the summary interval, and every later working
+   * publication carries it. Null clears it when the turn ends.
+   */
+  observeActivitySummary(entryId: string, summary: string | null, status: LiveActivitySummaryStatus): void {
+    this.summaries.observe(entryId, summary, status);
+  }
 
   async publish(
     entryId: string,
@@ -31,6 +51,9 @@ export class NativeActivityPublicationCoordinator {
     const observedMs = Date.parse(observedAt);
     const currentBinding = await this.ports.bindings.get(entryId);
     if (!currentBinding || !await this.ports.bindings.credentialFor(currentBinding)) return false;
+    // An idle agent does nothing to describe; its line is gone with the turn.
+    if (status === "idle") this.summaries.reset(entryId);
+    const activitySummary = status === "working" ? this.summaries.take(entryId) : null;
     const publication = await this.ports.bindings.publish(
       entryId,
       observedMs,
@@ -50,6 +73,7 @@ export class NativeActivityPublicationCoordinator {
             method: safeMethod,
             status,
             operation: "the daemon bridge",
+            activitySummary,
           }),
         };
       },

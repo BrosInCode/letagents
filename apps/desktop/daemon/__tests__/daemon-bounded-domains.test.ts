@@ -193,7 +193,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // retry policy stay in worker-authority-coordinator.ts.
   // 1662 -> 1677: daemon-wide convergence pacer composition and user-action
   // priority marks; limits, queueing and priority stay in convergence-pacer.ts.
-  assert.ok(mainSource.split("\n").length < 1_677, "main.ts must remain a thin composition root");
+  // 1677 -> 1678: the live activity summary port; the line, its path stripping
+  // and its throttle stay in live-activity-summary-relay.ts.
+  assert.ok(mainSource.split("\n").length < 1_678, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

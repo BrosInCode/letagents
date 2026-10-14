@@ -19,6 +19,7 @@ import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
 import { WorkerRuntimeCustody, type InstalledHostGrant } from "../worker-runtime-custody.js";
+import { LiveActivitySummaryRelay } from "../live-activity-summary-relay.js";
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { LifecycleProjectionObservation } from "../lifecycle-projection-ledger.js";
 
@@ -161,7 +162,8 @@ function coordinatorHarness(input: {
   startCutover?: (entryId: string) => Promise<void>;
   bindingGet?: (entryId: string) => Promise<WorkerSessionBinding | null>;
   heartbeat?: Partial<ProviderStreamCoordinatorOptions["heartbeat"]>;
-  publishNativeActivity?: () => Promise<void>;
+  publishNativeActivity?: (entryId?: string, method?: string, status?: "working" | "idle") => Promise<void>;
+  observeActivitySummary?: ProviderStreamCoordinatorOptions["observeActivitySummary"];
   requestConvergence?: (entryId: string) => void;
   serializeManifest?: <T>(operation: () => Promise<T>) => Promise<T>;
   setTimeout?: typeof setTimeout;
@@ -251,7 +253,8 @@ function coordinatorHarness(input: {
     },
     appendNativeActivity: async (_entryId, event, activityOnly) => activityOnly
       ? input.appendActivityOnly?.(event.method) : input.appendActivity?.(event.method),
-    publishNativeActivity: async () => input.publishNativeActivity?.(),
+    publishNativeActivity: async (entryId, method, status) => input.publishNativeActivity?.(entryId, method, status),
+    observeActivitySummary: input.observeActivitySummary,
     handleTerminal: async () => {},
     streams: { reset: () => {}, push: (_entryId, event) => input.pushStream?.(event), end: (entryId) => input.endStream?.(entryId) },
     delivery: { start: input.startDelivery ?? (async () => {}), startCutover: input.startCutover ?? (async () => {}) },
@@ -1317,6 +1320,80 @@ test("provider stream events are FIFO per entry and stale handles are ignored", 
     streamEvent(3, "item/stale"),
   );
   assert.deepEqual(calls, ["item/first", "item/second"]);
+  await harness.coordinator.disposeAll();
+});
+
+test("each human-visible working event gives the room the owner's live line, from the bound runtime only", async () => {
+  const lines: Array<[string, string | null, Promise<string | null> | string | null]> = [];
+  const harness = coordinatorHarness({
+    observeActivitySummary: (entryId, summary, status) => { lines.push([entryId, summary, status()]); },
+  });
+  const settled = async () => Promise.all(lines.map(async ([entryId, summary, status]) => [entryId, summary, await status]));
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.enqueue("agent-1", handle, streamEvent(1, "item/agentMessage/delta"));
+  assert.deepEqual(await settled(), [["agent-1", "Writing a response", null]], "no binding yet: the line waits for one");
+  harness.runtimeCustody.installLiveBinding("agent-1", {
+    agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+  });
+  await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(2, "thread/read"), kind: "item_lifecycle" });
+  assert.equal(lines.length, 1, "a protocol read says nothing about the line");
+  await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(3, "item/commandExecution/outputDelta"), kind: "command_output" });
+  assert.deepEqual((await settled()).at(-1), ["agent-1", "Working in the project", "working"]);
+  await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(4, "item/completed"), kind: "item_lifecycle", payload: { item: { status: "completed" } } });
+  assert.equal(lines.length, 2, "an item that ends inside the turn keeps the line, as on the owner's desktop");
+  await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(5, "turn/completed"), kind: "turn_lifecycle" });
+  assert.deepEqual(lines.at(-1)?.slice(0, 2), ["agent-1", null], "the end of the turn clears the line");
+  await harness.coordinator.disposeAll();
+});
+
+test("a recovering agent publishes no activity line; the next heartbeat after it works again carries the kept line", async () => {
+  let heartbeat: (() => void) | null = null;
+  const published: Array<[string | undefined, string | undefined, string | null]> = [];
+  let timers: Array<() => void> = [];
+  const relay: LiveActivitySummaryRelay = new LiveActivitySummaryRelay({
+    publish: async (entryId, status) => { published.push(["native_harness.activity_summary", status, status === "working" ? relay.take(entryId) : null]); },
+    setTimeout: ((callback: () => void) => { timers.push(callback); return 0; }) as never,
+    clearTimeout: () => {},
+  });
+  const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
+  // A typed daemon-inbox agent: no per-event publication, so only the relay and the heartbeat publish.
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => "ready",
+    onStream: async (_handle, listener) => { rawListeners.push(listener); return () => {}; },
+    observeActivitySummary: (entryId, summary, status) => relay.observe(entryId, summary, status),
+    publishNativeActivity: async (entryId, method, status) => {
+      published.push([method, status, status === "working" ? relay.take(entryId!) : null]);
+    },
+    setInterval: ((callback: () => void) => { heartbeat = callback; return { unref() {} }; }) as unknown as typeof setInterval,
+  });
+  const runTimers = async () => {
+    const due = timers; timers = [];
+    for (const run of due) run();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  harness.runtimeCustody.installLiveBinding("agent-1", {
+    agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+  });
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(rawListeners.length, 1);
+  harness.setManifest({ ...harness.getManifest(), observed_state: "recovering" });
+  rawListeners[0]!({ ...streamEvent(1, "item/commandExecution/outputDelta"), kind: "command_output" });
+  await harness.coordinator.drainCallbacks();
+  await runTimers();
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  assert.deepEqual(published, [], "a recovering agent announces neither its line nor its liveness");
+
+  harness.setManifest({ ...harness.getManifest(), observed_state: "working" });
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  assert.deepEqual(published, [["native_harness.heartbeat", "working", "Working in the project"]], "the kept line rides the next heartbeat");
+  await runTimers();
+  assert.equal(published.length, 1, "and is not published twice");
   await harness.coordinator.disposeAll();
 });
 

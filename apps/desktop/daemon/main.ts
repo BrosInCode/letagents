@@ -391,6 +391,7 @@ export class SupervisorDaemon {
       transition: (entryId, state, condition, detail, actor) => this.transition(entryId, state, condition, detail, actor),
       appendNativeActivity: (entryId, event, activityOnly, position) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly, position),
       publishNativeActivity: (entryId, method, status, observedAt) => this.publishNativeActivity(entryId, method, status, observedAt),
+      observeActivitySummary: (entryId, summary, status) => this.nativeActivity.observeActivitySummary(entryId, summary, status),
       handleTerminal: (installation, _bindingIdentity, terminal) =>
         this.providerTerminals.handleTerminal(installation, terminal),
       streams: {
