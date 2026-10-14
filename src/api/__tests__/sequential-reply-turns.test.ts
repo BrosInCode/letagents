@@ -62,9 +62,13 @@ test("all speakers can express a complete viewpoint without a prescribed convers
     assert.match(guidance, /Speaking later does not require a shorter answer/);
     assert.match(guidance, /no required agreement preface/);
     assert.match(guidance, /Agreement can be substantive/);
-    assert.match(guidance, /Useful overlap is welcome/);
+    assert.match(guidance, /use applicable explanations and proposals as shared context/);
+    assert.match(guidance, /prose, examples and suggested scripts as well as lists/);
+    assert.match(guidance, /Restate material when readers need it to follow your reasoning/);
+    assert.match(guidance, /own view or recommendation does not by itself request another full restatement/);
+    assert.match(guidance, /Do not manufacture disagreement or novelty/);
     assert.match(guidance, /shared work already in progress/);
-    assert.match(guidance, /unless the human asks for separate full answers/);
+    assert.match(guidance, /when the human asks for separate full answers/);
     assert.match(guidance, /does not require starting a thread/);
     assert.match(guidance, /Silence is not a vote/);
     assert.doesNotMatch(guidance, /Add only new points|agree in one short line|Cover only/);
