@@ -666,6 +666,46 @@ test("a self-reported no_reply ends the turn and releases the next position", sk
   }
 });
 
+test("a successor can settle its retired session's silent outcome without reviving another turn", skip, async () => {
+  const a = await seed();
+  const sent = await a.send("@everyone what should we build next?");
+  const [first] = await order(a, sent.message.id);
+  const predecessor = a.sessions[first!]!;
+  await api!.endRoomAgentSession({ session_id: predecessor.session_id, room_id: a.room.id });
+  const before = await a.turns(sent.message.id);
+  const successor = await api!.createRoomAgentSession({
+    room_id: a.room.id, session_kind: "worker", runtime: "claude-code",
+    actor_label: predecessor.actor_label, display_name: predecessor.display_name,
+    agent_key: predecessor.agent_key, owner_account_id: a.ownerId,
+    owner_label: a.ownerId, ide_label: "Agent",
+  });
+  const outsider = await api!.createRoomAgentSession({
+    room_id: a.room.id, session_kind: "worker", runtime: "claude-code",
+    actor_label: "Unrouted", display_name: "Unrouted", agent_key: `${a.ownerId}/unrouted`,
+    owner_account_id: a.ownerId, owner_label: a.ownerId, ide_label: "Agent",
+  });
+  const route = pollRoute(a.room.id);
+  try {
+    const retired = await route.reportSelf(predecessor, a.ownerId, sent.message.id, "no_reply");
+    assert.equal(retired.statusCode, 401, "retired credentials cannot settle a receipt");
+    const unrelated = await route.reportSelf(outsider, a.ownerId, sent.message.id, "no_reply");
+    assert.equal(unrelated.statusCode, 404, "another durable agent cannot settle this receipt");
+    const reported = await route.reportSelf(successor, a.ownerId, sent.message.id, "no_reply");
+    assert.equal(reported.statusCode, 200, JSON.stringify(reported.body));
+    const replay = await route.reportSelf(successor, a.ownerId, sent.message.id, "no_reply");
+    assert.equal(replay.statusCode, 200, "a lost acknowledgment can be retried");
+    assert.deepEqual(await a.turns(sent.message.id), before, "settlement does not release another agent out of turn");
+    const receipt = await client!.pool.query(
+      `SELECT r.receipt_state, e.from_state, e.actor_session_id FROM message_agent_receipts r
+       JOIN message_agent_receipt_events e ON e.receipt_id = r.id
+       WHERE r.message_room_id = $1 AND r.message_number = $2 AND r.agent_key = $3 AND e.to_state = 'no_reply'`,
+      [a.room.id, Number(sent.message.id.slice(4)), predecessor.agent_key],
+    );
+    assert.deepEqual(receipt.rows, [{ receipt_state: "no_reply", from_state: "unavailable", actor_session_id: successor.session_id }],
+      "one truthful completion event records the authenticated successor");
+  } finally { route.close(); }
+});
+
 for (const off of ["parallel", null] as const) {
   test(`switching off (${off}) releases waiting turns and removes guidance without cancelling work`, skip, async () => {
     const a = await seed();
