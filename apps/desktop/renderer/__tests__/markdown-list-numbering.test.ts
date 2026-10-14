@@ -4,7 +4,8 @@ import { renderDesktopMarkdown } from "../src/components/desktop/content/formatt
 
 test("Room replies keep numbered steps when an agent separates them with blank lines", () => {
   const html = renderDesktopMarkdown("1. **See who is available.**\n\n2. **Ask the room for help.**", { block: true });
-  assert.equal(html, '<ol><li><strong>See who is available.</strong></li></ol><ol start="2"><li><strong>Ask the room for help.</strong></li></ol>');
+  // One loose list: the second step is item 2 of the same <ol>, so it shows "2.".
+  assert.equal(html, '<ol><li><strong>See who is available.</strong></li><li><strong>Ask the room for help.</strong></li></ol>');
 });
 
 test("continued lists retain their starting number while ordinary lists keep normal numbering", () => {
