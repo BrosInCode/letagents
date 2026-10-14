@@ -113,6 +113,16 @@ test("a message without reactions shows no bar but can still be reacted to", asy
   assert.match(html, /room-message-react-action/);
 });
 
+test('a loading GIF-only message hides its fallback prose, while a GIF with ordinary text keeps that text', async () => {
+  const gif = { provider: 'giphy', id: 'celebration', title: 'Celebration', text_fallback_only: true };
+  const fallback = await render({ message: message({ text: 'This is only the textual fallback.', gif }) });
+  assert.match(fallback.html, /room-gif-placeholder/);
+  assert.doesNotMatch(fallback.html, /This is only the textual fallback\./);
+  const caption = await render({ message: message({ text: 'Our first milestone is complete.', gif: { ...gif, text_fallback_only: undefined } }) });
+  assert.match(caption.html, /Our first milestone is complete\./);
+  assert.match(caption.html, /room-gif-placeholder/);
+});
+
 test("someone who cannot react sees the reactions without any control", async () => {
   const { html } = await render({
     message: message(),

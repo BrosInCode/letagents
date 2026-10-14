@@ -146,7 +146,7 @@
         />
 
         <DesktopLongMessageContent
-          v-else-if="(!message.gif || visibleText) && !(message.gif?.text_fallback_only && gifAvailable)"
+          v-else-if="(!message.gif || visibleText) && !(message.gif?.text_fallback_only && gifState !== 'unavailable')"
           :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
@@ -161,7 +161,7 @@
           :event="linkPreviewPresentation(preview)"
           compact
         />
-        <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @available="gifAvailable = $event" />
+        <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @state="gifState = $event" />
         <DesktopMessageAttachments
           v-if="message.attachments.length"
           :message-id="message.id"
@@ -625,7 +625,7 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   return `Waiting for ${receipt.agentName}`;
 }
 
-const gifAvailable = ref(false);
+const gifState = ref<'loading' | 'ready' | 'unavailable'>('loading');
 const remindable = computed(() => Boolean(reminderAccount.value && props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier) && isValidMessageId(props.message.id) && !props.message.outgoing));
 const { pushActionToast } = useDesktopActionToasts();
 function reminderScheduled(dueAt: string) {
