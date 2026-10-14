@@ -13,6 +13,6 @@ import BiomechPanel from '@/components/landing/BiomechPanel.vue'
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background: #040706;
+  background: #fbfbfa;
 }
 </style>
