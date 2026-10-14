@@ -64,55 +64,65 @@ export async function captureWorkspaceTree(workspace, identity) {
         const paths = [...new Set([...original.keys(), ...(await git(root, ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], signal)).split('\0').filter(Boolean)])];
         if (paths.length > 10_000)
             return null;
-        const entries = [];
-        let bytesRead = 0;
-        // Each file is consumed (including hash-object's stdin) before advancing.
-        // Reuse the bounded read buffer instead of allocating 8 MiB per file.
-        let readBuffer;
-        for (const path of paths) {
-            // Parent symlinks must not redirect an observation outside the managed workspace.
-            const parent = await realpath(dirname(join(root, path))).catch(() => null);
-            if (parent && (relative(root, parent).startsWith('..') || relative(root, parent).startsWith('/')))
-                return null;
-            if (signal.aborted)
-                return null;
-            const absolute = join(root, path);
-            const stat = await lstat(absolute).catch(error => { if (error.code === 'ENOENT' || error.code === 'ENOTDIR')
-                return null; throw error; });
-            if (original.get(path)?.[1] === 'commit')
-                return null; // Submodules need their own workspace.
-            if (!stat) {
-                entries.push(`0 ${'0'.repeat(head.length)}\t${path}\0`);
-                continue;
-            }
-            let bytes;
-            if (stat.isSymbolicLink())
-                bytes = Buffer.from(await readlink(absolute));
-            else if (stat.isFile() && stat.size <= 8 * 1024 * 1024) {
-                const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
-                try {
-                    const buffer = readBuffer ??= Buffer.alloc(8 * 1024 * 1024 + 1);
-                    const read = await handle.read(buffer, 0, buffer.length, 0);
-                    bytes = buffer.subarray(0, read.bytesRead);
+        // Four bounded lanes overlap filesystem waits without a promise or buffer per file.
+        // Each lane owns its reusable buffer until hash-object has consumed its stdin.
+        // Slots preserve Git index-info order, including directory-to-file replacements.
+        const results = new Array(paths.length);
+        let bytesRead = 0, next = 0, failed = false;
+        await Promise.all(Array.from({ length: Math.min(4, paths.length) }, async () => {
+            let readBuffer;
+            try {
+                while (!failed && !signal.aborted) {
+                    const slot = next++;
+                    if (slot >= paths.length) return;
+                    const path = paths[slot];
+                    // Parent symlinks must not redirect an observation outside the managed workspace.
+                    const parent = await realpath(dirname(join(root, path))).catch(() => null);
+                    if (parent && (relative(root, parent).startsWith('..') || relative(root, parent).startsWith('/')))
+                        throw new Error('Workspace observation unavailable.');
+                    if (signal.aborted)
+                        throw new Error('Workspace observation unavailable.');
+                    const absolute = join(root, path);
+                    const stat = await lstat(absolute).catch(error => { if (error.code === 'ENOENT' || error.code === 'ENOTDIR')
+                        return null; throw error; });
+                    if (original.get(path)?.[1] === 'commit')
+                        throw new Error('Workspace observation unavailable.'); // Submodules need their own workspace.
+                    if (!stat) {
+                        results[slot] = `0 ${'0'.repeat(head.length)}\t${path}\0`;
+                        continue;
+                    }
+                    let bytes;
+                    if (stat.isSymbolicLink())
+                        bytes = Buffer.from(await readlink(absolute));
+                    else if (stat.isFile() && stat.size <= 8 * 1024 * 1024) {
+                        const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+                        try {
+                            const buffer = readBuffer ??= Buffer.alloc(8 * 1024 * 1024 + 1);
+                            const read = await handle.read(buffer, 0, buffer.length, 0);
+                            bytes = buffer.subarray(0, read.bytesRead);
+                        }
+                        finally {
+                            await handle.close();
+                        }
+                    }
+                    else
+                        throw new Error('Workspace observation unavailable.'); // Includes submodule changes: do not attribute a fabricated text diff.
+                    bytesRead += bytes.length;
+                    if (bytes.length > 8 * 1024 * 1024 || bytesRead > 64 * 1024 * 1024)
+                        throw new Error('Workspace observation unavailable.');
+                    const mode = stat.isSymbolicLink() ? '120000' : stat.mode & 0o111 ? '100755' : '100644';
+                    const rawOid = createHash(head.length === 64 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+                    if (original.get(path)?.[0] === mode && original.get(path)?.[2] === rawOid)
+                        continue;
+                    const oid = (await git(root, ['hash-object', '-w', '--no-filters', '--stdin'], signal, undefined, bytes)).trim();
+                    results[slot] = `${mode} ${oid}\t${path}\0`;
+
                 }
-                finally {
-                    await handle.close();
-                }
-            }
-            else
-                return null; // Includes submodule changes: do not attribute a fabricated text diff.
-            bytesRead += bytes.length;
-            if (bytes.length > 8 * 1024 * 1024 || bytesRead > 64 * 1024 * 1024)
-                return null;
-            const mode = stat.isSymbolicLink() ? '120000' : stat.mode & 0o111 ? '100755' : '100644';
-            const rawOid = createHash(head.length === 64 ? 'sha256' : 'sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
-            if (original.get(path)?.[0] === mode && original.get(path)?.[2] === rawOid)
-                continue;
-            if (entries.length >= 10_000)
-                return null;
-            const oid = (await git(root, ['hash-object', '-w', '--no-filters', '--stdin'], signal, undefined, bytes)).trim();
-            entries.push(`${mode} ${oid}\t${path}\0`);
-        }
+            } catch { failed = true; }
+            // Do not reject early: every started file/Git operation must finish before cleanup.
+        }));
+        if (failed || signal.aborted) return null;
+        const entries = results.filter(value => value !== undefined);
         if (entries.length)
             await git(root, ['update-index', '-z', '--index-info'], signal, index, entries.join(''));
         const tree = (await git(root, ['write-tree'], signal, index)).trim();
