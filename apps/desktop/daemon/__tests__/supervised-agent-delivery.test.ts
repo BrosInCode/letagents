@@ -5535,9 +5535,9 @@ test("a credential-only rebind clears recovery ownership for the successor conte
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     let normalizations = 0;
     const normalize = store.normalizeStartupRecovery.bind(store);
-    (store as unknown as { normalizeStartupRecovery(agentId: string): Promise<void> }).normalizeStartupRecovery = async (agentId) => {
+    store.normalizeStartupRecovery = async (agentId) => {
       normalizations += 1;
-      await normalize(agentId);
+      return normalize(agentId);
     };
     const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
       poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
