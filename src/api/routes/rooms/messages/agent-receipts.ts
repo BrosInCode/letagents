@@ -179,7 +179,9 @@ const RECEIPT_STATE_TRANSITIONS: Record<string, readonly string[]> = {
   retrying: ["responding", "blocked", "no_reply", "replied", "cancelled"],
   blocked: ["responding", "retrying", "no_reply", "replied", "cancelled"],
   no_reply: ["replied"],
-  unavailable: ["responding", "replied"],
+  // A successor may recover a completed silent turn as well as a reply.
+  // Requiring a fabricated responding step would misreport saved completion.
+  unavailable: ["responding", "replied", "no_reply"],
   replied: [],
   cancelled: [],
 };
