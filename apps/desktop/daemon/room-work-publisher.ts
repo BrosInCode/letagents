@@ -1,7 +1,8 @@
 import { readableContributionText } from "../../../shared/contribution-text.mjs";
 import { hasReviewableRoomContribution } from "../../../shared/room-agent-work.mjs";
 import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
-import { captureRecordedRemoteTips, captureWorkspaceHead, captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
+import { captureRecordedRemoteTips, captureWorkspaceHead, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
+import { WorkspaceCapture } from "./workspace-capture.js";
 import type { DatabaseSync } from "node:sqlite";
 import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
@@ -82,6 +83,7 @@ export class RoomWorkPublisher {
   private readonly remoteAnswers = new RecordedRemoteAnswers(
     (remote) => (this.options.askRemote ?? captureRecordedRemoteTips)(remote), () => this.now());
   private readonly cancellation = new AbortController();
+  private readonly workspaceCapture = new WorkspaceCapture();
   private scheduled: NodeJS.Timeout | null = null;
   private scheduledFor = Infinity;
   private running = false;
@@ -143,7 +145,7 @@ export class RoomWorkPublisher {
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
       // Decided now, before the agent runs, and not awaited: a slow remote must not delay the turn.
       const remoteTips = location.remote ? this.remoteAnswers.forTurn(location.remote) : Promise.resolve(null);
-      const tree = await captureWorkspaceTree(location.path, ref);
+      const tree = await this.workspaceCapture.begin(location.path, ref);
       const head = tree ? await captureWorkspaceHead(location.path) : null;
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
@@ -164,7 +166,7 @@ export class RoomWorkPublisher {
       const location = await this.options.workspaceLocation(agent.workAttemptId);
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
       const start = this.turnStarts.get(ref);
-      const pair = await captureWorkspacePair(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref, start?.head, start?.remoteTips);
+      const pair = await this.workspaceCapture.settle(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref, start?.head, start?.remoteTips);
       pair.contribution.summary = readableContributionText(summaryText);
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
@@ -210,6 +212,7 @@ export class RoomWorkPublisher {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.workspaceCapture.close();
     this.cancellation.abort();
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduled = null;

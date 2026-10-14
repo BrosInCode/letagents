@@ -6708,3 +6708,54 @@ test("inspector usage retains native Claude measurements without a Live subscrib
   child.emit({ type: "assistant", session_id: "another", message: { model: "opus", usage: { input_tokens: 1 }, content: [] } });
   assert.equal((await adapter.readUsage(handle))?.context?.usedTokens, 23000);
 });
+
+for (const invalidation of ["none", "compaction", "compaction-success", "disconnect", "checkpoint", "detach"] as const) {
+  test(`Claude context reuse retains human instructions and resets after ${invalidation}`, async () => {
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    let handle = await adapter.spawn(spawnRequest());
+    let child = harness.children[0]!;
+    const observedContext = [
+      { id: "msg_1", source: "agent", text: "OLDER_AGENT_CONTENT" },
+      { id: "msg_2", source: "human", text: "HUMAN_CONSTRAINT" },
+      ...[3, 4, 5].map(id => ({ id: `msg_${id}`, source: "agent", text: `RECENT_${id}` })),
+    ];
+    const run = async (index: number) => {
+      const controller = new AbortController();
+      const pending = adapter.runRoomTurn(handle, {
+        roomId: "room", inboxItemId: `inbox-${index}`, actionId: `action-${index}`,
+        sourceMessage: { id: `msg_${10 + index}`, source: "human", text: "Next question" }, observedContext, activation: {},
+      }, {
+        detachSignal: controller.signal,
+        checkpointTerminalResult: async () => {
+          if (index === 1 && invalidation === "checkpoint") throw new Error("checkpoint failed");
+          if (index === 1 && invalidation === "detach") controller.abort();
+        },
+      });
+      await flush();
+      const frame = JSON.parse(child.written.at(-1)!);
+      if (index === 1 && invalidation === "compaction") child.emit({
+        type: "system", subtype: "compact_boundary", session_id: handle.providerContinuationId,
+      });
+      if (index === 1 && invalidation === "compaction-success") child.emit({
+        type: "system", subtype: "status", status: null, compact_result: "success", session_id: handle.providerContinuationId,
+      });
+      if (index === 1 && invalidation === "disconnect") child.disconnect();
+      child.emit({ type: "result", subtype: "success", is_error: false,
+        session_id: handle.providerContinuationId, user_message_uuid: frame.uuid, result: "LETAGENTS_NO_ROOM_REPLY" });
+      if (index === 1 && invalidation === "checkpoint") await assert.rejects(pending, /checkpoint failed/);
+      else await pending;
+      return frame.message.content[0].text as string;
+    };
+    assert.match(await run(1), /OLDER_AGENT_CONTENT/);
+    if (invalidation === "disconnect") {
+      handle = await adapter.resume({ workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId! }, spawnRequest());
+      child = harness.children.at(-1)!;
+    }
+    const next = await run(2);
+    assert.match(next, /HUMAN_CONSTRAINT/);
+    assert.match(next, /RECENT_3/);
+    if (invalidation === "none") { assert.doesNotMatch(next, /OLDER_AGENT_CONTENT/); assert.match(next, /previously_supplied/); }
+    else assert.match(next, /OLDER_AGENT_CONTENT/);
+  });
+}
