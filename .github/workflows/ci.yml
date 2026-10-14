@@ -97,7 +97,7 @@ jobs:
         run: node --import tsx --test src/api/__tests__/room-artifact-routes.test.ts
 
       - name: Test automatic command review
-        run: node --import tsx --test src/api/__tests__/command-review.test.ts src/api/__tests__/jev-conversation-routing.test.ts
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/command-review.test.ts src/api/__tests__/jev-conversation-routing.test.ts src/api/__tests__/jev-acknowledgment.test.ts src/api/__tests__/jev-acknowledgment-eval.test.ts
 
       - name: Run GitHub room event unit tests
         run: node --import tsx --test src/api/__tests__/github-notify-account-access.test.ts src/api/__tests__/github-room-events.test.ts src/api/__tests__/github-room-event-projection.test.ts src/api/__tests__/github-room-event-artifacts.test.ts src/api/__tests__/github-git-room-routing.test.ts
