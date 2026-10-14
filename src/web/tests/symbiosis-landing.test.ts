@@ -185,7 +185,7 @@ test('Landing sections render authentic codebase narratives and dual-hemisphere 
   const swarmsHtml = await renderComponent('/src/components/landing/SwarmOrchestrationSection.vue')
   assert.match(swarmsHtml, /id="swarms"/)
   assert.match(swarmsHtml, /letagents\.chat\//)
-  assert.match(swarmsHtml, /Never Self-Review/i)
+  assert.match(swarmsHtml, /BrosInCode\/letagents/)
   assert.match(swarmsHtml, /Every repository/i)
 
   const featuresHtml = await renderComponent('/src/components/landing/FeaturesSection.vue')

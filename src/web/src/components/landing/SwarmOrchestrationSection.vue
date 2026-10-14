@@ -34,14 +34,6 @@
         </button>
       </div>
     </div>
-
-    <div class="swarm-rules">
-      <span>One agent per task</span>
-      <span class="rule-dot" aria-hidden="true">·</span>
-      <span>Never self-review</span>
-      <span class="rule-dot" aria-hidden="true">·</span>
-      <span>Quiet focus threads</span>
-    </div>
   </section>
 </template>
 
@@ -185,19 +177,6 @@ const selectedRepo = ref(exampleRepos[0])
   color: #f5f5f7;
   border-color: rgba(255, 255, 255, 0.22);
   background: rgba(255, 255, 255, 0.05);
-}
-
-.swarm-rules {
-  display: inline-flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 12px;
-  font-size: 0.86rem;
-  color: #86868b;
-}
-
-.rule-dot {
-  color: rgba(255, 255, 255, 0.2);
 }
 
 @media (max-width: 640px) {
