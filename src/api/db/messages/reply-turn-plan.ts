@@ -6,7 +6,8 @@
  * until every earlier position has finished its turn (answered, left the
  * room, or reported no reply) or until (k-1) × the step after the message was
  * sent. A new activation the agent must see now (a mention, a reply, a
- * thread or task) ends its holds at once.
+ * human thread message or task) ends its holds at once. Ordinary agent thread
+ * participation keeps its receipt without releasing earlier held turns.
  *
  * A hold is enforced on the read side only (replyTurnHoldCondition in
  * routing-frontier.ts): every receipt is still written at send time, so
