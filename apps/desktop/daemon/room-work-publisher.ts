@@ -88,6 +88,7 @@ export class RoomWorkPublisher {
   private scheduledFor = Infinity;
   private running = false;
   private readonly changedAgents = new Set<string>();
+  private readonly settledAgents = new Set<string>();
   private sweepNext = false;
   private closed = false;
   private scanAfter = "";
@@ -209,6 +210,15 @@ export class RoomWorkPublisher {
     this.schedule(COALESCE_MS);
   }
 
+  /** Delivery released its lane. This is only a prompt hint: durable evidence
+   * and the usual authority checks still decide what can be published. */
+  settled(agentId: string): void {
+    if (this.unavailable()) return;
+    this.changedAgents.add(agentId);
+    this.settledAgents.add(agentId);
+    this.schedule(0);
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -218,6 +228,7 @@ export class RoomWorkPublisher {
     this.scheduled = null;
     this.scheduledFor = Infinity;
     this.changedAgents.clear();
+    this.settledAgents.clear();
     this.stamps.clear(); this.attemptedAt.clear(); this.stagingAttemptedAt.clear(); this.turnStarts.clear(); this.remoteAnswers.clear();
     // Never drain capture or upload a shutdown tail. Late responses are fenced.
     try { this.database.close(); } catch { this.report("storage_unavailable"); }
@@ -228,10 +239,10 @@ export class RoomWorkPublisher {
   private report(code: Parameters<NonNullable<Options["diagnostic"]>>[0]): void {
     try { if (this.options.diagnostic) this.options.diagnostic(code); else console.warn(`[room_work_publication] ${code}`); } catch { /* optional diagnostics */ }
   }
-  private schedule(delay: number): void {
+  private schedule(delay: number, replace = false): void {
     if (this.unavailable()) return;
     const due = Date.now() + delay;
-    if (this.scheduled && this.scheduledFor <= due) return;
+    if (!replace && this.scheduled && this.scheduledFor <= due) return;
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduledFor = due;
     this.scheduled = setTimeout(() => {
@@ -362,6 +373,7 @@ export class RoomWorkPublisher {
     if (this.unavailable() || this.running) return;
     this.running = true;
     let more = false;
+    let failed = false;
     try {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
@@ -370,7 +382,7 @@ export class RoomWorkPublisher {
       // Still only one agent (at most 10k pins/facts) per pass.
       const nextAgent = () => this.database.prepare(`SELECT agent_id FROM room_work_publications
         WHERE state='open' AND agent_id>? ORDER BY agent_id LIMIT 1`).get(this.scanAfter);
-      const changedAgent = this.changedAgents.values().next().value;
+      const changedAgent = this.settledAgents.values().next().value ?? this.changedAgents.values().next().value;
       let agentId: string;
       if (changedAgent && !this.sweepNext) {
         agentId = changedAgent;
@@ -388,6 +400,7 @@ export class RoomWorkPublisher {
       // Consume before awaiting: a hint arriving during staging/upload must
       // remain queued for another pass, including a terminal no-reply update.
       this.changedAgents.delete(agentId);
+      this.settledAgents.delete(agentId);
       try { more = await this.stageChanged(agentId) || more; }
       catch { this.report("storage_unavailable"); }
       if (this.unavailable()) return;
@@ -430,10 +443,12 @@ export class RoomWorkPublisher {
           }
         } catch { if (!this.unavailable()) this.report("publication_unavailable"); }
       }
-    } catch { if (!this.unavailable()) this.report("authority_unavailable"); }
+    } catch { failed = true; if (!this.unavailable()) this.report("authority_unavailable"); }
     finally {
       this.running = false;
-      this.schedule(more || this.changedAgents.size ? COALESCE_MS : RETRY_MS);
+      // A failed pass may not have consumed its hint. Preserve it, but replace
+      // even a wake queued during the failure so lost authority cannot spin.
+      this.schedule(failed ? RETRY_MS : this.settledAgents.size ? 0 : more || this.changedAgents.size ? COALESCE_MS : RETRY_MS, failed);
     }
   }
 }

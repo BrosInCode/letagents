@@ -6290,18 +6290,18 @@ test("daemon socket retry accepts only the exact blocked binding and reports com
     const internals = daemon as unknown as {
       liveHandles: Map<string, typeof agent.handle>;
       supervisedInbox: SupervisedAgentInboxStore;
-      roomWorkPublisher: { changed(agentId: string): void };
+      roomWorkPublisher: { settled(agentId: string): void };
       workerBindings: { bind(input: Record<string, string>): Promise<unknown>; unbind(entryId: string): Promise<void> };
     };
     await daemon.start();
     const observed = new DatabaseSync(paths.manifestPath, { readOnly: true });
     t.after(() => observed.close());
     const completionHints: string[] = [];
-    const changed = internals.roomWorkPublisher.changed.bind(internals.roomWorkPublisher);
-    t.mock.method(internals.roomWorkPublisher, "changed", (agentId: string) => {
+    const settled = internals.roomWorkPublisher.settled.bind(internals.roomWorkPublisher);
+    t.mock.method(internals.roomWorkPublisher, "settled", (agentId: string) => {
       const row = observed.prepare("SELECT state FROM supervised_agent_inbox WHERE agent_id=? AND source_message_id='msg_1'").get(agentId);
       if (row?.state === "acknowledged_no_reply") completionHints.push(agentId);
-      changed(agentId);
+      settled(agentId);
     });
     const identities = {
       stone: { attempt: "00000000-0000-4000-8000-000000000001", execution: "00000000-0000-4000-8000-000000000011", session: "00000000-0000-4000-8000-000000000021" },

@@ -542,6 +542,79 @@ test("capture hints expedite an existing retry timer and singleton loss never di
   await f.publisher.flush(); assert.equal(f.sent.length, 1); assert.equal(f.row().revision, 1);
 });
 
+test("settled delivery hints publish promptly without accelerating ordinary progress", async t => {
+  const f = await fixture(t); const attempt = f.captureMessage(); f.restart(); await f.publisher.flush();
+  const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+  const realTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
+  });
+  f.publisher.changed("agent");
+  assert.deepEqual(timers.map(timer => timer.delay), [1000]);
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  f.publisher.settled("agent");
+  assert.deepEqual(timers.map(timer => timer.delay), [1000, 0]);
+  clearTimeout(timers[1].timer); timers[1].fire();
+  for (let i = 0; i < 30 && f.row().acknowledgedRevision < 2; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.row().acknowledgedRevision, 2);
+  assert.equal(f.sent[1].summary.recorded_state, "completed_no_reply");
+  assert.equal(timers.at(-1)!.delay, 1000, "normal recovery sweep keeps its batching interval");
+});
+
+test("a settled hint survives its timer firing during an existing upload", async t => {
+  const f = await fixture(t); const attempt = f.captureMessage(); f.restart();
+  let release!: (result: RoomWorkPublishResult) => void;
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  f.options.publish = async input => { f.sent.push(input); started(); return new Promise(resolve => { release = resolve; }); };
+  const uploading = f.publisher.flush(); await ready;
+  const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+  const realTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
+  });
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  f.publisher.settled("agent");
+  clearTimeout(timers[0].timer); timers[0].fire();
+  release("acknowledged"); await uploading;
+  assert.deepEqual(timers.map(timer => timer.delay), [0, 0], "the busy flush preserves an immediate next wake");
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  clearTimeout(timers[1].timer); timers[1].fire();
+  for (let i = 0; i < 30 && f.row().acknowledgedRevision < 2; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.row().acknowledgedRevision, 2);
+  assert.equal(f.sent[1].summary.recorded_state, "completed_no_reply");
+});
+
+test("settled hints retain bounded retries when authority fails before consumption", async t => {
+  const f = await fixture(t); f.captureMessage(); f.restart();
+  const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+  const cleared = new Set<ReturnType<typeof setTimeout>>();
+  const realTimeout = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
+  });
+  t.mock.method(globalThis, "clearTimeout", (timer: ReturnType<typeof setTimeout>) => {
+    cleared.add(timer); realClear(timer);
+  });
+  f.options.assertCurrent = async () => {
+    f.publisher.settled("agent"); // A fresh hint can arrive while the pass awaits authority.
+    throw new Error("singleton lost");
+  };
+  f.publisher.settled("agent");
+  clearTimeout(timers[0].timer); timers[0].fire();
+  for (let i = 0; i < 10; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(timers.map(timer => timer.delay), [0, 0, 30_000]);
+  assert.ok(cleared.has(timers[1].timer), "the failure replaces the in-flight immediate wake");
+  assert.equal(f.sent.length, 0);
+  clearTimeout(timers[2].timer); timers[2].fire();
+  for (let i = 0; i < 10; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(timers.at(-1)!.delay, 30_000, "persistent loss never creates an immediate retry loop");
+  f.options.assertCurrent = async () => {};
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1, "the retained hint is recoverable when authority returns");
+});
+
 for (const provider of ["codex", "claude-code"] as const) {
   test(`${provider} no-reply completion bypasses historical agents in the recovery sweep`, async t => {
     const f = await fixture(t, provider);
