@@ -120,7 +120,9 @@ export async function getDesktopNeedsYou(includeUpdates = false): Promise<Deskto
     return listLocalRoomEntries({ linkedIdentity: 'cloud' });
   });
   const queue = [...new Map(accountRooms.flatMap(room => [room, ...room.focusRooms]).map(room => [room.roomIdentifier, room])).values()];
-  const result: DesktopNeedsYou = { rooms: [], failures: [], cloudUnavailable, limited: accountRooms.length >= 100, signedOut: !auth.token };
+  // A focus room may carry its repo room's GitHub events; the Inbox shows each event once.
+  const parents = new Map(accountRooms.flatMap(room => room.focusRooms.map(focus => [focus.roomIdentifier, room.roomIdentifier] as const)));
+  const result: DesktopNeedsYou = { rooms: [], failures: [], cloudUnavailable, limited: accountRooms.length >= 100, signedOut: !auth.token, updatesIncluded: includeUpdates };
   const now = Date.now();
   // Bound concurrency; never load full room snapshots just to build an inbox.
   await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
@@ -135,7 +137,8 @@ export async function getDesktopNeedsYou(includeUpdates = false): Promise<Deskto
         const page = attention.status === 'fulfilled' ? attention.value : { records: [], truncated: false, tasks: [] };
         result.rooms.push({ ...page, tasks: page.tasks ?? [], updates: updates.status === 'fulfilled' ? updates.value : undefined,
           boardIntents: boardIntents.status === 'fulfilled' ? boardIntents.value : undefined,
-          roomIdentifier: room.roomIdentifier, displayName: room.displayName } satisfies DesktopAttentionRoom);
+          roomIdentifier: room.roomIdentifier, displayName: room.displayName,
+          ...(parents.has(room.roomIdentifier) ? { parentRoomIdentifier: parents.get(room.roomIdentifier) } : {}) } satisfies DesktopAttentionRoom);
       } catch { result.failures.push({ roomIdentifier: room.roomIdentifier, displayName: room.displayName }); }
     }
   }));

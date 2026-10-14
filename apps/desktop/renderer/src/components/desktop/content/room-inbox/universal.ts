@@ -2,6 +2,7 @@ import type { DesktopRentalRequest } from '../../../../../../electron/ipc-types.
 import type { DesktopNeedsYou } from '../../../../../../electron/ipc-types/knowledge.js';
 import type { KnowledgeRecord } from '../../../../../../../../shared/room-knowledge.mjs';
 import { buildDesktopInboxItems, desktopInboxItemFingerprint, type DesktopInboxItem } from './items';
+import { claimGitHubEvents } from './github-event-claims';
 import type { AgentAttentionItem } from './agent-attention';
 import type { AttentionNavigationIntent } from '../room-shell/types';
 import { hostApprovalHeading, hostApprovalSummary } from '../room-chat/host-approval-presentation';
@@ -31,6 +32,8 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
   for (const item of attention) result.push({ key: item.key, roomIdentifier: item.roomIdentifier,
     roomName: roomNames.get(item.roomIdentifier) || item.roomIdentifier, section: 'needs-you', category: item.kind,
     timestamp: item.timestamp, attention: item, fingerprint: item.timestamp, ...agentAttentionText(item) });
+  // Rooms that share a GitHub event lane show each event once.
+  const githubEvents = claimGitHubEvents(data?.rooms ?? []);
   for (const room of data?.rooms ?? []) {
     const scope = { roomIdentifier: room.roomIdentifier, roomName: room.displayName };
     for (const record of room.records) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, record.id]),
@@ -44,7 +47,7 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
       timestamp: task.updatedAt || '', actor: 'Task board', taskId: task.id, fingerprint: `${task.status}:${task.updatedAt}` });
     if (!room.updates) continue;
     for (const activity of buildDesktopInboxItems({ filter: 'actionable', threadPage: room.updates.threads, tasks: [],
-      githubEvents: room.updates.githubEvents?.events ?? [], reasoningSessions: room.updates.reasoningSessions,
+      githubEvents: githubEvents.get(room.roomIdentifier) ?? [], reasoningSessions: room.updates.reasoningSessions,
       presence: room.updates.presence })) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, activity.id]),
         section: 'updates', category: activity.kind, title: activity.title, body: activity.preview || '', timestamp: activity.timestamp || '',
         actor: activity.context || 'Room activity', activity, fingerprint: desktopInboxItemFingerprint(activity) });
