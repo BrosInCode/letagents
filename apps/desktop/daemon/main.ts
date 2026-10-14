@@ -39,6 +39,7 @@ import { withProtectedStateUpgrade, reportStateRecoveryReady, type StateRecovery
 import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator.js";
 import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
+import { setRoomLatencyReporter } from "./room-latency-trace.js";
 import { NativeActivityPublicationCoordinator } from "./native-activity-publication-coordinator.js";
 import { ConvergencePacer } from "./convergence-pacer.js";
 import { recordedRemote, RoomWorkPublisher } from "./room-work-publisher.js";
@@ -1650,11 +1651,13 @@ export class SupervisorDaemon {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const paths = defaultDaemonPaths();
   const lifecycle = new DaemonLifecycleLog(paths.lifecycleLogPath);
+  setRoomLatencyReporter(sample => lifecycle.append({ event: "room_latency", detail: JSON.stringify(sample) }));
   lifecycle.append({ event: "daemon_starting" });
   process.on("uncaughtExceptionMonitor", (error) => {
     lifecycle.append({ event: "fatal_exception", detail: daemonLifecycleErrorDetail(error) });
   });
   process.on("exit", (exitCode) => {
+    setRoomLatencyReporter(null);
     lifecycle.append({ event: "process_exit", exitCode });
     lifecycle.close();
   });

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RoomLatencyTrace, type RoomLatencySample } from "../room-latency-trace.js";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DaemonLifecycleLog } from "../lifecycle-log.js";
+import { RoomLatencyTrace, setRoomLatencyReporter, type RoomLatencySample } from "../room-latency-trace.js";
 
 test("fast checks emit nothing; a delayed check separates waiting from execution", () => {
   let time = 0;
@@ -50,9 +54,13 @@ test("clock failures at construction, a phase, or finish disable the sample with
   }
 });
 
-test("default diagnostics are bounded per path and contain only timings", t => {
-  const lines: string[] = [];
-  t.mock.method(console, "warn", (_prefix: string, line: string) => lines.push(line));
+test("packaged diagnostics survive discarded stderr and are bounded per path", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "room-latency-"));
+  const path = join(directory, "lifecycle.jsonl");
+  const log = new DaemonLifecycleLog(path);
+  t.after(async () => { setRoomLatencyReporter(null); log.close(); await rm(directory, { recursive: true, force: true }); });
+  t.mock.method(console, "warn", () => { throw new Error("stderr unavailable"); });
+  setRoomLatencyReporter(sample => log.append({ event: "room_latency", detail: JSON.stringify(sample) }));
   for (let attempt = 0; attempt < 20; attempt += 1) {
     let time = 0;
     const timing = new RoomLatencyTrace("worker_binding_store", () => time);
@@ -60,8 +68,12 @@ test("default diagnostics are bounded per path and contain only timings", t => {
     timing.mark("queue_wait");
     timing.finish();
   }
+  const lines = (await readFile(path, "utf8")).trim().split("\n");
   assert.equal(lines.length, 1);
-  assert.deepEqual(Object.keys(JSON.parse(lines[0])).sort(), [
-    "at", "elapsed_ms", "event_loop_active_ms", "event_loop_idle_ms", "operation", "phases_ms",
+  const entry = JSON.parse(lines[0]);
+  assert.equal(entry.event, "room_latency");
+  assert.ok(entry.at);
+  assert.deepEqual(Object.keys(JSON.parse(entry.detail)).sort(), [
+    "elapsed_ms", "event_loop_active_ms", "event_loop_idle_ms", "operation", "phases_ms",
   ]);
 });

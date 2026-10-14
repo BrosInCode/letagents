@@ -14,7 +14,7 @@ import { redactCredentialText } from "./credential-redaction.js";
 const MAX_LIFECYCLE_LOG_BYTES = 256 * 1024;
 
 export type DaemonLifecycleEvent = {
-  event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit";
+  event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit" | "room_latency";
   detail?: string | null;
   exitCode?: number | null;
 };
@@ -46,6 +46,15 @@ export class DaemonLifecycleLog {
   append(event: DaemonLifecycleEvent): void {
     if (this.descriptor === null) return;
     try {
+      // Slow-operation samples can recur throughout a long-lived process.
+      // Keep the same two-file retention used at startup.
+      if (statSync(this.path).size >= this.maxBytes) {
+        closeSync(this.descriptor);
+        this.descriptor = null;
+        renameSync(this.path, `${this.path}.previous`);
+        this.descriptor = openSync(this.path, "a", 0o600);
+        chmodSync(this.path, 0o600);
+      }
       const detail = event.detail == null
         ? null
         : redactCredentialText(event.detail, 4_096).value;

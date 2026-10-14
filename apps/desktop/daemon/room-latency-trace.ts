@@ -11,13 +11,21 @@ export type RoomLatencySample = {
 };
 
 const lastReport: Partial<Record<Operation, number>> = {};
+let reportSample: ((sample: RoomLatencySample) => void) | null = null;
+
+/** The packaged daemon has no stderr; its entrypoint supplies the local log. */
+export function setRoomLatencyReporter(report: ((sample: RoomLatencySample) => void) | null): void {
+  reportSample = report;
+}
+
 function reportSlowOperation(sample: RoomLatencySample): void {
+  if (!reportSample) return;
   const now = performance.now();
   // A stalled host can slow every poll. Bound output to one sample per path
   // per ten seconds; retain no room content, identifiers, errors or credentials.
   if (now - (lastReport[sample.operation] ?? -Infinity) < 10_000) return;
   lastReport[sample.operation] = now;
-  console.warn("[room_latency]", JSON.stringify({ at: new Date().toISOString(), ...sample }));
+  reportSample(sample);
 }
 
 /** Duration-only diagnostics. This never changes authority, retry or settlement. */
