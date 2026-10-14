@@ -679,6 +679,7 @@ function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unk
   const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     let deadlineExpired = false;
+    let killedAtDeadline = false;
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const child = execFile(process.execPath, [entryPath, "--letagents-runtime-contract"], {
       encoding: "utf8", killSignal: "SIGKILL", maxBuffer: 64 * 1024,
@@ -691,22 +692,31 @@ function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unk
         const code = typeof error.code === "number" ? error.code : "unavailable";
         const signal = error.signal === "SIGKILL" ? "SIGKILL" : error.signal ? "other" : "none";
         const failure = new Error(`The verified LetAgents MCP runtime contract could not be read. Exit: ${code}; signal: ${signal}; killed: ${Boolean(error.killed)}; elapsed: ${Date.now() - startedAt}ms; output: ${Buffer.byteLength(stdout)} bytes.`);
-        // Only our own deadline is transient. External kills, buffer overflow,
-        // process errors and invalid contracts retain their fail-closed behavior.
-        if (deadlineExpired && error.signal === "SIGKILL" && error.code == null) {
+        // Retain the successful deadline-kill gate. A delayed exit notification
+        // cannot prove which SIGKILL caused termination; retries still require
+        // a fresh valid contract. Other observed failures remain fail-closed.
+        if (killedAtDeadline && error.signal === "SIGKILL" && error.code == null) {
           Object.assign(failure, { transientProviderStart: true });
         }
         return reject(failure);
+      }
+      if (deadlineExpired) {
+        // Timeout cleanup can discard unread stdout from a child that already
+        // exited successfully while this process's event loop was delayed.
+        return reject(Object.assign(new Error(`The verified LetAgents MCP runtime contract exceeded its eight-second deadline. Elapsed: ${Date.now() - startedAt}ms.`), { transientProviderStart: true }));
       }
       try { resolve(JSON.parse(stdout)); }
       catch { reject(new Error("The verified LetAgents MCP runtime contract is malformed.")); }
     });
     deadline = setTimeout(() => {
+      // Record the deadline before destroying pipes, even if the child has
+      // already exited. Preserve an already observed unsuccessful exit.
+      deadlineExpired = child.signalCode === null && (child.exitCode === null || child.exitCode === 0);
       // Match execFile's timeout cleanup: a descendant must not keep the
       // callback waiting by retaining the probe's output pipes.
       child.stdout?.destroy();
       child.stderr?.destroy();
-      if (child.exitCode === null && child.signalCode === null) deadlineExpired = child.kill("SIGKILL");
+      if (child.exitCode === null && child.signalCode === null) killedAtDeadline = child.kill("SIGKILL");
     }, 8_000);
     deadline.unref();
     child.stdin?.end();
