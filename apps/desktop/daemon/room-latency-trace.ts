@@ -1,7 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 type Operation = "authority" | "worker_binding_store" | "inbox_write";
-type Phase = "drain" | "generation" | "manifest" | "binding" | "credential" | "queue_wait" | "database" | "operation" | "remaining";
+type Phase = "drain" | "generation" | "manifest" | "binding" | "credential_lookup" | "queue_wait" | "database" | "operation" | "remaining";
 export type RoomLatencySample = {
   operation: Operation;
   elapsed_ms: number;

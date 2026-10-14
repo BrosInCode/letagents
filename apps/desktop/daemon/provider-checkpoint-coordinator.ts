@@ -470,7 +470,7 @@ export class ProviderCheckpointCoordinator {
         || binding.execution_generation_id !== authority.executionGenerationId
         || binding.agent_session_id !== authority.agentSessionId) return false;
       const credential = await this.bindings.credentialFor(binding);
-      timing.mark("credential");
+      timing.mark("credential_lookup");
       if (credential !== authority.bearer) return false;
       // Ingress authority deliberately survives loss of provider execution. A
       // bounded turn requires the exact live handle in addition to this route.

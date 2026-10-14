@@ -10,6 +10,7 @@ import {
 import { dirname } from "node:path";
 
 import { redactCredentialText } from "./credential-redaction.js";
+import { setRoomLatencyReporter } from "./room-latency-trace.js";
 
 const MAX_LIFECYCLE_LOG_BYTES = 256 * 1024;
 
@@ -80,6 +81,22 @@ export class DaemonLifecycleLog {
     }
     this.descriptor = null;
   }
+}
+
+/** Install process-level diagnostics only from the executable entrypoint. */
+export function startDaemonLifecycleDiagnostics(path: string): DaemonLifecycleLog {
+  const lifecycle = new DaemonLifecycleLog(path);
+  setRoomLatencyReporter(sample => lifecycle.append({ event: "room_latency", detail: JSON.stringify(sample) }));
+  lifecycle.append({ event: "daemon_starting" });
+  process.on("uncaughtExceptionMonitor", error => {
+    lifecycle.append({ event: "fatal_exception", detail: daemonLifecycleErrorDetail(error) });
+  });
+  process.on("exit", exitCode => {
+    setRoomLatencyReporter(null);
+    lifecycle.append({ event: "process_exit", exitCode });
+    lifecycle.close();
+  });
+  return lifecycle;
 }
 
 export function daemonLifecycleErrorDetail(error: unknown): string {

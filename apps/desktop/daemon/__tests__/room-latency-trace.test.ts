@@ -1,10 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DaemonLifecycleLog } from "../lifecycle-log.js";
 import { RoomLatencyTrace, setRoomLatencyReporter, type RoomLatencySample } from "../room-latency-trace.js";
+
+test("entrypoint diagnostics persist timing and process exit with discarded stdio", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "room-latency-process-"));
+  try {
+    for (const fail of [false, true]) {
+      const path = join(directory, `${fail ? "failure" : "success"}.jsonl`);
+      const script = `
+        import { startDaemonLifecycleDiagnostics } from ${JSON.stringify(new URL('../lifecycle-log.ts', import.meta.url).href)};
+        import { RoomLatencyTrace } from ${JSON.stringify(new URL('../room-latency-trace.ts', import.meta.url).href)};
+        startDaemonLifecycleDiagnostics(${JSON.stringify(path)});
+        let now = 0;
+        const trace = new RoomLatencyTrace('authority', () => now);
+        now = 2000;
+        trace.mark('credential_lookup');
+        trace.finish();
+        ${fail ? "throw new Error('synthetic startup failure');" : ""}
+      `;
+      const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script],
+        { stdio: 'ignore', timeout: 10_000 });
+      assert.ifError(child.error);
+      assert.equal(child.status, fail ? 1 : 0);
+      const events = (await readFile(path, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+      assert.deepEqual(events.map(event => event.event),
+        ['daemon_starting', 'room_latency', ...(fail ? ['fatal_exception'] : []), 'process_exit']);
+      assert.equal(JSON.parse(events[1].detail).phases_ms.credential_lookup, 2000);
+      assert.equal(events.at(-1).exit_code, fail ? 1 : 0);
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test("fast checks emit nothing; a delayed check separates waiting from execution", () => {
   let time = 0;
