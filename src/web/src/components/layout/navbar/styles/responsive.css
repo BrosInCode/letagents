@@ -50,8 +50,14 @@
   }
 
   .nav-mobile-primary,
+  .nav-mobile-theme,
   .nav-mobile-toggle {
     display: inline-flex;
+  }
+
+  .nav-mobile-theme {
+    width: 40px;
+    height: 40px;
   }
 
   .nav-mobile-primary {

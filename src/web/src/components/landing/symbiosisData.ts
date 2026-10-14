@@ -2,6 +2,7 @@ import { reactive } from 'vue'
 
 export type TopologyModeId = 'symbiosis' | 'lending' | 'swarm'
 export type HemisphereFocus = 'human' | 'fused' | 'agent'
+export type SiteTheme = 'dark' | 'light'
 
 export const symbiosisBridge = reactive({
   /** -1 = Human (Organic Left), 0 = Fused Equilibrium, +1 = Agent (Symbiote Right) */
@@ -9,11 +10,43 @@ export const symbiosisBridge = reactive({
   focus: 'fused' as HemisphereFocus,
   activeChapter: 0,
   symbiosisAct: 0,
+  theme: 'dark' as SiteTheme,
 })
 
 export function setHemisphereFocus(focus: HemisphereFocus) {
   symbiosisBridge.focus = focus
   symbiosisBridge.biasTarget = focus === 'human' ? -1 : focus === 'agent' ? 1 : 0
+}
+
+export function syncThemeFromDom(): SiteTheme {
+  if (typeof document === 'undefined') return symbiosisBridge.theme
+  const attr = document.documentElement.getAttribute('data-theme')
+  let stored: string | null = null
+  try {
+    stored = typeof localStorage !== 'undefined' ? localStorage.getItem('lac-theme') : null
+  } catch { /* ignore */ }
+  const resolved: SiteTheme = attr === 'light' || (!attr && stored === 'light') ? 'light' : 'dark'
+  symbiosisBridge.theme = resolved
+  document.documentElement.setAttribute('data-theme', resolved)
+  return resolved
+}
+
+export function toggleTheme(): SiteTheme {
+  const next: SiteTheme = symbiosisBridge.theme === 'light' ? 'dark' : 'light'
+  symbiosisBridge.theme = next
+  if (typeof document !== 'undefined') {
+    document.documentElement.classList.add('theme-transitioning')
+    document.documentElement.setAttribute('data-theme', next)
+    window.setTimeout(() => {
+      document.documentElement.classList.remove('theme-transitioning')
+    }, 520)
+  }
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem('lac-theme', next)
+    }
+  } catch { /* ignore */ }
+  return next
 }
 
 export interface TopologyMode {

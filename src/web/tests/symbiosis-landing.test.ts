@@ -12,6 +12,8 @@ import {
   SWARM_LIFECYCLE_STAGES,
   SYMBIOSIS_EXCHANGE_STEPS,
   TOPOLOGY_MODES,
+  symbiosisBridge,
+  toggleTheme,
 } from '../src/components/landing/symbiosisData'
 import { NAV_SECTION_LINKS } from '../src/components/layout/navbar/links'
 
@@ -117,9 +119,25 @@ test('Three.js SymbiosisCanvas implements dual-hemisphere symbiote core, custom 
   assert.match(canvasSource, /new THREE\.ShaderMaterial/)
   assert.match(canvasSource, /CORE_VERTEX_SHADER/)
   assert.match(canvasSource, /CORE_FRAGMENT_SHADER/)
+  assert.match(canvasSource, /uLightMode/)
   assert.match(canvasSource, /ResizeObserver/)
   assert.match(canvasSource, /IntersectionObserver/)
   assert.match(canvasSource, /prefers-reduced-motion:\s*reduce/)
+})
+
+test('Light and dark mode toggle switches reactive theme and coordinates CSS + WebGL transition tokens', () => {
+  assert.equal(symbiosisBridge.theme, 'dark')
+  const switched = toggleTheme()
+  assert.equal(switched, 'light')
+  assert.equal(symbiosisBridge.theme, 'light')
+  const restored = toggleTheme()
+  assert.equal(restored, 'dark')
+  assert.equal(symbiosisBridge.theme, 'dark')
+
+  const globalCss = readLandingFile('../src/styles/global.css')
+  assert.match(globalCss, /\[data-theme="light"\]/)
+  assert.match(globalCss, /--l-glass-bg:/)
+  assert.match(globalCss, /html\.theme-transitioning/)
 })
 
 test('Landing sections expose fixed-navbar-safe anchors and mount in Landing.vue', () => {

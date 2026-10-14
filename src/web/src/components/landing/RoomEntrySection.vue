@@ -106,12 +106,12 @@ async function handleCreate() {
   letter-spacing: -0.04em;
   line-height: 1.05;
   margin-bottom: 16px;
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 .entry-sub {
   font-size: 1.18rem;
-  color: #86868b;
+  color: var(--l-text-dim);
   line-height: 1.55;
   margin-bottom: 40px;
   text-wrap: balance;
@@ -119,14 +119,12 @@ async function handleCreate() {
 
 .entry-card {
   border-radius: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(18, 18, 22, 0.38);
-  backdrop-filter: blur(28px) saturate(150%);
-  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  border: 1px solid var(--l-glass-border);
+  background: var(--l-glass-bg);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
   padding: 28px;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 24px 64px rgba(0, 0, 0, 0.45);
+  box-shadow: var(--l-glass-shadow);
 }
 
 .join-row {
@@ -140,20 +138,20 @@ async function handleCreate() {
   padding: 14px 18px;
   border-radius: 999px;
   font-size: 0.94rem;
-  color: #f5f5f7;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--l-text);
+  background: var(--l-glass-bg-elevated);
+  border: 1px solid var(--l-glass-border);
   outline: none;
   font-family: inherit;
-  transition: border-color 200ms ease;
+  transition: border-color 200ms ease, background 200ms ease;
 }
 
 .join-input:focus {
-  border-color: rgba(255, 255, 255, 0.28);
+  border-color: var(--l-glass-border-strong);
 }
 
 .join-input::placeholder {
-  color: #6e6e73;
+  color: var(--l-text-dim);
 }
 
 .join-btn {
@@ -161,14 +159,14 @@ async function handleCreate() {
   border-radius: 999px;
   font-size: 0.9rem;
   font-weight: 600;
-  color: #000000;
-  background: #f5f5f7;
+  color: var(--l-cta-fg);
+  background: var(--l-cta-bg);
   white-space: nowrap;
-  transition: transform 200ms ease, opacity 200ms ease;
+  transition: transform 200ms ease, opacity 200ms ease, background 200ms ease, color 200ms ease;
 }
 
 .join-btn:hover:not(:disabled) {
-  background: #ffffff;
+  background: var(--l-cta-hover-bg);
   transform: scale(1.02);
 }
 
@@ -187,12 +185,12 @@ async function handleCreate() {
 .divider-line {
   flex: 1;
   height: 1px;
-  background: rgba(255, 255, 255, 0.07);
+  background: var(--l-hairline);
 }
 
 .divider-text {
   font-size: 0.78rem;
-  color: #6e6e73;
+  color: var(--l-text-dim);
 }
 
 .create-btn {
@@ -201,27 +199,27 @@ async function handleCreate() {
   border-radius: 999px;
   font-size: 0.9rem;
   font-weight: 500;
-  color: #f5f5f7;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--l-text);
+  background: var(--l-glass-bg-elevated);
+  border: 1px solid var(--l-glass-border);
   transition: background 200ms ease, border-color 200ms ease;
 }
 
 .create-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.2);
+  background: var(--l-glass-bg-hover);
+  border-color: var(--l-glass-border-strong);
 }
 
 .entry-hint {
   margin-top: 20px;
   font-size: 0.84rem;
-  color: #86868b;
+  color: var(--l-text-dim);
 }
 
 .entry-error {
   margin-top: 14px;
   font-size: 0.84rem;
-  color: #f87171;
+  color: var(--red-text, #f87171);
 }
 
 @media (max-width: 600px) {

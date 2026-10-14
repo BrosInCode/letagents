@@ -78,24 +78,24 @@ const selectedRepo = ref(exampleRepos[0])
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.05;
-  color: #f5f5f7;
+  color: var(--l-text);
   margin-bottom: 16px;
   text-wrap: balance;
 }
 
 .headline-dim {
-  color: #86868b;
+  color: var(--l-text-dim);
 }
 
 .subcopy {
   font-size: 1.14rem;
   line-height: 1.5;
-  color: #86868b;
+  color: var(--l-text-dim);
   text-wrap: balance;
 }
 
 .subcopy code {
-  color: #f5f5f7;
+  color: var(--l-text);
   font-weight: 500;
 }
 
@@ -111,13 +111,11 @@ const selectedRepo = ref(exampleRepos[0])
   gap: 16px;
   padding: 12px 12px 12px 24px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--l-glass-border);
+  background: var(--l-glass-bg);
   backdrop-filter: blur(28px) saturate(160%);
   -webkit-backdrop-filter: blur(28px) saturate(160%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    0 24px 64px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--l-glass-shadow);
 }
 
 .url-text {
@@ -129,28 +127,28 @@ const selectedRepo = ref(exampleRepos[0])
 }
 
 .url-prefix {
-  color: #2ac49f;
+  color: var(--l-mint);
   font-weight: 600;
 }
 
 .url-repo {
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 .url-open-btn {
   flex-shrink: 0;
   padding: 10px 20px;
   border-radius: 999px;
-  background: #f5f5f7;
-  color: #000000;
+  background: var(--l-cta-bg);
+  color: var(--l-cta-fg);
   font-size: 0.84rem;
   font-weight: 600;
   text-decoration: none;
-  transition: transform 200ms ease, background 200ms ease;
+  transition: transform 200ms ease, background 200ms ease, color 200ms ease;
 }
 
 .url-open-btn:hover {
-  background: #ffffff;
+  background: var(--l-cta-hover-bg);
   transform: scale(1.02);
 }
 
@@ -167,20 +165,20 @@ const selectedRepo = ref(exampleRepos[0])
   border-radius: 999px;
   font-size: 0.76rem;
   font-family: var(--font-mono);
-  color: #86868b;
+  color: var(--l-text-dim);
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  transition: color 200ms ease, border-color 200ms ease;
+  border: 1px solid var(--l-glass-border-subtle);
+  transition: color 200ms ease, border-color 200ms ease, background 200ms ease;
 }
 
 .repo-pill:hover {
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 .repo-pill--active {
-  color: #f5f5f7;
-  border-color: rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.05);
+  color: var(--l-text);
+  border-color: var(--l-glass-border-strong);
+  background: var(--l-glass-bg-elevated);
 }
 
 @media (max-width: 640px) {

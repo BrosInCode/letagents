@@ -3,17 +3,19 @@
     ref="stageEl"
     class="symbiosis-canvas-stage"
     :data-focus="symbiosisBridge.focus"
+    :data-theme-mode="symbiosisBridge.theme"
     aria-hidden="true"
   >
     <canvas ref="canvasEl" class="symbiosis-webgl" />
-    <div class="symbiosis-vignette" />
+    <div class="symbiosis-vignette symbiosis-vignette--dark" />
+    <div class="symbiosis-vignette symbiosis-vignette--light" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import * as THREE from 'three'
-import { symbiosisBridge, type TopologyModeId } from './symbiosisData'
+import { symbiosisBridge, syncThemeFromDom, type TopologyModeId } from './symbiosisData'
 
 const props = withDefaults(
   defineProps<{
@@ -56,6 +58,8 @@ let scrollCurrent = 0
 let manualModeOffset = 0
 let manualModeTarget = 0
 let biasCurrent = 0
+let lightModeTarget = 0
+let lightModeCurrent = 0
 
 const PARTICLE_COUNT = 4200
 
@@ -219,6 +223,7 @@ const CORE_VERTEX_SHADER = `
 
 const CORE_FRAGMENT_SHADER = `
   uniform float uScroll;
+  uniform float uLightMode;
   varying vec3 vNormal;
   varying float vSymbiote;
   varying float vSeamGlow;
@@ -232,21 +237,27 @@ const CORE_FRAGMENT_SHADER = `
     float rim = pow(1.0 - ndotv, 2.15);
     float subsurface = pow(1.0 - ndotv, 1.1) * 0.28;
 
-    // Human Organic side: warm pearl ivory glow
-    vec3 humanCol = vec3(0.97, 0.96, 0.94);
+    // Dark Mode Palette: warm pearl ivory human side + electric emerald-mint agent side
+    vec3 darkHuman = vec3(0.97, 0.96, 0.94);
+    vec3 darkAgent = mix(vec3(0.165, 0.78, 0.63), vec3(0.74, 1.0, 0.91), vTendrilCrest * 0.65);
+    vec3 darkSeam = vec3(0.86, 1.0, 0.95);
 
-    // Agent Symbiote side: electric emerald-mint glow with bright tendril crests
-    vec3 symbioteMint = vec3(0.165, 0.78, 0.63);
-    vec3 symbioteBright = vec3(0.74, 1.0, 0.91);
-    vec3 agentCol = mix(symbioteMint, symbioteBright, vTendrilCrest * 0.65);
+    // Light Mode Palette: sculpted graphite-obsidian human side + vibrant emerald-jade agent side
+    vec3 lightHuman = vec3(0.14, 0.15, 0.19);
+    vec3 lightAgent = mix(vec3(0.04, 0.62, 0.49), vec3(0.16, 0.84, 0.68), vTendrilCrest * 0.65);
+    vec3 lightSeam = vec3(0.08, 0.76, 0.60);
 
-    vec3 seamHot = vec3(0.86, 1.0, 0.95);
+    vec3 humanCol = mix(darkHuman, lightHuman, uLightMode);
+    vec3 agentCol = mix(darkAgent, lightAgent, uLightMode);
+    vec3 seamHot = mix(darkSeam, lightSeam, uLightMode);
+
     vec3 col = mix(humanCol, agentCol, vSymbiote);
     col = mix(col, seamHot, vSeamGlow * 0.45);
 
     float alpha = rim * 0.74 + subsurface + vSeamGlow * 0.36 + vTendrilCrest * vSymbiote * 0.22;
+    float maxAlpha = mix(0.84, 0.66, uLightMode);
 
-    gl_FragColor = vec4(col, clamp(alpha, 0.0, 0.84));
+    gl_FragColor = vec4(col, clamp(alpha, 0.0, maxAlpha));
   }
 `
 
@@ -301,6 +312,7 @@ const VERTEX_SHADER = `
 `
 
 const FRAGMENT_SHADER = `
+  uniform float uLightMode;
   varying float vSpecies;
   varying float vAlpha;
 
@@ -312,12 +324,17 @@ const FRAGMENT_SHADER = `
     float glow = exp(-d * d * 15.0);
     float core = smoothstep(0.22, 0.0, d);
 
-    vec3 humanColor = vec3(0.96, 0.96, 0.98);
-    vec3 agentMint = vec3(0.165, 0.769, 0.624);
-    vec3 agentColor = mix(agentMint, vec3(0.92, 1.0, 0.97), core * 0.72);
+    vec3 darkHuman = vec3(0.96, 0.96, 0.98);
+    vec3 darkAgent = mix(vec3(0.165, 0.769, 0.624), vec3(0.92, 1.0, 0.97), core * 0.72);
+
+    vec3 lightHuman = vec3(0.16, 0.17, 0.22);
+    vec3 lightAgent = mix(vec3(0.04, 0.62, 0.48), vec3(0.14, 0.80, 0.64), core * 0.55);
+
+    vec3 humanColor = mix(darkHuman, lightHuman, uLightMode);
+    vec3 agentColor = mix(darkAgent, lightAgent, uLightMode);
 
     vec3 col = mix(humanColor, agentColor, vSpecies);
-    gl_FragColor = vec4(col, glow * vAlpha * 0.78);
+    gl_FragColor = vec4(col, glow * vAlpha * mix(0.82, 0.68, uLightMode));
   }
 `
 
@@ -374,7 +391,7 @@ function initScene() {
   rootGroup = new THREE.Group()
   scene.add(rootGroup)
 
-  // 1. High-resolution Silky Rim-Lit Symbiote Core (no noisy wireframe triangles)
+  // 1. High-resolution Silky Rim-Lit Symbiote Core
   coreGroup = new THREE.Group()
   rootGroup.add(coreGroup)
 
@@ -384,11 +401,12 @@ function initScene() {
     fragmentShader: CORE_FRAGMENT_SHADER,
     transparent: true,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
+    blending: THREE.NormalBlending,
     uniforms: {
       uTime: { value: 0 },
       uBias: { value: 0 },
       uScroll: { value: 0 },
+      uLightMode: { value: lightModeCurrent },
       uPointer: { value: new THREE.Vector2(0, 0) },
     },
   })
@@ -411,11 +429,12 @@ function initScene() {
     fragmentShader: FRAGMENT_SHADER,
     transparent: true,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
+    blending: THREE.NormalBlending,
     uniforms: {
       uTime: { value: 0 },
       uBlend: { value: 0 },
       uBias: { value: 0 },
+      uLightMode: { value: lightModeCurrent },
       uPointer: { value: new THREE.Vector2(0, 0) },
     },
   })
@@ -441,10 +460,9 @@ function initScene() {
   const ringGeo = new THREE.BufferGeometry()
   ringGeo.setAttribute('position', new THREE.BufferAttribute(ringVerts, 3))
   const ringMat = new THREE.LineBasicMaterial({
-    color: 0xffffff,
+    color: 0x86868b,
     transparent: true,
-    opacity: 0.04,
-    blending: THREE.AdditiveBlending,
+    opacity: 0.08,
   })
   ringLines = new THREE.LineSegments(ringGeo, ringMat)
   rootGroup.add(ringLines)
@@ -465,12 +483,24 @@ watch(
   },
 )
 
+watch(
+  () => symbiosisBridge.theme,
+  (theme) => {
+    lightModeTarget = theme === 'light' ? 1 : 0
+    if (prefersReducedMotion) {
+      lightModeCurrent = lightModeTarget
+      renderFrame(performance.now() * 0.001)
+    }
+  },
+)
+
 function renderFrame(nowSec: number) {
   if (!renderer || !scene || !camera || !rootGroup || !coreGroup || !particleMaterial || !coreMaterial) return
 
   scrollCurrent += (scrollTarget - scrollCurrent) * 0.06
   manualModeOffset += (manualModeTarget - manualModeOffset) * 0.06
   biasCurrent += (symbiosisBridge.biasTarget - biasCurrent) * 0.055
+  lightModeCurrent += (lightModeTarget - lightModeCurrent) * 0.09
 
   const heroWeight = Math.max(0, 1 - scrollCurrent * 2.2)
   const stageValue = scrollCurrent * 3.0 * (1 - heroWeight) + manualModeOffset * heroWeight
@@ -483,11 +513,13 @@ function renderFrame(nowSec: number) {
 
   particleMaterial.uniforms.uTime.value = t
   particleMaterial.uniforms.uBias.value = biasCurrent
+  particleMaterial.uniforms.uLightMode.value = lightModeCurrent
   particleMaterial.uniforms.uPointer.value.set(pointerCurrentX, pointerCurrentY)
 
   coreMaterial.uniforms.uTime.value = t
   coreMaterial.uniforms.uBias.value = biasCurrent
   coreMaterial.uniforms.uScroll.value = scrollCurrent
+  coreMaterial.uniforms.uLightMode.value = lightModeCurrent
   coreMaterial.uniforms.uPointer.value.set(pointerCurrentX, pointerCurrentY)
 
   // Glide the symbiote core into open negative space opposite the active text column
@@ -553,6 +585,10 @@ function handleResize(entries: ResizeObserverEntry[]) {
 }
 
 onMounted(() => {
+  const initialTheme = syncThemeFromDom()
+  lightModeTarget = initialTheme === 'light' ? 1 : 0
+  lightModeCurrent = lightModeTarget
+
   motionMedia = window.matchMedia('(prefers-reduced-motion: reduce)')
   prefersReducedMotion = motionMedia.matches
   motionMedia.addEventListener('change', (ev) => {
@@ -620,8 +656,27 @@ onUnmounted(() => {
 .symbiosis-vignette {
   position: absolute;
   inset: 0;
+  transition: opacity 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.symbiosis-vignette--dark {
+  opacity: 1;
   background:
     radial-gradient(circle at 50% 45%, rgba(10, 10, 10, 0.16) 0%, rgba(10, 10, 10, 0.64) 72%, #0a0a0a 100%);
+}
+
+.symbiosis-vignette--light {
+  opacity: 0;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(245, 245, 247, 0.14) 0%, rgba(245, 245, 247, 0.66) 72%, #f5f5f7 100%);
+}
+
+.symbiosis-canvas-stage[data-theme-mode="light"] .symbiosis-vignette--dark {
+  opacity: 0;
+}
+
+.symbiosis-canvas-stage[data-theme-mode="light"] .symbiosis-vignette--light {
+  opacity: 1;
 }
 
 @media (prefers-reduced-motion: reduce) {

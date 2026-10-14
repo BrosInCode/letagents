@@ -129,18 +129,18 @@ async function copyForAgent(idx: number) {
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.05;
-  color: #f5f5f7;
+  color: var(--l-text);
   margin-bottom: 16px;
   text-wrap: balance;
 }
 
 .title-dim {
-  color: #86868b;
+  color: var(--l-text-dim);
 }
 
 .setup-sub {
   font-size: 1.14rem;
-  color: #86868b;
+  color: var(--l-text-dim);
   line-height: 1.5;
   text-wrap: balance;
 }
@@ -151,13 +151,11 @@ async function copyForAgent(idx: number) {
   gap: 16px;
   padding: 16px;
   border-radius: 32px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--l-glass-bg);
   backdrop-filter: blur(28px) saturate(160%);
   -webkit-backdrop-filter: blur(28px) saturate(160%);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    0 24px 64px rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--l-glass-border);
+  box-shadow: var(--l-glass-shadow);
 }
 
 .dock-item {
@@ -172,8 +170,8 @@ async function copyForAgent(idx: number) {
 }
 
 .dock-item:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.14);
+  background: var(--l-glass-bg-elevated);
+  border-color: var(--l-glass-border);
   transform: translateY(-2px);
 }
 
@@ -186,11 +184,11 @@ async function copyForAgent(idx: number) {
   width: 64px;
   height: 64px;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--l-glass-bg-elevated);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  border: 1px solid var(--l-glass-border);
+  box-shadow: var(--l-glass-pill-shadow);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -206,22 +204,22 @@ async function copyForAgent(idx: number) {
 .dock-name {
   font-size: 0.88rem;
   font-weight: 600;
-  color: #f5f5f7;
+  color: var(--l-text);
   margin-bottom: 4px;
 }
 
 .dock-action {
   font-size: 0.76rem;
-  color: #86868b;
+  color: var(--l-text-dim);
   transition: color 200ms ease;
 }
 
 .dock-item:hover .dock-action {
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 .dock-item--copied .dock-action {
-  color: #2ac49f;
+  color: var(--l-mint);
   font-weight: 600;
 }
 

@@ -79,22 +79,22 @@
 
           <!-- 60fps Solid Traveling Dots: Left Split -->
           <g v-if="splitPulseT > 0 && splitPulseT < 1">
-            <circle :cx="pulsePosLeft(0).x" :cy="pulsePosLeft(0).y" r="4" fill="#f5f5f7" />
-            <circle :cx="pulsePosLeft(1).x" :cy="pulsePosLeft(1).y" r="4" fill="#f5f5f7" />
-            <circle :cx="pulsePosLeft(2).x" :cy="pulsePosLeft(2).y" r="4" fill="#f5f5f7" />
+            <circle :cx="pulsePosLeft(0).x" :cy="pulsePosLeft(0).y" r="4" fill="var(--l-text)" />
+            <circle :cx="pulsePosLeft(1).x" :cy="pulsePosLeft(1).y" r="4" fill="var(--l-text)" />
+            <circle :cx="pulsePosLeft(2).x" :cy="pulsePosLeft(2).y" r="4" fill="var(--l-text)" />
           </g>
 
           <!-- 60fps Solid Traveling Dots: Peer Verification -->
           <g v-if="reviewPulseT > 0 && reviewPulseT < 1">
-            <circle :cx="480" :cy="104 + reviewPulseT * 152" r="4.5" fill="#2ac49f" />
-            <circle :cx="480" :cy="256 - reviewPulseT * 152" r="4.5" fill="#f5f5f7" />
+            <circle :cx="480" :cy="104 + reviewPulseT * 152" r="4.5" fill="var(--l-mint)" />
+            <circle :cx="480" :cy="256 - reviewPulseT * 152" r="4.5" fill="var(--l-text)" />
           </g>
 
           <!-- 60fps Solid Traveling Dots: Right Merge -->
           <g v-if="mergePulseT > 0 && mergePulseT < 1">
-            <circle :cx="pulsePosRight(0).x" :cy="pulsePosRight(0).y" r="4" fill="#2ac49f" />
-            <circle :cx="pulsePosRight(1).x" :cy="pulsePosRight(1).y" r="4" fill="#2ac49f" />
-            <circle :cx="pulsePosRight(2).x" :cy="pulsePosRight(2).y" r="4" fill="#2ac49f" />
+            <circle :cx="pulsePosRight(0).x" :cy="pulsePosRight(0).y" r="4" fill="var(--l-mint)" />
+            <circle :cx="pulsePosRight(1).x" :cy="pulsePosRight(1).y" r="4" fill="var(--l-mint)" />
+            <circle :cx="pulsePosRight(2).x" :cy="pulsePosRight(2).y" r="4" fill="var(--l-mint)" />
           </g>
         </svg>
 
@@ -446,31 +446,29 @@ onUnmounted(() => {
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.05;
-  color: #f5f5f7;
+  color: var(--l-text);
   margin-bottom: 18px;
 }
 
 .headline-dim {
-  color: #86868b;
+  color: var(--l-text-dim);
 }
 
 .subcopy {
   font-size: 1.16rem;
   line-height: 1.55;
-  color: #86868b;
+  color: var(--l-text-dim);
   text-wrap: balance;
 }
 
 /* ─── TRANSLUCENT FROSTED GLASS 5-NODE STAGE ─── */
 .motion-stage {
   border-radius: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--l-glass-border);
+  background: var(--l-glass-bg);
   backdrop-filter: blur(28px) saturate(160%);
   -webkit-backdrop-filter: blur(28px) saturate(160%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    0 24px 64px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--l-glass-shadow);
   overflow: hidden;
 }
 
@@ -492,7 +490,7 @@ onUnmounted(() => {
 }
 
 .path-track {
-  stroke: rgba(255, 255, 255, 0.09);
+  stroke: var(--l-track);
   stroke-width: 1.5;
 }
 
@@ -503,15 +501,15 @@ onUnmounted(() => {
 }
 
 .path-lit--white {
-  stroke: rgba(245, 245, 247, 0.55);
+  stroke: var(--l-lit-primary);
 }
 
 .path-lit--mint {
-  stroke: rgba(42, 196, 159, 0.65);
+  stroke: var(--l-mint);
 }
 
 .peer-line {
-  stroke: rgba(42, 196, 159, 0.5);
+  stroke: var(--l-mint);
   stroke-width: 1.5;
   stroke-dasharray: 4 4;
   opacity: 0;
@@ -519,7 +517,7 @@ onUnmounted(() => {
 }
 
 .peer-line--active {
-  opacity: 1;
+  opacity: 0.7;
 }
 
 /* ─── ENDPOINT NODES (YOU & SHIPPED) ─── */
@@ -552,34 +550,34 @@ onUnmounted(() => {
 }
 
 .orb--human {
-  background: #f5f5f7;
-  color: #09090b;
+  background: var(--l-human-orb-bg);
+  color: var(--l-human-orb-fg);
 }
 
 .orb--ship {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--l-glass-bg-elevated);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1.5px solid rgba(255, 255, 255, 0.16);
-  color: #86868b;
+  border: 1.5px solid var(--l-glass-border);
+  color: var(--l-text-dim);
   transition: background 300ms ease, border-color 300ms ease, color 300ms ease;
 }
 
 .endpoint-node--shipped .orb--ship {
-  background: #2ac49f;
-  border-color: #2ac49f;
-  color: #04130f;
+  background: var(--l-mint);
+  border-color: var(--l-mint);
+  color: #ffffff;
 }
 
 .node-title {
   font-size: 0.88rem;
   font-weight: 600;
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 .node-sub {
   font-size: 0.75rem;
-  color: #86868b;
+  color: var(--l-text-dim);
   margin-top: 2px;
 }
 
@@ -598,23 +596,23 @@ onUnmounted(() => {
   gap: 14px;
   padding: 6px 16px 6px 6px;
   border-radius: 18px;
-  background: rgba(255, 255, 255, 0.045);
+  background: var(--l-glass-bg-elevated);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--l-glass-border);
+  box-shadow: var(--l-glass-pill-shadow);
   min-width: 210px;
   transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), border-color 300ms ease, background 300ms ease;
 }
 
 .agent-node--active {
   transform: translateY(-2px);
-  background: rgba(255, 255, 255, 0.075);
-  border-color: rgba(255, 255, 255, 0.2);
+  background: var(--l-glass-bg-hover);
+  border-color: var(--l-glass-border-strong);
 }
 
 .agent-node--done {
-  border-color: rgba(42, 196, 159, 0.38);
+  border-color: rgba(42, 196, 159, 0.42);
 }
 
 .squircle-wrap {
@@ -633,14 +631,14 @@ onUnmounted(() => {
 }
 
 .ring-track {
-  fill: rgba(255, 255, 255, 0.05);
-  stroke: rgba(255, 255, 255, 0.1);
+  fill: var(--l-glass-bg);
+  stroke: var(--l-glass-border);
   stroke-width: 1.5;
 }
 
 .ring-progress {
   fill: none;
-  stroke: #2ac49f;
+  stroke: var(--l-mint);
   stroke-width: 2;
   stroke-dasharray: 196;
   transition: stroke-dashoffset 80ms linear;
@@ -664,45 +662,45 @@ onUnmounted(() => {
 .agent-name {
   font-size: 0.88rem;
   font-weight: 600;
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 .agent-state {
   font-size: 0.76rem;
-  color: #86868b;
+  color: var(--l-text-dim);
   transition: color 250ms ease;
 }
 
 .agent-state--mint {
-  color: #2ac49f;
+  color: var(--l-mint);
 }
 
 /* ─── LIVE CAPTION BAR ─── */
 .live-caption-bar {
   padding: 18px 28px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--l-glass-border-subtle);
   text-align: center;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--l-glass-subbar);
 }
 
 .live-caption-text {
   font-size: 0.98rem;
   font-weight: 500;
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 /* ─── 4-STEP SCRUBBER ─── */
 .scrubber-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.18);
+  border-top: 1px solid var(--l-glass-border-subtle);
+  background: var(--l-glass-subbar);
 }
 
 .scrubber-tab {
   padding: 16px 20px;
   text-align: left;
-  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  border-right: 1px solid var(--l-glass-border-subtle);
 }
 
 .scrubber-tab:last-child {
@@ -711,31 +709,31 @@ onUnmounted(() => {
 
 .tab-line-track {
   height: 2px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--l-track);
   margin-bottom: 10px;
   overflow: hidden;
 }
 
 .tab-line-fill {
   height: 100%;
-  background: #f5f5f7;
+  background: var(--l-text);
   transition: width 80ms linear;
 }
 
 .scrubber-tab--active .tab-line-fill {
-  background: #2ac49f;
+  background: var(--l-mint);
 }
 
 .tab-label {
   font-size: 0.8rem;
   font-weight: 500;
-  color: #86868b;
+  color: var(--l-text-dim);
   transition: color 200ms ease;
 }
 
 .scrubber-tab--active .tab-label,
 .scrubber-tab:hover .tab-label {
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 @media (max-width: 768px) {

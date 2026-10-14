@@ -138,7 +138,7 @@ onUnmounted(() => {
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.03;
-  color: #f5f5f7;
+  color: var(--l-text);
   margin: 0 auto 24px;
   text-wrap: balance;
 }
@@ -149,13 +149,13 @@ onUnmounted(() => {
 
 .hero-word {
   display: inline-block;
-  color: #86868b;
-  transition: opacity 300ms ease, transform 300ms ease;
+  color: var(--l-text-dim);
+  transition: opacity 300ms ease, transform 300ms ease, color 380ms ease;
 }
 
 .hero-sub {
   font-size: clamp(1.12rem, 1.6vw, 1.35rem);
-  color: #a1a1a6;
+  color: var(--l-text-sub);
   max-width: 520px;
   margin: 0 auto 40px;
   line-height: 1.5;
@@ -182,16 +182,16 @@ onUnmounted(() => {
   font-weight: 600;
   font-size: 0.95rem;
   letter-spacing: -0.01em;
-  background: #f5f5f7;
-  color: #000000;
+  background: var(--l-cta-bg);
+  color: var(--l-cta-fg);
   text-decoration: none;
-  transition: transform 200ms ease, background 200ms ease, box-shadow 200ms ease;
+  transition: transform 200ms ease, background 200ms ease, color 200ms ease, box-shadow 200ms ease;
 }
 
 .btn-white:hover {
-  background: #ffffff;
+  background: var(--l-cta-hover-bg);
   transform: scale(1.02);
-  box-shadow: 0 0 32px rgba(255, 255, 255, 0.18);
+  box-shadow: var(--l-cta-shadow);
 }
 
 .btn-glass {
@@ -204,17 +204,19 @@ onUnmounted(() => {
   font-weight: 500;
   font-size: 0.95rem;
   letter-spacing: -0.01em;
-  color: #f5f5f7;
-  background: rgba(16, 16, 18, 0.65);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  backdrop-filter: blur(20px);
+  color: var(--l-text);
+  background: var(--l-glass-bg-elevated);
+  border: 1px solid var(--l-glass-border);
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  box-shadow: var(--l-glass-pill-shadow);
   text-decoration: none;
-  transition: background 200ms ease, border-color 200ms ease, transform 200ms ease;
+  transition: background 200ms ease, border-color 200ms ease, color 200ms ease, transform 200ms ease;
 }
 
 .btn-glass:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.24);
+  background: var(--l-glass-bg-hover);
+  border-color: var(--l-glass-border-strong);
   transform: scale(1.02);
 }
 
@@ -224,7 +226,7 @@ onUnmounted(() => {
   justify-content: center;
   gap: 10px;
   font-size: 0.85rem;
-  color: #86868b;
+  color: var(--l-text-dim);
   scroll-margin-top: 92px;
 }
 
@@ -232,28 +234,28 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  color: #d4d4d8;
+  color: var(--l-text-sub);
   font-weight: 500;
   text-decoration: none;
   transition: color 200ms ease;
 }
 
 .mac-primary-link:hover {
-  color: #ffffff;
+  color: var(--l-text);
 }
 
 .mac-divider {
-  color: rgba(255, 255, 255, 0.2);
+  color: var(--l-hairline);
 }
 
 .mac-secondary-link {
-  color: #86868b;
+  color: var(--l-text-dim);
   text-decoration: none;
   transition: color 200ms ease;
 }
 
 .mac-secondary-link:hover {
-  color: #d4d4d8;
+  color: var(--l-text);
 }
 
 @media (max-width: 768px) {

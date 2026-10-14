@@ -113,11 +113,11 @@ const agentFeatures = [
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.06;
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 .headline-dim {
-  color: #86868b;
+  color: var(--l-text-dim);
 }
 
 .features-duality-columns {
@@ -136,7 +136,7 @@ const agentFeatures = [
   align-items: center;
   gap: 9px;
   padding-bottom: 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 1px solid var(--l-hairline);
 }
 
 .column-dot {
@@ -146,11 +146,11 @@ const agentFeatures = [
 }
 
 .column-dot--human {
-  background: #f5f5f7;
+  background: var(--l-human-dot);
 }
 
 .column-dot--agent {
-  background: #2ac49f;
+  background: var(--l-mint);
 }
 
 .column-label {
@@ -158,28 +158,28 @@ const agentFeatures = [
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #f5f5f7;
+  color: var(--l-text);
 }
 
 .column-label--agent {
-  color: #2ac49f;
+  color: var(--l-mint);
 }
 
 .feature-row {
   padding: 20px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  border-bottom: 1px solid var(--l-hairline);
   font-size: 0.95rem;
   line-height: 1.5;
 }
 
 .feature-title {
-  color: #f5f5f7;
+  color: var(--l-text);
   font-weight: 600;
   margin-right: 6px;
 }
 
 .feature-desc {
-  color: #86868b;
+  color: var(--l-text-dim);
 }
 
 @media (max-width: 768px) {

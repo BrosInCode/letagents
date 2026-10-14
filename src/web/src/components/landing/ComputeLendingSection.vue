@@ -101,31 +101,29 @@ const isRevoked = ref(false)
   font-weight: 800;
   letter-spacing: -0.04em;
   line-height: 1.05;
-  color: #f5f5f7;
+  color: var(--l-text);
   margin-bottom: 16px;
   text-wrap: balance;
 }
 
 .headline-dim {
-  color: #86868b;
+  color: var(--l-text-dim);
 }
 
 .subcopy {
   font-size: 1.14rem;
   line-height: 1.5;
-  color: #86868b;
+  color: var(--l-text-dim);
   text-wrap: balance;
 }
 
 .lending-card {
   border-radius: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--l-glass-border);
+  background: var(--l-glass-bg);
   backdrop-filter: blur(28px) saturate(160%);
   -webkit-backdrop-filter: blur(28px) saturate(160%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    0 24px 64px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--l-glass-shadow);
   overflow: hidden;
 }
 
@@ -159,17 +157,17 @@ const isRevoked = ref(false)
   margin-bottom: 12px;
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  box-shadow: var(--l-glass-pill-shadow);
 }
 
 .node-box--locked {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #f5f5f7;
+  background: var(--l-glass-bg-elevated);
+  border: 1px solid var(--l-glass-border);
+  color: var(--l-text);
 }
 
 .node-box--agent {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--l-glass-bg-elevated);
   border: 1px solid rgba(42, 196, 159, 0.38);
 }
 
@@ -182,13 +180,13 @@ const isRevoked = ref(false)
 .node-label {
   font-size: 0.92rem;
   font-weight: 600;
-  color: #f5f5f7;
+  color: var(--l-text);
   margin-bottom: 3px;
 }
 
 .node-meta {
   font-size: 0.78rem;
-  color: #86868b;
+  color: var(--l-text-dim);
 }
 
 .bridge-connector {
@@ -208,7 +206,7 @@ const isRevoked = ref(false)
 }
 
 .connector-line--paused {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--l-track);
 }
 
 .connector-dot {
@@ -218,7 +216,7 @@ const isRevoked = ref(false)
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #2ac49f;
+  background: var(--l-mint);
   animation: bridgeFlow 2.2s infinite cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -231,7 +229,7 @@ const isRevoked = ref(false)
 
 .connector-tag {
   font-size: 0.78rem;
-  color: #86868b;
+  color: var(--l-text-dim);
 }
 
 .card-footer {
@@ -240,8 +238,8 @@ const isRevoked = ref(false)
   justify-content: space-between;
   gap: 16px;
   padding: 18px 28px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(0, 0, 0, 0.18);
+  border-top: 1px solid var(--l-glass-border-subtle);
+  background: var(--l-glass-subbar);
 }
 
 .footer-status {
@@ -249,14 +247,14 @@ const isRevoked = ref(false)
   align-items: center;
   gap: 10px;
   font-size: 0.86rem;
-  color: #d4d4d8;
+  color: var(--l-text-sub);
 }
 
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #2ac49f;
+  background: var(--l-mint);
 }
 
 .status-dot--revoked {
@@ -268,7 +266,7 @@ const isRevoked = ref(false)
   border-radius: 999px;
   font-size: 0.8rem;
   font-weight: 600;
-  color: #f87171;
+  color: var(--red-text, #f87171);
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(239, 68, 68, 0.25);
   transition: background 200ms ease;
@@ -279,13 +277,13 @@ const isRevoked = ref(false)
 }
 
 .toggle-btn--restore {
-  color: #000000;
-  background: #f5f5f7;
+  color: var(--l-cta-fg);
+  background: var(--l-cta-bg);
   border-color: transparent;
 }
 
 .toggle-btn--restore:hover {
-  background: #ffffff;
+  background: var(--l-cta-hover-bg);
 }
 
 @media (max-width: 640px) {
