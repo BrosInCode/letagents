@@ -1,17 +1,17 @@
 <template>
   <section class="knowledge-page needs-you-page" aria-labelledby="inbox-title" data-testid="inbox-view" :data-motion="motionEnabled" @pointerdown.capture="motionEnabled = true" @keydown.capture="motionEnabled = false">
     <header class="knowledge-header">
-      <div><h1 id="inbox-title" ref="pageHeading" tabindex="-1">{{ sectionTitle }}<span class="knowledge-total">{{ items.length }}</span></h1><p>{{ sectionDescription }}</p></div>
+      <div><h1 id="inbox-title" ref="pageHeading" tabindex="-1">{{ sectionTitle }}<span v-if="section !== 'updates' || updatesLoaded" class="knowledge-total">{{ items.length }}</span></h1><p>{{ sectionDescription }}</p></div>
       <div class="knowledge-header-actions inbox-header-actions">
         <button v-if="sourceNoticeHidden" ref="showNoticeButton" class="knowledge-icon-button inbox-notice-indicator" :aria-label="hasSourceFailure ? 'Show loading issues' : 'Show inbox information'" :title="hasSourceFailure ? 'Some updates couldn’t be loaded' : 'Room access and history limits'" @click="showSourceNotice"><TriangleAlert :size="16" aria-hidden="true" /></button>
-        <button v-if="section === 'updates'" class="knowledge-button" :disabled="!items.length" :title="`Mark the ${items.length.toLocaleString()} displayed updates read${rooms.length ? ' in the selected rooms' : ''}. New activity will still appear.`" @click="markRead(items)"><CheckCheck :size="15" aria-hidden="true" />Mark all updates read</button>
+        <button v-if="section === 'updates'" class="knowledge-button" :disabled="!items.length || !updatesLoaded" :title="updatesLoaded ? `Mark the ${items.length.toLocaleString()} displayed updates read${rooms.length ? ' in the selected rooms' : ''}. New activity will still appear.` : 'Available once updates load.'" @click="markRead(items)"><CheckCheck :size="15" aria-hidden="true" />Mark all updates read</button>
         <button class="knowledge-button" :disabled="loading" @click="emit('refresh')"><RefreshCw :size="14" :class="{ 'knowledge-spin': loading }" />Refresh</button>
       </div>
     </header>
     <MessageRemindersSection @open="emit('openRoom', $event)" />
     <div class="knowledge-filters">
       <div class="knowledge-segments" aria-label="Inbox view">
-        <button v-for="tab in sections" :key="tab.id" :aria-pressed="section === tab.id" @click="emit('update:section', tab.id)">{{ tab.label }}<span v-if="tab.id !== 'answered'">{{ count(tab.id) }}</span></button>
+        <button v-for="tab in sections" :key="tab.id" :aria-pressed="section === tab.id" @click="emit('update:section', tab.id)">{{ tab.label }}<span v-if="tab.id !== 'answered' && (tab.id !== 'updates' || updatesLoaded)">{{ count(tab.id) }}</span></button>
       </div>
       <details ref="roomMenu" class="inbox-room-filter" @keydown.esc.stop="closeRoomMenu" @toggle="roomMenuToggled">
         <summary class="knowledge-button"><SlidersHorizontal :size="14" />{{ roomFilterLabel }}<ChevronDown :size="13" /></summary>
@@ -200,8 +200,10 @@ const roomFilterLabel = computed(() => !props.rooms.length ? 'All rooms' : props
 const unavailable = computed(() => (props.data?.rooms ?? []).filter(room => !props.rooms.length || props.rooms.includes(room.roomIdentifier)).flatMap(room => room.updates?.unavailable.length ? [`${room.displayName} (${[...room.updates.unavailable].sort().join(', ')})`] : []).sort());
 const roomsWithMoreThreads = computed(() => (props.data?.rooms ?? []).filter(room => room.updates?.threads.hasMore && (!props.rooms.length || props.rooms.includes(room.roomIdentifier))));
 const hiddenByFilter = computed(() => props.rooms.length ? filterUniversalInbox(allItems.value, props.section, [], dismissals.value).length - items.value.length : 0);
-const emptyTitle = computed(() => props.loading ? 'Checking your rooms' : hiddenByFilter.value ? 'Nothing here in the selected rooms' : props.section === 'updates' ? 'No unread updates to show' : props.error || hasSourceFailure.value ? 'Some inbox data is unavailable' : props.section === 'answered' ? 'No answers here yet' : 'You’re clear for now');
-const emptyDescription = computed(() => props.section === 'answered' ? 'Answered requests will appear here.' : props.section === 'updates' ? props.error || hasSourceFailure.value ? 'New activity will appear here. Some room data is still unavailable.' : 'Room updates will appear here as work progresses.' : 'Questions, decisions and approvals will appear when someone asks for your input.');
+// Updates load only while the Inbox is open. Until they arrive, the Updates list holds task rows only, so its count is not shown.
+const updatesLoaded = computed(() => Boolean(props.data?.updatesIncluded));
+const emptyTitle = computed(() => props.loading ? 'Checking your rooms' : hiddenByFilter.value ? 'Nothing here in the selected rooms' : props.section === 'updates' ? updatesLoaded.value ? 'No unread updates to show' : 'Updates aren’t loaded' : props.error || hasSourceFailure.value ? 'Some inbox data is unavailable' : props.section === 'answered' ? 'No answers here yet' : 'You’re clear for now');
+const emptyDescription = computed(() => props.section === 'answered' ? 'Answered requests will appear here.' : props.section === 'updates' && !updatesLoaded.value ? props.loading ? 'Gathering replies, checks and agent activity.' : 'Refresh to load replies, checks and agent activity.' : props.section === 'updates' ? props.error || hasSourceFailure.value ? 'New activity will appear here. Some room data is still unavailable.' : 'Room updates will appear here as work progresses.' : 'Questions, decisions and approvals will appear when someone asks for your input.');
 function count(section: InboxSection) { return filterUniversalInbox(allItems.value, section, props.rooms, dismissals.value).length; }
 watch(() => selected.value?.key, () => { sendError.value = ''; });
 watch([() => props.section, () => props.rooms], () => { outcome.value = null; });

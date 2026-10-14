@@ -140,7 +140,7 @@ test('Needs you presents a human decision with context and escapes agent content
     const unavailable = await renderToString(createSSRApp(component, { data: { ...data, rooms: [], failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }] }, loading: false, error: '' }));
     assert.match(unavailable, /Dismiss loading notice/); assert.match(unavailable, /Some updates couldn’t be loaded/);
     assert.match(unavailable, /Some inbox data is unavailable/); assert.match(unavailable, /<details class="inbox-source-notice"/); assert.match(unavailable, /Couldn’t load all inbox data for Product launch/); assert.doesNotMatch(unavailable, /You’re clear for now/);
-    const emptyUpdates = await renderToString(createSSRApp(component, { data: { ...data, rooms: [], failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }] }, section: 'updates', loading: false, error: '' }));
+    const emptyUpdates = await renderToString(createSSRApp(component, { data: { ...data, rooms: [], failures: [{ roomIdentifier: 'room', displayName: 'Product launch' }], updatesIncluded: true }, section: 'updates', loading: false, error: '' }));
     assert.match(emptyUpdates, /No unread updates to show/); assert.match(emptyUpdates, /Some room data is still unavailable/); assert.doesNotMatch(emptyUpdates, /You’re caught up/);
   } finally { await vite.close(); }
 });
