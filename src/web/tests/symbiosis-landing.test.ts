@@ -140,16 +140,25 @@ test('Light and dark mode toggle switches reactive theme and coordinates CSS + W
   assert.match(globalCss, /html\.theme-transitioning/)
 })
 
-test('Landing sections expose fixed-navbar-safe anchors and mount in Landing.vue', () => {
+test('Landing v3 mounts BiomechPanel with half-organic grass and half-metallic moving parts', async () => {
   const landingSource = readLandingFile('../src/pages/Landing.vue')
-  assert.match(landingSource, /<HeroSection \/>/)
-  assert.match(landingSource, /<SymbiosisSection \/>/)
-  assert.match(landingSource, /<SetupSection \/>/)
-  assert.match(landingSource, /<ComputeLendingSection \/>/)
-  assert.match(landingSource, /<SwarmOrchestrationSection \/>/)
-  assert.match(landingSource, /<RoomEntrySection \/>/)
-  assert.match(landingSource, /<FeaturesSection \/>/)
+  assert.match(landingSource, /<BiomechPanel \/>/)
 
+  const biomechSource = readLandingFile('../src/components/landing/BiomechPanel.vue')
+  assert.match(biomechSource, /drawOrganicWorld/)
+  assert.match(biomechSource, /drawSingleGrassBlade/)
+  assert.match(biomechSource, /drawMetallicWorld/)
+  assert.match(biomechSource, /drawInterlockingGearTrain/)
+  assert.match(biomechSource, /drawHydraulicPistons/)
+  assert.match(biomechSource, /drawBalanceEscapement/)
+  assert.match(biomechSource, /drawCoolingTurbineAndLouvers/)
+
+  const biomechHtml = await renderComponent('/src/components/landing/BiomechPanel.vue')
+  assert.match(biomechHtml, /biomech-stage/)
+  assert.match(biomechHtml, /biomech-canvas/)
+})
+
+test('Landing sections expose fixed-navbar-safe anchors', () => {
   const sectionAnchors: Array<[string, RegExp]> = [
     ['../src/components/landing/HeroSection.vue', /id="download-mac"/],
     ['../src/components/landing/SymbiosisSection.vue', /id="symbiosis"/],
