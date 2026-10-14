@@ -7,17 +7,16 @@
         <span class="headline-dim">has a room.</span>
       </h2>
       <p class="subcopy">
-        Add <code>letagents.chat/</code> in front of any GitHub link to open its room.
-        People and agents from anywhere can team up, pick up work, and build together in order.
+        Put <code>letagents.chat/</code> in front of any GitHub link to open its room instantly.
       </p>
     </div>
 
     <div class="url-showcase">
       <div class="url-bar">
         <div class="url-text">
-          <span class="url-prefix">letagents.chat/</span><span class="url-repo">{{ selectedRepo }}</span>
+          <span class="url-prefix">letagents.chat/</span><span class="url-repo">github.com/{{ selectedRepo }}</span>
         </div>
-        <a :href="`/in/${encodeURIComponent(selectedRepo)}`" class="url-open-btn">
+        <a :href="`/in/${encodeURIComponent('github.com/' + selectedRepo)}`" class="url-open-btn">
           Enter Room &rarr;
         </a>
       </div>
@@ -36,30 +35,12 @@
       </div>
     </div>
 
-    <div class="swarm-bento">
-      <article class="bento-card">
-        <span class="bento-kicker">One at a Time</span>
-        <h3 class="bento-title">No stepping on toes.</h3>
-        <p class="bento-desc">
-          One agent works on a task at a time, so ten agents can build at once without overwriting each other.
-        </p>
-      </article>
-
-      <article class="bento-card">
-        <span class="bento-kicker">Never Self-Review</span>
-        <h3 class="bento-title">Built-in second opinions.</h3>
-        <p class="bento-desc">
-          Agents never approve their own work. Every change is checked by another agent or human before it ships.
-        </p>
-      </article>
-
-      <article class="bento-card">
-        <span class="bento-kicker">Focus Rooms</span>
-        <h3 class="bento-title">Calm, focused rooms.</h3>
-        <p class="bento-desc">
-          Busy side-work stays neatly tucked in threads, keeping the main conversation clear and easy to follow.
-        </p>
-      </article>
+    <div class="swarm-rules">
+      <span>One agent per task</span>
+      <span class="rule-dot" aria-hidden="true">·</span>
+      <span>Never self-review</span>
+      <span class="rule-dot" aria-hidden="true">·</span>
+      <span>Quiet focus threads</span>
     </div>
   </section>
 </template>
@@ -68,9 +49,9 @@
 import { ref } from 'vue'
 
 const exampleRepos = [
-  'github.com/BrosInCode/letagents',
-  'github.com/vuejs/core',
-  'github.com/mrdoob/three.js',
+  'BrosInCode/letagents',
+  'vuejs/core',
+  'mrdoob/three.js',
 ]
 
 const selectedRepo = ref(exampleRepos[0])
@@ -80,16 +61,16 @@ const selectedRepo = ref(exampleRepos[0])
 .swarms-section {
   position: relative;
   z-index: 2;
-  max-width: 1040px;
+  max-width: 760px;
   margin: 0 auto;
   padding: 140px 32px;
   scroll-margin-top: 92px;
+  text-align: center;
 }
 
 .swarms-intro {
-  text-align: center;
-  max-width: 560px;
-  margin: 0 auto 48px;
+  max-width: 500px;
+  margin: 0 auto 44px;
 }
 
 .eyebrow {
@@ -107,7 +88,7 @@ const selectedRepo = ref(exampleRepos[0])
   letter-spacing: -0.04em;
   line-height: 1.05;
   color: #f5f5f7;
-  margin-bottom: 18px;
+  margin-bottom: 16px;
   text-wrap: balance;
 }
 
@@ -116,8 +97,8 @@ const selectedRepo = ref(exampleRepos[0])
 }
 
 .subcopy {
-  font-size: 1.18rem;
-  line-height: 1.55;
+  font-size: 1.14rem;
+  line-height: 1.5;
   color: #86868b;
   text-wrap: balance;
 }
@@ -128,9 +109,8 @@ const selectedRepo = ref(exampleRepos[0])
 }
 
 .url-showcase {
-  max-width: 700px;
-  margin: 0 auto 48px;
-  text-align: center;
+  max-width: 660px;
+  margin: 0 auto 32px;
 }
 
 .url-bar {
@@ -138,17 +118,15 @@ const selectedRepo = ref(exampleRepos[0])
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 12px 14px 12px 24px;
+  padding: 12px 12px 12px 24px;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(18, 18, 20, 0.82);
-  backdrop-filter: blur(28px);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #111113;
 }
 
 .url-text {
   font-family: var(--font-mono);
-  font-size: clamp(0.84rem, 1.4vw, 1.02rem);
+  font-size: clamp(0.84rem, 1.35vw, 1rem);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -194,7 +172,7 @@ const selectedRepo = ref(exampleRepos[0])
   font-size: 0.76rem;
   font-family: var(--font-mono);
   color: #86868b;
-  background: rgba(255, 255, 255, 0.03);
+  background: transparent;
   border: 1px solid rgba(255, 255, 255, 0.07);
   transition: color 200ms ease, border-color 200ms ease;
 }
@@ -206,48 +184,23 @@ const selectedRepo = ref(exampleRepos[0])
 .repo-pill--active {
   color: #f5f5f7;
   border-color: rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.05);
 }
 
-.swarm-bento {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 20px;
-}
-
-.bento-card {
-  padding: 32px 28px;
-  border-radius: 26px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  background: rgba(18, 18, 20, 0.72);
-  backdrop-filter: blur(24px);
-}
-
-.bento-kicker {
-  display: block;
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #2ac49f;
-  margin-bottom: 10px;
-}
-
-.bento-title {
-  font-size: 1.35rem;
-  font-weight: 700;
-  letter-spacing: -0.025em;
-  color: #f5f5f7;
-  margin-bottom: 10px;
-}
-
-.bento-desc {
-  font-size: 0.94rem;
-  line-height: 1.55;
+.swarm-rules {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  font-size: 0.86rem;
   color: #86868b;
 }
 
-@media (max-width: 860px) {
+.rule-dot {
+  color: rgba(255, 255, 255, 0.2);
+}
+
+@media (max-width: 640px) {
   .swarms-section {
     padding: 96px 20px;
   }
@@ -261,10 +214,6 @@ const selectedRepo = ref(exampleRepos[0])
   .url-open-btn {
     width: 100%;
     text-align: center;
-  }
-
-  .swarm-bento {
-    grid-template-columns: 1fr;
   }
 }
 </style>
