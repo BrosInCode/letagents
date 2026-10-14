@@ -542,6 +542,62 @@ test("capture hints expedite an existing retry timer and singleton loss never di
   await f.publisher.flush(); assert.equal(f.sent.length, 1); assert.equal(f.row().revision, 1);
 });
 
+for (const provider of ["codex", "claude-code"] as const) {
+  test(`${provider} no-reply completion bypasses historical agents in the recovery sweep`, async t => {
+    const f = await fixture(t, provider);
+    const attempt = f.captureMessage();
+    await f.publisher.flush();
+    assert.equal(f.sent[0].summary.recorded_state, "active");
+    // Model a desktop with old Room participants on both sides of this agent.
+    for (let id = 0; id < 14; id++) {
+      f.receipts.pin({ ...f.row(), agentId: `${id < 7 ? "aaa" : "zzz"}-${id}` }, ["msg_1"]);
+    }
+    f.restart();
+    await f.publisher.flush(); // Recovery cursor is now on aaa-0.
+    f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+    f.publisher.changed("agent");
+    f.publisher.changed("agent"); // Native capture/workspace hints coalesce.
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 2, "the very next pass publishes the changed agent, not aaa-1");
+    assert.equal(f.sent[1].summary.recorded_state, "completed_no_reply");
+    assert.equal(f.row().acknowledgedRevision, 2);
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 2, "duplicate hints do not repeat the publication");
+  });
+}
+
+test("live hints preserve recovery progress and a hint arriving during upload", async t => {
+  const f = await fixture(t);
+  const attempt = f.captureMessage();
+  const oldId = "aaa-old-agent";
+  const oldOrigin = { ...f.row(), agentId: oldId, agentKey: "owner/old-agent", agentInstanceId: `daemon:${oldId}` };
+  f.receipts.pin(oldOrigin, ["msg_1"]);
+  const oldRecord = f.receipts.get(oldId, "room", "msg_1")!;
+  f.capture.registerRuntime({ agentId: oldId, executionGenerationId: "old-generation", runtimeGenerationId: "old-runtime",
+    provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
+  const oldAttempt = f.capture.trackMessage({ agentId: oldId, roomId: "room", sourceMessageId: "msg_1",
+    executionGenerationId: "old-generation", workspaceId: "old-workspace", createdAtMs: 100 });
+  f.receipts.stage(oldRecord, { ...f.summary(), attemptId: oldAttempt });
+  f.custody.installHostGrant({ ...f.grant, entryId: oldId, agentKey: oldOrigin.agentKey });
+  f.custody.installWorkerAuthorization({ ...f.worker, entryId: oldId, agentKey: oldOrigin.agentKey,
+    agentSession: { ...f.worker.agentSession!, agent_key: oldOrigin.agentKey, agent_instance_id: oldOrigin.agentInstanceId } });
+  f.options.publish = async input => {
+    f.sent.push(input);
+    if (input.agentKey === "owner/agent" && input.revision === 1) {
+      f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+      f.publisher.changed("agent");
+    }
+    return "acknowledged";
+  };
+  await f.publisher.flush();
+  assert.equal(f.sent[0].agentKey, "owner/agent", "live hint is first");
+  await f.publisher.flush();
+  assert.equal(f.sent[1].agentKey, "owner/old-agent", "recovery is not starved by another live hint");
+  await f.publisher.flush();
+  assert.equal(f.sent[2].summary.recorded_state, "completed_no_reply", "the in-flight hint survives the recovery pass");
+  assert.equal(f.sent[2].agentKey, "owner/agent");
+});
+
 test("a hint timer firing during an upload remains pending until a new flush can run", async t => {
   const f = await fixture(t); f.captureMessage(); f.restart();
   let release!: (result: RoomWorkPublishResult) => void;
@@ -1171,13 +1227,15 @@ test('complete review pages resume after restart without recapturing or bloating
   f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
   await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', 'Large change', baseline);
   await f.publisher.flush();
-  const first = f.sent.at(-1)!.reviewPage!;
+  // The timer may already upload a page while workspace capture yields.
+  const first = f.sent.find(value => value.reviewPage)!.reviewPage!;
   assert.ok(first.total > 1); assert.equal(first.index, 0);
   assert.ok(JSON.stringify(f.sent.at(-1)!.summary).length < 128 * 1024);
   await rm(join(f.location.path, 'app.ts'));
   f.options.workspaceLocation = async () => { throw new Error('Cannot recapture'); };
   f.restart();
-  for (let i = 1; i < first.total; i++) await f.publisher.flush();
+  const uploaded = Number(f.db.prepare('SELECT uploaded_pages FROM room_workspace_reviews').get()!.uploaded_pages);
+  for (let i = uploaded; i < first.total; i++) await f.publisher.flush();
   const pages = f.sent.flatMap(value => value.reviewPage ? [value.reviewPage] : []);
   assert.deepEqual(pages.map(page => page.index), Array.from({ length: first.total }, (_, index) => index));
   const review = decodeWorkspaceReview(pages.map(page => page.data).join(''), first.digest);
