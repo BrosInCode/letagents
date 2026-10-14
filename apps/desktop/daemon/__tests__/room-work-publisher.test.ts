@@ -585,6 +585,63 @@ test("a settled hint survives its timer firing during an existing upload", async
   assert.equal(f.sent[1].summary.recorded_state, "completed_no_reply");
 });
 
+for (const provider of ["codex", "claude-code"] as const) {
+  test(`${provider} completed silence is published ahead of the same agent's history after restart`, async t => {
+    const f = await fixture(t, provider);
+    for (let id = 1; id <= 12; id++) {
+      const oldAttempt = f.captureMessage(id);
+      f.fact(id, { state: "terminal", turnOutcome: "completed" });
+      f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(oldAttempt);
+      f.receipts.stage(f.row(id), f.summary(id));
+      f.receipts.acknowledge(f.row(id));
+    }
+    const attempt = f.captureMessage(99);
+    // The server already knows the live turn is active. Older records still
+    // need recovery work, as on a busy Room with many prior thread messages.
+    f.receipts.stage(f.row(99), f.summary(99));
+    f.receipts.acknowledge(f.row(99));
+    f.restart();
+    f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+    f.publisher.settled("agent");
+    await f.publisher.flush();
+    assert.equal(f.sent[0]?.sourceMessageId, "msg_99", "completed silence must not sit behind older records of the same agent");
+    assert.equal(f.sent[0]?.summary.recorded_state, "completed_no_reply");
+    assert.equal(f.row(99).acknowledgedRevision, 2);
+    assert.equal(f.sent.length, 1, "unchanged historical evidence does not get re-uploaded");
+  });
+}
+
+test("completion reserves one bounded upload slot without skipping retry backoff or starving older progress", async t => {
+  const f = await fixture(t);
+  let now = Date.parse("2026-08-31T00:00:00Z"); f.options.now = () => now;
+  for (let id = 1; id <= 8; id++) {
+    f.captureMessage(id);
+    f.fact(id, { state: "terminal", turnOutcome: "completed" });
+    // A native terminal alone does not authorize delivery completion.
+    f.receipts.stage(f.row(id), f.summary(id));
+  }
+  const attempt = f.captureMessage(99);
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  f.receipts.stage(f.row(99), f.summary(99));
+  f.restart();
+  f.options.publish = async input => {
+    f.sent.push(input);
+    if (input.sourceMessageId === "msg_99") throw new Error("temporary offline");
+    return "acknowledged";
+  };
+  f.publisher.settled("agent"); await f.publisher.flush();
+  assert.deepEqual(f.sent.map(item => item.sourceMessageId), ["msg_99", "msg_1", "msg_2", "msg_3"]);
+  assert.equal(f.row(99).acknowledgedRevision, 0);
+  await f.publisher.flush();
+  assert.deepEqual(f.sent.slice(4).map(item => item.sourceMessageId), ["msg_4", "msg_5", "msg_6", "msg_7"]);
+  assert.equal(f.sent.filter(item => item.sourceMessageId === "msg_99").length, 1, "a completion hint does not waive failed-publication backoff");
+  now += 30_000;
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  await f.publisher.flush();
+  assert.deepEqual(f.sent.slice(8).map(item => item.sourceMessageId), ["msg_99", "msg_8"]);
+  assert.equal(f.row(99).acknowledgedRevision, 1);
+});
+
 test("settled hints retain bounded retries when authority fails before consumption", async t => {
   const f = await fixture(t); f.captureMessage(); f.restart();
   const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];

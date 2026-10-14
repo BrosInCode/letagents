@@ -35,6 +35,15 @@ const FAILED_RECEIPTS_PER_PASS = 4;
 const canonicalSource = (id: string) => /^msg_[1-9]\d{0,9}$/.test(id) && Number(id.slice(4)) <= 2147483647;
 const key = (record: Pick<RoomWorkPublication, "agentId" | "roomId" | "sourceMessageId">) =>
   JSON.stringify([record.agentId, record.roomId, record.sourceMessageId]);
+const terminalState = (state: unknown) => ["completed", "completed_no_reply", "failed", "interrupted"].includes(String(state));
+
+/** Reserve one place for completion; the other three keep recovery moving.
+ * This changes queue order only, never evidence, authority or retry eligibility. */
+function completionFirst<T>(items: T[], pendingCompletion: (item: T) => boolean): T[] {
+  const index = items.findIndex(pendingCompletion);
+  if (index > 0) items.unshift(...items.splice(index, 1));
+  return items;
+}
 
 /**
  * The remote to ask what a workspace's upstream held: the one the daemon recorded when it
@@ -306,7 +315,7 @@ export class RoomWorkPublisher {
       || archived.size > 0;
     const previous = this.stamps.get(agentId) ?? new Map<string, string>();
     this.stamps.set(agentId, previous);
-    const candidates: Array<{ record: RoomWorkPublication; stamp: string }> = [];
+    const candidates: Array<{ record: RoomWorkPublication; stamp: string; pendingCompletion: boolean }> = [];
     let scanned = 0;
     for (const record of records) {
       if (++scanned % 64 === 0) {
@@ -324,7 +333,10 @@ export class RoomWorkPublisher {
       const boundaries = [...evidence.runtimes].filter(runtime => archived.has(runtime)).sort();
       const stamp = JSON.stringify([attempt.attempt_id, attempt.state, attempt.conclusion, sequence, incomplete, boundaries]);
       const recordKey = key(record);
-      if (previous.get(recordKey) !== stamp) candidates.push({ record, stamp });
+      const state = attempt.state === "cleanly_concluded"
+        ? attempt.conclusion === "replied" ? "completed" : "completed_no_reply" : attempt.state;
+      if (previous.get(recordKey) !== stamp) candidates.push({ record, stamp,
+        pendingCompletion: terminalState(state) && record.summary?.recorded_state !== state });
     }
     // A capture gap means a message's turn was never recorded and never will
     // be. Its delivery receipt still says whether it failed. A few per pass;
@@ -343,7 +355,7 @@ export class RoomWorkPublisher {
       return prior === undefined || this.now() - prior >= RETRY_MS;
     }).sort((a, b) => (this.stagingAttemptedAt.get(key(a.record)) ?? -Infinity)
       - (this.stagingAttemptedAt.get(key(b.record)) ?? -Infinity));
-    for (const { record, stamp } of eligible.slice(0, 4)) {
+    for (const { record, stamp } of completionFirst(eligible, item => item.pendingCompletion).slice(0, 4)) {
       await new Promise<void>(resolve => setImmediate(resolve));
       await this.options.assertCurrent();
       if (this.unavailable()) return false;
@@ -415,7 +427,8 @@ export class RoomWorkPublisher {
         if (authority && this.sameOrigin(authority.origin, record)) eligible.push({ record, authority });
       }
       more = eligible.length > 4 || more;
-      for (const { record, authority } of eligible.slice(0, 4)) {
+      for (const { record, authority } of completionFirst(eligible,
+        ({ record }) => record.revision > record.acknowledgedRevision && terminalState(record.summary?.recorded_state)).slice(0, 4)) {
         await this.options.assertCurrent();
         const current = this.authority(record.agentId);
         if (this.unavailable() || current?.grant !== authority.grant || current?.worker !== authority.worker) continue;
