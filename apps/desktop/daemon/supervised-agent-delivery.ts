@@ -80,6 +80,10 @@ export interface SupervisedDeliveryHttp {
   reportNoReply?(input: {
     roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
   }): Promise<void>;
+  /** Relinquish only the reserved speaking position after unstarted preparation is blocked. */
+  yieldReplyTurn?(input: {
+    roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
+  }): Promise<void>;
   /** Existing task GETs, filtered to this exact worker's active work leases. */
   ownedTasks?(input: { roomId: string; apiUrl: string; bearer: string; agentSessionId: string;
     taskIds?: readonly string[]; heldBefore?: string; signal: AbortSignal }): Promise<ContinuityTask[]>;
@@ -1555,7 +1559,12 @@ export class SupervisedAgentDelivery {
     const retryFailure = async (failure: Parameters<SupervisedAgentInboxStore["recordRetryFailure"]>[1]): Promise<void> => {
       if (!await this.hasLaneAuthority(agent, turnController)) return;
       const { item: recorded, attempt } = await this.inbox.recordRetryFailure(item.inbox_item_id, failure);
-      if (recorded.state === "blocked") return;
+      if (recorded.state === "blocked") {
+        if (failure.domain === "pre_dispatch" && !recorded.provider_turn_id && !recorded.outcome) {
+          void this.reportReplyTurnReceipt(agent, recorded, controller, "yield").catch(() => {});
+        }
+        return;
+      }
       await this.sleep(failure.domain === "publication" ? this.retryDelayMs
         : Math.min(2_000, this.retryDelayMs * (2 ** (attempt - 1))));
       const retryable = await this.inbox.get(item.inbox_item_id);
@@ -2224,7 +2233,13 @@ export class SupervisedAgentDelivery {
    * room sooner. Failed/lost hints leave the existing work publisher to
    * release reply order. Never send before capture/Stop arbitration settles. */
   private reportNoReply(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController): Promise<void> {
-    if (!this.http.reportNoReply || this.fenced || this.isStopping(agent.agentId) || parent.signal.aborted
+    return this.reportReplyTurnReceipt(agent, item, parent, "no_reply");
+  }
+
+  private reportReplyTurnReceipt(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController, kind: "no_reply" | "yield"): Promise<void> {
+    const report = kind === "no_reply" ? this.http.reportNoReply : this.http.yieldReplyTurn;
+    if (kind === "yield" && !item.activation.turn) return Promise.resolve();
+    if (!report || this.fenced || this.isStopping(agent.agentId) || parent.signal.aborted
       || isLocalRoomApi(agent.apiUrl) || item.room_id !== agent.roomId
       || !/^msg_[1-9]\d*$/.test(item.source_message_id)) return Promise.resolve();
     // The pump can finish before this optional request. Give it its own
@@ -2237,8 +2252,10 @@ export class SupervisedAgentDelivery {
     this.auxiliaryControllers.set(agent.agentId, controllers);
     const operation = Promise.resolve().then(async () => {
       const settled = await this.inbox.get(item.inbox_item_id);
-      if (settled?.state !== "acknowledged_no_reply" || !await this.hasLaneAuthority(agent, controller)) return;
-      await this.http.reportNoReply!({ apiUrl: agent.apiUrl, roomId: agent.roomId, bearer: agent.bearer,
+      const eligible = kind === "no_reply" ? settled?.state === "acknowledged_no_reply"
+        : settled?.state === "blocked" && !settled.provider_turn_id && !settled.outcome;
+      if (!eligible || !await this.hasLaneAuthority(agent, controller)) return;
+      await report.call(this.http, { apiUrl: agent.apiUrl, roomId: agent.roomId, bearer: agent.bearer,
         sourceMessageId: item.source_message_id, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(2_000)]) });
     }).finally(() => {
       parent.signal.removeEventListener("abort", relayAbort);

@@ -4082,6 +4082,8 @@ for (const mode of ["failure", "authority-lost", "stop", "unsupported", "indepen
   let allowed = true;
   let runs = 0;
   let reads = 0;
+  let yields = 0;
+  let yieldObservation: unknown;
   const entered = deferred<void>();
   const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
     await options?.beforeNativeDispatch?.();
@@ -4103,20 +4105,62 @@ for (const mode of ["failure", "authority-lost", "stop", "unsupported", "indepen
       activation: { for_current_agent: { decision: "activate", reason: "broadcast",
         ...(mode === "independent" ? {} : { turn: { position: 1, count: 2, prior_speakers: [] } }) } } }] }),
     publish: async () => { throw new Error("no reply expected"); },
+    yieldReplyTurn: async input => {
+      yields++;
+      const row = await store.getBySourceMessage(agent.agentId, agent.roomId, input.sourceMessageId);
+      yieldObservation = { state: row?.state, providerTurnId: row?.provider_turn_id,
+        outcome: row?.outcome, bearer: input.bearer, source: input.sourceMessageId };
+      throw new Error("yield upload unavailable");
+    },
   }, async () => allowed, 60_000);
   try {
     const pending = delivery.poll(agent);
     if (mode === "stop") { await entered.promise; await delivery.fenceAndDrain(); }
     await pending;
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(reads, mode === "independent" ? 0 : mode === "failure" ? 3 : 1, "uses the existing bounded pre-dispatch retry budget");
     assert.equal(runs, mode === "unsupported" || mode === "independent" ? 1 : 0);
+    assert.equal(yields, mode === "failure" ? 1 : 0, "only exhausted unstarted work yields; transport failure is not a provider retry");
     if (mode === "failure") {
+      assert.deepEqual(yieldObservation, { state: "blocked", providerTurnId: null,
+        outcome: null, bearer: agent.bearer, source: "msg_183" });
       const row = (await store.receipts(agent.agentId))[0]!;
       assert.equal(row.provider_turn_id, null);
       assert.equal(row.attempt_count, 0, "a failed read did not spend a model attempt");
       assert.match(row.last_error ?? "", /Context temporarily unavailable/);
     }
   } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a blocked preparation yield stays tracked through Stop and preserves retryable work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-yield-drain-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const reporting = deferred<void>(), aborted = deferred<void>(), cleanup = deferred<void>();
+  let runs = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+    runs++; throw new Error("no model should start");
+  }), {
+    context: async () => { throw new Error("offline"); }, poll: async () => ({}), publish: async () => {},
+    yieldReplyTurn: async ({ signal }) => {
+      reporting.resolve();
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => { aborted.resolve(); resolve(); }, { once: true }));
+      await cleanup.promise;
+    },
+  }, currentAuthority, 0);
+  try {
+    await ingest(store, "msg_81", { turn: { position: 1, count: 2, prior_speakers: [] } });
+    await delivery.pump(agent);
+    await reporting.promise;
+    let drained = false;
+    const stopping = delivery.fenceAndDrain().then(() => { drained = true; });
+    await aborted.promise;
+    assert.equal(drained, false, "handoff waits for the tracked request cleanup");
+    cleanup.resolve(); await stopping;
+    const row = await store.getBySourceMessage(agent.agentId, agent.roomId, "msg_81");
+    assert.equal(row?.state, "blocked");
+    assert.equal(row.attempt_count, 0);
+    assert.equal(runs, 0);
+  } finally { cleanup.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("production delivery never establishes a first cursor lazily after activation", async () => {

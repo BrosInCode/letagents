@@ -288,6 +288,21 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
       throw new Error("No-reply receipt was not acknowledged.");
     }
   },
+  async yieldReplyTurn(input) {
+    if (isLocalRoomApi(input.apiUrl) || !/^msg_[1-9]\d*$/.test(input.sourceMessageId)) return;
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.sourceMessageId}/agent-receipts/self`, {
+      method: "PUT", redirect: "error",
+      headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({ yield_reply_turn: true }),
+      signal: AbortSignal.any([input.signal, AbortSignal.timeout(2_000)]),
+    });
+    if (!response.ok) throw new Error(`Reply-turn yield failed with HTTP ${response.status}.`);
+    const body = await response.json() as Record<string, unknown>;
+    if (body?.success !== true || body.reply_turn_yielded !== true
+      || typeof body.receipt_id !== "string" || !body.receipt_id.trim()) {
+      throw new Error("Reply-turn yield was not acknowledged.");
+    }
+  },
   async ownedTasks(input) {
     const tasks: Array<{ id: string; title: string; leaseId: string; epoch: number }> = [];
     const read = async (suffix: string) => {

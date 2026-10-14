@@ -104,3 +104,30 @@ test("context body reads retain Stop cancellation and omit response text from er
     });
   } finally { globalThis.fetch = prior; }
 });
+
+test("reply-turn yield uses only the authenticated scheduling operation and validates acknowledgment", async () => {
+  const prior = globalThis.fetch;
+  let body: unknown = { success: true, receipt_id: "receipt_1", reply_turn_yielded: true };
+  let calls = 0;
+  globalThis.fetch = (async (url, init) => {
+    calls++;
+    assert.equal(String(url), "https://letagents.test/rooms/room_1/messages/msg_1/agent-receipts/self");
+    assert.equal(init?.method, "PUT");
+    assert.equal(init?.redirect, "error");
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer worker-only");
+    assert.deepEqual(JSON.parse(String(init?.body)), { yield_reply_turn: true });
+    return new Response(JSON.stringify(body));
+  }) as typeof fetch;
+  try {
+    const request = { ...input, sourceMessageId: "msg_1" };
+    await productionSupervisedDeliveryHttp.yieldReplyTurn!(request);
+    for (const invalid of [{ success: true, receipt_id: "receipt_1", receipt_state: "blocked" }, null, { success: true, reply_turn_yielded: true, receipt_id: "" }]) {
+      body = invalid;
+      await assert.rejects(productionSupervisedDeliveryHttp.yieldReplyTurn!(request), /not acknowledged/);
+    }
+    const before = calls;
+    await productionSupervisedDeliveryHttp.yieldReplyTurn!({ ...request, sourceMessageId: "synthetic" });
+    await productionSupervisedDeliveryHttp.yieldReplyTurn!({ ...request, apiUrl: "letagents-local://rooms" });
+    assert.equal(calls, before);
+  } finally { globalThis.fetch = prior; }
+});
