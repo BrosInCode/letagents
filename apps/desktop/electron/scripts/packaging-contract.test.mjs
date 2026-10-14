@@ -98,13 +98,15 @@ test("release DMGs are signed before notarization and Gatekeeper assessment", as
   const packager = await source(join(scriptsDirectory, "package-macos.mjs"));
   const signDmg = packager.indexOf('await execFileAsync("codesign", ["--sign", identity, "--force", "--timestamp", dmg]);');
   const verifyDmg = packager.indexOf('await execFileAsync("codesign", ["--verify", "--verbose=2", dmg]);');
-  const notarizeDmg = packager.indexOf("await notarize({ appPath: dmg, ...credentials });");
+  const notarizeDmg = packager.indexOf("await notarizeWithStapleRecovery({ appPath: dmg, ...credentials }, { notarize, execFile: execFileAsync });");
+  const validateDmg = packager.indexOf('await execFileAsync("xcrun", ["stapler", "validate", dmg]);');
   const assessDmg = packager.indexOf('"context:primary-signature"');
 
   assert.ok(signDmg >= 0, "the DMG must receive a Developer ID signature");
   assert.ok(verifyDmg > signDmg, "the DMG signature must be verified after signing");
   assert.ok(notarizeDmg > verifyDmg, "the signed DMG must be notarized after verification");
-  assert.ok(assessDmg > notarizeDmg, "Gatekeeper assessment must run after notarization");
+  assert.ok(validateDmg > notarizeDmg, "the stapled ticket must be validated after notarization and recovery");
+  assert.ok(assessDmg > validateDmg, "Gatekeeper assessment must run after ticket validation");
 });
 
 test("release workflow builds, attests, and publishes independent public R2 feeds", async () => {
