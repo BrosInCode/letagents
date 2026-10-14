@@ -36,12 +36,12 @@
           @click="goToSection(section.id)"
         >
           <component :is="section.icon" aria-hidden="true" />
-          <span>{{ section.title }}</span>
+          <span class="room-settings-nav-title">{{ section.title }}</span>
           <span v-if="section.dot" class="room-settings-nav-value">
             <span class="room-settings-dot" :data-state="section.dot" aria-hidden="true" />
             <span class="sr-only">{{ section.summary }}</span>
           </span>
-          <span v-else-if="section.summary" class="room-settings-nav-value">{{ section.summary }}</span>
+          <span v-else-if="section.summary" class="room-settings-nav-value room-settings-nav-summary">{{ section.summary }}</span>
         </button>
       </div>
     </nav>
@@ -381,6 +381,7 @@ import {
   isLocalGitRoom,
   roomSupportsGitHubIntegration,
 } from "../../../../domain/git-rooms";
+import { conversationSettingsSummary } from "../../../../domain/room-settings-summary";
 
 const props = defineProps<{
   room: DesktopRoomInfo;
@@ -639,7 +640,7 @@ const sections = computed<SectionLink[]>(() => {
           id: "conversation",
           title: "Conversation",
           icon: MessageSquare,
-          summary: [routingSummary.value, replyOrderSummary.value].filter(Boolean).join(" · ") || null,
+          summary: conversationSettingsSummary(routingSummary.value, replyOrderSummary.value),
         }
       : null,
     { id: "guidelines", title: "Guidelines", icon: FileText, summary: cloudRoom.value ? guidelinesSummary.value : null },

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { renderToString } from "@vue/server-renderer";
 import { createSSRApp } from "vue";
 import { createServer, type ViteDevServer } from "vite";
+import { conversationSettingsSummary } from "../src/domain/room-settings-summary";
 
 let vite: ViteDevServer;
 let DesktopRoomActionPanel: object;
@@ -187,6 +188,8 @@ test("room-wide settings are offered only where the server can hold them", async
     assert.ok(cloud.includes(`data-testid="${testId}"`), `a cloud room offers ${testId}`);
   }
   assert.ok(cloud.includes('data-testid="desktop-room-settings-nav-conversation"'));
+  // Nav titles truncate instead of running under the summary beside them.
+  assert.match(cloud, /<span class="room-settings-nav-title">Conversation<\/span>/);
   // "Answer in turns" sits directly after conversation routing, in the same section.
   assert.ok(cloud.indexOf('data-testid="room-reply-order"') > cloud.indexOf('data-testid="room-conversation-routing"'));
   assert.ok(cloud.indexOf('data-testid="room-reply-order"') < cloud.indexOf('data-section="guidelines"'));
@@ -223,4 +226,13 @@ test("GitHub connection displays review permission evidence separately without p
     if (permission === "write") assert.match(html, /GitHub confirms authorization when a review is published/);
     else assert.match(html, /Ask the repository owner/);
   }
+});
+
+test("the Conversation nav summary stays short: one active setting by name, more as a count", () => {
+  assert.equal(conversationSettingsSummary(null, null), null);
+  assert.equal(conversationSettingsSummary("Standard", null), null);
+  assert.equal(conversationSettingsSummary("Smart", null), "Smart");
+  assert.equal(conversationSettingsSummary("Standard", "In turns"), "In turns");
+  assert.equal(conversationSettingsSummary(null, "In turns"), "In turns");
+  assert.equal(conversationSettingsSummary("Smart", "In turns"), "2 on");
 });

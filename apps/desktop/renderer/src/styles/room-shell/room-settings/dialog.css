@@ -101,7 +101,7 @@
 .room-settings-nav-item {
   position: relative;
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 18px minmax(0, 1fr) fit-content(45%);
   align-items: center;
   gap: 10px;
   min-height: 40px;
@@ -125,14 +125,29 @@
   color: var(--text);
 }
 
+.room-settings-nav-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .room-settings-nav-value {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-tertiary);
   font-size: 0.75rem;
   font-weight: 400;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Text summaries are block boxes so text-overflow can draw the ellipsis. */
+.room-settings-nav-summary {
+  display: block;
 }
 
 .room-settings-content {

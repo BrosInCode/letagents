@@ -64,12 +64,22 @@ onBeforeUnmount(() => { generation++; clearTimeout(cooldownTimer); window.remove
 </script>
 <style scoped>
 .giphy-attribution { width: 100px; height: auto; padding: 2px 4px; border-radius: 3px; background: #202126; object-fit: contain; }
-.room-gif-trigger { border: 1px solid currentColor; border-radius: 5px; background: transparent; color: inherit; font-size: 10px; font-weight: 700; padding: 4px; margin: 0 5px; }
+/* Matches .desktop-composer-attach; hosts may resize it with the custom properties. */
+.room-gif-trigger {
+  display: inline-grid; place-items: center; flex: none;
+  width: var(--room-gif-trigger-size, 30px); height: var(--room-gif-trigger-size, 30px);
+  margin: 0; padding: 0; border: 0; border-radius: var(--room-gif-trigger-radius, 9px);
+  background: transparent; color: var(--text-secondary);
+  font: inherit; font-size: 10px; font-weight: 700; line-height: 1; letter-spacing: 0.02em;
+  cursor: pointer;
+}
+.room-gif-trigger:hover:not(:disabled) { background: var(--room-gif-trigger-hover-bg, color-mix(in srgb, var(--text) 10%, transparent)); color: var(--text); }
+.room-gif-trigger:disabled { cursor: not-allowed; opacity: 0.48; }
 .room-gif-picker { color: var(--text-primary, #e9e9ee); background: var(--bg-panel, #202126); border: 1px solid #7775; border-radius: 14px; width: min(470px, calc(100vw - 32px)); max-height: min(650px, 85vh); padding: 18px; box-shadow: 0 20px 80px #0006; }
 .room-gif-picker::backdrop { background: #0006; }
 header, footer, .room-gif-search { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
-button, input { font: inherit; color: inherit; background: transparent; border: 1px solid #8886; border-radius: 6px; padding: 7px 10px; }
-button { cursor: pointer; } button:disabled { opacity: .5; cursor: default; } input { min-width: 0; flex: 1; }
+.room-gif-picker button, .room-gif-picker input { font: inherit; color: inherit; background: transparent; border: 1px solid #8886; border-radius: 6px; padding: 7px 10px; }
+.room-gif-picker button { cursor: pointer; } .room-gif-picker button:disabled { opacity: .5; cursor: default; } .room-gif-picker input { min-width: 0; flex: 1; }
 p { font-size: 13px; opacity: .8; }.room-gif-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-bottom: 14px; }
 .room-gif-grid button { padding: 0; min-height: 80px; overflow: hidden; } .room-gif-grid img { display: block; width: 100%; height: 105px; object-fit: cover; }
 footer { margin: 0; font-size: 12px; } a { color: inherit; }
