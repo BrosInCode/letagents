@@ -1,7 +1,7 @@
 <template>
   <section ref="surface" class="room-tab-page room-agents-page agents-ui" data-testid="room-activity-tab-view">
     <div v-show="activeView === 'live'">
-      <header class="agents-heading"><h2>Agents</h2><button class="agents-primary" type="button" data-testid="desktop-activity-add-agent" @click="emit('open-add-agent')">+ Add agent</button></header>
+      <header class="agents-heading"><h2>Agents</h2><span class="agents-heading-actions"><button v-if="viewerLogin" class="agents-quiet" type="button" data-testid="desktop-activity-your-work" @click="openOwnWork($event)">Your work</button><button class="agents-primary" type="button" data-testid="desktop-activity-add-agent" @click="emit('open-add-agent')">+ Add agent</button></span></header>
       <AgentRoster :rows="rosterRows" @select="selectRosterAgent">
         <template #provider="{ row }"><ProviderBadge :label="row.provider" :agent-key="nativeById.get(row.id)?.agentKey" /></template>
         <template #detail="{ row }"><WakeRuleLine v-if="waitingRules(rosterAgentKey(row.id)).length && row.state === 'Online'" :rules="waitingRules(rosterAgentKey(row.id))" /><template v-else>{{ row.detail }}</template></template>
@@ -14,7 +14,7 @@
       </AgentRoster>
       <footer class="agents-footer"><button ref="pastButton" class="agents-quiet" type="button" @click="archiveMode = 'past'; navigate('history', $event)">Past agents →</button></footer>
     </div>
-    <AgentHistory v-if="activeView === 'history'" v-model:mode="archiveMode" v-model:tab="archiveTab" v-model:query="historyQuery" :people="historyPeople" :work="historyWork" @back="navigate('live', $event)">
+    <AgentHistory v-if="activeView === 'history'" v-model:mode="archiveMode" v-model:tab="archiveTab" v-model:query="historyQuery" :people="historyPeople" :work="historyWork" @back="navigate('live', $event)" @open-person="(target, event) => emit('open-person', target, personMenuPosition(event), 'menu')">
       <template #provider="{ person }"><ProviderBadge v-if="person.kind === 'agent'" :label="person.provider" /><span v-else>{{ person.name.slice(0,1) }}</span></template>
       <template #status><p v-if="roomAgentWorkStatus === 'loading'" class="agents-note" role="status">Loading saved work…</p><p v-else-if="roomAgentWorkStatus === 'error'" class="agents-note" role="status">Saved work is temporarily unavailable. <button class="agents-quiet" type="button" @click="refreshActivity">Retry</button></p><p v-else-if="roomAgentWorkStatus === 'stale'" class="agents-note">Showing saved work while updates reconnect.</p></template>
       <template #work-detail="{ record }"><template v-if="recordedWorkById.get(record.id)"><ContributionDescription :work="recordedWorkById.get(record.id)!" /><p v-if="recordedWorkEvidenceIncomplete(recordedWorkById.get(record.id)!)" class="agents-note">Some work details weren't recorded.</p><button class="agents-quiet" type="button" @click="emit('reveal-message', recordedWorkById.get(record.id)!.sourceMessageId)">View in room →</button></template></template>
@@ -62,6 +62,8 @@ import {
   type AgentInspectorProjection,
 } from "../../../domain/agent-inspector";
 import { activityParticipantToAgentTarget, ownerAttribution } from "./room-activity/agentTarget";
+import type { PersonTarget } from "../../../domain/person-target";
+import { personMenuPosition, type PersonMenuAction, type PersonMenuPosition } from "../../../domain/person-context-menu";
 import {
   participantAgentInspectorRequest,
   supervisedAgentInspectorRequest,
@@ -101,6 +103,7 @@ const props = defineProps<{
   workers: WorkerSnapshot[];
   supervisorEntries: DesktopSupervisorManifestEntry[];
   agentProjections: AgentInspectorProjection[];
+  viewerLogin?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -111,7 +114,23 @@ const emit = defineEmits<{
   "refresh-room": [];
   "reveal-message": [messageId: string];
   "clear-artifact-task-filter": [];
+  "open-person": [target: PersonTarget, position: PersonMenuPosition, action: PersonMenuAction];
 }>();
+
+/** Open the Work panel for the signed-in person. */
+function openOwnWork(event: MouseEvent): void {
+  const login = props.viewerLogin?.trim();
+  if (!login) return;
+  emit("open-person", { login, displayName: login, avatarUrl: null }, personMenuPosition(event), "work");
+}
+
+/** The activity id is "<room id>:<participant key>". The summary row has the GitHub login. */
+function participantSummaryFor(entry: DesktopActivityEntry): DesktopParticipantSummary | undefined {
+  const prefix = entry.room ? `${entry.room.id}:` : null;
+  if (!prefix || !entry.id.startsWith(prefix)) return undefined;
+  const key = entry.id.slice(prefix.length);
+  return props.participants.find(person => person.participantKey === key);
+}
 
 function recordedAgentName(agentKey: string): string {
   return props.supervisorEntries.find(entry => entry.agentKey === agentKey)?.displayName
@@ -222,6 +241,7 @@ function selectRosterAgent(id: string) {
 const historyPeople = computed<AgentHistoryPerson[]>(() => props.recentActivity.map(entry => ({
   id: entry.id, name: entry.participantDisplayName, kind: entry.participantKind, provider: entry.participantIdeLabel || 'Agent', owner: entry.participantOwnerLabel || '', room: entry.room?.displayName || 'This room', branch: entry.repoBranch, firstSeen: entry.firstSeenAt, lastSeen: entry.lastRoomActivityAt,
   past: entry.activityState !== 'active' && entry.activityState !== 'away',
+  login: entry.participantGithubLogin ?? participantSummaryFor(entry)?.githubLogin ?? null, avatarUrl: null,
 })));
 const recordedWorkById = computed(() => new Map(props.roomAgentWork.map(work => [`record:${work.attemptId}:${work.agentKey}`, work])));
 const historyWork = computed(() => mergeHistoryWork([

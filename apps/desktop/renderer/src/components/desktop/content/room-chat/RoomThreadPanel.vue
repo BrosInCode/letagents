@@ -63,6 +63,7 @@
           @scroll-to-message="navigateThreadMessageReference"
           @open-image="$emit('open-image', $event)"
           @open-agent="$emit('open-agent', $event)"
+          @open-person="(target, position) => $emit('open-person', target, position)"
           @open-github-event="$emit('open-github-event', $event)"
           @open-task="$emit('open-task', $event)"
           @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
@@ -195,6 +196,8 @@ import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../Desktop
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
+import type { PersonTarget } from "../../../../domain/person-target";
+import type { PersonMenuPosition } from "../../../../domain/person-context-menu";
 import { applySelectedTextQuoteToDraft } from "./message-format";
 import {
   applyThreadQuoteToDraft,
@@ -255,6 +258,7 @@ const emit = defineEmits<{
   "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "open-github-event": [url: string];
   "open-agent": [target: AgentModalTarget];
+  "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "open-task": [taskId: string];
   "jump-message": [messageId: string];
   "load-older-replies": [];

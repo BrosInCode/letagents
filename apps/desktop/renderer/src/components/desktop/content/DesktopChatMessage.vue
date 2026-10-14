@@ -45,6 +45,15 @@
           >
             {{ displayName }}
           </button>
+          <button
+            v-else-if="personTarget"
+            class="room-message-author-button is-person-author"
+            type="button"
+            :title="`Options for ${displayName}`"
+            @click="openPersonMenu"
+          >
+            {{ displayName }}
+          </button>
           <strong v-else>{{ displayName }}</strong>
           <span v-if="ownerKind === 'agent' && ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
 
@@ -445,6 +454,8 @@ import {
   truncate,
 } from "./desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
+import type { PersonTarget } from "../../../domain/person-target";
+import { personMenuPosition, type PersonMenuPosition } from "../../../domain/person-context-menu";
 import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 import MessageReactionBar from "../../../../../../../shared/ui/MessageReactionBar.vue";
@@ -512,6 +523,7 @@ const emit = defineEmits<{
   "scroll-to-message": [messageId: string | null];
   "open-image": [imageId: string];
   "open-agent": [target: AgentModalTarget];
+  "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "open-github-event": [url: string];
   "open-task": [taskId: string];
   "quote-selection": [messageId: string, text: string];
@@ -672,6 +684,16 @@ const ownerKind = computed(() => {
   if (props.message.source === "agent" || ownerAttribution.value || ideLabel.value) return "agent";
   return "room";
 });
+/** A human who sent this message, with a GitHub login, can be clicked. System and GitHub senders cannot. */
+const personTarget = computed<PersonTarget | null>(() => {
+  const login = props.message.senderProfile?.login?.trim();
+  if (ownerKind.value !== "human" || !login) return null;
+  return { login, displayName: displayName.value, avatarUrl: props.message.senderProfile?.avatarUrl ?? null };
+});
+function openPersonMenu(event: MouseEvent): void {
+  const target = personTarget.value;
+  if (target) emit("open-person", target, personMenuPosition(event));
+}
 const provenanceLabel = computed(() =>
   ownerKind.value === "agent" && ownerAttribution.value ? null : ownerKind.value
 );

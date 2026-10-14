@@ -253,6 +253,7 @@ export function mapRecentActivity(data: ActivityHistoryResponse): DesktopActivit
     participantActorLabel: entry.participant.actor_label || null,
     participantAgentKey: entry.participant.agent_key || null,
     participantOwnerLabel: entry.participant.owner_label || null,
+    participantGithubLogin: entry.participant.github_login || null,
     participantIdeLabel: entry.participant.ide_label || null,
     repoBranch: entry.participant.repo_branch || null,
     activityState: entry.participant.activity_state || null,
