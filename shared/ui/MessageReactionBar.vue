@@ -54,11 +54,8 @@ const emit = defineEmits<{
 }>();
 
 function label(reaction: MessageReaction): string {
-  const description = describeMessageReaction(reaction, props.viewerLogin);
-  // The list may not name the viewer when many people reacted.
-  return props.viewerReacted(reaction.emoji) && !description.startsWith("You")
-    ? `You and others reacted with ${reaction.emoji}`
-    : description;
+  // Preserve the listed names even when the viewer falls beyond the server's list.
+  return describeMessageReaction(reaction, props.viewerLogin, props.viewerReacted(reaction.emoji));
 }
 </script>
 

@@ -255,6 +255,7 @@ const required = [
     "shared/message-search.mjs",
     "shared/paced-queue.mjs",
     "shared/permission-review.mjs",
+    "shared/room-expressions.mjs",
     "shared/room-turn-no-reply.mjs",
     "shared/room-typing.mjs",
     "shared/routing-aliases.mjs",
