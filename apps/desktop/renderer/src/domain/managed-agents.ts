@@ -635,6 +635,8 @@ export interface ManagedAgentWorkIndicator {
   agentKey?: string | null;
   /** Exact activating room message; establishes causal order without comparing host clocks. */
   sourceMessageId?: string | null;
+  /** Routed participant whose native turn may still be held by the room. */
+  awaitingRoomTurn?: true;
   /** The agent is not working: it waits for the time of its automatic attempt. The row rests. */
   waiting?: true;
   /** The turn is held open for background work. Its answer exists, and its owner can end the wait. The row works: something runs. */
@@ -675,6 +677,8 @@ export function workIndicatorSupersededByAgentMessage(
   indicator: ManagedAgentWorkIndicator,
   messages: readonly Pick<DesktopRoomMessage, "id" | "agentIdentity">[],
 ): boolean {
+  // A reply to an earlier request cannot finish this pending exchange.
+  if (indicator.awaitingRoomTurn) return false;
   const sourceMessageId = indicator.sourceMessageId?.trim() || null;
   if (!sourceMessageId) return false;
   const sourceIndex = messages.findIndex((message) => message.id === sourceMessageId);

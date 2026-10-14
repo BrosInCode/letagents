@@ -741,7 +741,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     if (event.type === "message") {
       const priorMessages = options.selectedSnapshot.value?.messages ?? [];
-      setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, event.message));
+      setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, event.message, event.live === true));
       if (messageReferencesMissingThreadContext(event.message, priorMessages)) {
         options.scheduleLiveMetadataRefresh();
       }
@@ -910,7 +910,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   function handleMessageSent(message: DesktopRoomMessage): void {
     const priorMessages = options.selectedSnapshot.value?.messages ?? [];
-    setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, message));
+    setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, message, true));
     if (messageReferencesMissingThreadContext(message, priorMessages)) {
       options.scheduleLiveMetadataRefresh();
     }

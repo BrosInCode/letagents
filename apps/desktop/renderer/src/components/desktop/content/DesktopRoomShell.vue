@@ -319,6 +319,8 @@
 
 <script setup lang="ts">
 import type { ChatScrollPosition } from "../../../domain/chat-scroll";
+import { mergeRoomResponseParticipants } from "../../../domain/room-response-participants";
+import { useRoomResponseParticipants } from "../../../composables/useRoomResponseParticipants";
 import { roomAgentRecoveryAction } from "../../../domain/room-agent-delivery";
 import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowReadonly, toRef, watch } from "vue";
@@ -496,7 +498,6 @@ import { desktopIpc } from "../../../ipc/index.js";
 import { hostApprovalStopsTurn } from "./room-chat/host-approval-presentation";
 import { hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./room-chat/host-approvals";
 import { provideRoomWakeRules, useRoomWakeRules } from "../../../composables/useRoomWakeRules";
-
 const props = defineProps<{
   viewerLogin?: string | null;
   sidebarMode: SidebarMode;
@@ -533,7 +534,6 @@ const props = defineProps<{
 }>();
 const { pushActionToast } = useDesktopActionToasts();
 const notifiedManagedAgentFailures = new Set<string>();
-
 const emit = defineEmits<{
   "attention-opened": [];
   "cycle-sidebar": [];
@@ -553,7 +553,6 @@ const emit = defineEmits<{
   "message-reveal-unavailable": [messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"];
   "open-inbox": [];
 }>();
-
 const roomRef = toRef(props, "room");
 const messagesRef = toRef(props, "messages");
 const reasoningSessionsRef = toRef(props, "reasoningSessions");
@@ -770,7 +769,6 @@ const {
   showRoomNotification,
   watchRoomNotifications,
 } = useDesktopRoomPreferences(() => props.room.identifier);
-
 const {
   sendingMessage,
   sendError,
@@ -933,8 +931,13 @@ const agentMentionInsertTextByEntryId = computed(() => {
   }
   return result;
 });
+const pendingResponseParticipants = useRoomResponseParticipants(() => ({
+  roomIdentifier: props.room.identifier, loading: props.roomLoading, messages: props.messages,
+  entries: supervisorEntries.value, presence: roomPresence.value,
+  fresh: supervisorEntriesResourceFreshness(supervisorEntriesState.value) === "fresh",
+}));
 const localAgentWork = computed(() =>
-  [
+  mergeRoomResponseParticipants([
     ...waitingAgentIndicators(supervisorEntries.value, props.room.identifier),
     ...activeManagedAgentWorkIndicators(
       roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId),
@@ -942,7 +945,7 @@ const localAgentWork = computed(() =>
     ),
     ...supervisedAgentWorkIndicators(supervisorEntries.value, roomPresence.value, props.room.identifier,
       supervisorEntriesResourceFreshness(supervisorEntriesState.value)),
-  ]
+  ], pendingResponseParticipants.value, props.messages)
 );
 const pendingPermissionApprovals = computed(() =>
   pendingManagedAgentPermissionApprovals(roomManagedAgentSessions.value, props.room.identifier)

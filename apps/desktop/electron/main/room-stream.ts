@@ -518,6 +518,7 @@ export function emitPersistedLocalRoomMessage(
   stream.localUiMessageTracker.remember(trimmedRoomIdentifier, message.id);
   emitRoomStreamEvent({
     type: "message",
+    live: true,
     roomIdentifier: trimmedRoomIdentifier,
     message,
   }, { deliverToManagedAgents: false });
@@ -998,6 +999,7 @@ function handleRoomStreamFrame(
     );
     emitRoomStreamEvent({
       type: "message",
+      live: true,
       roomIdentifier: eventRoomIdentifier,
       message: mapCloudRoomMessagePayload(
         payload as Parameters<typeof mapRoomMessagePayload>[0],

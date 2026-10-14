@@ -319,6 +319,8 @@ export interface DesktopRoomMessage {
   clientMessageId?: string | null;
   /** Renderer-only submission state; never a server message identity. */
   outgoing?: { status: "pending" | "uncertain"; attachmentCount: number; error: string | null };
+  /** Renderer-only arrival sequence from a live event/send, never history backfill. */
+  liveArrival?: number;
   sender: string;
   text: string;
   displayText?: string | null;
@@ -674,6 +676,8 @@ export type DesktopRoomStreamEvent =
       type: "message";
       roomIdentifier: string;
       message: DesktopRoomMessage;
+      /** Genuine live delivery, not a fetched history/catch-up event. */
+      live?: true;
     }
   | {
       /** Bounded authoritative tail used after a very large durable catch-up. */
