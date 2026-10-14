@@ -191,8 +191,9 @@
   transform: translateY(-50%) scale(1.03);
 }
 
+/* Rows stay draggable for reordering, but hovering one is a click target first: the grab hand shows only while a drag is in progress. */
 :is(.pinned-room, .project-row, .room-row)[draggable="true"] {
-  cursor: grab;
+  cursor: pointer;
 }
 
 :is(.pinned-room, .project-row, .room-row)[data-dragging="true"],
@@ -349,8 +350,7 @@
   color: var(--text);
 }
 
-.room-child-meta,
-.room-suggested-action {
+.room-child-meta {
   min-width: 0;
   overflow: hidden;
   font-size: 0.68rem;
@@ -362,10 +362,6 @@
 
 .room-child-meta {
   color: var(--text-tertiary);
-}
-
-.room-suggested-action {
-  color: color-mix(in srgb, var(--accent, #7dd3fc) 78%, var(--text-secondary));
 }
 
 .room-workspace-pill {

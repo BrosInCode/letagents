@@ -29,12 +29,6 @@
       <SidebarRoomActivity :activity="entry.activity" />
       <RoomUnreadBadge :count="entry.unreadCount || 0" :marked-unread="entry.hasUnread" />
     </span>
-    <small
-      v-if="entry.suggestedAction && !entry.currentWorkspace"
-      class="room-suggested-action"
-    >
-      {{ entry.suggestedAction }}
-    </small>
   </button>
 </template>
 

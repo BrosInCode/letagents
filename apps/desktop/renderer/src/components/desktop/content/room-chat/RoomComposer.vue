@@ -201,32 +201,34 @@
         @input="handleDraftInput"
         @keydown="handleComposerKey"
       />
-      <button
-        class="desktop-composer-attach"
-        type="button"
-        :disabled="roomLoading || sending || !roomIdentifier || attaching"
-        :title="attaching ? 'Attaching' : 'Attach files'"
-        :aria-label="attaching ? 'Attaching files' : 'Attach files'"
-        data-testid="desktop-composer-attach"
-        @click="$emit('pick-attachments')"
-      >
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.8-8.8a4 4 0 1 1 5.7 5.7l-8.9 8.9a2 2 0 0 1-2.8-2.8l8.1-8.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
-      </button>
-      <RoomGifPicker :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending" @select="selectedGif = $event" />
-      <button
-        class="desktop-composer-send"
-        type="submit"
-        :aria-label="sending ? 'Sending message' : 'Send message'"
-        :title="sending ? 'Sending message' : 'Send message'"
-        :disabled="roomLoading || sending || slash.busy.value || !canSend"
-        data-testid="desktop-composer-send"
-      >
-        <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
-        <ArrowUp v-else :size="17" aria-hidden="true" />
-      </button>
+      <div class="desktop-composer-actions" data-testid="desktop-composer-actions">
+        <button
+          class="desktop-composer-attach"
+          type="button"
+          :disabled="roomLoading || sending || !roomIdentifier || attaching"
+          :title="attaching ? 'Attaching' : 'Attach files'"
+          :aria-label="attaching ? 'Attaching files' : 'Attach files'"
+          data-testid="desktop-composer-attach"
+          @click="$emit('pick-attachments')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.8-8.8a4 4 0 1 1 5.7 5.7l-8.9 8.9a2 2 0 0 1-2.8-2.8l8.1-8.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
+        </button>
+        <RoomGifPicker :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending" @select="selectedGif = $event" />
+        <button
+          class="desktop-composer-send"
+          type="submit"
+          :aria-label="sending ? 'Sending message' : 'Send message'"
+          :title="sending ? 'Sending message' : 'Send message'"
+          :disabled="roomLoading || sending || slash.busy.value || !canSend"
+          data-testid="desktop-composer-send"
+        >
+          <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
+          <ArrowUp v-else :size="17" aria-hidden="true" />
+        </button>
+      </div>
     </div>
     <div v-if="selectedGif" class="desktop-composer-gif-draft">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
     <DesktopAttachmentDrafts
