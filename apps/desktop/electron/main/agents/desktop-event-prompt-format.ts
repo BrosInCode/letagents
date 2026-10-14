@@ -48,8 +48,21 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
     // A reference may contain fewer fields than a full message. Do not erase
     // a different edit, author, GIF, attachment or other substantive field.
     const candidates = supplied.filter(message => message.id === quote.id);
+    // Thread/reply previews can omit identity enrichment while the complete
+    // message in this same prompt has it. A null preview is not a competing
+    // author; conflicting or malformed identities must still stay explicit.
+    const identities = candidates.map(message => message.agent_identity).filter(value => value != null);
+    const identityEnrichment = quote.agent_identity === null && quote.source === "agent"
+      && typeof quote.sender === "string" && typeof quote.timestamp === "string"
+      && identities.length > 0 && identities.every(value => {
+        const identity = record(value);
+        return identity && typeof identity.agent_key === "string" && identity.agent_key.trim()
+          && typeof identity.actor_label === "string" && identity.actor_label.trim()
+          && (identity.agent_session_id == null || (typeof identity.agent_session_id === "string" && identity.agent_session_id.trim()))
+          && isDeepStrictEqual(value, identities[0]);
+      });
     if (candidates.length && candidates.every(message => Object.entries(quote).every(([key, field]) =>
-      isDeepStrictEqual(field, message[key])))) return { id: quote.id };
+      (key === "agent_identity" && identityEnrichment) || isDeepStrictEqual(field, message[key])))) return { id: quote.id };
     supplied.push(quote); // Keep an outside-history quote in full once.
     return quote;
   };

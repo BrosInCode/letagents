@@ -131,6 +131,59 @@ test("UI summaries and repeated bodies shrink while media, identities and source
   assert.deepEqual({ source, history }, before, "durable data is never mutated");
 });
 
+test("null identity enrichment does not repeat full reply previews already supplied in this prompt", () => {
+  const identity = { agent_key: "agent-a", actor_label: "Peer | Owner | Codex", agent_session_id: "session-a" };
+  const full = { id: "msg_1", sender: "Peer", source: "agent", timestamp: "2026-10-14T17:00:00Z",
+    text: "A complete independent perspective. ".repeat(100), agent_identity: identity,
+    attachments: [], gif: null };
+  const preview = { ...full, agent_identity: null };
+  const source = { id: "msg_2", room_id: "room-a", source: "human", text: "Keep this full human correction.",
+    reply_to: preview, thread: { root_message_id: "msg_1", latest_reply: preview } };
+  const before = structuredClone({ full, source });
+  const result = formatted(source, [full]);
+  assert.deepEqual(result.context, [full]);
+  assert.deepEqual(result.source.reply_to, { id: "msg_1" });
+  assert.deepEqual(result.source.thread.latest_reply, { id: "msg_1" });
+  assert.equal(result.source.text, source.text);
+  assert.equal(result.text.split(full.text).length - 1, 1);
+  assert.deepEqual({ full, source }, before);
+  const cache = new RoomTurnContextCache();
+  const request = { roomId: "room-a", sourceMessage: source, observedContext: [full], activation: {} } as any;
+  cache.prepare(request, "native-a").commit();
+  cache.reset();
+  assert.deepEqual(cache.prepare(request, "native-a").lines, formatRoomTurnContext(request), "reset still supplies every full message once");
+  const outside = formatted(source);
+  assert.deepEqual(outside.source.reply_to, preview, "outside-window context is still supplied in full");
+  assert.deepEqual(outside.source.thread.latest_reply, { id: "msg_1" });
+});
+
+test("null identity previews preserve edits, author conflicts, malformed identities and substantive differences", () => {
+  const identity = { agent_key: "agent-a", actor_label: "Peer | Owner | Codex", agent_session_id: "session-a" };
+  const full = { id: "msg_1", sender: "Peer", source: "agent", timestamp: "2026-10-14T17:00:00Z",
+    text: "A complete perspective", agent_identity: identity, gif: null, attachments: [] };
+  const preview = { ...full, agent_identity: null };
+  const changedPreviews = [
+    { ...preview, text: "Earlier edit" }, { ...preview, sender: "Other" },
+    { ...preview, source: "human" }, { ...preview, timestamp: "2026-10-14T16:00:00Z" },
+    { ...preview, gif: { id: "different-gif" } }, { ...preview, attachments: [{ id: "new-file" }] },
+    { ...preview, future_constraint: "Must remain complete" },
+    { ...preview, agent_identity: { ...identity, agent_key: "other-agent" } },
+    { ...preview, agent_identity: [] },
+  ];
+  for (const quote of changedPreviews) {
+    const result = formatted({ id: "msg_2", text: "Respond", reply_to: quote, thread: { latest_reply: quote } }, [full]);
+    assert.deepEqual(result.source.reply_to, quote);
+    assert.deepEqual(result.source.thread.latest_reply, quote);
+  }
+  for (const identityOrEdit of [
+    { agent_identity: { ...identity, agent_key: "other-agent" } },
+    { text: "Changed full message" }, { agent_identity: "malformed" }, { agent_identity: {} },
+  ]) {
+    const result = formatted({ id: "msg_2", text: "Respond", reply_to: preview }, [full, { ...full, ...identityOrEdit }]);
+    assert.deepEqual(result.source.reply_to, preview, "a null identity cannot collapse ambiguous full candidates");
+  }
+});
+
 test("unknown synthetic payloads, null source and distinct display text retain their content", () => {
   const synthetic = { id: "task-continuation:example", text: "Continue work", thread: { participants: ["Required participant"] },
     sender_profile: { avatar_url: "synthetic-data" }, custom: { required: true } };
