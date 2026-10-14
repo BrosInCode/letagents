@@ -8751,6 +8751,39 @@ test("Codex turn-boundary inspection validates the complete native snapshot with
   subscription.dispose();
 });
 
+test("an unloaded Codex thread proves idle only when its exact app-server has no loaded threads", async () => {
+  const cases = [
+    { name: "empty", loaded: { data: [], nextCursor: null }, idle: true },
+    { name: "same thread loaded", loaded: { data: ["thread-1"], nextCursor: null } },
+    { name: "another thread loaded", loaded: { data: ["other-thread"], nextCursor: null } },
+    { name: "incomplete page", loaded: { data: [], nextCursor: "next" } },
+    { name: "missing cursor", loaded: { data: [] } },
+    { name: "missing data", loaded: { nextCursor: null } },
+    { name: "null data", loaded: { data: null, nextCursor: null } },
+    { name: "unavailable", loaded: new Error("read failed") },
+    { name: "process replaced", loaded: { data: [], nextCursor: null }, race: true },
+  ];
+  for (const testCase of cases) {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    const calls: string[] = [];
+    client.request = async <T>(method: string): Promise<T> => {
+      calls.push(method);
+      if (method === "thread/read") return { thread: { id: handle.providerContinuationId,
+        status: { type: "notLoaded" }, turns: [{ id: "finished", status: "completed" }] } } as T;
+      assert.equal(method, "thread/loaded/list");
+      if (testCase.race) harness.launches[0]!.processIdentity += "-replaced";
+      if (testCase.loaded instanceof Error) throw testCase.loaded;
+      return testCase.loaded as T;
+    };
+    assert.equal((await adapter.inspectTurnBoundary(handle)).state, testCase.idle ? "idle" : "unknown", testCase.name);
+    assert.deepEqual(calls, ["thread/read", "thread/loaded/list"], testCase.name);
+    assert.deepEqual(harness.signals, []);
+  }
+});
+
 for (const race of ["process_birth", "continuation", "owned_handle"] as const) {
   test(`Codex turn-boundary inspection rejects ${race} changes during its native read`, async () => {
     const harness = createHarness();
@@ -8799,18 +8832,23 @@ for (const race of ["process_birth", "continuation", "owned_handle"] as const) {
   });
 }
 
-for (const race of ["none", "permission", "connection", "birth", "active", "unknown", "reservation"] as const) {
+for (const race of ["none", "unloaded", "unloaded_permission", "unloaded_connection", "permission", "connection", "birth", "active", "unknown", "reservation"] as const) {
   test(`idle replacement sends no signal after ${race} proof changes`, async () => {
     const harness = createHarness({ exitOnSignal: true });
     const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
     const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
     const client = harness.clients[0]!;
-    client.request = async <T>(): Promise<T> => {
+    client.request = async <T>(method: string): Promise<T> => {
+      if (method === "thread/loaded/list") {
+        if (race === "unloaded_permission") client.pendingPermissions.set(22, { id: 22, method: "unknown/request", params: {}, connectionId: client.connectionEpoch });
+        if (race === "unloaded_connection") client.connectionEpoch = "replacement";
+        return { data: [], nextCursor: null } as T;
+      }
       if (race === "permission") client.pendingPermissions.set(22, { id: 22, method: "unknown/request", params: {}, connectionId: client.connectionEpoch });
       if (race === "connection") client.connectionEpoch = "replacement";
       if (race === "birth") harness.launches[0]!.processIdentity += "-replacement";
       return (race === "unknown" ? {} : { thread: { id: handle.providerContinuationId,
-        status: { type: race === "active" ? "active" : "idle" },
+        status: { type: race.startsWith("unloaded") ? "notLoaded" : race === "active" ? "active" : "idle" },
         turns: race === "active" ? [{ id: "turn-live", status: "inProgress" }] : [] } }) as T;
     };
     let finalChecks = 0;
@@ -8818,7 +8856,7 @@ for (const race of ["none", "permission", "connection", "birth", "active", "unkn
       finalChecks += 1;
       if (race === "reservation") throw new Error("reservation changed");
     });
-    if (race === "none") {
+    if (race === "none" || race === "unloaded") {
       assert.equal((await stopping).terminalCause, "stopped");
       assert.equal(finalChecks, 1);
       assert.deepEqual(harness.signals, [{ pid: handle.pid, signal: "SIGTERM" }]);
