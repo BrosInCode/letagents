@@ -119,8 +119,13 @@ const isRevoked = ref(false)
 
 .lending-card {
   border-radius: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: #111113;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(18, 18, 22, 0.38);
+  backdrop-filter: blur(28px) saturate(150%);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 24px 64px rgba(0, 0, 0, 0.45);
   overflow: hidden;
 }
 
@@ -152,17 +157,20 @@ const isRevoked = ref(false)
   align-items: center;
   justify-content: center;
   margin-bottom: 12px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 
 .node-box--locked {
-  background: #18181b;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   color: #f5f5f7;
 }
 
 .node-box--agent {
-  background: #18181b;
-  border: 1px solid rgba(42, 196, 159, 0.35);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(42, 196, 159, 0.38);
 }
 
 .node-box--agent img {
@@ -232,8 +240,8 @@ const isRevoked = ref(false)
   justify-content: space-between;
   gap: 16px;
   padding: 18px 28px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  background: #0d0d0f;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
 }
 
 .footer-status {

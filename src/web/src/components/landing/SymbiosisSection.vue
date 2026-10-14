@@ -461,11 +461,16 @@ onUnmounted(() => {
   text-wrap: balance;
 }
 
-/* ─── MINIMALIST 5-NODE STAGE (ZERO GRADIENTS) ─── */
+/* ─── TRANSLUCENT FROSTED GLASS 5-NODE STAGE ─── */
 .motion-stage {
   border-radius: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  background: #111113;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(18, 18, 22, 0.38);
+  backdrop-filter: blur(28px) saturate(150%);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 24px 64px rgba(0, 0, 0, 0.45);
   overflow: hidden;
 }
 
@@ -487,7 +492,7 @@ onUnmounted(() => {
 }
 
 .path-track {
-  stroke: rgba(255, 255, 255, 0.07);
+  stroke: rgba(255, 255, 255, 0.09);
   stroke-width: 1.5;
 }
 
@@ -498,15 +503,15 @@ onUnmounted(() => {
 }
 
 .path-lit--white {
-  stroke: rgba(245, 245, 247, 0.45);
+  stroke: rgba(245, 245, 247, 0.55);
 }
 
 .path-lit--mint {
-  stroke: rgba(42, 196, 159, 0.55);
+  stroke: rgba(42, 196, 159, 0.65);
 }
 
 .peer-line {
-  stroke: rgba(42, 196, 159, 0.45);
+  stroke: rgba(42, 196, 159, 0.5);
   stroke-width: 1.5;
   stroke-dasharray: 4 4;
   opacity: 0;
@@ -552,8 +557,10 @@ onUnmounted(() => {
 }
 
 .orb--ship {
-  background: #18181b;
-  border: 1.5px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1.5px solid rgba(255, 255, 255, 0.16);
   color: #86868b;
   transition: background 300ms ease, border-color 300ms ease, color 300ms ease;
 }
@@ -591,19 +598,23 @@ onUnmounted(() => {
   gap: 14px;
   padding: 6px 16px 6px 6px;
   border-radius: 18px;
-  background: #161619;
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.045);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
   min-width: 210px;
-  transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), border-color 300ms ease;
+  transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), border-color 300ms ease, background 300ms ease;
 }
 
 .agent-node--active {
   transform: translateY(-2px);
-  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.075);
+  border-color: rgba(255, 255, 255, 0.2);
 }
 
 .agent-node--done {
-  border-color: rgba(42, 196, 159, 0.35);
+  border-color: rgba(42, 196, 159, 0.38);
 }
 
 .squircle-wrap {
@@ -622,8 +633,8 @@ onUnmounted(() => {
 }
 
 .ring-track {
-  fill: #1c1c20;
-  stroke: rgba(255, 255, 255, 0.08);
+  fill: rgba(255, 255, 255, 0.05);
+  stroke: rgba(255, 255, 255, 0.1);
   stroke-width: 1.5;
 }
 
@@ -669,9 +680,9 @@ onUnmounted(() => {
 /* ─── LIVE CAPTION BAR ─── */
 .live-caption-bar {
   padding: 18px 28px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
   text-align: center;
-  background: #0e0e10;
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .live-caption-text {
@@ -684,8 +695,8 @@ onUnmounted(() => {
 .scrubber-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  background: #0b0b0d;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
 }
 
 .scrubber-tab {

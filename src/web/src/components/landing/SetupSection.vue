@@ -151,8 +151,13 @@ async function copyForAgent(idx: number) {
   gap: 16px;
   padding: 16px;
   border-radius: 32px;
-  background: #111113;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(18, 18, 22, 0.38);
+  backdrop-filter: blur(28px) saturate(150%);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 24px 64px rgba(0, 0, 0, 0.45);
 }
 
 .dock-item {
@@ -167,22 +172,25 @@ async function copyForAgent(idx: number) {
 }
 
 .dock-item:hover {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
   transform: translateY(-2px);
 }
 
 .dock-item--copied {
-  background: rgba(42, 196, 159, 0.08);
-  border-color: rgba(42, 196, 159, 0.35);
+  background: rgba(42, 196, 159, 0.1);
+  border-color: rgba(42, 196, 159, 0.38);
 }
 
 .dock-squircle {
   width: 64px;
   height: 64px;
   border-radius: 18px;
-  background: #18181b;
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
   display: flex;
   align-items: center;
   justify-content: center;
