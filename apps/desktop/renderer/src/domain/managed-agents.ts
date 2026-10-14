@@ -380,6 +380,16 @@ export function supervisedAgentWorkIndicators(
     )
     .flatMap((entry) => {
       const turn = entry.roomAgentState!.turn;
+      // A terminal receipt can arrive before the active-turn projection clears.
+      // Do not keep saying "Writing" after this exact turn chose not to reply.
+      // Matching the native turn as well as the inbox preserves later retries.
+      const settled = entry.deliveryReceipts?.some(receipt =>
+        Boolean(turn.inboxItemId && turn.providerTurnId)
+        && receipt.inboxItemId === turn.inboxItemId
+        && receipt.providerTurnId === turn.providerTurnId
+        && receipt.sourceMessageId === turn.sourceMessageId
+        && (receipt.state.startsWith("acknowledged") || receipt.state.startsWith("cancelled")));
+      if (settled) return [];
       const turnStartedAt = currentRoomTurnStartedAt(entry);
       const turnStartedAtMs = Date.parse(turnStartedAt ?? "");
       const nativeActivityIsCurrent = entry.observedState === "working"

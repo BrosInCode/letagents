@@ -21,8 +21,8 @@ export function agentInspectorActionErrorMessage(
   error: unknown,
 ): string {
   const detail = error instanceof Error ? error.message : "";
-  if (kind === "reconnect" && /previous provider runtime is unavailable|no longer has a live runtime/i.test(detail)) {
-    return "This provider process has stopped. Recover the agent to continue with the same identity and workspace.";
+  if ((kind === "reconnect" || kind === "reconnect_runtime") && /previous provider runtime is unavailable|no longer has a live runtime/i.test(detail)) {
+    return "This provider process has stopped. Open Diagnostics → Agent runtime for recovery options to continue with the same identity and workspace.";
   }
   if (kind === "recover" && /cannot prove that the previous provider process stopped/i.test(detail)) {
     return "LetAgents could not safely prove the old provider stopped. No replacement was started.";
@@ -38,7 +38,7 @@ export function agentInspectorSignal(projection: AgentInspectorProjection, nowMs
   if (projection.resourceFreshness === 'stale') return {
     state: 'stale', label: 'Updates delayed', detail: 'Showing the last known state. Controls return when the connection does.', tone: 'amber', moving: false,
   };
-  if (agentCompactionProgress(projection.entry)) return {
+  if (!projection.runtimeExited && agentCompactionProgress(projection.entry)) return {
     state: 'compacting', label: 'Compacting context', detail: 'Summarizing earlier context.', tone: 'violet', moving: true,
   };
   const state = projection.overallState;

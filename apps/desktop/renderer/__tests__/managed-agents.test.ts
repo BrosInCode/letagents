@@ -788,6 +788,19 @@ test("supervisor native activity drives the chat work indicator for the bound ro
     }],
     "an internal item completing cannot hide an active room turn",
   );
+  const settledReceipt = { ...working.deliveryReceipts![0]!, state: "acknowledged_no_reply" as const };
+  assert.deepEqual(supervisedAgentWorkIndicators([
+    { ...working, deliveryReceipts: [settledReceipt] },
+  ], [], "room_1"), [], "a settled exact turn cannot still claim to be writing while its active projection catches up");
+  for (const mismatch of [
+    { inboxItemId: "previous_inbox" },
+    { providerTurnId: "previous_turn" },
+    { sourceMessageId: "previous_message" },
+  ]) {
+    assert.equal(supervisedAgentWorkIndicators([
+      { ...working, deliveryReceipts: [{ ...settledReceipt, ...mismatch }] },
+    ], [], "room_1").length, 1, "a completed different turn cannot hide current work");
+  }
   assert.deepEqual(
     supervisedAgentWorkIndicators([{
       ...working,

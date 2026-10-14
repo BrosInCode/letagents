@@ -668,6 +668,8 @@ const agentInspectorProjections = computed(() => {
     continuationRepairAvailable: continuationRepairAvailable.value,
     roomDeliverySkipAvailable: roomDeliverySkipAvailable.value,
     resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesState.value),
+    workResource: agentInspectorWorkResource.value,
+    daemonGeneration: supervisorStatus.value?.generation ?? null,
     mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
     deliveryRetryingKeys: deliveryRetryingKeys.value,
     pauseRequestedEntryIds: agentPauseRequests.entryIds.value,
@@ -2914,6 +2916,12 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
     };
   } catch (error) {
     if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
+    if (intent.kind === "reconnect" || intent.kind === "reconnect_runtime") {
+      // A failed credential reconnect may reveal a stopped runtime. Read the
+      // existing fenced diagnostics so Overview offers the correct recovery.
+      await refreshAgentInspectorDiagnostics().catch(() => false);
+      if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
+    }
     const refreshed = intent.kind === "retire_agent" ? await refreshSupervisorStatus() : supervisorStatus.value;
     agentInspectorActionState.value = {
       operationId,

@@ -20,6 +20,7 @@ import {
 import { ownerSetupRefusalReason, ownerSetupStartHint } from "./agent-home-harness";
 import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
+import { agentInspectorRuntimeControlMatchesFence, type AgentInspectorWorkResource } from "./agent-inspector-work";
 
 export type AgentInspectorOverallState =
   | "retired"
@@ -299,6 +300,8 @@ export interface AgentInspectorProjection {
   actions: AgentInspectorActionAvailability[];
   mentionInsertText: string | null;
   resourceFreshness: "fresh" | "stale";
+  /** Fresh exact runtime observation; overrides retained native progress hints. */
+  runtimeExited?: boolean;
   entry: DesktopSupervisorManifestEntry;
 }
 
@@ -329,6 +332,8 @@ export function agentInspectorLiveAnnouncement(
 
 export interface AgentInspectorProjectionOptions {
   roomId: string | null;
+  workResource?: AgentInspectorWorkResource;
+  daemonGeneration?: number | null;
   tasks?: readonly DesktopTaskSummary[];
   deliveryRetryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
@@ -1142,10 +1147,23 @@ export function projectAgentInspector(
   // take a while mid-turn. The drained delivery would read as disconnected
   // meanwhile, so this desktop's open request decides the state until then.
   const pausing = entry.desiredState === "running" && Boolean(options.pauseRequestedEntryIds?.has(entry.id));
-  const overallState = pausing ? "paused" : agentInspectorOverallState(entry);
-  const presentation = pausing ? pausingPresentation : overallPresentation(overallState);
   const resourceFreshness = options.resourceFreshness ?? "fresh";
-  const now = nowProjection(resourceFreshness === "fresh" ? entry : { ...entry, providerProgress: null }, overallState);
+  const detail = options.workResource?.detail;
+  // Overview and Diagnostics must use the same exact runtime observation.
+  // Retained PIDs and an unreachable control channel are not proof of exit.
+  const providerStopped = resourceFreshness === "fresh" && options.workResource?.status === "ready"
+    && entry.deliveryMode === "daemon_inbox"
+    && entry.desiredState === "running" && !entry.runtimeRecovery
+    && detail?.entry_id === entry.id && detail.room_id === entry.roomId
+    && detail.runtime_control?.runtime_state === "exited"
+    && agentInspectorRuntimeControlMatchesFence(detail.runtime_control, entry.executionGenerationId,
+      options.daemonGeneration ?? null, entry.runtimeGenerationId);
+  const overallState = pausing ? "paused" : providerStopped ? "needs_attention" : agentInspectorOverallState(entry);
+  const presentation = pausing ? pausingPresentation : overallPresentation(overallState);
+  const now: AgentInspectorNowProjection | null = providerStopped && !pausing
+    ? { kind: "attention", label: "Agent stopped", summary: "Open Recovery options to restart this agent with its saved conversation.",
+      observedAt: detail?.runtime_control?.observed_at ?? null }
+    : nowProjection(resourceFreshness === "fresh" ? entry : { ...entry, providerProgress: null }, overallState);
   const mentionInsertText = options.mentionInsertTextByEntryId?.get(entry.id) ?? null;
   const rawTurnControl = projectAgentInspectorTurnControl(entry);
   // A stale Inspector keeps its last meaningful explanation but never offers a
@@ -1168,7 +1186,10 @@ export function projectAgentInspector(
     resourceFreshness,
     mentionInsertText,
     turnControl,
-  );
+  ).map(action => providerStopped && !pausing
+    ? action.kind === "reconnect" || action.kind === "reconnect_runtime" ? { ...action, available: false }
+      : action.kind === "recovery_options" ? { ...action, available: true } : action
+    : action);
   return {
     entryId: entry.id,
     roomId: entry.roomId,
@@ -1180,7 +1201,7 @@ export function projectAgentInspector(
     charter: entry.charter,
     overallState,
     overallLabel: presentation.label,
-    overallDetail: resourceFreshness === "fresh" && agentCompactionProgress(entry)
+    overallDetail: resourceFreshness === "fresh" && !providerStopped && agentCompactionProgress(entry)
       ? "Compacting conversation" : presentation.detail,
     deliveryProgress: deliveryProgress(
       entry,
@@ -1196,6 +1217,7 @@ export function projectAgentInspector(
     actions,
     mentionInsertText,
     resourceFreshness,
+    runtimeExited: providerStopped && !pausing,
     entry,
   };
 }
