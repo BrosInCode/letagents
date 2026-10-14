@@ -34,7 +34,7 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
   for (const room of data?.rooms ?? []) {
     const scope = { roomIdentifier: room.roomIdentifier, roomName: room.displayName };
     for (const record of room.records) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, record.id]),
-      section: record.response ? 'answered' : 'needs-you', category: record.category,
+      section: record.response ? 'answered' : 'needs-you', category: attentionRecordCategory(record),
       title: record.title, body: record.body, timestamp: record.response?.at || record.created_at,
       actor: record.author.label, record, fingerprint: String(record.version) });
     const tasks = new Map(room.tasks.map(task => [task.id, { id: task.id, title: task.title, description: task.description, status: task.status, updatedAt: task.updated_at }]));
@@ -152,8 +152,13 @@ export function searchInboxRooms<T extends { roomIdentifier: string; displayName
   return needle ? rooms.filter(room => room.displayName.toLocaleLowerCase().includes(needle) || room.roomIdentifier.toLocaleLowerCase().includes(needle)) : [...rooms];
 }
 
+/** A request closed without an answer reads as Closed, whatever it asked. */
+export function attentionRecordCategory(record: KnowledgeRecord): string {
+  return record.response?.closed ? 'closed' : record.category;
+}
+
 export function inboxCategoryLabel(category: string): string {
-  return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', blocked: 'Blocked task',
+  return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', closed: 'Closed', blocked: 'Blocked task',
     in_review: 'Task review', done: 'Completed', merged: 'Merged', thread: 'Unread replies', github_failure: 'Failed check',
     agent_blocked: 'Blocked agent', agent_offline: 'Agent offline', rental_request: 'Rental request',
     tool_approval: 'Tool approval', agent_attention: 'Stuck agent', board_intent: 'Board request' } as Record<string, string>)[category] || category;

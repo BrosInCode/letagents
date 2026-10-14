@@ -971,6 +971,35 @@ test("supervisor worker end is idempotent after a committed response is lost", {
   );
 });
 
+test("an owner retiring a supervised worker closes its open requests; ending it otherwise keeps them", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const { createKnowledgeRecord } = await import("../../../shared/room-knowledge.mjs");
+  const knowledge = await import("../db/room-knowledge.js");
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const end = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end"); assert.ok(end);
+  const ask = (id: string, authorId: string) => knowledge.createRoomKnowledge(createKnowledgeRecord(room.id, "attention",
+    { client_id: id, category: "question", title: "Which port?", body: "Pick one." }, { id: authorId, label: "Route Agent", kind: "agent" }));
+  const startWorker = async (instance: string) => {
+    const minted = recorder();
+    await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: instance } }, minted);
+    assert.equal(minted.statusCode, 201, JSON.stringify(minted.body));
+    return (minted.body as any).session_id as string;
+  };
+  await ask("route-open-1", agent.canonical_key);
+  await ask("other-open-1", "owner/other-agent");
+  // A move or rotation ends the session without `retired`: the request stays open.
+  const moved = recorder();
+  await end({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: await startWorker("rotated-worker") }, body: { generation: 1 } }, moved);
+  assert.equal(moved.statusCode, 200);
+  assert.equal((await knowledge.getRoomKnowledge(room.id, "route-open-1"))!.response, null);
+  const retired = recorder();
+  await end({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: await startWorker("retired-worker") }, body: { generation: 1, retired: true } }, retired);
+  assert.equal(retired.statusCode, 200);
+  const closed = (await knowledge.getRoomKnowledge(room.id, "route-open-1"))!.response!;
+  assert.deepEqual([closed.body, closed.closed, closed.actor.id, closed.actor.kind], ["Agent retired.", true, "owner_route", "human"]);
+  assert.equal((await knowledge.getRoomKnowledge(room.id, "other-open-1"))!.response, null, "another agent keeps its requests");
+});
+
 test("supervisor worker retry collapses all historical active duplicates before rotating the retained session", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const common = {
