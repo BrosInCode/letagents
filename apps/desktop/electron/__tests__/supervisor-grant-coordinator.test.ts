@@ -86,11 +86,13 @@ function entry(id = "supervised_launch_1234567"): DesktopSupervisorManifestEntry
 function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) {
   const events: string[] = [];
   const bootstrapMessages: Array<string | undefined> = [];
+  const createOptions: Array<{ desiredState?: "running" | "paused" } | undefined> = [];
   const grants = new Map<string, { metadata: ReturnType<typeof metadata>; authority?: typeof authority | null; token: string; entryId: string; lastInstalledDaemonGeneration: number | null }>();
   const daemon = {
     async isMaintenanceHeld() { return false; },
     async ensureRunning() { events.push("ensure"); return { generation: 7 }; },
-    async create(input: { roomIdentifier: string; charter?: string }) { events.push(`create:${input.roomIdentifier}`); return { ...entry(), roomId: input.roomIdentifier, charter: input.charter ?? entry().charter, desiredState: "paused" as const }; },
+    async create(input: { roomIdentifier: string; charter?: string }, options?: { desiredState?: "running" | "paused" }) { events.push(`create:${input.roomIdentifier}`); createOptions.push(options); return { ...entry(), roomId: input.roomIdentifier, charter: input.charter ?? entry().charter, desiredState: options?.desiredState ?? "running" as const }; },
+    async setDesiredState(id: string, desiredState: "running" | "paused" | "stopped") { events.push(`set-desired:${id}:${desiredState}`); return { ...entry(id), desiredState }; },
     async list() { events.push("list"); return [entry()]; },
     async installHostGrant(input: { supervisorGrant: string; daemonGeneration: number }) {
       events.push(`install:${input.daemonGeneration}`);
@@ -133,15 +135,16 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
     ...overrides,
   };
   const request = (async () => { throw new Error("unexpected request"); }) as never;
-  return { events, bootstrapMessages, grants, daemon, operations, coordinator: new SupervisorGrantCoordinator(daemon as never, request, () => "host_1", operations, async () => "room_1") };
+  return { events, bootstrapMessages, createOptions, grants, daemon, operations, coordinator: new SupervisorGrantCoordinator(daemon as never, request, () => "host_1", operations, async () => "room_1") };
 }
 
-test("fresh Codex launch provisions before paused claim, installs before activation can occur", async () => {
+test("fresh Codex launch provisions first, saves a running entry, then installs the grant", async () => {
   const h = harness();
-  const result = await h.coordinator.createPausedAndInstall({
+  const result = await h.coordinator.createAndInstall({
     creationRequestId: "launch_1234567", roomIdentifier: "room_1", displayName: "Mutable label", providerId: "codex", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
   });
-  assert.equal(result.entry.desiredState, "paused");
+  assert.equal(result.entry.desiredState, "running");
+  assert.deepEqual(h.createOptions, [undefined], "a normal launch asks the daemon for its default running entry");
   assert.deepEqual(h.events, [
     // Every creation reads the room's saved names before it claims one.
     "ensure", "list", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false", "create:room_1", "ensure", "install:7", "bootstrap:supervised_launch_1234567:7", "replace:7",
@@ -150,9 +153,140 @@ test("fresh Codex launch provisions before paused claim, installs before activat
   assert.equal(JSON.stringify(result).includes("secret_provisioned"), false, "no bearer is in the public coordinator result");
 });
 
+const freshLaunch = {
+  creationRequestId: "launch_1234567", roomIdentifier: "room_1", displayName: "Mutable label", providerId: "codex" as const,
+  charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
+};
+
+test("the saved entry is reported to the caller before the grant install begins", async () => {
+  const h = harness();
+  const reported: DesktopSupervisorManifestEntry[] = [];
+  const result = await h.coordinator.createAndInstall(freshLaunch, {
+    onSaved: (saved) => { reported.push(saved); h.events.push(`saved:${saved.id}`); },
+  });
+  assert.equal(reported.length, 1, "the hook runs once for the one saved entry");
+  assert.equal(reported[0], result.entry, "the hook receives the entry the daemon saved");
+  const created = h.events.indexOf("create:room_1");
+  assert.deepEqual(h.events.slice(created, created + 4), [
+    "create:room_1", "saved:supervised_launch_1234567", "ensure", "install:7",
+  ], "the hook runs right after the save and before the install");
+});
+
+/**
+ * What the daemon reports for the saved entry when the install-failure handler
+ * looks it up. Before the entry is saved the room listing is empty, so the
+ * name lookup that precedes the save is not affected.
+ */
+function listingAfterSave(
+  h: ReturnType<typeof harness>,
+  view: DesktopSupervisorManifestEntry["observedState"] | "missing" | "unreadable",
+): void {
+  h.daemon.list = async (roomId?: string | null) => {
+    const saved = h.events.includes("create:room_1");
+    h.events.push(`list:${roomId}`);
+    if (!saved || view === "missing") return [];
+    if (view === "unreadable") throw new Error("daemon went away");
+    return [{ ...entry(), observedState: view }];
+  };
+}
+
+const savedEntryId = "supervised_launch_1234567";
+
+test("an install failure after the entry is saved stops that entry and rethrows the failure", async () => {
+  const h = harness();
+  const installError = new Error("daemon rejected the grant");
+  h.daemon.installHostGrant = async () => { h.events.push("install:7"); throw installError; };
+  listingAfterSave(h, "absent");
+  const reported: string[] = [];
+  await assert.rejects(
+    h.coordinator.createAndInstall(freshLaunch, { onSaved: (saved) => { reported.push(saved.id); } }),
+    (thrown: unknown) => thrown === installError,
+  );
+  assert.deepEqual(reported, [savedEntryId], "the entry was saved before the install failed");
+  const created = h.events.indexOf("create:room_1");
+  assert.deepEqual(h.events.slice(created), [
+    "create:room_1", "ensure", "install:7", "list:room_1", `set-desired:${savedEntryId}:stopped`,
+  ], "the saved entry is looked up, found absent, and stopped; room ingress is never bootstrapped");
+});
+
+test("an install failure stops a saved entry the daemon cannot find", async () => {
+  const h = harness();
+  const installError = new Error("daemon rejected the grant");
+  h.daemon.installHostGrant = async () => { h.events.push("install:7"); throw installError; };
+  listingAfterSave(h, "missing");
+  await assert.rejects(h.coordinator.createAndInstall(freshLaunch), (thrown: unknown) => thrown === installError);
+  const created = h.events.indexOf("create:room_1");
+  assert.deepEqual(h.events.slice(created), [
+    "create:room_1", "ensure", "install:7", "list:room_1", `set-desired:${savedEntryId}:stopped`,
+  ], "an entry that is not listed has not started, so it is stopped");
+});
+
+for (const observedState of ["starting", "working"] as const) {
+  test(`an install failure leaves an entry that already began launching (${observedState}) running and still rethrows`, async () => {
+    const h = harness();
+    const installError = new Error("desktop marker write failed");
+    h.daemon.installHostGrant = async () => { h.events.push("install:7"); throw installError; };
+    listingAfterSave(h, observedState);
+    await assert.rejects(h.coordinator.createAndInstall(freshLaunch), (thrown: unknown) => thrown === installError);
+    const created = h.events.indexOf("create:room_1");
+    assert.deepEqual(h.events.slice(created), [
+      "create:room_1", "ensure", "install:7", "list:room_1",
+    ], "the daemon began launching the provider, so the launch is left alone");
+    assert.equal(h.events.some((event) => event.startsWith("set-desired:")), false, "no stop is sent to a launching entry");
+  });
+}
+
+test("an install failure stops the entry when the daemon listing itself fails, and still rethrows the install failure", async () => {
+  const h = harness();
+  const installError = new Error("daemon rejected the grant");
+  h.daemon.installHostGrant = async () => { h.events.push("install:7"); throw installError; };
+  listingAfterSave(h, "unreadable");
+  await assert.rejects(h.coordinator.createAndInstall(freshLaunch), (thrown: unknown) => thrown === installError);
+  const created = h.events.indexOf("create:room_1");
+  assert.deepEqual(h.events.slice(created), [
+    "create:room_1", "ensure", "install:7", "list:room_1", `set-desired:${savedEntryId}:stopped`,
+  ], "a lookup that cannot prove the entry is idle fails closed: the entry is stopped");
+});
+
+test("an install failure stops the entry when the daemon listing stalls past the lookup timeout, and still rethrows", async () => {
+  const h = harness();
+  const installError = new Error("daemon rejected the grant");
+  const coordinator = new SupervisorGrantCoordinator(
+    {
+      ...h.daemon,
+      async installHostGrant() { h.events.push("install:7"); throw installError; },
+      list: (roomId?: string | null) => {
+        const saved = h.events.includes("create:room_1");
+        h.events.push(`list:${roomId}`);
+        return saved ? new Promise<never>(() => undefined) : Promise.resolve([]);
+      },
+    } as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    h.operations,
+    async () => "room_1",
+    undefined,
+    20,
+  );
+  const startedAt = Date.now();
+  await assert.rejects(coordinator.createAndInstall(freshLaunch), (thrown: unknown) => thrown === installError);
+  assert.ok(Date.now() - startedAt < 1_000, "a listing that never answers is abandoned promptly");
+  assert.equal(h.events.at(-1), `set-desired:${savedEntryId}:stopped`, "a lookup that cannot prove the entry is idle fails closed: the entry is stopped");
+});
+
+test("a failed stop never hides the install failure that caused it", async () => {
+  const h = harness();
+  const installError = new Error("daemon rejected the grant");
+  h.daemon.installHostGrant = async () => { throw installError; };
+  h.daemon.setDesiredState = async () => { throw new Error("daemon went away"); };
+  listingAfterSave(h, "absent");
+  await assert.rejects(h.coordinator.createAndInstall(freshLaunch), (thrown: unknown) => thrown === installError);
+  assert.ok(h.events.includes("list:room_1"), "the stop was attempted after the lookup");
+});
+
 test("fresh rental launch queues its accepted task once while recovery paths omit startup text", async () => {
   const h = harness();
-  await h.coordinator.createRentalPausedAndInstall({
+  const rental = await h.coordinator.createRentalPausedAndInstall({
     creationRequestId: "rental_12345678",
     roomIdentifier: "room_1",
     displayName: "Rental agent",
@@ -169,6 +303,8 @@ test("fresh rental launch queues its accepted task once while recovery paths omi
     },
   });
   assert.deepEqual(h.bootstrapMessages, ["complete the accepted rental task"], "the freshly created rental entry supplies its stored initial message");
+  assert.deepEqual(h.createOptions, [{ desiredState: "paused" }], "a rental waits paused for the rental server to acknowledge it");
+  assert.equal(rental.entry.desiredState, "paused");
 
   h.bootstrapMessages.length = 0;
   h.grants.set("owner/supervised_launch_1234567", {
@@ -193,7 +329,7 @@ test("fresh Open Model launch installs the desktop-held endpoint credential befo
         provider: "open-model",
         model: "qwen/agent-model",
         roomId: input.roomIdentifier,
-        desiredState: "paused" as const,
+        desiredState: "running" as const,
       };
     },
     async installOpenModelCredential(input: {
@@ -229,7 +365,7 @@ test("fresh Open Model launch installs the desktop-held endpoint credential befo
     }),
   );
 
-  const result = await coordinator.createPausedAndInstall({
+  const result = await coordinator.createAndInstall({
     creationRequestId: "launch_1234567",
     roomIdentifier: "room_1",
     displayName: "Open Quartz",
@@ -258,7 +394,7 @@ test("the ownership boundary repairs generic Open Model labels before identity p
         displayName: input.displayName,
         provider: "open-model",
         roomId: input.roomIdentifier,
-        desiredState: "paused" as const,
+        desiredState: "running" as const,
       };
     },
     async installOpenModelCredential() {
@@ -277,7 +413,7 @@ test("the ownership boundary repairs generic Open Model labels before identity p
     savedAt: "2026-07-28T00:00:00.000Z",
   }));
 
-  await coordinator.createPausedAndInstall({
+  await coordinator.createAndInstall({
     creationRequestId: "open_model_1234567",
     roomIdentifier: "room_1",
     displayName: "Open Model supervised agent",
@@ -313,7 +449,7 @@ test("a requested name another agent in the room answers to is replaced, and a r
           ...entry(id),
           displayName: input.displayName,
           roomId: input.roomIdentifier,
-          desiredState: "paused" as const,
+          desiredState: "running" as const,
         };
         entries.push(created);
         return created;
@@ -342,13 +478,13 @@ test("a requested name another agent in the room answers to is replaced, and a r
     repoRootPath: "/tmp/repo",
   };
 
-  const created = await coordinator.createPausedAndInstall(request);
+  const created = await coordinator.createAndInstall(request);
   assert.match(created.entry.displayName, /^[A-Za-z]+$/);
   assert.notEqual(created.entry.displayName.toLowerCase(), "fieldmeadow");
   assert.equal(identityNames.at(-1), created.entry.displayName,
     "the room identity is registered under the name that was saved");
 
-  const replayed = await coordinator.createPausedAndInstall(request);
+  const replayed = await coordinator.createAndInstall(request);
   assert.equal(replayed.entry.displayName, created.entry.displayName);
   assert.equal(entries.length, 2);
 });
@@ -369,7 +505,7 @@ test("a room lookup that stalls or fails never holds up or fails the creation", 
             ...entry(`supervised_${input.creationRequestId}`),
             displayName: input.displayName,
             roomId: input.roomIdentifier,
-            desiredState: "paused" as const,
+            desiredState: "running" as const,
           };
         },
       } as never,
@@ -381,7 +517,7 @@ test("a room lookup that stalls or fails never holds up or fails the creation", 
       20,
     );
     const startedAt = Date.now();
-    const result = await coordinator.createPausedAndInstall({
+    const result = await coordinator.createAndInstall({
       creationRequestId: `lookup_${lookup}_1234567`,
       roomIdentifier: "room_1",
       displayName: "",
@@ -412,7 +548,7 @@ test("the identity is registered again when the daemon saves a different name", 
           ...entry(`supervised_${input.creationRequestId}`),
           displayName: "CedarPeak",
           roomId: input.roomIdentifier,
-          desiredState: "paused" as const,
+          desiredState: "running" as const,
         };
       },
     } as never,
@@ -429,7 +565,7 @@ test("the identity is registered again when the daemon saves a different name", 
     async () => "room_1",
   );
 
-  const result = await coordinator.createPausedAndInstall({
+  const result = await coordinator.createAndInstall({
     creationRequestId: "renamed_1234567",
     roomIdentifier: "room_1",
     displayName: "FieldMeadow",
@@ -463,7 +599,7 @@ test("concurrent generic Open Model launches reserve distinct friendly names wit
         provider: "open-model",
         displayName: input.displayName,
         roomId: input.roomIdentifier,
-        desiredState: "paused" as const,
+        desiredState: "running" as const,
       };
       entries.push(created);
       return created;
@@ -485,7 +621,7 @@ test("concurrent generic Open Model launches reserve distinct friendly names wit
       savedAt: "2026-07-28T00:00:00.000Z",
     }),
   );
-  const create = (creationRequestId: string) => coordinator.createPausedAndInstall({
+  const create = (creationRequestId: string) => coordinator.createAndInstall({
     creationRequestId,
     roomIdentifier: "room_1",
     displayName: "Open Model supervised agent",
@@ -574,7 +710,7 @@ test("reconciliation repairs an existing generic Open Model identity without rep
 
 test("Claude daemon-inbox launch provisions its own exact host grant before activation", async () => {
   const h = harness();
-  const result = await h.coordinator.createPausedAndInstall({
+  const result = await h.coordinator.createAndInstall({
     creationRequestId: "launch_1234567", roomIdentifier: "room_alias", displayName: "Claude",
     providerId: "claude-code", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
   });
@@ -585,9 +721,9 @@ test("Claude daemon-inbox launch provisions its own exact host grant before acti
   ]);
 });
 
-test("grant failure occurs before the paused manifest can be activated", async () => {
+test("grant failure occurs before the manifest entry is saved", async () => {
   const h = harness({ provision: async () => { throw new Error("owner auth unavailable"); } });
-  await assert.rejects(h.coordinator.createPausedAndInstall({
+  await assert.rejects(h.coordinator.createAndInstall({
     creationRequestId: "launch_1234567", roomIdentifier: "room_1", displayName: "A", providerId: "codex", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
   }), /owner auth unavailable/);
   assert.equal(h.events.some((event) => event.startsWith("create:")), false);
@@ -602,6 +738,169 @@ test("app restart same daemon generation reinstalls idempotently without a hando
   assert.equal(h.events.some((event) => event === "bootstrap:supervised_launch_1234567:7"), true, "a cursorless pre-upgrade running entry is admitted without provider recovery");
   assert.equal(h.events.some((event) => event.includes("provision")), false);
 });
+
+/** A saved entry the daemon never started: no provider generation, worker session or readiness stamp. */
+function neverLaunchedEntry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): DesktopSupervisorManifestEntry {
+  return {
+    ...entry(),
+    desiredState: "running",
+    observedState: "absent",
+    workAttemptId: null,
+    agentSessionId: null,
+    agentSessionBindingState: "none",
+    executionGenerationId: null,
+    providerContinuationId: null,
+    providerPid: null,
+    readyReachedAt: null,
+    ...overrides,
+  };
+}
+
+/** The exact grant the previous install left behind, so an install goes straight to the daemon. */
+function storeInstalledGrant(h: ReturnType<typeof harness>, saved: DesktopSupervisorManifestEntry): void {
+  const key = `owner/${saved.id}`;
+  h.grants.set(key, { metadata: metadata(key), token: "secret_same", entryId: saved.id, lastInstalledDaemonGeneration: 7 });
+}
+
+type RecordedInstall = { credentialOnly?: boolean; recoveryOnly?: boolean };
+
+function recordInstalls(h: ReturnType<typeof harness>): RecordedInstall[] {
+  const installs: RecordedInstall[] = [];
+  h.daemon.installHostGrant = async (input: RecordedInstall & { supervisorGrant: string; daemonGeneration: number }) => {
+    installs.push(input);
+    return "installed" as const;
+  };
+  return installs;
+}
+
+test("a fresh launch bootstraps once, with the explicit charter, although the saved entry has never launched", async () => {
+  const h = harness();
+  const coordinator = new SupervisorGrantCoordinator(
+    {
+      ...h.daemon,
+      async create(input: { roomIdentifier: string; charter?: string }) {
+        h.events.push(`create:${input.roomIdentifier}`);
+        return neverLaunchedEntry({ roomId: input.roomIdentifier, charter: input.charter ?? "" });
+      },
+    } as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    h.operations,
+    async () => "room_1",
+  );
+  await coordinator.createAndInstall(freshLaunch);
+  assert.deepEqual(h.bootstrapMessages, ["help"], "the explicit message is sent once; the saved-charter fallback never adds a second");
+});
+
+test("a startup reconcile of an entry that never launched queues its saved charter as the first message", async () => {
+  const h = harness();
+  const saved = neverLaunchedEntry({ charter: "review the open pull requests" });
+  storeInstalledGrant(h, saved);
+  h.daemon.list = async () => [saved];
+  await h.coordinator.reconcileDesiredRunning();
+  assert.ok(h.events.includes(`bootstrap:${saved.id}:7`), "the room inbox is bootstrapped");
+  assert.deepEqual(h.bootstrapMessages, ["review the open pull requests"]);
+});
+
+test("the saved charter is trimmed before it is queued", async () => {
+  const h = harness();
+  const saved = neverLaunchedEntry({ charter: "  \n review the open pull requests \t " });
+  storeInstalledGrant(h, saved);
+  h.daemon.list = async () => [saved];
+  await h.coordinator.reconcileDesiredRunning();
+  assert.deepEqual(h.bootstrapMessages, ["review the open pull requests"]);
+});
+
+test("Retry of a saved entry that never launched installs authority, queues its charter, then activates", async () => {
+  const h = harness();
+  const stopped = neverLaunchedEntry({ desiredState: "stopped", observedState: "stopped", charter: "triage the backlog" });
+  storeInstalledGrant(h, stopped);
+  const result = await h.coordinator.activateEntry(stopped, async () => { h.events.push("activate"); return "started" as const; });
+  assert.equal(result, "started");
+  assert.deepEqual(h.bootstrapMessages, ["triage the backlog"]);
+  assert.ok(
+    h.events.indexOf(`bootstrap:${stopped.id}:7`) < h.events.indexOf("activate"),
+    "the first message is queued before the provider is allowed to start",
+  );
+});
+
+const launchMarkers: Array<[string, Partial<DesktopSupervisorManifestEntry>]> = [
+  ["executionGenerationId", { executionGenerationId: "execution_1" }],
+  ["providerContinuationId", { providerContinuationId: "thread_1" }],
+  ["providerPid", { providerPid: 4242 }],
+  ["agentSessionId", { agentSessionId: "session_1" }],
+  ["readyReachedAt", { readyReachedAt: "2026-01-01T00:00:00.000Z" }],
+];
+
+for (const [marker, recorded] of launchMarkers) {
+  test(`a startup reconcile of an entry with a recorded ${marker} never replays its charter`, async () => {
+    const h = harness();
+    const saved = neverLaunchedEntry({ charter: "review the open pull requests", ...recorded });
+    storeInstalledGrant(h, saved);
+    h.daemon.list = async () => [saved];
+    await h.coordinator.reconcileDesiredRunning();
+    assert.ok(h.events.includes(`bootstrap:${saved.id}:7`), "the inbox is still bootstrapped");
+    assert.deepEqual(h.bootstrapMessages, [undefined], "one recorded launch marker is enough to withhold the charter");
+  });
+}
+
+test("Restart of a stopped entry that has launched before queues no message", async () => {
+  const h = harness();
+  const stopped = { ...entry(), desiredState: "stopped" as const, observedState: "stopped" as const, charter: "triage the backlog" };
+  storeInstalledGrant(h, stopped);
+  await h.coordinator.activateEntry(stopped, async () => "started" as const);
+  assert.deepEqual(h.bootstrapMessages, [undefined]);
+});
+
+test("Reconnect re-binds the credential of a launched entry without queuing any message", async () => {
+  const h = harness();
+  const live = { ...entry(), charter: "triage the backlog" };
+  storeInstalledGrant(h, live);
+  const installs = recordInstalls(h);
+  await h.coordinator.reconnectEntry(live);
+  assert.equal(installs[0]?.credentialOnly, true);
+  assert.deepEqual(h.bootstrapMessages, [undefined]);
+});
+
+test("a credential-only install queues no message even for an entry that never launched", async () => {
+  const h = harness();
+  const saved = neverLaunchedEntry({ charter: "review the open pull requests" });
+  storeInstalledGrant(h, saved);
+  const installs = recordInstalls(h);
+  // The public Reconnect refuses an entry with no live runtime, so the guard on
+  // this branch is reachable only at the install boundary. Drive that boundary.
+  const reconcile = (h.coordinator as unknown as {
+    reconcileEntry(entry: DesktopSupervisorManifestEntry, daemonGeneration: number, credentialOnly: boolean): Promise<void>;
+  }).reconcileEntry.bind(h.coordinator);
+  await reconcile(saved, 7, true);
+  assert.equal(installs[0]?.credentialOnly, true);
+  assert.ok(h.events.includes(`bootstrap:${saved.id}:7`), "a credential-only install still admits the inbox cursor");
+  assert.deepEqual(h.bootstrapMessages, [undefined], "re-binding a credential never queues the charter");
+});
+
+test("runtime recovery of an entry that never launched installs authority and does not bootstrap the inbox", async () => {
+  const h = harness();
+  const saved = neverLaunchedEntry({ charter: "review the open pull requests" });
+  storeInstalledGrant(h, saved);
+  const installs = recordInstalls(h);
+  await h.coordinator.prepareEntryForRuntimeRecovery(saved);
+  assert.equal(installs.length, 1);
+  assert.equal(installs[0]?.recoveryOnly, true);
+  assert.deepEqual(h.bootstrapMessages, [], "recovery never bootstraps, so it cannot queue the charter");
+  assert.equal(h.events.some((event) => event.startsWith("bootstrap:")), false);
+});
+
+for (const [kind, blank] of [["blank", ""], ["whitespace-only", "   \n\t  "]] as const) {
+  test(`an entry that never launched with a ${kind} charter queues no message`, async () => {
+    const h = harness();
+    const saved = neverLaunchedEntry({ charter: blank });
+    storeInstalledGrant(h, saved);
+    h.daemon.list = async () => [saved];
+    await h.coordinator.reconcileDesiredRunning();
+    assert.ok(h.events.includes(`bootstrap:${saved.id}:7`), "the inbox is still bootstrapped");
+    assert.deepEqual(h.bootstrapMessages, [undefined], "no empty message is queued");
+  });
+}
 
 test("grant reconciliation follows daemon_inbox ownership instead of provider identity", async () => {
   const h = harness();
@@ -1539,7 +1838,7 @@ test("Reconnect, Restart and new agents go ahead of the startup sweep, and runni
   await sweep.until(() => sweep.started.includes(r6.id), "Reconnect takes the reserved slot at once");
   const restart = coordinator.prepareEntryForRuntimeRecovery(r4);
   await sweep.settle();
-  const created = coordinator.createPausedAndInstall({
+  const created = coordinator.createAndInstall({
     creationRequestId: "launch_new_agent_1", roomIdentifier: "room_1", displayName: "New agent", providerId: "codex",
     charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
   });
@@ -1693,7 +1992,7 @@ test("canonical room reuse avoids alias-triggered reprovision while independent 
     },
   };
   const c = new SupervisorGrantCoordinator(h.daemon as never, (async () => { throw new Error("unexpected"); }) as never, () => "host_1", operations, async () => "room_canonical");
-  await c.createPausedAndInstall({
+  await c.createAndInstall({
     creationRequestId: "launch_alias_1234567", roomIdentifier: "github.com/Owner/Repo", displayName: "First", providerId: "codex", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo",
   });
   assert.deepEqual(scopes, [[{ requestedRoomId: "github.com/Owner/Repo", canonicalRoomId: "room_canonical" }]]);
@@ -2251,7 +2550,7 @@ test("v4 destination grants remain revocation-unknown and cannot ACK a move acro
 
 test("maintenance rejects grant creation, activation, recovery and reconnect before hosted effects", async () => {
   const h = harness(); h.daemon.isMaintenanceHeld = async () => true;
-  await assert.rejects(h.coordinator.createPausedAndInstall({ creationRequestId: "launch_1234567", roomIdentifier: "room_1", displayName: "Test", providerId: "codex", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo" }), /maintenance/);
+  await assert.rejects(h.coordinator.createAndInstall({ creationRequestId: "launch_1234567", roomIdentifier: "room_1", displayName: "Test", providerId: "codex", charter: "help", model: null, permissionProfileId: null, repoRootPath: "/tmp/repo" }), /maintenance/);
   await assert.rejects(h.coordinator.activateEntry(entry(), async () => assert.fail("activation")), /maintenance/);
   await assert.rejects(h.coordinator.reconnectEntry(entry()), /maintenance/);
   await assert.rejects(h.coordinator.prepareEntryForRuntimeRecovery(entry()), /maintenance/);

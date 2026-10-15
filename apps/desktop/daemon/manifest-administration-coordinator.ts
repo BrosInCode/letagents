@@ -21,7 +21,6 @@ import type {
   DaemonManifest,
   DaemonManifestEntry,
   DaemonPurgeRecord,
-  LegacyLaneOwner,
 } from "./types.js";
 import {
   agentDisplayNameKey,
@@ -55,7 +54,6 @@ export type ManifestAdministrationStore = {
   write(
     expectedGeneration: number,
     entries: DaemonManifestEntry[],
-    legacyLaneOwners: LegacyLaneOwner[] | undefined,
     commitFence: CommitFence,
   ): Promise<Pick<DaemonManifest, "generation">>;
   getAgentConfiguration(entryId: string): Promise<StoredAgentConfiguration | undefined>;
@@ -120,7 +118,6 @@ export type ManifestAdministrationAuthority = {
 
 export type ManifestAdministrationPolicies = {
   projectCreateReplayParameters(entry: DaemonManifestEntry): unknown;
-  providerSupportsConcurrentAgents(provider: string): boolean;
   deriveProviderConfiguration(input: {
     provider: string;
     model: string | null;
@@ -137,9 +134,6 @@ export type ManifestAdministrationCoordinatorOptions = {
   store: ManifestAdministrationStore;
   authority: ManifestAdministrationAuthority;
   policies: ManifestAdministrationPolicies;
-  lanes: {
-    liveOwners(owners: readonly LegacyLaneOwner[]): LegacyLaneOwner[];
-  };
   convergence: {
     request(entryId: string): void;
   };
@@ -178,57 +172,6 @@ export class ManifestAdministrationCoordinator {
     }
   }
 
-  isSupervisedLaneOwner(entry: DaemonManifestEntry): boolean {
-    return !(entry.desired_state === "stopped" && entry.observed_state === "stopped");
-  }
-
-  competingSupervisedLaneOwner(
-    entries: readonly DaemonManifestEntry[],
-    entry: DaemonManifestEntry,
-  ): DaemonManifestEntry | undefined {
-    if (this.options.policies.providerSupportsConcurrentAgents(entry.provider)) return undefined;
-    return entries.find((candidate) =>
-      candidate.id !== entry.id
-      && candidate.room_id === entry.room_id
-      && candidate.provider === entry.provider
-      && this.isSupervisedLaneOwner(candidate));
-  }
-
-  async quarantineDuplicateSupervisedLaneOwners(): Promise<void> {
-    await this.options.authority.serialize(async () => {
-      const manifest = await this.options.store.load();
-      const ownersByLane = new Map<string, DaemonManifestEntry[]>();
-      for (const entry of manifest.entries) {
-        if (this.options.policies.providerSupportsConcurrentAgents(entry.provider)) continue;
-        if (!this.isSupervisedLaneOwner(entry)) continue;
-        const key = `${entry.room_id}\u0000${entry.provider}`;
-        const owners = ownersByLane.get(key) ?? [];
-        owners.push(entry);
-        ownersByLane.set(key, owners);
-      }
-      const duplicateIds = new Set(
-        [...ownersByLane.values()]
-          .filter((owners) => owners.length > 1)
-          .flatMap((owners) => owners.map((entry) => entry.id)),
-      );
-      if (!duplicateIds.size) return;
-      const entries = manifest.entries.map((entry) => duplicateIds.has(entry.id)
-        ? {
-            ...entry,
-            desired_state: "stopped" as const,
-            last_error: "LetAgents found multiple supervised agents for this provider lane after restart and stopped them to prevent duplicate work.",
-          }
-        : entry);
-      const next = await this.options.store.write(
-        this.options.authority.currentManifestGeneration(),
-        entries,
-        manifest.legacy_lane_owners,
-        this.options.authority.fenceCommit,
-      );
-      this.options.authority.acceptManifestGeneration(next.generation);
-    });
-  }
-
   /**
    * The requested name is a suggestion. This is the one place that reads the
    * names saved for a room and saves another in the same step, so it is where
@@ -261,7 +204,6 @@ export class ManifestAdministrationCoordinator {
         throw new Error(`Supervised entry '${entry.id}' was permanently purged. Start a genuinely new agent with a new creation request id.`);
       }
       const manifest = await this.options.store.load();
-      const legacyOwners = this.options.lanes.liveOwners(manifest.legacy_lane_owners ?? []);
       const existing = manifest.entries.find((candidate) => candidate.id === entry.id);
       if (existing) {
         // The name is assigned here, and the room may since have assigned
@@ -274,17 +216,6 @@ export class ManifestAdministrationCoordinator {
         }
         return existing;
       }
-      if (entry.desired_state !== "stopped") {
-        const supervisedOwner = this.competingSupervisedLaneOwner(manifest.entries, entry);
-        if (supervisedOwner) {
-          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
-        }
-        const legacyOwner = legacyOwners.find((candidate) =>
-          candidate.room_id === entry.room_id && candidate.provider === entry.provider);
-        if (legacyOwner && entry.desired_state === "running") {
-          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
-        }
-      }
       const nextEntry: DaemonManifestEntry = {
         ...entry,
         display_name: this.assignDisplayName(manifest.entries, entry),
@@ -295,7 +226,6 @@ export class ManifestAdministrationCoordinator {
       const next = await this.options.store.write(
         this.options.authority.currentManifestGeneration(),
         [...manifest.entries, nextEntry],
-        legacyOwners,
         this.options.authority.fenceCommit,
       );
       this.options.authority.acceptManifestGeneration(next.generation);
@@ -320,7 +250,6 @@ export class ManifestAdministrationCoordinator {
       const next = await this.options.store.write(
         this.options.authority.currentManifestGeneration(),
         manifest.entries.map((candidate) => candidate.id === id ? updated : candidate),
-        this.options.lanes.liveOwners(manifest.legacy_lane_owners ?? []),
         this.options.authority.fenceCommit,
       );
       this.options.authority.acceptManifestGeneration(next.generation);

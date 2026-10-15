@@ -53,6 +53,20 @@ test("mentions, single receipts, mixed reasons and the parallel setting stay par
   assert.ok(parallel(receipts("recent_conversation")), "recent_conversation stays parallel");
 });
 
+test("thread participants sequence only for a verified shared human request", () => {
+  const options = { messageNumber: 7, timestamp: sentAt, sequential: true };
+  assert.ok(planReplyTurns(receipts("thread_participant"), options).every(row => row.turn_position === null));
+  const planned = planReplyTurns(receipts("thread_participant"), { ...options, sharedHumanThread: true });
+  assert.deepEqual(planned.map(row => row.turn_position), [1, 2, 3]);
+  assert.ok(planned.every(row => row.activation_reason === "thread_participant"), "recipient authority is unchanged");
+  for (const reason of ["explicit_mention", "reply_target", "task_owner", "recent_conversation"]) {
+    assert.ok(planReplyTurns(receipts(reason), { ...options, sharedHumanThread: true })
+      .every(row => row.turn_position === null), `${reason} retains its lane`);
+  }
+  assert.ok(planReplyTurns(receipts("thread_participant"), { ...options, sequential: false, sharedHumanThread: true })
+    .every(row => row.turn_position === null));
+});
+
 test("all speakers can express a complete viewpoint without a prescribed conversational formula", () => {
   for (const position of [1, 2, 3]) {
     const guidance = replyTurnGuidance(position, 3, position > 1 ? ["Alice"] : []);

@@ -346,7 +346,6 @@ test("desktop-managed providers declare their supervised runtimes", () => {
   assert.equal(openModel?.runtimeCommand, "opencode");
   assert.equal(openModel?.mcpTargetId, null);
   assert.ok(cursor?.capabilities.includes("supervised_runtime"));
-  assert.ok(cursor?.capabilities.includes("concurrent_supervised_agents"));
   assert.equal(cursor?.supervisedDeliveryMode, "daemon_inbox");
 });
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { productionSupervisedDeliveryHttp } from "../cloud-http.js";
+import { productionSupervisedDeliveryHttp, reportGroupedNoReply } from "../cloud-http.js";
 
 test("no-reply transport uses the exact worker identity and requires an acknowledged receipt", async () => {
   const prior = globalThis.fetch;
@@ -31,6 +31,36 @@ test("no-reply transport uses the exact worker identity and requires an acknowle
     await productionSupervisedDeliveryHttp.reportNoReply!({ ...input, apiUrl: "letagents-local://rooms" });
     await productionSupervisedDeliveryHttp.reportNoReply!({ ...input, sourceMessageId: "initial:1" });
     assert.equal(calls, before);
+  } finally { globalThis.fetch = prior; }
+});
+
+test("grouped no-reply reports accept only exact success or explicit terminal self-receipt conflicts", async () => {
+  const prior = globalThis.fetch;
+  const input = { apiUrl: "https://letagents.test", roomId: "room", sourceMessageId: "msg_11", bearer: "worker-only", signal: new AbortController().signal };
+  let status = 200, body: unknown = { success: true, receipt_state: "no_reply", receipt_id: "receipt" };
+  globalThis.fetch = (async (url, init) => {
+    assert.equal(String(url), "https://letagents.test/rooms/room/messages/msg_11/agent-receipts/self");
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer worker-only");
+    assert.deepEqual(JSON.parse(String(init?.body)), { receipt_state: "no_reply" });
+    return new Response(JSON.stringify(body), { status });
+  }) as typeof fetch;
+  try {
+    assert.equal(await reportGroupedNoReply(input), "no_reply");
+    status = 409;
+    for (const state of ["replied", "cancelled"]) {
+      body = { receipt_state: state };
+      assert.equal(await reportGroupedNoReply(input), state);
+    }
+    for (const state of [undefined, "unavailable", "responding", "queued", "retrying", "blocked", "no_reply"]) {
+      body = { receipt_state: state };
+      await assert.rejects(reportGroupedNoReply(input), /not acknowledged/);
+    }
+    for (const code of [200, 401, 403, 404, 500]) {
+      status = code; body = { success: true, receipt_state: "replied", receipt_id: "receipt" };
+      await assert.rejects(reportGroupedNoReply(input), /not acknowledged/);
+    }
+    status = 200; body = { success: true, receipt_state: "no_reply" };
+    await assert.rejects(reportGroupedNoReply(input), /not acknowledged/);
   } finally { globalThis.fetch = prior; }
 });
 

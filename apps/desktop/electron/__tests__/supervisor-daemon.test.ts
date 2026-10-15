@@ -1507,7 +1507,6 @@ async function startWireDaemon(
   configurationApplyResponseDelayMs = 0,
 ) {
   const entries: Array<Record<string, any>> = [];
-  const legacyOwners: Array<Record<string, any>> = [];
   const requests: Array<{ method: string; params: Record<string, any> | undefined }> = [];
   const statusRecoveryDiagnostics: { value: unknown } = { value: undefined };
   const runtimeRecoveryCapability = { v2: true };
@@ -1611,32 +1610,6 @@ async function startWireDaemon(
         result = null;
       } else if (["supervisor.prepare_room_move", "supervisor.commit_room_move", "supervisor.get_room_move", "supervisor.get_current_room_move", "supervisor.acknowledge_room_move_source_revocation", "supervisor.rollback_room_move"].includes(request.method)) {
         result = { operation_id: request.params!.operation_id ?? `inspector-room-move:${request.params!.entry_id}:${request.params!.request_id}`, request_id: request.params!.request_id ? `inspector:${request.params!.request_id}` : "inspector:request_1", agent_id: request.params!.entry_id, source_room_id: "room_1", destination_room_id: "room_2", daemon_generation: request.params!.daemon_generation, work_attempt_id: "attempt_1", execution_generation_id: "execution_1", agent_session_id: "session_1", phase: request.method === "supervisor.prepare_room_move" ? "prepared" : "bootstrapping_destination_tail", remote_room_id: request.method === "supervisor.prepare_room_move" ? null : "room_2", destination_cursor: null, source_credentials_revoked: request.method !== "supervisor.prepare_room_move", error: null, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:01.000Z" };
-      } else if (request.method === "lane.reserve_legacy") {
-        const owner = {
-          reservation_id: request.params!.reservation_id,
-          room_id: request.params!.room_id,
-          provider: request.params!.provider,
-          owner_pid: request.params!.owner_pid,
-          owner_process_identity: request.params!.owner_process_identity,
-          state: "reserved",
-          session_id: null,
-          created_at: "2026-01-01T00:00:00.000Z",
-          updated_at: "2026-01-01T00:00:00.000Z",
-        };
-        legacyOwners.push(owner);
-        result = owner;
-      } else if (request.method === "lane.activate_legacy") {
-        const owner = legacyOwners.find((candidate) => candidate.reservation_id === request.params!.reservation_id)!;
-        owner.state = "active";
-        owner.session_id = request.params!.session_id;
-        result = owner;
-      } else if (request.method === "lane.release_legacy") {
-        const index = legacyOwners.findIndex((candidate) =>
-          candidate.reservation_id === request.params!.reservation_id
-          || candidate.session_id === request.params!.session_id
-          || (candidate.room_id === request.params!.room_id && candidate.provider === request.params!.provider));
-        if (index >= 0) legacyOwners.splice(index, 1);
-        result = { released: index >= 0 };
       } else if (request.method === "attempt.read") {
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         result = { entry_id: entry.id, work_attempt_id: null, workspace_path: entry.workspace_path, last_terminal: null, restart_count: 0, activity: entry.activity };
@@ -2631,7 +2604,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     assert.equal(status.generation, 3);
     const createInput = { creationRequestId: "request_alpha", roomIdentifier: "git-room:github.com:owner/repo", displayName: "Durable Codex", providerId: "codex" as const, charter: "Keep polling.", repoRootPath: "/tmp/work" };
     const created = await client.create(createInput);
-    assert.deepEqual([created.desiredState, created.observedState, created.condition], ["paused", "absent", "none"]);
+    assert.deepEqual([created.desiredState, created.observedState, created.condition], ["running", "absent", "none"]);
     assert.equal(created.deliveryMode, "daemon_inbox");
     assert.equal(created.runtimeGenerationId, null);
     wire.entries[0]!.runtime_generation_id = "opaque-birth";
@@ -2707,11 +2680,6 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const temporarilyUnbound = (await client.list(created.roomId)).find((entry) => entry.id === created.id)!;
     assert.equal(temporarilyUnbound.agentSessionId, "agent_session_rebound", "identity-only history keeps exact controls routed after live credentials unbind");
     assert.equal(temporarilyUnbound.agentSessionBindingState, "historical", "historical control identity never masquerades as an active room binding");
-    await assert.rejects(
-      () => client.assertLegacyStartAllowed(created.roomId, "codex"),
-      /already owns the codex lane through the supervised engine/,
-      "the paused transfer claim fences a concurrent legacy start before activation",
-    );
     assert.equal((await client.setDesiredState(created.id, "running")).desiredState, "running");
     assert.equal(await client.compareAndSetDesiredState(created.id, "paused", "stopped"), null);
     assert.equal((await client.setDesiredState(second.id, "running")).desiredState, "running");
@@ -2732,10 +2700,32 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
       wire.entries.find((candidate) => candidate.provider === "claude-code")?.provider_launch_policy,
       { permissionMode: "acceptEdits", model: "sonnet" },
     );
-    const reservation = await client.reserveLegacyLane("room_legacy_client", "codex", "legacy_client");
-    assert.equal(reservation.owner_pid, process.pid);
-    assert.equal((await client.activateLegacyLane("legacy_client", "legacy_session_client")).state, "active");
-    assert.equal(await client.releaseLegacyLane({ roomIdentifier: "room_legacy_client", provider: "codex" }), true);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a supervised launch is saved running unless the caller asks for a paused rental entry", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 3);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const input = { creationRequestId: "request_default", roomIdentifier: "git-room:github.com:owner/repo", displayName: "Default Codex", providerId: "codex" as const, charter: "Keep polling.", repoRootPath: "/tmp/work" };
+    const normal = await client.create(input);
+    assert.equal(normal.desiredState, "running", "a normal launch has no paused claim step");
+    const rental = await client.create(
+      { ...input, creationRequestId: "request_rental", displayName: "Rental Codex" },
+      { desiredState: "paused" },
+    );
+    assert.equal(rental.desiredState, "paused", "a rental launch waits paused for the rental server to acknowledge it");
+    assert.deepEqual(
+      wire.requests.filter((request) => request.method === "manifest.put").map((request) => request.params?.entry.desired_state),
+      ["running", "paused"],
+    );
   } finally {
     await closeServer(wire.server, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
@@ -3307,7 +3297,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.253");
+    assert.equal(status.implementationVersion, "2.0.257");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

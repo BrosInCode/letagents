@@ -174,7 +174,7 @@ test("Add Agent modal requires first recovery consent and restores previously at
     launchRecoverySource.indexOf("async function recover"),
     launchRecoverySource.indexOf("function offer"),
   );
-  assert.match(recoveryBody, /supervisor\.resumeOwnershipTransfer\(entry\.id\)/);
+  assert.doesNotMatch(recoveryBody, /resumeOwnershipTransfer/);
   assert.doesNotMatch(recoveryBody, /supervisor\.setDesiredState\(entry\.id,\s*"running"\)/);
   assert.match(recoveryBody, /options\.rememberLaunch\(roomIdentifier, entry\.id\)/);
   assert.match(recoveryBody, /options\.activate\(entry\)/);
@@ -187,7 +187,9 @@ test("Add Agent modal requires first recovery consent and restores previously at
   assert.match(launchComponentSource, /<AddAgentRecoveryNotice/);
   assert.match(modalSource, /@recover-launch="handleRecoverSupervisedLaunch"/);
   assert.match(actionBarSource, /props\.canStartBase[\s\S]*?canStartNewSupervisedLaunch\(\{/);
-  assert.match(controllerSource, /canStartNewSupervisedLaunch\(\{[\s\S]*?hasRecoveryCandidate: Boolean\(supervisedRecoveryCandidate\.value\)/);
+  assert.match(controllerSource, /canStartNewSupervisedLaunch\(\{[\s\S]*?recoveringCandidate: recoveringSupervisedCandidate\.value/);
+  assert.doesNotMatch(controllerSource, /hasRecoveryCandidate|supportsConcurrentAgents|concurrent_supervised_agents/);
+  assert.doesNotMatch(actionBarSource, /hasRecoveryCandidate|supportsConcurrentAgents|concurrent_supervised_agents/);
   assert.match(controllerSource, /supervisedLaunch\.offerRecoveryCandidate\(entry\)/);
   assert.match(controllerSource, /supervisedLaunch\.offerAmbiguousCreationCandidate\(/);
   assert.match(controllerSource, /candidate\.provider !== selectedProviderId\.value/);

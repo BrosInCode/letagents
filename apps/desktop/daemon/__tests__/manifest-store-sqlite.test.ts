@@ -12,7 +12,8 @@ import { projectStateWatchActivity } from "../state-watch-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection, LegacyLaneOwner } from "../types.js";
+import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
+import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
@@ -3703,6 +3704,54 @@ test("a native reply winning Stop preserves its intercepted thread choice across
   }
 });
 
+test("a durable grouped no-reply winning Stop settles its exact members through shared terminal recovery", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const controlled: DaemonManifestEntry = { ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined,
+    last_turn_control_sequence: 0, provider_ref: { ...entry.provider_ref!, provider_connection: {
+      kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex:4311" } } };
+  try {
+    const initial = await store.write(0, [controlled]);
+    const messages = [72, 73].map(n => ({ source_message_id: `msg_${n}`,
+      source_message: { id: `msg_${n}`, text: `My view ${n}.`, source: "agent", sender: `Peer ${n}`, thread_root_id: "msg_1",
+        agent_identity: { actor_label: `Peer ${n}`, agent_key: `owner/peer${n}` } },
+      activation: { decision: "activate", reason: "thread_participant" } }));
+    await inbox.ingestPoll({ agent_id: controlled.id, room_id: controlled.room_id, last_observed_message_id: "msg_73", messages });
+    const db = new DatabaseSync(env.databasePath);
+    try {
+      new RoomWorkPublicationStore(db).pin({ agentId: controlled.id, roomId: controlled.room_id, apiOrigin: "https://letagents.test",
+        agentKey: "owner/self", agentInstanceId: `daemon:${controlled.id}`, hostId: "host", installationId: "installation", sourceSessionId: "session" }, ["msg_72", "msg_73"]);
+    } finally { db.close(); }
+    const head = (await inbox.claimHead(controlled.id))!;
+    assert.ok(head.activation.queued_peer_messages);
+    await inbox.checkpointTurnStarted(head.inbox_item_id, "turn-A", TEST_PROVIDER_TURN_AUTHORITY);
+    const control = await store.prepareTurnControlState(initial.generation, {
+      agentId: controlled.id, roomId: controlled.room_id, expectedInboxItemId: head.inbox_item_id, expectedSourceMessageId: "msg_72",
+      expectedProviderTurnId: "turn-A", actionId: "stop", actionSequence: 1, workAttemptId: "attempt_1", executionGenerationId: "run_1",
+      providerContinuationId: "thread_1", providerConnection: controlled.provider_ref!.provider_connection, deliveryMode: "daemon_inbox",
+      hasCorrection: false, correctionText: null, correctionStrategy: null, capability: "native_interrupt", recordedAt: new Date().toISOString(),
+    });
+    await inbox.checkpointNormalizedTerminal({ inbox_item_id: head.inbox_item_id, agent_id: controlled.id, execution_generation_id: "run_1",
+      provider_turn_id: "turn-A", outcome: "no_reply", text: null, evidence: "stream",
+      terminal_evidence: { turnId: "turn-A", providerContinuationId: "thread_1", outcome: "no_reply", text: null, evidence: "stream" } });
+    const dispatching = await store.replaceEntry(control.generation, { ...control.entry,
+      turn_control: { ...control.entry.turn_control!, status: "dispatching", stages: ["interrupting"] } });
+    await store.commitTurnControlState(dispatching.generation, { agentId: controlled.id, roomId: controlled.room_id, actionId: "stop",
+      workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "native_applied", settleOriginal: true, activateCorrection: false,
+      observedAt: new Date().toISOString(),
+    }, current => ({ ...current, turn_control: { ...current.turn_control!, status: "completed", interrupted: false, resumed: false, state: "idle", stages: ["applied"] } }));
+    assert.equal((await inbox.get(head.inbox_item_id))!.state, "acknowledged_no_reply");
+    const child = (await inbox.getBySourceMessage(controlled.id, controlled.room_id, "msg_73"))!;
+    assert.equal(child.state, "acknowledged_no_reply"); assert.equal(child.attempt_count, 0); assert.equal(child.provider_turn_id, null);
+    const proof = new DatabaseSync(env.databasePath);
+    try {
+      assert.ok(proof.prepare("SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key='peer_batch_report:pending'").get(child.inbox_item_id));
+      assert.equal(proof.prepare("SELECT 1 FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(child.inbox_item_id), undefined);
+    } finally { proof.close(); }
+  } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
 test("exact native failure wins every Stop resolution and admits only the new correction", async () => {
   for (const outcome of ["failed", "interrupted"] as const) {
     for (const mode of ["native_applied", "operator_applied", "operator_not_applied"] as const) {
@@ -5683,18 +5732,6 @@ const entry: DaemonManifestEntry = {
   }],
 };
 
-const owner: LegacyLaneOwner = {
-  reservation_id: "reservation_1",
-  room_id: "room_1",
-  provider: "codex",
-  owner_pid: 123,
-  owner_process_identity: "birth-123",
-  state: "active",
-  session_id: "session_legacy",
-  created_at: "2026-07-19T00:00:00.000Z",
-  updated_at: "2026-07-19T00:00:01.000Z",
-};
-
 async function fixture(): Promise<{ root: string; databasePath: string; legacyPath: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-manifest-sqlite-"));
   return {
@@ -5844,7 +5881,7 @@ test("SQLite manifest round-trips the flat wire projection from relational domai
   const store = new ManifestStore(env.databasePath);
   try {
     const undefinedPolicyEntry = { ...entry, id: "agent_2", provider_launch_policy: undefined };
-    const saved = await store.write(0, [entry, undefinedPolicyEntry], [owner]);
+    const saved = await store.write(0, [entry, undefinedPolicyEntry]);
     assert.deepEqual(await store.load(), saved);
     assert.equal(Object.hasOwn(saved.entries[1]!, "provider_launch_policy"), false);
 
@@ -5965,7 +6002,7 @@ test("SQLite manifest generation CAS serializes independent connections without 
 
 test("legacy JSON imports once after checksum validation and is retained as a backup", async () => {
   const env = await fixture();
-  const manifest: DaemonManifest = { generation: 41, entries: [entry], legacy_lane_owners: [owner] };
+  const manifest: DaemonManifest = { generation: 41, entries: [entry] };
   const imported = { ...manifest, entries: manifest.entries.map(withImportedRuntimeIdentity) };
   await writeFile(env.legacyPath, storedManifest(manifest), { mode: 0o600 });
   const store = new ManifestStore(env.databasePath, env.legacyPath);
@@ -6528,7 +6565,7 @@ test("targeted projection failure occurs before commit and rolls back generation
   }
 });
 
-test("detached deployment identity survives lane-owner full writes and restart", async () => {
+test("detached deployment identity survives full manifest writes and restart", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   try {
@@ -6550,8 +6587,8 @@ test("detached deployment identity survives lane-owner full writes and restart",
     assert.equal(detached.entry.run_id, launched.run_id);
     assert.equal(detached.entry.deployment_id, launched.deployment_id);
 
-    const beforeLaneChange = await store.load();
-    await store.write(2, beforeLaneChange.entries, [owner]);
+    const beforeFullWrite = await store.load();
+    await store.write(2, beforeFullWrite.entries);
     await store.close();
 
     const reopened = new ManifestStore(env.databasePath);

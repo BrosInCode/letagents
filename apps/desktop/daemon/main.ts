@@ -37,7 +37,6 @@ import { ManifestAdministrationCoordinator } from "./manifest-administration-coo
 import { ManifestStore } from "./manifest-store.js";
 import { withProtectedStateUpgrade, reportStateRecoveryReady, type StateRecoveryBootstrap } from "./state-recovery-key.js";
 import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator.js";
-import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { startDaemonLifecycleDiagnostics, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { NativeActivityPublicationCoordinator } from "./native-activity-publication-coordinator.js";
 import { ConvergencePacer } from "./convergence-pacer.js";
@@ -60,10 +59,9 @@ import { RuntimeConfigurationApplyCoordinator } from "./runtime-configuration-ap
 import { RuntimeRecoveryCoordinator } from "./runtime-recovery-coordinator.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { runEveryStopStep } from "./stop-steps.js";
-import { type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
+import { type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type ExecutionTerminalPayload, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import {
   deriveProviderConfigurationSnapshot,
-  providerSupportsConcurrentSupervisedAgents,
 } from "./provider-configuration.js";
 import {
   supervisedPermissionProfilesForProvider,
@@ -112,7 +110,6 @@ export class SupervisorDaemon {
   private maintenance: DaemonMaintenanceService | null = null;
   private readonly authority: DaemonAuthority;
   private readonly store: ManifestStore;
-  private readonly legacyLanes: LegacyLaneCoordinator;
   private readonly manifestAdministration: ManifestAdministrationCoordinator;
   private readonly manifestTransitions: ManifestTransitionCoordinator;
   private readonly readModel: DaemonReadModel;
@@ -201,19 +198,6 @@ export class SupervisorDaemon {
       drive: (entryId, signal) => this.deliveryCutoverExecution.drive(entryId, signal),
     });
     this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath, undefined, undefined, /* schemaPrepared */ true);
-    this.legacyLanes = new LegacyLaneCoordinator({
-      storage: { load: () => this.store.load() },
-      commit: {
-        currentGeneration: () => this.manifestGeneration,
-        write: (expectedGeneration, entries, owners) => this.writeManifest(expectedGeneration, entries, owners),
-        acceptGeneration: (generation) => { this.manifestGeneration = generation; },
-      },
-      authority: {
-        serialize: (operation) => this.serializeManifestMutation(operation),
-        assertCurrent: () => this.singleton.assertCurrent(),
-      },
-      isSupervisedLaneOwner: (entry) => this.isSupervisedLaneOwner(entry),
-    });
     this.manifestAdministration = new ManifestAdministrationCoordinator({
       store: this.store,
       authority: {
@@ -226,14 +210,10 @@ export class SupervisorDaemon {
       },
       policies: {
         projectCreateReplayParameters: projectDaemonCreateRequestReplayParameters,
-        providerSupportsConcurrentAgents: providerSupportsConcurrentSupervisedAgents,
         deriveProviderConfiguration: deriveProviderConfigurationSnapshot,
         permissionProfilesForProvider: supervisedPermissionProfilesForProvider,
         sanitizeActivity: sanitizeDaemonActivityEvent,
         safeErrorDetail: schedulerErrorDetail,
-      },
-      lanes: {
-        liveOwners: (owners) => this.legacyLanes.liveOwners(owners),
       },
       convergence: {
         request: (entryId) => this.requestConvergence(entryId),
@@ -748,8 +728,6 @@ export class SupervisorDaemon {
     this.desiredStates = new DesiredStateCoordinator({
       store: this.store,
       entryConcurrency: this.entryConcurrency,
-      legacyLanes: this.legacyLanes,
-      manifestAdministration: this.manifestAdministration,
       delivery: this.supervisedDelivery,
       authority: {
         currentManifestGeneration: () => this.manifestGeneration,
@@ -913,7 +891,6 @@ export class SupervisorDaemon {
       cancelDeliveryDrain: (input) => this.deliveryCutoverExecution.cancelDrain(input),
       acknowledgeInspectorRoomMoveSourceRevocation: (input) => this.roomMoves.acknowledgeSourceRevocation(input),
       applyAgentConfiguration: (input) => this.runtimeConfigurationApply.apply(input),
-      activateLegacyLane: this.activateLegacyLane.bind(this),
       appendActivity: this.appendActivity.bind(this),
       bindWorkerSession: this.workerAuthority.bindWorkerSession.bind(this.workerAuthority),
       bootstrapRoomIngress: (input) => this.userAction(input.initial_message === undefined ? null : input.entry_id,
@@ -944,8 +921,6 @@ export class SupervisorDaemon {
       putManifestEntry: (entry) => this.userAction(entry.id, () => this.putManifestEntry(entry)),
       readAttempt: this.readAttempt.bind(this),
       recoverAgentRuntime: (id, generation, recovery) => this.userAction(id, () => this.runtimeRecovery.recoverAgentRuntime(id, generation, recovery)),
-      releaseLegacyLane: this.releaseLegacyLane.bind(this),
-      reserveLegacyLane: this.reserveLegacyLane.bind(this),
       resolveTurnControl: (input) => this.turnControls.resolve(input),
       restoreAgentConversation: this.restoreAgentConversation.bind(this),
       retireAgent: this.lifecycleAdministration.retireAgent.bind(this.lifecycleAdministration),
@@ -1043,9 +1018,7 @@ export class SupervisorDaemon {
       this.executionDelegations.start();
     }
     await this.supervisedInbox.normalizeInterruptedEffects();
-    await this.quarantineDuplicateSupervisedLaneOwners();
     await this.runtimeRecovery.recoverTurnControls();
-    await this.recoverOrphanedLegacyReservations();
     await this.roomMoves.reconcilePrepared();
     await this.lifecycleAdministration.recoverPreparedPurges();
     await this.lifecycleAdministration.recoverEphemeralWorkspaces();
@@ -1290,27 +1263,6 @@ export class SupervisorDaemon {
     return result;
   }
 
-  private isSupervisedLaneOwner(entry: DaemonManifestEntry): boolean {
-    return this.manifestAdministration.isSupervisedLaneOwner(entry);
-  }
-
-  /**
-   * Providers whose entries own independently addressable runtimes may have
-   * multiple supervised participants in one room. This only relaxes
-   * supervised-vs-supervised admission; a live supervised entry still fences
-   * an Electron-owned legacy runtime for that provider below.
-   */
-  private competingSupervisedLaneOwner(
-    entries: readonly DaemonManifestEntry[],
-    entry: DaemonManifestEntry,
-  ): DaemonManifestEntry | undefined {
-    return this.manifestAdministration.competingSupervisedLaneOwner(entries, entry);
-  }
-
-  private async quarantineDuplicateSupervisedLaneOwners(): Promise<void> {
-    await this.manifestAdministration.quarantineDuplicateSupervisedLaneOwners();
-  }
-
   /** Inspector configuration is a durable optimistic-concurrency resource. */
   private async getAgentConfiguration(entryId: string, daemonGeneration: number) {
     return this.manifestAdministration.getAgentConfiguration(entryId, daemonGeneration);
@@ -1334,26 +1286,6 @@ export class SupervisorDaemon {
 
   private admitNewTurnControl(entryId: string): void {
     this.turnControls.admitNew(entryId);
-  }
-
-  private async reserveLegacyLane(input: { reservation_id: string; room_id: string; provider: string; owner_pid: number; owner_process_identity: string }): Promise<LegacyLaneOwner> {
-    return this.legacyLanes.reserve(input);
-  }
-
-  private liveLegacyLaneOwners(owners: readonly LegacyLaneOwner[]): LegacyLaneOwner[] {
-    return this.legacyLanes.liveOwners(owners);
-  }
-
-  private async recoverOrphanedLegacyReservations(): Promise<void> {
-    await this.legacyLanes.recoverOrphanedReservations();
-  }
-
-  private async activateLegacyLane(reservationId: string, sessionId: string): Promise<LegacyLaneOwner> {
-    return this.legacyLanes.activate(reservationId, sessionId);
-  }
-
-  private async releaseLegacyLane(input: { reservation_id: string | null; session_id: string | null; room_id: string | null; provider: string | null }): Promise<{ released: boolean }> {
-    return this.legacyLanes.release(input);
   }
 
   private async appendActivity(id: string, event: DaemonActivityEvent): Promise<DaemonManifestEntry> {
@@ -1597,13 +1529,11 @@ export class SupervisorDaemon {
   private writeManifest(
     expectedGeneration: number,
     entries: DaemonManifestEntry[],
-    legacyOwners?: LegacyLaneOwner[],
     roomMoveCancellation?: { agentId: string; detail: string },
   ) {
     return this.store.write(
       expectedGeneration,
       entries,
-      legacyOwners,
       (commit) => this.fenceDaemonCommit(commit),
       roomMoveCancellation,
     );

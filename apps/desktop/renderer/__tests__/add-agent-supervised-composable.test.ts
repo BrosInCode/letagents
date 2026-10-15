@@ -98,7 +98,6 @@ test("supervised polling serializes reads and unsubscribes at terminal state", a
     roomIdentifier: () => "room-1",
     roomLabel: () => "Room one",
     providerId: () => "codex",
-    supportsConcurrentAgents: () => true,
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
@@ -382,18 +381,20 @@ test("durable manifest truth wins over a post-save terminal launch event", async
 
     assert.equal(launch.conflict.value?.id, durableEntry.id, `${desiredState} claim remains attached`);
     assert.equal(launch.conflict.value?.desiredState, desiredState);
-    if (desiredState === "paused") {
-      assert.equal(launch.view.value?.failed, true);
-      assert.equal(launch.view.value?.recovery, null);
+    if (desiredState === "stopped") {
+      // Saved, then stopped before ready, with a failed terminal event: the
+      // card reports the failure instead of a plain cancellation.
+      assert.equal(launch.view.value?.status, "failed");
+      assert.equal(launch.view.value?.failureDetail, "Activation acknowledgement timed out.");
     }
     launch.cleanup();
   }
 });
 
-test("explicit recovery activates a paused durable ownership claim", async () => {
+test("a paused durable entry is not a recoverable launch and is never resumed by recovery", async () => {
   const paused = entry({ desiredState: "paused", observedState: "starting" });
   const running = entry({ desiredState: "running", observedState: "starting" });
-  let activations = 0;
+  let reads = 0;
   Object.assign(globalThis, {
     window: {
       sessionStorage: memorySessionStorage(),
@@ -401,8 +402,12 @@ test("explicit recovery activates a paused durable ownership claim", async () =>
       clearTimeout: () => undefined,
       letagentsDesktop: {
         supervisor: {
-          listAgents: async () => [paused],
-          resumeOwnershipTransfer: async () => { activations += 1; return running; },
+          listAgents: async () => {
+            reads += 1;
+            // Scan 1 sees a paused entry; scan 2 sees a running one; the
+            // explicit recovery refresh (read 3) then finds it paused again.
+            return reads === 2 ? [running] : [paused];
+          },
           onLaunchEvent: () => () => undefined,
           getLaunchEvents: async () => [],
         },
@@ -425,11 +430,19 @@ test("explicit recovery activates a paused durable ownership claim", async () =>
   });
 
   await launch.detectRecoverableLaunch();
-  assert.equal(launch.recoveryCandidate.value?.desiredState, "paused");
-  await launch.recoverDetectedLaunch();
+  assert.equal(launch.recoveryCandidate.value, null, "a paused entry is not offered for recovery");
+  assert.equal(launch.recoveryScanStatus.value, "ready");
 
-  assert.equal(activations, 1);
-  assert.equal(launch.conflict.value?.desiredState, "running");
+  // Re-scan: a running entry is offered.
+  await launch.detectRecoverableLaunch();
+  assert.equal(launch.recoveryCandidate.value?.desiredState, "running");
+
+  // Explicit recovery finds the entry paused by now: it is not resumed, only reported.
+  await launch.recoverDetectedLaunch();
+  assert.equal(launch.recoveryCandidate.value, null);
+  assert.equal(launch.conflict.value, null, "a paused entry is never activated by recovery");
+  assert.equal(launch.conflictLookupTone.value, "warning");
+  assert.match(launch.conflictLookupError.value ?? "", /no longer available/);
   launch.cleanup();
 });
 
@@ -479,18 +492,12 @@ test("the shared supervised start policy preserves authoritative live fences", (
     providerId: "claude-code" as const,
     scanStatus: "error" as const,
     hasActiveLaunch: false,
-    hasRecoveryCandidate: false,
     recoveringCandidate: false,
-    supportsConcurrentAgents: false,
   };
   assert.equal(canStartNewSupervisedLaunch(base), true);
-  assert.equal(canStartNewSupervisedLaunch({ ...base, hasRecoveryCandidate: true }), false);
-  assert.equal(canStartNewSupervisedLaunch({
-    ...base,
-    providerId: "open-model",
-    supportsConcurrentAgents: true,
-    hasRecoveryCandidate: true,
-  }), true);
+  for (const providerId of ["codex", "open-model"] as const) {
+    assert.equal(canStartNewSupervisedLaunch({ ...base, providerId }), true, `${providerId} is not gated by a recoverable entry`);
+  }
   assert.equal(canStartNewSupervisedLaunch({ ...base, hasActiveLaunch: true }), false);
   assert.equal(canStartNewSupervisedLaunch({ ...base, recoveringCandidate: true }), false);
 });
@@ -1990,7 +1997,6 @@ test("a ready Codex card can be released for another request without stopping it
     roomIdentifier: () => "room-1",
     roomLabel: () => "Room one",
     providerId: () => "codex",
-    supportsConcurrentAgents: () => true,
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
@@ -2019,7 +2025,7 @@ test("a ready Codex card can be released for another request without stopping it
   launch.cleanup();
 });
 
-test("only providers with isolated supervised runtimes offer Add another", () => {
+test("every provider offers Add another for a ready agent and only once it is ready", () => {
   const ready = entry({
     observedState: "working",
     workspacePath: "/tmp/worktree",
@@ -2029,16 +2035,16 @@ test("only providers with isolated supervised runtimes offer Add another", () =>
     workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
   });
   assert.equal(canAddAnotherSupervisedAgent({
-    providerId: "codex", entry: ready, supportsConcurrentAgents: true,
+    providerId: "codex", entry: ready,
   }), true);
   assert.equal(canAddAnotherSupervisedAgent({
-    providerId: "claude-code", entry: { ...ready, provider: "claude-code" }, supportsConcurrentAgents: true,
+    providerId: "claude-code", entry: { ...ready, provider: "claude-code" },
   }), true);
   assert.equal(canAddAnotherSupervisedAgent({
-    providerId: "open-model", entry: { ...ready, provider: "open-model" }, supportsConcurrentAgents: true,
+    providerId: "open-model", entry: { ...ready, provider: "open-model" },
   }), true);
   assert.equal(canAddAnotherSupervisedAgent({
-    providerId: "codex", entry: entry(), supportsConcurrentAgents: true,
+    providerId: "codex", entry: entry(),
   }), false);
 });
 
@@ -2167,7 +2173,6 @@ test("switching away from Codex revokes the shared Add-another eligibility and h
     roomIdentifier: () => "room-1",
     roomLabel: () => "Room one",
     providerId: selectedProviderId,
-    supportsConcurrentAgents: () => selectedProviderId.value === "codex",
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,

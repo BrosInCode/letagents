@@ -46,7 +46,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.253";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.257";
 /**
  * The room-level state channel carries activity summaries, not history. Keep in
  * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
@@ -273,17 +273,6 @@ type WireActivityEvent = {
   payload_truncated: boolean;
   payload_redacted: boolean;
   durable_payload_ref: string | null;
-};
-type WireLegacyLaneOwner = {
-  reservation_id: string;
-  room_id: string;
-  provider: string;
-  owner_pid: number;
-  owner_process_identity: string;
-  state: "reserved" | "active";
-  session_id: string | null;
-  created_at: string;
-  updated_at: string;
 };
 
 export type DaemonProcessState = "live" | "zombie";
@@ -1064,7 +1053,17 @@ export class SupervisorDaemonClient {
     };
   }
 
-  async create(input: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> {
+  /**
+   * Save a new supervised entry. A normal launch is saved as `running`: the
+   * daemon starts the provider only once owner authority and room delivery
+   * are installed, so the entry waits durably without a separate claim step.
+   * A rental launch is saved `paused` and activated after the rental server
+   * acknowledges provisioning.
+   */
+  async create(
+    input: DesktopSupervisorCreateInput,
+    options: { desiredState?: "running" | "paused" } = {},
+  ): Promise<DesktopSupervisorManifestEntry> {
     if (!input.charter.trim()) throw new Error("A supervised agent initial message is required.");
     const creationRequestId = input.creationRequestId?.trim() || randomUUID();
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(creationRequestId)) {
@@ -1079,9 +1078,7 @@ export class SupervisorDaemonClient {
       provider: input.providerId,
       model: input.model?.trim() || null,
       charter: input.charter.trim(),
-      // This durable paused claim is the engine-ownership fence. Electron
-      // stops any legacy owner only after this CAS succeeds, then activates it.
-      desired_state: "paused",
+      desired_state: options.desiredState ?? "running",
       observed_state: "absent",
       condition: "none",
       permission_profile_id: input.permissionProfileId ?? null,
@@ -1111,47 +1108,6 @@ export class SupervisorDaemonClient {
     };
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.put", { entry }));
-  }
-
-  async assertLegacyStartAllowed(roomIdentifier: string, provider: string): Promise<void> {
-    const owner = (await this.list(roomIdentifier)).find((entry) => entry.provider === provider && entry.desiredState !== "stopped");
-    if (owner) {
-      throw new Error(`${owner.displayName} already owns the ${provider} lane through the supervised engine. Stop it before starting a legacy agent.`);
-    }
-  }
-
-  async reserveLegacyLane(roomIdentifier: string, provider: string, reservationId: string): Promise<WireLegacyLaneOwner> {
-    await this.ensureRunning();
-    const ownerProcessIdentity = defaultGetProcessIdentity(process.pid);
-    if (typeof ownerProcessIdentity !== "string" || !ownerProcessIdentity) {
-      throw new Error("Could not prove the Electron process birth identity for a legacy lane reservation.");
-    }
-    return this.request<WireLegacyLaneOwner>("lane.reserve_legacy", {
-      reservation_id: reservationId,
-      room_id: roomIdentifier,
-      provider,
-      owner_pid: process.pid,
-      owner_process_identity: ownerProcessIdentity,
-    });
-  }
-
-  async activateLegacyLane(reservationId: string, sessionId: string): Promise<WireLegacyLaneOwner> {
-    await this.ensureRunning();
-    return this.request<WireLegacyLaneOwner>("lane.activate_legacy", {
-      reservation_id: reservationId,
-      session_id: sessionId,
-    });
-  }
-
-  async releaseLegacyLane(input: { reservationId?: string | null; sessionId?: string | null; roomIdentifier?: string | null; provider?: string | null }): Promise<boolean> {
-    await this.ensureRunning();
-    const result = await this.request<{ released: boolean }>("lane.release_legacy", {
-      reservation_id: input.reservationId ?? null,
-      session_id: input.sessionId ?? null,
-      room_id: input.roomIdentifier ?? null,
-      provider: input.provider ?? null,
-    });
-    return result.released;
   }
 
   async setDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> {

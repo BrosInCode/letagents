@@ -373,6 +373,55 @@ test("a start refused over the owner's own setup leads with the reason and the w
   assert.doesNotMatch(projection?.now?.summary ?? "", /convergence scheduler failure/);
 });
 
+test("a refused Codex sandbox startup offers confirmed recovery despite retained PID and idle evidence", () => {
+  const lastError = "convergence scheduler failure: Codex did not answer when LetAgents asked for its settings "
+    + "(Codex did not answer in time), so LetAgents will not start it at a sandboxed access level. Start the agent again.";
+  const refused = entry({
+    observedState: "recovering", condition: "coordination_blocked", lastError,
+    runtimeGenerationId: "runtime_1",
+    nativeLiveness: { state: "idle", observedAt: "2026-07-23T09:00:00.000Z", detail: "Retained old observation." },
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: "2026-07-23T10:00:00.000Z", detail: lastError },
+      ingress: { state: "stopped", observedAt: "2026-07-23T10:00:00.000Z", detail: null },
+      inbox: { state: "waiting_for_desktop_credentials", pendingCount: 0, blockedByMessageId: null, detail: null },
+    },
+  });
+  const projection = projectAgentInspector(refused, { roomId: "focus_1" });
+  const action = (kind: string) => projection?.actions.find(candidate => candidate.kind === kind);
+  assert.equal(projection?.overallState, "needs_attention");
+  assert.equal(projection?.now?.summary,
+    "Agent startup needs attention. Review the startup error. Use Recovery options to restart and resume.");
+  assert.equal(projection?.runtimeExited, false, "a refused startup is not proof that a retained process exited");
+  assert.equal(action("reconnect")?.available, false);
+  assert.equal(action("reconnect_runtime")?.available, false);
+  assert.equal(action("recovery_options")?.available, true);
+  assert.equal(action("restart_runtime")?.available, true);
+  assert.equal(action("restart_runtime")?.danger, true, "restart still uses the confirmed recovery flow");
+  assert.equal(projectAgentInspectorDiagnostics(projection!).recovery.lastError, lastError);
+
+  const stale = projectAgentInspector(refused, { roomId: "focus_1", resourceFreshness: "stale" });
+  for (const kind of ["reconnect", "reconnect_runtime", "recovery_options", "restart_runtime"]) {
+    assert.equal(stale?.actions.find(candidate => candidate.kind === kind)?.available, false);
+  }
+  const credentialsOnly = projectAgentInspector({ ...refused,
+    lastError: "The provider is running, but room access could not be restored after 3 attempts.",
+    nativeLiveness: { state: "healthy", observedAt: "2026-07-23T10:00:00.000Z", detail: null },
+  }, { roomId: "focus_1" });
+  assert.equal(credentialsOnly?.actions.find(candidate => candidate.kind === "reconnect")?.available, true);
+  assert.equal(credentialsOnly?.actions.find(candidate => candidate.kind === "reconnect_runtime")?.available, true);
+
+  for (const change of [
+    { desiredState: "paused" }, { desiredState: "stopped" }, { observedState: "idle", condition: "none", providerPid: 456 },
+    { runtimeRecovery: { operationId: "recovery_1", roomId: refused.roomId,
+      executionGenerationId: refused.executionGenerationId!, runtimeGenerationId: "runtime_1", mode: "resume", phase: "prepared" } },
+  ] satisfies Partial<DesktopSupervisorManifestEntry>[]) {
+    const changed = projectAgentInspector({ ...refused, ...change }, { roomId: "focus_1" });
+    assert.doesNotMatch(changed?.now?.summary ?? "", /Agent startup needs attention/,
+      "old startup errors do not override a paused, recovered or actively restarting agent");
+  }
+});
+
 test("only a trailing startup observation list is left out of the Now summary", () => {
   const summary = (lastError: string) => projectAgentInspector(entry({
     provider: "claude",
