@@ -1,9 +1,19 @@
 import type { RoomGif } from "../../../shared/room-expressions.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
-import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
+import { ReplyTurnCompactionObserver, type ReplyTurnCompactionProof } from "./reply-turn-compaction.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import { defaultFollowUpDelayMs, FOLLOW_UP_ENDED, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL, OWNERSHIP_UNVERIFIED_DETAIL, taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
+
+type CompactionReplyTurnAuthority = {
+  proof: ReplyTurnCompactionProof;
+  invocationId: number;
+  recoveryContext: string;
+  handle: ProviderActionHandle;
+  connection: ProviderActionConnectionRef;
+  originExecutionGenerationId: string;
+};
 
 function providerFailureDisplayText(message: string): string {
   const normalized = message
@@ -80,7 +90,7 @@ export interface SupervisedDeliveryHttp {
   reportNoReply?(input: {
     roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
   }): Promise<void>;
-  /** Relinquish only the reserved speaking position after unstarted preparation is blocked. */
+  /** Relinquish only the speaking position for blocked preparation or proven active native compaction. */
   yieldReplyTurn?(input: {
     roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
   }): Promise<void>;
@@ -1581,6 +1591,13 @@ export class SupervisedAgentDelivery {
     let originProcessEnded = false;
     /** The saved turn's own conversation, when it is not the one this runtime continues. */
     let earlierContinuationId: string | null = null;
+    let compactionObserver: ReplyTurnCompactionObserver | null = null;
+    let disposeCompactionStream: (() => void) | null = null;
+    const closeCompactionObservation = () => {
+      compactionObserver?.close();
+      try { disposeCompactionStream?.(); } catch { /* Optional scheduling observation. */ }
+      disposeCompactionStream = null;
+    };
     try {
       if (await this.inbox.nativeFailure(item.inbox_item_id)) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
@@ -1692,6 +1709,7 @@ export class SupervisedAgentDelivery {
       // release this daemon generation.
       let settledCursorEnding: ProviderRoomTurnCheckpointDisposition | null = null;
       const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<ProviderRoomTurnCheckpointDisposition> => {
+        closeCompactionObservation(); // A terminal edge must cancel the hint before any checkpoint await.
         if (settledCursorEnding) return settledCursorEnding;
         const providerContinuationId = earlierContinuationId ?? agent.handle?.providerContinuationId ?? agent.providerContinuationId;
         if (result.outcome === "failed" || result.outcome === "interrupted") {
@@ -1893,6 +1911,27 @@ export class SupervisedAgentDelivery {
       // would be a fact about a turn the record cannot place.
       const recordEnding = recovering
         && await this.inbox.recordedTurnIsOpen(item.inbox_item_id).catch(() => false);
+      if (agent.provider === "codex" && item.activation.turn && this.http.yieldReplyTurn
+        && this.provider.onStream && agent.handle && agent.providerContinuationId && agent.providerConnection
+        && sameProviderActionConnectionIdentity(agent.providerConnection, agent.handle.providerConnection)) {
+        const handle = agent.handle;
+        const connection = { ...agent.providerConnection };
+        compactionObserver = new ReplyTurnCompactionObserver({ workAttemptId: agent.workAttemptId,
+          providerContinuationId: agent.providerContinuationId }, proof => {
+          void this.reportReplyTurnReceipt(agent, item, turnController, "compaction_yield", {
+            proof, invocationId, recoveryContext, handle, connection,
+            originExecutionGenerationId: providerTurnOriginExecutionGenerationId,
+          }).catch(() => {});
+        });
+        try {
+          const observer = compactionObserver;
+          disposeCompactionStream = await this.provider.onStream(handle, event => {
+            try { observer.observe(event); } catch { observer.close(); }
+          });
+          if (item.provider_turn_id) observer.admit(item.provider_turn_id);
+        } catch { closeCompactionObservation(); }
+        if (!await hasProviderAuthority()) return;
+      }
       providerCallEntered = true;
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
@@ -1947,6 +1986,7 @@ export class SupervisedAgentDelivery {
         // Cursor additionally checkpoints its wrapper birth before allowing
         // retirement; every other adapter's exact turn id is its recovery key.
         if (agent.provider !== "cursor") markProviderTurnDurablyStarted();
+        compactionObserver?.admit(turnId);
       }, checkpointPreparedTurn, checkpointProviderState, settleLifecycleBeforeIdle, markDurableTurnStarted: () => {
         if (agent.provider === "cursor" && this.checkpointPreparedTurn) {
           cursorNativeReleased = true;
@@ -1965,6 +2005,7 @@ export class SupervisedAgentDelivery {
         () => !providerTurnDurablyStarted,
         providerTurnDurable,
       );
+      closeCompactionObservation();
       if (!providerResult) throw new Error("Provider does not support bounded room turns.");
       if (settledCursorEnding) return;
       if (!await (recovering ? hasProviderAuthority() : hasTerminalAuthority(providerResult))) return;
@@ -2195,6 +2236,7 @@ export class SupervisedAgentDelivery {
       }
       await retryFailure({ domain: "pre_dispatch", error: message });
     } finally {
+      closeCompactionObservation();
       try { await this.releaseWorkspace?.(agent, item.source_message_id, item.inbox_item_id); } catch { /* Optional retention cleanup. */ }
       controller.signal.removeEventListener("abort", relayPumpAbort);
       const abort = this.activeTurnAborts.get(agent.agentId);
@@ -2229,16 +2271,16 @@ export class SupervisedAgentDelivery {
   }
 
   private readonly publishedIds = new Map<string, string>();
-  /** No new journal or retry loop: this only gets a settled silence to the
-   * room sooner. Failed/lost hints leave the existing work publisher to
-   * release reply order. Never send before capture/Stop arbitration settles. */
+  /** Silence is reported only after capture and Stop arbitration settle.
+   * Failed hints retain the existing publication/deadline release paths. */
   private reportNoReply(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController): Promise<void> {
     return this.reportReplyTurnReceipt(agent, item, parent, "no_reply");
   }
 
-  private reportReplyTurnReceipt(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController, kind: "no_reply" | "yield"): Promise<void> {
+  private reportReplyTurnReceipt(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController,
+    kind: "no_reply" | "yield" | "compaction_yield", compaction?: CompactionReplyTurnAuthority): Promise<void> {
     const report = kind === "no_reply" ? this.http.reportNoReply : this.http.yieldReplyTurn;
-    if (kind === "yield" && !item.activation.turn) return Promise.resolve();
+    if (kind !== "no_reply" && !item.activation.turn) return Promise.resolve();
     if (!report || this.fenced || this.isStopping(agent.agentId) || parent.signal.aborted
       || isLocalRoomApi(agent.apiUrl) || item.room_id !== agent.roomId
       || !/^msg_[1-9]\d*$/.test(item.source_message_id)) return Promise.resolve();
@@ -2251,10 +2293,31 @@ export class SupervisedAgentDelivery {
     controllers.add(controller);
     this.auxiliaryControllers.set(agent.agentId, controllers);
     const operation = Promise.resolve().then(async () => {
+      const exactCompaction = () => {
+        const active = this.activeTurns.get(agent.agentId);
+        return compaction && compaction.proof.isCompacting()
+          && active?.invocationId === compaction.invocationId && active.phase === "responding"
+          && active.recoveryContext === compaction.recoveryContext && active.inboxItemId === item.inbox_item_id
+          && active.providerTurnId === compaction.proof.providerTurnId && agent.handle === compaction.handle
+          && agent.providerContinuationId === compaction.proof.providerContinuationId
+          && sameProviderActionConnectionIdentity(compaction.connection, agent.providerConnection)
+          && sameProviderActionConnectionIdentity(compaction.connection, agent.handle.providerConnection);
+      };
       const settled = await this.inbox.get(item.inbox_item_id);
       const eligible = kind === "no_reply" ? settled?.state === "acknowledged_no_reply"
-        : settled?.state === "blocked" && !settled.provider_turn_id && !settled.outcome;
+        : kind === "yield" ? settled?.state === "blocked" && !settled.provider_turn_id && !settled.outcome
+        : exactCompaction() && settled?.provider_turn_id === compaction!.proof.providerTurnId
+          && !settled.outcome && ["dispatching", "awaiting_result"].includes(settled.state);
       if (!eligible || !await this.hasLaneAuthority(agent, controller)) return;
+      if (kind === "compaction_yield") {
+        const binding = await this.inbox.providerTurnBinding(item.inbox_item_id);
+        if (!compaction || !binding || binding.agent_id !== agent.agentId || binding.room_id !== agent.roomId
+          || binding.work_attempt_id !== agent.workAttemptId
+          || binding.origin_execution_generation_id !== compaction.originExecutionGenerationId
+          || binding.provider_continuation_id !== compaction.proof.providerContinuationId
+          || binding.provider_turn_id !== compaction.proof.providerTurnId
+          || !await this.hasExecutionAuthority(agent, controller) || !exactCompaction()) return;
+      }
       await report.call(this.http, { apiUrl: agent.apiUrl, roomId: agent.roomId, bearer: agent.bearer,
         sourceMessageId: item.source_message_id, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(2_000)]) });
     }).finally(() => {
