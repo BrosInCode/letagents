@@ -963,6 +963,9 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
     database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
   }
   const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  // Newer Node versions protect sqlite_master by default. Only this disposable
+  // historical-schema fixture intentionally rewrites it; production keeps protection.
+  database.enableDefensive?.(false);
   database.exec("PRAGMA writable_schema=ON");
   database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
   database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
@@ -971,6 +974,7 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
   );
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
     UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
+  database.enableDefensive?.(true);
   database.close();
   await chmod(statePath, 0o600);
   const mainModule = new URL("../../daemon/main.ts", import.meta.url).href;
