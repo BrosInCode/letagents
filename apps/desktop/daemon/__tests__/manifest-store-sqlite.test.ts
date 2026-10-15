@@ -43,10 +43,12 @@ function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync):
     DELETE FROM lifecycle_projection_totals WHERE provider='open-model';
     ${noDelete}`);
   const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.enableDefensive?.(false); // Only the disposable three-provider legacy fixture.
   database.exec("PRAGMA writable_schema=ON");
   database.prepare(`UPDATE sqlite_master SET sql=replace(sql, ?, '')
     WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+  database.enableDefensive?.(true);
   validateLegacyLifecycleProjectionLedgerSchema(database);
 }
 

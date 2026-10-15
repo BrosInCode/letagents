@@ -1315,6 +1315,7 @@ test("current v13 repairs an intermediate inbox missing the failure-code constra
     // but omitted the failure-code CHECK from the persisted table definition.
     const partial = new DatabaseSync(env.database);
     const schemaVersion = (partial.prepare("PRAGMA schema_version").get() as { schema_version: number }).schema_version;
+    partial.enableDefensive?.(false); // Only this disposable historical-schema fixture.
     partial.exec("PRAGMA writable_schema=ON");
     partial.prepare(`
       UPDATE sqlite_master
@@ -1326,6 +1327,7 @@ test("current v13 repairs an intermediate inbox missing the failure-code constra
       WHERE type='table' AND name='supervised_agent_inbox'
     `).run();
     partial.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+    partial.enableDefensive?.(true);
     partial.close();
 
     const repaired = new SupervisedAgentInboxStore(env.database);
@@ -1374,6 +1376,7 @@ test("current v13 rejects unsupported failure codes even when the repair journal
 
     const malformed = new DatabaseSync(env.database);
     const schemaVersion = (malformed.prepare("PRAGMA schema_version").get() as { schema_version: number }).schema_version;
+    malformed.enableDefensive?.(false); // Construct the rejected legacy table in the test fixture only.
     malformed.exec(`
       PRAGMA foreign_keys=OFF;
       DROP TABLE provider_continuation_repairs;
@@ -1389,6 +1392,7 @@ test("current v13 rejects unsupported failure codes even when the repair journal
       WHERE type='table' AND name='supervised_agent_inbox'
     `).run();
     malformed.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};`);
+    malformed.enableDefensive?.(true);
     malformed.close();
 
     const unsupported = new DatabaseSync(env.database);
