@@ -53,6 +53,7 @@ import {
   createAccountRoutingTargetBudget,
   getBoundedActiveWorkLeaseOwners,
   getRecentHumanConversationRecipient,
+  getHumanThreadRootRecipientOwners,
   getMessageAccountAgentRouting,
   MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES,
   MAX_ACCOUNT_ROUTING_TARGETS,
@@ -480,6 +481,8 @@ export async function addMessageWithCreateStatus(
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;
       publisher_account_id?: string | null;
+      visibility?: string | null;
+      rental_session_id?: string | null;
     } | null = null;
     if (replyToNumber) {
       const [foundReply] = await tx
@@ -490,6 +493,8 @@ export async function addMessageWithCreateStatus(
           publisher_agent_key: messages.publisher_agent_key,
           publisher_agent_session_id: messages.publisher_agent_session_id,
           publisher_account_id: messages.publisher_account_id,
+          visibility: messages.visibility,
+          rental_session_id: messages.rental_session_id,
         })
         .from(messages)
         .where(and(eq(messages.room_id, roomId), eq(messages.number, replyToNumber)))
@@ -501,6 +506,8 @@ export async function addMessageWithCreateStatus(
         publisher_agent_key: foundReply.publisher_agent_key,
         publisher_agent_session_id: foundReply.publisher_agent_session_id,
         publisher_account_id: foundReply.publisher_account_id,
+        visibility: foundReply.visibility,
+        rental_session_id: foundReply.rental_session_id,
       };
     }
 
@@ -758,6 +765,24 @@ export async function addMessageWithCreateStatus(
             ? replyGroup.sessions.find((session) =>
                 session.session_id === replyToMessage.publisher_agent_session_id)
             : undefined;
+        }
+      }
+
+      // Top-level answers do not make an agent a thread participant. Let a
+      // human's first unaddressed thread follow-up reach the root's captured
+      // audience without making every subsequent peer reply a broadcast.
+      if (createdMessage.source === "browser" && createdMessage.publisher_account_id
+        && !createdMessage.publisher_agent_key && !createdMessageIsPromptOnly
+        && createdMessage.thread_root_number !== null && threadMembership.size === 0
+        && !globalAddresses.broadcast && !globalAddresses.hasMention
+        && !replyToMessage?.publisher_agent_key && replyToMessage?.source !== "agent"
+        && replyToMessage?.visibility == null && replyToMessage?.rental_session_id == null
+        && !(taskOwnerFollowUp && leases.length > 0)) {
+        const rootRecipients = await getHumanThreadRootRecipientOwners(
+          tx, roomId, routingThreadRootNumber, createdMessage.number, ownedSessionGroups.map(([key]) => key),
+        );
+        for (const [key, capturedOwner] of rootRecipients) {
+          if (ownerScopeByAgentKey.get(key) === capturedOwner) threadMembership.add(key);
         }
       }
 

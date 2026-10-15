@@ -318,7 +318,9 @@ jobs:
           node
           --import ./node_modules/tsx/dist/loader.mjs
           --test
+          --test-concurrency=1
           src/api/__tests__/thread-inbox-parity-db.test.ts
+          src/api/__tests__/human-thread-audience-db.test.ts
 
       - name: Run desktop push worker database tests
         run: >-
