@@ -29,6 +29,7 @@ import {
   upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat,
   upsertRoomAgentPresence,
 } from "../../../db.js";
+import { parseNativeActivitySummary } from "../../../db/presence/liveness.js";
 import {
   respondWithInternalError,
   type AuthenticatedRequest,
@@ -1031,6 +1032,7 @@ export function registerAgentSessionRoutes(
       sequence?: unknown;
       method?: unknown;
       status?: unknown;
+      activity_summary?: unknown;
     };
     let identity: ResolvedRequestAgentIdentity | null = null;
     if (req.authKind === "agent_session") {
@@ -1097,6 +1099,11 @@ export function registerAgentSessionRoutes(
       res.status(400).json({ error: "observed_at, positive integer sequence, native method, and a valid native status are required." });
       return;
     }
+    const activitySummary = parseNativeActivitySummary(body.activity_summary);
+    if (!activitySummary.ok) {
+      res.status(400).json({ error: activitySummary.error });
+      return;
+    }
     try {
       const result = await recordNativeHarnessActivity({
         room_id: project.id,
@@ -1113,6 +1120,7 @@ export function registerAgentSessionRoutes(
         sequence,
         method,
         status,
+        activity_summary: activitySummary.summary,
       });
       res.json({ room_id: project.id, axis: "execution_activity", ...result });
     } catch (error) {

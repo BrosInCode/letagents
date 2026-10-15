@@ -50,7 +50,7 @@
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  --room-chat-content-max: 720px;
+  --room-chat-content-max: 960px;
   --room-chat-side-gutter: clamp(18px, 4vw, 56px);
 }
 
@@ -126,7 +126,7 @@
   grid-template-columns: 32px minmax(0, 1fr);
   gap: 14px;
   align-self: center;
-  width: min(720px, 100%);
+  width: min(var(--room-chat-content-max), 100%);
   padding: 13px 0;
 }
 
@@ -262,7 +262,7 @@
   position: relative;
   box-sizing: border-box;
   width: fit-content;
-  max-width: min(64ch, 100%);
+  max-width: min(92ch, 100%);
   margin-top: 5px;
   padding: 9px 13px;
   border: 1px solid var(--border-strong);

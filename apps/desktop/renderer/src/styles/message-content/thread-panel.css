@@ -100,7 +100,12 @@
 .room-thread-composer textarea:focus { box-shadow: none; }
 .room-thread-composer:focus-within { border-top-color: color-mix(in srgb, var(--text-secondary) 40%, transparent); }
 .room-thread-composer-footer { grid-column: 2; grid-row: 1; display: flex; align-items: center; }
-.room-thread-composer-actions { display: flex; align-items: center; gap: 4px; }
+.room-thread-composer-actions {
+  display: flex; align-items: center; gap: 4px;
+  /* Size the shared GIF trigger like the other thread action buttons. */
+  --room-gif-trigger-size: 32px; --room-gif-trigger-radius: 8px;
+  --room-gif-trigger-hover-bg: color-mix(in srgb, var(--text) 7%, transparent);
+}
 .room-thread-composer-actions button, .room-thread-quote-preview button {
   display: grid; place-items: center; width: 32px; height: 32px; padding: 0;
   border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer;

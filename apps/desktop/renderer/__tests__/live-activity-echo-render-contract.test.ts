@@ -89,7 +89,7 @@ const chatViewSource = readFileSync(fileURLToPath(new URL(
 
 test("the wait for background work has a button of its own that asks for the existing stop of the turn", () => {
   // A button beside the indicator, never inside it: the indicator is a button itself.
-  assert.match(viewportSource, /<div v-for="work in collapsedAgentWork\.visible" :key="work\.id" class="room-local-agent-work-group">\s*<button[\s\S]*?class="room-local-agent-work"[\s\S]*?<\/button>\s*<button\s+v-if="work\.waitsForBackgroundWork"\s+type="button"\s+class="room-local-agent-work-action"/);
+  assert.match(viewportSource, /<div v-for="work in collapsedAgentWork\.visible" :key="work\.id" class="room-local-agent-work-group">\s*(?:<!--[^\n]*-->\s*<div\s+v-if="work\.remote"[\s\S]*?<\/div>\s*)?<button[\s\S]*?class="room-local-agent-work"[\s\S]*?<\/button>\s*<button\s+v-if="work\.waitsForBackgroundWork"\s+type="button"\s+class="room-local-agent-work-action"/);
   // What the title says is what the adapter's interrupt does: a command goes on, a sub-agent is stopped (each captured).
   assert.match(viewportSource, /title="Post the answer that the agent has now\. A command in the background keeps running\. A sub-agent that still runs is stopped\. No later result is posted\."/);
   // The click names the turn that the button was shown for, by the room message that started it.
@@ -105,7 +105,7 @@ test("the wait for background work has a button of its own that asks for the exi
   assert.match(cssSource, /\.room-local-agent-work-action:focus-visible\s*\{[\s\S]*?outline:/);
   // The row of a held turn keeps the look of work, because something runs. Only an agent that waits for the time of
   // its next attempt has a row at rest: that mark is never set from the wait for background work.
-  assert.match(viewportSource, /<div v-for="work in collapsedAgentWork\.visible" :key="work\.id" class="room-local-agent-work-group">\s*<button[^>]*?:data-waiting="work\.waiting \|\| undefined"[^>]*?class="room-local-agent-work"/);
+  assert.match(viewportSource, /<div v-for="work in collapsedAgentWork\.visible" :key="work\.id" class="room-local-agent-work-group">\s*(?:<!--[^\n]*-->\s*<div\s+v-if="work\.remote"[\s\S]*?<\/div>\s*)?<button[^>]*?:data-waiting="work\.waiting \|\| undefined"[^>]*?class="room-local-agent-work"/);
   assert.equal(viewportSource.match(/data-waiting/g)?.length, 1);
   assert.doesNotMatch(cssSource, /waitsForBackgroundWork|room-local-agent-work-action[^{]*data-waiting/);
 });

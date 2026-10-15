@@ -367,7 +367,7 @@ import {
   mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
   pendingManagedAgentPermissionApprovals,
-  supervisedAgentWorkIndicators,
+  supervisedAgentWorkIndicators, remoteAgentWorkIndicators,
   managedAgentRootPathForRoom,
   type ManagedAgentPermissionApproval,
   managedAgentSessionListsEqual,
@@ -942,12 +942,11 @@ const localAgentWork = computed(() =>
   mergeRoomResponseParticipants([
     ...waitingAgentIndicators(supervisorEntries.value, props.room.identifier),
     ...activeManagedAgentWorkIndicators(
-      roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId),
-      props.room.identifier,
-    ),
+      roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId), props.room.identifier),
     ...supervisedAgentWorkIndicators(supervisorEntries.value, roomPresence.value, props.room.identifier,
       supervisorEntriesResourceFreshness(supervisorEntriesState.value)),
-  ], pendingResponseParticipants.value, props.messages)
+  ], [...pendingResponseParticipants.value, /* other members' agents, last */ ...remoteAgentWorkIndicators(roomPresence.value,
+    supervisorEntries.value, roomManagedAgentSessions.value, props.room.identifier)], props.messages)
 );
 const pendingPermissionApprovals = computed(() =>
   pendingManagedAgentPermissionApprovals(roomManagedAgentSessions.value, props.room.identifier)

@@ -22,7 +22,16 @@ import type {
 import { isGenericAgentProviderLabel } from "./agent-provider";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 import { normalizeAgentKey } from "./agents";
+import { ACTIVE_AGENT_PRESENCE_WINDOW_MS } from "../../../../../src/shared/agent-presence";
 import { supervisedAgentDisplayLabel } from "./codenames";
+import { BACKGROUND_WORK_METHOD, humanFacingSupervisorActivitySummary, isHumanVisibleSupervisorActivity, liveActivityEchoText } from "../../../../../shared/live-activity-summary.mjs";
+// The owner's echo and the line published to room presence share one source.
+export {
+  humanFacingSupervisorActivitySummary,
+  isHumanVisibleSupervisorActivity,
+  LIVE_ACTIVITY_ECHO_MAX_LENGTH,
+  liveActivityEchoText,
+} from "../../../../../shared/live-activity-summary.mjs";
 
 /** Current native-owner progress, never inferred from saved activity or a timer. */
 export function agentCompactionProgress(entry: Pick<DesktopSupervisorManifestEntry,
@@ -463,73 +472,6 @@ function roomTurnFallbackSummary(state: string): string {
   return "Thinking";
 }
 
-/** An agent waiting on its model provider is not working, and looks stuck
- * unless its owner is told. The adapter sends this as a `provider_event`,
- * which the daemon treats as ordinary activity; it is the one such event
- * shown. */
-const PROVIDER_RETRY_METHOD = "letagents/providerretry";
-const PROVIDER_RETRY_SUMMARY = /^The model provider returned an error\. Retrying \(attempt \d{1,3}\)\.$/;
-
-/** A Claude turn that stays open for background work it started is not thinking, and looks stuck unless its
- * owner is told what it waits for and for how long. The adapter sends this as a `provider_event` too. */
-const BACKGROUND_WORK_METHOD = "letagents/backgroundwork";
-const BACKGROUND_WORK_SUMMARY = /^(?:Waiting for (?:a sub-agent|sub-agents) to finish \((?:under 1 min|\d{1,4} min)\): "[^\n]{1,600}\.|Waiting up to \d{1,3} min for (?:a background command|background commands|background work): "[^\n]{1,400}\.|Waiting for Claude's answer about background work that ended (?:under 1 min|\d{1,4} min) ago\.)$/;
-
-/** Provider transport/account notifications remain in diagnostics, but they
- * are not evidence that an agent is doing work for the room. */
-export function isHumanVisibleSupervisorActivity(
-  event: Pick<DesktopSupervisorActivityEvent, "kind" | "method">,
-): boolean {
-  const method = event.method.trim().toLowerCase();
-  if (
-    method === "account/ratelimits/updated"
-    || method === "account/ratelimitsupdated"
-    || method === "thread/read"
-  ) return false;
-  if (method === PROVIDER_RETRY_METHOD || method === BACKGROUND_WORK_METHOD) return true;
-  return event.kind !== "usage" && event.kind !== "provider_event";
-}
-
-/** Translate provider-native events into stable product language. The exact
- * provider method remains available in Activity/diagnostics, but Chat should
- * describe what the agent is doing rather than expose a protocol trace. */
-export function humanFacingSupervisorActivitySummary(
-  event: Pick<DesktopSupervisorActivityEvent, "kind" | "method" | "summary">,
-): string {
-  const kind = event.kind.trim().toLowerCase();
-  const method = event.method.trim().toLowerCase();
-  if (method === PROVIDER_RETRY_METHOD) {
-    // Only the adapter's own sentence is shown. Anything else under this
-    // method gets fixed copy, so provider text cannot be shown here.
-    const summary = event.summary.trim();
-    return PROVIDER_RETRY_SUMMARY.test(summary) ? summary : "Waiting for the model provider";
-  }
-  if (method === BACKGROUND_WORK_METHOD) {
-    // The adapter's sentence, with the model's own short description of the work. Anything else gets fixed copy.
-    const summary = event.summary.trim();
-    return BACKGROUND_WORK_SUMMARY.test(summary) ? liveActivityEchoText(summary) : "Waiting for background work to finish";
-  }
-  if (method === "item/reasoning/summarytextdelta") {
-    // The Codex adapter places only the provider-approved reasoning summary in
-    // this field. Older/fallback daemon events contain the protocol label, so
-    // keep the calm generic copy until a real summary arrives.
-    const summary = event.summary.trim();
-    if (summary && !/^[\w-]+\s*·\s*item\/reasoning\/summarytextdelta$/i.test(summary)) {
-      return liveActivityEchoText(summary);
-    }
-    return "Thinking through the request";
-  }
-  if (method.includes("reasoning") || method.includes("thinking")) return "Thinking through the request";
-  if (kind === "text_delta" || method.includes("agentmessage") || method === "assistant") return "Writing a response";
-  if (kind === "tool_lifecycle" || /(?:toolcall|tool_use|websearch|filechange)/i.test(method)) return "Using a tool";
-  if (kind === "command_output" || /(?:command|process|terminal)/i.test(method)) return "Working in the project";
-  // The provider's own review decides these; nobody is being asked.
-  if (/(?:autoapprovalreview|guardianwarning)/.test(method)) return "Checking an action";
-  if (kind === "approval") return "Waiting for approval";
-  if (kind === "turn_lifecycle" || kind === "item_lifecycle") return "Thinking";
-  return liveActivityEchoText(event.summary);
-}
-
 /**
  * Managed session state is push-maintained and repaired by a bounded room-
  * shell reconciliation read. Assigning a freshly allocated but content-equal
@@ -651,31 +593,12 @@ export interface ManagedAgentWorkIndicator {
   waiting?: true;
   /** The turn is held open for background work. Its answer exists, and its owner can end the wait. The row works: something runs. */
   waitsForBackgroundWork?: boolean;
+  /** Another member's agent, known only from room presence: shown as a label, with no control and no live stream. */
+  remote?: true;
 }
-
-/** Longest live-activity echo shown in the room work indicator. */
-export const LIVE_ACTIVITY_ECHO_MAX_LENGTH = 100;
 
 /** Default number of concurrent work indicators shown before collapsing. */
 export const WORK_INDICATOR_VISIBLE_LIMIT = 3;
-
-/**
- * Last-mile guard for the live-activity echo. The daemon already sanitizes and
- * redacts native activity, but the echo is human-facing in a shared room, so
- * collapse whitespace/control characters to a single line and length-bound it
- * to keep the indicator unobtrusive and prevent any multi-line payload from
- * widening the row.
- */
-export function liveActivityEchoText(summary: string | null | undefined): string {
-  const collapsed = (summary ?? "")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!collapsed) return "Working in the room.";
-  if (collapsed.length <= LIVE_ACTIVITY_ECHO_MAX_LENGTH) return collapsed;
-  return `${collapsed.slice(0, LIVE_ACTIVITY_ECHO_MAX_LENGTH - 1).trimEnd()}…`;
-}
 
 /**
  * Retire progress only when the same exact agent has published after the room
@@ -1574,6 +1497,55 @@ export function mergeDesktopManagedAgentPresence(
     merged[existingIndex] = mergeManagedAgentPresenceEntry(merged[existingIndex], syntheticPresence);
   }
   return merged;
+}
+
+/**
+ * Rows for the live strip from room presence: agents that work in this room
+ * and that this desktop does not run. The text is the line the agent's own
+ * daemon published (the same line its owner sees), else "Working". Local
+ * supervisor entries and managed sessions have rows of their own, so every
+ * agent with a local identity is left out, and so is every agent that already
+ * has a row.
+ */
+export function remoteAgentWorkIndicators(
+  presenceEntries: readonly DesktopAgentPresence[],
+  entries: readonly Pick<DesktopSupervisorManifestEntry, "agentKey" | "agentSessionId">[],
+  sessions: readonly DesktopManagedAgentSession[],
+  roomIdentifier: string | null | undefined,
+  existing: readonly Pick<ManagedAgentWorkIndicator, "agentKey" | "agentSessionId">[] = [],
+  nowMs: number = Date.now(),
+): ManagedAgentWorkIndicator[] {
+  const localSessions = new Set<string>();
+  const localKeys = new Set<string>();
+  const roomSessions = sessions.filter((session) => managedAgentSessionMatchesRoom(session, roomIdentifier));
+  for (const local of [...entries, ...roomSessions, ...existing]) {
+    if (local.agentSessionId) localSessions.add(local.agentSessionId);
+    const key = normalizeAgentKey(local.agentKey);
+    if (key) localKeys.add(key);
+  }
+  const rows = new Map<string, ManagedAgentWorkIndicator>();
+  for (const presence of presenceEntries) {
+    const key = normalizeAgentKey(presence.agentKey);
+    const identity = key || presence.agentSessionId;
+    const heartbeatMs = Date.parse(presence.lastHeartbeatAt);
+    if (!identity || rows.has(identity)
+      || (presence.status !== "working" && presence.status !== "reviewing")
+      || !Number.isFinite(heartbeatMs) || nowMs - heartbeatMs > ACTIVE_AGENT_PRESENCE_WINDOW_MS
+      || (presence.agentSessionId && localSessions.has(presence.agentSessionId))
+      || (key && localKeys.has(key))
+      || roomSessions.some((session) => presenceMatchesManagedAgentSession(presence, session))) continue;
+    rows.set(identity, {
+      id: `remote:${identity}`,
+      displayName: presence.displayName?.trim() || presence.actorLabel,
+      summary: liveActivityEchoText(presence.statusText?.trim() || "Working"),
+      // Unknown: presence tells when the agent was last seen, not when its work started.
+      startedAt: "",
+      agentSessionId: presence.agentSessionId,
+      agentKey: presence.agentKey,
+      remote: true,
+    });
+  }
+  return [...rows.values()];
 }
 
 export function mergeReachableAgentPresenceParticipants(
