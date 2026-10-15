@@ -70,7 +70,7 @@ import {
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
 import {
-  repairDesktopRoomStreamManagedDelivery,
+  acknowledgeDesktopRoomStreamGapRepair,
   startDesktopRoomStream,
   stopDesktopRoomStream,
 } from "../room-stream.js";
@@ -311,7 +311,7 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       _event,
       roomIdentifier: string,
       repair: DesktopRoomDeliveryRepair,
-    ): Promise<void> => repairDesktopRoomStreamManagedDelivery(roomIdentifier, repair),
+    ): Promise<void> => acknowledgeDesktopRoomStreamGapRepair(roomIdentifier, repair),
   );
   targetIpcMain.handle(
     "desktop:room:stop-stream",

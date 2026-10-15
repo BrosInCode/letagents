@@ -46,7 +46,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.249";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.250";
 /**
  * The room-level state channel carries activity summaries, not history. Keep in
  * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
@@ -185,7 +185,7 @@ type WireEntry = {
   condition: DesktopSupervisorManifestEntry["condition"];
   last_error?: string | null;
   permission_profile_id: string | null;
-  delivery_mode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
+  delivery_mode?: "mcp_polling" | "daemon_inbox";
   polling_contract?: "custodial_polling_v1" | null;
   home_harness?: string;
   permission_pending?: boolean;
@@ -2445,10 +2445,7 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
     condition: entry.condition,
     lastError: entry.last_error ?? null,
     permissionProfileId: entry.permission_profile_id,
-    // The daemon keeps "desktop_events" in its stored enum for one release.
-    // The desktop engine that delivered those events is gone, so the UI
-    // treats such an entry as a polling entry.
-    deliveryMode: entry.delivery_mode === "daemon_inbox" ? "daemon_inbox" : "mcp_polling",
+    deliveryMode: entry.delivery_mode ?? "mcp_polling",
     ...(entry.polling_contract === "custodial_polling_v1" ? { pollingContract: entry.polling_contract } : {}),
     ...(entry.home_harness === "on" || entry.home_harness === "after_restart" || entry.home_harness === "until_restart"
       ? { homeHarness: entry.home_harness } : {}),

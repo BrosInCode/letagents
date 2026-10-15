@@ -24,28 +24,8 @@ import type {
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../src/components/desktop/types";
-import {
-  buildRoomStreamDeliveryRepair,
-  useDesktopAppData,
-} from "../src/composables/useDesktopAppData";
+import { useDesktopAppData } from "../src/composables/useDesktopAppData";
 import type { RecentRootRoom } from "../src/domain/sidebar-rooms";
-
-it("builds managed-agent repairs only from authoritative snapshot deltas", () => {
-  const existingTask = { ...taskSummary("task_1"), updatedAt: "2026-08-11T10:00:00.000Z" };
-  const updatedTask = { ...existingTask, updatedAt: "2026-08-11T10:01:00.000Z" };
-  const repair = buildRoomStreamDeliveryRepair(
-    roomSnapshot("focus_a", {
-      messages: [roomMessage("msg_1", "existing")],
-      tasks: [existingTask],
-    }),
-    roomSnapshot("focus_a", {
-      messages: [roomMessage("msg_1", "existing"), roomMessage("msg_2", "missed target")],
-      tasks: [updatedTask, { ...taskSummary("task_2"), updatedAt: "2026-08-11T10:02:00.000Z" }],
-    }),
-  );
-  assert.deepEqual(repair.messages.map((message) => message.id), ["msg_2"]);
-  assert.deepEqual(repair.tasks.map((task) => task.id), ["task_1", "task_2"]);
-});
 
 describe("useDesktopAppData selected focus room snapshots", () => {
   it("shows an optimistic snapshot only for uncached focus room loads", async () => {
@@ -293,7 +273,7 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
     assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
   });
 
-  it("hands authoritative gap deltas back to managed-agent delivery once", async () => {
+  it("acknowledges the authoritative gap snapshot to the room stream once", async () => {
     const harness = createHarness();
     const priorTask = { ...taskSummary("task_1"), updatedAt: "2026-08-11T10:00:00.000Z" };
     harness.selectedSnapshot.value = roomSnapshot("focus_a", {
@@ -334,12 +314,10 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
 
     assert.equal(harness.deliveryRepairs.length, 1);
     assert.equal(harness.deliveryRepairs[0]?.roomIdentifier, "focus_a");
-    assert.equal(harness.deliveryRepairs[0]?.repair.token, 41);
-    assert.deepEqual(harness.deliveryRepairs[0]?.repair.messages.map((message) => message.id), ["msg_2"]);
-    assert.deepEqual(harness.deliveryRepairs[0]?.repair.tasks.map((task) => task.id), ["task_1", "task_2"]);
+    assert.deepEqual(harness.deliveryRepairs[0]?.repair, { token: 41 });
   });
 
-  it("retries a rejected managed-agent handoff with the same baseline and token", async () => {
+  it("retries a rejected gap acknowledgement with the same token", async () => {
     const harness = createHarness({ deliveryRepairRetryMs: 1 });
     harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_1", "Existing")]);
     harness.nextSelectedSnapshot = Promise.resolve(focusSnapshot([
@@ -361,14 +339,8 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
     });
 
     assert.deepEqual(
-      harness.deliveryRepairs.map(({ repair }) => ({
-        token: repair.token,
-        messages: repair.messages.map((message) => message.id),
-      })),
-      [
-        { token: 42, messages: ["msg_2"] },
-        { token: 42, messages: ["msg_2"] },
-      ],
+      harness.deliveryRepairs.map(({ repair }) => repair),
+      [{ token: 42 }, { token: 42 }],
     );
   });
 
@@ -396,11 +368,7 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
       await waitForDesktop(() => harness.deliveryRepairs.length === 1);
     });
 
-    assert.equal(harness.deliveryRepairs[0]?.repair.token, 43);
-    assert.deepEqual(
-      harness.deliveryRepairs[0]?.repair.messages.map((message) => message.id),
-      ["msg_2"],
-    );
+    assert.deepEqual(harness.deliveryRepairs[0]?.repair, { token: 43 });
     assert.equal(harness.getSnapshotRequests.length, 2);
   });
 

@@ -1540,10 +1540,6 @@ async function startWireDaemon(
       } else if (request.method === "attempt.read") {
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         result = { entry_id: entry.id, work_attempt_id: null, workspace_path: entry.workspace_path, last_terminal: null, restart_count: 0, activity: entry.activity };
-      } else if (request.method === "manifest.append_activity") {
-        const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
-        entry.activity.push(request.params!.event);
-        result = entry;
       } else if (request.method === "supervisor.retry_room_delivery") {
         result = { accepted: true };
       } else if (request.method === "supervisor.install_host_grant") {
@@ -3194,7 +3190,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.249");
+    assert.equal(status.implementationVersion, "2.0.250");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

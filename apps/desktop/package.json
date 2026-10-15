@@ -32,7 +32,6 @@
     "package:mac": "npm run package:artifact && node electron/scripts/package-macos.mjs",
     "package:mac:local": "cross-env MACOS_SKIP_SIGNING=1 npm run package:mac",
     "smoke:electron": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 electron .",
-    "screenshot:agent-detail": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT=/tmp/letagents-agent-detail-responsive.png electron .",
     "screenshot:board": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_BOARD_SCREENSHOT=/tmp/letagents-room-board.png electron .",
     "screenshot:board-tasks": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_BOARD_FIXTURE=tasks LETAGENTS_DESKTOP_BOARD_SCREENSHOT=/tmp/letagents-room-board-tasks.png electron .",
     "screenshot:updates": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_UPDATES_SCREENSHOT=/tmp/letagents-desktop-updates.png electron .",

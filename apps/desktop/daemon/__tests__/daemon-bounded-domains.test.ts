@@ -25,7 +25,6 @@ const expectedControlMethods = [
   "daemon.status",
   "local_board.mutate",
   "local_board.watch",
-  "manifest.append_activity",
   "manifest.compare_and_set_desired_state",
   "manifest.control_turn",
   "manifest.list",

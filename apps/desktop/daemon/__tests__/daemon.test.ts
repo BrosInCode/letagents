@@ -1743,6 +1743,17 @@ function fakeGit(root: string): (args: string[]) => Promise<string> {
   };
 }
 
+/**
+ * The write a provider stream makes for each activity event. The `manifest.append_activity`
+ * request that once exposed it is retired, so these tests reach it through the daemon itself.
+ */
+function appendNativeActivity(daemon: SupervisorDaemon, id: string, event: DaemonActivityEvent): Promise<void> {
+  const { manifestAdministration } = daemon as unknown as {
+    manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
+  };
+  return manifestAdministration.appendNativeActivity(id, event, false);
+}
+
 const entry: DaemonManifestEntry = {
   id: "agent_1", room_id: "room_1", display_name: "Agent", provider: "test", model: null, charter: "test",
   desired_state: "running", observed_state: "idle", condition: "none", permission_profile_id: null, created_by: "test", created_at: "2026-01-01T00:00:00.000Z",
@@ -3160,7 +3171,7 @@ test("stop fences a launch waiting on provider capabilities before generation cr
 test("provider delivery capabilities block mismatches while legacy omissions remain compatible", async () => {
   const runCase = async (
     id: "delivery_mode_mismatch" | "legacy_delivery_capabilities",
-    deliveryModes: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox"> | undefined,
+    deliveryModes: ReadonlyArray<"mcp_polling" | "daemon_inbox"> | undefined,
   ) => {
     const env = await fixture();
     const paths = {
@@ -8767,10 +8778,15 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     assert.equal(saved.native_liveness?.state, "unknown");
     const paused = await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "paused" });
     assert.equal((paused.result as DaemonManifestEntry).desired_state, "paused");
-    const event = { observed_at: "2026-01-01T00:00:01.000Z", sequence: 1, provider: "codex", kind: "turn_lifecycle", method: "turn/started", summary: "Working on the task", status: "working", payload: {}, payload_truncated: false, payload_redacted: true, durable_payload_ref: null };
-    const active = await daemonRequest(paths.socketPath, "manifest.append_activity", { id: entry.id, event });
-    assert.equal((active.result as DaemonManifestEntry).observed_state, "working");
-    assert.equal((active.result as DaemonManifestEntry).native_liveness?.state, "active");
+    const event: DaemonActivityEvent = { observed_at: "2026-01-01T00:00:01.000Z", sequence: 1, provider: "codex", kind: "turn_lifecycle", method: "turn/started", summary: "Working on the task", status: "working", payload: {}, payload_truncated: false, payload_redacted: true, durable_payload_ref: null };
+    await appendNativeActivity(daemon, entry.id, event);
+    // The stored axes, not the read model's: an event this old reads back as stale, as the next lines show.
+    const inspection = new ManifestStore(paths.manifestPath);
+    try {
+      const active = (await inspection.getEntry(entry.id))!;
+      assert.equal(active.observed_state, "working");
+      assert.equal(active.native_liveness?.state, "active");
+    } finally { await inspection.close(); }
     await daemonRequest(paths.socketPath, "manifest.update_workplace_liveness", { id: entry.id, state: "reachable", detail: "heartbeat", observed_at: "2026-01-01T00:00:01.000Z" });
     const stale = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
     assert.equal(stale.workplace_liveness?.state, "stale");
@@ -8796,34 +8812,32 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
   try {
     await daemon.start();
     await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, id: "credential_firewall" } });
-    const response = await daemonRequest(paths.socketPath, "manifest.append_activity", {
-      id: "credential_firewall",
-      event: {
-        observed_at: "2026-01-01T00:00:01.000Z",
-        sequence: 1,
-        provider: "claude-code",
-        kind: "tool_result",
-        method: `tool/result Authorization: Bearer ${canary}`,
-        summary: `LETAGENTS_TOKEN=${canary}`,
-        status: "working",
-        payload: {
-          nested: [{ LETAGENTS_TOKEN: canary }, { api_key: canary }, { clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }],
-          json: JSON.stringify({ LETAGENTS_TOKEN: canary }),
-          header: `Authorization: Bearer ${canary}`,
-          basic: `Authorization: Basic ${canary}`,
-          arbitraryAuthorization: `Authorization: ${canary}`,
-          stringifiedHeaders: JSON.stringify({ bearer: `Authorization: Bearer ${canary}`, basic: `Authorization: Basic ${canary}`, arbitrary: `Authorization: ${canary}` }),
-          stringifiedCamelCase: JSON.stringify({ clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }),
-          standaloneOwnedTokens: `worker=${workerBearer} host=${hostGrant}`,
-          stringifiedOwnedTokens: JSON.stringify({ message: `${workerBearer} ${hostGrant}` }),
-        },
-        payload_truncated: false,
-        payload_redacted: false,
-        durable_payload_ref: `Authorization: Bearer ${canary}`,
+    await appendNativeActivity(daemon, "credential_firewall", {
+      observed_at: "2026-01-01T00:00:01.000Z",
+      sequence: 1,
+      provider: "claude-code",
+      kind: "tool_result",
+      method: `tool/result Authorization: Bearer ${canary}`,
+      summary: `LETAGENTS_TOKEN=${canary}`,
+      status: "working",
+      payload: {
+        nested: [{ LETAGENTS_TOKEN: canary }, { api_key: canary }, { clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }],
+        json: JSON.stringify({ LETAGENTS_TOKEN: canary }),
+        header: `Authorization: Bearer ${canary}`,
+        basic: `Authorization: Basic ${canary}`,
+        arbitraryAuthorization: `Authorization: ${canary}`,
+        stringifiedHeaders: JSON.stringify({ bearer: `Authorization: Bearer ${canary}`, basic: `Authorization: Basic ${canary}`, arbitrary: `Authorization: ${canary}` }),
+        stringifiedCamelCase: JSON.stringify({ clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }),
+        standaloneOwnedTokens: `worker=${workerBearer} host=${hostGrant}`,
+        stringifiedOwnedTokens: JSON.stringify({ message: `${workerBearer} ${hostGrant}` }),
       },
+      payload_truncated: false,
+      payload_redacted: false,
+      durable_payload_ref: `Authorization: Bearer ${canary}`,
     });
-    assert.equal(response.ok, true, response.error);
-    const dto = response.result as DaemonManifestEntry;
+    const listed = await daemonRequest(paths.socketPath, "manifest.list");
+    assert.equal(listed.ok, true, listed.error);
+    const dto = (listed.result as DaemonManifestEntry[]).find((candidate) => candidate.id === "credential_firewall")!;
     assert.equal(dto.activity?.[0]?.payload_redacted, true);
     assert.doesNotMatch(JSON.stringify(dto), new RegExp(canary));
     assert.doesNotMatch(JSON.stringify(dto), new RegExp(workerBearer));

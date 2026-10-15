@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.249";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.250";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -168,7 +168,7 @@ export type DaemonAgentConfiguration = {
 };
 
 /** Durable owner of room ingress for one supervised provider execution. */
-export type DaemonAgentDeliveryMode = "mcp_polling" | "desktop_events" | "daemon_inbox";
+export type DaemonAgentDeliveryMode = "mcp_polling" | "daemon_inbox";
 
 /** Durable one-way handoff from legacy polling to daemon-owned ingress. */
 export type DaemonDeliveryCutover = {

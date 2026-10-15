@@ -201,7 +201,7 @@ export function emitPersistedLocalRoomArtifactUpdate(
  * reconciliation and the daemon owns agent delivery, so the only work left
  * here is to let the stream's event cursor advance once the snapshot landed.
  */
-export function repairDesktopRoomStreamManagedDelivery(
+export function acknowledgeDesktopRoomStreamGapRepair(
   roomIdentifier: string,
   repair: DesktopRoomDeliveryRepair,
 ): void {
