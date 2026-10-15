@@ -119,10 +119,13 @@ test("a list indented one level deeper on every line renders quickly and stays a
   const value = Array.from({ length: 800 }, (_, level) => `${"  ".repeat(level)}- item ${level}`).join("\n");
   assert.ok(value.length > 600_000);
   renderDesktopMarkdown("- warm up", { block: true });
-  const started = performance.now();
+  // This synchronous parser test budgets its own work, not time preempted by
+  // the other test-file processes running alongside it in CI.
+  const started = process.cpuUsage();
   const html = block(value);
-  const elapsed = performance.now() - started;
-  assert.ok(elapsed < 100, `rendering took ${elapsed.toFixed(1)} ms`);
+  const usage = process.cpuUsage(started);
+  const elapsed = (usage.user + usage.system) / 1000;
+  assert.ok(elapsed < 100, `rendering used ${elapsed.toFixed(1)} ms of CPU time`);
   assert.match(html, /^<ul><li>item 0<ul><li>item 1/);
   assert.match(html, /item 799/);
 });
