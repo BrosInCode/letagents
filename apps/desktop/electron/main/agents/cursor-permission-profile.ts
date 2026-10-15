@@ -37,21 +37,6 @@ export function cursorLaunchOptionsForPermissionProfile(
   }
 }
 
-export function cursorPermissionProfileRuntimeLine(
-  profileId: DesktopManagedAgentPermissionProfileId | null | undefined,
-): string {
-  switch (normalizeCursorPermissionProfileId(profileId)) {
-    case "sandboxed_write":
-      return "Runtime mode: Cursor sandboxed write. Cursor is launched with --force and --sandbox enabled; exposed MCP tools remain governed separately by the runtime.";
-    case "full_access":
-      return "Runtime mode: Cursor full access. Cursor is launched with --force and --sandbox disabled.";
-    case "ask_before_write":
-      return "Runtime mode: Cursor ask-before-write is not enabled here; treat this session as read-only.";
-    default:
-      return "Runtime mode: Cursor read-only. You are running in ask mode and must not edit files.";
-  }
-}
-
 export function cursorPermissionProfileInstructionLines(
   profileId: DesktopManagedAgentPermissionProfileId | null | undefined,
 ): string[] {
@@ -77,19 +62,6 @@ export function cursorPermissionProfileInstructionLines(
         "- Do not edit files, run write-capable actions, or try to bypass read-only mode. If the event requires code changes, explain the needed change instead of making it.",
         "- If action is useful, inspect/analyze locally as allowed by Cursor read-only mode and make your final answer the public room reply the desktop should publish as you.",
       ];
-  }
-}
-
-export function cursorPermissionProfileStartMessage(
-  profileId: DesktopManagedAgentPermissionProfileId | null | undefined,
-): string {
-  switch (normalizeCursorPermissionProfileId(profileId)) {
-    case "sandboxed_write":
-      return "Cursor sandboxed-write agent started with desktop-delivered room events.";
-    case "full_access":
-      return "Cursor full-access agent started with desktop-delivered room events.";
-    default:
-      return "Cursor read-only agent started with desktop-delivered room events.";
   }
 }
 

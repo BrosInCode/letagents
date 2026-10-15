@@ -2632,20 +2632,6 @@ export class ManifestStore {
       last_sequence: row.last_sequence == null ? -1 : Number(row.last_sequence) } : undefined;
   }
 
-  async appendActivity(
-    expectedGeneration: number,
-    agentId: string,
-    event: DaemonActivityEvent,
-    observedState: DaemonManifestEntry["observed_state"],
-    nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]>,
-    limit = 200,
-    commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
-    const result = await this.writeActivity(expectedGeneration, agentId, event, { observedState, nativeLiveness }, limit,
-      database => this.activityEntry(database, agentId), commitFence);
-    return { generation: result.generation, entry: result.value };
-  }
-
   /** Persist presentation detail without acquiring any runtime lifecycle field. */
   async appendActivityOnly(
     expectedGeneration: number,

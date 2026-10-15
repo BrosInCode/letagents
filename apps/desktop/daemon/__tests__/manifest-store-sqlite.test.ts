@@ -6348,11 +6348,15 @@ test("targeted activity writes keep presentation-only events out of lifecycle fi
     raw.replaceEntries = () => { throw new Error("full replacement must not run on the activity path"); };
 
     const nextEvent = { ...entry.activity![0]!, sequence: 5, observed_at: "2026-07-19T00:04:00.000Z", summary: "Targeted event" };
-    const result = await store.appendActivity(1, entry.id, nextEvent, "idle", {
-      state: "idle", observed_at: nextEvent.observed_at, detail: nextEvent.summary,
+    const recorded = await store.recordActivity(1, entry.id, nextEvent, {
+      observedState: "idle",
+      nativeLiveness: { state: "idle", observed_at: nextEvent.observed_at, detail: nextEvent.summary },
     }, 1);
-    assert.equal(result.generation, 2);
+    assert.equal(recorded.generation, 2);
+    const result = { entry: (await store.getEntry(entry.id))! };
     assert.deepEqual(result.entry.activity, [nextEvent]);
+    assert.equal(result.entry.observed_state, "idle");
+    assert.equal(result.entry.native_liveness?.state, "idle");
     assert.deepEqual(snapshot(), before);
     assert.deepEqual(await store.getEntry(other.id), created.entries.find((candidate) => candidate.id === other.id));
 
@@ -6477,7 +6481,7 @@ test("targeted writes return their committed projection without any post-commit 
     assert.equal(replaced.generation, 2);
     assert.equal(replaced.entry.observed_state, "idle");
     const event = { ...entry.activity![0]!, sequence: 5, observed_at: "2026-07-19T01:00:00.000Z" };
-    const appended = await store.appendActivity(2, entry.id, event, "working", { state: "active", observed_at: event.observed_at, detail: "working" });
+    const appended = await store.appendActivityOnly(2, entry.id, event);
     assert.equal(appended.generation, 3);
     assert.equal(appended.entry.activity?.at(-1)?.sequence, 5);
     const live = await store.updateWorkplaceLiveness(3, entry.id, { state: "reachable", observed_at: event.observed_at, detail: "online" });

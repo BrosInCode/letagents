@@ -252,8 +252,8 @@ const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
   },
   deliveryModes: ["mcp_polling", "daemon_inbox"],
   // `--resume <session_id>` is the documented continuation across per-turn
-  // children (the legacy engine already relies on it); the adapter asserts the
-  // session identity echo per turn. Subject to TrailDelta's task_38 spike cell.
+  // children; the adapter asserts the session identity echo per turn. Subject
+  // to TrailDelta's task_38 spike cell.
   resume: true,
   // cursor-agent takes its prompt as a positional argument and ignores stdin —
   // there is NO channel into a RUNNING turn. poke() delivers at the next turn

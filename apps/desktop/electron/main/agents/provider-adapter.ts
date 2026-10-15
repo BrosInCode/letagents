@@ -42,7 +42,7 @@ export interface ProviderAdapterCapabilities {
    * Room-ingress modes this adapter can safely run. Daemon inbox support
    * requires bounded run/recover semantics, not merely a long-lived process.
    */
-  deliveryModes?: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox">;
+  deliveryModes?: ReadonlyArray<"mcp_polling" | "daemon_inbox">;
   /** Continue the SAME provider session across a restart (vs. starting fresh). */
   resume: boolean;
   /** Inject a message into a running session at its next tool boundary (poke). */
@@ -236,7 +236,7 @@ export interface ProviderSpawnRequest {
   workAttemptId: string;
   roomId: string;
   /** Durable ingress owner selected by the daemon, never inferred from policy. */
-  deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
+  deliveryMode?: "mcp_polling" | "daemon_inbox";
   /** Requested lifecycle authority, frozen when the returned native birth is checkpointed. */
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   /** Dormant, attested borrowed-worker profile. Launch returns idle; it never starts polling. */

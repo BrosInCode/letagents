@@ -164,29 +164,6 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
       });
       return { generation: durableManifestGeneration, outcome: "updated", configuration };
     },
-    async appendActivity(expectedGeneration, entryId, event, observedState, nativeLiveness, limit, commitFence) {
-      events.push(`store:append:${event.sequence}:${limit}`);
-      assert.equal(expectedGeneration, durableManifestGeneration,
-        "activity append must use the durable manifest generation");
-      let updated!: DaemonManifestEntry;
-      await commitFence(async () => {
-        events.push("store:commit-activity");
-        const current = manifest.entries.find((candidate) => candidate.id === entryId)!;
-        updated = {
-          ...current,
-          observed_state: observedState,
-          native_liveness: nativeLiveness,
-          activity: [...(current.activity ?? []), event].slice(-limit),
-        };
-        durableManifestGeneration = expectedGeneration + 1;
-        manifest = {
-          ...manifest,
-          generation: durableManifestGeneration,
-          entries: manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate),
-        };
-      });
-      return { generation: durableManifestGeneration, entry: updated };
-    },
     async appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence) {
       events.push(`store:append-only:${event.sequence}:${limit}`);
       assert.equal(expectedGeneration, durableManifestGeneration,
@@ -210,11 +187,30 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
     },
     async recordActivity(expectedGeneration, entryId, event, runtimeUpdate, limit, commitFence) {
       events.push(`store:record:${event.sequence}:${limit}`);
-      const next = runtimeUpdate
-        ? await store.appendActivity(expectedGeneration, entryId, event,
-          runtimeUpdate.observedState, runtimeUpdate.nativeLiveness, limit, commitFence)
-        : await store.appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence);
-      return { generation: next.generation };
+      if (!runtimeUpdate) {
+        const next = await store.appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence);
+        return { generation: next.generation };
+      }
+      assert.equal(expectedGeneration, durableManifestGeneration,
+        "activity append must use the durable manifest generation");
+      let updated!: DaemonManifestEntry;
+      await commitFence(async () => {
+        events.push("store:commit-activity");
+        const current = manifest.entries.find((candidate) => candidate.id === entryId)!;
+        updated = {
+          ...current,
+          observed_state: runtimeUpdate.observedState,
+          native_liveness: runtimeUpdate.nativeLiveness,
+          activity: [...(current.activity ?? []), event].slice(-limit),
+        };
+        durableManifestGeneration = expectedGeneration + 1;
+        manifest = {
+          ...manifest,
+          generation: durableManifestGeneration,
+          entries: manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate),
+        };
+      });
+      return { generation: durableManifestGeneration };
     },
     async updateWorkplaceLiveness(expectedGeneration, entryId, liveness, commitFence) {
       events.push(`store:liveness:${liveness.state}`);
@@ -437,7 +433,7 @@ test("serialized admission asserts current ownership and the commit fence blocks
   const fenced = harness([entry()]);
   fenced.setHandoffScheduled(true);
   await assert.rejects(
-    fenced.subject.appendActivity("agent-1", activity()),
+    fenced.subject.appendNativeActivity("agent-1", activity(), false),
     /Supervisor handoff fenced a stale daemon-owned commit/,
   );
   assert.equal(fenced.events.includes("authority:fence"), true);
@@ -451,21 +447,22 @@ test("activity sanitization precedes sequence admission and persists exact bound
   const state = harness([entry({ activity: [prior], observed_state: "idle" })]);
 
   await assert.rejects(
-    state.subject.appendActivity("agent-1", activity({ sequence: 5 })),
+    state.subject.appendNativeActivity("agent-1", activity({ sequence: 5 }), false),
     /Native activity sequence 5 is not newer than 5/,
   );
 
-  const updated = await state.subject.appendActivity("agent-1", activity({
+  await state.subject.appendNativeActivity("agent-1", activity({
     sequence: 6,
     status: "blocked",
     summary: "blocked token=abcdefghijklmnopqrstuvwxyz123456",
     payload: { api_key: "secret-value" },
-  }));
+  }), false);
+  const updated = state.manifest.entries[0]!;
   assert.equal(updated.observed_state, "idle", "blocked activity preserves observed state");
   assert.equal(updated.native_liveness?.state, "active");
   assert.equal(updated.activity?.at(-1)?.payload_redacted, true);
   assert.equal(JSON.stringify(updated.activity?.at(-1)).includes("secret-value"), false);
-  assert.equal(state.events.includes("store:append:6:200"), true);
+  assert.equal(state.events.includes("store:record:6:200"), true);
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
 });
 
@@ -562,7 +559,7 @@ test("activity, liveness, and configuration stores reject a stale accepted manif
   const staleActivity = harness([entry()]);
   staleActivity.setAcceptedManifestGeneration(3);
   await assert.rejects(
-    staleActivity.subject.appendActivity("agent-1", activity()),
+    staleActivity.subject.appendNativeActivity("agent-1", activity(), false),
     /activity append must use the durable manifest generation/,
   );
   assert.equal(staleActivity.events.includes("authority:fence"), false);
