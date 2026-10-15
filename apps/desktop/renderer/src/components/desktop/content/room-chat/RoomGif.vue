@@ -24,16 +24,29 @@ const paused = ref(typeof window !== 'undefined' && window.matchMedia("(prefers-
 const mediaUrl = computed(() => (paused.value ? item.value?.still_url : item.value?.image_url) || undefined);
 const state = computed(() => failed.value || (item.value && !mediaUrl.value) ? 'unavailable' : loaded.value ? 'ready' : 'loading');
 let observer: IntersectionObserver | undefined; let generation = 0;
-function mediaLoaded(event: Event): void { if (event.target === media.value) loaded.value = true; }
-function mediaFailed(event: Event): void { if (event.target === media.value) failed.value = true; }
+let previewTimer: ReturnType<typeof setTimeout> | undefined;
+function mediaLoaded(event: Event): void {
+  if (event.target === media.value) { clearTimeout(previewTimer); loaded.value = true; }
+}
+function mediaFailed(event: Event): void {
+  if (event.target === media.value) { clearTimeout(previewTimer); failed.value = true; }
+}
 async function load(): Promise<void> {
+  clearTimeout(previewTimer);
   const version = ++generation; item.value = null; failed.value = false; loaded.value = false;
   if (!props.roomIdentifier) { failed.value = true; return; }
+  // A stalled metadata request or media host may never produce an error event.
+  // End this preview attempt without retries; retain the normal GIPHY link.
+  previewTimer = setTimeout(() => {
+    if (version !== generation || loaded.value) return;
+    generation++; failed.value = true;
+  }, 15_000);
   try {
     const result = await desktopIpc.room.resolveGif(props.roomIdentifier, props.gif.id);
     if (version !== generation) return;
     if (result.ok && result.items[0]?.image_url) item.value = result.items[0]; else failed.value = true;
   } catch { if (version === generation) failed.value = true; }
+  if (failed.value) clearTimeout(previewTimer);
 }
 function observe(): void {
   observer?.disconnect();
@@ -42,9 +55,9 @@ function observe(): void {
 }
 watch(mediaUrl, (_value, previous) => { if (!previous) loaded.value = false; }, { flush: 'sync' });
 watch(state, value => emit('state', value), { immediate: true });
-watch([() => props.roomIdentifier, () => props.gif.id], () => { generation++; item.value = null; failed.value = false; loaded.value = false; observe(); });
+watch([() => props.roomIdentifier, () => props.gif.id], () => { clearTimeout(previewTimer); generation++; item.value = null; failed.value = false; loaded.value = false; observe(); });
 onMounted(observe);
-onBeforeUnmount(() => { generation++; observer?.disconnect(); });
+onBeforeUnmount(() => { clearTimeout(previewTimer); generation++; observer?.disconnect(); });
 </script>
 <style scoped>
 .giphy-attribution { width: 100px; height: auto; padding: 2px 4px; border-radius: 3px; background: #202126; object-fit: contain; }

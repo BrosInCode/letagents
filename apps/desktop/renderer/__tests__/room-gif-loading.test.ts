@@ -91,6 +91,44 @@ test('actual provider or image failures expose the unavailable fallback', async 
   }
 });
 
+test('stalled metadata ends the loading frame and ignores a late result', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let resolve!: (result: any) => void;
+  const view = await mount(() => new Promise(done => { resolve = done; }));
+  try {
+    t.mock.timers.tick(14_999); await flush();
+    assert.equal(view.states.at(-1), 'loading');
+    t.mock.timers.tick(1); await flush();
+    assert.equal(view.states.at(-1), 'unavailable');
+    assert.match(text(view.root), /Preview unavailable/);
+    assert.ok(all(view.root).some(n => n.tag === 'a'), 'the provider link remains usable');
+    resolve({ ok: true, items: [item] }); await flush();
+    assert.equal(view.states.at(-1), 'unavailable');
+    assert.equal(image(view.root), undefined);
+  } finally { view.close(); }
+});
+
+test('stalled media ends gracefully while a later GIF gets its own loading deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let calls = 0;
+  const view = await mount(async (_room, id) => { calls++; return { ok: true, items: [{ ...item, id, image_url: `https://media.giphy.com/${id}.gif` }] }; });
+  try {
+    await flush(); const stalled = image(view.root);
+    t.mock.timers.tick(15_000); await flush();
+    assert.equal(view.states.at(-1), 'unavailable');
+    stalled.props.onLoad({ target: stalled }); await flush();
+    assert.equal(view.states.at(-1), 'unavailable', 'a late old image cannot revive the expired preview');
+    view.props.gif.id = 'second'; await flush();
+    assert.equal(view.states.at(-1), 'loading');
+    t.mock.timers.tick(14_999); await flush();
+    const current = image(view.root); current.props.onLoad({ target: current }); await flush();
+    assert.equal(view.states.at(-1), 'ready');
+    t.mock.timers.tick(15_000); await flush();
+    assert.equal(view.states.at(-1), 'ready', 'successful loading cancels the deadline');
+    assert.equal(calls, 2, 'timeouts do not automatically retry provider calls');
+  } finally { view.close(); }
+});
+
 test('changing GIF ignores an old image event and an old metadata response', async () => {
   const pending = new Map<string, (result: any) => void>();
   const view = await mount((_room, id) => new Promise(resolve => pending.set(id, resolve)));
