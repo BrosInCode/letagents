@@ -13,7 +13,7 @@ import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
-import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection, LegacyLaneOwner } from "../types.js";
+import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
@@ -5732,18 +5732,6 @@ const entry: DaemonManifestEntry = {
   }],
 };
 
-const owner: LegacyLaneOwner = {
-  reservation_id: "reservation_1",
-  room_id: "room_1",
-  provider: "codex",
-  owner_pid: 123,
-  owner_process_identity: "birth-123",
-  state: "active",
-  session_id: "session_legacy",
-  created_at: "2026-07-19T00:00:00.000Z",
-  updated_at: "2026-07-19T00:00:01.000Z",
-};
-
 async function fixture(): Promise<{ root: string; databasePath: string; legacyPath: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-manifest-sqlite-"));
   return {
@@ -5893,7 +5881,7 @@ test("SQLite manifest round-trips the flat wire projection from relational domai
   const store = new ManifestStore(env.databasePath);
   try {
     const undefinedPolicyEntry = { ...entry, id: "agent_2", provider_launch_policy: undefined };
-    const saved = await store.write(0, [entry, undefinedPolicyEntry], [owner]);
+    const saved = await store.write(0, [entry, undefinedPolicyEntry]);
     assert.deepEqual(await store.load(), saved);
     assert.equal(Object.hasOwn(saved.entries[1]!, "provider_launch_policy"), false);
 
@@ -6014,7 +6002,7 @@ test("SQLite manifest generation CAS serializes independent connections without 
 
 test("legacy JSON imports once after checksum validation and is retained as a backup", async () => {
   const env = await fixture();
-  const manifest: DaemonManifest = { generation: 41, entries: [entry], legacy_lane_owners: [owner] };
+  const manifest: DaemonManifest = { generation: 41, entries: [entry] };
   const imported = { ...manifest, entries: manifest.entries.map(withImportedRuntimeIdentity) };
   await writeFile(env.legacyPath, storedManifest(manifest), { mode: 0o600 });
   const store = new ManifestStore(env.databasePath, env.legacyPath);
@@ -6577,7 +6565,7 @@ test("targeted projection failure occurs before commit and rolls back generation
   }
 });
 
-test("detached deployment identity survives lane-owner full writes and restart", async () => {
+test("detached deployment identity survives full manifest writes and restart", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   try {
@@ -6599,8 +6587,8 @@ test("detached deployment identity survives lane-owner full writes and restart",
     assert.equal(detached.entry.run_id, launched.run_id);
     assert.equal(detached.entry.deployment_id, launched.deployment_id);
 
-    const beforeLaneChange = await store.load();
-    await store.write(2, beforeLaneChange.entries, [owner]);
+    const beforeFullWrite = await store.load();
+    await store.write(2, beforeFullWrite.entries);
     await store.close();
 
     const reopened = new ManifestStore(env.databasePath);

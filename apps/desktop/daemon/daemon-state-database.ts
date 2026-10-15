@@ -646,6 +646,10 @@ createSchema(database: DatabaseSync): void {
       PRIMARY KEY(agent_id, sort_order)
     ) STRICT;
 
+    -- Unused since legacy provider lanes were retired. Kept for one release so
+    -- an older daemon (a downgrade, or a dev build sharing ~/.letagents) can
+    -- still open a database first created by this build; it read this table
+    -- unconditionally. Drop it once no older daemon can meet this database.
     CREATE TABLE IF NOT EXISTS legacy_lane_owners (
       reservation_id TEXT PRIMARY KEY,
       room_id TEXT NOT NULL,
@@ -4673,7 +4677,6 @@ validateV2Shape(database: DatabaseSync): void {
     activity_events: ["agent_id", "sort_order", "observed_at", "sequence", "provider", "kind", "method", "summary", "status", "payload_json", "payload_truncated", "payload_redacted", "durable_payload_ref"], agent_lifecycle_states: ["agent_id", "condition", "last_error_present", "last_error"], agent_readiness: ["agent_id", "ready_reached_at_present", "ready_reached_at"],
     turn_control_journals: ["agent_id", "turn_control_present", "action_id", "turn_work_attempt_id", "turn_execution_generation_id", "has_correction", "status", "capability", "interrupted", "resumed", "turn_state", "error", "recorded_at", "updated_at"], turn_control_stages: ["agent_id", "sort_order", "stage"], retained_worker_bindings: ["agent_id", "last_worker_binding_present", "binding_agent_session_id", "binding_work_attempt_id", "binding_execution_generation_id", "binding_updated_at"],
     reconciliation_records: ["agent_id", "reconciliation_present", "consecutive_action_failures", "last_observed_state", "next_restart_at_ms", "last_action_sequence", "pending_action_id", "pending_action_sequence", "pending_action_kind", "pending_action_recorded_at_ms", "last_terminal_present", "terminal_ended_at", "terminal_exit_code", "terminal_signal", "terminal_stdio_archive_ref", "terminal_stdio_tail", "terminal_cause", "terminal_actor", "terminal_generation", "terminal_provider_continuation_id", "reconciliation_notices_present"], reconciliation_exit_timestamps: ["agent_id", "sort_order", "timestamp_ms"], reconciliation_completed_actions: ["agent_id", "sort_order", "action_id"], reconciliation_notices: ["agent_id", "sort_order", "at", "kind", "cause", "terminal_present", "terminal_ended_at", "terminal_exit_code", "terminal_signal", "terminal_stdio_archive_ref", "terminal_stdio_tail", "terminal_cause", "terminal_actor", "terminal_generation", "terminal_provider_continuation_id"],
-    legacy_lane_owners: ["reservation_id", "room_id", "provider", "owner_pid", "owner_process_identity", "state", "session_id", "created_at", "updated_at", "sort_order"],
   };
   for (const [table, expected] of Object.entries(required)) {
     const actual = this.tableColumns(database, table);

@@ -19,7 +19,6 @@ import {
   permissionChangeKey,
   permissionChangedSince,
   startedWithHomeHarness,
-  providerSupportsConcurrentSupervisedAgents,
   resolveProviderConfigurationSnapshot,
   storedHomeHarness,
   storedLaunchPolicy,
@@ -430,14 +429,6 @@ test("rental admission rejects trusted-local profiles at the daemon launch bound
     () => assertSupervisedRentalPermissionProfileAvailable("codex", "full_access"),
     /verified workspace-rooted permission profile/,
   );
-});
-
-test("isolated supervised provider runtimes admit multiple agents in one room", () => {
-  assert.equal(providerSupportsConcurrentSupervisedAgents("codex"), true);
-  assert.equal(providerSupportsConcurrentSupervisedAgents("claude-code"), true);
-  assert.equal(providerSupportsConcurrentSupervisedAgents("claude"), true);
-  assert.equal(providerSupportsConcurrentSupervisedAgents("open-model"), true);
-  assert.equal(providerSupportsConcurrentSupervisedAgents("cursor"), true);
 });
 
 test("Auto hands approval review to the provider and leaves no trace when switched away", () => {

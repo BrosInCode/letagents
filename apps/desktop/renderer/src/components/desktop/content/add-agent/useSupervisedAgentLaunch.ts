@@ -19,11 +19,9 @@ import { useSupervisedLaunchRecovery } from "./useSupervisedLaunchRecovery";
 export function canAddAnotherSupervisedAgent(input: {
   providerId: DesktopAgentProviderId | null;
   entry: DesktopSupervisorManifestEntry | null;
-  supportsConcurrentAgents: boolean;
 }): boolean {
   return Boolean(input.providerId)
     && input.entry?.provider === input.providerId
-    && input.supportsConcurrentAgents
     && supervisedLaunchProgress(input.entry).ready;
 }
 
@@ -32,7 +30,6 @@ export function useSupervisedAgentLaunch(options: {
   roomIdentifier: MaybeRefOrGetter<string>;
   roomLabel: MaybeRefOrGetter<string>;
   providerId: MaybeRefOrGetter<DesktopAgentProviderId | null>;
-  supportsConcurrentAgents?: MaybeRefOrGetter<boolean>;
   authCommand: MaybeRefOrGetter<string | null>;
   authCommandForProvider: (providerId: string | null) => string | null;
   isCurrentRequest: (version: number) => boolean;
@@ -69,9 +66,6 @@ export function useSupervisedAgentLaunch(options: {
   const canAddAnotherSupervisedAgentState = computed(() => canAddAnotherSupervisedAgent({
     providerId: toValue(options.providerId),
     entry: conflict.value,
-    supportsConcurrentAgents: options.supportsConcurrentAgents === undefined
-      ? false
-      : toValue(options.supportsConcurrentAgents),
   }));
 
   const view = computed(() =>
@@ -303,7 +297,7 @@ export function useSupervisedAgentLaunch(options: {
     clearActiveLaunch();
     if (
       preserveRecoveryCandidate
-      && (activeEntry?.desiredState === "running" || activeEntry?.desiredState === "paused")
+      && activeEntry?.desiredState === "running"
       && !supervisedLaunchProgress(activeEntry).ready
     ) recoveryCandidate.value = activeEntry;
     creationRequestId.value = null;

@@ -182,7 +182,6 @@ const expectedDirectChannels = [
   "desktop:supervisor:recover-agent-runtime",
   "desktop:supervisor:resolve-turn-control",
   "desktop:supervisor:restore-agent-conversation",
-  "desktop:supervisor:resume-ownership-transfer",
   "desktop:supervisor:retire-agent",
   "desktop:supervisor:retry-room-delivery",
   "desktop:supervisor:revoke-host-tool-rule",

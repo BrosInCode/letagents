@@ -355,6 +355,17 @@ test("observedState failed is a failure even with condition none", () => {
   assert.equal(stateOf(progress, progress.currentPhaseId), "failed");
 });
 
+test("a paused entry is not a failed launch and has no cleanup headline", () => {
+  const progress = supervisedLaunchProgress(entry({ desiredState: "paused", observedState: "starting" }));
+  assert.equal(progress.failed, false);
+  assert.equal(progress.stopped, false);
+  assert.equal(progress.stopFailed, false);
+  assert.equal(progress.ready, false);
+  assert.equal(progress.failureDetail, null);
+  assert.equal(progress.headline, "Starting Codex agent");
+  assert.doesNotMatch(progress.headline, /cleanup/i);
+});
+
 test("stop intent stays nonterminal until the daemon observes the provider stopped", () => {
   const progress = supervisedLaunchProgress(entry({
     desiredState: "stopped",
