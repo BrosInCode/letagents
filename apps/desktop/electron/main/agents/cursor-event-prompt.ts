@@ -39,7 +39,7 @@ export function buildCursorDesktopEventPrompt(
     ...cursorPermissionProfileInstructionLines(session.permission_profile_id),
     "- If this message is a reply, write the final answer as the reply text; the desktop will keep it in the same thread.",
     "- In public room replies, never mention control markers, Result JSON, desktop bridge details, or internal tool request syntax.",
-    "- For task_update events, act only when the task is unclaimed and appropriate for you, assigned or leased to you, needs your review, or contains a blocker that you can resolve. If it is assigned or leased to another worker, finish quietly.",
+    "- For task_update events, act only when the task is assigned or leased to you, when its review is yours, or when a blocker on it is addressed to you. Otherwise finish quietly; unassigned tasks are not yours to pick up.",
     `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
     "- Do not include hidden chain-of-thought in the final answer.",
   ].join("\n");

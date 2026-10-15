@@ -1395,6 +1395,26 @@ test("Codex codename suggestions avoid visible room names without provider numbe
   assert.doesNotMatch(suggested, /^Codex\b/i);
 });
 
+test("a non-Codex polling start prompt never asks a fresh worker to claim unassigned work", () => {
+  const prompt = buildCodexStartPrompt({
+    roomIdentifier: "github.com/example/repo",
+    joinedVia: "join_room",
+    cwd: "/tmp/repo",
+    deliveryMode: "mcp_polling",
+    stopPhrase: "/stop-codex-room",
+    token: "LOCAL_CODEX_ROOM_test",
+    suggestedDisplayName: "MapleRidge",
+    deadlineUtc: null,
+    maxMinutes: 0,
+    providerLabel: "Cursor",
+    runtimeKey: "cursor",
+  });
+
+  assert.match(prompt, /do not claim unassigned tasks on your own/);
+  assert.doesNotMatch(prompt, /claim it with claim_task/);
+  assert.doesNotMatch(prompt, /accepted unassigned work/);
+});
+
 test("Codex start prompts distinguish MCP polling from desktop-delivered events", () => {
   const pollingPrompt = buildCodexStartPrompt({
     roomIdentifier: "github.com/example/repo",
@@ -1432,7 +1452,8 @@ test("Codex start prompts distinguish MCP polling from desktop-delivered events"
   assert.match(pollingPrompt, /Never call yourself Codex, Codex 1, Codex 2, or any numbered provider label/);
   assert.match(pollingPrompt, /Do not continue into the room loop until register_agent_session succeeds/);
   assert.match(pollingPrompt, /Call read_messages once, then call get_board once/);
-  assert.match(pollingPrompt, /claim it with claim_task using the registered agent_session_id before entering the wait loop/);
+  assert.doesNotMatch(pollingPrompt, /claim it with claim_task/, "a fresh polling worker is never told to pick up unassigned work");
+  assert.doesNotMatch(pollingPrompt, /accepted unassigned work/);
   assert.match(pollingPrompt, /get_onboarding_status/);
   assert.match(pollingPrompt, /advance the cursor for every observed message/);
   assert.match(pollingPrompt, /direct @mention of your exact ID\/name/);
@@ -2602,6 +2623,8 @@ test("Cursor desktop event prompts include thread metadata for human thread repl
   assert.match(prompt, /desktop will keep it in the same thread/);
   assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /NO_ROOM_REPLY/);
+  assert.match(prompt, /Otherwise finish quietly; unassigned tasks are not yours to pick up/);
+  assert.doesNotMatch(prompt, /unclaimed/);
 });
 
 test("Cursor desktop event prompts keep top-level messages free of thread context", () => {
@@ -2736,9 +2759,33 @@ test("desktop-delivered task prompts include assignment and workflow context", (
   assert.match(prompt, /Active locks:\n- task reason=review message=Review in progress createdBy=CedarVista/);
   assert.match(prompt, /Stale prompt: worker idle for 120000ms/);
   assert.match(prompt, /assigned or leased to you/);
-  assert.match(prompt, /assigned or leased to another worker, finish quietly/);
+  assert.match(prompt, /Otherwise finish quietly; unassigned tasks are not yours to pick up/);
   assert.match(prompt, /NO_ROOM_REPLY/);
   assert.match(prompt, /do not call wait_for_messages/);
+});
+
+test("desktop-delivered task prompts never surface an unclaimed-task stale hint", () => {
+  const task = taskSummary({
+    status: "accepted",
+    assignee: null,
+    stalePromptState: {
+      isStale: true,
+      reason: "accepted_unclaimed",
+      staleForMs: 900000,
+      muted: false,
+      mutedBy: null,
+      mutedAt: null,
+    },
+  });
+  const prompt = buildDesktopEventPrompt(liveSession(), {
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task,
+  });
+
+  assert.doesNotMatch(prompt, /Stale prompt/);
+  assert.doesNotMatch(prompt, /unclaimed/);
+  assert.match(prompt, /unassigned tasks are not yours to pick up/);
 });
 
 test("desktop event routing suppresses a renamed worker's own messages by stable identity", () => {

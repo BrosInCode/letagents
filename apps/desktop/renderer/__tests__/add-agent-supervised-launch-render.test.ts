@@ -393,7 +393,7 @@ const setupPresentationProps = {
 test("successful setup keeps diagnostics collapsed and the launch form prominent", async () => {
   const html = await renderToString(createSSRApp({
     render: () => h(AddAgentSetupStatus, setupPresentationProps, {
-      default: () => h("textarea", { "aria-label": "First task" }),
+      default: () => h("textarea", { "aria-label": "First message" }),
       actions: () => h("button", "Start agent"),
     }),
   }));
@@ -403,7 +403,7 @@ test("successful setup keeps diagnostics collapsed and the launch form prominent
   assert.doesNotMatch(html, /desktop-add-agent-status-header|status-pill|Choose how it works here/);
   assert.match(html, /<summary tabindex="0"[^>]*>Setup details<\/summary>/);
   assert.match(html, /codex-cli 0.153.4/);
-  assert.ok(html.indexOf("First task") < html.indexOf("Start agent"));
+  assert.ok(html.indexOf("First message") < html.indexOf("Start agent"));
 });
 
 test("setup problems expand diagnostics and retain their actionable instructions", async () => {
@@ -451,7 +451,7 @@ test("collapsed access options still disclose the selected high-risk permissions
   assert.ok(details);
   assert.doesNotMatch(details, /\bopen\b/);
   assert.match(html, /<summary tabindex="0"[^>]*>[\s\S]*?Full access[\s\S]*?High risk[\s\S]*?<\/summary>/);
-  assert.match(html, /<small[^>]*>First task<\/small>/);
+  assert.match(html, /<small[^>]*>First message<\/small>/);
 });
 
 /** Give an SSR-loaded SFC a client render so the host renderer can mount it. */
@@ -480,7 +480,7 @@ test("a first task set with only a change event survives choosing another access
   // task back over the text.
   const sandboxed = { id: "sandboxed_write", label: "Workspace writes", risk: "medium", status: "available", description: "Edits a copy." };
   const fullAccess = { id: "full_access", label: "Full access", risk: "high", status: "available", description: "Host files and network." };
-  const charter = ref("Join the room, check the board, and help move the available work forward.");
+  const charter = ref("You are part of this room's team. Work on the tasks assigned to you, answer when you are addressed, and coordinate with the team in the room.");
   const selected = ref(sandboxed);
   await attachClientRender(AddAgentRuntimeSettings, "components/desktop/content/add-agent/AddAgentRuntimeSettings.vue");
   const root = hostNode("root");
