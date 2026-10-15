@@ -1,7 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { createGlobalAgentAddressResolver, isTaskOwnerFollowUpMessageText } from "../../../shared/activation-routing.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
-import { RoomWorkPublicationStore } from "./room-work-publication-store.js";
+import { RoomWorkPublicationStore, type RoomWorkOrigin } from "./room-work-publication-store.js";
 import { sameWorkerPublicationOrigin } from "./worker-publication-authority.js";
 import type { SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
@@ -40,7 +40,8 @@ function event(database: DatabaseSync, id: string, key: string, phase: "queued" 
 }
 
 /** Conservative eligibility: uncertain identities or dedicated instructions keep their own turn. */
-export function ordinaryPeerThread(item: Pick<SupervisedInboxItem, "source_message_id" | "source_message" | "activation">): string | null {
+export function ordinaryPeerThread(item: Pick<SupervisedInboxItem, "source_message_id" | "source_message" | "activation">,
+  recipient?: Pick<RoomWorkOrigin, "agentKey" | "roomId">): string | null {
   const message = record(item.source_message), activation = item.activation;
   const identity = record(message?.agent_identity), reply = record(message?.reply_to);
   const root = message?.thread_root_id ?? record(message?.thread)?.root_message_id;
@@ -50,8 +51,22 @@ export function ordinaryPeerThread(item: Pick<SupervisedInboxItem, "source_messa
     || !canonicalId(root) || typeof message.text !== "string" || message.agent_prompt_kind != null
     || activation.decision !== "activate" || activation.reason !== "thread_participant" || activation.turn != null
     || Object.keys(activation).some(key => key.startsWith("task_continuity"))
-    || (reply && (reply.agent_identity != null || reply.source !== "browser"))
+    || (message.reply_to != null && !reply)
     || isTaskOwnerFollowUpMessageText(message.text)) return null;
+  if (reply && !(reply.source === "browser" && reply.agent_identity == null)) {
+    const quoted = record(reply.agent_identity);
+    // A quote addresses its own recipient separately. Other thread members
+    // may handle the complete quoted contribution with already queued peers.
+    if (!recipient || reply.source !== "agent" || !canonicalId(reply.id) || typeof reply.text !== "string"
+      || typeof quoted?.agent_key !== "string" || !quoted.agent_key.trim()
+      || typeof quoted.actor_label !== "string" || !quoted.actor_label.trim()
+      || (quoted.agent_session_id != null && (typeof quoted.agent_session_id !== "string" || !quoted.agent_session_id.trim()))
+      || quoted.agent_key.trim().toLowerCase() === recipient.agentKey.trim().toLowerCase()
+      || (message.room_id != null && message.room_id !== recipient.roomId)
+      || (reply.room_id != null && reply.room_id !== recipient.roomId)
+      || (message.thread_reply_to_id != null && message.thread_reply_to_id !== reply.id)
+      || (record(message.thread)?.reply_to_id != null && record(message.thread)?.reply_to_id !== reply.id)) return null;
+  }
   const addressed = addresses(message);
   return addressed.broadcast || addressed.hasMention || addressed.hasAgentMention ? null : root;
 }
@@ -62,16 +77,16 @@ export function freezeQueuedPeers(database: DatabaseSync, head: SupervisedInboxI
   // A retry must use the exact original assignment, never expand or reconstruct it.
   if (hasFrozenPeerBatch(database, head.inbox_item_id)) return head.activation;
   const { queued_peer_messages: _untrusted, queued_notices: _notices, ...activation } = head.activation;
-  const root = headUntouched ? ordinaryPeerThread(head) : null;
-  if (!root) return activation;
   const pins = new RoomWorkPublicationStore(database);
   const origin = pins.get(head.agent_id, head.room_id, head.source_message_id);
   if (!origin || isLocalRoomApi(origin.apiOrigin) || origin.revision !== 0 || origin.state !== "open") return activation;
+  const root = headUntouched ? ordinaryPeerThread(head, origin) : null;
+  if (!root) return activation;
   let previous = Number(head.source_message_id.slice(4));
   let bytes = Buffer.byteLength(JSON.stringify(head.source_message), "utf8");
   const members: SupervisedInboxItem[] = [];
   for (const item of rows) {
-    if (!item.untouched || item.room_id !== head.room_id || ordinaryPeerThread(item) !== root
+    if (!item.untouched || item.room_id !== head.room_id || ordinaryPeerThread(item, origin) !== root
       || Number(item.source_message_id.slice(4)) !== previous + 1) break;
     const pin = pins.get(item.agent_id, item.room_id, item.source_message_id);
     if (!pin || pin.revision !== 0 || pin.state !== "open" || !sameWorkerPublicationOrigin(origin, pin)) break;

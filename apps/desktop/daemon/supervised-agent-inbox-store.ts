@@ -9,7 +9,7 @@ import { pendingRuntimeRecovery } from "./runtime-recovery-journal.js";
 import type { RetainedExecutionDetail } from "../shared/execution-protocol.js";
 import type { PreparedRoomContext, MessageIntervention } from "../shared/message-outcome.js";
 import { prepareRoomContext } from "./prepared-room-context.js";
-import { freezeQueuedPeers, hasFrozenPeerBatch, ordinaryPeerThread } from "./queued-peer-deliveries.js";
+import { freezeQueuedPeers, hasFrozenPeerBatch } from "./queued-peer-deliveries.js";
 
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
@@ -496,7 +496,12 @@ export class SupervisedAgentInboxStore {
     // Dispatch bookkeeping changes fresh eligibility, but never the already
     // committed membership assigned to a proven pre-native retry.
     if (hasFrozenPeerBatch(database, head.inbox_item_id)) return head.activation;
-    if (ordinaryPeerThread(head)) {
+    // Exact quote/recipient eligibility is checked against the immutable
+    // publication pin inside freezeQueuedPeers, including quoted peer heads.
+    const source = head.source_message;
+    if (source && typeof source === "object" && !Array.isArray(source)
+      && (source as Record<string, unknown>).source === "agent" && head.activation.decision === "activate"
+      && head.activation.reason === "thread_participant") {
       const rows = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched
         FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
           AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')

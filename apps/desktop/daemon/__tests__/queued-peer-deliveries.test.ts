@@ -29,6 +29,62 @@ async function fixture(t: TestContext, messages = [peer(10), peer(11), peer(12)]
 function memberIds(item: SupervisedInboxItem): string[] {
   return ((item.activation.queued_peer_messages as { messages?: Array<{ source_message_id: string }> })?.messages ?? []).map(row => row.source_message_id);
 }
+const otherQuote = {
+  id: "msg_2", source: "agent", text: "A complete proposal that another participant is discussing.",
+  agent_identity: { agent_key: "owner/other", actor_label: "Other participant", agent_session_id: "other-session" },
+};
+
+test("observers can group quoted peer heads and children with full attribution", async t => {
+  const fullQuote = { ...otherQuote, text: "A detailed quoted argument. ".repeat(160), room_id: "room" };
+  const f = await fixture(t, [
+    peer(10, { reply_to: fullQuote, thread_reply_to_id: "msg_2" }),
+    peer(11, { reply_to: otherQuote, thread: { root_message_id: "msg_1", reply_to_id: "msg_2" } }),
+    peer(12),
+  ]);
+  const head = (await f.store.claimHead("agent"))!;
+  assert.deepEqual(memberIds(head), ["msg_11", "msg_12"], "quoted heads reach the pin-aware dispatch path");
+  assert.deepEqual((head.source_message as Record<string, unknown>).reply_to, fullQuote);
+  const batch = head.activation.queued_peer_messages as { messages: Array<{ source_message: Record<string, unknown> }> };
+  assert.deepEqual(batch.messages[0]!.source_message.reply_to, otherQuote);
+  await nativeTerminal(f.store, head);
+  await f.store.transition(head.inbox_item_id, "acknowledged_no_reply");
+  assert.deepEqual(f.pendingReports(), ["msg_11", "msg_12"]);
+});
+
+test("quoting the recipient's stable key remains a barrier across native sessions", async t => {
+  const selfQuote = { ...otherQuote, agent_identity: { agent_key: "owner/self", actor_label: "Previous session", agent_session_id: "old-session" } };
+  const f = await fixture(t, [peer(10, { reply_to: selfQuote }), peer(11), peer(12)]);
+  assert.deepEqual(memberIds((await f.store.claimHead("agent"))!), []);
+  assert.equal(ordinaryPeerThread(peer(10, { reply_to: selfQuote }), origin), null);
+  assert.equal(ordinaryPeerThread(peer(10, { reply_to: otherQuote })), null, "a quote needs a pinned recipient identity");
+});
+
+for (const [name, middle] of [
+  ["quoted recipient", peer(11, { reply_to: { ...otherQuote, agent_identity: { agent_key: "owner/self", actor_label: "Self", agent_session_id: "previous" } } })],
+  ["direct reply activation", peer(11, { reply_to: otherQuote }, { reason: "reply_target" })],
+  ["missing quote identity", peer(11, { reply_to: { ...otherQuote, agent_identity: null } })],
+  ["missing quote label", peer(11, { reply_to: { ...otherQuote, agent_identity: { agent_key: "owner/other" } } })],
+  ["missing quote text", peer(11, { reply_to: { ...otherQuote, text: undefined } })],
+  ["malformed quote text", peer(11, { reply_to: { ...otherQuote, text: {} } })],
+  ["malformed quote session", peer(11, { reply_to: { ...otherQuote, agent_identity: { ...otherQuote.agent_identity, agent_session_id: {} } } })],
+  ["noncanonical quote ID", peer(11, { reply_to: { ...otherQuote, id: "legacy_2" } })],
+  ["foreign quote Room", peer(11, { reply_to: { ...otherQuote, room_id: "another-room" } })],
+  ["foreign source Room", peer(11, { reply_to: otherQuote, room_id: "another-room" })],
+  ["conflicting thread quote", peer(11, { reply_to: otherQuote, thread_reply_to_id: "msg_3" })],
+  ["conflicting thread metadata", peer(11, { reply_to: otherQuote, thread: { reply_to_id: "msg_3" } })],
+  ["malformed quote", peer(11, { reply_to: "msg_2" })],
+] as const) test(`${name} blocks observer grouping without skipping to a later peer`, async t => {
+  const f = await fixture(t, [peer(10), middle, peer(12)]);
+  assert.deepEqual(memberIds((await f.store.claimHead("agent"))!), []);
+});
+
+for (const source of [null, "unknown", ["agent"]]) test(`malformed source head ${JSON.stringify(source)} stays ungrouped`, async t => {
+  const f = await fixture(t, [{ ...peer(10), source_message: source }, peer(11), peer(12)]);
+  const head = (await f.store.claimHead("agent"))!;
+  assert.equal(head.source_message_id, "msg_10");
+  assert.deepEqual(memberIds(head), []);
+});
+
 async function nativeTerminal(store: SupervisedAgentInboxStore, head: SupervisedInboxItem, outcome: "reply" | "no_reply" = "no_reply") {
   await store.checkpointTurnStarted(head.inbox_item_id, "turn", { work_attempt_id: "attempt", origin_execution_generation_id: "generation", provider_continuation_id: "thread" });
   await store.checkpointNormalizedTerminal({ inbox_item_id: head.inbox_item_id, agent_id: "agent", execution_generation_id: "generation",
