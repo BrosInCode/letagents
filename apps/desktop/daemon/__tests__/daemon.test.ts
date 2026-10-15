@@ -5790,6 +5790,34 @@ test("daemon lifecycle diagnostics are private, redacted, and strictly bounded",
   } finally { await env.cleanup(); }
 });
 
+test("daemon lifecycle diagnostics rotate repeated samples within one process", async () => {
+  const env = await fixture();
+  const path = join(env.root, "daemon-lifecycle.jsonl");
+  const log = new DaemonLifecycleLog(path, 1);
+  try {
+    for (let i = 0; i < 20; i++) log.append({ event: "room_latency", detail: `sample ${i}` });
+    const files = (await readdir(env.root)).filter(name => name.startsWith("daemon-lifecycle.jsonl")).sort();
+    assert.deepEqual(files, ["daemon-lifecycle.jsonl", "daemon-lifecycle.jsonl.previous"]);
+    assert.equal(JSON.parse((await readFile(path, "utf8")).trim()).detail, "sample 19");
+    assert.equal(JSON.parse((await readFile(`${path}.previous`, "utf8")).trim()).detail, "sample 18");
+    for (const name of files) assert.equal((await stat(join(env.root, name))).mode & 0o777, 0o600);
+  } finally { log.close(); await env.cleanup(); }
+});
+
+test("daemon lifecycle diagnostics fail open when live rotation fails", async () => {
+  const env = await fixture();
+  const path = join(env.root, "daemon-lifecycle.jsonl");
+  const log = new DaemonLifecycleLog(path, 1);
+  try {
+    log.append({ event: "daemon_starting" });
+    await mkdir(`${path}.previous`);
+    assert.doesNotThrow(() => log.append({ event: "room_latency", detail: "rotation blocked" }));
+    assert.doesNotThrow(() => log.append({ event: "daemon_ready" }));
+    assert.match(await readFile(path, "utf8"), /daemon_starting/);
+    assert.doesNotMatch(await readFile(path, "utf8"), /rotation blocked|daemon_ready/);
+  } finally { log.close(); await env.cleanup(); }
+});
+
 test("daemon lifecycle diagnostics never become a startup dependency", async () => {
   const env = await fixture();
   try {

@@ -248,6 +248,7 @@ const required = [
     "shared/agent-codenames.mjs",
     "shared/codex-owner-isolation.mjs",
     "shared/codex-read-only-room-tools.mjs",
+    "shared/live-activity-summary.mjs",
     "shared/message-contracts.mjs",
     "shared/message-link-previews.mjs",
     "shared/message-pins.mjs",
@@ -262,6 +263,7 @@ const required = [
     "shared/scratch-workspace-repository.mjs",
     "shared/sqlite-thread-routing.mjs",
     "shared/supervised-read-tools.mjs",
+    "shared/workspace-turn-capture.mjs",
     "shared/workspace-turn-capture-worker.mjs",
   ].map((relative) => ({
     absolutePath: join(contents, relative),

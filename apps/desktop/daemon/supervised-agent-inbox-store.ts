@@ -1,3 +1,4 @@
+import { RoomLatencyTrace } from "./room-latency-trace.js";
 import { normalizeRoomGif, validReplyGifIntent, type RoomGif } from "../../../shared/room-expressions.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { SUPERVISED_READ_ONLY_TOOLS } from "../../../shared/supervised-read-tools.mjs";
@@ -2540,15 +2541,21 @@ export class SupervisedAgentInboxStore {
   private async read<T>(operation: (database: DatabaseSync) => Promise<T> | T): Promise<T> { return operation(await this.getDatabase()); }
   private async exclusive<T>(operation: (database: DatabaseSync) => Promise<T>, affectedAgentId?: string,
     shouldNotify: () => boolean = () => true): Promise<T> {
+    const timing = new RoomLatencyTrace("inbox_write");
     let release!: () => void; const prior = this.writes; this.writes = new Promise<void>((resolve) => { release = resolve; });
     await prior;
+    timing.mark("queue_wait");
     let committed = false;
     try {
-      const result = await operation(await this.getDatabase());
+      const database = await this.getDatabase();
+      timing.mark("database");
+      const result = await operation(database);
       committed = true;
       return result;
     } finally {
       release();
+      timing.mark("operation");
+      timing.finish();
       if (committed && shouldNotify()) this.onMutation(affectedAgentId);
     }
   }

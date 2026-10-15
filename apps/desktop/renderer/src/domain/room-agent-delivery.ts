@@ -192,6 +192,7 @@ function isBlockedIdleCursor(agent: Pick<RoomAgentRecoveryEntry,
 export function roomAgentRecoveryAction(agent: RoomAgentRecoveryEntry): "recover" | "recovery_options" | null {
   if (agent.deliveryMode !== "daemon_inbox" || agent.desiredState === "stopped") return null;
   const recoveryState = ["absent", "paused", "failed", "recovering"].includes(agent.observedState)
+    || agent.nativeLiveness?.state === "terminal"
     || agent.condition === "coordination_blocked"
     || agent.condition === "auth_blocked";
   // A recorded recovery must continue its exact operation, even after a fresh

@@ -1,5 +1,6 @@
 import "./isolated-home.js";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6250,6 +6251,39 @@ test("Codex custodial polling reads the selected built executable contract witho
       await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
         error instanceof Error && !(error as Error & { transientProviderStart?: boolean }).transientProviderStart);
     }
+    // A healthy child can finish while the parent's event loop is delayed.
+    // Deadline cleanup must not misdiagnose its discarded output as malformed.
+    for (const [completion, expected] of [
+      [`process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))})`, "deadline"],
+      ["process.exit(1)", "failure"],
+    ]) {
+      const probeStartedFile = join(directory, "probe-started");
+      const probeReleaseFile = join(directory, "probe-release");
+      await rm(probeStartedFile, { force: true });
+      await rm(probeReleaseFile, { force: true });
+      await writeFile(entry, `import { writeFileSync, existsSync } from 'node:fs';
+        writeFileSync(${JSON.stringify(probeStartedFile)}, 'started');
+        const release = setInterval(() => {
+          if (!existsSync(${JSON.stringify(probeReleaseFile)})) return;
+          clearInterval(release);
+          ${completion};
+        }, 5);`);
+      const delayedProbe = adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry });
+      const delayedProbeAssertion = assert.rejects(delayedProbe, (error: unknown) =>
+        error instanceof Error && (expected === "deadline"
+          ? (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
+            && /deadline/.test(error.message) && !/malformed/.test(error.message)
+          : !(error as Error & { transientProviderStart?: boolean }).transientProviderStart));
+      const childStartDeadline = Date.now() + 5_000;
+      while (!(await readFile(probeStartedFile, "utf8").catch(() => ""))) {
+        assert.ok(Date.now() < childStartDeadline, "contract probe child must start before blocking its parent");
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      writeFileSync(probeReleaseFile, "release");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 8_200);
+      await delayedProbeAssertion;
+    }
+
     const descendantPidFile = join(directory, "probe-child.pid");
     await writeFile(entry, `import { spawn } from 'node:child_process';
       import { writeFileSync } from 'node:fs';

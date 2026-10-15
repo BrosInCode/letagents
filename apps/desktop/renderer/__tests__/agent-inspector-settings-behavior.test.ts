@@ -1122,7 +1122,7 @@ function troubleshootingProps() {
 }
 
 test("primary and Diagnostics recovery choices never dispatch until a restart is confirmed", async () => {
-  for (const route of ["primary", "diagnostics", "unsupported"] as const) {
+  for (const route of ["primary", "diagnostics", "unsupported", "exited"] as const) {
     const state = troubleshootingProps();
     Object.assign(state.projection.entry, {
       displayName: "QuartzMeadow", createdBy: "owner", charter: "Notes", provider: "claude-code", deliveryMode: "daemon_inbox",
@@ -1132,7 +1132,21 @@ test("primary and Diagnostics recovery choices never dispatch until a restart is
     });
     state.projection.entry.roomAgentState.task = { state: "none", taskId: null, title: null };
     state.daemonStatus.capabilities = { agentRuntimeRecovery: true, agentRuntimeRecoveryV2: route !== "unsupported" };
-    state.projection = projectAgentInspector(state.projection.entry, { roomId: "room_a" });
+    if (route === "exited") {
+      state.projection.entry.observedState = "idle";
+      state.projection.entry.condition = "none";
+      state.projection.entry.roomAgentState.inbox.state = "waiting_for_desktop_credentials";
+      state.workResource.detail = { entry_id: "diagnostic_a", room_id: "room_a", availability: "not_loaded",
+        requested_source_message_id: null, inbox_item_id: null, source_message: null, receipt: null, terminal: null,
+        publication: null, continuation_repair: null, timeline: [], items: [], uncertain_effects: [], history_boundary: null,
+        runtime_control: {
+        runtime_state: "exited", control_state: "responsive", runtime_generation_id: "runtime_a",
+        execution_generation_id: "generation_a", daemon_generation_id: "1", observed_at: "2026-10-14T22:45:00Z",
+      } };
+    }
+    state.projection = projectAgentInspector(state.projection.entry, {
+      roomId: "room_a", workResource: state.workResource, daemonGeneration: 1,
+    });
     const actions: unknown[] = [];
     const mounted = mount(AgentInspectorSurface, {
       ...state, compact: false, initialTab: route === "diagnostics" ? "diagnostics" : "overview",

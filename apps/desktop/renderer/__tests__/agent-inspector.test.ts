@@ -19,6 +19,8 @@ import {
 import type { AgentInspectorActionState } from "../src/domain/agent-inspector";
 import { useAgentPauseRequests } from "../src/domain/agent-pause-requests";
 import { ref } from "vue";
+import type { AgentInspectorWorkResource } from "../src/domain/agent-inspector-work";
+import { agentInspectorActionErrorMessage, agentInspectorSignal } from "../src/domain/agent-inspector-presentation";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
 import { projectAgentInspectorDiagnostics } from "../src/domain/agent-inspector-diagnostics";
 import {
@@ -148,6 +150,64 @@ function task(id: string, status: string, overrides: Partial<DesktopTaskSummary>
     ...overrides,
   };
 }
+
+test("stopped runtime evidence gives Overview the same confirmed recovery path as Diagnostics", () => {
+  const stopped = entry({ observedState: "idle", runtimeGenerationId: "runtime_1" });
+  stopped.roomAgentState!.inbox.state = "waiting_for_desktop_credentials";
+  const workResource: AgentInspectorWorkResource = {
+    status: "ready", error: null, sourceMessageId: null,
+    detail: {
+      availability: "not_loaded", entry_id: stopped.id, room_id: stopped.roomId,
+      requested_source_message_id: null, inbox_item_id: null, source_message: null,
+      receipt: null, terminal: null, publication: null, continuation_repair: null,
+      timeline: [], items: [], uncertain_effects: [], history_boundary: null,
+      runtime_control: { runtime_generation_id: "runtime_1", execution_generation_id: stopped.executionGenerationId!,
+        daemon_generation_id: "7", runtime_state: "exited", control_state: "responsive", observed_at: "2026-10-14T22:45:00Z" },
+    },
+  };
+  const options = { roomId: stopped.roomId, workResource, daemonGeneration: 7 };
+  const actions = (overrides: Partial<typeof options> = {}, candidate = stopped) =>
+    projectAgentInspector(candidate, { ...options, ...overrides })!.actions.filter(action => action.available).map(action => action.kind);
+  assert.ok(actions().includes("recovery_options"));
+  assert.ok(!actions().includes("reconnect"));
+  assert.ok(!actions().includes("reconnect_runtime"));
+  assert.equal(projectAgentInspector(stopped, options)!.now?.label, "Agent stopped");
+  const retainedCompaction = projectAgentInspector({ ...stopped,
+    provider: "claude-code",
+    providerProgress: { state: "compacting", startedAt: "2026-10-14T22:44:00Z" },
+  }, options)!;
+  assert.doesNotMatch(retainedCompaction.overallDetail, /compacting/i);
+  assert.equal(agentInspectorSignal(retainedCompaction).state, "needs_attention");
+  assert.equal(agentInspectorSignal(retainedCompaction).moving, false);
+  assert.ok(!actions({}, { ...stopped, desiredState: "stopped" }).includes("recovery_options"));
+  assert.ok(!actions({}, { ...stopped, deliveryMode: "mcp_polling" }).includes("recovery_options"));
+  const control = workResource.detail!.runtime_control!;
+  for (const change of [
+    { runtime_state: "ready" as const, control_state: "responsive" as const },
+    { runtime_state: "ready" as const, control_state: "lost" as const },
+    { runtime_state: "ready" as const, control_state: "degraded" as const },
+    { execution_generation_id: "old_execution" }, { runtime_generation_id: "old_runtime" },
+    { daemon_generation_id: "6" },
+  ]) {
+    const resource = { ...workResource, detail: { ...workResource.detail!, runtime_control: { ...control, ...change } } };
+    assert.ok(actions({ workResource: resource }).includes("reconnect"), "only exact exited evidence suppresses credential reconnect");
+    assert.ok(!actions({ workResource: resource }).includes("recovery_options"));
+  }
+  for (const resource of [
+    { ...workResource, status: "error" as const }, { ...workResource, status: "refreshing" as const },
+    { ...workResource, detail: { ...workResource.detail!, entry_id: "another_agent" } },
+    { ...workResource, detail: { ...workResource.detail!, room_id: "another_room" } },
+  ]) assert.ok(actions({ workResource: resource }).includes("reconnect"));
+  assert.ok(!projectAgentInspector(stopped, { ...options, resourceFreshness: "stale" })!.actions.some(action =>
+    action.available && ["reconnect", "recovery_options"].includes(action.kind)));
+  const terminal = { ...stopped, nativeLiveness: { ...stopped.nativeLiveness, state: "terminal" as const } };
+  assert.ok(projectAgentInspector(terminal, { roomId: stopped.roomId })!.actions.some(action => action.kind === "recovery_options" && action.available));
+  for (const kind of ["reconnect", "reconnect_runtime"] as const) {
+    const message = agentInspectorActionErrorMessage(kind, new Error("Error invoking remote method: Error: The previous provider runtime is unavailable."));
+    assert.match(message, /Diagnostics → Agent runtime/);
+    assert.doesNotMatch(message, /remote method/);
+  }
+});
 
 test("truthful online state requires the exact delivery connection and preserves reconnecting", () => {
   assert.equal(agentInspectorOverallState(entry()), "online");

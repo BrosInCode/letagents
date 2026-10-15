@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { captureWorkspaceChanges } from '../../../../shared/workspace-change-capture.mjs';
@@ -105,30 +105,66 @@ test('turn snapshots separate consecutive turns, preserve staged work, and never
 });
 
 
-test('turn capture reuses one bounded buffer without mixing file contents', async (t) => {
+test('turn capture reuses four bounded buffers without mixing file contents', async (t) => {
   const { captureWorkspaceTree, releaseWorkspaceTree } = await import('../../../../shared/workspace-turn-capture.mjs');
   const directory = mkdtempSync(join(tmpdir(), 'workspace-buffer-'));
   try {
     git(directory, 'init', '-q'); git(directory, 'config', 'user.name', 'Test'); git(directory, 'config', 'user.email', 'test@example.com');
     writeFileSync(join(directory, 'base.txt'), 'original\n'); git(directory, 'add', '.'); git(directory, 'commit', '-qm', 'base');
+    const unchanged = await captureWorkspaceTree(directory, 'unchanged');
+    assert.equal(unchanged, git(directory, 'rev-parse', 'HEAD^{tree}'));
+    await releaseWorkspaceTree(directory, 'unchanged');
     const files = new Map([
       ['a-large.bin', Buffer.alloc(512 * 1024, 0xab)],
       ['b-short.txt', Buffer.from('only this text\n')],
       ['c-empty.txt', Buffer.alloc(0)],
       ['d-large.bin', Buffer.alloc(256 * 1024, 0xcd)],
     ]);
+    for (let i = 0; i < 12; i++) files.set(`reuse-${i}.bin`, Buffer.alloc(i * 12345, i + 1));
     for (const [path, bytes] of files) writeFileSync(join(directory, path), bytes);
     const allocations = t.mock.method(Buffer, 'alloc');
     const tree = await captureWorkspaceTree(directory, 'buffer-lifetime');
     assert.ok(tree);
-    assert.equal(allocations.mock.calls.filter(call => call.arguments[0] === 8 * 1024 * 1024 + 1).length, 1);
+    assert.equal(allocations.mock.calls.filter(call => call.arguments[0] === 8 * 1024 * 1024 + 1).length, 4);
     for (const [path, bytes] of files) {
       assert.deepEqual(execFileSync('git', ['cat-file', 'blob', `${tree}:${path}`], { cwd: directory }), bytes, path);
     }
     await releaseWorkspaceTree(directory, 'buffer-lifetime');
     writeFileSync(join(directory, 'too-large.bin'), Buffer.alloc(8 * 1024 * 1024 + 1));
     assert.equal(await captureWorkspaceTree(directory, 'oversized'), null, 'oversized files still fail closed');
+    assert.equal(git(directory, 'for-each-ref', '--format=%(refname)', 'refs/letagents/workspace-review'), '');
   } finally { rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('parallel capture keeps replacement ordering and rejects unsupported or oversized trees', async () => {
+  const { captureWorkspaceTree, releaseWorkspaceTree } = await import('../../../../shared/workspace-turn-capture.mjs');
+  const directory = mkdtempSync(join(tmpdir(), 'workspace-replacement-'));
+  const outside = mkdtempSync(join(tmpdir(), 'workspace-outside-'));
+  try {
+    git(directory, 'init', '-q'); git(directory, 'config', 'user.name', 'Test'); git(directory, 'config', 'user.email', 'test@example.com');
+    mkdirSync(join(directory, 'replace'));
+    for (let i = 0; i < 8; i++) writeFileSync(join(directory, 'replace', `file-${i}`), `inside ${i}`);
+    git(directory, 'add', '.'); git(directory, 'commit', '-qm', 'base');
+    rmSync(join(directory, 'replace'), { recursive: true });
+    writeFileSync(join(directory, 'replace'), 'now a file');
+    const tree = await captureWorkspaceTree(directory, 'replacement');
+    assert.ok(tree);
+    assert.equal(git(directory, 'cat-file', 'blob', `${tree}:replace`), 'now a file');
+    assert.equal(git(directory, 'ls-tree', '-r', '--name-only', tree), 'replace');
+    await releaseWorkspaceTree(directory, 'replacement');
+
+    rmSync(join(directory, 'replace'));
+    writeFileSync(join(outside, 'file-0'), 'external bytes');
+    symlinkSync(outside, join(directory, 'replace'));
+    assert.equal(await captureWorkspaceTree(directory, 'outside-parent'), null, 'a parent symlink must not redirect a tracked path outside the workspace');
+    rmSync(join(directory, 'replace'));
+    mkdirSync(join(directory, 'replace'));
+    // Each file is allowed separately; together they exceed the accepted 64 MiB tree budget.
+    const bytes = Buffer.alloc(8 * 1024 * 1024, 0x5a);
+    for (let i = 0; i < 9; i++) writeFileSync(join(directory, `large-${i}.bin`), bytes);
+    assert.equal(await captureWorkspaceTree(directory, 'aggregate-overflow'), null);
+    assert.equal(git(directory, 'for-each-ref', '--format=%(refname)', 'refs/letagents/workspace-review'), '');
+  } finally { rmSync(directory, { recursive: true, force: true }); rmSync(outside, { recursive: true, force: true }); }
 });
 
 test('full review retains the last line beyond the room preview and survives workspace deletion', async () => {
