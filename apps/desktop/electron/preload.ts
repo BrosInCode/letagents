@@ -395,7 +395,6 @@ const api: DesktopApi = {
     getServiceSnapshot: () => ipcRenderer.invoke("desktop:supervisor:get-service-snapshot"),
     listAgents: (roomIdentifier) => ipcRenderer.invoke("desktop:supervisor:list-agents", roomIdentifier ?? null),
     createAgent: (input) => ipcRenderer.invoke("desktop:supervisor:create-agent", input),
-    resumeOwnershipTransfer: (id) => ipcRenderer.invoke("desktop:supervisor:resume-ownership-transfer", id),
     setDesiredState: (id, desiredState) => ipcRenderer.invoke("desktop:supervisor:set-desired-state", id, desiredState),
     reconnectAgent: (input) => ipcRenderer.invoke("desktop:supervisor:reconnect-agent", input),
     recoverAgentRuntime: (input) => ipcRenderer.invoke("desktop:supervisor:recover-agent-runtime", input),

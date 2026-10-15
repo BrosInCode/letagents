@@ -317,21 +317,6 @@ const efforts = new Set<Exclude<ProviderReasoningEffort, null>>(["low", "medium"
 const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reasoningEffort", "sandbox"]);
 
 /**
- * Admission may share a room/provider lane only when every durable entry owns
- * an independently addressable native runtime. Codex uses separate app-server
- * threads; Claude launches an isolated CLI/session per entry; Cursor uses a
- * stable private profile and continuation per entry; Open Model launches one
- * isolated OpenCode server per entry.
- */
-export function providerSupportsConcurrentSupervisedAgents(provider: string): boolean {
-  return provider === "codex"
-    || provider === "claude-code"
-    || provider === "claude"
-    || provider === "cursor"
-    || provider === "open-model";
-}
-
-/**
  * The immutable provider is the authority for editable Inspector settings.
  * This validator is shared by mutation admission and every future native
  * launch, so stored configuration cannot become a provider-side surprise.
