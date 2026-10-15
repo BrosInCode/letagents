@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { EventEmitter } from "node:events";
 import { replyTurnGuidance } from "../../shared/activation-routing.js";
+import type { MessageCreateTransaction } from "../db/messages/create.js";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
 const url = process.env.TEST_DB_URL;
@@ -185,6 +186,115 @@ test("a broadcast to three agents is sequenced, rotated, and hidden from later p
 
   const nextSent = await a.send("@everyone and after that?");
   assert.notDeepEqual(await order(a, nextSent.message.id), [first, second, third], "the first speaker changes");
+});
+
+test("a first shared human thread follow-up sequences all eight original recipients and carries prior replies", skip, async () => {
+  const a = await seed(8);
+  const root = await a.send("@everyone discuss the original question");
+  let before = root.message.id;
+  for (let i = 0; i < 8; i++) before = (await a.reply(i, root.message.id)).message.id;
+  const follow = await a.send("The room is now available for only 45 minutes. How would you revise it?", {
+    thread_root_message_id: root.message.id, reply_to_message_id: root.message.id,
+  });
+  const rows = await a.turns(follow.message.id);
+  assert.deepEqual(rows.map(row => [row.turn_position, row.turn_count, row.released]),
+    Array.from({ length: 8 }, (_, index) => [index + 1, 8, index === 0]));
+  const [first, second, third] = await order(a, follow.message.id);
+  const firstRead = await a.read(first!, before);
+  assert.equal(a.forAgent(firstRead, follow.message.id)?.reason, "thread_participant");
+  assert.equal(a.forAgent(firstRead, follow.message.id)?.guidance, replyTurnGuidance(1, 8));
+  assert.deepEqual(await a.read(second!, before), []);
+  const answer = await a.reply(first!, follow.message.id, "I would shorten the programme.", {
+    thread_root_message_id: root.message.id, reply_to_message_id: follow.message.id,
+  });
+  const nextRead = await a.read(second!, before);
+  assert.ok(nextRead.some(message => message.id === answer.message.id), "the next speaker sees the actual earlier answer");
+  assert.deepEqual(a.forAgent(nextRead, follow.message.id)?.turn,
+    { position: 2, count: 8, prior_speakers: [a.sessions[first!]!.actor_label] });
+  assert.deepEqual(await a.read(third!, before), [], "a peer answer must not release unrelated held positions");
+});
+
+test("a newer shared human thread correction releases older holds but preserves its own sequence", skip, async () => {
+  const a = await seed();
+  const root = await a.send("@everyone compare the original options");
+  const first = await a.send("What about a simpler version?", { thread_root_message_id: root.message.id });
+  assert.ok((await a.turns(root.message.id)).every(row => row.released));
+  assert.deepEqual((await a.turns(first.message.id)).map(row => row.released), [true, false, false]);
+  const correction = await a.send("We have only one host now. Please revise the options.", {
+    thread_root_message_id: root.message.id,
+  });
+  assert.ok((await a.turns(first.message.id)).every(row => row.released), "old holds cannot conceal a fresh human correction");
+  assert.deepEqual((await a.turns(correction.message.id)).map(row => row.released), [true, false, false],
+    "the older-hold release must not flatten the new sequence");
+  const positions = await order(a, correction.message.id);
+  const held = a.sessions[positions[1]!]!;
+  const route = pollRoute(a.room.id);
+  try {
+    const before = await a.turns(correction.message.id);
+    const ordinary = await route.history(held, a.ownerId, { before: "latest", limit: "30" });
+    assert.ok(!ordinary.body.messages.some(message => message.id === correction.message.id));
+    const context = await route.history(held, a.ownerId, { before: "latest", limit: "30", context_only: "true" });
+    const observed = context.body.messages.find(message => message.id === correction.message.id);
+    assert.ok(observed, "an earlier active turn can observe the correction before its new activation is released");
+    assert.equal(observed.activation, undefined, "awareness does not grant another activation");
+    assert.deepEqual(await a.turns(correction.message.id), before, "reading context does not release the new holds");
+  } finally { route.close(); }
+});
+
+test("explicit human mentions and quotes to agents inside a thread remain parallel", skip, async () => {
+  const a = await seed();
+  const root = await a.send("@everyone discuss this");
+  const answers = [];
+  for (let i = 0; i < 3; i++) answers.push(await a.reply(i, root.message.id, "My view.", { thread_root_message_id: root.message.id }));
+  const mentioned = await a.send("@Agent0 @Agent1 compare your different views", { thread_root_message_id: root.message.id });
+  const mentionRows = await a.turns(mentioned.message.id);
+  assert.equal(mentionRows.length, 2);
+  assert.ok(mentionRows.every(row => row.turn_position === null));
+  const quoted = await a.send("Explain your view further.", {
+    thread_root_message_id: root.message.id, reply_to_message_id: answers[0]!.message.id,
+  });
+  assert.ok((await a.turns(quoted.message.id)).every(row => row.turn_position === null),
+    "quoting an agent must not become an ordered room-wide question");
+});
+
+test("shared human thread follow-ups stay parallel with turn ordering disabled", skip, async () => {
+  const a = await seed(3, null);
+  const root = await a.send("@everyone discuss this");
+  const follow = await a.send("How should we change it?", { thread_root_message_id: root.message.id });
+  const rows = await a.turns(follow.message.id);
+  assert.equal(rows.length, 3);
+  assert.ok(rows.every(row => row.turn_position === null));
+});
+
+for (const restriction of ["visibility", "rental_session_id"] as const) {
+  test(`a transaction hook's ${restriction} restriction cannot opt a thread into sequencing`, skip, async () => {
+    const a = await seed();
+    const root = await a.send("@everyone discuss this");
+    for (let i = 0; i < 3; i++) await a.reply(i, root.message.id, "My view.", { thread_root_message_id: root.message.id });
+    const follow = await a.send("How should we change this?", {
+      thread_root_message_id: root.message.id,
+      with_created_message_in_transaction: async (tx: MessageCreateTransaction, message: { number: number }) => {
+        const { sql } = await import("drizzle-orm");
+        const change = restriction === "visibility" ? sql`visibility='internal'` : sql`rental_session_id='fixture-rental'`;
+        await tx.execute(sql`UPDATE messages SET ${change} WHERE room_id=${a.room.id} AND number=${message.number}`);
+      },
+    });
+    assert.ok((await a.turns(follow.message.id)).every(row => row.turn_position === null));
+  });
+}
+
+test("visible inline human thread questions sequence, while prompt-only and unauthenticated messages do not", skip, async () => {
+  const a = await seed();
+  const root = await a.send("@everyone discuss this");
+  for (let i = 0; i < 3; i++) await a.reply(i, root.message.id, "My view.", { thread_root_message_id: root.message.id });
+  const inline = await a.send("How should we change this?", {
+    thread_root_message_id: root.message.id, agent_prompt_kind: "inline",
+  });
+  assert.deepEqual((await a.turns(inline.message.id)).map(row => row.turn_position), [1, 2, 3]);
+  const hidden = await a.send("", { thread_root_message_id: root.message.id, agent_prompt_kind: "auto" });
+  assert.ok((await a.turns(hidden.message.id)).every(row => row.turn_position === null));
+  const anonymous = await a.send("What should we do next?", { thread_root_message_id: root.message.id, account_id: null });
+  assert.ok((await a.turns(anonymous.message.id)).every(row => row.turn_position === null));
 });
 
 test("a supervised reply releases the next position, which sees who answered; the last stays hidden", skip, async () => {
@@ -409,10 +519,16 @@ for (const interruption of ["human_thread", "agent_mention", "agent_quote"] as c
     assert.deepEqual((await a.turns(a.sent.message.id)).map(row => row.released),
       interruption === "human_thread" ? [true, true, true] : [true, false, true]);
     const before = a.priorReplies.at(-1)!.message.id;
-    const page = await a.read(third, before);
-    assert.equal(a.forAgent(page, interrupt.message.id)?.reason,
-      interruption === "human_thread" ? "thread_participant" : interruption === "agent_mention" ? "explicit_mention" : "reply_target");
-    if (interruption !== "human_thread") assert.deepEqual(await a.read(second, before), []);
+    if (interruption === "human_thread") {
+      const positions = await order(a, interrupt.message.id);
+      assert.deepEqual((await a.turns(interrupt.message.id)).map(row => row.released), [true, false, false]);
+      assert.equal(a.forAgent(await a.read(positions[0]!, before), interrupt.message.id)?.reason, "thread_participant");
+      for (const held of positions.slice(1)) assert.equal(a.forAgent(await a.read(held, before), interrupt.message.id), undefined);
+    } else {
+      const page = await a.read(third, before);
+      assert.equal(a.forAgent(page, interrupt.message.id)?.reason, interruption === "agent_mention" ? "explicit_mention" : "reply_target");
+      assert.deepEqual(await a.read(second, before), []);
+    }
   });
 }
 
