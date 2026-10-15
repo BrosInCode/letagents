@@ -16,6 +16,8 @@ import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult 
 import { captureRecordedRemoteTips } from "../../../../shared/workspace-turn-capture.mjs";
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
 
 async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex") {
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
@@ -1407,4 +1409,94 @@ test('optional full-review capacity cannot discard a valid compact receipt', asy
   store.settle(key, summary, { version: 1, workspace: full, contribution: full });
   assert.deepEqual(store.settled('agent', 'room', 'msg_1'), summary);
   assert.equal(store.pendingPage('agent', 'room', 'msg_1'), null);
+});
+
+async function settledPeerGroup(f: Awaited<ReturnType<typeof fixture>>, roomId = "room", start = 10) {
+  const inbox = new SupervisedAgentInboxStore(f.path);
+  try {
+    const messages = [start, start + 1].map(n => ({ source_message_id: `msg_${n}`,
+      source_message: { id: `msg_${n}`, source: "agent", sender: `Peer ${n}`, text: `My own argument ${n}.`,
+        agent_identity: { agent_key: `owner/peer${n}`, actor_label: `Peer ${n}` }, thread_root_id: "msg_1" },
+      activation: { decision: "activate", reason: "thread_participant" } }));
+    await inbox.ingestPoll({ agent_id: "agent", room_id: roomId, messages, last_observed_message_id: `msg_${start + 1}` });
+    f.receipts.pin({ agentId: "agent", roomId, apiOrigin: f.grant.apiUrl, agentKey: f.grant.agentKey,
+      agentInstanceId: "daemon:agent", hostId: f.grant.hostId, installationId: f.grant.installationId,
+      sourceSessionId: f.worker.agentSessionId }, messages.map(row => row.source_message_id));
+    const head = (await inbox.claimHead("agent"))!;
+    assert.equal(head.source_message_id, `msg_${start}`);
+    await inbox.checkpointTurnStarted(head.inbox_item_id, `turn-${start}`, { work_attempt_id: "workspace",
+      origin_execution_generation_id: "generation", provider_continuation_id: "conversation" });
+    await inbox.checkpointNormalizedTerminal({ inbox_item_id: head.inbox_item_id, agent_id: "agent", execution_generation_id: "generation",
+      provider_turn_id: `turn-${start}`, outcome: "no_reply", text: null, evidence: "stream",
+      terminal_evidence: { turnId: `turn-${start}`, providerContinuationId: "conversation", outcome: "no_reply", text: null, evidence: "stream" } });
+    await inbox.transition(head.inbox_item_id, "awaiting_result");
+    await inbox.transition(head.inbox_item_id, "acknowledged_no_reply");
+    return (await inbox.getBySourceMessage("agent", roomId, `msg_${start + 1}`))!;
+  } finally { await inbox.close(); }
+}
+const pendingGrouped = (db: DatabaseSync) => db.prepare(`SELECT room_id,source_message_id FROM supervised_agent_inbox i
+  WHERE ${PENDING_PEER_REPORT_SQL} ORDER BY fifo_sequence`).all();
+
+test("grouped report failure survives restart and retries through an authorized successor without fake execution", async t => {
+  const f = await fixture(t);
+  const child = await settledPeerGroup(f);
+  let calls = 0, now = Date.parse("2026-10-01T00:00:00Z");
+  f.options.now = () => now;
+  f.options.reportGroupedNoReply = async input => {
+    calls++;
+    assert.equal(input.sourceMessageId, "msg_11");
+    if (calls === 1) throw new Error("lost successful response");
+    assert.equal(input.bearer, "successor-bearer");
+    return "no_reply";
+  };
+  await f.publisher.flush();
+  assert.equal(calls, 1); assert.equal(pendingGrouped(f.db).length, 1);
+  await f.publisher.flush(); assert.equal(calls, 1, "existing cooldown prevents a retry loop");
+  f.restart();
+  f.custody.installWorkerAuthorization({ ...f.worker, agentSessionId: "successor", bearer: "successor-bearer",
+    agentSession: { ...f.worker.agentSession!, session_id: "successor" } });
+  now += 30_001;
+  await f.publisher.flush();
+  assert.equal(calls, 2); assert.deepEqual(pendingGrouped(f.db), []);
+  assert.equal(f.row(11).revision, 0);
+  assert.equal(f.db.prepare("SELECT 1 FROM execution_message_attempts WHERE source_message_id='msg_11'").get(), undefined);
+  assert.match(String(f.db.prepare("SELECT detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key='peer_batch_report:resolved'").get(child.inbox_item_id)?.detail), /no_reply/);
+});
+
+test("old-room pending grouped reports do not use current-room custody or starve the current Room", async t => {
+  const f = await fixture(t);
+  await settledPeerGroup(f, "old-room", 100);
+  const moving = new SupervisedAgentInboxStore(f.path);
+  try {
+    await moving.commitRoomMoveCursor({ agent_id: "agent", source_room_id: "old-room", destination_room_id: "room", last_observed_message_id: "msg_9" });
+  } finally { await moving.close(); }
+  await settledPeerGroup(f);
+  const reported: string[] = [];
+  f.options.reportGroupedNoReply = async input => { reported.push(`${input.roomId}/${input.sourceMessageId}`); return "replied"; };
+  await f.publisher.flush();
+  assert.deepEqual(reported, ["room/msg_11"]);
+  assert.deepEqual(pendingGrouped(f.db).map(row => `${row.room_id}/${row.source_message_id}`), ["old-room/msg_101"]);
+});
+
+test("ordinary completed work uploads before an awaited grouped receipt and each pass remains bounded", async t => {
+  const f = await fixture(t);
+  await settledPeerGroup(f);
+  await settledPeerGroup(f, "room", 20);
+  const attempt = f.captureMessage(1);
+  f.fact(1, { state: "terminal", turnOutcome: "completed" });
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  const order: string[] = [];
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  let reportEntered!: () => void;
+  const entered = new Promise<void>(resolve => { reportEntered = resolve; });
+  f.options.publish = async () => { order.push("work"); return "acknowledged"; };
+  f.options.reportGroupedNoReply = async () => { order.push("receipt"); reportEntered(); await pending; return "cancelled"; };
+  const flushing = f.publisher.flush();
+  try {
+    await entered;
+    assert.deepEqual(order, ["work", "receipt"], "a slow optional report cannot precede ready ordinary publication");
+    assert.equal(f.row(1).acknowledgedRevision, f.row(1).revision);
+  } finally { release(); await flushing; }
+  assert.equal(pendingGrouped(f.db).length, 1, "only one grouped report was attempted in this pass");
 });
