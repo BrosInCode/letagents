@@ -196,8 +196,8 @@ function mountComposer() {
   const emitted: Array<[string, ...unknown[]]> = [];
   const props = reactive({
     attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], messageNamespace: "room-a",
-    participants: [], pendingAttachmentDrafts: [], permissionApprovals: [], permissionError: null, replyTo: null,
-    resolvingPermissionIds: {}, roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false,
+    participants: [], pendingAttachmentDrafts: [], replyTo: null,
+    roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false,
     correctableAgents: [{ entryId: "supervised_busy", displayName: "LunarAmber", mentionInsertText: "LunarAmber" }],
   });
   let vm!: Record<string, any>;

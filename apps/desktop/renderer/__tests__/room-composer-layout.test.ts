@@ -56,7 +56,7 @@ after(async () => {
 
 async function mountInputRow(t: { after: (fn: () => void) => void }, gifEnabled: boolean) {
   ipc.room.getExpressions = async () => ({ enabled: gifEnabled, gif_provider_configured: true });
-  const props = reactive({ attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], messageNamespace: `layout-${gifEnabled}`, participants: [], pendingAttachmentDrafts: [], permissionApprovals: [], permissionError: null, replyTo: null, resolvingPermissionIds: {}, roomIdentifier: 'room-a', roomLoading: false, sendError: null, sending: false });
+  const props = reactive({ attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], messageNamespace: `layout-${gifEnabled}`, participants: [], pendingAttachmentDrafts: [], replyTo: null, roomIdentifier: 'room-a', roomLoading: false, sendError: null, sending: false });
   const root = node('root');
   const app = renderer.createApp({ render: () => h(Composer, props) });
   app.mount(root);

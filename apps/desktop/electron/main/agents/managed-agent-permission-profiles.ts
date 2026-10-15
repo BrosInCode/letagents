@@ -228,7 +228,6 @@ export function managedAgentPermissionProfileForProvider(
 export function assertManagedAgentPermissionProfileAvailable(
   providerId: DesktopAgentProviderId,
   requestedProfileId?: DesktopManagedAgentPermissionProfileId | null,
-  launchMode: "legacy" | "supervised" = "legacy",
 ): DesktopManagedAgentPermissionProfile {
   const requested = normalizeProfileId(requestedProfileId);
   const profiles = listManagedAgentPermissionProfiles(providerId);
@@ -236,12 +235,12 @@ export function assertManagedAgentPermissionProfileAvailable(
     throw new Error(`Unknown permission profile '${requested}' for ${providerId}.`);
   }
   const profile = managedAgentPermissionProfileForProvider(providerId, requestedProfileId);
-  if (launchMode === "supervised" && profile.id === "auto_review" && providerId === "open-model") {
+  if (profile.id === "auto_review" && providerId === "open-model") {
     return { ...profile, status: "available",
       description: "Lets LetAgents review each command before it runs. Routine commands and edits to project files run without asking.",
       detail: "Reading and checking commands are sent to LetAgents and to Jev, a decision model, for review. Committing, fetching, reading pull requests, and pushing to the agent's own LetAgents branch run without asking. A command that deletes, installs, force-pushes, or pushes anywhere else still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project." };
   }
-  if (launchMode === "supervised" && profile.id === "auto_review" && (providerId === "claude-code" || providerId === "codex")) {
+  if (profile.id === "auto_review" && (providerId === "claude-code" || providerId === "codex")) {
     return providerId === "claude-code"
       ? { ...profile, status: "available",
         description: "Lets Claude check each action before it runs. Actions it judges safe run without asking.",
@@ -250,21 +249,17 @@ export function assertManagedAgentPermissionProfileAvailable(
         description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
         detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project." };
   }
-  if (launchMode === "supervised" && providerId === "claude-code" && profile.id === "ask_before_write") {
+  if (providerId === "claude-code" && profile.id === "ask_before_write") {
     return { ...profile, status: "available",
       description: "Requires approval before Claude can change files or run write-capable commands.",
       detail: "Commands that only read the project, its history, or its pull requests run without asking. Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available." };
   }
-  if (launchMode === "supervised" && providerId === "codex" && profile.id === "read_only") {
+  if (providerId === "codex" && profile.id === "read_only") {
     return { ...profile, status: "available", risk: "medium",
       description: "Can read files on this Mac, also outside your project, and read and post in the room.",
       detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews." };
   }
-  if (
-    launchMode === "supervised"
-    && (providerId === "codex" || providerId === "open-model")
-    && profile.id === "ask_before_write"
-  ) {
+  if ((providerId === "codex" || providerId === "open-model") && profile.id === "ask_before_write") {
     const openModel = providerId === "open-model";
     return {
       ...profile,

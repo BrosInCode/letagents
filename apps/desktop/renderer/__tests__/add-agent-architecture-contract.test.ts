@@ -23,8 +23,8 @@ const actionBar = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/AddAgentActionBar.vue",
   import.meta.url,
 )), "utf8");
-const managedSessions = readFileSync(fileURLToPath(new URL(
-  "../src/components/desktop/content/add-agent/AddAgentManagedSessions.vue",
+const supervisedLaunch = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunch.vue",
   import.meta.url,
 )), "utf8");
 const controller = readFileSync(fileURLToPath(new URL(
@@ -60,7 +60,7 @@ const managedSessionStyles = readFileSync(fileURLToPath(new URL(
   import.meta.url,
 )), "utf8");
 
-test("Add Agent modal is not a managed-session polling owner", () => {
+test("Add Agent modal is not a supervisor-state polling owner", () => {
   assert.ok(modal.split("\n").length < 250, "modal shell should stay below 250 lines");
   assert.doesNotMatch(modal, /managedSessions\s*:/);
   assert.doesNotMatch(modal, /managed-sessions-updated/);
@@ -85,7 +85,7 @@ test("supervised polling state is consumed only by live islands", () => {
 test("extracted islands preserve compact responsive providers and sticky actions", () => {
   assert.match(providerRail, /<style scoped src="\.\/AddAgentProviderRail\.css">/);
   assert.match(actionBar, /<style scoped src="\.\/AddAgentActionBar\.css">/);
-  assert.match(managedSessions, /<style scoped src="\.\/AddAgentLiveCard\.css">/);
+  assert.match(supervisedLaunch, /<style scoped src="\.\/AddAgentLiveCard\.css">/);
   assert.match(providerStyles, /\.desktop-add-agent-providers\s*\{[\s\S]*?display: grid;[\s\S]*?align-content: start;/);
   assert.match(providerStyles, /@media \(max-width: 520px\)[\s\S]*?\.desktop-add-agent-providers\s*\{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
   assert.match(actionStyles, /\.desktop-add-agent-actions\s*\{[\s\S]*?bottom: 0;[\s\S]*?background: var\(--bg\);/);
@@ -93,18 +93,13 @@ test("extracted islands preserve compact responsive providers and sticky actions
   assert.doesNotMatch(styles, /^\.desktop-add-agent-(?:providers|managed-session|actions)\s*\{/m);
 });
 
-test("the room shell owns push-maintained sessions and a bounded repair timer", () => {
-  assert.match(shell, /provide\(managedAgentSessionsKey/);
-  assert.match(shell, /managedAgentSessionsRefreshTimer = window\.setTimeout/);
+test("the room shell owns push-maintained supervisor entries and a bounded repair timer", () => {
+  assert.match(shell, /provide\(supervisorEntriesKey/);
   assert.match(shell, /supervisorStateRepairDelayMs/);
-  assert.doesNotMatch(shell, /managedAgentSessionsRefreshTimer = window\.setInterval/);
-  assert.match(shell, /requestId !== managedAgentSessionsRefreshRequestId/);
-  assert.match(shell, /mutationVersion === managedAgentSessionsMutationVersion/);
-  assert.match(shell, /managedAgentSessionsRefreshInFlight/);
-  assert.match(shell, /managedAgentSessionsRefreshQueued/);
+  assert.doesNotMatch(shell, /RefreshTimer = window\.setInterval/);
+  assert.doesNotMatch(shell, /managedAgentSessionsKey|managed-agent-sessions-context/);
+  assert.doesNotMatch(shell, /@managed-session-started/);
   assert.doesNotMatch(participantSurface, /useManagedAgentSessionsContext/);
-  assert.match(shell, /:managed-sessions="roomManagedAgentSessions"/);
-  assert.match(shell, /@session-updated="applyAgentInspectorParticipantSessionUpdate"/);
   assert.doesNotMatch(participantSurface, /listManagedAgentSessions/);
 });
 
@@ -123,8 +118,8 @@ test("setup owns provider, preflight, authentication, and worktree lifecycles", 
 });
 
 test("secure credential storage is a supervised readiness prerequisite", () => {
-  assert.match(setup, /launchMode === "supervised"[\s\S]*?supervisorGrant\.getStorageStatus\(\)/);
-  assert.match(presentation, /launchMode\.value !== "supervised" \|\| secureStorageStatus\.value\?\.available === true/);
+  assert.match(setup, /hasSupervisedRuntime\(bindings\.selectedProvider\.value\)[\s\S]*?supervisorGrant\.getStorageStatus\(\)/);
+  assert.match(presentation, /props\.roomStorageMode === "local" \|\| secureStorageStatus\.value\?\.available === true/);
   assert.match(setupStatus, /<dt>Secure storage<\/dt>/);
   assert.match(setup, /window\.addEventListener\("focus", recheckUnlockedStorage\)/);
 });
@@ -132,7 +127,6 @@ test("secure credential storage is a supervised readiness prerequisite", () => {
 test("ready provider copy separates identity, state, and next action", () => {
   assert.match(presentation, /status === "ready"\) return "Choose how it works here"/);
   assert.match(presentation, /Choose a model, set its access, and give it something to work on/);
-  assert.match(presentation, /Set its model and access before launch/);
   assert.match(presentation, /Use the handoff below to bring it into this room/);
   assert.match(setupStatus, /\{\{ statusDescription \}\}/);
   assert.doesNotMatch(setupStatus, /preflight\?\.detail/);

@@ -10,7 +10,7 @@ function provider(overrides: Partial<DesktopAgentProvider> = {}): DesktopAgentPr
     id: "codex",
     name: "Codex",
     description: "Codex",
-    capabilities: ["desktop_managed_runtime"],
+    capabilities: ["supervised_runtime"],
     runtimeCommand: "codex",
     runtimeInstallCommand: "install codex",
     runtimeInstallUrl: "https://example.com/codex",
@@ -38,7 +38,7 @@ test("missing external runtime preflight fails closed when the registry has no i
   assert.match(result.detail || "", /missing both an install command and an installation guide/i);
 });
 
-test("supervised Codex supplies its own connection and setup refresh explicitly reconciles the daemon environment", async (t) => {
+test("Codex supplies its own connection and setup refresh explicitly reconciles the daemon environment", async (t) => {
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   let environmentCurrent = true;
   const compare = t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => environmentCurrent);
@@ -54,14 +54,14 @@ test("supervised Codex supplies its own connection and setup refresh explicitly 
   process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = join(env.tempDir, "user-data");
   await writeFile(bin, "#!/usr/bin/env node\nconsole.log(process.argv[2] === '--version' ? 'codex-cli 0.153.4' : 'signed in');\n", { mode: 0o755 });
   const { runDesktopAgentProviderPreflight } = await import("../main/agents/providers.js");
-  const supervised = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, launchMode: "supervised" });
+  const supervised = await runDesktopAgentProviderPreflight("codex", { roomOnly: true });
   assert.equal(supervised.mcpStatus, "not_installed");
   assert.equal(supervised.status, "ready");
   assert.equal(supervised.canStart, true);
   assert.equal(compare.mock.callCount(), 1);
   assert.equal(refresh.mock.callCount(), 0, "ordinary setup is read-only");
   environmentCurrent = false;
-  const stale = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, launchMode: "supervised" });
+  const stale = await runDesktopAgentProviderPreflight("codex", { roomOnly: true });
   assert.equal(stale.status, "config_required");
   assert.equal(stale.canStart, false);
   assert.equal(stale.message, "Agent setup needs refreshing.");
@@ -71,11 +71,7 @@ test("supervised Codex supplies its own connection and setup refresh explicitly 
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
   t.after(() => { if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; });
-  const refreshed = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, launchMode: "supervised", refreshEnvironment: true });
+  const refreshed = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, refreshEnvironment: true });
   assert.equal(refreshed.canStart, true);
   assert.equal(refresh.mock.callCount(), 1, "explicit refresh compares the daemon even when Electron PATH is unchanged");
-  const legacy = await runDesktopAgentProviderPreflight("codex", { roomOnly: true, launchMode: "legacy" });
-  assert.equal(legacy.status, "bridge_required");
-  assert.equal(legacy.nextAction, "install_mcp_bridge");
-  assert.equal(legacy.canStart, false);
 });

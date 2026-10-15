@@ -326,7 +326,7 @@ const provider = {
   id: "codex",
   name: "Codex",
   description: "",
-  capabilities: ["desktop_managed_runtime"],
+  capabilities: ["supervised_runtime"],
   runtimeCommand: null,
   mcpTargetId: "codex",
   permissionProfiles: [{
@@ -401,6 +401,23 @@ test("mounted Settings exposes provider-declared permission profiles as a single
   (radios[0]?.props.onChange as () => void)();
   assert.deepEqual(patches, [{ permissionProfileId: "full_access" }]);
   mounted.app.unmount();
+});
+
+test("mounted Settings lets a supervised agent edit its model, Claude Code included, and says when it is fixed", () => {
+  const modelInput = (root: HostNode) => descendants(root).find((node) => node.type === "input" && node.props.placeholder === "Default model");
+  for (const id of ["codex", "claude-code"]) {
+    const supervised = mount(AgentInspectorSettings, settingsProps({
+      resource: { ...readyResource, configuration: { ...configuration, provider: id } },
+      providers: [{ ...provider, id, capabilities: ["supervised_runtime"] }],
+    }));
+    assert.equal(modelInput(supervised.root)?.props.disabled, false, id);
+    assert.doesNotMatch(textContent(supervised.root), /The model cannot be changed for this agent\./, id);
+    supervised.app.unmount();
+  }
+  const fixed = mount(AgentInspectorSettings, settingsProps({ providers: [{ ...provider, capabilities: ["external_mcp"] }] }));
+  assert.equal(modelInput(fixed.root)?.props.disabled, true);
+  assert.match(textContent(fixed.root), /The model cannot be changed for this agent\./);
+  fixed.app.unmount();
 });
 
 test("mounted Settings honors exact supervised profile gates instead of generic provider availability", () => {
@@ -852,7 +869,6 @@ test("wide Host closes on a primary pointer press outside and stays open for ins
     settingsConflict: false,
     roomIdentifier: "room_a",
     requestVersion: 1,
-    managedSessions: [],
     reasoningSessions: [],
     onClose: () => { closeCount += 1; },
   });
@@ -935,7 +951,6 @@ test("retrying unavailable agent details keeps keyboard focus inside the Inspect
         liveFeed: { events: [], ended: false, droppedEvents: 0 },
         roomIdentifier: "room_a",
         requestVersion: 1,
-        managedSessions: [],
         reasoningSessions: [],
         onRetry: () => {
           selection.value = {

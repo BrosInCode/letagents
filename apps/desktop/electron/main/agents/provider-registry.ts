@@ -49,7 +49,6 @@ const agentProviders: DesktopAgentProvider[] = [
     description: "Start a local Cursor agent here.",
     capabilities: [
       "external_mcp",
-      "desktop_managed_runtime",
       "supervised_runtime",
       "auth_preflight",
       "turn_control",
@@ -68,7 +67,6 @@ const agentProviders: DesktopAgentProvider[] = [
     description: "Start a Codex agent here.",
     capabilities: [
       "external_mcp",
-      "desktop_managed_runtime",
       "supervised_runtime",
       "auth_preflight",
       "turn_control",
@@ -89,7 +87,6 @@ const agentProviders: DesktopAgentProvider[] = [
     name: "Open Model",
     description: "Run an open model through the bundled OpenCode engine.",
     capabilities: [
-      "desktop_managed_runtime",
       "supervised_runtime",
       "installable_runtime",
       "auth_preflight",

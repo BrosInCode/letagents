@@ -20,9 +20,7 @@ import {
   mapAgentInspectorDetail,
   mapEntry,
   SupervisorDaemonClient,
-  onSupervisorActivity,
   onSupervisorAgentStream,
-  publishSupervisorActivity,
   setFocusedAgentStream,
   supervisorStateWatchAcceptsStatus,
   supervisorStateWatchRetryDelay,
@@ -1639,36 +1637,6 @@ async function runReleasedSocketHandoffScenario(input: {
     await env.cleanup();
   }
 }
-
-test("local supervisor activity subscribers receive only the canonical redacted event", async () => {
-  const canary = "canary-not-a-real-emitter-secret-123456789";
-  const originalAppend = supervisorDaemonClient.appendActivity;
-  let sentToDaemon: unknown;
-  let emitted: unknown;
-  (supervisorDaemonClient as unknown as { appendActivity: (id: string, event: unknown) => Promise<unknown> }).appendActivity = async (_id, event) => {
-    sentToDaemon = event;
-    return {};
-  };
-  const unsubscribe = onSupervisorActivity((event) => { emitted = event; });
-  try {
-    await publishSupervisorActivity({
-      entryId: "credential_emitter",
-      provider: `provider Authorization: Bearer ${canary}`,
-      kind: `kind clientSecret=${canary}`,
-      method: `method Authorization: Basic ${canary}`,
-      summary: `${"x".repeat(470)} Authorization: Bearer ${canary}`,
-      status: "working",
-      payload: { output: JSON.stringify({ clientSecret: canary }) },
-    });
-    assert.doesNotMatch(JSON.stringify(sentToDaemon), new RegExp(canary));
-    assert.doesNotMatch(JSON.stringify(emitted), new RegExp(canary));
-    assert.match(JSON.stringify(emitted), /REDACTED/i);
-    assert.match((emitted as { event: { summary: string } }).event.summary, /Authorization: Bearer \[REDACTED\]/);
-  } finally {
-    unsubscribe();
-    (supervisorDaemonClient as unknown as { appendActivity: typeof originalAppend }).appendActivity = originalAppend;
-  }
-});
 
 test("causal manifest projection accepts a fully valid room state and receipt timeline", () => {
   const wire = wireEntryWithCausalProjection();

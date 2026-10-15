@@ -1,9 +1,6 @@
 import { app, autoUpdater, protocol } from "electron";
 import { join } from "node:path";
 
-import {
-  retireLegacyCodexBackedOpenModelSessions,
-} from "./main/agents/legacy-open-model-retirement.js";
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
 import { configureApplicationMenu } from "./main/menu.js";
@@ -50,11 +47,6 @@ app.once("ready", async (_event, launchInfo) => {
   const startupPreparation = (async () => {
     await startDesktopShellEnvironmentHydration().catch((error) => {
       console.warn(`Desktop shell environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
-    });
-    if (!await supervisorDaemonClient.isMaintenanceHeld()) await retireLegacyCodexBackedOpenModelSessions().catch((error) => {
-      console.warn(
-        `Legacy Open Model retirement failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
     });
   })();
   const backgroundStartup = (async () => {

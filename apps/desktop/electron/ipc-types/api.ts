@@ -53,15 +53,6 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
-  DesktopManagedAgentChangeSummary,
-  DesktopManagedAgentInspectResult,
-  DesktopManagedAgentPermissionDecisionInput,
-  DesktopManagedAgentPermissionDecisionResult,
-  DesktopManagedAgentRetryInput,
-  DesktopManagedAgentSession,
-  DesktopManagedAgentStartInput,
-  DesktopManagedAgentStartResult,
-  DesktopManagedAgentStopInput,
   DesktopSupervisorAttemptDetail,
   DesktopSupervisorAgentConfiguration,
   DesktopSupervisorAgentConfigurationApplyInput,
@@ -425,22 +416,6 @@ export interface DesktopApi {
   };
   workers: {
     list: () => Promise<WorkerSnapshot[]>;
-    listManagedAgentSessions: (roomIdentifier?: string | null) => Promise<DesktopManagedAgentSession[]>;
-    onManagedAgentSessionUpdate: (callback: (session: DesktopManagedAgentSession) => void) => () => void;
-    startManagedAgent: (input: DesktopManagedAgentStartInput) => Promise<DesktopManagedAgentStartResult>;
-    stopManagedAgent: (input?: DesktopManagedAgentStopInput) => Promise<DesktopManagedAgentSession | null>;
-    retryManagedAgent: (input: DesktopManagedAgentRetryInput) => Promise<DesktopManagedAgentSession | null>;
-    inspectManagedAgent: (
-      sessionId?: string | null,
-      roomIdentifier?: string | null
-    ) => Promise<DesktopManagedAgentInspectResult | null>;
-    getManagedAgentChangeSummary: (
-      sessionId?: string | null,
-      roomIdentifier?: string | null
-    ) => Promise<DesktopManagedAgentChangeSummary | null>;
-    resolveManagedAgentPermission: (
-      input: DesktopManagedAgentPermissionDecisionInput
-    ) => Promise<DesktopManagedAgentPermissionDecisionResult>;
     listAgentProviders: () => Promise<DesktopAgentProvider[]>;
     listAgentProviderModels: (
       providerId: DesktopAgentProviderId,

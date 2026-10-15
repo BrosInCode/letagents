@@ -193,18 +193,11 @@ const expectedDirectChannels = [
   "desktop:updates:check",
   "desktop:updates:get-status",
   "desktop:updates:install",
-  "desktop:workers:get-managed-agent-change-summary",
-  "desktop:workers:inspect-managed-agent",
   "desktop:workers:list",
   "desktop:workers:list-agent-provider-models",
   "desktop:workers:list-agent-providers",
-  "desktop:workers:list-managed-agent-sessions",
-  "desktop:workers:resolve-managed-agent-permission",
-  "desktop:workers:retry-managed-agent",
   "desktop:workers:run-agent-provider-preflight",
   "desktop:workers:run-agent-provider-setup",
-  "desktop:workers:start-managed-agent",
-  "desktop:workers:stop-managed-agent",
 ] as const;
 
 function readDomainSource(domain: string): string {
@@ -327,9 +320,6 @@ test("application registers startup preparation before rental recovery without d
     mock.module("../main/desktop-shell-environment.js", { namedExports: {
       startDesktopShellEnvironmentHydration: () => preparation,
     } }),
-    mock.module("../main/agents/legacy-open-model-retirement.js", { namedExports: {
-      retireLegacyCodexBackedOpenModelSessions: async () => { calls.push("prepared"); },
-    } }),
     mock.module("../main/supervisor-daemon.js", { namedExports: { supervisorDaemonClient: {
       async isMaintenanceHeld() { return false; },
       async ensureRunning(prerequisite: Promise<void>) {
@@ -374,7 +364,7 @@ test("application registers startup preparation before rental recovery without d
     releaseDaemon();
     if (process.platform === "darwin") {
       await reconciled;
-      assert.deepEqual(calls.slice(-3), ["prepared", "native-start", "grants"]);
+      assert.deepEqual(calls.slice(-2), ["native-start", "grants"]);
     }
   } finally {
     releasePreparation(); releaseDaemon();

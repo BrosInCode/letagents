@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { DesktopCodexJoinedVia } from "./state.js";
-import type { DesktopManagedAgentDeliveryMode } from "../../ipc-types.js";
 import { LETAGENTS_CODENAME_EXAMPLES } from "./codenames.js";
-import { DESKTOP_EVENTS_NO_ROOM_REPLY } from "./codex-event-prompt.js";
 
 export const DEFAULT_CODEX_STOP_PHRASE = "/stop-codex-room";
 
@@ -29,17 +27,6 @@ export function makeCodexStopToken(): string {
   return `LOCAL_CODEX_ROOM_${randomUUID()}`;
 }
 
-export function formatCodexDeadline(minutes: number): { utc: string | null } {
-  if (minutes <= 0) {
-    return { utc: null };
-  }
-
-  const deadline = new Date(Date.now() + minutes * 60 * 1000);
-  return {
-    utc: deadline.toISOString().replace("T", " ").replace(".000Z", " UTC"),
-  };
-}
-
 function buildJoinInstruction(joinedVia: DesktopCodexJoinedVia, roomIdentifier: string): string {
   if (joinedVia === "join_code") {
     return `Call the LetAgents MCP tool join_code with ${JSON.stringify({ code: roomIdentifier, session_mode: "current" })}.`;
@@ -61,7 +48,6 @@ export function buildCodexStartPrompt(input: {
   roomIdentifier: string;
   joinedVia: DesktopCodexJoinedVia;
   cwd: string;
-  deliveryMode: DesktopManagedAgentDeliveryMode;
   stopPhrase: string;
   token: string;
   suggestedDisplayName: string;
@@ -90,29 +76,6 @@ export function buildCodexStartPrompt(input: {
     input.maxMinutes > 0 && input.deadlineUtc
       ? `Hard stop deadline: ${input.deadlineUtc}. Stop when the stop phrase appears or when that deadline is reached, whichever comes first.`
       : "There is no hard deadline. Stop only when the stop phrase appears or when you are interrupted.";
-
-  if (input.deliveryMode === "desktop_events") {
-    return [
-      "Start as a desktop-supervised local Codex worker for a LetAgents room.",
-      `Primary working directory: ${input.cwd}. Use this repository/worktree when future room events ask for implementation or repo work.`,
-      deadlineInstruction,
-      "",
-      "Bootstrap instructions:",
-      `1. The LetAgents desktop app has already registered this room worker as ${input.suggestedDisplayName}.`,
-      "2. Do not call LetAgents MCP room tools during bootstrap. This app-server surface may not expose them.",
-      "3. Do not call wait_for_messages. The desktop app will send room events into this same Codex thread as future turns.",
-      `4. Finish this bootstrap turn with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
-      "",
-      "Future event turns:",
-      "- When the desktop sends a room event, decide whether action is needed.",
-      "- If action is useful, do the local work and make your final answer the public room reply the desktop should publish as you.",
-      `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
-      "- The room transcript is shared context; an activation decision never limits what earlier room or thread context you may read.",
-      "- Be concise, avoid duplicate responses, and do not narrate hidden chain-of-thought.",
-      `- Stop immediately if a future room message text exactly equals: ${input.stopPhrase}`,
-      `- When stopping, finish with exactly: ${input.token}_DONE`,
-    ].join("\n");
-  }
 
   if (input.resumeWorker) {
     const cursorInstruction = input.resumeWorker.roomCursor

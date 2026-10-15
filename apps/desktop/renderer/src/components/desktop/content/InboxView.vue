@@ -118,11 +118,10 @@ const sectionDescription = computed(() => props.section === 'needs-you' ? 'Quest
 // Loading issues follow the room filter; rental requests belong to no room.
 const failedRooms = computed(() => inboxSourceFailures(props.data, props.rooms));
 const rentalErrorInView = computed(() => props.rooms.length ? '' : props.rentalError);
-const hasSourceFailure = computed(() => Boolean(failedRooms.value.length || unavailable.value.length || props.data?.managedSessionsUnavailable || rentalErrorInView.value || props.data?.cloudUnavailable));
+const hasSourceFailure = computed(() => Boolean(failedRooms.value.length || unavailable.value.length || rentalErrorInView.value || props.data?.cloudUnavailable));
 const sourceFailures = computed(() => [
   ...(failedRooms.value.length ? [`Couldn’t load all inbox data for ${failedRooms.value.map(room => room.displayName).sort().join(', ')}.`] : []),
   ...(unavailable.value.length ? [`Some updates are unavailable: ${unavailable.value.join('; ')}.`] : []),
-  ...(props.data?.managedSessionsUnavailable ? ['Local agent status could not be checked.'] : []),
   ...(rentalErrorInView.value ? [rentalErrorInView.value] : []),
   ...(props.data?.cloudUnavailable ? ['Shared rooms are unavailable.'] : []),
 ]);

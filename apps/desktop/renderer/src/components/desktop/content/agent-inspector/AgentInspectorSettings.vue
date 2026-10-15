@@ -130,7 +130,7 @@ const props = defineProps<{ entryId: string; displayName: string; workspacePath:
 const emit = defineEmits<{ patch: [patch: Partial<AgentInspectorConfigurationDraft>]; save: [overwrite: boolean]; apply: []; reload: []; "prepare-move": [destination: string]; "commit-move": []; retire: []; purge: [] }>();
 const destination = ref(""); const purgeConfirmation = ref(""); const confirmRetire = ref(false);
 const provider = computed(() => props.providers.find((item) => item.id === props.resource.configuration?.provider) ?? null);
-const canEditModel = computed(() => Boolean(provider.value?.capabilities.includes("desktop_managed_runtime")));
+const canEditModel = computed(() => Boolean(provider.value?.capabilities.includes("supervised_runtime")));
 const canEditEffort = computed(() => agentInspectorProviderSupportsEffort(provider.value?.id));
 const runtimeLag = computed(() => configurationHasRuntimeLag(props.resource.configuration));
 const settingsEditable = computed(() => props.resource.status === "ready");

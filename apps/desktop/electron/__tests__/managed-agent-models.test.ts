@@ -291,7 +291,6 @@ test("Cursor model discovery uses the managed profile environment", async () => 
 
   const result = await listDesktopAgentProviderModels("cursor", {
     repoRootPath: tempDir,
-    cursorMcpPolicy: "filter_letagents",
   });
 
   assert.equal(result.status, "ready");

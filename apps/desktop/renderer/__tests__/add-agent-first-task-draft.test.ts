@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createApp, reactive, ref } from "vue";
+import { createApp, reactive } from "vue";
 
 import type { DesktopAgentProvider, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
-import { managedAgentSessionsKey } from "../src/components/desktop/content/add-agent/managed-agent-sessions-context";
+import { supervisorEntriesKey } from "../src/components/desktop/content/add-agent/supervisor-entries-context";
 import {
   useAddAgentController,
   type AddAgentModalProps,
@@ -173,7 +173,7 @@ async function openAddAgentDialog(supervisor: Record<string, unknown>) {
     openModel: { getSettingsStatus: quiet },
   };
   const app = createApp({ render: () => null });
-  app.provide(managedAgentSessionsKey, { sessions: ref([]), refresh: async () => undefined, upsert: () => undefined });
+  app.provide(supervisorEntriesKey, { refresh: async () => undefined });
   const props = reactive<AddAgentModalProps>({
     open: false,
     roomStorageMode: "local",

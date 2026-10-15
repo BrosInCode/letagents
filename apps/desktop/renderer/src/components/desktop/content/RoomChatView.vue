@@ -152,11 +152,8 @@
           :presence-chips="presenceChips"
           :message-namespace="messageNamespace"
           :participants="participants"
-          :permission-approvals="permissionApprovals"
-          :permission-error="permissionError"
           :pending-attachment-drafts="pendingAttachmentDrafts"
           :reply-to="replyTarget"
-          :resolving-permission-ids="resolvingPermissionIds"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :send-error="sendError"
@@ -164,12 +161,10 @@
           :correctable-agents="correctableAgents"
           @clear-reply="clearReplyTarget"
           @open-add-agent="emit('open-add-agent')"
-          @open-permission-detail="emit('open-permission-detail', $event)"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
           @open-event-preview="openEventPreview"
           @dismiss-event-preview="emit('dismiss-event-preview', $event)"
-          @resolve-permission="(approval, behavior) => emit('resolve-permission', approval, behavior)"
           @stop-agent-turn="(agentId, approvalId) => emit('stop-agent-turn', agentId, approvalId)"
           @send-message="handleComposerSend"
           @open-agent-correction="(handoff, opened) => emit('open-agent-correction', handoff, opened)"
@@ -215,7 +210,6 @@ import { provideRoomMessagePins, useRoomMessagePins } from "../../../composables
 import { provideRoomMessageReactions, useRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import type {
   DesktopAgentPresence,
-  DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
@@ -228,7 +222,6 @@ import type {
 import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
 import {
   normalizeManagedAgentRoomIdentifier,
-  type ManagedAgentPermissionApproval,
   type ManagedAgentWorkIndicator,
 } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
@@ -270,8 +263,6 @@ const props = defineProps<{
   continuationRepairKeys?: ReadonlySet<string>;
   roomDeliverySkipKeys?: ReadonlySet<string>;
   revealedMessageId?: string | null;
-  permissionApprovals: ManagedAgentPermissionApproval[];
-  permissionError: string | null;
   composerEventPreviews: ComposerEventPreview[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
@@ -290,7 +281,6 @@ const props = defineProps<{
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   roomAgentWorkTruncated?: boolean;
-  resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
   reasoningSessions: DesktopReasoningSession[];
   tasks: DesktopTaskSummary[];
   searchQuery: string;
@@ -329,7 +319,6 @@ const emit = defineEmits<{
   "open-agent-detail": [target: AgentModalTarget];
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
   "open-add-agent": [];
-  "open-permission-detail": [approval: ManagedAgentPermissionApproval];
   "scroll-position": [scrollTop: ChatScrollPosition];
   "open-github-event": [url: string];
   "open-events": [];
@@ -340,10 +329,6 @@ const emit = defineEmits<{
   "reveal-message": [messageId: string];
   "message-reveal-unavailable": [messageId: string];
   "dismiss-event-preview": [messageId: string];
-  "resolve-permission": [
-    approval: ManagedAgentPermissionApproval,
-    behavior: DesktopManagedAgentPermissionDecisionBehavior,
-  ];
   "thread-read": [threadRootId: string, summary: DesktopRoomMessageThreadSummary];
   "stop-agent-turn": [agentId: string, approvalId: string];
   "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];

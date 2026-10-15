@@ -1,6 +1,5 @@
 import { ROOM_TYPING, parseTypingSignal } from "../../../../shared/room-typing.mjs";
 import type {
-  DesktopManagedAgentSession,
   DesktopRentalActivityEvent,
   DesktopRoomDeliveryRepair,
   DesktopRoomMessage,
@@ -15,10 +14,7 @@ import {
   localRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
 } from "./rooms/local-store.js";
-import {
-  getLocalChatMessages,
-  getLocalChatThreadRoutingAgentKeysForRoots,
-} from "./rooms/messages/local-store.js";
+import { getLocalChatMessages } from "./rooms/messages/local-store.js";
 import { resolveLocalThreadReaderKey } from "./rooms/messages/thread-reader.js";
 import { subscribeLocalTasks } from "./rooms/local-task-subscription.js";
 import {
@@ -31,15 +27,6 @@ import {
 } from "./rooms.js";
 import { mapRoomArtifactPayload } from "./rooms/snapshot/mappers.js";
 import { emitToMainWindow } from "./window.js";
-import {
-  dispatchRoomStreamEventToManagedAgents,
-  listDesktopManagedAgentSessionPopulationForRoom,
-} from "./agents/codex-supervisor.js";
-import {
-  readAgentLocalStateSnapshot,
-  type StoredAgentSessionState,
-} from "./agents/state.js";
-import type { LocalRoutingAuthorityWorker } from "./agents/codex-event-routing.js";
 import {
   createManagedMessageDeliveryTracker,
   type ManagedMessageDeliveryTracker,
@@ -55,8 +42,6 @@ let activeRoomStream: {
   lastMessageId: string | null;
   lastEventCursor: string | null;
   localRoomIdentifier: string | null;
-  managedMessageDeliveryTracker: ManagedMessageDeliveryTracker;
-  managedTaskDeliveryTracker: ManagedMessageDeliveryTracker;
   localUiMessageTracker: ManagedMessageDeliveryTracker;
   messageRepairRequestedGeneration: number;
   messageRepairCompletedGeneration: number;
@@ -64,7 +49,7 @@ let activeRoomStream: {
   // Large catch-up suppresses intermediate renderer pages and finishes with
   // one authoritative latest window. Keep this durable for the stream
   // generation so a failed final window cannot be forgotten after the
-  // managed-delivery cursor has already advanced.
+  // stream cursor has already advanced.
   rendererWindowRefreshNeeded: boolean;
   gapRepairGeneration: number;
   pendingGapRepair: {
@@ -172,357 +157,18 @@ function isCurrentRoomStream(
   return activeRoomStream === stream && !stream.stopped;
 }
 
-export function emitRoomStreamEvent(
-  event: DesktopRoomStreamEvent,
-  options: { deliverToManagedAgents?: boolean } = {},
-): void {
+export function emitRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   emitToMainWindow("desktop:room:stream-event", event);
-  if (options.deliverToManagedAgents === false) {
-    return;
-  }
-  try {
-    managedAgentRoomStreamDispatcher(event);
-  } catch {
-    // Agent delivery must not break the human room stream.
-  }
 }
 
-export async function deliverDesktopRoomMessageToManagedAgents(
-  roomIdentifier: string,
-  message: DesktopRoomMessage,
-): Promise<void> {
-  await deliverDesktopRoomMessageToManagedAgentsInternal(roomIdentifier, message, true);
-}
-
-async function deliverDesktopRoomMessageToManagedAgentsInternal(
-  roomIdentifier: string,
-  message: DesktopRoomMessage,
-  scheduleRetry: boolean,
-): Promise<"ready" | "transient" | "invalid"> {
-  let deliveryMessage = message;
-  let transientHydrationFailure = false;
-  if (!message.accountAgentRouting) {
-    try {
-      const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
-      if (storage.effectiveMode === "local") {
-        const [routed] = await localAccountAgentRoutingHydrator(
-          roomIdentifier,
-          localRoomIdentifierForStorage(storage, roomIdentifier),
-          [message],
-        );
-        deliveryMessage = routed ?? message;
-      }
-    } catch {
-      transientHydrationFailure = true;
-      deliveryMessage = {
-        ...message,
-        accountAgentRouting: { version: 1, authority: "invalid" },
-      };
-    }
-  }
-  if (deliveryMessage.accountAgentRouting?.authority === "invalid") {
-    // A missing envelope that could not be projected is retryable. An
-    // explicitly invalid imported/server envelope is durable authority and
-    // must remain fail-closed instead of being reinterpreted as legacy data.
-    if (transientHydrationFailure) {
-      if (scheduleRetry) scheduleLocalManagedMessageDeliveryRetry(roomIdentifier, message);
-      return "transient";
-    }
-    return "invalid";
-  }
-  removePendingLocalManagedMessageDelivery(roomIdentifier, message.id);
-  const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(roomIdentifier, message.id);
-  if (!shouldDeliverToManagedAgents) return "ready";
-  managedAgentRoomStreamDispatcher({
-    type: "message",
-    roomIdentifier,
-    message: deliveryMessage ?? message,
-  });
-  return "ready";
-}
-
-type LocalManagedMessageDeliveryRetry = {
-  messages: Map<string, DesktopRoomMessage>;
-  attempt: number;
-  startedAt: number;
-  timer: ReturnType<typeof setTimeout> | null;
-};
-
-const MAX_LOCAL_MANAGED_DELIVERY_RETRY_MESSAGES = 500;
-const MAX_LOCAL_MANAGED_DELIVERY_RETRY_ATTEMPTS = 8;
-const MAX_LOCAL_MANAGED_DELIVERY_RETRY_AGE_MS = 30_000;
-const localManagedMessageDeliveryRetries = new Map<string, LocalManagedMessageDeliveryRetry>();
-
-function removePendingLocalManagedMessageDelivery(
-  roomIdentifier: string,
-  messageId: string,
-): void {
-  const roomKey = roomIdentifier.trim();
-  const pending = localManagedMessageDeliveryRetries.get(roomKey);
-  if (!pending) return;
-  pending.messages.delete(messageId);
-  if (pending.messages.size > 0) return;
-  if (pending.timer) clearTimeout(pending.timer);
-  localManagedMessageDeliveryRetries.delete(roomKey);
-}
-
-function clearLocalManagedMessageDeliveryRetries(roomIdentifier?: string): void {
-  const roomKey = roomIdentifier?.trim();
-  for (const [key, pending] of localManagedMessageDeliveryRetries) {
-    if (roomKey && key !== roomKey) continue;
-    if (pending.timer) clearTimeout(pending.timer);
-    localManagedMessageDeliveryRetries.delete(key);
-  }
-}
-
-export function inspectLocalManagedMessageDeliveryRetriesForTest(): {
-  rooms: number;
-  messages: number;
-} {
-  return {
-    rooms: localManagedMessageDeliveryRetries.size,
-    messages: [...localManagedMessageDeliveryRetries.values()]
-      .reduce((total, pending) => total + pending.messages.size, 0),
-  };
-}
-
-export function clearLocalManagedMessageDeliveryRetriesForTest(): void {
-  clearLocalManagedMessageDeliveryRetries();
-}
-
-function scheduleLocalManagedMessageDeliveryRetry(
-  roomIdentifier: string,
-  message: DesktopRoomMessage,
-): void {
-  const roomKey = roomIdentifier.trim();
-  let pending = localManagedMessageDeliveryRetries.get(roomKey);
-  if (!pending) {
-    pending = { messages: new Map(), attempt: 0, startedAt: Date.now(), timer: null };
-    localManagedMessageDeliveryRetries.set(roomKey, pending);
-  }
-  // The ordered local poll remains the durable recovery owner. This small
-  // coalesced queue only closes the immediate-send latency gap; overflow is
-  // intentionally left for the poll rather than spawning per-message timers.
-  if (
-    pending.messages.size < MAX_LOCAL_MANAGED_DELIVERY_RETRY_MESSAGES
-    || pending.messages.has(message.id)
-  ) {
-    pending.messages.set(message.id, message);
-  }
-  scheduleLocalManagedMessageDeliveryRetryTimer(roomKey, pending);
-}
-
-function scheduleLocalManagedMessageDeliveryRetryTimer(
-  roomIdentifier: string,
-  pending: LocalManagedMessageDeliveryRetry,
-): void {
-  if (pending.timer || pending.messages.size === 0) return;
-  if (
-    pending.attempt >= MAX_LOCAL_MANAGED_DELIVERY_RETRY_ATTEMPTS
-    || Date.now() - pending.startedAt >= MAX_LOCAL_MANAGED_DELIVERY_RETRY_AGE_MS
-  ) {
-    localManagedMessageDeliveryRetries.delete(roomIdentifier);
-    return;
-  }
-  const delayMs = Math.min(2_000, 50 * (2 ** Math.min(pending.attempt + 1, 5)));
-  pending.timer = setTimeout(() => {
-    pending.timer = null;
-    void retryLocalManagedMessageDeliveries(roomIdentifier, pending);
-  }, delayMs);
-  pending.timer.unref?.();
-}
-
-async function retryLocalManagedMessageDeliveries(
-  roomIdentifier: string,
-  pending: LocalManagedMessageDeliveryRetry,
-): Promise<void> {
-  if (localManagedMessageDeliveryRetries.get(roomIdentifier) !== pending) return;
-  if (
-    activeRoomStream
-    && (activeRoomStream.stopped || activeRoomStream.roomIdentifier !== roomIdentifier)
-  ) {
-    clearLocalManagedMessageDeliveryRetries(roomIdentifier);
-    return;
-  }
-  pending.attempt += 1;
-  for (const [messageId, message] of pending.messages) {
-    let result: "ready" | "transient" | "invalid";
-    try {
-      result = await deliverDesktopRoomMessageToManagedAgentsInternal(
-        roomIdentifier,
-        message,
-        false,
-      );
-    } catch {
-      result = "transient";
-    }
-    if (result === "transient") break;
-    pending.messages.delete(messageId);
-  }
-  if (pending.messages.size === 0) {
-    localManagedMessageDeliveryRetries.delete(roomIdentifier);
-    return;
-  }
-  scheduleLocalManagedMessageDeliveryRetryTimer(roomIdentifier, pending);
-}
-
-function isPersistedWorkerActiveInRoom(
-  session: StoredAgentSessionState,
-  roomIdentifiers: ReadonlySet<string>,
-): boolean {
-  return session.session_kind === "worker"
-    && !session.ended_at
-    && roomIdentifiers.has(String(session.room_id ?? "").trim())
-    && Boolean(String(session.session_id ?? "").trim())
-    && Boolean(String(session.agent_key ?? "").trim());
-}
-
-function localRoutingAuthorityPopulation(
-  roomIdentifier: string,
-  localRoomIdentifier: string,
-  desktopSessions: readonly DesktopManagedAgentSession[],
-): { complete: boolean; sessions: LocalRoutingAuthorityWorker[] } {
-  const snapshot = readAgentLocalStateSnapshot();
-  const roomIdentifiers = new Set(
-    [roomIdentifier, localRoomIdentifier].map((value) => value.trim()).filter(Boolean),
-  );
-  const sessions = new Map<string, LocalRoutingAuthorityWorker>();
-  for (const session of desktopSessions) {
-    const sessionId = String(session.agentSessionId ?? "").trim();
-    if (sessionId) sessions.set(sessionId, session);
-  }
-  for (const stored of Object.values(snapshot.state.agent_sessions ?? {})) {
-    if (!isPersistedWorkerActiveInRoom(stored, roomIdentifiers)) continue;
-    const sessionId = stored.session_id.trim();
-    if (sessions.has(sessionId)) continue;
-    sessions.set(sessionId, {
-      id: `persisted:${sessionId}`,
-      agentSessionId: sessionId,
-      agentKey: stored.agent_key?.trim() || null,
-      actorLabel: stored.actor_label?.trim() || null,
-      displayName: stored.display_name?.trim() || null,
-      startedAt: stored.created_at?.trim() || stored.updated_at?.trim() || "1970-01-01T00:00:00.000Z",
-    });
-  }
-  return { complete: snapshot.complete, sessions: [...sessions.values()] };
-}
-
-async function attachLocalAccountAgentRouting(
-  roomIdentifier: string,
-  localRoomIdentifier: string,
-  messages: readonly DesktopRoomMessage[],
-): Promise<DesktopRoomMessage[]> {
-  const roots = new Set<string>();
-  for (const message of messages) {
-    const rootId = message.threadRootId || message.thread?.rootMessageId || message.id;
-    if (!message.accountAgentRouting && rootId !== message.id) roots.add(rootId);
-  }
-
-  try {
-    const unresolvedMessages = messages.filter((message) => !message.accountAgentRouting);
-    if (unresolvedMessages.length === 0) return [...messages];
-    const population = listDesktopManagedAgentSessionPopulationForRoom(roomIdentifier);
-    const authorityPopulation = localRoutingAuthorityPopulation(
-      roomIdentifier,
-      localRoomIdentifier,
-      population.sessions,
-    );
-    if (!population.complete || !authorityPopulation.complete) {
-      return messages.map((message) => message.accountAgentRouting
-        ? message
-        : { ...message, accountAgentRouting: { version: 1, authority: "invalid" } });
-    }
-    const sessions = population.sessions;
-    const { buildLocalLegacyAccountAgentRouting } = await import("./agents/codex-event-routing.js");
-    const membership = roots.size > 0
-      ? await getLocalChatThreadRoutingAgentKeysForRoots(
-          localRoomIdentifier,
-          [...roots],
-          authorityPopulation.sessions,
-        )
-      : new Map<string, Set<string>>();
-    return messages.map((message) => {
-      const rootId = message.threadRootId || message.thread?.rootMessageId || message.id;
-      if (message.accountAgentRouting) return message;
-      const participantKeys = [...(membership.get(rootId) ?? [])].sort();
-      return {
-        ...message,
-        accountAgentRouting: buildLocalLegacyAccountAgentRouting(
-          sessions,
-          message,
-          participantKeys,
-          authorityPopulation.sessions,
-        ),
-      };
-    });
-  } catch {
-    // A local projection failure must not turn a persisted human message into
-    // a failed send or fall back to a capped display approximation.
-    return messages.map((message) => {
-      return message.accountAgentRouting
-        ? message
-        : { ...message, accountAgentRouting: { version: 1, authority: "invalid" } };
-    });
-  }
-}
-
-type LocalAccountAgentRoutingHydrator = typeof attachLocalAccountAgentRouting;
-let localAccountAgentRoutingHydrator: LocalAccountAgentRoutingHydrator =
-  attachLocalAccountAgentRouting;
-
-type ManagedAgentRoomStreamDispatcher = typeof dispatchRoomStreamEventToManagedAgents;
-let managedAgentRoomStreamDispatcher: ManagedAgentRoomStreamDispatcher =
-  dispatchRoomStreamEventToManagedAgents;
 type ExecutionDelegationInvalidationHandler = (roomId: string) => void | Promise<void>;
 let executionDelegationInvalidationHandler: ExecutionDelegationInvalidationHandler = () => undefined;
-
-export function setLocalAccountAgentRoutingHydratorForTest(
-  hydrator: LocalAccountAgentRoutingHydrator | null,
-): void {
-  localAccountAgentRoutingHydrator = hydrator ?? attachLocalAccountAgentRouting;
-}
-
-export function setManagedAgentRoomStreamDispatcherForTest(
-  dispatcher: ManagedAgentRoomStreamDispatcher | null,
-): void {
-  managedAgentRoomStreamDispatcher = dispatcher ?? dispatchRoomStreamEventToManagedAgents;
-}
 
 /** Main-process-only wake; pointer payloads never become renderer authority. */
 export function setExecutionDelegationInvalidationHandler(
   handler: ExecutionDelegationInvalidationHandler | null,
 ): void {
   executionDelegationInvalidationHandler = handler ?? (() => undefined);
-}
-
-export function emitPersistedLocalRoomMessage(
-  roomIdentifier: string,
-  message: DesktopRoomMessage,
-): void {
-  const trimmedRoomIdentifier = roomIdentifier.trim();
-  const stream = activeRoomStream;
-  if (
-    !stream ||
-    stream.roomIdentifier !== trimmedRoomIdentifier ||
-    stream.stopped ||
-    !stream.localRoomIdentifier
-  ) {
-    return;
-  }
-
-  // The renderer gets the locally persisted message immediately, but the
-  // durable poll remains responsible for advancing the room cursor. Managed
-  // delivery starts now for low latency and is deduped against the later poll;
-  // if projection is temporarily unavailable, leaving the cursor untouched
-  // guarantees that the persisted row is retried in order.
-  stream.localUiMessageTracker.remember(trimmedRoomIdentifier, message.id);
-  emitRoomStreamEvent({
-    type: "message",
-    live: true,
-    roomIdentifier: trimmedRoomIdentifier,
-    message,
-  }, { deliverToManagedAgents: false });
-  void deliverDesktopRoomMessageToManagedAgents(trimmedRoomIdentifier, message);
 }
 
 export function emitPersistedLocalRoomArtifactUpdate(
@@ -547,30 +193,13 @@ export function emitPersistedLocalRoomArtifactUpdate(
     roomIdentifier: stream.roomIdentifier,
     artifactIdentityKey: artifact.identityKey,
     artifact,
-  }, { deliverToManagedAgents: false });
-}
-
-function shouldDeliverManagedMessageEvent(
-  roomIdentifier: string,
-  messageId: string | null | undefined,
-): boolean {
-  return activeRoomStream?.managedMessageDeliveryTracker.remember(roomIdentifier, messageId) ?? true;
-}
-
-function shouldDeliverManagedTaskEvent(
-  roomIdentifier: string,
-  task: DesktopTaskSummary,
-): boolean {
-  return activeRoomStream?.managedTaskDeliveryTracker.remember(
-    roomIdentifier,
-    `${task.id}@${task.updatedAt}`,
-  ) ?? true;
+  });
 }
 
 /**
- * Replays only deltas found by the renderer's authoritative gap snapshot. The
- * renderer already owns UI reconciliation; this path restores the managed
- * agent delivery that a broker gap could otherwise silently skip.
+ * Acknowledges the renderer's authoritative gap snapshot. The renderer owns UI
+ * reconciliation and the daemon owns agent delivery, so the only work left
+ * here is to let the stream's event cursor advance once the snapshot landed.
  */
 export function repairDesktopRoomStreamManagedDelivery(
   roomIdentifier: string,
@@ -578,22 +207,6 @@ export function repairDesktopRoomStreamManagedDelivery(
 ): void {
   const stream = activeRoomStream;
   if (!stream || !isCurrentRoomStream(stream) || stream.roomIdentifier !== roomIdentifier.trim()) return;
-  for (const message of repair.messages) {
-    if (!shouldDeliverManagedMessageEvent(roomIdentifier, message.id)) continue;
-    try {
-      dispatchRoomStreamEventToManagedAgents({ type: "message", roomIdentifier, message });
-    } catch {
-      // A managed runtime must not break later repaired deliveries.
-    }
-  }
-  for (const task of repair.tasks) {
-    if (!shouldDeliverManagedTaskEvent(roomIdentifier, task)) continue;
-    try {
-      dispatchRoomStreamEventToManagedAgents({ type: "task_update", roomIdentifier, task });
-    } catch {
-      // A managed runtime must not break later repaired deliveries.
-    }
-  }
   if (stream.pendingGapRepair?.token === repair.token) {
     stream.pendingGapRepair.snapshotRepaired = true;
     commitCompletedGapRepair(stream);
@@ -687,7 +300,7 @@ function repairMalformedRoomStreamFrame(
     gap: true,
     verified: true,
     deliveryRepairToken: gapRepairToken,
-  }, { deliverToManagedAgents: false });
+  });
   repairDurableMessagesAfterBrokerGap(stream, gapRepairToken);
 }
 
@@ -701,7 +314,7 @@ function handleRoomStreamFrame(
     try {
       const signal = parseTypingSignal(JSON.parse(data));
       if (signal && signal.room_id === (activeRoomStream?.canonicalRoomIdentifier ?? roomIdentifier)) {
-        emitRoomStreamEvent({ type: "typing", roomIdentifier, signal }, { deliverToManagedAgents: false });
+        emitRoomStreamEvent({ type: "typing", roomIdentifier, signal });
       }
     } catch { /* Malformed ephemeral hints are ignored, without cursor or gap changes. */ }
     return;
@@ -733,7 +346,7 @@ function handleRoomStreamFrame(
         type: "task_update",
         roomIdentifier: eventRoomIdentifier,
         task,
-      }, { deliverToManagedAgents: shouldDeliverManagedTaskEvent(eventRoomIdentifier, task) });
+      });
     } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
@@ -785,7 +398,7 @@ function handleRoomStreamFrame(
       gap: payload.gap === true,
       verified: true,
       deliveryRepairToken: gapRepairToken ?? undefined,
-    }, { deliverToManagedAgents: false });
+    });
     if (gapRepairStream) {
       repairDurableMessagesAfterBrokerGap(gapRepairStream, gapRepairToken as number);
     }
@@ -965,7 +578,7 @@ function handleRoomStreamFrame(
         type: "resource_invalidation",
         roomIdentifier: payloadRoomIdentifier,
         resource,
-      }, { deliverToManagedAgents: false });
+      });
     } else if (resource === "execution_delegation") {
       void Promise.resolve(executionDelegationInvalidationHandler(payloadRoomIdentifier)).catch((error) => {
         console.warn(`Execution delegation invalidation failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -987,16 +600,6 @@ function handleRoomStreamFrame(
     ) {
       activeRoomStream.lastMessageId = messageId;
     }
-    // A routed frame re-publishes an already-seen message once the server has
-    // appended routing receipts after commit. It carries new managed-agent
-    // authority, so it must pass the by-id dedupe that drops ordinary replays.
-    const routingPass = typeof payload.routing_pass === "number" && payload.routing_pass > 1
-      ? payload.routing_pass
-      : null;
-    const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(
-      eventRoomIdentifier,
-      routingPass ? `${messageId}#routing-pass-${routingPass}` : messageId,
-    );
     emitRoomStreamEvent({
       type: "message",
       live: true,
@@ -1004,7 +607,7 @@ function handleRoomStreamFrame(
       message: mapCloudRoomMessagePayload(
         payload as Parameters<typeof mapRoomMessagePayload>[0],
       ),
-    }, { deliverToManagedAgents: shouldDeliverToManagedAgents });
+    });
     return;
   }
   // Newer servers may publish event types this client does not render. A
@@ -1088,8 +691,8 @@ function finishDeferredSseFrames(
 // returns, advancing the cursor. Shared by the fallback long-poll loop
 // (`timeoutMs = 25_000`, one request per iteration) and the SSE-open catch-up
 // (`timeoutMs = 0`, a single non-blocking gap-fill). Cursor advancement and the
-// dedupe/delivery decision are identical in both callers so the two transports
-// stay interchangeable and never diverge on what "delivered" means.
+// dedupe decision are identical in both callers so the two transports stay
+// interchangeable.
 async function fetchRoomMessagePollPage(
   stream: NonNullable<typeof activeRoomStream>,
   after: string | null,
@@ -1153,40 +756,23 @@ async function fetchRoomMessagePollPage(
     } catch {
       serializedBytes = MAX_CATCH_UP_BYTES_PER_PASS + 1;
     }
-    const shouldDeliver = shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id);
-    if (options.emitToRenderer === false) {
-      if (shouldDeliver) {
-        try {
-          dispatchRoomStreamEventToManagedAgents({ type: "message", roomIdentifier, message });
-        } catch {
-          // One managed runtime must not break exact progress for later ids.
-        }
-      }
-      continue;
-    }
+    if (options.emitToRenderer === false) continue;
     if (options.batchRenderer) {
       rendererMessages.push(message);
-      if (shouldDeliver) {
-        try {
-          dispatchRoomStreamEventToManagedAgents({ type: "message", roomIdentifier, message });
-        } catch {
-          // One managed runtime must not break exact progress for later ids.
-        }
-      }
       continue;
     }
     emitRoomStreamEvent({
       type: "message",
       roomIdentifier,
       message,
-    }, { deliverToManagedAgents: shouldDeliver });
+    });
   }
   if (rendererMessages.length > 0) {
     emitRoomStreamEvent({
       type: "message_batch",
       roomIdentifier: page.room_id || stream.roomIdentifier,
       messages: rendererMessages,
-    }, { deliverToManagedAgents: false });
+    });
   }
   return {
     hasMore: page.has_more === true,
@@ -1252,9 +838,7 @@ async function fetchLatestRoomMessagePage(
     if (!isCurrentRoomStream(stream)) return;
     if (typeof rawMessage.id === "string") stream.lastMessageId = rawMessage.id;
     const roomIdentifier = page.room_id || stream.roomIdentifier;
-    emitRoomStreamEvent({ type: "message", roomIdentifier, message: mapCloudRoomMessagePayload(rawMessage) }, {
-      deliverToManagedAgents: shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id),
-    });
+    emitRoomStreamEvent({ type: "message", roomIdentifier, message: mapCloudRoomMessagePayload(rawMessage) });
   }
 }
 
@@ -1352,7 +936,7 @@ async function emitLatestRoomMessageWindow(
     type: "message_window",
     roomIdentifier: page.room_id || stream.roomIdentifier,
     messages: (page.messages || []).map(mapRoomMessagePayload),
-  }, { deliverToManagedAgents: false });
+  });
 }
 
 function requestDurableMessageRepair(
@@ -1382,7 +966,7 @@ function repairDurableMessagesAfterBrokerGap(
   gapRepairToken: number,
 ): void {
   // Keep one durable fallback alive until the bounded catch-up closes the
-  // broker gap. Both channels share by-id managed-agent dedupe.
+  // broker gap. Both channels share the by-id dedupe.
   startFallbackPoll(stream);
   void requestDurableMessageRepair(stream).then(() => {
     if (!isCurrentRoomStream(stream)) return;
@@ -1456,15 +1040,7 @@ async function pollLocalDesktopRoomMessages(
         readerKey: await resolveLocalThreadReaderKey(),
       });
       if (!isCurrentRoomStream(stream)) return;
-      const pageMessages = await localAccountAgentRoutingHydrator(
-        stream.roomIdentifier,
-        localRoomIdentifier,
-        page.messages.map(mapRoomMessagePayload),
-      );
-      if (pageMessages.some((message) => message.accountAgentRouting?.authority === "invalid")) {
-        throw new Error("Local message routing authority is temporarily unavailable.");
-      }
-      for (const message of pageMessages) {
+      for (const message of page.messages.map(mapRoomMessagePayload)) {
         if (!isCurrentRoomStream(stream)) return;
         const shouldEmitToRenderer = stream.localUiMessageTracker.remember(
           stream.roomIdentifier,
@@ -1475,9 +1051,8 @@ async function pollLocalDesktopRoomMessages(
             type: "message",
             roomIdentifier: stream.roomIdentifier,
             message,
-          }, { deliverToManagedAgents: false });
+          });
         }
-        await deliverDesktopRoomMessageToManagedAgents(stream.roomIdentifier, message);
         stream.lastMessageId = message.id;
       }
       await new Promise((resolve) => setTimeout(resolve, page.messages.length ? 250 : 1500));
@@ -1567,7 +1142,7 @@ async function readDesktopRoomStreamBody(
         gap: true,
         verified: true,
         deliveryRepairToken: gapRepairToken,
-      }, { deliverToManagedAgents: false });
+      });
       repairDurableMessagesAfterBrokerGap(stream, gapRepairToken);
       await reader.cancel("SSE frame exceeded bounded size").catch(() => undefined);
       throw new Error("Room stream frame exceeded bounded size.");
@@ -1626,7 +1201,7 @@ async function openDesktopRoomStream(
         checkpoint: stream.lastMessageId,
         gap: true,
         verified: false,
-      }, { deliverToManagedAgents: false });
+      });
       stream.resolveReady?.();
       stream.resolveReady = null;
     }, roomSyncHandshakeTimeoutMs);
@@ -1659,8 +1234,8 @@ async function openDesktopRoomStream(
     //      cursor and was either just delivered by the catch-up or will arrive
     //      on the SSE reader we start next. Any id delivered by both channels in
     //      the overlap window is collapsed by the existing by-id dedupe
-    //      (managedMessageDeliveryTracker for agents; message id downstream in
-    //      the renderer), so overlap is at worst a redundant emit, never a loss.
+    //      (message id in the renderer), so overlap is at worst a redundant
+    //      emit, never a loss.
     //   4. If the catch-up itself fails, we deliberately leave the fallback poll
     //      running as the gap-filler and still start the SSE reader; a bounded
     //      retry (scheduleCatchUpRetry) keeps re-running the catch-up until one
@@ -1715,7 +1290,7 @@ async function openDesktopRoomStream(
         checkpoint: stream.lastMessageId,
         gap: true,
         verified: false,
-      }, { deliverToManagedAgents: false });
+      });
     }
     stream.resolveReady?.();
     stream.resolveReady = null;
@@ -1762,8 +1337,6 @@ export async function startDesktopRoomStream(
     lastMessageId: afterMessageId || null,
     lastEventCursor: roomEventCursors.get(trimmedRoomIdentifier) ?? null,
     localRoomIdentifier: null,
-    managedMessageDeliveryTracker: createManagedMessageDeliveryTracker(),
-    managedTaskDeliveryTracker: createManagedMessageDeliveryTracker(),
     localUiMessageTracker: createManagedMessageDeliveryTracker(),
     messageRepairRequestedGeneration: 0,
     messageRepairCompletedGeneration: 0,
@@ -1796,7 +1369,7 @@ export async function startDesktopRoomStream(
       checkpoint: startingStream.lastMessageId,
       gap: true,
       verified: false,
-    }, { deliverToManagedAgents: false });
+    });
   }, roomSyncHandshakeTimeoutMs);
   if (isDesktopSmokeCheck()) {
     emitRoomStreamEvent({
@@ -1825,8 +1398,7 @@ export async function startDesktopRoomStream(
     const reportTaskError = (error: unknown): void => {
       if (!isCurrentRoomStream(startingStream)) return;
       emitRoomStreamEvent({ type: "error", roomIdentifier: trimmedRoomIdentifier,
-        message: error instanceof Error ? error.message : "Local board updates disconnected." },
-      { deliverToManagedAgents: false });
+        message: error instanceof Error ? error.message : "Local board updates disconnected." });
     };
     void subscribeLocalTasks(startingStream.localRoomIdentifier, startingStream.abortController.signal,
       tasks => {
@@ -1834,13 +1406,11 @@ export async function startDesktopRoomStream(
         const nextTasks = new Map(tasks.map(task => [task.id, JSON.stringify(task)]));
         for (const task of tasks) {
           if (previousTasks.get(task.id) === nextTasks.get(task.id)) continue;
-          emitRoomStreamEvent({ type: "task_update", roomIdentifier: trimmedRoomIdentifier, task },
-            { deliverToManagedAgents: false });
+          emitRoomStreamEvent({ type: "task_update", roomIdentifier: trimmedRoomIdentifier, task });
         }
         for (const taskId of previousTasks.keys()) {
           if (!nextTasks.has(taskId)) {
-            emitRoomStreamEvent({ type: "task_remove", roomIdentifier: trimmedRoomIdentifier, taskId },
-              { deliverToManagedAgents: false });
+            emitRoomStreamEvent({ type: "task_remove", roomIdentifier: trimmedRoomIdentifier, taskId });
           }
         }
         previousTasks = nextTasks;
@@ -1874,7 +1444,6 @@ function stopActiveRoomStream(roomIdentifier?: string | null): void {
   )
     return;
 
-  clearLocalManagedMessageDeliveryRetries(activeRoomStream.roomIdentifier);
   activeRoomStream.stopped = true;
   activeRoomStream.resolveReady?.();
   activeRoomStream.resolveReady = null;

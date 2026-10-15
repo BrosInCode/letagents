@@ -6,7 +6,7 @@ import { createSSRApp } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer } from "vite";
 
-import type { DesktopAgentPresence, DesktopManagedAgentSession } from "../../electron/ipc-types";
+import type { DesktopAgentPresence } from "../../electron/ipc-types";
 import { remoteAgentWorkIndicators, type ManagedAgentWorkIndicator } from "../src/domain/managed-agents";
 import { mergeRoomResponseParticipants } from "../src/domain/room-response-participants";
 
@@ -41,7 +41,7 @@ test("a working agent of another member gets a remote row with the line its daem
     presence("Birch", { statusText: "Thinking through the request" }),
     presence("Cedar", { statusText: null }),
     presence("Elm", { status: "reviewing", statusText: "Reviewing" }),
-  ], [], [], "room_1", [], NOW);
+  ], [], [], NOW);
   assert.deepEqual(rows.map(row => [row.id, row.displayName, row.summary, row.remote]), [
     ["remote:shannon/birch", "Birch", "Thinking through the request", true],
     ["remote:shannon/cedar", "Cedar", "Working", true],
@@ -58,7 +58,7 @@ test("idle, blocked and stale agents get no remote row, and the text is one boun
     presence("Stale", { lastHeartbeatAt: new Date(NOW - 91_000).toISOString() }),
     presence("Nameless", { agentKey: null, agentSessionId: null }),
     presence("Long", { statusText: `Line one\nline two ${"x".repeat(200)}` }),
-  ], [], [], "room_1", [], NOW);
+  ], [], [], NOW);
   assert.deepEqual(rows.map(row => row.displayName), ["Long"]);
   assert.equal(rows[0]!.summary.length, 100);
   assert.doesNotMatch(rows[0]!.summary, /\n/);
@@ -66,31 +66,28 @@ test("idle, blocked and stale agents get no remote row, and the text is one boun
 
 test("the viewer's own agents keep their local rows: no remote row duplicates them", () => {
   const local = { agentKey: "Shannon/birch", agentSessionId: "session_birch" };
-  const managed = { id: "managed_1", roomIdentifier: "room_1", agentSessionId: "session_cedar", agentKey: "desktop/codex/x",
-    actorLabel: "Cedar | Shannon's agent | Codex", displayName: "Cedar" } as DesktopManagedAgentSession;
   const rows = remoteAgentWorkIndicators([
     presence("Birch"),
     presence("Birch", { agentSessionId: "session_birch_successor" }),
-    presence("Cedar"),
     presence("Dogwood"),
     presence("Fir"),
     presence("Fir", { actorLabel: "Fir again" }),
-  ], [local], [managed], "room_1", [{ agentKey: "SHANNON/dogwood", agentSessionId: null }], NOW);
-  assert.deepEqual(rows.map(row => row.displayName), ["Fir"], "local entries, managed sessions and existing rows win; one row per agent");
+  ], [local], [{ agentKey: "SHANNON/dogwood", agentSessionId: null }], NOW);
+  assert.deepEqual(rows.map(row => row.displayName), ["Fir"], "local entries and existing rows win; one row per agent");
 });
 
 test("remote rows follow the local rows in the strip and never replace one", () => {
   const localRow: ManagedAgentWorkIndicator = { id: "supervised_1", displayName: "Oak", summary: "Writing a response",
     startedAt: "2026-10-15T09:59:00.000Z", agentSessionId: "session_oak", agentKey: "EmmyMay/oak" };
   const remote = remoteAgentWorkIndicators([presence("Birch"), presence("Oak", { agentKey: "EmmyMay/oak", agentSessionId: "session_oak" })],
-    [{ agentKey: "EmmyMay/oak", agentSessionId: "session_oak" }], [], "room_1", [], NOW);
+    [{ agentKey: "EmmyMay/oak", agentSessionId: "session_oak" }], [], NOW);
   const merged = mergeRoomResponseParticipants([localRow], remote, []);
   assert.deepEqual(merged.map(row => [row.displayName, row.remote ?? false]), [["Oak", false], ["Birch", true]]);
 });
 
 test("the room shell adds remote rows after its local rows", () => {
   const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
-  assert.match(shell, /\], \[\.\.\.pendingResponseParticipants\.value, [^\n]*\.\.\.remoteAgentWorkIndicators\(roomPresence\.value,\s*supervisorEntries\.value, roomManagedAgentSessions\.value, props\.room\.identifier\)\], props\.messages\)/);
+  assert.match(shell, /\], \[\.\.\.pendingResponseParticipants\.value, [^\n]*\.\.\.remoteAgentWorkIndicators\(props\.presence,\s*supervisorEntries\.value\)\], props\.messages\)/);
 });
 
 test("the live strip shows a remote row as a label with the same look, marked data-remote, that opens nothing", async () => {
@@ -99,7 +96,7 @@ test("the live strip shows a remote row as a label with the same look, marked da
     const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue")).default;
     const localRow: ManagedAgentWorkIndicator = { id: "supervised_1", displayName: "Oak", summary: "Writing a response",
       startedAt: "2026-10-15T09:59:00.000Z", agentSessionId: "session_oak", agentKey: "EmmyMay/oak" };
-    const [remoteRow] = remoteAgentWorkIndicators([presence("Birch", { statusText: "Reading `app.ts`" })], [], [], "room_1", [], NOW);
+    const [remoteRow] = remoteAgentWorkIndicators([presence("Birch", { statusText: "Reading `app.ts`" })], [], [], NOW);
     const rendered = await renderToString(createSSRApp(component, {
       active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
       loadingOlderMessages: false, messages: [], threadMessages: [], messageNamespace: "remote-rows",

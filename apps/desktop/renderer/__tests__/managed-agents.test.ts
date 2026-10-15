@@ -8,39 +8,28 @@ import type {
   DesktopAgentProviderPreflight,
   DesktopGitRoomInfo,
   DesktopManagedAgentPermissionProfile,
-  DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
 import { supervisedPermissionProfilesForProvider } from "../../daemon/supervised-permission-profiles";
 import {
-  activeManagedAgentWorkIndicators,
   agentSetupActionButtonLabel,
   agentSetupConfirmationMessage,
   agentAuthCommand,
   branchScopedGitRoomExpectedBranch,
   agentProviderNeedsDesktopRepo,
-  canStopManagedAgentTurn,
-  cursorMcpPolicyDescription,
-  cursorMcpPolicyLabel,
-  cursorMcpPolicyOptions,
-  defaultCursorMcpPolicy,
   externalMcpProviderJoinPrompt,
   externalMcpProviderInstruction,
-  hasDesktopManagedRuntime,
   hasSupervisedRuntime,
   humanFacingSupervisorActivitySummary,
   isAgentSetupConfirmationActive,
-  isDeliverableManagedAgentSession,
   isExternalMcpProviderReady,
   isHumanVisibleSupervisorActivity,
-  isVisibleManagedAgentSession,
   isBranchScopedGitRoomIdentifier,
-  managedAgentRepoDetail,
   managedAgentRepoStatusForRoom,
   managedAgentRootPathForRoom,
   managedAgentRoomBranchMismatch,
-  managedAgentPermissionProfileLabel,
+  managedAgentRoomBranchMismatchLabel,
   managedAgentPermissionProfileSelectionForProvider,
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
@@ -49,30 +38,12 @@ import {
   supervisedPermissionProfilePresentation,
   supervisedProviderLaunchPolicy,
   autoReviewNotice,
-  managedAgentPermissionRequestTargetLabel,
-  managedAgentDetailSelection,
-  managedAgentProviderIdentityForTarget,
-  managedAgentSessionMatchesSupervisorTarget,
-  managedAgentSessionMatchesRoom,
-  managedAgentSessionMatchesReasoning,
-  managedAgentSessionMatchesTarget,
-  managedAgentSessionDisplayName,
-  managedAgentSessionStatusLabel,
-  managedAgentStopResultNeedsAttention,
-  managedAgentStopResultMessage,
-  mergeDesktopManagedAgentParticipants,
   mergeDesktopSupervisorAgentParticipants,
-  mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
-  exactSupervisorEntriesForManagedSessions,
-  exactSupervisorEntriesForTarget,
   matchingManagedAgentWorktrees,
   matchingManagedAgentWorktreesForBranch,
   normalizeManagedAgentRoomIdentifier,
-  pendingManagedAgentPermissionApprovals,
   preferredManagedAgentRepoRootPath,
-  shouldShowCursorMcpPolicySelector,
-  shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
   supervisedAgentWorkIndicators,
   visibleDesktopAgentProviders,
@@ -93,7 +64,7 @@ function provider(
     id: "codex",
     name: "Codex",
     description: "Codex",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    capabilities: ["external_mcp", "supervised_runtime"],
     runtimeCommand: "codex",
     mcpTargetId: "codex",
     permissionProfiles: [{
@@ -122,46 +93,6 @@ function preflight(
     nextAction: null,
     version: "codex 1.0.0",
     mcpStatus: "installed",
-    ...overrides,
-  };
-}
-
-function session(
-  overrides: Partial<DesktopManagedAgentSession> = {},
-): DesktopManagedAgentSession {
-  return {
-    id: "managed_1",
-    providerId: "codex",
-    runtime: "codex",
-    roomIdentifier: "room_1",
-    roomDisplayName: null,
-    repoRootPath: "/tmp/repo",
-    repoBranch: null,
-    status: "running",
-    deliveryMode: "mcp_polling",
-    permissionProfileId: "full_access",
-    permissionProfile: {
-      id: "full_access",
-      label: "Full access",
-      description: "Trusted local access.",
-      status: "available",
-      risk: "high",
-      detail: null,
-      isDefault: true,
-    },
-    canStop: true,
-    agentSessionId: "agent_1",
-    actorLabel: "MapleRidge",
-    agentKey: "codex",
-    displayName: "MapleRidge",
-    ownerLabel: "Local desktop",
-    ideLabel: "Codex",
-    reasoningSessionId: null,
-    activeWork: null,
-    pendingPermissionRequests: [],
-    startedAt: "2026-06-14T12:00:00.000Z",
-    updatedAt: "2026-06-14T12:00:00.000Z",
-    lastError: null,
     ...overrides,
   };
 }
@@ -273,71 +204,26 @@ function presence(
   };
 }
 
-test("hasDesktopManagedRuntime identifies providers the desktop can supervise directly", () => {
-  assert.equal(hasDesktopManagedRuntime(provider()), true);
-  assert.equal(hasDesktopManagedRuntime(provider({
-    id: "claude-code",
-    name: "Claude Code",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
-    runtimeCommand: "claude",
-    mcpTargetId: "claude-code",
-  })), true);
-});
-
-test("Cursor MCP policy selector metadata defaults to filtering LetAgents", () => {
-  assert.equal(defaultCursorMcpPolicy, "filter_letagents");
-  assert.deepEqual(
-    cursorMcpPolicyOptions.map((option) => [option.id, option.label]),
-    [
-      ["filter_letagents", "Filter LetAgents"],
-      ["normal", "Normal Cursor MCPs"],
-      ["none", "No MCPs"],
-    ],
-  );
-  assert.equal(cursorMcpPolicyDescription("filter_letagents"), "Use my MCPs except LetAgents.");
-  assert.equal(cursorMcpPolicyDescription("normal"), "Use my normal Cursor MCP setup as-is.");
-  assert.equal(cursorMcpPolicyLabel("normal"), "Normal Cursor MCPs");
-  assert.equal(cursorMcpPolicyLabel(null), "Filter LetAgents");
-});
-
-test("Cursor MCP policy selector only shows for desktop-managed Cursor", () => {
-  assert.equal(shouldShowCursorMcpPolicySelector(provider({
-    id: "cursor",
-    name: "Cursor",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
-    runtimeCommand: "cursor-agent",
-    mcpTargetId: "cursor",
-  })), true);
-  assert.equal(shouldShowCursorMcpPolicySelector(provider()), false);
-  assert.equal(shouldShowCursorMcpPolicySelector(provider({
-    id: "cursor",
-    name: "Cursor",
-    capabilities: ["external_mcp"],
-    runtimeCommand: "cursor-agent",
-    mcpTargetId: "cursor",
-  })), false);
-});
-
-test("managed model selector only shows for desktop-managed providers", () => {
+test("managed model selector only shows for supervised providers", () => {
   assert.equal(shouldShowManagedModelSelector(provider()), true);
   assert.equal(shouldShowManagedModelSelector(provider({
     id: "claude-code",
     name: "Claude Code",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    capabilities: ["external_mcp", "supervised_runtime"],
     runtimeCommand: "claude",
     mcpTargetId: "claude-code",
   })), true);
   assert.equal(shouldShowManagedModelSelector(provider({
     id: "cursor",
     name: "Cursor",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    capabilities: ["external_mcp", "supervised_runtime"],
     runtimeCommand: "cursor-agent",
     mcpTargetId: "cursor",
   })), true);
   assert.equal(shouldShowManagedModelSelector(provider({
     id: "open-model",
     name: "Open Model",
-    capabilities: ["desktop_managed_runtime"],
+    capabilities: ["supervised_runtime"],
     runtimeCommand: "codex",
     mcpTargetId: "open-model",
   })), true);
@@ -348,19 +234,19 @@ test("managed model selector only shows for desktop-managed providers", () => {
 
 test("durable supervision is advertised only by providers with validated native evidence", () => {
   assert.equal(hasSupervisedRuntime(provider({
-    capabilities: ["external_mcp", "desktop_managed_runtime", "supervised_runtime"],
+    capabilities: ["external_mcp", "supervised_runtime"],
   })), true);
   assert.equal(hasSupervisedRuntime(provider({
     id: "open-model",
     name: "Open Model",
-    capabilities: ["desktop_managed_runtime", "reasoning_stream"],
+    capabilities: ["reasoning_stream"],
     runtimeCommand: "codex",
     mcpTargetId: "open-model",
   })), false);
   assert.equal(hasSupervisedRuntime(provider({
     id: "cursor",
     name: "Cursor",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    capabilities: ["external_mcp"],
     runtimeCommand: "cursor-agent",
     mcpTargetId: "cursor",
   })), false);
@@ -390,300 +276,6 @@ test("supervised recovery keeps an honest fallback and surfaces the latest durab
       durablePayloadRef: null,
     }],
   })), "provider restart failed before MCP registration");
-});
-
-test("Inspector activity uses exact supervisor ids when same-provider agents share a label", () => {
-  const first = supervisorEntry({ id: "supervised_first", displayName: "Codex supervised agent" });
-  const second = supervisorEntry({ id: "supervised_second", displayName: "Codex supervised agent" });
-  assert.deepEqual(
-    exactSupervisorEntriesForManagedSessions([first, second], [{ supervisorEntryId: "supervised_second" }]).map((entry) => entry.id),
-    ["supervised_second"],
-  );
-  assert.equal(exactSupervisorEntriesForManagedSessions([first, second], [{ supervisorEntryId: null }]), null);
-});
-
-test("a rebound room session resolves one exact supervisor entry without a local managed session", () => {
-  const first = supervisorEntry({
-    id: "supervised_first",
-    displayName: "Codex supervised agent",
-    agentSessionId: "agent_session_402",
-  });
-  const rebound = supervisorEntry({
-    id: "supervised_second",
-    displayName: "Codex supervised agent",
-    agentSessionId: "agent_session_403",
-  });
-  assert.deepEqual(
-    exactSupervisorEntriesForTarget([first, rebound], [], "agent_session_403").map((entry) => entry.id),
-    ["supervised_second"],
-  );
-  assert.deepEqual(
-    exactSupervisorEntriesForTarget([first, rebound], [], "agent_session_missing"),
-    [],
-    "a specific room worker never widens to a same-label peer",
-  );
-  assert.deepEqual(
-    exactSupervisorEntriesForTarget([
-      { ...rebound, agentSessionId: null },
-      first,
-    ], [], "agent_session_403", ["supervised_second"]).map((entry) => entry.id),
-    ["supervised_second"],
-    "a previously exact entry remains controllable when restart temporarily clears its worker binding",
-  );
-});
-
-test("exact supervisor worker bindings join Activity workers to their managed Claude and Codex controls", () => {
-  const codexEntry = supervisorEntry({
-    id: "supervised_codex",
-    displayName: "Shared agent",
-    provider: "codex",
-    agentSessionId: "agent_session_codex",
-    agentSessionBindingState: "active",
-  });
-  const claudeEntry = supervisorEntry({
-    id: "supervised_claude",
-    displayName: "Shared agent",
-    provider: "claude-code",
-    agentSessionId: "agent_session_claude",
-    agentSessionBindingState: "active",
-  });
-  const codexSession = session({
-    id: "managed_codex",
-    providerId: "codex",
-    agentSessionId: "local_agent_session_codex",
-    displayName: "Shared agent",
-    supervisorEntryId: "supervised_codex",
-  });
-  const claudeSession = session({
-    id: "managed_claude",
-    providerId: "claude-code",
-    agentSessionId: "local_agent_session_claude",
-    displayName: "Shared agent",
-    supervisorEntryId: "supervised_claude",
-  });
-
-  assert.equal(
-    managedAgentSessionMatchesSupervisorTarget(
-      claudeSession,
-      [codexEntry, claudeEntry],
-      "agent_session_claude",
-    ),
-    true,
-    "a freshly registered Claude worker reaches the managed session that owns its exact supervisor entry",
-  );
-  assert.equal(
-    managedAgentSessionMatchesSupervisorTarget(
-      codexSession,
-      [codexEntry, claudeEntry],
-      "agent_session_codex",
-    ),
-    true,
-    "Codex uses the same provider-neutral durable binding path",
-  );
-  assert.equal(
-    managedAgentSessionMatchesSupervisorTarget(
-      codexSession,
-      [codexEntry, claudeEntry],
-      "agent_session_claude",
-    ),
-    false,
-    "same-label peers never inherit another worker's controls",
-  );
-  assert.equal(
-    managedAgentSessionMatchesSupervisorTarget(
-      claudeSession,
-      [codexEntry, claudeEntry],
-      "external_session",
-    ),
-    false,
-    "unbound external workers keep the external-agent Inspector",
-  );
-});
-
-test("supervisor target joins survive room re-registration and temporary restart unbinding", () => {
-  const managed = session({
-    providerId: "claude-code",
-    agentSessionId: "local_agent_session_claude",
-    supervisorEntryId: "supervised_claude",
-  });
-  const rebound = supervisorEntry({
-    id: "supervised_claude",
-    provider: "claude-code",
-    agentSessionId: "agent_session_re_registered",
-    agentSessionBindingState: "active",
-  });
-  assert.equal(
-    managedAgentSessionMatchesSupervisorTarget(
-      managed,
-      [rebound],
-      "agent_session_re_registered",
-    ),
-    true,
-  );
-
-  const restarting = {
-    ...rebound,
-    agentSessionId: null,
-    agentSessionBindingState: "historical" as const,
-  };
-  assert.equal(
-    managedAgentSessionMatchesSupervisorTarget(
-      managed,
-      [restarting],
-      "agent_session_re_registered",
-      ["supervised_claude"],
-    ),
-    true,
-    "the previously exact entry stays joined while a restart briefly clears the daemon projection",
-  );
-});
-
-test("ambiguous duplicate worker bindings fail closed instead of widening controls", () => {
-  const first = supervisorEntry({ id: "supervised_first", agentSessionId: "agent_session_shared" });
-  const second = supervisorEntry({ id: "supervised_second", agentSessionId: "agent_session_shared" });
-  assert.equal(
-    managedAgentSessionMatchesSupervisorTarget(
-      session({ supervisorEntryId: "supervised_first" }),
-      [first, second],
-      "agent_session_shared",
-    ),
-    false,
-  );
-});
-
-test("Agent Inspector selection exposes exact bound controls and keeps unsafe targets external", () => {
-  const boundEntry = supervisorEntry({
-    id: "supervised_claude",
-    displayName: "Claude Code supervised agent",
-    provider: "claude-code",
-    agentSessionId: "agent_session_441",
-    agentSessionBindingState: "historical",
-  });
-  const boundSession = session({
-    id: "managed_claude",
-    providerId: "claude-code",
-    agentSessionId: null,
-    canStop: false,
-    supervisorEntryId: "supervised_claude",
-  });
-  const target = {
-    agentSessionId: "agent_session_441",
-    agentKey: "EmmyMay/summitcrisp",
-    actorLabel: "SummitCrisp | EmmyMay's agent | Agent",
-    displayName: "SummitCrisp",
-    ideLabel: "Agent",
-    ownerAttribution: "EmmyMay's agent",
-    sender: "SummitCrisp | EmmyMay's agent | Agent",
-  };
-
-  const bound = managedAgentDetailSelection(
-    [boundSession],
-    [boundEntry],
-    target,
-    null,
-  );
-  assert.deepEqual(bound.managedSessions.map((candidate) => candidate.id), ["managed_claude"]);
-  assert.deepEqual(bound.supervisorEntries.map((entry) => entry.id), ["supervised_claude"]);
-  assert.equal(bound.providerIdentity?.label, "Claude Code");
-  assert.equal(bound.showExternalFallback, false);
-
-  const external = managedAgentDetailSelection(
-    [boundSession],
-    [boundEntry],
-    { ...target, agentSessionId: "external_session" },
-    null,
-  );
-  assert.deepEqual(external.managedSessions, []);
-  assert.deepEqual(external.supervisorEntries, []);
-  assert.equal(external.providerIdentity, null);
-  assert.equal(external.showExternalFallback, true);
-
-  const ambiguous = managedAgentDetailSelection(
-    [boundSession],
-    [boundEntry, { ...boundEntry, id: "supervised_peer" }],
-    target,
-    null,
-  );
-  assert.deepEqual(ambiguous.managedSessions, []);
-  assert.deepEqual(ambiguous.supervisorEntries, []);
-  assert.equal(ambiguous.providerIdentity, null);
-  assert.equal(ambiguous.showExternalFallback, true, "ambiguous durable entries fail closed without controls");
-});
-
-test("provider identity presentation follows exact active and historical supervisor bindings", () => {
-  const codex = supervisorEntry({
-    id: "supervised_codex",
-    provider: "codex",
-    model: "gpt-5.3-codex",
-    agentSessionId: "agent_session_codex",
-    agentSessionBindingState: "active",
-  });
-  const claude = supervisorEntry({
-    id: "supervised_claude",
-    provider: "claude-code",
-    model: null,
-    agentSessionId: "agent_session_claude",
-    agentSessionBindingState: "historical",
-  });
-
-  assert.deepEqual(
-    managedAgentProviderIdentityForTarget([codex, claude], [], "agent_session_codex"),
-    {
-      supervisorEntryId: "supervised_codex",
-      providerId: "codex",
-      label: "Codex",
-      model: "gpt-5.3-codex",
-      accessibleLabel: "Codex · gpt-5.3-codex",
-      bindingState: "active",
-    },
-  );
-  assert.equal(
-    managedAgentProviderIdentityForTarget([codex, claude], [], "agent_session_claude")?.accessibleLabel,
-    "Claude Code",
-  );
-});
-
-test("provider identity fails closed for unbound, external, and ambiguous same-label peers", () => {
-  const codex = supervisorEntry({
-    id: "supervised_codex",
-    displayName: "Shared agent",
-    provider: "codex",
-    agentSessionId: null,
-  });
-  const claude = supervisorEntry({
-    id: "supervised_claude",
-    displayName: "Shared agent",
-    provider: "claude-code",
-    agentSessionId: null,
-  });
-
-  assert.equal(managedAgentProviderIdentityForTarget([codex, claude], [], null), null);
-  assert.equal(managedAgentProviderIdentityForTarget([], [], "external_session"), null);
-  assert.equal(
-    managedAgentProviderIdentityForTarget([codex, claude], [{ supervisorEntryId: "supervised_codex" }], null)?.label,
-    "Codex",
-  );
-});
-
-test("provider identity remains exact while a relaunch temporarily clears its room binding", () => {
-  const relaunched = supervisorEntry({
-    id: "supervised_relaunch",
-    provider: "claude-code",
-    model: "claude-opus-4-1",
-    agentSessionId: null,
-    agentSessionBindingState: "historical",
-    executionGenerationId: "generation_2",
-  });
-
-  assert.equal(
-    managedAgentProviderIdentityForTarget(
-      [relaunched],
-      [],
-      "agent_session_previous",
-      ["supervised_relaunch"],
-    )?.accessibleLabel,
-    "Claude Code · claude-opus-4-1",
-  );
 });
 
 test("supervisor native activity drives the chat work indicator for the bound room identity", () => {
@@ -891,31 +483,6 @@ test("a first supervised Start refreshes its exact durable entry to blocked or h
   assert.equal(createCalls, 1, "refreshing a returned entry must never issue a second create");
 });
 
-test("delivery mode selector only shows for managed Codex", () => {
-  assert.equal(shouldShowDeliveryModeSelector(provider()), true);
-  assert.equal(shouldShowDeliveryModeSelector(provider({
-    id: "claude-code",
-    name: "Claude Code",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
-    runtimeCommand: "claude",
-    mcpTargetId: "claude-code",
-  })), false);
-  assert.equal(shouldShowDeliveryModeSelector(provider({
-    id: "cursor",
-    name: "Cursor",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
-    runtimeCommand: "cursor-agent",
-    mcpTargetId: "cursor",
-  })), false);
-  assert.equal(shouldShowDeliveryModeSelector(provider({
-    id: "open-model",
-    name: "Open Model",
-    capabilities: ["desktop_managed_runtime"],
-    runtimeCommand: "codex",
-    mcpTargetId: "open-model",
-  })), false);
-});
-
 test("preferredManagedAgentRepoRootPath defaults local agents to the main checkout", () => {
   assert.equal(preferredManagedAgentRepoRootPath({
     rootPath: "/repo-feature-worktree",
@@ -1067,198 +634,6 @@ test("managedAgentRootPathForRoom never falls back to HOME", () => {
   );
 });
 
-test("isVisibleManagedAgentSession keeps idle and attention-needed workers visible", () => {
-  assert.equal(isVisibleManagedAgentSession(session({
-    deliveryMode: "desktop_events",
-    status: "completed",
-    canStop: true,
-  })), true);
-  assert.equal(isVisibleManagedAgentSession(session({
-    deliveryMode: "mcp_polling",
-    status: "completed",
-    canStop: false,
-  })), false);
-  assert.equal(isVisibleManagedAgentSession(session({
-    status: "failed",
-    canStop: true,
-  })), false);
-  assert.equal(isVisibleManagedAgentSession(session({
-    status: "unknown",
-    canStop: true,
-  })), true);
-  assert.equal(isVisibleManagedAgentSession(session({
-    status: "blocked",
-    canStop: true,
-  })), true);
-});
-
-test("isDeliverableManagedAgentSession requires a registered room worker", () => {
-  assert.equal(isDeliverableManagedAgentSession(session({
-    status: "running",
-    agentSessionId: "agent_1",
-  })), true);
-  assert.equal(isDeliverableManagedAgentSession(session({
-    status: "running",
-    agentSessionId: null,
-  })), false);
-  assert.equal(isDeliverableManagedAgentSession(session({
-    status: "starting",
-    agentSessionId: "agent_1",
-  })), false);
-  assert.equal(isDeliverableManagedAgentSession(session({
-    status: "unknown",
-    agentSessionId: "agent_1",
-  })), true);
-  assert.equal(isDeliverableManagedAgentSession(session({
-    status: "blocked",
-    agentSessionId: "agent_1",
-  })), false);
-  assert.equal(isDeliverableManagedAgentSession(session({
-    deliveryMode: "desktop_events",
-    status: "completed",
-    agentSessionId: "agent_1",
-    canStop: true,
-  })), true);
-});
-
-test("pendingManagedAgentPermissionApprovals derives composer approval items", () => {
-  const approvals = pendingManagedAgentPermissionApprovals([
-    session({
-      id: "managed_late",
-      displayName: "NorthForge",
-      ideLabel: "Claude Code",
-      pendingPermissionRequests: [{
-        id: "perm_late",
-        providerId: "claude-code",
-        sessionId: "managed_late",
-        toolName: "Edit",
-        toolUseId: "tool_1",
-        title: "Use Edit",
-        description: null,
-        inputSummary: "/tmp/repo/apps/desktop/electron/main/agents/providers.ts",
-        decisionReason: null,
-        roomMessageId: null,
-        requestedAt: "2026-07-01T12:00:02.000Z",
-      }],
-    }),
-    session({
-      id: "managed_early",
-      displayName: "CedarVista",
-      ideLabel: "Claude Code",
-      pendingPermissionRequests: [{
-        id: "perm_early",
-        providerId: "claude-code",
-        sessionId: "managed_early",
-        toolName: "Bash",
-        toolUseId: "tool_2",
-        title: "Run command",
-        description: "npm test",
-        inputSummary: null,
-        decisionReason: null,
-        roomMessageId: null,
-        requestedAt: "2026-07-01T12:00:01.000Z",
-      }],
-    }),
-    session({
-      id: "managed_other_room",
-      roomIdentifier: "room_2",
-      pendingPermissionRequests: [{
-        id: "perm_other",
-        providerId: "claude-code",
-        sessionId: "managed_other_room",
-        toolName: "Edit",
-        toolUseId: null,
-        title: "Use Edit",
-        description: null,
-        inputSummary: "/tmp/repo/README.md",
-        decisionReason: null,
-        roomMessageId: null,
-        requestedAt: "2026-07-01T12:00:00.000Z",
-      }],
-    }),
-  ], "room_1");
-
-  assert.deepEqual(approvals.map((approval) => approval.id), ["perm_early", "perm_late"]);
-  assert.equal(approvals[0]?.displayName, "CedarVista");
-  assert.equal(approvals[0]?.targetLabel, "npm test");
-  assert.equal(approvals[1]?.targetLabel, "apps/desktop/electron/main/agents/providers.ts");
-});
-
-test("managedAgentPermissionRequestTargetLabel keeps external targets intact", () => {
-  assert.equal(managedAgentPermissionRequestTargetLabel({
-    inputSummary: "/var/tmp/outside.txt",
-    description: null,
-  }, session()), "/var/tmp/outside.txt");
-  assert.equal(managedAgentPermissionRequestTargetLabel({
-    inputSummary: "/tmp/repo",
-    description: null,
-  }, session()), ".");
-});
-
-test("activeManagedAgentWorkIndicators only exposes running room work", () => {
-  const indicators = activeManagedAgentWorkIndicators([
-    session({
-      id: "running_local",
-      displayName: "LumenRiver",
-      status: "running",
-      activeWork: {
-        kind: "message",
-        eventId: "msg_1",
-        startedAt: "2026-06-14T12:10:00.000Z",
-        summary: "Checking the attachment path.",
-      },
-    }),
-    session({
-      id: "waiting_local",
-      displayName: "CedarVista",
-      status: "completed",
-      deliveryMode: "desktop_events",
-      activeWork: null,
-    }),
-    session({
-      id: "other_room",
-      roomIdentifier: "room_2",
-      displayName: "MapleRidge",
-      status: "running",
-      activeWork: {
-        kind: "message",
-        eventId: "msg_2",
-        startedAt: "2026-06-14T12:11:00.000Z",
-        summary: "Working elsewhere.",
-      },
-    }),
-  ], "room_1");
-
-  assert.deepEqual(indicators, [{
-    id: "running_local:msg_1",
-    displayName: "LumenRiver",
-    summary: "Checking the attachment path.",
-    startedAt: "2026-06-14T12:10:00.000Z",
-    agentSessionId: "agent_1",
-    agentKey: "codex",
-  }]);
-});
-
-test("canStopManagedAgentTurn only enables turn stops for active startup or running turns", () => {
-  assert.equal(canStopManagedAgentTurn(session({
-    status: "running",
-    canStop: true,
-  })), true);
-  assert.equal(canStopManagedAgentTurn(session({
-    status: "starting",
-    canStop: true,
-  })), true);
-  assert.equal(canStopManagedAgentTurn(session({
-    deliveryMode: "desktop_events",
-    status: "completed",
-    canStop: true,
-  })), false);
-  assert.equal(canStopManagedAgentTurn(session({
-    status: "running",
-    canStop: false,
-  })), false);
-});
-
 test("isExternalMcpProviderReady distinguishes bridge-only providers from desktop-supervised providers", () => {
   assert.equal(isExternalMcpProviderReady(provider(), preflight()), false);
   assert.equal(isExternalMcpProviderReady(provider({
@@ -1316,10 +691,13 @@ test("agentProviderNeedsDesktopRepo only requires a repo for desktop-supervised 
   assert.equal(agentProviderNeedsDesktopRepo(provider({
     id: "claude-code",
     name: "Claude Code",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    capabilities: ["external_mcp", "supervised_runtime"],
     runtimeCommand: "claude",
     mcpTargetId: "claude-code",
   })), true);
+  assert.equal(agentProviderNeedsDesktopRepo(provider({
+    capabilities: ["external_mcp"],
+  })), false);
 });
 
 test("agentAuthCommand exposes provider sign-in commands for managed runtimes", () => {
@@ -1330,7 +708,7 @@ test("agentAuthCommand exposes provider sign-in commands for managed runtimes", 
   assert.equal(agentAuthCommand(provider({
     id: "claude-code",
     name: "Claude Code",
-    capabilities: ["external_mcp", "desktop_managed_runtime"],
+    capabilities: ["external_mcp", "supervised_runtime"],
     runtimeCommand: "claude",
     mcpTargetId: "claude-code",
   })), "claude auth login");
@@ -1402,7 +780,7 @@ test("agent setup action labels and confirmation copy are provider-aware", () =>
   const openModel = provider({
     id: "open-model",
     name: "Open Model",
-    capabilities: ["desktop_managed_runtime", "installable_runtime"],
+    capabilities: ["supervised_runtime", "installable_runtime"],
     runtimeCommand: "opencode",
     mcpTargetId: null,
   });
@@ -1438,137 +816,48 @@ test("agent setup action labels and confirmation copy are provider-aware", () =>
   );
 });
 
-test("managedAgentSessionStatusLabel presents idle desktop-event turns as waiting", () => {
-  assert.equal(managedAgentSessionStatusLabel(session({
-    deliveryMode: "desktop_events",
-    status: "completed",
-  })), "Waiting for events");
-  assert.equal(managedAgentSessionStatusLabel(session({
-    deliveryMode: "mcp_polling",
-    status: "completed",
-  })), "Completed");
-  assert.equal(managedAgentSessionStatusLabel(session({
-    status: "starting",
-  })), "Starting");
-});
-
-test("managedAgentRepoDetail includes branch when available", () => {
-  assert.equal(
-    managedAgentRepoDetail(session({ repoBranch: "codex/git-rooms" })),
-    "codex/git-rooms - /tmp/repo",
-  );
-  assert.equal(managedAgentRepoDetail(session({ repoBranch: null })), "/tmp/repo");
-});
-
 test("managedAgentRoomBranchMismatch only flags branch-scoped room conflicts", () => {
   const defaultBranchGitRoom = branchGitRoom("main");
   defaultBranchGitRoom.ref.type = "default_branch";
 
   assert.deepEqual(
     managedAgentRoomBranchMismatch(
-      session({ repoBranch: "main" }),
+      { repoBranch: "main" },
       branchGitRoom("feature/codex-work"),
     ),
     { expectedBranch: "feature/codex-work", actualBranch: "main" },
   );
   assert.equal(
-    managedAgentRepoDetail(
-      session({ repoBranch: "main" }),
+    managedAgentRoomBranchMismatchLabel(
+      { repoBranch: "main" },
       branchGitRoom("feature/codex-work"),
     ),
-    "main - /tmp/repo - Expected feature/codex-work; agent is on main",
+    "Expected feature/codex-work; agent is on main",
   );
   assert.equal(
     managedAgentRoomBranchMismatch(
-      session({ repoBranch: "feature/codex-work" }),
+      { repoBranch: "feature/codex-work" },
       branchGitRoom("feature/codex-work"),
     ),
     null,
   );
   assert.equal(
     managedAgentRoomBranchMismatch(
-      session({ repoBranch: "feature/codex-work" }),
+      { repoBranch: "feature/codex-work" },
       defaultBranchGitRoom,
     ),
     null,
   );
   assert.equal(
     managedAgentRoomBranchMismatch(
-      session({ repoBranch: "feature/codex-work" }),
+      { repoBranch: "feature/codex-work" },
       branchGitRoom("main"),
     ),
     null,
   );
 });
 
-test("managedAgentStopResultMessage does not hide failed stop interrupts", () => {
-  assert.equal(managedAgentStopResultMessage(session({
-    status: "running",
-    lastError: null,
-  })), "Codex turn stopped.");
-  assert.equal(managedAgentStopResultMessage(session({
-    status: "unknown",
-    lastError: null,
-  })), "Codex turn state is unknown; refresh the agent to inspect it.");
-  assert.equal(managedAgentStopResultMessage(session({
-    status: "unknown",
-    lastError: "Could not interrupt Codex turn.",
-  })), "Could not interrupt Codex turn.");
-  assert.equal(managedAgentStopResultMessage(session({
-    status: "interrupted",
-    lastError: null,
-  })), "Codex worker stopped.");
-  assert.equal(managedAgentStopResultNeedsAttention(session({
-    status: "running",
-    lastError: null,
-  })), false);
-  assert.equal(managedAgentStopResultNeedsAttention(session({
-    status: "unknown",
-    lastError: null,
-  })), true);
-  assert.equal(managedAgentStopResultNeedsAttention(session({
-    status: "running",
-    lastError: "Could not interrupt Codex turn.",
-  })), true);
-});
-
-test("managedAgentSessionDisplayName prefers the worker codename", () => {
-  assert.equal(managedAgentSessionDisplayName(session({
-    displayName: "MapleRidge",
-    actorLabel: "Codex fallback",
-  })), "MapleRidge");
-  assert.equal(managedAgentSessionDisplayName(session({
-    displayName: null,
-    actorLabel: "CedarVista",
-  })), "CedarVista");
-  assert.equal(managedAgentSessionDisplayName(session({
-    displayName: null,
-    actorLabel: null,
-    runtime: "codex",
-  })), "Local agent");
-  assert.equal(managedAgentSessionDisplayName(session({
-    displayName: null,
-    actorLabel: null,
-    runtime: "codex:LOCAL_CODEX_ROOM_test",
-  })), "Local agent");
-});
-
-test("managed supervised sessions project legacy identity suffixes out of product labels", () => {
-  const requestId = "6697e364-62d0-4027-b02d-ee71a8fbf579";
-
-  assert.equal(managedAgentSessionDisplayName(session({
-    displayName: `GardenWinter · ${requestId}`,
-    supervisorEntryId: `supervised_${requestId}`,
-  })), "GardenWinter");
-  assert.equal(managedAgentSessionDisplayName(session({
-    displayName: "GardenWinter · 000001",
-    supervisorEntryId: `supervised_${requestId}`,
-  })), "GardenWinter · 000001");
-});
-
 test("managed permission profile helpers present available and gated modes", () => {
-  const running = session();
-  assert.equal(managedAgentPermissionProfileLabel(running), "Full access");
   assert.equal(managedAgentPermissionProfileStatusLabel("available"), "Available");
   assert.equal(managedAgentPermissionProfileStatusLabel("gated"), "Not available yet");
   assert.equal(managedAgentPermissionProfileSummary({
@@ -1765,133 +1054,9 @@ test("managed permission profile selection is scoped by provider", () => {
   );
 });
 
-test("managed agent room matching follows backend room filtering semantics", () => {
+test("managed agent room identifiers normalize like backend room filtering", () => {
   assert.equal(normalizeManagedAgentRoomIdentifier(" ABCD-1234 "), "abcd-1234");
   assert.equal(normalizeManagedAgentRoomIdentifier(" github.com/BrosInCode/letagents "), "github.com/brosincode/letagents");
-  assert.equal(managedAgentSessionMatchesRoom(session({
-    roomIdentifier: "ABCD-1234",
-  }), " abcd-1234 "), true);
-  assert.equal(managedAgentSessionMatchesRoom(session({
-    roomIdentifier: "github.com/BrosInCode/letagents",
-  }), "github.com/brosincode/letagents"), true);
-  assert.equal(managedAgentSessionMatchesRoom(session({
-    roomIdentifier: "github.com/BrosInCode/letagents",
-  }), "github.com/BrosInCode/other"), false);
-});
-
-test("managedAgentSessionMatchesTarget uses stable identity before display names", () => {
-  assert.equal(managedAgentSessionMatchesTarget(session({
-    agentSessionId: "session_maple",
-    actorLabel: "MapleRidge",
-    agentKey: "codex/maple-ridge",
-    displayName: "MapleRidge",
-  }), {
-    agentSessionId: "session_maple",
-    actorLabel: "Renamed",
-    agentKey: null,
-    displayName: "Renamed",
-  }), true);
-
-  assert.equal(managedAgentSessionMatchesTarget(session({
-    agentSessionId: null,
-    actorLabel: "OldName",
-    agentKey: "codex/maple-ridge",
-    displayName: "OldName",
-  }), {
-    agentSessionId: null,
-    actorLabel: "Renamed",
-    agentKey: "codex/maple-ridge",
-    displayName: "Renamed",
-  }), true);
-
-  assert.equal(managedAgentSessionMatchesTarget(session({
-    agentSessionId: null,
-    actorLabel: "MapleRidge",
-    agentKey: "codex",
-    displayName: "MapleRidge",
-  }), {
-    agentSessionId: null,
-    actorLabel: "CedarVista",
-    agentKey: "codex",
-    displayName: "CedarVista",
-  }), false);
-
-  assert.equal(managedAgentSessionMatchesTarget(session({
-    agentSessionId: null,
-    actorLabel: null,
-    agentKey: null,
-    displayName: "MapleRidge",
-  }), {
-    displayName: "MapleRidge",
-  }), false);
-
-  assert.equal(managedAgentSessionMatchesTarget(session({
-    agentSessionId: null,
-    actorLabel: null,
-    agentKey: null,
-    displayName: "MapleRidge",
-    ideLabel: "Codex",
-  }), {
-    displayName: "MapleRidge",
-    ideLabel: "Codex",
-  }), true);
-
-  assert.equal(managedAgentSessionMatchesTarget(session({
-    agentSessionId: null,
-    actorLabel: null,
-    agentKey: null,
-    displayName: "MapleRidge",
-    ideLabel: "Codex",
-  }), {
-    displayName: "MapleRidge",
-    ideLabel: "Antigravity",
-  }), false);
-});
-
-test("managedAgentSessionMatchesReasoning links modal reasoning streams back to local sessions", () => {
-  assert.equal(managedAgentSessionMatchesReasoning(session({
-    agentSessionId: "agent_1",
-    reasoningSessionId: "reasoning_1",
-  }), {
-    id: "reasoning_1",
-    agentSessionId: null,
-  }), true);
-
-  assert.equal(managedAgentSessionMatchesReasoning(session({
-    agentSessionId: "agent_1",
-    reasoningSessionId: null,
-  }), {
-    id: "reasoning_other",
-    agentSessionId: "agent_1",
-  }), true);
-
-  assert.equal(managedAgentSessionMatchesReasoning(session({
-    agentSessionId: "agent_1",
-    reasoningSessionId: "reasoning_1",
-  }), {
-    id: "reasoning_other",
-    agentSessionId: "agent_other",
-  }), false);
-});
-
-test("managed desktop agents become mentionable room participants", () => {
-  const participants = mergeDesktopManagedAgentParticipants([], [
-    session({
-      deliveryMode: "desktop_events",
-      displayName: "SummitGrove",
-      actorLabel: "SummitGrove",
-      agentSessionId: "agent_summit",
-      roomIdentifier: "github.com/BrosInCode/letagents",
-      repoBranch: "codex/git-rooms",
-      updatedAt: "2026-06-15T09:30:00.000Z",
-    }),
-  ], "github.com/brosincode/letagents");
-
-  assert.equal(participants.length, 1);
-  assert.equal(participants[0].kind, "agent");
-  assert.equal(participants[0].displayName, "SummitGrove");
-  assert.equal(participants[0].activityState, "active");
-  assert.deepEqual(participants[0].sourceFlags, ["delivery", "presence"]);
 });
 
 test("live daemon-inbox agents become friendly mentionable room participants", () => {
@@ -1965,7 +1130,7 @@ test("supervisor reachability preserves server-owned attribution while replacing
 
 test("presence restores message-history identity before supervisor rows are projected", () => {
   const shell = readFileSync(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8");
-  assert.match(shell, /const roomParticipants = computed\(\(\) =>\s*mergeDesktopSupervisorAgentParticipants\(\s*mergeDesktopManagedAgentParticipants\(\s*(?:\/\/[^\n]*\n\s*)*mergeReachableAgentPresenceParticipants\(props\.participants,/);
+  assert.match(shell, /const roomParticipants = computed\(\(\) =>\s*mergeDesktopSupervisorAgentParticipants\(\s*(?:\/\/[^\n]*\n\s*)*mergeReachableAgentPresenceParticipants\(props\.participants,/);
   const history = [participant({
     participantKey: "agent:dawnhaven | emmymay's agent | codex",
     displayName: "DawnHaven",
@@ -1993,11 +1158,7 @@ test("presence restores message-history identity before supervisor rows are proj
     },
   })];
   const participants = mergeDesktopSupervisorAgentParticipants(
-    mergeDesktopManagedAgentParticipants(
-      mergeReachableAgentPresenceParticipants(history, live, "room_1"),
-      [],
-      "room_1",
-    ),
+    mergeReachableAgentPresenceParticipants(history, live, "room_1"),
     entries,
     "room_1",
   );
@@ -2034,9 +1195,7 @@ test("presence restores message-history identity before supervisor rows are proj
     ...entries[0], id: `supervised_${owner}`, agentKey: `${owner}/dawn`,
   }));
   const ownerParticipants = mergeDesktopSupervisorAgentParticipants(
-    mergeDesktopManagedAgentParticipants(
-      mergeReachableAgentPresenceParticipants(ownerHistory, ownerPresence, "room_1"), [], "room_1",
-    ), ownerEntries, "room_1",
+    mergeReachableAgentPresenceParticipants(ownerHistory, ownerPresence, "room_1"), ownerEntries, "room_1",
   );
   assert.deepEqual(ownerParticipants.map((item) => [item.ownerLabel, item.agentKey]), [
     ["Alice", "Alice/dawn"], ["Bob", "Bob/dawn"],
@@ -2171,78 +1330,6 @@ test("stale or non-delivery presence does not become mentionable", () => {
       sourceFlags: ["presence"],
     }),
   ], "room_1"), []);
-});
-
-test("managed desktop agents become reachable activity presence", () => {
-  const presenceEntries = mergeDesktopManagedAgentPresence([], [
-    session({
-      deliveryMode: "desktop_events",
-      displayName: "SummitGrove",
-      actorLabel: "SummitGrove",
-      agentSessionId: "agent_summit",
-      roomIdentifier: "github.com/BrosInCode/letagents",
-      repoBranch: "codex/git-rooms",
-      updatedAt: "2026-06-15T09:30:00.000Z",
-    }),
-  ], "github.com/brosincode/letagents");
-
-  assert.equal(presenceEntries.length, 1);
-  assert.equal(presenceEntries[0].actorLabel, "SummitGrove");
-  assert.equal(presenceEntries[0].sessionKind, "worker");
-  assert.equal(presenceEntries[0].freshness, "active");
-  assert.equal(presenceEntries[0].activityState, "active");
-  assert.equal(presenceEntries[0].livenessObservation?.source, "desktop_managed_agent");
-  assert.equal(presenceEntries[0].livenessObservation?.detail, "codex/git-rooms - /tmp/repo");
-  assert.deepEqual(presenceEntries[0].sourceFlags, ["delivery", "presence"]);
-});
-
-test("managed desktop agent merges with existing room identities instead of duplicating them", () => {
-  const managedSession = session({
-    displayName: "MapleRidge",
-    actorLabel: "MapleRidge",
-    agentSessionId: "agent_1",
-    agentKey: "desktop/codex/maple",
-    updatedAt: "2026-06-15T09:30:00.000Z",
-  });
-
-  const participants = mergeDesktopManagedAgentParticipants([
-    participant(),
-  ], [managedSession], "room_1");
-  assert.equal(participants.length, 1);
-  assert.equal(participants[0].sourceFlags.includes("messages"), true);
-
-  const presenceEntries = mergeDesktopManagedAgentPresence([
-    presence(),
-  ], [managedSession], "room_1");
-  assert.equal(presenceEntries.length, 1);
-  assert.equal(presenceEntries[0].freshness, "active");
-  assert.equal(presenceEntries[0].activityState, "active");
-  assert.equal(presenceEntries[0].sourceFlags.includes("delivery"), true);
-  assert.equal(presenceEntries[0].livenessObservation?.source, "desktop_managed_agent");
-});
-
-test("unregistered agents stay hidden while unknown agents remain visible but unreachable", () => {
-  const unregistered = session({
-    status: "starting",
-    agentSessionId: null,
-    displayName: "CloudForge",
-    actorLabel: "CloudForge",
-  });
-  const unknown = session({
-    status: "unknown",
-    agentSessionId: "agent_cloudforge",
-    displayName: "CloudForge",
-    actorLabel: "CloudForge",
-  });
-
-  assert.deepEqual(mergeDesktopManagedAgentParticipants([], [unregistered], "room_1"), []);
-  assert.deepEqual(mergeDesktopManagedAgentPresence([], [unregistered], "room_1"), []);
-  const unknownParticipants = mergeDesktopManagedAgentParticipants([], [unknown], "room_1");
-  const unknownPresence = mergeDesktopManagedAgentPresence([], [unknown], "room_1");
-  assert.equal(unknownParticipants.length, 1);
-  assert.equal(unknownPresence.length, 1);
-  assert.equal(unknownPresence[0]?.freshness, "stale");
-  assert.equal(unknownPresence[0]?.activityState, "offline");
 });
 
 test("supervised Claude exposes one-time native approval without enabling its legacy profile", () => {

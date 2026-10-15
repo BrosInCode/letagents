@@ -184,10 +184,6 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           appInfo: typeof api?.app?.getInfo === "function",
           roomSnapshot: typeof api?.room?.getSnapshot === "function",
           workerProviders: typeof api?.workers?.listAgentProviders === "function",
-          managedSessions: typeof api?.workers?.listManagedAgentSessions === "function",
-          managedSessionUpdates: typeof api?.workers?.onManagedAgentSessionUpdate === "function",
-          managedStart: typeof api?.workers?.startManagedAgent === "function",
-          managedStop: typeof api?.workers?.stopManagedAgent === "function",
           desktopShell: false,
           addAgentButton: false,
           addAgentModal: false,
@@ -197,11 +193,9 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           codexProvider: false,
           codexMissingRuntime: false,
           codexInstallGuidance: false,
-          managedSessionCodename: false,
-          addAgentStopAgentOnly: false,
+          supervisedCharter: false,
           installGuidanceClears: false,
           setupConfirmationClearsOnClose: false,
-          deliveryControls: false,
           externalProviderInstruction: false,
           externalJoinPrompt: false,
           bridgeOnlyRepoCopy: false,
@@ -210,9 +204,6 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           agentDetailModalLayout: false,
           agentDetailModalNarrowLayout: false,
           agentDetailStopZoneNarrowLayout: false,
-          localSessionPill: false,
-          localStopControl: false,
-          stopTurnKeepsLocalSession: false,
           supervisorTurnControl: false,
           supervisorTurnControlRejectTruthful: false,
           supervisorTurnControlLadder: false,
@@ -375,21 +366,10 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           modalText().includes("Install command")
         );
         result.codexMissingRuntime = true;
-        await waitFor("managed session codename", () =>
-          modalText().includes("MapleRidge") &&
-          modalText().includes("From this desktop app")
-        );
-        result.managedSessionCodename = true;
-        result.addAgentStopAgentOnly = modalText().includes("Stop agent") && !modalText().includes("Stop turn");
-        result.deliveryControls = modalText().includes("From the agent app") && modalText().includes("From this desktop app");
-        const supervisedLifecycleButton = document.querySelector('[data-testid="desktop-add-agent-lifecycle-supervised"]');
-        supervisedLifecycleButton?.click();
-        await waitFor("supervised lifecycle controls", () =>
-          modalText().includes("A detached daemon owns desired state and recovery") &&
+        await waitFor("supervised charter", () =>
           Boolean(document.querySelector('[data-testid="desktop-add-agent-supervised-charter"]'))
         );
-        result.supervisedLifecycleControls = true;
-        document.querySelector('[data-testid="desktop-add-agent-lifecycle-legacy"]')?.click();
+        result.supervisedCharter = true;
         result.addAgentModalScroll = (() => {
           const dialog = document.querySelector(".desktop-add-agent-modal");
           const status = dialog?.querySelector(".desktop-add-agent-status");
@@ -486,34 +466,15 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         result.agentDetailModalLayout = (() => {
           const modal = document.querySelector('[data-testid="desktop-agent-detail-modal"]');
           const panels = Array.from(modal?.querySelectorAll(".desktop-agent-detail-panel") || []);
-          const stopButton = modal?.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]');
           return rectInsideViewport(modal) &&
             panels.length === 3 &&
             panels.every((panel) => {
               const rect = rectFor(panel);
               return Boolean(rect && rect.width > 0 && rect.height > 0);
             }) &&
-            panels.every((panel, index) => panels.slice(index + 1).every((other) => rectsDoNotOverlap(panel, other))) &&
-            rectInsideViewport(stopButton);
+            panels.every((panel, index) => panels.slice(index + 1).every((other) => rectsDoNotOverlap(panel, other)));
         })();
         const detailText = () => document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent || "";
-        await waitFor("local supervised session", () =>
-          detailText().includes("Local agent") &&
-          detailText().includes("MapleRidge") &&
-          detailText().includes("Local")
-        );
-        result.localSessionPill = true;
-        await waitFor("local stop control", () =>
-          document.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]')
-        );
-        result.localStopControl = true;
-        document.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]')?.click();
-        await waitFor("stop turn keeps local session", () =>
-          detailText().includes("Local agent") &&
-          detailText().includes("MapleRidge") &&
-          document.querySelector('[data-testid="desktop-agent-detail-stop-managed-agent"]')
-        );
-        result.stopTurnKeepsLocalSession = true;
         await waitFor("supervisor turn control", () =>
           detailText().includes("Steer this agent") &&
           detailText().includes("Native interrupt · preserves this provider session") &&

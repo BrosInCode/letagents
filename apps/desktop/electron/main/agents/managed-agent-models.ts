@@ -10,7 +10,7 @@ import type {
   DesktopManagedAgentEffort,
 } from "../../ipc-types.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
-import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
+import { DEFAULT_CURSOR_MCP_POLICY, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
 import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
@@ -157,7 +157,6 @@ export async function validateDesktopManagedAgentModel(input: {
   model?: string | null;
   modelSource?: DesktopAgentProviderModelSource | null;
   repoRootPath?: string | null;
-  cursorMcpPolicy?: DesktopAgentProviderPreflightInput["cursorMcpPolicy"];
 }): Promise<{ model: string | null; error: string | null }> {
   const model = normalizeManagedAgentModel(input.model);
   if (!model) {
@@ -283,7 +282,7 @@ function cursorModelExecutionContext(input: DesktopAgentProviderPreflightInput):
 } {
   const workspaceRoot = normalizeOptionalPath(input.repoRootPath);
   const resolvedWorkspaceRoot = workspaceRoot ? resolve(workspaceRoot) : null;
-  const mcpPolicy = normalizeCursorMcpPolicy(input.cursorMcpPolicy);
+  const mcpPolicy = DEFAULT_CURSOR_MCP_POLICY;
   try {
     const profile = prepareCursorManagedProfile({
       workspaceRoot: resolvedWorkspaceRoot,

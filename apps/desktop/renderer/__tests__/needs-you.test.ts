@@ -212,7 +212,7 @@ test('loading notices distinguish same-name rooms and stay dismissed when source
   assert.notEqual(inboxSourceFailureKey(partial, ['first'], ''), inboxSourceFailureKey(partial, ['second'], ''));
   const reversed = { ...partial, rooms: [...partial.rooms].reverse().map(room => ({ ...room, updates: { ...room.updates!, unavailable: [...room.updates!.unavailable].reverse() } })) };
   assert.equal(inboxSourceFailureKey(partial, [], ''), inboxSourceFailureKey(reversed, [], ''));
-  assert.notEqual(inboxSourceFailureKey(partial, [], ''), inboxSourceFailureKey({ ...partial, managedSessionsUnavailable: true }, [], ''));
+  assert.notEqual(inboxSourceFailureKey(partial, [], ''), inboxSourceFailureKey({ ...partial, cloudUnavailable: true }, [], ''));
 });
 
 test('bulk read follows the room filter and undo preserves earlier and later read versions', async () => {
@@ -399,15 +399,6 @@ test('a dismissed loading notice is kept per room filter, so switching filters n
     const legacy = await renderToString(createSSRApp(component, { data: failed, loading: false, error: '' }));
     assert.match(legacy, /Show loading issues/, 'an earlier unscoped dismissal still covers the unfiltered view');
   } finally { await vite.close(); Object.assign(globalThis, { window: priorWindow }); }
-});
-
-test('unknown local managed agents remain visible in Updates only in their own room', async () => {
-  const { buildUniversalInbox, filterUniversalInbox } = await import('../src/components/desktop/content/room-inbox/universal');
-  const session = { id: 'managed_1', providerId: 'codex', runtime: 'codex', roomIdentifier: 'room', status: 'unknown', canStop: true, agentSessionId: 'agent_1', agentKey: 'desktop/codex/maple', actorLabel: 'Maple', displayName: 'Maple', startedAt: '2026-09-14T12:00:00Z', updatedAt: '2026-09-14T12:00:00Z', pendingPermissionRequests: [] } as any;
-  const updates = { tasks: [], threads: { threads: [], hasMore: false, unreadThreadCount: 0 }, githubEvents: null, presence: [], reasoningSessions: [], unavailable: [], limited: false };
-  const items = buildUniversalInbox({ ...data, managedSessions: [session], rooms: [{ ...data.rooms[0], updates }, { ...data.rooms[0], roomIdentifier: 'other-room', updates }] });
-  assert.equal(filterUniversalInbox(items, 'updates', ['room'], {})[0].category, 'agent_offline');
-  assert.equal(filterUniversalInbox(items, 'updates', ['other-room'], {}).length, 0);
 });
 
 test('a room read on its own activity replaces that room until a newer full read, and a slower older read never undoes it', async () => {
