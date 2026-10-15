@@ -6809,12 +6809,16 @@ test("state summary loads only the newest payload-free activity without changing
     assert.equal(summary.entries[0]!.activity!.length, 16);
     assert.equal(full.entries[0]!.activity!.length, 200);
     assert.deepEqual(await store.getEntry(entry.id), full.entries[0]);
+    assert.deepEqual(await store.getEntry(entry.id, "summary"), summary.entries[0]);
+    assert.equal(await store.getEntry("missing", "summary"), undefined);
     const database = new DatabaseSync(env.databasePath);
     try {
       // Invalid raw JSON proves the summary path never parses discarded payloads.
       database.exec("UPDATE activity_events SET payload_json='invalid-json'");
       assert.deepEqual(await store.load("summary"), summary);
+      assert.deepEqual(await store.getEntry(entry.id, "summary"), summary.entries[0]);
       await assert.rejects(store.load(), /JSON/);
+      await assert.rejects(store.getEntry(entry.id), /JSON/);
       const plan = database.prepare(`EXPLAIN QUERY PLAN SELECT sequence,summary FROM activity_events
         WHERE agent_id=? ORDER BY sequence DESC,sort_order DESC LIMIT 16`).all(entry.id);
       assert.match(JSON.stringify(plan), /activity_events_summary/);
