@@ -57,6 +57,18 @@ for (const ending of ["item/completed", "turn/completed", "turn/interrupted", "r
   });
 }
 
+for (const flag of ["payloadTruncated", "payloadRedacted"] as const) {
+  test(`${flag} native terminal before admission revokes buffered compaction without lifecycle authority`, () => {
+    let yields = 0;
+    const observer = new ReplyTurnCompactionObserver(scope, () => yields++);
+    observer.observe(frame());
+    observer.observe(frame("turn/completed", { [flag]: true, payload: {} }));
+    observer.admit("turn");
+    observer.observe(frame());
+    assert.equal(yields, 0);
+  });
+}
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>(done => { resolve = done; });
@@ -64,7 +76,8 @@ function deferred() {
 }
 
 for (const mode of ["during-turn", "during-turn-reply", "reporting-failure", "before-checkpoint", "already-completed",
-  "completion-during-authority", "terminal-during-authority", "authority-lost", "replaced-handle", "mutated-process-birth",
+  "completion-during-authority", "terminal-during-authority", "truncated-terminal-during-authority", "redacted-terminal-during-authority",
+  "authority-lost", "replaced-handle", "mutated-process-birth",
   "handoff-during-http", "user-stop-during-http", "registration-failure", "independent"]) {
   test(`real inbox compaction yield: ${mode} preserves work, native settlement and delivery authority`, async () => {
     const root = await mkdtemp(join(tmpdir(), "letagents-compaction-yield-"));
@@ -121,7 +134,7 @@ for (const mode of ["during-turn", "during-turn-reply", "reporting-failure", "be
         else if (["authority-lost", "replaced-handle", "mutated-process-birth"].includes(mode)) {
           await hintRead.promise;
           await new Promise(resolve => setImmediate(resolve)); // Drain the guard after its actual row read.
-        } else if (["completion-during-authority", "terminal-during-authority"].includes(mode)) await authorityObserved.promise;
+        } else if (mode.endsWith("during-authority")) await authorityObserved.promise;
         if (stoppedDuringHttp) await nativeFinish.promise;
         if (mode === "during-turn-reply") return { turnId: "turn", outcome: "reply", text: "My own contribution, after compaction." };
         return { turnId: "turn", outcome: "no_reply", text: null };
@@ -145,9 +158,11 @@ for (const mode of ["during-turn", "during-turn-reply", "reporting-failure", "be
         }
       },
     }, async () => {
-      if (checkingCompaction && ["completion-during-authority", "terminal-during-authority"].includes(mode)) {
+      if (checkingCompaction && mode.endsWith("during-authority")) {
         checkingCompaction = false;
-        listener?.(frame(mode === "completion-during-authority" ? "item/completed" : "turn/completed"));
+        listener?.(frame(mode === "completion-during-authority" ? "item/completed" : "turn/completed",
+          mode === "truncated-terminal-during-authority" ? { payloadTruncated: true, payload: {} }
+            : mode === "redacted-terminal-during-authority" ? { payloadRedacted: true, payload: {} } : {}));
         authorityObserved.resolve();
       }
       return allowed;

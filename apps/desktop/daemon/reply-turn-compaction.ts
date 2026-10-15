@@ -39,15 +39,22 @@ export class ReplyTurnCompactionObserver {
   observe(event: ProviderActionStreamEvent): void {
     if (this.closed || event.provider !== "codex" || event.workAttemptId !== this.scope.workAttemptId
       || event.providerContinuationId !== this.scope.providerContinuationId
-      || event.payloadTruncated || event.payloadRedacted || event.lifecycleProjectionOnly) return;
+      || event.lifecycleProjectionOnly) return;
+    const terminal = /^turn\/(?:completed|interrupted|failed|cancelled|stopped)$/.test(event.method);
+    if (event.payloadTruncated || event.payloadRedacted) {
+      // Partial native terminal evidence can revoke this optional hint, but
+      // cannot establish lifecycle completion or authorize a scheduling action.
+      if (terminal) this.close();
+      return;
+    }
     if (event.method !== "item/started" && event.method !== "item/completed"
-      && !/^turn\/(?:completed|interrupted|failed|cancelled|stopped)$/.test(event.method)) return;
+      && !terminal) return;
     const params = record(event.payload);
     const turn = record(params?.turn);
     const providerTurnId = identity(params?.turnId ?? turn?.id);
     if (!params || params.threadId !== this.scope.providerContinuationId || !providerTurnId
       || (params.turnId !== undefined && turn?.id !== undefined && params.turnId !== turn.id)) return;
-    if (/^turn\/(?:completed|interrupted|failed|cancelled|stopped)$/.test(event.method)) {
+    if (terminal) {
       this.terminalTurn = providerTurnId;
       if (this.compacting?.turn === providerTurnId) this.compacting = null;
       if (this.admittedTurn === providerTurnId) this.close();
