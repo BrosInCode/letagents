@@ -15,6 +15,10 @@ const peer = (n: number, patch: Record<string, unknown> = {}, activation: Record
     agent_identity: { agent_key: `owner/peer${n}`, actor_label: `Peer ${n}` }, thread_root_id: "msg_1", ...patch },
   activation: { decision: "activate", reason: "thread_participant", ...activation },
 });
+const human = (n = 10, patch: Record<string, unknown> = {}, activation: Record<string, unknown> = {}): IngressMessage =>
+  peer(n, { source: "browser", agent_identity: null, sender: "Human", text: "Which failure scenarios matter now?",
+    reply_to: { id: "msg_1", source: "browser", agent_identity: null, text: "Our original question." }, ...patch },
+  { addressed: true, turn: { position: 2, count: 3, prior_speakers: ["First speaker"] }, guidance: "Existing team guidance.", ...activation });
 async function fixture(t: TestContext, messages = [peer(10), peer(11), peer(12)], pin = true) {
   const dir = await mkdtemp(join(tmpdir(), "queued-peers-")), path = join(dir, "state.sqlite");
   let store = new SupervisedAgentInboxStore(path);
@@ -59,6 +63,7 @@ test("quoting the recipient's stable key remains a barrier across native session
   assert.equal(ordinaryPeerThread(peer(10, { reply_to: otherQuote })), null, "a quote needs a pinned recipient identity");
 });
 
+for (const first of [peer(10), human()])
 for (const [name, middle] of [
   ["quoted recipient", peer(11, { reply_to: { ...otherQuote, agent_identity: { agent_key: "owner/self", actor_label: "Self", agent_session_id: "previous" } } })],
   ["direct reply activation", peer(11, { reply_to: otherQuote }, { reason: "reply_target" })],
@@ -73,8 +78,8 @@ for (const [name, middle] of [
   ["conflicting thread quote", peer(11, { reply_to: otherQuote, thread_reply_to_id: "msg_3" })],
   ["conflicting thread metadata", peer(11, { reply_to: otherQuote, thread: { reply_to_id: "msg_3" } })],
   ["malformed quote", peer(11, { reply_to: "msg_2" })],
-] as const) test(`${name} blocks observer grouping without skipping to a later peer`, async t => {
-  const f = await fixture(t, [peer(10), middle, peer(12)]);
+] as const) test(`${(first.source_message as { source: string }).source} head: ${name} blocks observer grouping`, async t => {
+  const f = await fixture(t, [first, middle, peer(12)]);
   assert.deepEqual(memberIds((await f.store.claimHead("agent"))!), []);
 });
 
@@ -93,10 +98,14 @@ async function nativeTerminal(store: SupervisedAgentInboxStore, head: Supervised
   await store.transition(head.inbox_item_id, "awaiting_result");
 }
 
-for (const outcome of ["reply", "no_reply"] as const) test(`full peer arguments settle only after the parent's final ${outcome} acknowledgment`, async t => {
+for (const headKind of ["peer", "human"] as const)
+for (const outcome of ["reply", "no_reply"] as const) test(`${headKind} head: full peer arguments settle only after final ${outcome} acknowledgment`, async t => {
   const text = "A full argument. ".repeat(180);
-  const f = await fixture(t, [peer(10), peer(11, { text, attachments: [{ name: "diagram.png" }] }), peer(12)]);
+  const first = headKind === "human" ? human() : peer(10);
+  const f = await fixture(t, [first, peer(11, { text, attachments: [{ name: "diagram.png" }] }), peer(12)]);
   const head = (await f.store.claimHead("agent"))!;
+  assert.deepEqual(head.source_message, first.source_message);
+  for (const key of ["turn", "guidance"]) assert.deepEqual(head.activation[key], first.activation[key]);
   assert.deepEqual(memberIds(head), ["msg_11", "msg_12"]);
   const payload = head.activation.queued_peer_messages as { instruction: string; messages: Array<{ source_message: Record<string, unknown> }> };
   assert.match(payload.instruction, /own voice/);
@@ -118,8 +127,8 @@ for (const outcome of ["reply", "no_reply"] as const) test(`full peer arguments 
   assert.equal(f.pins.get("agent", "room", "msg_11")!.revision, 0, "grouped receipt reporting invents no work summary");
 });
 
-test("native pre-dispatch retry preserves frozen membership and does not absorb later arrivals", async t => {
-  const f = await fixture(t, [peer(10), peer(11)]);
+for (const first of [peer(10), human()]) test(`${(first.source_message as { source: string }).source} head retry preserves frozen membership and excludes late arrivals`, async t => {
+  const f = await fixture(t, [first, peer(11)]);
   const head = (await f.store.claimHead("agent"))!;
   await f.store.checkpointDispatchIntent(head.inbox_item_id);
   await f.store.resetPreNativeHandoff(head.inbox_item_id);
@@ -133,8 +142,8 @@ test("native pre-dispatch retry preserves frozen membership and does not absorb 
   assert.equal((await f.store.head("agent"))!.source_message_id, "msg_12");
 });
 
-test("user Stop leaves each grouped contribution queued for ordinary handling", async t => {
-  const f = await fixture(t);
+for (const first of [peer(10), human()]) test(`Stop of ${(first.source_message as { source: string }).source} head leaves grouped contributions queued`, async t => {
+  const f = await fixture(t, [first, peer(11), peer(12)]);
   const head = (await f.store.claimHead("agent"))!;
   await f.store.cancelInterruptedTurn(head.inbox_item_id, "Stopped by human.");
   assert.deepEqual(f.pendingReports(), []);
@@ -143,8 +152,8 @@ test("user Stop leaves each grouped contribution queued for ordinary handling", 
   assert.deepEqual(memberIds(next), ["msg_12"], "stopped work can be freshly assigned when the next untouched contribution reaches the head");
 });
 
-test("a later human retains people-first priority after a grouped parent is Stopped", async t => {
-  const f = await fixture(t);
+for (const first of [peer(10), human()]) test(`a later human retains priority after grouped ${(first.source_message as { source: string }).source} head Stop`, async t => {
+  const f = await fixture(t, [first, peer(11), peer(12)]);
   const head = (await f.store.claimHead("agent"))!;
   await f.store.ingestPoll({ agent_id: "agent", room_id: "room", messages: [peer(13, { source: "browser", agent_identity: null, text: "Please change the time." })], last_observed_message_id: "msg_13" });
   await f.store.cancelInterruptedTurn(head.inbox_item_id, "Stopped by human.");
@@ -153,6 +162,7 @@ test("a later human retains people-first priority after a grouped parent is Stop
   assert.deepEqual(f.pendingReports(), []);
 });
 
+for (const first of [peer(10), human()])
 for (const [name, middle] of [
   ["human", peer(11, { source: "browser", agent_identity: null })],
   ["another thread", peer(11, { thread_root_id: "msg_2" })],
@@ -163,22 +173,80 @@ for (const [name, middle] of [
   ["positioned turn", peer(11, {}, { turn: { position: 1, count: 2 } })],
   ["continuation", peer(11, {}, { task_continuity_kind: "review" })],
   ["legacy identity", peer(11, { agent_identity: null })],
-] as const) test(`${name} is a barrier rather than skipped to reach a later peer`, async t => {
-  const f = await fixture(t, [peer(10), middle, peer(12)]);
+] as const) test(`${(first.source_message as { source: string }).source} head: ${name} is a barrier rather than skipped`, async t => {
+  const f = await fixture(t, [first, middle, peer(12)]);
   assert.deepEqual(memberIds((await f.store.claimHead("agent"))!), []);
 });
 
-test("chronological gaps and people-first reordering cannot bridge an intervening human or self message", async t => {
-  const f = await fixture(t, [peer(10), peer(12), peer(13)]);
+for (const first of [peer(10), human()]) test(`${(first.source_message as { source: string }).source} head cannot bridge a chronological gap`, async t => {
+  const f = await fixture(t, [first, peer(12), peer(13)]);
   assert.deepEqual(memberIds((await f.store.claimHead("agent"))!), []);
 });
 
-test("missing or incompatible immutable source pins disable grouping without inventing attribution", async t => {
-  const f = await fixture(t, [peer(10), peer(11), peer(12)], false);
+for (const first of [peer(10), human()]) test(`${(first.source_message as { source: string }).source} head requires matching immutable pins`, async t => {
+  const f = await fixture(t, [first, peer(11), peer(12)], false);
   f.pins.pin(origin, ["msg_10"]);
   f.pins.pin({ ...origin, hostId: "other-host" }, ["msg_11"]);
   f.pins.pin(origin, ["msg_12"]);
   assert.deepEqual(memberIds((await f.store.claimHead("agent"))!), []);
+});
+
+for (const [name, first] of [
+  ["unpositioned", human(10, {}, { turn: undefined })],
+  ["wrong activation", human(10, {}, { reason: "reply_target" })],
+  ["not addressed", human(10, {}, { addressed: false })],
+  ["noninteger position", human(10, {}, { turn: { position: 1.5, count: 3, prior_speakers: [] } })],
+  ["out of range", human(10, {}, { turn: { position: 4, count: 3, prior_speakers: [] } })],
+  ["too many speakers", human(10, {}, { turn: { position: 1, count: 9, prior_speakers: [] } })],
+  ["single speaker", human(10, {}, { turn: { position: 1, count: 1, prior_speakers: [] } })],
+  ["too many prior speakers", human(10, {}, { turn: { position: 1, count: 3, prior_speakers: ["Unexpected"] } })],
+  ["invalid prior speaker", human(10, {}, { turn: { position: 2, count: 3, prior_speakers: [null] } })],
+  ["prompt only", human(10, { agent_prompt_kind: "auto", text: "" })],
+  ["unknown prompt kind", human(10, { agent_prompt_kind: "follow_up" })],
+  ["agent identity", human(10, { agent_identity: { agent_key: "owner/self" } })],
+  ["forged ID", human(10, { id: "msg_9" })],
+  ["top level", human(10, { thread_root_id: "msg_10" })],
+  ["foreign Room", human(10, { room_id: "elsewhere" })],
+  ["conflicting thread", human(10, { thread: { root_message_id: "msg_2" } })],
+  ["direct agent quote", human(10, { reply_to: otherQuote })],
+  ["malformed quote", human(10, { reply_to: "msg_1" })],
+  ["foreign quoted Room", human(10, { reply_to: { id: "msg_1", source: "browser", room_id: "elsewhere" } })],
+  ["mention", human(10, { text: "@someone what do you think?" })],
+  ["broadcast", human(10, { text: "Everyone, which option?" })],
+  ["task follow-up", human(10, { text: "Okay, push it." })],
+  ["task continuation", human(10, {}, { task_continuity_kind: "review" })],
+] as const) test(`${name} human head keeps separate deliveries`, async t => {
+  const f = await fixture(t, [first, peer(11), peer(12)]);
+  assert.deepEqual(memberIds((await f.store.claimHead("agent"))!), []);
+});
+
+for (const prior_speakers of [[], ["One written reply"]]) test(`ordered human head still groups peers after ${prior_speakers.length} earlier written replies`, async t => {
+  const first = human(10, {}, { turn: { position: 3, count: 3, prior_speakers } });
+  const f = await fixture(t, [first, peer(11), peer(12)]);
+  const head = (await f.store.claimHead("agent"))!;
+  assert.deepEqual(memberIds(head), ["msg_11", "msg_12"], "silence or a yielded earlier position is not a missing-name error");
+  assert.deepEqual(head.activation.turn, first.activation.turn);
+});
+
+test("visible inline human thread questions use the same claim-time grouping", async t => {
+  const first = human(10, { agent_prompt_kind: "inline" });
+  const f = await fixture(t, [first, peer(11)]);
+  const head = (await f.store.claimHead("agent"))!;
+  assert.deepEqual(memberIds(head), ["msg_11"]);
+  assert.deepEqual(head.source_message, first.source_message);
+});
+
+test("context-only observations and peers arriving after human claim are never assigned retroactively", async t => {
+  const f = await fixture(t, [human()]);
+  const head = (await f.store.claimHead("agent"))!;
+  await f.store.checkpointDispatchIntent(head.inbox_item_id, undefined, [peer(11).source_message]);
+  await f.store.ingestPoll({ agent_id: "agent", room_id: "room", messages: [peer(11)], last_observed_message_id: "msg_11" });
+  f.pins.pin(origin, ["msg_11"]);
+  await nativeTerminal(f.store, head);
+  await f.store.transition(head.inbox_item_id, "acknowledged_no_reply");
+  assert.equal((await f.store.getBySourceMessage("agent", "room", "msg_11"))!.state, "pending");
+  assert.deepEqual(memberIds(head), []);
+  assert.deepEqual(f.pendingReports(), []);
 });
 
 test("local Room pins retain ordinary delivery because the local adapter has no self-receipt report route", async t => {

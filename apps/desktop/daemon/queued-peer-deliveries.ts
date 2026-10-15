@@ -71,6 +71,30 @@ export function ordinaryPeerThread(item: Pick<SupervisedInboxItem, "source_messa
   return addressed.broadcast || addressed.hasMention || addressed.hasAgentMention ? null : root;
 }
 
+/** Assign already queued contributions to a normal ordered human thread turn. */
+function orderedHumanThread(item: SupervisedInboxItem, recipient: RoomWorkOrigin): string | null {
+  const message = record(item.source_message), activation = item.activation;
+  const turn = record(activation.turn), reply = record(message?.reply_to);
+  const thread = record(message?.thread), root = message?.thread_root_id ?? thread?.root_message_id;
+  if (!canonicalId(item.source_message_id) || message?.id !== item.source_message_id
+    || message.source !== "browser" || message.agent_identity != null
+    || (message.agent_prompt_kind != null && message.agent_prompt_kind !== "inline")
+    || !canonicalId(root) || root === item.source_message_id || typeof message.text !== "string"
+    || (message.room_id != null && message.room_id !== recipient.roomId)
+    || (reply?.room_id != null && reply.room_id !== recipient.roomId)
+    || (thread?.root_message_id != null && thread.root_message_id !== root)
+    || (message.reply_to != null && (!reply || reply.source !== "browser" || reply.agent_identity != null || !canonicalId(reply.id)))
+    || activation.decision !== "activate" || activation.reason !== "thread_participant" || activation.addressed !== true
+    || !turn || !Number.isInteger(turn.position) || !Number.isInteger(turn.count)
+    || Number(turn.position) < 1 || Number(turn.position) > Number(turn.count) || Number(turn.count) < 2 || Number(turn.count) > 8
+    || !Array.isArray(turn.prior_speakers) || turn.prior_speakers.length > Number(turn.position) - 1
+    || turn.prior_speakers.some(speaker => typeof speaker !== "string" || !speaker.trim())
+    || Object.keys(activation).some(key => key.startsWith("task_continuity"))
+    || isTaskOwnerFollowUpMessageText(message.text)) return null;
+  const addressed = addresses(message);
+  return addressed.broadcast || addressed.hasMention || addressed.hasAgentMention ? null : root;
+}
+
 /** Caller owns the claim transaction; untouched is evaluated BEFORE changing the head state. */
 export function freezeQueuedPeers(database: DatabaseSync, head: SupervisedInboxItem,
   rows: readonly (SupervisedInboxItem & { untouched: boolean })[], headUntouched: boolean, timestamp: string): Record<string, unknown> {
@@ -80,7 +104,7 @@ export function freezeQueuedPeers(database: DatabaseSync, head: SupervisedInboxI
   const pins = new RoomWorkPublicationStore(database);
   const origin = pins.get(head.agent_id, head.room_id, head.source_message_id);
   if (!origin || isLocalRoomApi(origin.apiOrigin) || origin.revision !== 0 || origin.state !== "open") return activation;
-  const root = headUntouched ? ordinaryPeerThread(head, origin) : null;
+  const root = headUntouched ? ordinaryPeerThread(head, origin) ?? orderedHumanThread(head, origin) : null;
   if (!root) return activation;
   let previous = Number(head.source_message_id.slice(4));
   let bytes = Buffer.byteLength(JSON.stringify(head.source_message), "utf8");

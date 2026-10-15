@@ -497,10 +497,12 @@ export class SupervisedAgentInboxStore {
     // committed membership assigned to a proven pre-native retry.
     if (hasFrozenPeerBatch(database, head.inbox_item_id)) return head.activation;
     // Exact quote/recipient eligibility is checked against the immutable
-    // publication pin inside freezeQueuedPeers, including quoted peer heads.
+    // publication pin inside freezeQueuedPeers, including quoted peer heads
+    // and ordinary ordered human thread turns with peers already queued.
     const source = head.source_message;
     if (source && typeof source === "object" && !Array.isArray(source)
-      && (source as Record<string, unknown>).source === "agent" && head.activation.decision === "activate"
+      && ((source as Record<string, unknown>).source === "agent" || (source as Record<string, unknown>).source === "browser")
+      && head.activation.decision === "activate"
       && head.activation.reason === "thread_participant") {
       const rows = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched
         FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
