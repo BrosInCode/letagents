@@ -12,7 +12,6 @@ import type {
   DesktopAgentProviderModelSource,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
-  DesktopCursorMcpPolicy,
   DesktopGitRoomInfo,
   DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfile,
@@ -21,7 +20,6 @@ import type {
 import {
   agentSetupActionButtonLabel,
   agentSetupConfirmationMessage,
-  hasDesktopManagedRuntime,
   hasSupervisedRuntime,
   isAgentSetupConfirmationActive,
   visibleDesktopAgentProviders,
@@ -44,15 +42,12 @@ interface SetupBindings {
   expectedWorktreeBranch: ComputedRef<string | null>;
   authCommand: ComputedRef<string | null>;
   externalJoinPrompt: ComputedRef<string | null>;
-  selectedCursorMcpPolicy: Ref<DesktopCursorMcpPolicy>;
   selectedModel: ComputedRef<string | null>;
   selectedModelSource: ComputedRef<DesktopAgentProviderModelSource | null>;
   selectedEffort: Ref<DesktopManagedAgentEffort | "">;
-  launchMode: Ref<"legacy" | "supervised">;
   loadOpenModelSettings: () => Promise<void>;
   loadProviderModels: (options?: { refresh?: boolean }) => Promise<void>;
   syncPermissionProfileSelection: () => void;
-  syncDeliveryModeSelection: () => void;
   invalidateConfigurationRequests: () => void;
   resetConfigurationModelSelection: () => void;
   resetConfigurationTransientState: () => void;
@@ -149,7 +144,6 @@ export function useAddAgentSetup() {
       loadError.value = null;
       setupConfirmation.value = null;
       try {
-        const launchMode = bindings.launchMode.value;
         const [result, storageStatus] = await Promise.all([
           desktopIpc.workers.runAgentProviderPreflight(providerId, {
           roomIdentifier: bindings.roomIdentifier(),
@@ -160,16 +154,15 @@ export function useAddAgentSetup() {
           // demand a repo. This never relaxes a repo-backed room (gitRoom set) or
           // a durable-project room (repoRootPath set).
           roomOnly: bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim(),
-          launchMode,
           permissionProfileId: bindings.selectedPermissionProfile.value?.id ?? null,
-          cursorMcpPolicy: providerId === "cursor" ? bindings.selectedCursorMcpPolicy.value : null,
           model: bindings.selectedModel.value,
           modelSource: bindings.selectedModelSource.value,
           effort: bindings.selectedEffort.value || null,
           refreshModels: options.refreshModels,
           refreshEnvironment: options.refreshEnvironment,
           }),
-          launchMode === "supervised"
+          // Secure credential storage matters only to a supervised launch.
+          hasSupervisedRuntime(bindings.selectedProvider.value)
             ? desktopIpc.supervisorGrant.getStorageStatus()
             : Promise.resolve(null),
         ]);
@@ -232,13 +225,7 @@ export function useAddAgentSetup() {
           && nextProviders.some((provider) => provider.id === selectedProviderId.value)
           ? selectedProviderId.value
           : nextProviders.find((provider) => provider.id === "codex")?.id || nextProviders[0]?.id || null;
-        if (
-          hasSupervisedRuntime(bindings.selectedProvider.value)
-        ) {
-          bindings.launchMode.value = "supervised";
-        }
         bindings.syncPermissionProfileSelection();
-        bindings.syncDeliveryModeSelection();
         if (selectedProviderId.value && selectedProviderId.value === previousProviderId) {
           await refreshSelectedProvider();
         }
@@ -269,16 +256,8 @@ export function useAddAgentSetup() {
       worktreeRequestId += 1;
       clearScheduledModelPreflight();
       selectedProviderId.value = providerId;
-      if (
-        hasSupervisedRuntime(bindings.selectedProvider.value)
-      ) {
-        bindings.launchMode.value = "supervised";
-      } else if (!hasSupervisedRuntime(bindings.selectedProvider.value)) {
-        bindings.launchMode.value = "legacy";
-      }
       bindings.resetConfigurationModelSelection();
       bindings.syncPermissionProfileSelection();
-      bindings.syncDeliveryModeSelection();
       invalidateCurrentPreflight();
       setupBusy.value = setupActionInFlight;
       creatingWorktree.value = worktreeOperationInFlight;
@@ -459,9 +438,7 @@ export function useAddAgentSetup() {
     const recheckUnlockedStorage = (): void => {
       if (
         secureStorageFocusRecheckArmed
-        &&
-        bindings.open()
-        && bindings.launchMode.value === "supervised"
+        && bindings.open()
         && secureStorageStatus.value?.available === false
         && !loadingPreflight.value
       ) {

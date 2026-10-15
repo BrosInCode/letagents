@@ -213,21 +213,8 @@ async function codexPreflight(
     };
   }
 
-  // Supervised Codex installs an exact, bounded MCP override for each launch.
-  // Only the compatibility runtime depends on the user's global connection.
-  if (input.launchMode !== "supervised" && mcpStatus !== "installed") {
-    return {
-      providerId: provider.id,
-      status: "bridge_required",
-      canStart: false,
-      message: "Codex needs the LetAgents connection.",
-      detail: "Install or repair the Codex connection so the local agent can act in rooms.",
-      nextAction: "install_mcp_bridge",
-      version,
-      mcpStatus,
-    };
-  }
-
+  // Supervised Codex installs an exact, bounded MCP override for each launch,
+  // so it does not depend on the user's global Codex connection.
   if (!input.repoRootPath?.trim() && !input.roomOnly) {
     return {
       providerId: provider.id,
@@ -279,7 +266,7 @@ async function claudeCodePreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const versionReadiness = inspectClaudeCodeVersion(version ?? "", input.launchMode === "supervised" ? claudeApprovalProfileLabel(input.permissionProfileId) : null);
+  const versionReadiness = inspectClaudeCodeVersion(version ?? "", claudeApprovalProfileLabel(input.permissionProfileId));
   if (!versionReadiness.supported) {
     return {
       providerId: provider.id,
@@ -435,17 +422,10 @@ export async function runDesktopAgentProviderPreflight(
   const withManagedRuntimeValidation = async (
     result: DesktopAgentProviderPreflight,
   ): Promise<DesktopAgentProviderPreflight> => {
-    if (
-      !result.canStart
-      || (
-        !provider.capabilities.includes("desktop_managed_runtime")
-        && !provider.capabilities.includes("supervised_runtime")
-      )
-    ) {
+    if (!result.canStart || !provider.capabilities.includes("supervised_runtime")) {
       return result;
     }
-    if (input.launchMode !== "legacy" && !isDesktopSmokeCheck()
-      && !(await supervisorDaemonClient.isRuntimeEnvironmentCurrent())) {
+    if (!isDesktopSmokeCheck() && !(await supervisorDaemonClient.isRuntimeEnvironmentCurrent())) {
       return {
         ...result,
         status: "config_required",
@@ -507,38 +487,23 @@ export async function runDesktopAgentProviderPreflight(
     const smokeHasWorkspace = Boolean(input.repoRootPath?.trim()) || Boolean(input.roomOnly);
     return withManagedRuntimeValidation({
       providerId: provider.id,
-      status: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      )
+      status: provider.capabilities.includes("supervised_runtime")
         ? smokeHasWorkspace
           ? "ready"
           : "repo_required"
         : "ready",
-      canStart: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      ) && smokeHasWorkspace,
-      message: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      )
+      canStart: provider.capabilities.includes("supervised_runtime") && smokeHasWorkspace,
+      message: provider.capabilities.includes("supervised_runtime")
         ? smokeHasWorkspace
           ? `${provider.name} is ready to start.`
           : `Choose a local repository before starting ${provider.name}.`
         : `${provider.name} is connected to LetAgents.`,
-      detail: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      )
+      detail: provider.capabilities.includes("supervised_runtime")
         ? smokeHasWorkspace
           ? "The desktop can launch and supervise this local provider."
           : "A supervised agent needs a local repo or worktree for code actions."
         : "Open this agent app, then ask it to join this room through LetAgents.",
-      nextAction: (
-        provider.capabilities.includes("desktop_managed_runtime")
-        || provider.capabilities.includes("supervised_runtime")
-      ) && !smokeHasWorkspace
+      nextAction: provider.capabilities.includes("supervised_runtime") && !smokeHasWorkspace
         ? "choose_repo"
         : null,
       version: provider.id === "codex" ? "codex smoke" : null,

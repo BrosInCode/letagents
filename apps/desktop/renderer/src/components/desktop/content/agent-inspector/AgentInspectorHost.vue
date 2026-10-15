@@ -11,9 +11,7 @@
         v-bind="surfaceProps(false)"
         @close="emit('close')"
         @action="forwardAction($event, 'wide')"
-        @status="participantAnnouncement = $event"
         @retry="retryStatus"
-        @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
@@ -39,9 +37,7 @@
         v-bind="surfaceProps(true)"
         @close="emit('close')"
         @action="forwardAction($event, 'compact')"
-        @status="participantAnnouncement = $event"
         @retry="retryStatus"
-        @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
@@ -69,16 +65,13 @@ import type {
   DesktopRoomAgentWork,
   DesktopAgentStreamEvent,
   DesktopFocusRoomInfo,
-  DesktopManagedAgentSession,
   DesktopReasoningSession,
 } from "../../../../../../electron/ipc-types";
 import {
   projectAgentInspectorParticipant,
   projectAgentInspectorStatus,
-  type AgentInspectorParticipantSessionUpdate,
 } from "../../../../domain/agent-inspector-participant";
 import { agentInspectorSignal, sharedAgentInspectorPresentation } from "../../../../domain/agent-inspector-presentation";
-import { agentInspectorRequestResetKey } from "../../../../domain/agent-inspector-identity";
 import { latestReasoningSessionForExactIdentity } from "../../../../domain/reasoning";
 import AgentInspectorSurface from "./AgentInspectorSurface.vue";
 import AgentInspectorStatusSurface from "./AgentInspectorStatusSurface.vue";
@@ -115,7 +108,6 @@ const props = defineProps<{
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
-  managedSessions: readonly DesktopManagedAgentSession[];
   reasoningSessions: readonly DesktopReasoningSession[];
   correctionRequest?: AgentInspectorCorrectionRequest | null;
 }>();
@@ -138,7 +130,6 @@ const emit = defineEmits<{
   "room-move-commit": [];
   retire: [];
   purge: [];
-  "session-updated": [update: AgentInspectorParticipantSessionUpdate];
   "open-reasoning": [sessionId: string];
   retry: [];
 }>();
@@ -146,27 +137,10 @@ const emit = defineEmits<{
 const compact = ref(false);
 const wideHostElement = ref<HTMLElement | null>(null);
 const surfaceComponent = ref<{ focusInitial: () => void; containsFocus: () => boolean } | null>(null);
-const participantAnnouncement = ref<string | null>(null);
-const participantProjection = computed(() =>
-  projectAgentInspectorParticipant(props.selection, props.managedSessions, props.roomIdentifier)
-);
-const participantSelectionKey = computed(() =>
-  agentInspectorRequestResetKey(props.selection, props.requestVersion)
-);
-const participantReasoning = computed(() => {
-  const participant = participantProjection.value;
-  if (!participant) return null;
-  if (participant.kind === "local_managed" && participant.session.reasoningSessionId) {
-    const linked = props.reasoningSessions.find((session) =>
-      session.id === participant.session.reasoningSessionId
-    );
-    if (linked) return linked;
-  }
-  const identity = participant.kind === "local_managed"
-    ? participant.session
-    : props.selection;
-  return latestReasoningSessionForExactIdentity(identity, props.reasoningSessions);
-});
+const participantProjection = computed(() => projectAgentInspectorParticipant(props.selection));
+const participantReasoning = computed(() => participantProjection.value
+  ? latestReasoningSessionForExactIdentity(props.selection, props.reasoningSessions)
+  : null);
 const surfaceKind = computed(() => props.projection ? "projection" : participantProjection.value ? "participant" : "status");
 const surfaceComponentType = computed<Component>(() => props.projection
   ? AgentInspectorSurface
@@ -180,21 +154,10 @@ const sharedPresentation = computed(() => sharedAgentInspectorPresentation(
 ));
 const liveAnnouncement = computed(() => {
   if (props.actionState?.message) return props.actionState.message;
-  if (participantAnnouncement.value) return participantAnnouncement.value;
   if (props.projection) return `${props.projection.displayName}: ${agentInspectorSignal(props.projection).label}.`;
-  if (participantProjection.value?.kind === "local_managed") {
-    return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
-  }
-  if (participantProjection.value?.kind === "unavailable") {
-    return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
-  }
-  if (participantProjection.value?.kind === "external") return `${participantProjection.value.title}: ${sharedPresentation.value.signal.label}.`;
+  if (participantProjection.value) return `${participantProjection.value.title}: ${sharedPresentation.value.signal.label}.`;
   return `${statusPresentation.value.title}: ${statusPresentation.value.heading}.`;
 });
-watch(
-  () => [props.roomIdentifier, props.requestVersion, participantSelectionKey.value],
-  () => { participantAnnouncement.value = null; },
-);
 function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
   const workspace = { roomAgentWork: props.roomAgentWork ?? [], roomAgentWorkStatus: props.roomAgentWorkStatus ?? 'idle',
     workspaceSourceMessageId: props.workspaceSourceMessageId, workspaceAgentKey: props.selection.agentKey,
@@ -229,10 +192,8 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
       shared: sharedPresentation.value,
       roomDisplayName: props.roomDisplayName,
       compact: compactPresentation,
-      busy: false,
       roomIdentifier: props.roomIdentifier,
       requestVersion: props.requestVersion,
-      selectionKey: participantSelectionKey.value,
       reasoning: participantReasoning.value,
     };
   }

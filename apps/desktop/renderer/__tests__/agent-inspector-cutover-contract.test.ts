@@ -55,13 +55,11 @@ test("Chat carries the clicked canonical message into exact supervised identity 
   assert.doesNotMatch(identity, /displayName.*resolveSupervisorEntryIdForPublishedMessage|actorLabel.*resolveSupervisorEntryIdForPublishedMessage/);
 });
 
-test("the shared Inspector keeps external and exact local-managed participants distinct", () => {
-  assert.match(host, /projectAgentInspectorParticipant\(\s*props\.selection,\s*props\.managedSessions,\s*props\.roomIdentifier\s*\)/);
-  assert.match(participantProjection, /selection\.kind === "external"/);
-  assert.match(participantSurface, /projection\.kind === 'local_managed'/);
-  assert.match(participantSurface, /participant-inspector-stop-turn/);
-  assert.match(participantSurface, /participant-inspector-retry/);
-  assert.match(participantSurface, /participant-inspector-stop-worker/);
+test("the shared Inspector shows an external participant read-only and never builds one from a local session", () => {
+  assert.match(host, /projectAgentInspectorParticipant\(props\.selection\)/);
+  assert.match(participantProjection, /selection\.kind !== "external"\) return null/);
+  assert.doesNotMatch(host, /managedSessions|session-updated/);
+  assert.doesNotMatch(participantSurface, /local_managed|participant-inspector-stop-turn|participant-inspector-retry|participant-inspector-stop-worker/);
   assert.match(identity, /Only a completed list operation can authoritatively classify the target[\s\S]*resource\.state === "ready"/);
   assert.match(identity, /resource\.state === "error"[\s\S]*unavailableReason: "load_error"/);
   assert.doesNotMatch(identity, /displayName.*resolveSupervisorEntryId|sender.*resolveSupervisorEntryId/);

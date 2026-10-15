@@ -1603,7 +1603,6 @@ export class CursorProviderAdapter implements ProviderAdapter {
       roomIdentifier: req.roomId,
       joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
       cwd: req.cwd,
-      deliveryMode: "mcp_polling",
       stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
       token: makeCodexStopToken(),
       suggestedDisplayName: req.agentDisplayName.trim(),

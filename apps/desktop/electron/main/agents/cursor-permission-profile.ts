@@ -95,23 +95,14 @@ export function cursorPermissionProfileStartMessage(
 
 export function cursorPermissionProfileReadyDetail(
   profileId: DesktopManagedAgentPermissionProfileId | null | undefined,
-  supervised = false,
 ): string {
   switch (normalizeCursorPermissionProfileId(profileId)) {
     case "sandboxed_write":
-      if (supervised) {
-        return "Cursor edits a separate copy of your project with restricted file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and Git history is kept.";
-      }
-      return "Cursor can edit files with its own file and command restrictions enabled. Connected tools follow the access you selected for them.";
+      return "Cursor edits a separate copy of your project with restricted file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and Git history is kept.";
     case "full_access":
-      if (supervised) {
-        return "Cursor changes files directly and runs commands without approval prompts. It can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.";
-      }
-      return "Cursor can change files and run commands without its own restrictions or approval prompts. Connected tools follow the access you selected for them.";
+      return "Cursor changes files directly and runs commands without approval prompts. It can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.";
     default:
-      return supervised
-        ? "Cursor can inspect the selected workspace but cannot edit it."
-        : "Cursor can inspect files without editing them.";
+      return "Cursor can inspect the selected workspace but cannot edit it.";
   }
 }
 

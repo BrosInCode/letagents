@@ -186,7 +186,7 @@ test("a saved access level that has not reached the running agent is marked, and
   const badge = permissionPendingBadge("daemon_inbox");
   assert.equal(badge.label, "Settings pending");
   assert.equal(badge.title, "You changed this agent's access level. It applies when the current turn ends, or when the agent restarts.");
-  for (const mode of ["mcp_polling", "desktop_events", undefined]) {
+  for (const mode of ["mcp_polling", undefined]) {
     assert.equal(permissionPendingBadge(mode).label, "Settings pending");
     assert.equal(permissionPendingBadge(mode).title, "You changed this agent's access level. It applies the next time the agent starts.", String(mode));
   }
@@ -198,7 +198,7 @@ test("a saved access level that has not reached the running agent is marked, and
   assert.equal(permissionTimingNote("daemon_inbox", true),
     "Your new access level is saved. The agent switches to it when its current turn ends, or when it restarts.");
   // Any other agent gets it when it starts again, and nothing promises more.
-  for (const mode of ["mcp_polling", "desktop_events", undefined]) {
+  for (const mode of ["mcp_polling", undefined]) {
     assert.equal(permissionTimingNote(mode, false), "Choose what the agent can access the next time it starts.");
     assert.equal(permissionTimingNote(mode, true), "Your new access level is saved. The agent gets it the next time it starts.");
   }

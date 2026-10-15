@@ -318,7 +318,7 @@ test("open-model permission profiles default to honestly-labeled full access", (
   const fullAccess = assertManagedAgentPermissionProfileAvailable("open-model", "full_access");
   assert.equal(fullAccess.risk, "high");
   assert.equal(
-    assertManagedAgentPermissionProfileAvailable("open-model", "ask_before_write", "supervised").status,
+    assertManagedAgentPermissionProfileAvailable("open-model", "ask_before_write").status,
     "available",
   );
   assert.throws(
@@ -336,12 +336,13 @@ test("desktop-managed providers declare their supervised runtimes", () => {
 
   assert.ok(codex?.capabilities.includes("supervised_runtime"));
   assert.ok(claude?.capabilities.includes("supervised_runtime"));
-  assert.equal(
-    claude?.capabilities.includes("desktop_managed_runtime"),
-    false,
-    "the former in-app Claude Agent SDK runtime is no longer selectable",
-  );
-  assert.ok(openModel?.capabilities.includes("desktop_managed_runtime"));
+  for (const provider of providers) {
+    assert.equal(
+      (provider.capabilities as readonly string[]).includes("desktop_managed_runtime"),
+      false,
+      `${provider.id} must not declare the retired in-app runtime capability`,
+    );
+  }
   assert.ok(openModel?.capabilities.includes("supervised_runtime"));
   assert.equal(openModel?.runtimeCommand, "opencode");
   assert.equal(openModel?.mcpTargetId, null);

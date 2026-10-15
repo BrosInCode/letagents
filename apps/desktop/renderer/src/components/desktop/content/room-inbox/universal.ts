@@ -4,7 +4,6 @@ import type { KnowledgeRecord } from '../../../../../../../../shared/room-knowle
 import { buildDesktopInboxItems, desktopInboxItemFingerprint, type DesktopInboxItem } from './items';
 import type { AgentAttentionItem } from './agent-attention';
 import type { AttentionNavigationIntent } from '../room-shell/types';
-import { mergeDesktopManagedAgentPresence } from '../../../../domain/managed-agents';
 import { hostApprovalHeading, hostApprovalSummary } from '../room-chat/host-approval-presentation';
 import { readableIntentBody } from '../room-board/governance-presentation';
 
@@ -46,7 +45,7 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
     if (!room.updates) continue;
     for (const activity of buildDesktopInboxItems({ filter: 'actionable', threadPage: room.updates.threads, tasks: [],
       githubEvents: room.updates.githubEvents?.events ?? [], reasoningSessions: room.updates.reasoningSessions,
-      presence: mergeDesktopManagedAgentPresence(room.updates.presence, data?.managedSessions ?? [], room.roomIdentifier) })) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, activity.id]),
+      presence: room.updates.presence })) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, activity.id]),
         section: 'updates', category: activity.kind, title: activity.title, body: activity.preview || '', timestamp: activity.timestamp || '',
         actor: activity.context || 'Room activity', activity, fingerprint: desktopInboxItemFingerprint(activity) });
   }
@@ -177,7 +176,7 @@ export function inboxSourceFailureKey(data: DesktopNeedsYou | null, rooms: strin
     (data?.rooms ?? []).filter(room => (!rooms.length || rooms.includes(room.roomIdentifier)) && room.updates?.unavailable.length)
       .map(room => [room.roomIdentifier, [...room.updates!.unavailable].sort()] as const)
       .sort((a, b) => a[0].localeCompare(b[0])),
-    Boolean(data?.managedSessionsUnavailable), Boolean(data?.cloudUnavailable), rentalError,
+    Boolean(data?.cloudUnavailable), rentalError,
   ]);
 }
 

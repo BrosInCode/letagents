@@ -353,27 +353,6 @@ const api: DesktopApi = {
   },
   workers: {
     list: () => ipcRenderer.invoke("desktop:workers:list"),
-    listManagedAgentSessions: (roomIdentifier) =>
-      ipcRenderer.invoke("desktop:workers:list-managed-agent-sessions", roomIdentifier || null),
-    onManagedAgentSessionUpdate: (callback) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
-      ipcRenderer.on("desktop:workers:managed-agent-session", listener);
-      return () => {
-        ipcRenderer.off("desktop:workers:managed-agent-session", listener);
-      };
-    },
-    startManagedAgent: (input) =>
-      ipcRenderer.invoke("desktop:workers:start-managed-agent", input),
-    stopManagedAgent: (input = {}) =>
-      ipcRenderer.invoke("desktop:workers:stop-managed-agent", input),
-    retryManagedAgent: (input) =>
-      ipcRenderer.invoke("desktop:workers:retry-managed-agent", input),
-    inspectManagedAgent: (sessionId = null, roomIdentifier = null) =>
-      ipcRenderer.invoke("desktop:workers:inspect-managed-agent", sessionId, roomIdentifier),
-    getManagedAgentChangeSummary: (sessionId = null, roomIdentifier = null) =>
-      ipcRenderer.invoke("desktop:workers:get-managed-agent-change-summary", sessionId, roomIdentifier),
-    resolveManagedAgentPermission: (input) =>
-      ipcRenderer.invoke("desktop:workers:resolve-managed-agent-permission", input),
     listAgentProviders: () => ipcRenderer.invoke("desktop:workers:list-agent-providers"),
     listAgentProviderModels: (providerId, input = {}) =>
       ipcRenderer.invoke("desktop:workers:list-agent-provider-models", providerId, input),

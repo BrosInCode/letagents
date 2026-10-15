@@ -1,16 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type {
-  DesktopManagedAgentSession,
-  DesktopSupervisorManifestEntry,
-} from "../../electron/ipc-types";
+import type { DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
 import {
-  agentInspectorRequestResetKey,
   isCurrentAgentInspectorOperation,
   isCurrentAgentInspectorSupervisorUpdate,
   participantAgentInspectorRequest,
   resolvingAgentInspectorRequest,
-  resolveAgentInspectorManagedSessions,
   resolveAgentInspectorSelection,
   resolveSupervisorEntryId,
   resolveSupervisorEntryIdForPublishedMessage,
@@ -22,10 +17,7 @@ import {
   type AgentInspectorOperationToken,
   type SupervisorEntriesResource,
 } from "../src/domain/agent-inspector-identity";
-import type {
-  AgentInspectorSelection,
-  AgentModalTarget,
-} from "../src/components/desktop/content/desktop-chat-message/types";
+import type { AgentModalTarget } from "../src/components/desktop/content/desktop-chat-message/types";
 
 function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): DesktopSupervisorManifestEntry {
   return {
@@ -75,49 +67,6 @@ function target(overrides: Partial<AgentModalTarget> = {}): AgentModalTarget {
     agentSessionId: "session_current",
     ...overrides,
   };
-}
-
-function managedSession(overrides: Partial<DesktopManagedAgentSession> = {}): DesktopManagedAgentSession {
-  return {
-    id: "managed_garden",
-    providerId: "codex",
-    runtime: "codex",
-    roomIdentifier: "room_a",
-    roomDisplayName: null,
-    repoRootPath: "/tmp/repo",
-    repoBranch: null,
-    status: "running",
-    deliveryMode: "desktop_events",
-    permissionProfileId: "full_access",
-    permissionProfile: {
-      id: "full_access",
-      label: "Full access",
-      description: "Trusted local access.",
-      status: "available",
-      risk: "high",
-      detail: null,
-      isDefault: true,
-    },
-    canStop: true,
-    agentSessionId: "session_current",
-    actorLabel: "GardenSignal",
-    agentKey: "owner/garden-signal",
-    displayName: "GardenSignal",
-    ownerLabel: "EmmyMay",
-    ideLabel: "Codex",
-    reasoningSessionId: null,
-    activeWork: null,
-    pendingPermissionRequests: [],
-    startedAt: "2026-07-22T10:00:00.000Z",
-    updatedAt: "2026-07-22T10:00:00.000Z",
-    lastError: null,
-    supervisorEntryId: null,
-    ...overrides,
-  };
-}
-
-function externalSelection(overrides: Partial<AgentModalTarget> = {}): AgentInspectorSelection {
-  return { ...target(overrides), kind: "external" };
 }
 
 function resource(
@@ -386,55 +335,6 @@ test("a retained direct request follows resource loss and recovery without ident
   assert.equal(resolveAgentInspectorSelection(resource("ready", [garden]), request, "room_a").kind, "supervised");
 });
 
-test("control-bearing managed sessions require one agreeing exact identity", () => {
-  const garden = managedSession();
-  assert.deepEqual(
-    resolveAgentInspectorManagedSessions([garden], externalSelection()),
-    [garden],
-  );
-
-  const sessionOwner = managedSession({ id: "session_owner", agentKey: "owner/a" });
-  const keyOwner = managedSession({ id: "key_owner", agentSessionId: "session_b" });
-  assert.deepEqual(resolveAgentInspectorManagedSessions(
-    [sessionOwner, keyOwner],
-    externalSelection({ agentSessionId: "session_current", agentKey: "owner/garden-signal" }),
-  ), []);
-});
-
-test("same labels and duplicate durable identities never expose managed controls or permissions", () => {
-  const permission = {
-    id: "permission_1",
-    providerId: "codex" as const,
-    sessionId: "session_current",
-    title: "Run command",
-    toolName: "shell",
-    toolUseId: null,
-    description: "Run a destructive command.",
-    inputSummary: "rm -rf /tmp/example",
-    decisionReason: null,
-    roomMessageId: null,
-    requestedAt: "2026-07-22T10:00:00.000Z",
-  };
-  const peers = [
-    managedSession({ id: "one", pendingPermissionRequests: [permission] }),
-    managedSession({ id: "two", pendingPermissionRequests: [permission] }),
-  ];
-  assert.deepEqual(resolveAgentInspectorManagedSessions(
-    peers,
-    externalSelection({ agentKey: null, agentSessionId: "session_current" }),
-  ), []);
-  assert.deepEqual(resolveAgentInspectorManagedSessions(
-    peers,
-    externalSelection({ agentKey: null, agentSessionId: null }),
-  ), []);
-
-  const supervisedPeers = peers.map((session) => ({ ...session, supervisorEntryId: "supervised_garden" }));
-  assert.deepEqual(resolveAgentInspectorManagedSessions(
-    supervisedPeers,
-    { ...target(), kind: "supervised", supervisorEntryId: "supervised_garden" },
-  ), []);
-});
-
 test("late supervisor actions cannot update a different room or Inspector request", () => {
   const update = {
     entry: entry(),
@@ -520,11 +420,6 @@ test("a new exact request resets operations even when its presentation is unchan
     kind: "supervised" as const,
     supervisorEntryId: "supervised_garden",
   };
-  assert.notEqual(
-    agentInspectorRequestResetKey(samePresentation, 10),
-    agentInspectorRequestResetKey(samePresentation, 11),
-  );
-
   const oldContext: AgentInspectorOperationContext = {
     modalStateVersion: 10,
     roomIdentifier: "room_a",

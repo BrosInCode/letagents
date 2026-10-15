@@ -148,7 +148,6 @@ const AGENT_STREAM_REOPEN_POLL_MS = 1_000;
 const activityEmitter = new EventEmitter();
 const stateEmitter = new EventEmitter();
 const agentStreamEmitter = new EventEmitter();
-const activitySequences = new Map<string, number>();
 let stateWatchOperation: Promise<void> | null = null;
 let stateWatchUnsupportedGeneration: number | null = null;
 /** Newest pushed manifest state; absent until the watch delivers one. */
@@ -1513,11 +1512,6 @@ export class SupervisorDaemonClient {
     throw new Error("Supervisor returned an invalid purge result.");
   }
 
-  async appendActivity(id: string, event: DesktopSupervisorActivityEvent): Promise<DesktopSupervisorManifestEntry> {
-    await this.ensureRunning();
-    return mapEntry(await this.request<WireEntry>("manifest.append_activity", { id, event: wireActivity(event) }));
-  }
-
   async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.update_workplace_liveness", {
@@ -2451,7 +2445,10 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
     condition: entry.condition,
     lastError: entry.last_error ?? null,
     permissionProfileId: entry.permission_profile_id,
-    deliveryMode: entry.delivery_mode ?? "mcp_polling",
+    // The daemon keeps "desktop_events" in its stored enum for one release.
+    // The desktop engine that delivered those events is gone, so the UI
+    // treats such an entry as a polling entry.
+    deliveryMode: entry.delivery_mode === "daemon_inbox" ? "daemon_inbox" : "mcp_polling",
     ...(entry.polling_contract === "custodial_polling_v1" ? { pollingContract: entry.polling_contract } : {}),
     ...(entry.home_harness === "on" || entry.home_harness === "after_restart" || entry.home_harness === "until_restart"
       ? { homeHarness: entry.home_harness } : {}),
@@ -2705,23 +2702,6 @@ function mapActivity(event: WireActivityEvent): DesktopSupervisorActivityEvent {
     payloadRedacted: event.payload_redacted,
     durablePayloadRef: event.durable_payload_ref,
   });
-}
-
-function wireActivity(event: DesktopSupervisorActivityEvent): WireActivityEvent {
-  const safe = sanitizeDesktopActivityEvent(event);
-  return {
-    observed_at: safe.observedAt,
-    sequence: safe.sequence,
-    provider: safe.provider,
-    kind: safe.kind,
-    method: safe.method,
-    summary: safe.summary,
-    status: safe.status,
-    payload: safe.payload,
-    payload_truncated: safe.payloadTruncated,
-    payload_redacted: safe.payloadRedacted,
-    durable_payload_ref: safe.durablePayloadRef,
-  };
 }
 
 function sanitizeDesktopActivityEvent(event: DesktopSupervisorActivityEvent): DesktopSupervisorActivityEvent {
@@ -2989,62 +2969,3 @@ async function runAgentStreamWatch(): Promise<void> {
   }
 }
 
-export async function publishSupervisorActivity(input: {
-  entryId: string;
-  provider: string;
-  kind: string;
-  method: string;
-  summary: string;
-  status: DesktopSupervisorActivityEvent["status"];
-  payload?: unknown;
-}): Promise<DesktopSupervisorManifestEntry> {
-  const sequence = Math.max((activitySequences.get(input.entryId) ?? 0) + 1, Date.now());
-  activitySequences.set(input.entryId, sequence);
-  const { value: redactedPayload, redacted } = redactActivityPayload(input.payload ?? { summary: input.summary });
-  const serialized = safeJson(redactedPayload);
-  const truncated = serialized.length > 8_192;
-  const event = sanitizeDesktopActivityEvent({
-    observedAt: new Date().toISOString(),
-    sequence,
-    provider: input.provider,
-    kind: input.kind,
-    method: input.method,
-    summary: input.summary,
-    status: input.status,
-    payload: truncated ? `${serialized.slice(0, 8_192)}…` : redactedPayload,
-    payloadTruncated: truncated,
-    payloadRedacted: redacted,
-    durablePayloadRef: null,
-  });
-  const entry = await supervisorDaemonClient.appendActivity(input.entryId, event);
-  activityEmitter.emit("activity", { entryId: input.entryId, event });
-  return entry;
-}
-
-function redactActivityPayload(payload: unknown): { value: unknown; redacted: boolean } {
-  let redacted = false;
-  const seen = new WeakSet<object>();
-  const walk = (value: unknown, key = "", depth = 0): unknown => {
-    if (/token|secret|password|authorization|api[_-]?key|credential/i.test(key)) {
-      redacted = true;
-      return "[redacted]";
-    }
-    if (depth > 8) { redacted = true; return "[truncated-depth]"; }
-    if (typeof value === "string") {
-      const safe = redactCredentialText(value);
-      redacted ||= safe.redacted;
-      return safe.value.length > 4_096 ? (redacted = true, `${safe.value.slice(0, 4_096)}…`) : safe.value;
-    }
-    if (typeof value === "bigint") return value.toString();
-    if (!value || typeof value !== "object") return value;
-    if (seen.has(value)) { redacted = true; return "[circular]"; }
-    seen.add(value);
-    if (Array.isArray(value)) return value.slice(0, 100).map((item) => walk(item, key, depth + 1));
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 100).map(([nextKey, nextValue]) => [nextKey, walk(nextValue, nextKey, depth + 1)]));
-  };
-  return { value: walk(payload), redacted };
-}
-
-function safeJson(value: unknown): string {
-  try { return JSON.stringify(value); } catch { return JSON.stringify("[unserializable]"); }
-}

@@ -60,7 +60,7 @@ for (const approval of [false, true]) test(`Claude Code ${approval ? "tool appro
   try {
     const result = await runDesktopAgentProviderPreflight(
       "claude-code",
-      { repoRootPath: root, ...(approval ? { launchMode: "supervised" as const, permissionProfileId: "ask_before_write" as const } : {}) },
+      { repoRootPath: root, ...(approval ? { permissionProfileId: "ask_before_write" as const } : {}) },
       { commandTimeoutMs: 0 },
     );
     assert.equal(result.status, "error");

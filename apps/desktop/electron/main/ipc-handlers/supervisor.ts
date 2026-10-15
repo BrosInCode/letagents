@@ -154,7 +154,7 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
           throw new LaunchBlockedError(`Supervised ${provider} is not available yet: no background lifecycle is supported for this provider.`, "retry");
         }
         try {
-          assertManagedAgentPermissionProfileAvailable(provider, input.permissionProfileId, "supervised");
+          assertManagedAgentPermissionProfileAvailable(provider, input.permissionProfileId);
         } catch (error) {
           throw new LaunchBlockedError(
             error instanceof Error ? error.message : "The selected permission profile is unavailable.",

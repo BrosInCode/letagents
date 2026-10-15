@@ -34,7 +34,7 @@ test("supervisor creation admits supervised profiles before the daemon saves the
   const createHandler = handlerSource("desktop:supervisor:create-agent", "desktop:supervisor:get-launch-events");
   assert.match(createHandler, /provider !== "cursor"/);
   assert.doesNotMatch(createHandler, /provider === "cursor" && input\.permissionProfileId !== "read_only"/);
-  assert.match(createHandler, /assertManagedAgentPermissionProfileAvailable\(provider, input\.permissionProfileId, "supervised"\)/);
+  assert.match(createHandler, /assertManagedAgentPermissionProfileAvailable\(provider, input\.permissionProfileId\)/);
   const admission = createHandler.indexOf("assertManagedAgentPermissionProfileAvailable");
   const save = createHandler.indexOf("createAndInstall");
   assert.ok(admission >= 0, "the create handler admits the permission profile");
