@@ -74,7 +74,7 @@ import {
   planReplyTurns,
   queueReplyTurnWakes,
   releaseAgentReplyTurnHoldsTx,
-  SEQUENTIAL_REPLY_REASONS,
+  sequentialReplyReason,
   type ReleasedReplyTurn,
   type ReplyTurnFields,
 } from "./reply-turns.js";
@@ -959,12 +959,33 @@ export async function addMessageWithCreateStatus(
       }
 
       const routedReceipts = [...receiptsByAgentKey.values()];
+      // An unaddressed human question to a thread is still a shared conversation.
+      // Keep mentions, quoted agents, task follow-ups and all peer messages in
+      // their existing lanes; only this verified human shape can sequence
+      // thread_participant receipts. No recipient selection changes here.
+      const sharedHumanThreadCandidate = routedReceipts.length >= 2
+        && createdMessage.source === "browser" && !createdMessageIsPromptOnly
+        && Boolean(createdMessage.publisher_account_id) && !createdMessage.publisher_agent_key
+        && createdMessage.thread_root_number !== null && !taskOwnerFollowUp
+        && !globalAddresses.broadcast && !globalAddresses.hasMention
+        && (replyToMessage === null || (replyToMessage.source === "browser"
+          && Boolean(replyToMessage.publisher_account_id) && !replyToMessage.publisher_agent_key
+          && replyToMessage.visibility === null && replyToMessage.rental_session_id === null));
+      // The transaction hook may restrict the persisted message. MessageRow
+      // deliberately omits these fields, so inspect the row after that hook
+      // rather than treating absent projection fields as public visibility.
+      const [visibleSharedRequest] = sharedHumanThreadCandidate
+        ? await tx.select({ number: messages.number }).from(messages).where(and(
+          eq(messages.room_id, roomId), eq(messages.number, createdMessage.number),
+          sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`,
+        )).limit(1) : [];
+      const sharedHumanThread = Boolean(visibleSharedRequest);
       // Several agents woken by one broadcast or small-room message answer
       // one after another only in a room whose admin turned sequential replies
       // on (NULL is parallel). The setting is read only when the receipts
       // could be sequenced at all.
       const sequenceCandidate = routedReceipts.length >= 2
-        && routedReceipts.every((receipt) => SEQUENTIAL_REPLY_REASONS.has(receipt.activation_reason));
+        && routedReceipts.every((receipt) => sequentialReplyReason(receipt.activation_reason, sharedHumanThread));
       const [replyOrder] = sequenceCandidate
         ? await tx.select({ order: room_settings.agent_reply_order })
           .from(room_settings).where(eq(room_settings.room_id, roomId)).for("share")
@@ -973,6 +994,7 @@ export async function addMessageWithCreateStatus(
         messageNumber: createdMessage.number,
         timestamp: createdMessage.timestamp,
         sequential: sequenceCandidate && replyOrder?.order === "sequential",
+        sharedHumanThread,
         readySessionIds: replyOrder?.order === "sequential"
           ? await getReplyTurnReadySessions(tx, roomId, routedReceipts.map(receipt => receipt.agent_session_id))
           : undefined,
@@ -1009,6 +1031,13 @@ export async function addMessageWithCreateStatus(
           .find((session) => session.session_id === receipt.agent_session_id)!.owner_account_id,
       }));
       await insertMessageReceiptRows(tx, receiptRowsToInsert);
+      // A newer human correction must get past older holds, while retaining
+      // its own reply order. The bound is essential: releasing all holds after
+      // insertion would also release the sequence just created above.
+      if (sharedHumanThread) releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
+        tx, roomId, receiptRowsToInsert.filter(receipt => receipt.turn_position !== null)
+          .map(receipt => receipt.agent_key), createdMessage.number,
+      ));
       // A direct activation (mention, reply target, human thread, task owner)
       // must not stay behind an earlier held turn: the frontier would hide it
       // too. Automatic participation in a peer's thread reply is different:
