@@ -14,6 +14,7 @@ import { currentWorkerPublicationAuthority, sameWorkerPublicationOrigin } from "
 import { isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { isNetworkRemote, type WorkspaceMarker } from "./workspace-provisioner.js";
 import { RecordedRemoteAnswers } from "./recorded-remote-answers.js";
+import { RoomLatencyTrace } from "./room-latency-trace.js";
 
 type Options = {
   custody: Pick<WorkerRuntimeCustody, "hostGrant" | "workerAuthorization">;
@@ -169,17 +170,23 @@ export class RoomWorkPublisher {
   /** Save immutable settled bytes even when delayed native execution evidence isn't ready yet. */
   async captureWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string, summaryText?: string | null, invocationBaseline: string | null = null): Promise<void> {
     if (this.unavailable() || !this.options.workspaceLocation) return;
+    const timing = new RoomLatencyTrace("workspace_capture");
     const context = this.captureAuthority(agent, sourceMessageId);
-    if (!context || context.record.summary?.workspace || this.workspaces.settled(agent.agentId, agent.roomId, sourceMessageId)) return;
+    const alreadySettled = context && (context.record.summary?.workspace || this.workspaces.settled(agent.agentId, agent.roomId, sourceMessageId));
+    timing.mark("lookup");
+    if (!context || alreadySettled) { timing.finish(); return; }
     const identity: WorkspaceCaptureIdentity = { ...agent, sourceMessageId, inboxItemId };
     try {
       const location = await this.options.workspaceLocation(agent.workAttemptId);
+      timing.mark("location");
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
       const start = this.turnStarts.get(ref);
       const pair = await this.workspaceCapture.settle(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref, start?.head, start?.remoteTips);
+      timing.mark("capture");
       pair.contribution.summary = readableContributionText(summaryText);
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
+      timing.mark("authority");
       if (current?.authority.worker !== context.authority.worker || current?.authority.grant !== context.authority.grant) return;
       const captured = this.capture.roomWorkSummary(agent.agentId, agent.roomId, sourceMessageId);
       const execution = captured.availability === "available" ? captured.summary : {
@@ -190,14 +197,18 @@ export class RoomWorkPublisher {
       const { review, ...preview } = pair;
       const summary = { ...execution, version: 3 as const, ...preview };
       const reviewable = hasReviewableRoomContribution(summary);
+      timing.mark("projection");
       // Settlement is also the durable no-review decision. Preserve unavailable
       // evidence instead of treating it as no change or recapturing on restart.
       this.workspaces.settle(identity, summary, reviewable ? review : undefined);
       if (captured.availability === "available") this.store.stage(current.record,
         reviewable ? { ...captured, summary } : captured);
+      timing.mark("persistence");
       this.changed(agent.agentId);
       await releaseWorkspaceTree(location.path, ref);
+      timing.mark("cleanup");
     } catch { this.report("storage_unavailable"); }
+    finally { timing.finish(); }
   }
 
   /** Release only our private retention refs, including Stop, recovery and fencing exits. */

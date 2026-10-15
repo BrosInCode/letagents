@@ -2,6 +2,7 @@ import type { RoomGif } from "../../../shared/room-expressions.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { ReplyTurnCompactionObserver, type ReplyTurnCompactionProof } from "./reply-turn-compaction.js";
+import { RoomLatencyTrace } from "./room-latency-trace.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import { defaultFollowUpDelayMs, FOLLOW_UP_ENDED, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL, OWNERSHIP_UNVERIFIED_DETAIL, taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
@@ -2038,11 +2039,16 @@ export class SupervisedAgentDelivery {
           return;
         }
         if (result.outcome === "no_reply") {
-          if (!await this.hasExecutionAuthority(agent, turnController)) return;
-          await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
-          void this.reportNoReply(agent, item, controller).catch(() => {});
-          await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
-          return;
+          const timing = new RoomLatencyTrace("silent_ack");
+          try {
+            if (!await this.hasExecutionAuthority(agent, turnController)) return;
+            timing.mark("authority");
+            await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
+            timing.mark("database");
+            void this.reportNoReply(agent, item, controller).catch(() => {});
+            await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+            return;
+          } finally { timing.finish(); }
         }
         const text = result.text?.trim();
         if (!text) throw new Error("Provider returned an empty room answer without the no-reply outcome.");

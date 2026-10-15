@@ -1,4 +1,5 @@
 import { Worker } from "node:worker_threads";
+import { RoomLatencyTrace } from "./room-latency-trace.js";
 import { releaseWorkspaceTree, type captureWorkspaceTree, type captureWorkspacePair } from "../../../shared/workspace-turn-capture.mjs";
 
 /** One short-lived capture worker per publisher; never one per agent at once.
@@ -27,14 +28,21 @@ export class WorkspaceCapture {
 
   private run<T>(operation: "begin" | "settle", args: unknown[], remoteTips?: Parameters<typeof captureWorkspacePair>[5]): Promise<T> {
     if (this.closed || this.pending >= 8) return Promise.reject(new Error("Workspace capture is unavailable."));
+    const timing = new RoomLatencyTrace(operation === "begin" ? "workspace_begin" : "workspace_settle");
     this.pending++;
     let expired = false;
     let queueTimer: NodeJS.Timeout;
     const queueDeadline = new Promise<never>((_resolve, reject) => {
-      queueTimer = setTimeout(() => { expired = true; reject(new Error("Workspace capture queue is busy.")); }, 30_000);
+      queueTimer = setTimeout(() => {
+        expired = true;
+        timing.mark("queue_wait");
+        timing.finish();
+        reject(new Error("Workspace capture queue is busy."));
+      }, 30_000);
     });
     const result = this.tail.then(async () => {
       clearTimeout(queueTimer);
+      timing.mark("queue_wait");
       if (this.closed || expired) throw new Error("Workspace capture is closed or expired.");
       const worker = new Worker(new URL("../../../shared/workspace-turn-capture-worker.mjs", import.meta.url), {
         execArgv: [], workerData: { operation, args },
@@ -52,11 +60,13 @@ export class WorkspaceCapture {
           worker.once("exit", () => reject(new Error("Workspace capture stopped before completion.")));
         });
       } finally {
+        timing.mark("worker");
         await worker.terminate();
         if (this.worker === worker) this.worker = null;
         if (this.closed) await releaseWorkspaceTree(String(args[0]), String(args[operation === "begin" ? 1 : 3]));
+        timing.mark("cleanup");
       }
-    }).finally(() => { this.pending--; clearTimeout(queueTimer); });
+    }).finally(() => { this.pending--; clearTimeout(queueTimer); timing.finish(); });
     this.tail = result.catch(() => undefined);
     return Promise.race([result, queueDeadline]);
   }
