@@ -5290,11 +5290,6 @@ test("listDesktopAgentProviders excludes antigravity", () => {
     !providers.some((p) => p.id === "antigravity"),
     "antigravity should not appear in the Add Agent UI provider list",
   );
-  assert.ok(
-    providers.find((provider) => provider.id === "claude-code")
-      ?.capabilities.includes("concurrent_supervised_agents"),
-    "Claude owns an isolated CLI process and continuation per supervised entry",
-  );
 });
 
 test("external runtime install commands stay valid for the current platform", () => {

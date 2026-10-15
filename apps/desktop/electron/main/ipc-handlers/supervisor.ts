@@ -11,7 +11,6 @@ import type {
   DesktopSupervisorRetirementInput,
   DesktopSupervisorRetirementStatus,
 } from "../../ipc-types.js";
-import { listDesktopManagedAgentSessions, stopDesktopManagedAgent } from "../agents/codex-supervisor.js";
 import { assertManagedAgentPermissionProfileAvailable } from "../agents/managed-agent-permission-profiles.js";
 import { removeCursorSupervisedProfile } from "../agents/cursor-managed-profile.js";
 import { redactCredentialText } from "../agents/provider-evidence.js";
@@ -46,7 +45,6 @@ import {
   desktopRetirementDurablyCompleted,
   SupervisorRetirementOperations,
 } from "../supervisor-retirement-operations.js";
-import { transferSupervisorOwnership } from "../supervisor-ownership.js";
 import { assertDesktopUpdateMutationAllowed } from "../updates.js";
 import { assertHostApprovalSender, emitToMainWindow } from "../window.js";
 
@@ -144,6 +142,7 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       };
       // The user clicked Start: the first server-side fact of this launch.
       launchFact("launch.requested", { entryId, detail: "You asked LetAgents to add this agent." });
+      let savedEntry = false;
       try {
         const storage = await getDesktopRoomStorage(roomIdentifier);
         if (storage.effectiveMode === "local") {
@@ -170,34 +169,25 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
           throw new LaunchBlockedError("LetAgents could not reach background agent management. Make sure the app can start its background service, then try again.", "reconnect");
         }
         launchFact("supervisor.connected", { entryId, detail: "Background agent management is available." });
-        // Claim the lane durably first. Every legacy start consults this daemon
-        // fence, so no new legacy owner may appear while transfer is in flight.
-        return await transferSupervisorOwnership({
-          claim: async () => {
-            const { entry: manifest } = await supervisorGrantCoordinator.createPausedAndInstall(input);
-            // The paused ownership claim is now persisted: setup survives an app
-            // restart from here on.
-            launchFact("agent.saved", { entryId: manifest.id, detail: "Your request is recorded and will survive an app restart.", durable: true });
-            return manifest;
+        // The daemon owns the launch from the moment the entry is saved: it
+        // starts the native provider once owner authority and room delivery
+        // are installed, and remains authoritative after the app quits.
+        const { entry: manifest } = await supervisorGrantCoordinator.createAndInstall(input, {
+          // The running entry is now persisted: setup survives an app restart
+          // from here on.
+          onSaved: (saved) => {
+            savedEntry = true;
+            launchFact("agent.saved", { entryId: saved.id, detail: "Your request is recorded and will survive an app restart.", durable: true });
           },
-          listLegacy: () => listDesktopManagedAgentSessions(roomIdentifier)
-            .filter((session) => session.providerId === provider && !session.supervisorEntryId),
-          stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
-          // Activation is the second durable CAS. The daemon, not Electron,
-          // launches the native provider and remains authoritative after quit.
-          activate: async (manifest) => {
-            const activated = await supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "running");
-            if (!activated) throw new Error("The supervised launch changed while ownership was being transferred; it was not restarted.");
-            launchFact("launch.activated", { entryId: manifest.id, detail: "LetAgents is now responsible for starting this agent.", durable: true });
-            return activated;
-          },
-          rollback: (manifest) => supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "stopped").then(() => undefined),
         });
+        launchFact("launch.activated", { entryId: manifest.id, detail: "LetAgents is now responsible for starting this agent.", durable: true });
+        return manifest;
       } catch (error) {
         const diagnostic = redactCredentialText(error instanceof Error ? error.message : String(error));
         console.error(`[supervised-launch:${entryId}] ${diagnostic.value}`);
         const failure = classifyLaunchFailure(error);
-        launchFact(failure.type, { entryId, detail: failure.detail, diagnostic: failure.diagnostic, recovery: failure.recovery });
+        // Once the entry is saved, its failure is a fact about a durable agent.
+        launchFact(failure.type, { entryId, detail: failure.detail, diagnostic: failure.diagnostic, recovery: failure.recovery, durable: savedEntry });
         throw error;
       }
     },
@@ -208,78 +198,42 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       getLaunchEvents(launchId, afterSequence ?? null),
   );
   targetIpcMain.handle(
-    "desktop:supervisor:resume-ownership-transfer",
-    async (_event, id: string): Promise<DesktopSupervisorManifestEntry> => {
-      assertDesktopUpdateMutationAllowed();
-      const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === id);
-      if (!entry) throw new Error(`Unknown supervised agent: ${id}`);
-      if (entry.desiredState !== "paused") return entry;
-      const launchId = id.startsWith("supervised_") ? id.slice("supervised_".length) : id;
-      const launchFact = (
-        type: Parameters<typeof emitLaunchEvent>[0]["type"],
-        detail: string,
-      ): void => {
-        emitLaunchEvent({
-          launchId,
-          entryId: entry.id,
-          roomIdentifier: entry.roomId,
-          provider: entry.provider,
-          type,
-          detail,
-          durable: true,
-        });
-      };
-      launchFact("launch.requested", "You asked LetAgents to resume this saved launch.");
-      try {
-        return await supervisorGrantCoordinator.activateEntry(entry, async () => {
-          launchFact("supervisor.connected", "Background agent management is available.");
-          launchFact("agent.saved", "Your saved launch is ready to resume.");
-          return transferSupervisorOwnership({
-            claim: async () => entry,
-            listLegacy: () => listDesktopManagedAgentSessions(entry.roomId)
-              .filter((session) => session.providerId === entry.provider && !session.supervisorEntryId),
-            stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
-            activate: async (manifest) => {
-              const activated = await supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "running");
-              if (!activated) throw new Error("The saved launch changed while ownership was being resumed; it was not restarted.");
-              launchFact("launch.activated", "LetAgents resumed ownership of this agent.");
-              return activated;
-            },
-            rollback: (manifest) => supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "stopped").then(() => undefined),
-          });
-        });
-      } catch (error) {
-        const failure = classifyLaunchFailure(error);
-        emitLaunchEvent({
-          launchId,
-          entryId: entry.id,
-          roomIdentifier: entry.roomId,
-          provider: entry.provider,
-          type: failure.type,
-          detail: failure.detail,
-          recovery: failure.recovery,
-          durable: true,
-        });
-        throw error;
-      }
-    },
-  );
-  targetIpcMain.handle(
     "desktop:supervisor:set-desired-state",
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
       assertDesktopUpdateMutationAllowed();
       if (desiredState === "running") {
         const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === id);
         if (!entry) throw new Error(`Unknown supervised agent: ${id}`);
-        // Claude receives a private managed MCP config at launch. Other
-        // providers retain their existing external-config refresh behavior.
-        if (entry.provider !== "claude-code") {
-          await refreshInstalledLetAgentsMcpServerAuth();
+        // Starting a saved supervised entry is a launch attempt of its own:
+        // the Add Agent card's Retry lands here. A fresh `launch.requested`
+        // starts a new attempt so an earlier terminal fact cannot stand in
+        // for this one, and a failure here is recorded as this attempt's.
+        const launchId = id.startsWith("supervised_") ? id.slice("supervised_".length) : null;
+        const launchFact = (
+          type: Parameters<typeof emitLaunchEvent>[0]["type"],
+          extra: { detail?: string | null; diagnostic?: string | null; recovery?: import("../launch-events.js").EmitLaunchEventInput["recovery"] } = {},
+        ): void => {
+          if (!launchId) return;
+          emitLaunchEvent({ launchId, entryId: id, roomIdentifier: entry.roomId, provider: entry.provider, type, durable: true, ...extra });
+        };
+        launchFact("launch.requested", { detail: "You asked LetAgents to start this saved agent." });
+        try {
+          // Claude receives a private managed MCP config at launch. Other
+          // providers retain their existing external-config refresh behavior.
+          if (entry.provider !== "claude-code") {
+            await refreshInstalledLetAgentsMcpServerAuth();
+          }
+          const updated = await supervisorGrantCoordinator.activateEntry(
+            entry,
+            () => supervisorDaemonClient.setDesiredState(id, desiredState),
+          );
+          launchFact("launch.activated", { detail: "LetAgents is now responsible for starting this agent." });
+          return updated;
+        } catch (error) {
+          const failure = classifyLaunchFailure(error);
+          launchFact(failure.type, { detail: failure.detail, diagnostic: failure.diagnostic, recovery: failure.recovery });
+          throw error;
         }
-        return supervisorGrantCoordinator.activateEntry(
-          entry,
-          () => supervisorDaemonClient.setDesiredState(id, desiredState),
-        );
       }
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
       // Cancelling belongs to launch history only when the launch never reached

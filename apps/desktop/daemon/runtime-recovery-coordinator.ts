@@ -255,7 +255,6 @@ export class RuntimeRecoveryCoordinator {
       const next = await this.store.write(
         this.authority.currentManifestGeneration(),
         entries,
-        manifest.legacy_lane_owners,
         (commit) => this.authority.fenceCommit(commit),
       );
       this.authority.acceptManifestGeneration(next.generation);

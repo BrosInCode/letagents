@@ -211,9 +211,7 @@ const canStart = computed(() => props.canStartBase
     providerId: props.providerId,
     scanStatus: recoveryScanStatus.value,
     hasActiveLaunch: Boolean(props.supervised.launch.view.value),
-    hasRecoveryCandidate: Boolean(props.supervised.launch.recoveryCandidate.value),
     recoveringCandidate: props.supervised.launch.recoveringCandidate.value,
-    supportsConcurrentAgents: props.provider?.capabilities.includes("concurrent_supervised_agents") === true,
   })));
 const startButtonLabel = computed(() => {
   if (props.startingAgent) return "Starting...";

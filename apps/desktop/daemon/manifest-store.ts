@@ -97,7 +97,6 @@ import type {
   DaemonRoomMoveRecord,
   DaemonTurnControlEffect,
   ExecutionTerminalPayload,
-  LegacyLaneOwner,
   ReconciliationNotice,
   ReconciliationState,
 } from "./types.js";
@@ -300,26 +299,7 @@ export class ManifestStore {
     const generation = Number((this.reads.get(database, "generation").get() as Row).generation);
     const entries = (this.reads.get(database, "allEntries").all() as Row[])
       .map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)));
-
-    const legacyLaneOwners = (database.prepare(`
-      SELECT reservation_id, room_id, provider, owner_pid, owner_process_identity,
-             state, session_id, created_at, updated_at
-      FROM legacy_lane_owners ORDER BY sort_order
-    `).all() as Row[]).map((row): LegacyLaneOwner => ({
-      reservation_id: String(row.reservation_id),
-      room_id: String(row.room_id),
-      provider: String(row.provider),
-      owner_pid: Number(row.owner_pid),
-      owner_process_identity: String(row.owner_process_identity),
-      state: String(row.state) as LegacyLaneOwner["state"],
-      session_id: nullableString(row.session_id),
-      created_at: String(row.created_at),
-      updated_at: String(row.updated_at),
-    }));
-
-    return legacyLaneOwners.length
-      ? { generation, entries, legacy_lane_owners: legacyLaneOwners }
-      : { generation, entries };
+    return { generation, entries };
   }
 
   async getEntry(agentId: string): Promise<DaemonManifestEntry | undefined> {
@@ -2786,14 +2766,12 @@ export class ManifestStore {
   async write(
     expectedGeneration: number,
     entries: DaemonManifest["entries"],
-    legacyLaneOwners?: DaemonManifest["legacy_lane_owners"],
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
     roomMoveCancellation?: PreMembershipRoomMoveCancellation,
   ): Promise<DaemonManifest> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
       const normalizedEntries = entries.map(canonicalManifestEntry);
-      const owners = legacyLaneOwners ?? this.readLegacyLaneOwners(database);
       let committed = false;
       let transactionOpen = false;
       try {
@@ -2811,7 +2789,6 @@ export class ManifestStore {
           }
           if (roomMoveCancellation) this.failPreMembershipRoomMoves(database, roomMoveCancellation);
           this.replaceEntries(database, normalizedEntries);
-          this.replaceLegacyLaneOwners(database, owners ?? []);
           database.exec("COMMIT");
           transactionOpen = false;
           committed = true;
@@ -2834,9 +2811,7 @@ export class ManifestStore {
             },
           }
           : entry);
-        const manifest: DaemonManifest = owners?.length
-          ? { generation: expectedGeneration + 1, entries: returnedEntries, legacy_lane_owners: owners }
-          : { generation: expectedGeneration + 1, entries: returnedEntries };
+        const manifest: DaemonManifest = { generation: expectedGeneration + 1, entries: returnedEntries };
         return manifest;
       } catch (error) {
         if (transactionOpen) {
@@ -2917,7 +2892,6 @@ export class ManifestStore {
         entry.provider === "codex" && entry.provider_ref
           ? { ...entry, desired_state: "stopped" as const }
           : entry), false);
-      this.replaceLegacyLaneOwners(database, stored.manifest.legacy_lane_owners ?? []);
       run(database.prepare("UPDATE manifest_metadata SET generation = ? WHERE singleton = 1"), stored.manifest.generation);
       run(database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)"), migrationKey, stored.checksum, new Date().toISOString());
       database.exec("COMMIT");
@@ -3271,15 +3245,6 @@ export class ManifestStore {
     };
   }
 
-  private readLegacyLaneOwners(database: DatabaseSync): LegacyLaneOwner[] {
-    return (database.prepare("SELECT * FROM legacy_lane_owners ORDER BY sort_order").all() as Row[]).map((row) => ({
-      reservation_id: String(row.reservation_id), room_id: String(row.room_id), provider: String(row.provider),
-      owner_pid: Number(row.owner_pid), owner_process_identity: String(row.owner_process_identity),
-      state: String(row.state) as LegacyLaneOwner["state"], session_id: nullableString(row.session_id),
-      created_at: String(row.created_at), updated_at: String(row.updated_at),
-    }));
-  }
-
   /**
    * A lifecycle stop/pause or exact runtime replacement may cancel a room move
    * only before destination join starts. The move, its MCP effect, the
@@ -3398,12 +3363,6 @@ export class ManifestStore {
       }
     }
     pruneSupervisedAgentHistory(database, input.agentId, () => timestamp);
-  }
-
-  private replaceLegacyLaneOwners(database: DatabaseSync, owners: LegacyLaneOwner[]): void {
-    database.exec("DELETE FROM legacy_lane_owners");
-    const insert = database.prepare("INSERT INTO legacy_lane_owners VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    owners.forEach((owner, index) => run(insert, owner.reservation_id, owner.room_id, owner.provider, owner.owner_pid, owner.owner_process_identity, owner.state, owner.session_id, owner.created_at, owner.updated_at, index));
   }
 
   /** Journal-first transaction helper. A manifest projection must perform its

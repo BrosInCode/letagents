@@ -71,13 +71,6 @@ export interface DaemonControlOperations {
   resolveTurnControl(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; actionId: string; resolution: "not_applied" | "applied";
   }): unknown;
-  reserveLegacyLane(input: {
-    reservation_id: string; room_id: string; provider: string; owner_pid: number; owner_process_identity: string;
-  }): unknown;
-  activateLegacyLane(reservationId: string, sessionId: string): unknown;
-  releaseLegacyLane(input: {
-    reservation_id: string | null; session_id: string | null; room_id: string | null; provider: string | null;
-  }): unknown;
   appendActivity(id: string, event: DaemonActivityEvent): unknown;
   updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null, observedAt: string): unknown;
   bindWorkerSession(input: WorkerSessionCoordinates & { agent_session_token: string; api_url: string }): unknown;
@@ -621,29 +614,6 @@ export function createDaemonControlRequestHandler(
         executionGenerationId: String(params.execution_generation_id ?? ""),
         actionId: String(params.action_id ?? ""),
         resolution: String(params.resolution ?? "") as "not_applied" | "applied",
-      });
-    }
-    if (request.method === "lane.reserve_legacy") {
-      const params = paramsRecord(request.params);
-      return operations.reserveLegacyLane({
-        reservation_id: String(params.reservation_id ?? ""),
-        room_id: String(params.room_id ?? ""),
-        provider: String(params.provider ?? ""),
-        owner_pid: Number(params.owner_pid ?? 0),
-        owner_process_identity: String(params.owner_process_identity ?? ""),
-      });
-    }
-    if (request.method === "lane.activate_legacy") {
-      const params = paramsRecord(request.params);
-      return operations.activateLegacyLane(String(params.reservation_id ?? ""), String(params.session_id ?? ""));
-    }
-    if (request.method === "lane.release_legacy") {
-      const params = paramsRecord(request.params);
-      return operations.releaseLegacyLane({
-        reservation_id: typeof params.reservation_id === "string" ? params.reservation_id : null,
-        session_id: typeof params.session_id === "string" ? params.session_id : null,
-        room_id: typeof params.room_id === "string" ? params.room_id : null,
-        provider: typeof params.provider === "string" ? params.provider : null,
       });
     }
     if (request.method === "manifest.append_activity") {

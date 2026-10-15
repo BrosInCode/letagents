@@ -17,9 +17,7 @@ export type DesktopAgentProviderCapability =
   | "installable_runtime"
   | "auth_preflight"
   | "turn_control"
-  | "reasoning_stream"
-  /** Each durable entry owns an independently addressable provider runtime. */
-  | "concurrent_supervised_agents";
+  | "reasoning_stream";
 
 export type DesktopAgentProviderStatus =
   | "missing_runtime"

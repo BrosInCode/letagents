@@ -299,30 +299,45 @@ export class SupervisorGrantCoordinator {
 
   /**
    * Fresh launch ordering is deliberate: resolve identity, provision and
-   * encrypt a per-entry grant, persist a paused manifest, install to the exact
-   * daemon generation, and only then allow the caller to activate ownership.
+   * encrypt a per-entry grant, persist a running manifest entry, then install
+   * to the exact daemon generation. The daemon does not start a provider until
+   * its grant is installed and its room inbox is bootstrapped, so the saved
+   * entry waits durably in the manifest rather than behind a paused claim.
+   * When installation fails after the entry is saved, the entry is stopped so
+   * the launch reports that failure instead of waiting for authority forever.
    */
-  async createPausedAndInstall(input: DesktopSupervisorCreateInput): Promise<SupervisedGrantPreparation> {
+  async createAndInstall(
+    input: DesktopSupervisorCreateInput,
+    hooks: { onSaved?: (entry: DesktopSupervisorManifestEntry) => void } = {},
+  ): Promise<SupervisedGrantPreparation> {
     return this.paced(`supervised_${input.creationRequestId?.trim() ?? ""}`, GRANT_RECONCILE_PRIORITY.user,
-      () => this.createPausedAndInstallAdmitted(input));
+      () => this.createAndInstallAdmitted(input, hooks));
   }
 
-  private async createPausedAndInstallAdmitted(input: DesktopSupervisorCreateInput): Promise<SupervisedGrantPreparation> {
+  private async createAndInstallAdmitted(
+    input: DesktopSupervisorCreateInput,
+    hooks: { onSaved?: (entry: DesktopSupervisorManifestEntry) => void },
+  ): Promise<SupervisedGrantPreparation> {
     await this.assertSupervisionAvailable();
     const entryId = `supervised_${input.creationRequestId?.trim() ?? ""}`;
     if (!/^supervised_[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(entryId)) {
       throw new Error("A valid supervised agent creation request id is required.");
     }
+    const saved = (entry: DesktopSupervisorManifestEntry): DesktopSupervisorManifestEntry => {
+      hooks.onSaved?.(entry);
+      return entry;
+    };
     if (supervisedDeliveryModeForProvider(input.providerId) !== "daemon_inbox") {
-      return { entry: await this.daemon.create(input), agentKey: "" };
+      return { entry: saved(await this.daemon.create(input)), agentKey: "" };
     }
     if (input.localRoomId) {
       return this.serialize(entryId, async () => {
         if (input.localRoomId !== input.roomIdentifier) throw new Error("Local launch storage identity changed.");
         const status = await this.daemon.ensureRunning();
         const displayName = await this.resolveCreateDisplayName(input.roomIdentifier, entryId, input);
-        const entry = await this.daemon.create({ ...input, displayName });
-        const agentKey = await this.installLocal(entry, status.generation, false, false, input.charter);
+        const entry = saved(await this.daemon.create({ ...input, displayName }));
+        const agentKey = await this.stopOnInstallFailure(entry, () =>
+          this.installLocal(entry, status.generation, false, false, input.charter));
         return { entry, agentKey };
       });
     }
@@ -348,7 +363,7 @@ export class SupervisorGrantCoordinator {
           hostId: this.hostId(), entryId, agentKey,
           roomScopes: [{ requestedRoomId: input.roomIdentifier, canonicalRoomId: roomId }],
         }, { apiFetch: this.request });
-        const entry = await this.daemon.create({ ...normalizedInput, roomIdentifier: roomId });
+        const entry = saved(await this.daemon.create({ ...normalizedInput, roomIdentifier: roomId }));
         if (entry.displayName !== displayName) {
           // The daemon saved a different name than the one the identity was
           // registered under. Registration is idempotent, so repeat it with
@@ -365,7 +380,7 @@ export class SupervisorGrantCoordinator {
       // Re-read after the durable manifest write: a daemon successor may have
       // appeared while owner authority was being provisioned. No predecessor
       // received this fresh grant, so install directly into that successor.
-      await this.install(
+      await this.stopOnInstallFailure(prepared.entry, async () => this.install(
         prepared.entry,
         prepared.agentKey,
         prepared.grant,
@@ -373,9 +388,36 @@ export class SupervisorGrantCoordinator {
         false,
         false,
         prepared.entry.charter,
-      );
+      ));
       return { entry: prepared.entry, agentKey: prepared.agentKey };
     });
+  }
+
+  /**
+   * A saved running entry whose authority could not be installed would wait
+   * in the manifest forever. Stop it so the launch reports the failure and a
+   * retry can re-provision from the saved entry. Once the daemon has begun
+   * launching the provider (room ingress was bootstrapped before the failing
+   * step), the launch is left alone: the failed step was a desktop-side
+   * marker that the next reconcile repairs, and stopping would interrupt a
+   * provider that is already allowed to run.
+   */
+  private async stopOnInstallFailure<T>(
+    entry: DesktopSupervisorManifestEntry,
+    install: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await install();
+    } catch (error) {
+      // A listing that fails or times out leaves the state unknown; fail
+      // closed and stop, exactly as when the entry has not started.
+      const current = (await this.savedRoomEntries(entry.roomId))
+        ?.find((candidate) => candidate.id === entry.id) ?? null;
+      if (!current || current.observedState === "absent") {
+        await this.daemon.setDesiredState(entry.id, "stopped").catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -418,7 +460,9 @@ export class SupervisorGrantCoordinator {
       }
       const entry = await this.serializeDisplayNameMutation(roomId, async () => {
         const displayName = await this.resolveCreateDisplayName(roomId, entryId, input);
-        return this.daemon.create({ ...input, displayName, roomIdentifier: roomId });
+        // A rental starts paused: the rental server must acknowledge
+        // provisioning before the launch coordinator activates it.
+        return this.daemon.create({ ...input, displayName, roomIdentifier: roomId }, { desiredState: "paused" });
       });
       await this.operations.replaceGrant({
         agentKey,
@@ -1137,7 +1181,15 @@ export class SupervisorGrantCoordinator {
     // forward. Bootstrap admits the cursor before any running convergence and
     // never converges a stopped provider.
     if (entry.deliveryMode === "daemon_inbox" && !recoveryOnly) {
-      const bootstrapped = await this.daemon.bootstrapRoomIngress(entry.id, daemonGeneration, initialMessage);
+      // A fresh launch passes its charter explicitly. An install that arrives
+      // through reconciliation (a restart after a crash between save and
+      // install, or Retry after a failed install) passes nothing, so a saved
+      // entry that has never launched supplies its own charter. The daemon
+      // queues it under one fixed message id and ignores a repeat, so an
+      // agent that already ran never has its charter re-sent.
+      const firstMessage = initialMessage
+        ?? (!credentialOnly && supervisedEntryNeverLaunched(entry) ? entry.charter.trim() || undefined : undefined);
+      const bootstrapped = await this.daemon.bootstrapRoomIngress(entry.id, daemonGeneration, firstMessage);
       if (bootstrapped === "stale") throw new Error("Background agent management changed generation before room delivery could be initialized.");
     }
     // Only a confirmed exact-generation socket install advances the durable
@@ -1149,6 +1201,15 @@ export class SupervisorGrantCoordinator {
       lastInstalledDaemonGeneration: daemonGeneration,
     });
   }
+}
+
+/** No provider generation, worker session, or readiness stamp has ever been recorded for the entry. */
+function supervisedEntryNeverLaunched(entry: DesktopSupervisorManifestEntry): boolean {
+  return entry.executionGenerationId == null
+    && entry.providerContinuationId == null
+    && entry.providerPid == null
+    && entry.agentSessionId == null
+    && entry.readyReachedAt == null;
 }
 
 function requiresSupervisorGrant(entry: DesktopSupervisorManifestEntry): boolean {

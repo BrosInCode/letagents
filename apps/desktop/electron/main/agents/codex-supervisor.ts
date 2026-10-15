@@ -22,7 +22,6 @@ import { emitPersistedLocalRoomMessage } from "../room-stream.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import { emitToMainWindow } from "../window.js";
 import { publishSupervisorActivity } from "../supervisor-daemon.js";
-import { launchLegacyWithOwnership } from "../supervisor-ownership.js";
 import {
   cloudRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
@@ -1241,21 +1240,7 @@ export async function startDesktopManagedAgent(
   input: DesktopManagedAgentStartInput,
 ): Promise<DesktopManagedAgentStartResult> {
   await desktopShellEnvironmentReady();
-  if (input.supervisorEntryId || (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1")) {
-    return desktopManagedAgentRuntimes.start(input);
-  }
-  const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
-  const reservationId = `legacy_${randomUUID()}`;
-  return launchLegacyWithOwnership({
-    reserve: () => supervisorDaemonClient.reserveLegacyLane(input.roomIdentifier, input.providerId, reservationId).then(() => undefined),
-    start: () => desktopManagedAgentRuntimes.start(input),
-    activate: (started) => supervisorDaemonClient.activateLegacyLane(reservationId, started.session.id).then(() => undefined),
-    stop: async (started) => {
-      const stopped = await desktopManagedAgentRuntimes.stop({ sessionId: started.session.id, stopMode: "worker" });
-      if (!stopped) throw new Error("Spawned legacy agent could not be stopped after ownership activation failed.");
-    },
-    release: () => supervisorDaemonClient.releaseLegacyLane({ reservationId }).then(() => undefined),
-  });
+  return desktopManagedAgentRuntimes.start(input);
 }
 
 async function inspectDesktopManagedCodexAgentSession(
@@ -2348,17 +2333,7 @@ export async function stopDesktopManagedAgent(
   if (owned?.supervisorEntryId) {
     throw new Error("This agent is daemon-supervised. Change its desired state instead of using legacy stop controls.");
   }
-  const stopped = await desktopManagedAgentRuntimes.stop(input);
-  if (stopped && (input.stopMode === "worker" || input.shutdownServer === true)
-    && (process.platform === "darwin" || process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1")) {
-    const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
-    await supervisorDaemonClient.releaseLegacyLane({
-      sessionId: stopped.id,
-      roomIdentifier: stopped.roomIdentifier,
-      provider: stopped.providerId,
-    });
-  }
-  return stopped;
+  return desktopManagedAgentRuntimes.stop(input);
 }
 
 export async function stopDaemonOwnedManagedAgent(sessionId: string): Promise<DesktopManagedAgentSession | null> {

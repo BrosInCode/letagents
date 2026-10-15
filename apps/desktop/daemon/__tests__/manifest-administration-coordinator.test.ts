@@ -11,17 +11,13 @@ import {
   type StoredAgentConfiguration,
 } from "../manifest-administration-coordinator.js";
 import { projectDaemonCreateRequestReplayParameters } from "../manifest-entry-projection.js";
-import {
-  deriveProviderConfigurationSnapshot,
-  providerSupportsConcurrentSupervisedAgents,
-} from "../provider-configuration.js";
+import { deriveProviderConfigurationSnapshot } from "../provider-configuration.js";
 import { DaemonFenceLostError } from "../singleton.js";
 import { supervisedPermissionProfilesForProvider } from "../supervised-permission-profiles.js";
 import type {
   DaemonActivityEvent,
   DaemonManifest,
   DaemonManifestEntry,
-  LegacyLaneOwner,
 } from "../types.js";
 
 const DAEMON_GENERATION = 7;
@@ -59,21 +55,6 @@ function activity(overrides: Partial<DaemonActivityEvent> = {}): DaemonActivityE
     payload_truncated: false,
     payload_redacted: false,
     durable_payload_ref: null,
-    ...overrides,
-  };
-}
-
-function legacyOwner(overrides: Partial<LegacyLaneOwner> = {}): LegacyLaneOwner {
-  return {
-    reservation_id: "legacy-1",
-    room_id: "room-1",
-    provider: "legacy-provider",
-    owner_pid: 10,
-    owner_process_identity: "birth-1",
-    state: "active",
-    session_id: "session-1",
-    created_at: CREATED_AT,
-    updated_at: CREATED_AT,
     ...overrides,
   };
 }
@@ -143,13 +124,13 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
       events.push(`store:get-purge:${operationId}`);
       return purgeComplete ? { phase: "complete" } as never : null;
     },
-    async write(expectedGeneration, entries, legacyLaneOwners, commitFence) {
+    async write(expectedGeneration, entries, commitFence) {
       events.push(`store:write:${expectedGeneration}`);
       assert.equal(expectedGeneration, durableManifestGeneration, "manifest write must use the durable generation");
       await commitFence(async () => {
         events.push("store:commit");
         durableManifestGeneration += 1;
-        manifest = { generation: durableManifestGeneration, entries, legacy_lane_owners: legacyLaneOwners };
+        manifest = { generation: durableManifestGeneration, entries };
       });
       return { generation: durableManifestGeneration };
     },
@@ -274,17 +255,10 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
     },
     policies: {
       projectCreateReplayParameters: projectDaemonCreateRequestReplayParameters,
-      providerSupportsConcurrentAgents: providerSupportsConcurrentSupervisedAgents,
       deriveProviderConfiguration: deriveProviderConfigurationSnapshot,
       permissionProfilesForProvider: supervisedPermissionProfilesForProvider,
       sanitizeActivity: sanitizeDaemonActivityEvent,
       safeErrorDetail: schedulerErrorDetail,
-    },
-    lanes: {
-      liveOwners: (owners) => {
-        events.push("lanes:live");
-        return [...owners];
-      },
     },
     convergence: {
       request: (entryId) => { events.push(`convergence:${entryId}`); },
@@ -324,7 +298,6 @@ test("entry validation and create replay preserve exact validation and convergen
     "authority:assert",
     "store:get-purge:purge:agent-1",
     "store:load",
-    "lanes:live",
     "store:write:4",
     "authority:fence",
     "authority:assert",
@@ -428,54 +401,22 @@ test("manifest.put rejects caller-supplied polling custody before any write or c
   }
 });
 
-test("put enforces purge, supervised, and live legacy lane ownership without overfencing stopped claims", async () => {
+test("put enforces purge and admits a second supervised entry for the same room and provider", async () => {
   const purged = harness();
   purged.setPurgeComplete(true);
   await assert.rejects(purged.subject.putManifestEntry(entry()), /was permanently purged/);
 
   const supervised = harness([entry({ id: "owner", desired_state: "running" })]);
-  await assert.rejects(
-    supervised.subject.putManifestEntry(entry({ id: "candidate", desired_state: "paused" })),
-    /already owned by supervised entry 'owner'/,
-  );
-
-  const legacy = harness();
-  (legacy.manifest as DaemonManifest).legacy_lane_owners = [legacyOwner()];
-  await assert.rejects(
-    legacy.subject.putManifestEntry(entry({ desired_state: "running" })),
-    /already owned by legacy reservation 'legacy-1'/,
-  );
-  assert.equal((await legacy.subject.putManifestEntry(entry({ id: "stopped", desired_state: "stopped" }))).id, "stopped");
+  const candidate = await supervised.subject.putManifestEntry(entry({ id: "candidate", desired_state: "paused" }));
+  assert.equal(candidate.id, "candidate");
+  assert.deepEqual(supervised.manifest.entries.map((current) => current.id), ["owner", "candidate"]);
 });
 
-test("restart quarantine stops every duplicate non-concurrent lane owner and preserves concurrent providers", async () => {
-  const state = harness([
-    entry({ id: "left", desired_state: "running" }),
-    entry({ id: "right", desired_state: "paused" }),
-    entry({ id: "terminal", desired_state: "stopped", observed_state: "stopped" }),
-    entry({ id: "codex-left", provider: "codex", desired_state: "running" }),
-    entry({ id: "codex-right", provider: "codex", desired_state: "running" }),
-  ]);
-
-  await state.subject.quarantineDuplicateSupervisedLaneOwners();
-
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "left")?.desired_state, "stopped");
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "right")?.desired_state, "stopped");
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "left")?.last_error,
-    "LetAgents found multiple supervised agents for this provider lane after restart and stopped them to prevent duplicate work.");
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "terminal")?.last_error, undefined);
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "codex-left")?.desired_state, "running");
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "codex-right")?.desired_state, "running");
-  assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
-});
-
-test("display naming trims, avoids no-op commits, and keeps legacy-owner cleanup in the write", async () => {
+test("display naming trims and avoids no-op commits", async () => {
   const state = harness([entry()]);
-  (state.manifest as DaemonManifest).legacy_lane_owners = [legacyOwner()];
 
   const renamed = await state.subject.setDisplayName("agent-1", "  Renamed  ");
   assert.equal(renamed.display_name, "Renamed");
-  assert.equal(state.events.includes("lanes:live"), true);
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
 
   state.events.length = 0;

@@ -234,8 +234,6 @@ const supervisedLaunch = useSupervisedAgentLaunch({
   roomIdentifier: () => props.roomIdentifier,
   roomLabel,
   providerId: selectedProviderId,
-  supportsConcurrentAgents: () =>
-    selectedProvider.value?.capabilities.includes("concurrent_supervised_agents") === true,
   authCommand,
   authCommandForProvider,
   currentVersion: setup.currentVersion,
@@ -447,9 +445,7 @@ async function startManagedAgent(
           supervisedConflict.value
           || (!retryingSamePreDurableLaunch && (supervisedLaunchView.value || launchStarted.value))
         ),
-        hasRecoveryCandidate: Boolean(supervisedRecoveryCandidate.value),
         recoveringCandidate: recoveringSupervisedCandidate.value,
-        supportsConcurrentAgents: selectedProvider.value?.capabilities.includes("concurrent_supervised_agents") === true,
       })) return;
       if (!hasSupervisedRuntime(selectedProvider.value)) {
         throw new Error("This provider has not passed the durable supervision evidence gate.");

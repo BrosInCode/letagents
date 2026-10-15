@@ -464,7 +464,6 @@ export interface DesktopApi {
     getServiceSnapshot?: () => Promise<import("./agents.js").DesktopSupervisorServiceSnapshot>;
     listAgents: (roomIdentifier?: string | null) => Promise<DesktopSupervisorManifestEntry[]>;
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
-    resumeOwnershipTransfer: (id: string) => Promise<DesktopSupervisorManifestEntry>;
     setDesiredState: (id: string, desiredState: DesktopSupervisorDesiredState) => Promise<DesktopSupervisorManifestEntry>;
     reconnectAgent: (input: import("./agents.js").DesktopSupervisorReconnectInput) => Promise<DesktopSupervisorManifestEntry>;
     recoverAgentRuntime: (input: import("./agents.js").DesktopSupervisorRuntimeRecoveryInput) => Promise<DesktopSupervisorManifestEntry>;
