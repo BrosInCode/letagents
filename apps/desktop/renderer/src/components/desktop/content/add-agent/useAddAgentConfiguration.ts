@@ -30,7 +30,6 @@ interface ConfigurationBindings {
   selectedPermissionProfile: ComputedRef<DesktopManagedAgentPermissionProfile | null>;
   showOpenModelConfig: ComputedRef<boolean>;
   showModelSelector: ComputedRef<boolean>;
-  showEffortSelector: ComputedRef<boolean>;
   providerModelOptions: ComputedRef<DesktopAgentProviderModelOption[]>;
   selectedModel: ComputedRef<string | null>;
   selectedModelSource: ComputedRef<DesktopAgentProviderModelSource | null>;
@@ -365,11 +364,6 @@ export function useAddAgentConfiguration() {
     watch(customModelId, () => {
       if (bindings.open() && bindings.selectedProviderId.value && selectedModelMode.value === "custom") {
         bindings.requestPreflight({ debounce: true });
-      }
-    });
-    watch(selectedEffort, () => {
-      if (bindings.open() && bindings.selectedProviderId.value && bindings.showEffortSelector.value) {
-        bindings.requestPreflight();
       }
     });
 
