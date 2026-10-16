@@ -64,7 +64,7 @@ test("opening a fetched repo room preserves its identity without calculating bra
       updateLocalRoomDisplayName: unused,
     },
   });
-  const { createProjectRoom, pickNewProjectParent, pickRepoRoom, openRepoRoomFromPath, getDesktopGitHubIntegrationStatus } = await import("../main/rooms/repo.js");
+  const { connectProjectToRoom, createProjectRoom, pickNewProjectParent, pickRepoRoom, openRepoRoomFromPath, getDesktopGitHubIntegrationStatus } = await import("../main/rooms/repo.js");
   const tracePath = join(repoPath, ".git", "room-opening-trace.jsonl");
   const previousTrace = process.env.GIT_TRACE2_EVENT;
   try {
@@ -196,6 +196,54 @@ test("opening a fetched repo room preserves its identity without calculating bra
       assert.equal(await pending, null);
       dialogResult = Promise.resolve({ canceled: false, filePaths: [repoPath] });
       assert.equal(await pickNewProjectParent(), repoPath);
+    });
+    await t.test("reconnecting a published local project keeps its original room and never publishes chat", async () => {
+      const { resolveRoomIdentifierFromPath } = await import("../repo-status.js");
+      const { bindProjectRoot } = await import("../main/project-bindings-store.js");
+      const parent = realpathSync(mkdtempSync(join(tmpdir(), "letagents-connect-published-")));
+      const localPath = join(parent, "Scene Finder");
+      const unrelatedPath = join(parent, "Other project");
+      for (const path of [localPath, unrelatedPath]) {
+        mkdirSync(path);
+      }
+      try {
+        const plain = await resolveRoomIdentifierFromPath(localPath);
+        const plainContext = { roomIdentifier: plain.roomIdentifier, gitRoom: null };
+        const plainBinding = await bindProjectRoot({ context: plainContext, rootPath: localPath, source: "local_folder" });
+        for (const path of [localPath, unrelatedPath]) {
+          execFileSync("git", ["init", "-b", "main"], { cwd: path, stdio: "ignore" });
+        }
+        dialogResult = Promise.resolve({ canceled: false, filePaths: [localPath] });
+        assert.equal((await connectProjectToRoom(plainContext)).binding?.identityKey, plainBinding.identityKey);
+        const local = await resolveRoomIdentifierFromPath(localPath);
+        const context = { roomIdentifier: local.roomIdentifier, gitRoom: local.gitRoom };
+        const original = await bindProjectRoot({ context, rootPath: localPath, source: "local_git" });
+        for (const path of [localPath, unrelatedPath]) {
+          execFileSync("git", ["remote", "add", "origin", "https://github.com/example/scene-finder.git"], { cwd: path });
+        }
+        const oldSnapshot = fetchedSnapshot;
+        const roomCount = createdRooms.length;
+        const modeCount = localModes.length;
+        dialogResult = Promise.resolve({ canceled: false, filePaths: [unrelatedPath] });
+        assert.match((await connectProjectToRoom(context)).error || "", /different project/,
+          "the same remote in a different folder does not prove the original local project");
+        dialogResult = Promise.resolve({ canceled: false, filePaths: [localPath] });
+        const connected = await connectProjectToRoom(context);
+        assert.equal(connected.error, null);
+        assert.equal(connected.binding?.id, original.id);
+        assert.equal(connected.binding?.identityKey, original.identityKey);
+        assert.equal(connected.binding?.rootPath, localPath);
+        assert.equal((await connectProjectToRoom(context)).binding?.id, original.id);
+        const plainReconnected = await connectProjectToRoom(plainContext);
+        assert.equal(plainReconnected.binding?.id, plainBinding.id);
+        assert.equal(plainReconnected.binding?.identityKey, plainBinding.identityKey);
+        assert.equal(createdRooms.length, roomCount);
+        assert.equal(localModes.length, modeCount);
+        assert.strictEqual(fetchedSnapshot, oldSnapshot, "connection must not create or navigate to a hosted room");
+      } finally {
+        dialogResult = Promise.resolve({ canceled: true, filePaths: [] });
+        rmSync(parent, { recursive: true, force: true });
+      }
     });
     await t.test("new projects create an empty named local folder without overwriting existing data", async () => {
       const parent = realpathSync(mkdtempSync(join(tmpdir(), "letagents-new-project-")));

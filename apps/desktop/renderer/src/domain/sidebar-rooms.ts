@@ -141,7 +141,7 @@ export function resolveAccountRoomAliasIdentifier(
   return identifiers.size === 1 ? [...identifiers][0] || null : null;
 }
 
-function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {
+export function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {
   return new Set([
     snapshot.roomIdentifier,
     snapshot.access.roomIdentifier,
@@ -149,6 +149,8 @@ function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {
     snapshot.room?.identifier,
     snapshot.room?.name,
     snapshot.room?.code,
+    snapshot.storage?.localRoom?.roomIdentifier,
+    snapshot.storage?.localRoom?.cloudRoomIdentifier,
   ]
     .map(normalizeRoomIdentifier)
     .filter((value): value is string => Boolean(value)));

@@ -103,6 +103,27 @@ export function promoteSidebarProject(
   return { ...order, [key]: [projectId, ...sectionIds.filter((id) => id !== projectId)] };
 }
 
+/** A published local project keeps its position when its repository identity changes. */
+export function replaceSidebarProjectId(
+  order: SidebarRoomOrder,
+  previousId: string,
+  nextId: string,
+): SidebarRoomOrder {
+  if (previousId === nextId) return order;
+  // Other unpublished branches may still occupy the local project group.
+  // Keep its position after the hosted group; absent IDs are ignored on render.
+  const replace = (ids: string[]) => ids.includes(previousId)
+    ? ids.filter((id) => id !== nextId).flatMap((id) => id === previousId ? [nextId, previousId] : [id])
+    : ids;
+  const childIdsByProject = { ...order.childIdsByProject };
+  if (childIdsByProject[previousId]) {
+    childIdsByProject[nextId] = [...new Set([
+      ...childIdsByProject[previousId], ...(childIdsByProject[nextId] || []),
+    ])];
+  }
+  return { pinnedParentIds: replace(order.pinnedParentIds), roomParentIds: replace(order.roomParentIds), childIdsByProject };
+}
+
 export function isSidebarRoomReorderEnabled(
   selectionActive: boolean,
   batchActionBusy: boolean,

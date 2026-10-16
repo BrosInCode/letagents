@@ -72,9 +72,9 @@
         </SettingsRow>
 
         <SettingsRow
-          v-if="activePane !== 'storage:database' && !selectedRoomIsLocalGitRoom"
+          v-if="activePane !== 'storage:database'"
           title="Publish this local room"
-          description="Upload this room's local messages and tasks to LetAgents cloud. Nothing uploads until you click Publish."
+          :description="selectedRoomIsLocalGitRoom ? 'Add this project’s GitHub origin remote, then publish its messages and tasks to the repository room. Nothing uploads until you click Publish.' : 'Upload this room’s local messages and tasks to LetAgents cloud. Nothing uploads until you click Publish.'"
           badge="manual"
           badge-state="away"
         >
@@ -91,14 +91,6 @@
             </button>
           </template>
         </SettingsRow>
-
-        <SettingsRow
-          v-if="activePane !== 'storage:database' && selectedRoomIsLocalGitRoom"
-          title="Local Git Room"
-          description="This room stays on your Mac until you connect a repository hosted online."
-          badge="local"
-          badge-state="away"
-        />
 
         <SettingsRow
           v-if="activePane === 'storage:sync'"

@@ -12,7 +12,7 @@ import type {
   DesktopProjectConnectionResult,
 } from "../../ipc-types.js";
 import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../../repo-status.js";
-import { projectContextsCompatibleForConnection } from "../../project-bindings.js";
+import { findProjectBinding, projectContextsCompatibleForConnection } from "../../project-bindings.js";
 import { ensureRepoWorktree } from "./worktrees.js";
 import { apiFetch } from "../auth.js";
 import { openAllowedExternalUrl } from "../external-url.js";
@@ -20,6 +20,7 @@ import { isDesktopSmokeCheck } from "../smoke.js";
 import { focusMainWindow, getMainWindow } from "../window.js";
 import {
   bindProjectRoot,
+  listProjectBindings,
 } from "../project-bindings-store.js";
 import { fetchRoomSnapshot } from "./snapshot.js";
 import {
@@ -254,10 +255,16 @@ export async function connectProjectToRoom(
       roomIdentifier: resolved.roomIdentifier,
       gitRoom: resolved.gitRoom,
     };
+    const selectedRepoStatus = await buildRepoStatus(resolved.repoRoot || result.filePaths[0], { includeBranchDeltas: false });
+    const rootPath = await realpath(selectedRepoStatus.isGitRepo
+      ? selectedRepoStatus.mainRootPath || selectedRepoStatus.rootPath
+      : result.filePaths[0]);
+    const existingBinding = findProjectBinding(await listProjectBindings(), context);
     if (!projectContextsCompatibleForConnection(
       context,
       resolvedContext,
       resolved.source || "local_folder",
+      existingBinding?.rootPath === rootPath,
     )) {
       return {
         canceled: false,
@@ -266,14 +273,12 @@ export async function connectProjectToRoom(
         error: "That folder belongs to a different project room.",
       };
     }
-    const selectedRepoStatus = await buildRepoStatus(resolved.repoRoot || result.filePaths[0]);
-    const rootPath = selectedRepoStatus.isGitRepo
-      ? selectedRepoStatus.mainRootPath || selectedRepoStatus.rootPath
-      : result.filePaths[0];
     const binding = await bindProjectRoot({
       context: {
         roomIdentifier: context.roomIdentifier || resolved.roomIdentifier,
-        gitRoom: context.gitRoom || resolved.gitRoom,
+        // Reconnect preserves the existing room's identity, including a plain
+        // folder room that did not have Git metadata when it was created.
+        gitRoom: context.roomIdentifier ? context.gitRoom || null : resolved.gitRoom,
       },
       rootPath,
       source: resolved.source || "local_folder",

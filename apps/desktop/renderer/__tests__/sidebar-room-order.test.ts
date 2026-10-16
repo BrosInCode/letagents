@@ -8,6 +8,7 @@ import {
   isSidebarRoomReorderEnabled,
   orderedSidebarChildRooms,
   promoteSidebarProject,
+  replaceSidebarProjectId,
   readStoredSidebarRoomOrder,
   rememberSidebarRoomOrder,
   reorderSidebarChildRooms,
@@ -49,6 +50,23 @@ function project(
 }
 
 describe("sidebar room order", () => {
+  it("keeps a published local project in its existing position and deduplicates its hosted entry", () => {
+    const order: SidebarRoomOrder = {
+      pinnedParentIds: ["pin"], roomParentIds: ["other", "local", "later", "hosted"],
+      childIdsByProject: { local: ["one"], hosted: ["two"], other: ["untouched"] },
+    };
+    const next = replaceSidebarProjectId(order, "local", "hosted");
+    assert.deepEqual(next, { pinnedParentIds: ["pin"], roomParentIds: ["other", "hosted", "local", "later"],
+      childIdsByProject: { local: ["one"], hosted: ["one", "two"], other: ["untouched"] } });
+    assert.deepEqual(applySidebarRoomOrder([project("hosted"), project("later"), project("other")], next)
+      .map((entry) => entry.id), ["other", "hosted", "later"]);
+    assert.deepEqual(applySidebarRoomOrder([project("hosted"), project("later"), project("local", { branches: ["one"] }), project("other")], next)
+      .map((entry) => entry.id), ["other", "hosted", "local", "later"]);
+    assert.deepEqual(replaceSidebarProjectId(next, "local", "hosted"), next);
+    assert.deepEqual(replaceSidebarProjectId({ ...order, pinnedParentIds: ["before", "local", "after"], roomParentIds: [] },
+      "local", "hosted").pinnedParentIds, ["before", "hosted", "local", "after"]);
+    assert.deepEqual(order.roomParentIds, ["other", "local", "later", "hosted"]);
+  });
   it("promotes an explicit project open above saved manual order without changing pins or child order", () => {
     const projects = [project("new"), project("a", { focuses: ["a1", "a2"] }), project("b"),
       project("pin-a", { pinned: true }), project("pin-b", { pinned: true })];

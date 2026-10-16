@@ -17,6 +17,7 @@ import {
   normalizeRoomIdentifier,
   rememberRecentRootRooms,
   resolveAccountRoomAliasIdentifier,
+  roomSnapshotAliases,
   rootPathLabel,
   rootRoomEntryId,
   type RecentRootRoom,
@@ -425,17 +426,4 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
 function projectChildRooms(project: ProjectGroup): RoomEntry[] {
   return [...project.branchRooms, ...project.focusRooms];
-}
-
-function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {
-  return new Set([
-    snapshot.roomIdentifier,
-    snapshot.access.roomIdentifier,
-    snapshot.access.code,
-    snapshot.room?.identifier,
-    snapshot.room?.name,
-    snapshot.room?.code,
-  ]
-    .map(normalizeRoomIdentifier)
-    .filter((value): value is string => Boolean(value)));
 }
