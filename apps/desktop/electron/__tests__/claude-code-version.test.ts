@@ -12,7 +12,12 @@ import {
   requireSupportedClaudeCodeVersion,
   resolveClaudeCodeExecutable,
 } from "../main/agents/claude-code-version.js";
+import { clearProbeCache } from "../main/agents/provider-probe-cache.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
+
+// Every preflight case below fakes the Claude CLI with different output; no
+// case may be answered from a probe that an earlier case memoised.
+test.beforeEach(() => clearProbeCache());
 
 test("Claude Code version readiness accepts supported output and rejects old or unreadable runtimes", () => {
   assert.equal(MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION, "2.1.70");

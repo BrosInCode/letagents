@@ -5,6 +5,7 @@ import {
   existsSync,
   linkSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -36,6 +37,7 @@ const cursorSourceHome = join(tempDir, "cursor-source-home");
 const cursorManagedHome = join(tempDir, "cursor-managed-home");
 const fakeCursorBin = join(tempDir, "cursor-agent-fake.js");
 const fakeCursorMcpMode = join(tempDir, ".fake-cursor-mcp-mode");
+const fakeCursorProbeLog = join(tempDir, ".fake-cursor-probes");
 const runtimePackageRoot = join(tempDir, "runtime", "node_modules", "letagents");
 const runtimeEntry = join(runtimePackageRoot, "dist", "mcp", "server.js");
 process.env.LETAGENTS_CURSOR_SOURCE_HOME = cursorSourceHome;
@@ -59,6 +61,9 @@ writeFileSync(fakeCursorBin, `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
+if (args[0] === "--version" || args[0] === "--help") {
+  fs.appendFileSync(path.join(path.dirname(process.argv[1]), ".fake-cursor-probes"), args[0] + " " + process.cwd() + "\\n");
+}
 if (args[0] === "--version") {
   console.log("cursor-agent fake 1.0.0");
   process.exit(0);
@@ -94,6 +99,7 @@ process.exit(2);
 chmodSync(fakeCursorBin, 0o755);
 
 const { runDesktopCursorProviderPreflight } = await import("../main/agents/cursor-provider-preflight.js");
+const { clearProbeCache } = await import("../main/agents/provider-probe-cache.js");
 const { CursorIdentityAuthRequiredError } = await import("../main/agents/cursor-provider-adapter.js");
 const cursorProvider: DesktopAgentProvider = {
   id: "cursor",
@@ -153,6 +159,16 @@ function runPreflight(
 function setFakeCursorMcpMode(mode: string | null): void {
   if (mode === null) rmSync(fakeCursorMcpMode, { force: true });
   else writeFileSync(fakeCursorMcpMode, `${mode}\n`);
+}
+
+// The fake CLI answers `--help` from a per-workspace fixture file, so a probe
+// memoised by an earlier case must not decide a later one.
+test.beforeEach(() => clearProbeCache());
+
+function recordedProbes(): string[] {
+  return existsSync(fakeCursorProbeLog)
+    ? readFileSync(fakeCursorProbeLog, "utf8").split("\n").filter(Boolean)
+    : [];
 }
 
 test("Cursor preflight validates write-capable permission profile flags", async () => {
@@ -422,6 +438,37 @@ test("Cursor preflight blocks unknown permission profiles", async () => {
   assert.equal(result.canStart, false);
   assert.equal(result.message, "Cursor permission profile is unknown.");
   assert.match(result.detail ?? "", /unknown_profile/);
+});
+
+test("Cursor preflight reuses its CLI probes inside the window and re-runs them after the cache is cleared", async () => {
+  const first = workspaceFixture("probe-cache-first");
+  const second = workspaceFixture("probe-cache-second");
+  writeFileSync(join(second, ".fake-cursor-help"), "Usage: cursor-agent --force --sandbox <mode>\n");
+  rmSync(fakeCursorProbeLog, { force: true });
+  setFakeCursorMcpMode("ready");
+  const probeFlags = () => recordedProbes().map((probe) => probe.split(" ", 1)[0]);
+  try {
+    for (let run = 0; run < 3; run += 1) {
+      const result = await runPreflight({ repoRootPath: first });
+      assert.equal(result.status, "ready");
+    }
+    assert.deepEqual(probeFlags(), ["--version", "--help"], "three runs spawn each CLI probe once");
+
+    // `--help` is read from the workspace, so another workspace is a new probe
+    // and must not be answered from the first workspace's cached output.
+    const unsupported = await runPreflight({ repoRootPath: second });
+    assert.equal(unsupported.status, "error");
+    assert.equal(unsupported.message, "Cursor Agent does not support the selected permission profile.");
+    assert.deepEqual(probeFlags(), ["--version", "--help", "--help"]);
+    assert.ok(recordedProbes()[2]?.endsWith("probe-cache-second"), "the second `--help` ran in the second workspace");
+
+    clearProbeCache();
+    const again = await runPreflight({ repoRootPath: first });
+    assert.equal(again.status, "ready");
+    assert.deepEqual(probeFlags(), ["--version", "--help", "--help", "--version", "--help"]);
+  } finally {
+    setFakeCursorMcpMode(null);
+  }
 });
 
 function workspaceFixture(name: string): string {
