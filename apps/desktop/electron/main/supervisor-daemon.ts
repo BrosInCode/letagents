@@ -46,7 +46,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.258";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.259";
 /**
  * The room-level state channel carries activity summaries, not history. Keep in
  * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
@@ -330,6 +330,12 @@ export function defaultInspectDaemonProcess(pid: number): DaemonIdentityInspecti
 export class SupervisorDaemonProtocolMismatchError extends Error {
   constructor(readonly clientVersion: number, readonly daemonVersion: number, message: string) {
     super(message);
+  }
+}
+
+class SupervisorDaemonRequestTimeoutError extends Error {
+  constructor(readonly method: string) {
+    super(`Supervisor daemon request timed out: ${method}`);
   }
 }
 
@@ -1649,7 +1655,16 @@ export class SupervisorDaemonClient {
     const expectedRuntimeEnvironmentFingerprint = spawnEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT!;
     let retiredGeneration: number | undefined;
     try {
-      const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION);
+      const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION)
+        .catch((error: unknown) => {
+          if (!(error instanceof SupervisorDaemonRequestTimeoutError) || error.method !== "daemon.negotiate") throw error;
+          this.assertNotRestarting();
+          // Sibling provider starts can briefly delay the service. Retry only
+          // this read, once, with the existing rich-read bound. A timeout is
+          // never evidence that another daemon may be spawned.
+          return this.request<Record<string, unknown>>("daemon.negotiate", undefined,
+            SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+        });
       this.assertNotRestarting();
       if (hold && negotiated.maintenance_hold_id !== hold.id) throw new Error("Service maintenance is pending. Use Force restart service in Settings → Updates.");
       const daemonVersion = Number(negotiated.protocol_version ?? 0);
@@ -2086,7 +2101,7 @@ export class SupervisorDaemonClient {
       }
       signal?.addEventListener("abort", onAbort, { once: true });
       socket.setEncoding("utf8");
-      socket.setTimeout(timeoutMs, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
+      socket.setTimeout(timeoutMs, () => finish(new SupervisorDaemonRequestTimeoutError(method)));
       socket.once("error", (error) => finish(error));
       socket.once("close", () => finish(new Error(`Supervisor daemon disconnected before replying: ${method}`)));
       socket.on("data", (chunk: string) => {

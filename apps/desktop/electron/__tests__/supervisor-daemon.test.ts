@@ -1509,6 +1509,7 @@ async function startWireDaemon(
   const statusRecoveryDiagnostics: { value: unknown } = { value: undefined };
   const runtimeRecoveryCapability = { v2: true };
   const maintenance = { unresponsive: false, id: null as string | null };
+  const negotiation = { delayMs: 0, error: null as string | null };
   const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
   const capturedEnvironment = supervisorDaemonSpawnEnvironment();
   const compatibilityFingerprint: { value: string | null } = {
@@ -1529,6 +1530,13 @@ async function startWireDaemon(
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
         if (maintenance.unresponsive) return;
+        if (request.method === "daemon.negotiate") {
+          if (negotiation.error) {
+            socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: negotiation.error })}\n`);
+            return;
+          }
+          responseDelayMs = negotiation.delayMs;
+        }
         result = { maintenance_hold_id: maintenance.id, healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
           ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
@@ -1631,13 +1639,13 @@ async function startWireDaemon(
         return;
       }
       const response = `${JSON.stringify({ version, id: request.id, ok: true, result })}\n`;
-      if (responseDelayMs) setTimeout(() => socket.end(response), responseDelayMs);
+      if (responseDelayMs) setTimeout(() => { if (!socket.destroyed) socket.end(response); }, responseDelayMs);
       else socket.end(response);
     });
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance };
+  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -2557,6 +2565,65 @@ test("manifest list allows a cold rich projection beyond the generic control tim
   }
 });
 
+test("startup retries only a timed-out negotiation and validates the fresh daemon response", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 23);
+  wire.negotiation.delayMs = 60;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, requestTimeoutMs: 20,
+    spawnDaemon: () => assert.fail("a slow existing daemon must never permit another spawn") });
+  try {
+    const status = await client.ensureRunning();
+    assert.equal(status.generation, 23);
+    assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate", "daemon.negotiate"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a daemon error that resembles a negotiation timeout is not retried", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 23);
+  wire.negotiation.error = "Supervisor daemon request timed out: daemon.negotiate";
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => assert.fail("an unsuccessful negotiation is not permission to spawn") });
+  try {
+    await assert.rejects(client.ensureRunning(), /request timed out: daemon.negotiate/);
+    assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("startup gives up after one bounded negotiation retry without spawning or mutating", { timeout: 18_000 }, async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 23);
+  wire.maintenance.unresponsive = true;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, requestTimeoutMs: 20,
+    spawnDaemon: () => assert.fail("timeout cannot authorize another spawn") });
+  try {
+    await assert.rejects(client.ensureRunning(), /request timed out: daemon.negotiate/);
+    assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate", "daemon.negotiate"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("Electron client uses a healthy daemon and maps manifest/attempt data", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -3261,7 +3328,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.258");
+    assert.equal(status.implementationVersion, "2.0.259");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
