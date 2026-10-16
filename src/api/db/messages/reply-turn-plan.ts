@@ -6,7 +6,8 @@
  * until every earlier position has finished its turn (answered, left the
  * room, or reported no reply) or until (k-1) × the step after the message was
  * sent. A new activation the agent must see now (a mention, a reply, a
- * human thread message or task) ends its older holds at once. An ordinary
+ * human message or task) ends its older holds at once. A newer public human
+ * sequence releases only older holds; its own order remains intact. An ordinary
  * shared human thread request can have its own reply order. Ordinary agent thread
  * participation keeps its receipt without releasing earlier held turns.
  *

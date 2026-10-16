@@ -728,19 +728,34 @@ test("the poll route hides a held turn from its worker, then delivers it with tu
   }
 });
 
-test("a quick follow-up broadcast does not let a held agent answer the previous one out of turn", skip, async () => {
-  const a = await seed(2);
-  const before = await a.send("@Agent0 warm up");
-  const first = await a.send("what do you both think?");
-  const [, heldOnFirst] = await order(a, first.message.id);
-  const second = await a.send("and one more question for you both");
-  const secondOrder = await order(a, second.message.id);
-  assert.equal(secondOrder[0], heldOnFirst, "the held agent speaks first on the follow-up");
-  assert.deepEqual((await a.turns(first.message.id)).map((row) => row.released), [true, false],
-    "position 1 of the follow-up does not release the earlier hold");
-  assert.deepEqual((await a.read(heldOnFirst!, before.message.id)).map((message) => message.id), [],
-    "the follow-up waits behind the earlier held turn");
+test("a newer human broadcast passes older holds and preserves its own order and receipts", skip, async () => {
+  const a = await seed(3);
+  const first = await a.send("@everyone what do you think?");
+  const second = await a.send("@everyone pause while I decide");
+  assert.deepEqual((await a.turns(first.message.id)).map(row => row.released), [true, true, true]);
+  assert.deepEqual((await a.turns(second.message.id)).map(row => [row.turn_position, row.released]), [[1, true], [2, false], [3, false]]);
+  const [next] = await order(a, second.message.id);
+  assert.ok((await a.read(next!)).some(message => message.id === second.message.id), "new first speaker is not hidden behind the old sequence");
+  const receipts = await client!.pool.query("SELECT receipt_state FROM message_agent_receipts WHERE message_room_id=$1", [a.room.id]);
+  assert.ok(receipts.rows.every(row => row.receipt_state === "queued"), "release does not ACK, cancel or consume work");
 });
+
+for (const restriction of ["visibility", "rental", "anonymous", "agent", "agent_session", "hidden_prompt"] as const) {
+  test(`a persisted ${restriction} message cannot acquire the human sequence bypass`, skip, async () => {
+    const a = await seed(3);
+    const first = await a.send("@everyone discuss this");
+    await a.send("@everyone another question", {
+      with_created_message_in_transaction: async (tx: MessageCreateTransaction, message: {number: number}) => {
+        const {sql} = await import("drizzle-orm");
+        const changes = {visibility: sql`visibility='internal'`, rental: sql`rental_session_id='fixture-rental'`,
+          anonymous: sql`publisher_account_id=NULL`, agent: sql`source='agent'`,
+          agent_session: sql`publisher_agent_session_id='fixture-session'`, hidden_prompt: sql`text='', agent_prompt_kind='auto'`};
+        await tx.execute(sql`UPDATE messages SET ${changes[restriction]} WHERE room_id=${a.room.id} AND number=${message.number}`);
+      },
+    });
+    assert.deepEqual((await a.turns(first.message.id)).map(row => row.released), [true, false, false]);
+  });
+}
 
 test("a legacy silent position 1 does not stall the chain after a deadline release", skip, async () => {
   const a = await seed();
