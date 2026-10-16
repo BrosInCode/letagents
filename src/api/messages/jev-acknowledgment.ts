@@ -13,7 +13,10 @@ export function buildAcknowledgmentRequest(input: AcknowledgmentInput) {
     || !Array.isArray(input.recentConversation)
     || input.recentConversation.length > 6
     || input.recentConversation.some(entry => !entry || !["human", "agent"].includes(entry.kind)
-      || typeof entry.text !== "string" || entry.text.length > 1_200)) return null;
+      || typeof entry.text !== "string")
+    // Retain the original six × 1,200-character payload budget while allowing
+    // a complete long reply. Never trim a late proposal or instruction.
+    || input.recentConversation.reduce((total, entry) => total + entry.text.length, 0) > 7_200) return null;
   return {
     state: { recent_conversation: input.recentConversation.map(({ kind, text }) => ({ kind, text })), latest_human_message: input.text },
     questions: {

@@ -40,6 +40,12 @@ test("standalone package needs no dependencies or keys for dry-run; preserves me
     assert.ok(holdoutReport.results.every(row => row.id.startsWith("holdout-")));
     assert.equal(holdoutReport.results.filter(row => row.status === "ineligible").length, 4);
     assert.equal(holdoutReport.results.filter(row => row.expected === "independent_acknowledgment").length, 12);
+    const long = await run(script, ["--suite", "long-context", "--dry-run", "--json", reportFile], env);
+    assert.equal(long.code, 0, long.output);
+    const longReport = JSON.parse(await readFile(reportFile, "utf8"));
+    assert.equal(longReport.suite, "long-context");
+    assert.equal(longReport.results.length, 12);
+    assert.equal(longReport.results.filter(row => row.status === "ineligible").length, 1);
     assert.equal((await run(script, [], env)).code, 2, "missing credentials fail closed");
 
     let count = 0;
@@ -78,7 +84,7 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
   const workflow = parse(await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8"));
   assert.equal(workflow.on.workflow_dispatch.inputs.purpose.default, "checks");
   assert.deepEqual(workflow.on.workflow_dispatch.inputs.purpose.options, ["checks", "room-ack-evaluation"]);
-  assert.deepEqual(workflow.on.workflow_dispatch.inputs.ack_suite.options, ["baseline", "holdout"]);
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.ack_suite.options, ["baseline", "holdout", "long-context"]);
   assert.equal(workflow.on.workflow_dispatch.inputs.ack_suite.default, "baseline");
   for (const name of ["build", "integration-tests", "npm-publish", "docker", "deploy"]) {
     assert.equal(workflow.jobs[name].if, ["build", "integration-tests"].includes(name)
