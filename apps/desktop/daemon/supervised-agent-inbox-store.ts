@@ -9,6 +9,7 @@ import { pendingRuntimeRecovery } from "./runtime-recovery-journal.js";
 import type { RetainedExecutionDetail } from "../shared/execution-protocol.js";
 import type { PreparedRoomContext, MessageIntervention } from "../shared/message-outcome.js";
 import { prepareRoomContext } from "./prepared-room-context.js";
+import { freezeQueuedPeers, hasFrozenPeerBatch } from "./queued-peer-deliveries.js";
 
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
@@ -206,7 +207,8 @@ const UNTOUCHED_PENDING_SQL = `(i.state='pending' AND i.attempt_count=0 AND i.pr
   AND i.outcome IS NULL AND i.last_error IS NULL AND i.failure_code IS NULL AND i.blocked_by_inbox_item_id IS NULL
   AND i.next_attempt_at_ms IS NULL AND i.terminal_reason IS NULL
   AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e WHERE e.inbox_item_id=i.inbox_item_id
-    AND e.idempotency_key NOT IN ('received:0','queued:0','queued:person_first') AND e.idempotency_key NOT GLOB 'passed:*')
+    AND e.idempotency_key NOT IN ('received:0','queued:0','queued:person_first') AND e.idempotency_key NOT GLOB 'passed:*'
+    AND e.idempotency_key NOT GLOB 'peer_batch_assigned:*')
   AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=i.inbox_item_id)
   AND NOT EXISTS (SELECT 1 FROM turn_control_journals j WHERE j.inbox_item_id=i.inbox_item_id))`;
 /**
@@ -490,8 +492,25 @@ export class SupervisedAgentInboxStore {
    * until that turn completes with a reply or no reply (checkpointNormalizedTerminal
    * settles them); a skip, stop, failure or unreadable result leaves them queued.
    */
-  private dispatchActivation(database: DatabaseSync, head: SupervisedInboxItem): InboxActivation {
-    const { queued_notices: _stale, ...activation } = head.activation;
+  private dispatchActivation(database: DatabaseSync, head: SupervisedInboxItem, untouched: boolean, timestamp: string): InboxActivation {
+    // Dispatch bookkeeping changes fresh eligibility, but never the already
+    // committed membership assigned to a proven pre-native retry.
+    if (hasFrozenPeerBatch(database, head.inbox_item_id)) return head.activation;
+    // Exact quote/recipient eligibility is checked against the immutable
+    // publication pin inside freezeQueuedPeers, including quoted peer heads
+    // and ordinary ordered human thread turns with peers already queued.
+    const source = head.source_message;
+    if (source && typeof source === "object" && !Array.isArray(source)
+      && ((source as Record<string, unknown>).source === "agent" || (source as Record<string, unknown>).source === "browser")
+      && head.activation.decision === "activate"
+      && head.activation.reason === "thread_participant") {
+      const rows = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched
+        FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
+          AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+        ORDER BY i.fifo_sequence LIMIT 17`).all(head.agent_id, head.fifo_sequence) as Row[];
+      return freezeQueuedPeers(database, head, rows.map(row => ({ ...rowToItem(row), untouched: Number(row.untouched) === 1 })), untouched, timestamp);
+    }
+    const { queued_notices: _stale, queued_peer_messages: _untrusted, ...activation } = head.activation;
     if (queuedDeliveryKind(head.source_message_id, head.source_message) !== "notice") return activation;
     const rows = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched
       FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.fifo_sequence>?
@@ -889,6 +908,14 @@ export class SupervisedAgentInboxStore {
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
   }
+  /** Reuse the queue's exact no-dispatch/retry/control-history boundary. */
+  async untouchedPending(inboxItemId: string): Promise<SupervisedInboxItem | null> {
+    return this.read(async database => {
+      const row = database.prepare(`SELECT i.* FROM supervised_agent_inbox i WHERE i.inbox_item_id=? AND ${UNTOUCHED_PENDING_SQL}`)
+        .get(inboxItemId) as Row | undefined;
+      return row ? rowToItem(row) : null;
+    });
+  }
   /** Read one stable room-source identity, including terminal legacy rows. */
   async getBySourceMessage(agentId: string, roomId: string, sourceMessageId: string): Promise<SupervisedInboxItem | null> {
     this.require(agentId, "agent_id"); this.require(roomId, "room_id"); this.require(sourceMessageId, "source_message_id");
@@ -1100,7 +1127,7 @@ export class SupervisedAgentInboxStore {
   async claimHead(agentId: string, expected?: InboxHeadSnapshot | null): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       if (pendingRuntimeRecovery(database, agentId)) return null;
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
+      const row = database.prepare(`SELECT i.*,${UNTOUCHED_PENDING_SQL} AS untouched FROM supervised_agent_inbox i WHERE i.agent_id=? AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY i.fifo_sequence LIMIT 1`).get(agentId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
       if (expected !== undefined && !sameInboxHead(expected, item)) return null;
@@ -1132,7 +1159,7 @@ export class SupervisedAgentInboxStore {
       run(database.prepare("UPDATE supervised_agent_inbox SET state='dispatching',updated_at=? WHERE inbox_item_id=? AND state='pending'"), timestamp, item.inbox_item_id);
       // A recovering row keeps the activation its existing provider turn was started with.
       if (!item.provider_turn_id && !item.outcome) {
-        const activation = this.dispatchActivation(database, item);
+        const activation = this.dispatchActivation(database, item, Number(row.untouched) === 1, timestamp);
         if (JSON.stringify(activation) !== JSON.stringify(item.activation)) {
           run(database.prepare("UPDATE supervised_agent_inbox SET activation_json=? WHERE inbox_item_id=?"), JSON.stringify(activation), item.inbox_item_id);
         }

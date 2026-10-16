@@ -11,6 +11,7 @@ import {
   canReconnectRoomAgent,
   canRecoverSavedRoomAgent,
   roomAgentRecoveryAction,
+  roomAgentSandboxStartupBlocked,
 } from "./room-agent-delivery";
 import {
   agentCompactionProgress,
@@ -409,6 +410,12 @@ const STARTUP_OBSERVATIONS_TAIL = new RegExp(
 function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   const detail = entry.lastError?.trim() || null;
   if (!detail) return null;
+  if (roomAgentSandboxStartupBlocked(entry)) {
+    const recovery = roomAgentRecoveryAction(entry);
+    const nextStep = recovery === "recovery_options" ? " Use Recovery options to restart and resume."
+      : recovery === "recover" ? " Recover the agent to restart and resume." : "";
+    return `Agent startup needs attention. Review the startup error.${nextStep}`;
+  }
   // A start refused over the owner's own setup leads with what the launch said, not with the scheduler's prefix.
   const refusal = ownerSetupRefusalReason(detail);
   if (refusal) return refusal;
@@ -1072,7 +1079,7 @@ function actionAvailability(
     { kind: "reconnect", label: "Reconnect", available: stateDependentActionsAvailable && canReconnectRoomAgent(entry) },
     { kind: "recover", label: "Recover agent", available: stateDependentActionsAvailable && canRecoverSavedRoomAgent(entry) },
     { kind: "recovery_options", label: "Recovery options", available: stateDependentActionsAvailable && roomAgentRecoveryAction(entry) === "recovery_options" },
-    { kind: "reconnect_runtime", label: "Reconnect", available: canRestartRuntime && entry.desiredState === "running" && !entry.runtimeRecovery },
+    { kind: "reconnect_runtime", label: "Reconnect", available: canRestartRuntime && entry.desiredState === "running" && !entry.runtimeRecovery && !roomAgentSandboxStartupBlocked(entry) },
     { kind: "restart_runtime", label: entry.runtimeRecovery?.mode === "resume" ? "Continue restart" : "Restart and resume", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "resume"), danger: true },
     { kind: "fresh_runtime", label: entry.runtimeRecovery?.mode === "fresh" ? "Continue fresh start" : "Start fresh", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "fresh"), danger: true },
     { kind: "stop_turn", label: "Stop current turn", available: stateDependentActionsAvailable && canStopTurn },

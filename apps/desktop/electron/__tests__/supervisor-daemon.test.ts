@@ -402,7 +402,7 @@ test("host approval reads wait for scheduled startup preparation and daemon read
     child.emit("message", { type: "state_recovery_ready" });
     const [status, earlySnapshot, bootstrapSnapshot] = await Promise.all([startup, earlyRead, bootstrapRead]);
     assert.deepEqual(beforePreparation, { settled: false, spawns: 0, signerLoads: 0 });
-    assert.deepEqual(beforeReady, { settled: false, spawns: 1, signerLoads: 0 });
+    assert.deepEqual(beforeReady, { settled: false, spawns: 1, signerLoads: 1 });
     assert.equal(status.generation, 42);
     for (const snapshot of [earlySnapshot, bootstrapSnapshot]) {
       assert.equal(snapshot.available, true);
@@ -482,6 +482,73 @@ test("host approval client reports unenrolled or absent daemon without startup o
     assert.match(result.error!, /not enrolled.*Unlock.*restart/); assert.equal(loads, 0);
     assert.deepEqual(wire.requests.map(request => request.method), ["supervisor.host_approval_challenge"]);
   } finally { await closeServer(wire?.server ?? null, env.socketPath); await env.cleanup(); }
+});
+
+test("new daemon births prepare signing before the verifier deadline and keep maintenance fenced", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  try {
+    for (const mode of ["available", "locked", "maintenance"] as const) await t.test(mode, async () => {
+      const env = await fixture();
+      const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+      let release!: (value: typeof signer) => void;
+      let deny!: (error: Error) => void;
+      const loading = new Promise<typeof signer>((resolve, reject) => { release = resolve; deny = reject; });
+      let entered!: () => void;
+      const didLoad = new Promise<void>(resolve => { entered = resolve; });
+      let loads = 0; let spawns = 0;
+      const retained: { wire: Awaited<ReturnType<typeof startWireDaemon>> | null } = { wire: null };
+      const child = new EventEmitter() as ChildProcess;
+      Object.defineProperty(child, "connected", { value: true });
+      const sent: Array<{ type?: string; publicKey?: string | null }> = [];
+      child.send = ((message: typeof sent[number], callback: () => void) => {
+        sent.push(message); callback();
+        setImmediate(() => child.emit("message", { type: "state_recovery_ready" }));
+        return true;
+      }) as ChildProcess["send"];
+      const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+        loadApprovalSigner: async () => { loads++; entered(); return loading; },
+        spawnDaemon: () => {
+          spawns++;
+          void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42).then(value => {
+            retained.wire = value;
+            child.emit("message", { type: "host_approval_verifier_request", id: "00000000-0000-4000-8000-000000000000" });
+          });
+          return child;
+        },
+      });
+      const startup = client.ensureRunning();
+      void startup.catch(() => undefined);
+      try {
+        await didLoad;
+        assert.equal(client.ensureRunning(), startup, "concurrent callers share the same preparation");
+        assert.equal(spawns, 0, "secure storage finishes before the child begins its verifier deadline");
+        if (mode === "maintenance") await client.stopForMaintenance().catch(() => undefined);
+        if (mode === "locked") deny(new Error("private-storage-error")); else release(signer);
+        if (mode === "maintenance") {
+          await assert.rejects(startup, /restart|paused/i);
+          assert.equal(spawns, 0, "maintenance requested during signing prevents a late spawn");
+        } else {
+          assert.equal((await startup).generation, 42);
+          assert.deepEqual(sent, [{ type: "host_approval_verifier", id: "00000000-0000-4000-8000-000000000000",
+            publicKey: mode === "available" ? signer.publicKey : null }]);
+          assert.equal(spawns, 1); assert.equal(loads, 1);
+          assert.doesNotMatch(JSON.stringify(sent), /private-storage-error/);
+          await client.ensureRunning();
+          assert.equal(loads, 1, "attaching to a compatible daemon does not unseal signing again");
+        }
+      } finally {
+        release(signer);
+        child.emit("message", { type: "state_recovery_ready" });
+        await startup.catch(() => undefined);
+        await closeServer(retained.wire?.server ?? null, env.socketPath);
+        await env.cleanup();
+      }
+    });
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+  }
 });
 
 test("host approval identity is OS-sealed, private, exclusive across creators, and stable on reopen", async () => {
@@ -894,6 +961,9 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
     database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
   }
   const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  // Newer Node versions protect sqlite_master by default. Only this disposable
+  // historical-schema fixture intentionally rewrites it; production keeps protection.
+  database.enableDefensive?.(false);
   database.exec("PRAGMA writable_schema=ON");
   database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
   database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
@@ -902,6 +972,7 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
   );
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
     UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
+  database.enableDefensive?.(true);
   database.close();
   await chmod(statePath, 0o600);
   const mainModule = new URL("../../daemon/main.ts", import.meta.url).href;
@@ -1438,6 +1509,7 @@ async function startWireDaemon(
   const statusRecoveryDiagnostics: { value: unknown } = { value: undefined };
   const runtimeRecoveryCapability = { v2: true };
   const maintenance = { unresponsive: false, id: null as string | null };
+  const negotiation = { delayMs: 0, error: null as string | null };
   const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
   const capturedEnvironment = supervisorDaemonSpawnEnvironment();
   const compatibilityFingerprint: { value: string | null } = {
@@ -1458,6 +1530,13 @@ async function startWireDaemon(
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
         if (maintenance.unresponsive) return;
+        if (request.method === "daemon.negotiate") {
+          if (negotiation.error) {
+            socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: negotiation.error })}\n`);
+            return;
+          }
+          responseDelayMs = negotiation.delayMs;
+        }
         result = { maintenance_hold_id: maintenance.id, healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
           ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
@@ -1560,13 +1639,13 @@ async function startWireDaemon(
         return;
       }
       const response = `${JSON.stringify({ version, id: request.id, ok: true, result })}\n`;
-      if (responseDelayMs) setTimeout(() => socket.end(response), responseDelayMs);
+      if (responseDelayMs) setTimeout(() => { if (!socket.destroyed) socket.end(response); }, responseDelayMs);
       else socket.end(response);
     });
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance };
+  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -2486,6 +2565,65 @@ test("manifest list allows a cold rich projection beyond the generic control tim
   }
 });
 
+test("startup retries only a timed-out negotiation and validates the fresh daemon response", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 23);
+  wire.negotiation.delayMs = 60;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, requestTimeoutMs: 20,
+    spawnDaemon: () => assert.fail("a slow existing daemon must never permit another spawn") });
+  try {
+    const status = await client.ensureRunning();
+    assert.equal(status.generation, 23);
+    assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate", "daemon.negotiate"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a daemon error that resembles a negotiation timeout is not retried", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 23);
+  wire.negotiation.error = "Supervisor daemon request timed out: daemon.negotiate";
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => assert.fail("an unsuccessful negotiation is not permission to spawn") });
+  try {
+    await assert.rejects(client.ensureRunning(), /request timed out: daemon.negotiate/);
+    assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("startup gives up after one bounded negotiation retry without spawning or mutating", { timeout: 18_000 }, async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 23);
+  wire.maintenance.unresponsive = true;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, requestTimeoutMs: 20,
+    spawnDaemon: () => assert.fail("timeout cannot authorize another spawn") });
+  try {
+    await assert.rejects(client.ensureRunning(), /request timed out: daemon.negotiate/);
+    assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate", "daemon.negotiate"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("Electron client uses a healthy daemon and maps manifest/attempt data", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -3190,7 +3328,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.250");
+    assert.equal(status.implementationVersion, "2.0.261");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

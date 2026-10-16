@@ -8,6 +8,27 @@ import {
   type ExecutionDelegationDecisionIntent,
 } from "../../../shared/execution-delegation-decision.mjs";
 import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
+import type { PeerReceiptResult } from "./queued-peer-deliveries.js";
+
+/** Exact self-receipt reporting for messages explicitly delivered in another turn. */
+export async function reportGroupedNoReply(input: {
+  roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
+}): Promise<PeerReceiptResult> {
+  if (isLocalRoomApi(input.apiUrl) || !/^msg_[1-9]\d*$/.test(input.sourceMessageId)) {
+    throw new Error("Grouped receipt requires a canonical hosted room source.");
+  }
+  const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.sourceMessageId}/agent-receipts/self`, {
+    method: "PUT", redirect: "error", headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
+    body: JSON.stringify({ receipt_state: "no_reply" }), signal: AbortSignal.any([input.signal, AbortSignal.timeout(CLOUD_REQUEST_TIMEOUT_MS)]),
+  });
+  const body = await response.json().catch(() => null) as Record<string, unknown> | null;
+  if (response.ok && body?.success === true && body.receipt_state === "no_reply"
+    && typeof body.receipt_id === "string" && body.receipt_id.trim()) return "no_reply";
+  // A separate tool reply may already have settled this exact receipt. A bare
+  // compare-and-set conflict, unavailable or any other HTTP error stays pending.
+  if (response.status === 409 && (body?.receipt_state === "replied" || body?.receipt_state === "cancelled")) return body.receipt_state;
+  throw new Error(`Grouped receipt was not acknowledged (HTTP ${response.status}).`);
+}
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
 // Public deployments commonly terminate idle upstream requests at 60 seconds.

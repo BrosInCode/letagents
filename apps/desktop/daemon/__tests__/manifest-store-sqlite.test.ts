@@ -12,6 +12,7 @@ import { projectStateWatchActivity } from "../state-watch-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
 import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
@@ -43,10 +44,12 @@ function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync):
     DELETE FROM lifecycle_projection_totals WHERE provider='open-model';
     ${noDelete}`);
   const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.enableDefensive?.(false); // Only the disposable three-provider legacy fixture.
   database.exec("PRAGMA writable_schema=ON");
   database.prepare(`UPDATE sqlite_master SET sql=replace(sql, ?, '')
     WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+  database.enableDefensive?.(true);
   validateLegacyLifecycleProjectionLedgerSchema(database);
 }
 
@@ -3701,6 +3704,54 @@ test("a native reply winning Stop preserves its intercepted thread choice across
   }
 });
 
+test("a durable grouped no-reply winning Stop settles its exact members through shared terminal recovery", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const controlled: DaemonManifestEntry = { ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined,
+    last_turn_control_sequence: 0, provider_ref: { ...entry.provider_ref!, provider_connection: {
+      kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex:4311" } } };
+  try {
+    const initial = await store.write(0, [controlled]);
+    const messages = [72, 73].map(n => ({ source_message_id: `msg_${n}`,
+      source_message: { id: `msg_${n}`, text: `My view ${n}.`, source: "agent", sender: `Peer ${n}`, thread_root_id: "msg_1",
+        agent_identity: { actor_label: `Peer ${n}`, agent_key: `owner/peer${n}` } },
+      activation: { decision: "activate", reason: "thread_participant" } }));
+    await inbox.ingestPoll({ agent_id: controlled.id, room_id: controlled.room_id, last_observed_message_id: "msg_73", messages });
+    const db = new DatabaseSync(env.databasePath);
+    try {
+      new RoomWorkPublicationStore(db).pin({ agentId: controlled.id, roomId: controlled.room_id, apiOrigin: "https://letagents.test",
+        agentKey: "owner/self", agentInstanceId: `daemon:${controlled.id}`, hostId: "host", installationId: "installation", sourceSessionId: "session" }, ["msg_72", "msg_73"]);
+    } finally { db.close(); }
+    const head = (await inbox.claimHead(controlled.id))!;
+    assert.ok(head.activation.queued_peer_messages);
+    await inbox.checkpointTurnStarted(head.inbox_item_id, "turn-A", TEST_PROVIDER_TURN_AUTHORITY);
+    const control = await store.prepareTurnControlState(initial.generation, {
+      agentId: controlled.id, roomId: controlled.room_id, expectedInboxItemId: head.inbox_item_id, expectedSourceMessageId: "msg_72",
+      expectedProviderTurnId: "turn-A", actionId: "stop", actionSequence: 1, workAttemptId: "attempt_1", executionGenerationId: "run_1",
+      providerContinuationId: "thread_1", providerConnection: controlled.provider_ref!.provider_connection, deliveryMode: "daemon_inbox",
+      hasCorrection: false, correctionText: null, correctionStrategy: null, capability: "native_interrupt", recordedAt: new Date().toISOString(),
+    });
+    await inbox.checkpointNormalizedTerminal({ inbox_item_id: head.inbox_item_id, agent_id: controlled.id, execution_generation_id: "run_1",
+      provider_turn_id: "turn-A", outcome: "no_reply", text: null, evidence: "stream",
+      terminal_evidence: { turnId: "turn-A", providerContinuationId: "thread_1", outcome: "no_reply", text: null, evidence: "stream" } });
+    const dispatching = await store.replaceEntry(control.generation, { ...control.entry,
+      turn_control: { ...control.entry.turn_control!, status: "dispatching", stages: ["interrupting"] } });
+    await store.commitTurnControlState(dispatching.generation, { agentId: controlled.id, roomId: controlled.room_id, actionId: "stop",
+      workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "native_applied", settleOriginal: true, activateCorrection: false,
+      observedAt: new Date().toISOString(),
+    }, current => ({ ...current, turn_control: { ...current.turn_control!, status: "completed", interrupted: false, resumed: false, state: "idle", stages: ["applied"] } }));
+    assert.equal((await inbox.get(head.inbox_item_id))!.state, "acknowledged_no_reply");
+    const child = (await inbox.getBySourceMessage(controlled.id, controlled.room_id, "msg_73"))!;
+    assert.equal(child.state, "acknowledged_no_reply"); assert.equal(child.attempt_count, 0); assert.equal(child.provider_turn_id, null);
+    const proof = new DatabaseSync(env.databasePath);
+    try {
+      assert.ok(proof.prepare("SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key='peer_batch_report:pending'").get(child.inbox_item_id));
+      assert.equal(proof.prepare("SELECT 1 FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(child.inbox_item_id), undefined);
+    } finally { proof.close(); }
+  } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
 test("exact native failure wins every Stop resolution and admits only the new correction", async () => {
   for (const outcome of ["failed", "interrupted"] as const) {
     for (const mode of ["native_applied", "operator_applied", "operator_not_applied"] as const) {
@@ -6801,12 +6852,16 @@ test("state summary loads only the newest payload-free activity without changing
     assert.equal(summary.entries[0]!.activity!.length, 16);
     assert.equal(full.entries[0]!.activity!.length, 200);
     assert.deepEqual(await store.getEntry(entry.id), full.entries[0]);
+    assert.deepEqual(await store.getEntry(entry.id, "summary"), summary.entries[0]);
+    assert.equal(await store.getEntry("missing", "summary"), undefined);
     const database = new DatabaseSync(env.databasePath);
     try {
       // Invalid raw JSON proves the summary path never parses discarded payloads.
       database.exec("UPDATE activity_events SET payload_json='invalid-json'");
       assert.deepEqual(await store.load("summary"), summary);
+      assert.deepEqual(await store.getEntry(entry.id, "summary"), summary.entries[0]);
       await assert.rejects(store.load(), /JSON/);
+      await assert.rejects(store.getEntry(entry.id), /JSON/);
       const plan = database.prepare(`EXPLAIN QUERY PLAN SELECT sequence,summary FROM activity_events
         WHERE agent_id=? ORDER BY sequence DESC,sort_order DESC LIMIT 16`).all(entry.id);
       assert.match(JSON.stringify(plan), /activity_events_summary/);

@@ -8150,6 +8150,300 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("silence yields at its first durable checkpoint before the adapter returns", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-silent-checkpoint-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const checkpointed = deferred<void>(), adapterDone = deferred<void>();
+  let yields = 0, captures = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+    const result = { turnId: request.inboxItemId, outcome: "no_reply" as const, text: null };
+    await options?.checkpointTerminalResult?.(result);
+    await options?.checkpointTerminalResult?.(result);
+    checkpointed.resolve(); await adapterDone.promise;
+    return result;
+  }), { poll: async () => ({}), publish: async () => {}, yieldReplyTurn: async () => { yields++; } }, currentAuthority,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  async () => { captures++; });
+  try {
+    await ingest(store, "msg_81", { turn: { position: 1, count: 2, prior_speakers: [] } });
+    const pumping = delivery.pump(agent);
+    await checkpointed.promise;
+    await waitForAsync(async () => yields === 1, 1_000);
+    assert.equal(captures, 0, "the slot does not wait for the duplicate outer authority/checkpoint path");
+    assert.notEqual((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+    adapterDone.resolve(); await pumping;
+    assert.equal(yields, 1); assert.equal(captures, 1);
+  } finally { adapterDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a busy older native turn yields only the new human speaking position", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-busy-human-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const nativeStarted = deferred<void>(), nativeDone = deferred<void>();
+  const captureStarted = deferred<void>(), captureDone = deferred<void>();
+  const yielded: string[] = [], nativeSources: string[] = [];
+  const message = { id: "msg_82", source: "browser", agent_identity: null, text: "Change of plan",
+    activation: { for_current_agent: { decision: "activate", reason: "broadcast", turn: { position: 1, count: 2, prior_speakers: [] } } } };
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    nativeSources.push(String(request.sourceMessage.id));
+    await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+    if (request.sourceMessage.id === "msg_81") { nativeStarted.resolve(); await nativeDone.promise; }
+    return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+  }), { poll: async () => ({ messages: [message] }), publish: async () => {},
+    yieldReplyTurn: async input => { yielded.push(input.sourceMessageId); } }, currentAuthority,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  async (_agent, source) => { if (source === "msg_81") { captureStarted.resolve(); await captureDone.promise; } });
+  try {
+    await ingest(store, "msg_81");
+    const pumping = delivery.pump(agent); await nativeStarted.promise;
+    const intake = delivery as unknown as { pollOnce(worker: typeof agent): Promise<void> };
+    await intake.pollOnce(agent);
+    await waitForAsync(async () => yielded.includes("msg_82"), 1_000);
+    await intake.pollOnce(agent);
+    assert.deepEqual(yielded, ["msg_82"], "replaying the poll cannot repeat the optional hint");
+    const next = await store.getBySourceMessage(agent.agentId, agent.roomId, "msg_82");
+    assert.equal(next?.state, "pending"); assert.equal(next?.provider_turn_id, null); assert.equal(next?.outcome, null);
+    assert.deepEqual(nativeSources, ["msg_81"]);
+    nativeDone.resolve(); await captureStarted.promise;
+    assert.deepEqual(nativeSources, ["msg_81"], "the new native turn still waits for local capture");
+    captureDone.resolve(); await pumping;
+    assert.deepEqual(nativeSources, ["msg_81", "msg_82"]);
+    assert.ok((await store.receipts(agent.agentId)).every(row => row.state === "acknowledged_no_reply"));
+  } finally { nativeDone.resolve(); captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const mode of ["agent-source", "spoofed-human", "unordered", "single-recipient", "control-history", "old-completed",
+  "stop-before-http", "authority-lost", "handle-replaced", "http-failure", "stop-during-http", "handoff-during-http"] as const) {
+  test(`busy human scheduling yield preserves both inbox items: ${mode}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-busy-human-fence-"));
+    const path = join(root, "state.sqlite"), store = new SupervisedAgentInboxStore(path);
+    const started = deferred<void>(), nativeDone = deferred<void>();
+    const capturing = deferred<void>(), captureDone = deferred<void>();
+    const checking = deferred<void>(), checkDone = deferred<void>();
+    const reporting = deferred<void>(), aborted = deferred<void>(), cleanup = deferred<void>();
+    let allowed = true, yields = 0, polls = 0, calls = 0, publications = 0, historyAdded = false;
+    const current = { ...agent, handle: { ...agent.handle } };
+    const waitAtBinding = ["old-completed", "stop-before-http", "authority-lost", "handle-replaced"].includes(mode);
+    const originalBinding = store.providerTurnBinding.bind(store);
+    store.providerTurnBinding = async id => {
+      const binding = await originalBinding(id);
+      if (polls && waitAtBinding) { checking.resolve(); await checkDone.promise; }
+      return binding;
+    };
+    const untouched = store.untouchedPending.bind(store);
+    store.untouchedPending = async id => {
+      if (mode === "control-history" && !historyAdded) {
+        historyAdded = true;
+        const db = new DatabaseSync(path);
+        try { db.prepare(`INSERT INTO supervised_agent_inbox_events
+          (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+          SELECT ?,COALESCE(MAX(event_sequence),0)+1,'retry:test','queued',?,NULL FROM supervised_agent_inbox_events WHERE inbox_item_id=?`)
+          .run(id, new Date().toISOString(), id); } finally { db.close(); }
+      }
+      return untouched(id);
+    };
+    const activation = { decision: "activate", reason: "broadcast",
+      ...(mode === "unordered" ? {} : { turn: { position: 1, count: mode === "single-recipient" ? 1 : 2, prior_speakers: [] } }) };
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      calls++;
+      await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+      if (request.sourceMessage.id === "msg_81") { started.resolve(); await nativeDone.promise; }
+      return { turnId: request.inboxItemId, outcome: mode === "old-completed" ? "no_reply" : "reply",
+        text: mode === "old-completed" ? null : `my contribution to ${request.sourceMessage.id}` };
+    }), {
+      poll: async () => { polls++; return { messages: [{ id: "msg_82", text: "New human direction",
+        source: mode === "agent-source" ? "agent" : "browser",
+        agent_identity: mode === "spoofed-human" ? { agent_key: "other-agent" } : null,
+        activation: { for_current_agent: activation } }] }; },
+      publish: async input => { publications++; return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
+      yieldReplyTurn: async ({ sourceMessageId, signal }) => {
+        assert.equal(sourceMessageId, "msg_82"); yields++; reporting.resolve();
+        if (mode === "http-failure") throw new Error("optional scheduling hint failed");
+        if (mode === "stop-during-http" || mode === "handoff-during-http") {
+          await new Promise<void>(resolve => signal.addEventListener("abort", () => { aborted.resolve(); resolve(); }, { once: true }));
+          await cleanup.promise;
+        }
+      },
+    }, async () => allowed, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    async (_agent, source) => { if (source === "msg_81") { capturing.resolve(); await captureDone.promise; } });
+    let draining: Promise<void> | undefined;
+    try {
+      await ingest(store, "msg_81");
+      const pumping = delivery.pump(current); await started.promise;
+      const intake = delivery as unknown as { pollOnce(agent: typeof current): Promise<void>; auxiliaryControllers: Map<string, Set<AbortController>> };
+      await intake.pollOnce(current);
+      if (waitAtBinding) {
+        await checking.promise;
+        if (mode === "old-completed") { nativeDone.resolve(); await capturing.promise; }
+        if (mode === "stop-before-http") assert.equal(await delivery.interruptActiveDelivery(current), "settled");
+        if (mode === "authority-lost") allowed = false;
+        if (mode === "handle-replaced") current.handle = { ...current.handle };
+        checkDone.resolve();
+      }
+      if (mode.endsWith("during-http")) {
+        await reporting.promise;
+        if (mode === "stop-during-http") assert.equal(await delivery.interruptActiveDelivery(current), "settled");
+        let drained = false; draining = delivery.fenceAndDrain().then(() => { drained = true; });
+        await aborted.promise; await new Promise(resolve => setImmediate(resolve));
+        assert.equal(drained, false, "handoff joins the cancelled HTTP request's cleanup");
+        cleanup.resolve(); nativeDone.resolve(); captureDone.resolve();
+        await pumping; await draining;
+      } else {
+        await waitForAsync(async () => !intake.auxiliaryControllers.get(current.agentId)?.size);
+        assert.equal(yields, mode === "http-failure" ? 1 : 0);
+        if (mode === "http-failure") {
+          nativeDone.resolve(); await capturing.promise;
+          assert.equal((await store.getBySourceMessage(current.agentId, current.roomId, "msg_82"))?.state, "pending");
+          assert.equal(calls, 1); captureDone.resolve(); await pumping;
+          assert.equal(calls, 2); assert.equal(publications, 2, "a failed hint does not suppress either agent contribution");
+        } else {
+          draining = delivery.fenceAndDrain(); nativeDone.resolve(); captureDone.resolve(); await pumping; await draining;
+        }
+      }
+      if (mode.startsWith("stop-")) assert.equal((await store.getBySourceMessage(current.agentId, current.roomId, "msg_81"))?.state, "cancelled_by_user");
+    } finally {
+      checkDone.resolve(); nativeDone.resolve(); captureDone.resolve(); cleanup.resolve();
+      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("durable silence yields the remote speaking slot while capture still owns local settlement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-silent-slot-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const capturing = deferred<void>(), captureDone = deferred<void>();
+  let turns = 0, yields = 0, reports = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    turns++;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.(request.inboxItemId);
+    const result = { turnId: request.inboxItemId, outcome: "no_reply" as const, text: null,
+      publicationContract: "legacy_cursor_aggregate_v0" as const };
+    await options?.checkpointTerminalResult?.(result);
+    await options?.checkpointTerminalResult?.(result);
+    return result;
+  }), {
+    poll: async () => ({}), publish: async () => { throw new Error("no reply"); },
+    yieldReplyTurn: async () => { yields++; },
+    reportNoReply: async () => { reports++; },
+  }, currentAuthority, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  async (_agent, source) => { if (source === "msg_81") { capturing.resolve(); await captureDone.promise; } });
+  try {
+    await ingest(store, "msg_81", { turn: { position: 1, count: 2, prior_speakers: [] } });
+    await ingest(store, "msg_82");
+    const pumping = delivery.pump(agent);
+    await capturing.promise;
+    await waitForAsync(async () => yields === 1, 1_000);
+    const [head, next] = await store.receipts(agent.agentId);
+    assert.equal(JSON.parse(head!.outcome!).kind, "no_reply");
+    assert.notEqual(head!.state, "acknowledged_no_reply", "yield is scheduling progress, not a receipt ACK");
+    assert.equal(next!.state, "pending");
+    assert.equal(turns, 1, "the same agent cannot start its next native turn during capture");
+    assert.equal(reports, 0, "no_reply receipt still waits for capture and Stop arbitration");
+    captureDone.resolve(); await pumping;
+    await waitForAsync(async () => reports === 2);
+    assert.equal(yields, 1, "duplicate native checkpoints and an unsequenced successor cannot duplicate the hint");
+    assert.equal(turns, 2);
+    assert.ok((await store.receipts(agent.agentId)).every(row => row.state === "acknowledged_no_reply"));
+  } finally { captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const mode of ["stop-before-dispatch", "replacement-before-dispatch", "handle-replaced", "connection-mutated",
+  "foreign-origin", "foreign-continuation", "foreign-turn", "http-failure", "stop-during-http", "handoff-during-http",
+  "reply", "unreadable", "failed", "unsequenced", "local", "synthetic"] as const) {
+  test(`silent scheduling yield preserves settlement and authority: ${mode}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-silent-yield-fence-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const capturing = deferred<void>(), captureDone = deferred<void>();
+    const checking = deferred<void>(), checkDone = deferred<void>();
+    const reporting = deferred<void>(), aborted = deferred<void>(), httpCleanup = deferred<void>();
+    const liveAgent = { ...agent, handle: { ...agent.handle, providerConnection: { ...agent.handle.providerConnection } },
+      providerConnection: { ...agent.providerConnection }, apiUrl: mode === "local" ? "letagents-local://rooms" : agent.apiUrl };
+    let terminalCommitted = false, ownsLane = true, yields = 0, nativeCalls = 0;
+    const checkpoint = store.checkpointNormalizedTerminal.bind(store);
+    store.checkpointNormalizedTerminal = async input => { const saved = await checkpoint(input); terminalCommitted = true; return saved; };
+    const binding = store.providerTurnBinding.bind(store);
+    store.providerTurnBinding = async id => {
+      const saved = await binding(id);
+      if (!terminalCommitted) return saved;
+      checking.resolve();
+      if (["stop-before-dispatch", "replacement-before-dispatch", "handle-replaced", "connection-mutated", "foreign-origin", "foreign-continuation", "foreign-turn"].includes(mode)) await capturing.promise;
+      if (mode === "stop-before-dispatch" || mode === "replacement-before-dispatch") await checkDone.promise;
+      if (mode === "handle-replaced") liveAgent.handle = { ...liveAgent.handle };
+      if (mode === "connection-mutated") liveAgent.handle.providerConnection.processIdentity = "replacement-process";
+      if (saved && mode === "foreign-origin") return { ...saved, origin_execution_generation_id: "old-generation" };
+      if (saved && mode === "foreign-continuation") return { ...saved, provider_continuation_id: "other-thread" };
+      if (saved && mode === "foreign-turn") return { ...saved, provider_turn_id: "other-turn" };
+      return saved;
+    };
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      nativeCalls++;
+      await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+      const outcome = mode === "reply" || mode === "unreadable" || mode === "failed" ? mode : "no_reply";
+      return { turnId: request.inboxItemId, providerContinuationId: "thread", outcome, text: outcome === "reply" ? "my answer" : null,
+        evidence: "stream", publicationContract: "legacy_cursor_aggregate_v0", ...(outcome === "failed" ? { error: "provider failure" } : {}) };
+    }), {
+      poll: async () => ({}), publish: async input => ({ messageId: "msg_99", roomId: input.roomId }),
+      yieldReplyTurn: async ({ signal }) => {
+        yields++; reporting.resolve();
+        if (mode === "http-failure") throw new Error("optional yield unavailable");
+        if (mode === "stop-during-http" || mode === "handoff-during-http") {
+          await new Promise<void>(resolve => signal.addEventListener("abort", () => { aborted.resolve(); resolve(); }, { once: true }));
+          await httpCleanup.promise;
+        }
+      },
+    }, async () => ownsLane, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { capturing.resolve(); await captureDone.promise; });
+    let draining: Promise<void> | undefined;
+    try {
+      const activation = mode === "unsequenced" ? {} : { turn: { position: 1, count: 2, prior_speakers: [] } };
+      if (mode === "synthetic") await store.enqueueInitialMessage({ agent_id: liveAgent.agentId, room_id: liveAgent.roomId,
+        source_message_id: "initial:1", source_message: { id: "initial:1", text: "start" }, activation });
+      else await ingest(store, "msg_81", activation);
+      const pumping = delivery.pump(liveAgent);
+      await capturing.promise;
+      if (mode === "stop-before-dispatch" || mode === "replacement-before-dispatch") {
+        await checking.promise;
+        if (mode === "stop-before-dispatch") assert.equal(await delivery.interruptActiveDelivery(liveAgent), "settled");
+        else ownsLane = false;
+        checkDone.resolve();
+      }
+      if (mode === "http-failure" || mode === "stop-during-http" || mode === "handoff-during-http") await reporting.promise;
+      if (mode === "stop-during-http" || mode === "handoff-during-http") {
+        if (mode === "stop-during-http") assert.equal(await delivery.interruptActiveDelivery(liveAgent), "settled");
+        let drained = false;
+        draining = delivery.fenceAndDrain().then(() => { drained = true; });
+        await aborted.promise;
+        captureDone.resolve(); await pumping;
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(drained, false, "retirement joins the aborted optional request's cleanup");
+        httpCleanup.resolve(); await draining;
+      } else {
+        if (["handle-replaced", "connection-mutated", "foreign-origin", "foreign-continuation", "foreign-turn"].includes(mode)) {
+          await checking.promise;
+        }
+        // Registration precedes capture. Observe its tracked completion before
+        // asserting negatives; fencing early could otherwise hide a late hint.
+        const tracked = delivery as unknown as { auxiliaryControllers: Map<string, Set<AbortController>> };
+        await waitForAsync(async () => !tracked.auxiliaryControllers.get(agent.agentId)?.size);
+        assert.equal(yields, mode === "http-failure" ? 1 : 0);
+        // Prevent unreadable recovery and invalidated proof fixtures from retrying native work.
+        if (!["http-failure", "reply", "unsequenced", "local", "synthetic"].includes(mode)) {
+          draining = delivery.fenceAndDrain();
+        }
+        captureDone.resolve(); await pumping; await draining;
+      }
+      assert.equal(nativeCalls, 1, "optional scheduling transport cannot rerun a completed native turn");
+      if (mode === "http-failure") assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+      if (mode.startsWith("stop-")) assert.equal((await store.receipts(agent.agentId))[0]?.state, "cancelled_by_user");
+    } finally {
+      checkDone.resolve(); captureDone.resolve(); httpCleanup.resolve();
+      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("settled no-reply hints do not wait for report upload or retry a provider after transport failure", async () => {
   for (const candidate of ["codex", "claude-code"]) {
     const root = await mkdtemp(join(tmpdir(), "letagents-no-reply-hint-"));

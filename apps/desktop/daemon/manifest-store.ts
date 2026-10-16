@@ -302,9 +302,9 @@ export class ManifestStore {
     return { generation, entries };
   }
 
-  async getEntry(agentId: string): Promise<DaemonManifestEntry | undefined> {
+  async getEntry(agentId: string, activityMode: "full" | "summary" = "full"): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
-    return this.readEntryFromDatabase(database, agentId);
+    return this.readEntryFromDatabase(database, agentId, activityMode);
   }
 
   async listRoomEntries(roomId: string): Promise<DaemonManifestEntry[]> {
@@ -1396,9 +1396,9 @@ export class ManifestStore {
     });
   }
 
-  private readEntryFromDatabase(database: DatabaseSync, agentId: string): DaemonManifestEntry | undefined {
+  private readEntryFromDatabase(database: DatabaseSync, agentId: string, activityMode: "full" | "summary" = "full"): DaemonManifestEntry | undefined {
     const row = this.reads.get(database, "entry").get(agentId) as Row | undefined;
-    return row ? composeDaemonManifestEntry(this.projectionFromRow(database, row)) : undefined;
+    return row ? composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)) : undefined;
   }
 
   async replaceEntry(

@@ -1,6 +1,7 @@
 import { ManagedRuntimeRefreshDeferred } from "./provider-action-port.js";
 import { agentUsesHomeHarness, permissionChangedSince } from "./provider-configuration.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
+import { transientProviderStartFailure } from "./daemon-error-policy.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
 import type { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
 import type { ManifestStore } from "./manifest-store.js";
@@ -32,9 +33,11 @@ type ManagedReplacement = { contract: string; apiUrl: string };
 
 type ApplyInspection = ReadyReplacement | ApplyAgentConfigurationResult;
 
-/** The agent is still to be replaced: convergence should run again after this long. `notice` is for its activity. */
+/** Convergence must recheck the runtime after this wait. `notice` is for its activity. */
 export type ManagedRefreshRetry = { retryAfterMs: number; notice?: string };
 
+const MANAGED_CONTRACT_RETRY_MS = 15_000;
+const MANAGED_CONTRACT_RETRY_LIMIT = 3;
 /**
  * How long a runtime's delivery must stay blocked by its execution record
  * before the daemon restarts the runtime. A record that is only late, as it
@@ -113,6 +116,9 @@ export type RuntimeConfigurationApplyCoordinatorOptions = {
 export class RuntimeConfigurationApplyCoordinator {
   private readonly desiredContracts = new Map<string, string>();
   private readonly pendingDesiredContracts = new Map<string, Promise<string | null>>();
+  // Verification follows convergence on an already-live runtime. Its retry
+  // episode must not be reset by successful native launch/reattachment.
+  private readonly managedContractRetries = new WeakMap<ProviderInstallationToken, number>();
   private readonly admissionRefreshRequested = new WeakMap<object, ProviderInstallationToken>();
   private readonly ownerSetupEndTries = new WeakMap<ProviderInstallationToken, { all: number; unexplained: number }>();
   /** Since when each runtime's delivery has been blocked by its record, and how often it could not be replaced yet. */
@@ -377,10 +383,37 @@ export class RuntimeConfigurationApplyCoordinator {
     const binding = await managed.bindings.get(entryId);
     if (!binding || binding.room_id !== entry.room_id || binding.work_attempt_id !== entry.work_attempt_id
       || binding.execution_generation_id !== installation.executionGenerationId) return;
-    const contract = await this.desiredContract(binding.api_url);
+    const daemonGeneration = this.options.authority.currentDaemonGeneration();
+    const configurationRevision = configuration.config_revision;
+    const runtimeConfigurationRevision = configuration.runtime_configuration_revision;
+    let contract: string | null;
+    try {
+      contract = await this.desiredContract(binding.api_url);
+    } catch (error) {
+      if (!transientProviderStartFailure(error)) throw error;
+      const current = await this.options.store.getEntry(entryId);
+      const currentConfiguration = await this.options.store.getAgentConfiguration(entryId);
+      if (this.options.authority.isHandoffScheduled()
+        || this.options.authority.currentDaemonGeneration() !== daemonGeneration
+        || this.options.streams.currentInstallation(entryId) !== installation
+        || current?.desired_state !== "running" || current.observed_state !== "idle" || current.condition !== "none"
+        || currentConfiguration?.config_revision !== configurationRevision
+        || currentConfiguration.runtime_configuration_revision !== runtimeConfigurationRevision) return;
+      const attempts = (this.managedContractRetries.get(installation) ?? 0) + 1;
+      this.managedContractRetries.set(installation, attempts);
+      if (attempts > MANAGED_CONTRACT_RETRY_LIMIT) throw error;
+      // A read-only probe did not invalidate the live birth. Let the existing
+      // convergence timer verify again; delivery still requires its contract.
+      // Writing coordination_blocked here would make refreshManaged skip the retry.
+      return { retryAfterMs: MANAGED_CONTRACT_RETRY_MS };
+    }
+    if (this.options.authority.isHandoffScheduled()
+      || this.options.authority.currentDaemonGeneration() !== daemonGeneration
+      || this.options.streams.currentInstallation(entryId) !== installation) return;
+    if (contract) this.managedContractRetries.delete(installation);
     if (!contract) return;
     await this.applyInternal({ entryId, daemonGeneration: this.options.authority.currentDaemonGeneration(),
-      expectedConfigurationRevision: configuration.config_revision }, { contract, apiUrl: binding.api_url });
+      expectedConfigurationRevision: configurationRevision }, { contract, apiUrl: binding.api_url });
   }
 
   async apply(input: ApplyAgentConfigurationInput): Promise<ApplyAgentConfigurationResult> {
