@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { nextTick, ref } from "vue";
+import { nextTick, ref, shallowRef } from "vue";
 import type { DesktopLaunchEvent, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
+import type { SupervisorEntriesResource } from "../src/domain/agent-inspector-identity";
 import {
   canAddAnotherSupervisedAgent,
   useSupervisedAgentLaunch,
@@ -58,121 +59,60 @@ function memorySessionStorage() {
   };
 }
 
-test("supervised polling serializes reads and unsubscribes at terminal state", async () => {
-  const firstRead = deferred<DesktopSupervisorManifestEntry[]>();
-  const storage = memorySessionStorage();
+const READY_ENTRY_FIELDS: Partial<DesktopSupervisorManifestEntry> = {
+  observedState: "working",
+  workspacePath: "/tmp/worktree",
+  providerPid: 42,
+  agentSessionId: "agent-1",
+  agentSessionBindingState: "active",
+  workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+  nativeLiveness: { state: "working", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
+};
+
+/**
+ * The room shell's pushed supervisor entries, as the launch composable receives
+ * them. Assigning a NEW array to `entries` is a daemon push; changing `state`
+ * and `error` is a shell read finishing.
+ */
+function pushedEntries(
+  initial: readonly DesktopSupervisorManifestEntry[] = [],
+  initialState: SupervisorEntriesResource["state"] = "ready",
+) {
+  const entries = shallowRef<readonly DesktopSupervisorManifestEntry[]>(initial);
+  const state = ref<SupervisorEntriesResource["state"]>(initialState);
+  const error = ref<string | null>(null);
+  return {
+    entries,
+    state,
+    error,
+    options: {
+      entries: () => entries.value,
+      entriesState: () => state.value,
+      entriesError: () => error.value,
+    },
+  };
+}
+
+/** A renderer window whose timers are recorded, so a test can prove nothing is polled on a timer. */
+function launchWindow(supervisor: Record<string, unknown>, storage = memorySessionStorage()) {
   const timers: Array<() => void> = [];
-  let reads = 0;
-  let unsubscribed = 0;
   Object.assign(globalThis, {
     window: {
       crypto: { randomUUID: () => "launch-1" },
       sessionStorage: storage,
       setTimeout: (callback: () => void) => { timers.push(callback); return timers.length; },
       clearTimeout: () => undefined,
-      letagentsDesktop: {
-        supervisor: {
-          listAgents: () => {
-            reads += 1;
-            return reads === 1
-              ? firstRead.promise
-              : Promise.resolve([entry({
-                  observedState: "working",
-                  workspacePath: "/tmp/worktree",
-                  providerPid: 42,
-                  agentSessionId: "agent-1",
-                  agentSessionBindingState: "active",
-                  workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
-                  nativeLiveness: { state: "working", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
-                })]);
-          },
-          onLaunchEvent: () => () => { unsubscribed += 1; },
-          getLaunchEvents: async () => [],
-        },
-      },
+      letagentsDesktop: { supervisor },
     },
   });
-  const open = ref(true);
-  const launch = useSupervisedAgentLaunch({
-    open,
-    roomIdentifier: () => "room-1",
-    roomLabel: () => "Room one",
-    providerId: () => "codex",
-    authCommand: () => null,
-    authCommandForProvider: () => null,
-    currentVersion: () => 0,
-    isCurrentRequest: () => true,
-    onChooseRepo: () => undefined,
-    onCopyAuthCommand: () => undefined,
-    onRetry: () => undefined,
-    onMessage: () => undefined,
-  });
+  return { timers, storage };
+}
 
-  launch.begin();
-  launch.complete(entry());
-  assert.equal(reads, 1);
-  assert.equal(timers.length, 0, "no second read is scheduled while the first is in flight");
-
-  firstRead.resolve([entry()]);
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.equal(timers.length, 1);
-  timers.shift()!();
-  await Promise.resolve();
-  await Promise.resolve();
-  await nextTick();
-
-  assert.equal(reads, 2);
-  assert.equal(launch.view.value?.ready, true);
-  assert.equal(unsubscribed, 1);
-  assert.equal(storage.getItem("letagents:add-agent:attached-launch:room-1:supervised_launch-1"), null);
-  launch.cleanup();
-});
-
-test("an actionable reconnect block keeps a calm cadence through errors and can still resolve", async () => {
-  const timers: Array<{ callback: () => void; delay: number }> = [];
-  let reads = 0;
-  let unsubscribed = 0;
-  const blocked = entry({
-    workspacePath: "/tmp/worktree",
-    providerPid: 42,
-    observedState: "recovering",
-    condition: "coordination_blocked",
-    lastError: "durable execution generation remains live without an attachable provider handle",
-  });
-  const ready = entry({
-    workspacePath: "/tmp/worktree",
-    providerPid: 42,
-    observedState: "working",
-    condition: "none",
-    agentSessionId: "agent-1",
-    agentSessionBindingState: "active",
-    workplaceLiveness: { state: "reachable", observedAt: "2026-07-18T00:00:02.000Z", detail: null },
-  });
-  Object.assign(globalThis, {
-    window: {
-      crypto: { randomUUID: () => "launch-1" },
-      sessionStorage: memorySessionStorage(),
-      setTimeout: (callback: () => void, delay: number) => {
-        timers.push({ callback, delay });
-        return timers.length;
-      },
-      clearTimeout: () => undefined,
-      letagentsDesktop: {
-        supervisor: {
-          listAgents: async () => {
-            reads += 1;
-            if (reads === 1) return [blocked];
-            if (reads === 2) throw new Error("daemon temporarily unavailable");
-            return [ready];
-          },
-          onLaunchEvent: () => () => { unsubscribed += 1; },
-          getLaunchEvents: async () => [],
-        },
-      },
-    },
-  });
-  const launch = useSupervisedAgentLaunch({
+function pushedLaunch(
+  feed: ReturnType<typeof pushedEntries>,
+  overrides: Partial<Parameters<typeof useSupervisedAgentLaunch>[0]> = {},
+) {
+  return useSupervisedAgentLaunch({
     open: () => true,
     roomIdentifier: () => "room-1",
     roomLabel: () => "Room one",
@@ -181,41 +121,310 @@ test("an actionable reconnect block keeps a calm cadence through errors and can 
     authCommandForProvider: () => null,
     currentVersion: () => 0,
     isCurrentRequest: () => true,
+    ...feed.options,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
     onRetry: () => undefined,
     onMessage: () => undefined,
+    ...overrides,
   });
+}
+
+test("a supervised launch follows pushed entries and unsubscribes at terminal state", async () => {
+  const starting = entry();
+  const feed = pushedEntries([starting]);
+  let reads = 0;
+  let unsubscribed = 0;
+  const { timers, storage } = launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    onLaunchEvent: () => () => { unsubscribed += 1; },
+    getLaunchEvents: async () => [],
+  });
+  const launch = pushedLaunch(feed);
+
+  launch.begin();
+  launch.complete(starting);
+  await nextTick();
+  assert.equal(launch.view.value?.ready, false);
+  assert.equal(unsubscribed, 0, "an unfinished launch stays subscribed to its events");
+  assert.equal(
+    storage.getItem("letagents:add-agent:attached-launch:room-1:supervised_launch-1"),
+    "1",
+    "an unfinished launch stays attached",
+  );
+
+  feed.entries.value = [entry(READY_ENTRY_FIELDS)];
+  await nextTick();
+
+  assert.equal(launch.view.value?.ready, true);
+  assert.equal(unsubscribed, 1);
+  assert.equal(storage.getItem("letagents:add-agent:attached-launch:room-1:supervised_launch-1"), null);
+
+  feed.entries.value = [entry({ observedState: "failed", condition: "runtime_error" })];
+  await nextTick();
+  assert.equal(launch.view.value?.ready, true, "a finished launch stops following later pushes");
+  assert.equal(reads, 0, "pushed entries replace the daemon read loop");
+  assert.equal(timers.length, 0, "following pushed entries schedules no timers");
+  launch.cleanup();
+});
+
+test("an actionable reconnect block stays on the card through a read error and resolves on a later push", async () => {
+  const blocked = entry({
+    workspacePath: "/tmp/worktree",
+    providerPid: 42,
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError: "durable execution generation remains live without an attachable provider handle",
+  });
+  const ready = entry(READY_ENTRY_FIELDS);
+  const feed = pushedEntries([blocked]);
+  let reads = 0;
+  let unsubscribed = 0;
+  const { timers } = launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    onLaunchEvent: () => () => { unsubscribed += 1; },
+    getLaunchEvents: async () => [],
+  });
+  const launch = pushedLaunch(feed);
 
   launch.begin();
   launch.complete(blocked);
-  await Promise.resolve();
-  await Promise.resolve();
   await nextTick();
 
   assert.equal(launch.view.value?.status, "blocked");
   assert.equal(launch.view.value?.recovery, null);
   assert.equal(unsubscribed, 0, "blocked recovery remains subscribed to real lifecycle evidence");
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0]!.delay, 4_000, "a blocked card uses the calm live-region cadence");
+  assert.equal(launch.conflictLookupError.value, null);
 
-  timers.shift()!.callback();
-  await Promise.resolve();
-  await Promise.resolve();
+  feed.error.value = "The daemon socket closed.";
+  feed.state.value = "error";
   await nextTick();
 
-  assert.equal(launch.view.value?.status, "blocked");
-  assert.equal(timers.length, 1);
-  assert.equal(timers[0]!.delay, 4_000, "a daemon read error does not accelerate blocked polling");
+  assert.equal(launch.view.value?.status, "blocked", "a shell read error keeps the blocked card");
+  assert.equal(launch.conflict.value?.id, blocked.id);
+  assert.equal(launch.conflictLookupTone.value, "warning");
+  assert.match(launch.conflictLookupError.value ?? "", /Couldn't refresh supervised status: The daemon socket closed\./);
+  assert.match(launch.conflictLookupError.value ?? "", /We'll keep watching without restarting the agent\./);
+  assert.equal(unsubscribed, 0);
 
-  timers.shift()!.callback();
-  await Promise.resolve();
-  await Promise.resolve();
+  feed.entries.value = [ready];
+  feed.error.value = null;
+  feed.state.value = "ready";
   await nextTick();
 
   assert.equal(launch.view.value?.ready, true);
+  assert.equal(launch.conflictLookupError.value, null, "a later successful push clears the warning");
+  assert.equal(unsubscribed, 1);
+  assert.equal(reads, 0, "a blocked card does not read the daemon on its own");
+  assert.equal(timers.length, 0, "a blocked card schedules no polling timers");
+  launch.cleanup();
+});
+
+test("a pushed list without the launch triggers exactly one confirming read before the launch is lost", async () => {
+  const feed = pushedEntries([entry()]);
+  const confirmingRead = deferred<DesktopSupervisorManifestEntry[]>();
+  let reads = 0;
+  let unsubscribed = 0;
+  launchWindow({
+    listAgents: () => { reads += 1; return confirmingRead.promise; },
+    onLaunchEvent: () => () => { unsubscribed += 1; },
+    getLaunchEvents: async () => [],
+  });
+  const launch = pushedLaunch(feed);
+
+  launch.begin();
+  launch.complete(entry());
+  await nextTick();
+  assert.equal(reads, 0, "a launch present in the pushed list needs no read");
+
+  feed.entries.value = [];
+  await nextTick();
+  assert.equal(reads, 1, "a missing launch is confirmed with one direct read");
+  assert.equal(launch.view.value?.failed, false, "the launch is not lost before the read answers");
+
+  feed.state.value = "refreshing";
+  await nextTick();
+  feed.state.value = "ready";
+  await nextTick();
+  assert.equal(reads, 1, "pushes during the confirming read do not start another read");
+
+  confirmingRead.resolve([]);
+  await Promise.resolve();
+  await Promise.resolve();
+  await nextTick();
+
+  assert.equal(reads, 1);
+  assert.equal(launch.conflict.value, null);
+  assert.equal(launch.view.value?.failed, true);
+  assert.equal(launch.view.value?.recovery, "retry");
+  assert.equal(launch.view.value?.failureDetail, "We lost track of this launch. Try again or dismiss it.");
+  assert.equal(unsubscribed, 1);
+
+  feed.entries.value = [];
+  feed.state.value = "refreshing";
+  await nextTick();
+  feed.state.value = "ready";
+  await nextTick();
+  assert.equal(reads, 1, "a lost launch is no longer watched");
+  launch.cleanup();
+});
+
+test("a confirming read that finds the launch applies it instead of reporting a loss", async () => {
+  const feed = pushedEntries([]);
+  let reads = 0;
+  let unsubscribed = 0;
+  launchWindow({
+    listAgents: async () => { reads += 1; return [entry(READY_ENTRY_FIELDS)]; },
+    onLaunchEvent: () => () => { unsubscribed += 1; },
+    getLaunchEvents: async () => [],
+  });
+  const launch = pushedLaunch(feed);
+
+  launch.begin();
+  launch.complete(entry());
+  await Promise.resolve();
+  await Promise.resolve();
+  await nextTick();
+
+  assert.equal(reads, 1, "an entry newer than the last push is confirmed by one read");
+  assert.equal(launch.view.value?.ready, true);
+  assert.equal(launch.view.value?.failed, false);
   assert.equal(unsubscribed, 1);
   launch.cleanup();
+});
+
+test("a failed confirming read keeps the launch and a later push resolves it", async () => {
+  const feed = pushedEntries([]);
+  let reads = 0;
+  let unsubscribed = 0;
+  launchWindow({
+    listAgents: async () => { reads += 1; throw new Error("daemon temporarily unavailable"); },
+    onLaunchEvent: () => () => { unsubscribed += 1; },
+    getLaunchEvents: async () => [],
+  });
+  const launch = pushedLaunch(feed);
+
+  launch.begin();
+  launch.complete(entry());
+  await Promise.resolve();
+  await Promise.resolve();
+  await nextTick();
+
+  assert.equal(reads, 1);
+  assert.equal(launch.conflict.value?.id, "supervised_launch-1", "a read error is not a lost launch");
+  assert.equal(launch.view.value?.failed, false);
+  assert.equal(launch.conflictLookupTone.value, "warning");
+  assert.match(launch.conflictLookupError.value ?? "", /We'll keep watching without restarting the agent\./);
+  assert.equal(unsubscribed, 0);
+
+  feed.entries.value = [entry(READY_ENTRY_FIELDS)];
+  await nextTick();
+
+  assert.equal(launch.view.value?.ready, true);
+  assert.equal(launch.conflictLookupError.value, null);
+  assert.equal(unsubscribed, 1);
+  assert.equal(reads, 1);
+  launch.cleanup();
+});
+
+test("a loading or refreshing shell never reports the launch as lost", async () => {
+  const feed = pushedEntries([], "loading");
+  let reads = 0;
+  launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    onLaunchEvent: () => () => undefined,
+    getLaunchEvents: async () => [],
+  });
+  const launch = pushedLaunch(feed);
+
+  launch.begin();
+  launch.complete(entry());
+  await nextTick();
+  assert.equal(reads, 0, "loading waits for the shell's own read");
+  assert.equal(launch.conflict.value?.id, "supervised_launch-1");
+  assert.equal(launch.view.value?.failed, false);
+
+  feed.state.value = "refreshing";
+  await nextTick();
+  assert.equal(reads, 0, "refreshing waits for the shell's own read");
+  assert.equal(launch.view.value?.failed, false);
+
+  feed.entries.value = [entry(READY_ENTRY_FIELDS)];
+  feed.state.value = "ready";
+  await nextTick();
+  assert.equal(launch.view.value?.ready, true, "the shell's result arrives through the same watch");
+  assert.equal(reads, 0);
+  launch.cleanup();
+});
+
+test("an error state without a shell message falls back to the daemon read error", async () => {
+  const feed = pushedEntries([entry()]);
+  let reads = 0;
+  launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    onLaunchEvent: () => () => undefined,
+    getLaunchEvents: async () => [],
+  });
+  const launch = pushedLaunch(feed);
+
+  launch.begin();
+  launch.complete(entry());
+  await nextTick();
+  assert.equal(launch.conflictLookupError.value, null);
+
+  feed.state.value = "error";
+  await nextTick();
+
+  assert.equal(launch.conflictLookupTone.value, "warning");
+  assert.match(
+    launch.conflictLookupError.value ?? "",
+    /Couldn't refresh supervised status: Could not refresh the supervised runtime\. Check the daemon connection; the existing runtime was not restarted\. We'll keep watching without restarting the agent\./,
+  );
+  assert.equal(launch.conflict.value?.id, "supervised_launch-1", "the card keeps the launch");
+  assert.equal(reads, 0);
+  launch.cleanup();
+});
+
+test("a push that arrives during the confirming read wins over the read result", async () => {
+  const pushedCopy = entry({ providerPid: 42, workspacePath: "/tmp/worktree" });
+  const olderReadResults: Array<[string, DesktopSupervisorManifestEntry[]]> = [
+    ["a read that misses the entry", []],
+    ["a read that finds an older failed copy", [entry({ observedState: "failed", condition: "runtime_error" })]],
+  ];
+  for (const [label, readResult] of olderReadResults) {
+    const feed = pushedEntries([]);
+    const confirmingRead = deferred<DesktopSupervisorManifestEntry[]>();
+    let reads = 0;
+    let unsubscribed = 0;
+    launchWindow({
+      listAgents: () => { reads += 1; return confirmingRead.promise; },
+      onLaunchEvent: () => () => { unsubscribed += 1; },
+      getLaunchEvents: async () => [],
+    });
+    const launch = pushedLaunch(feed);
+
+    launch.begin();
+    launch.complete(entry());
+    await nextTick();
+    assert.equal(reads, 1, `${label}: the missing entry starts one confirming read`);
+
+    feed.entries.value = [pushedCopy];
+    await nextTick();
+    assert.equal(launch.conflict.value?.providerPid, 42, `${label}: the push is applied at once`);
+
+    confirmingRead.resolve(readResult);
+    await Promise.resolve();
+    await Promise.resolve();
+    await nextTick();
+
+    assert.equal(launch.conflict.value?.providerPid, 42, `${label}: the push wins over the read result`);
+    assert.equal(launch.conflict.value?.observedState, "starting", label);
+    assert.equal(launch.view.value?.failed, false, `${label}: the launch is neither lost nor failed`);
+    assert.equal(launch.conflictLookupError.value, null, label);
+    assert.equal(unsubscribed, 0, `${label}: the launch stays watched`);
+    assert.equal(reads, 1, label);
+    launch.cleanup();
+  }
 });
 
 test("a pre-durable blocked event is terminal and releases its event subscription", async () => {
@@ -247,6 +456,9 @@ test("a pre-durable blocked event is terminal and releases its event subscriptio
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -311,6 +523,9 @@ test("failed creation recovery preserves the provider's actionable blocked event
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -369,6 +584,9 @@ test("durable manifest truth wins over a post-save terminal launch event", async
       authCommand: () => null,
       authCommandForProvider: () => null,
       currentVersion: () => 0,
+      entries: () => [durableEntry],
+      entriesState: () => "ready",
+      entriesError: () => null,
       isCurrentRequest: () => true,
       onChooseRepo: () => undefined,
       onCopyAuthCommand: () => undefined,
@@ -422,6 +640,9 @@ test("a paused durable entry is not a recoverable launch and is never resumed by
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -465,6 +686,9 @@ test("recovery ownership failures are visible and keep supervised Start fenced",
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -523,6 +747,9 @@ test("a stalled recovery scan times out into an actionable retry instead of disa
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -570,6 +797,9 @@ test("a recovery candidate arriving during a hung scan cannot be overwritten by 
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -593,47 +823,32 @@ test("a recovery candidate arriving during a hung scan cannot be overwritten by 
   launch.cleanup();
 });
 
-test("ambiguous create recovery resumes polling from the recovered running entry", async () => {
+test("ambiguous create recovery follows the recovered running entry through pushed entries", async () => {
+  const feed = pushedEntries([entry()]);
   let reads = 0;
-  Object.assign(globalThis, {
-    window: {
-      crypto: { randomUUID: () => "launch-1" },
-      setTimeout: () => 1,
-      clearTimeout: () => undefined,
-      letagentsDesktop: {
-        supervisor: {
-          listAgents: async () => {
-            reads += 1;
-            return [entry()];
-          },
-          onLaunchEvent: () => () => undefined,
-          getLaunchEvents: async () => [],
-        },
-      },
+  launchWindow({
+    listAgents: async () => {
+      reads += 1;
+      return [entry()];
     },
+    onLaunchEvent: () => () => undefined,
+    getLaunchEvents: async () => [],
   });
-  const launch = useSupervisedAgentLaunch({
-    open: () => true,
-    roomIdentifier: () => "room-1",
-    roomLabel: () => "Room one",
-    providerId: () => "codex",
-    authCommand: () => null,
-    authCommandForProvider: () => null,
-    currentVersion: () => 0,
-    isCurrentRequest: () => true,
-    onChooseRepo: () => undefined,
-    onCopyAuthCommand: () => undefined,
-    onRetry: () => undefined,
-    onMessage: () => undefined,
-  });
+  const launch = pushedLaunch(feed);
 
   launch.begin();
   await launch.recoverFailedCreation();
-  await Promise.resolve();
+  await nextTick();
 
   assert.equal(launch.creationRequestId.value, null);
   assert.equal(launch.conflict.value?.id, "supervised_launch-1");
-  assert.ok(reads >= 2, "recovery lookup is followed by active runtime polling");
+  assert.equal(reads, 1, "the recovery lookup is the only read; the running entry is followed by push");
+
+  feed.entries.value = [entry(READY_ENTRY_FIELDS)];
+  await nextTick();
+
+  assert.equal(launch.view.value?.ready, true);
+  assert.equal(reads, 1);
   launch.cleanup();
 });
 
@@ -662,6 +877,9 @@ test("missing create recovery becomes a safe retryable terminal state", async ()
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -705,6 +923,9 @@ test("failed creation recovery folds an existing stopped entry into a terminal s
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -721,84 +942,55 @@ test("failed creation recovery folds an existing stopped entry into a terminal s
 });
 
 test("a runtime that disappears becomes a dismissible terminal failure", async () => {
-  Object.assign(globalThis, {
-    window: {
-      crypto: { randomUUID: () => "launch-1" },
-      sessionStorage: memorySessionStorage(),
-      setTimeout: () => 1,
-      clearTimeout: () => undefined,
-      letagentsDesktop: {
-        supervisor: {
-          listAgents: async () => [],
-          onLaunchEvent: () => () => undefined,
-          getLaunchEvents: async () => [],
-        },
-      },
-    },
+  const feed = pushedEntries([entry()]);
+  let reads = 0;
+  launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    onLaunchEvent: () => () => undefined,
+    getLaunchEvents: async () => [],
   });
-  const launch = useSupervisedAgentLaunch({
-    open: () => true,
-    roomIdentifier: () => "room-1",
-    roomLabel: () => "Room one",
-    providerId: () => "codex",
-    authCommand: () => null,
-    authCommandForProvider: () => null,
-    currentVersion: () => 0,
-    isCurrentRequest: () => true,
-    onChooseRepo: () => undefined,
-    onCopyAuthCommand: () => undefined,
-    onRetry: () => undefined,
-    onMessage: () => undefined,
-  });
+  const launch = pushedLaunch(feed);
 
   launch.begin();
   launch.complete(entry());
+  await nextTick();
+  assert.equal(launch.conflict.value?.id, "supervised_launch-1");
+
+  feed.entries.value = [];
   await Promise.resolve();
   await Promise.resolve();
   await nextTick();
 
+  assert.equal(reads, 1, "one confirming read precedes the lost-launch report");
   assert.equal(launch.conflict.value, null);
   assert.equal(launch.view.value?.failed, true);
   assert.equal(launch.view.value?.recovery, "retry");
+  launch.dismiss();
+  assert.equal(launch.view.value, null);
 });
 
 test("explicit supervised stop performs deterministic terminal cleanup", async () => {
   let unsubscribed = 0;
+  let reads = 0;
   const messages: Array<string | null> = [];
-  const observedStop = deferred<DesktopSupervisorManifestEntry[]>();
-  Object.assign(globalThis, {
-    window: {
-      crypto: { randomUUID: () => "launch-1" },
-      setTimeout: () => 1,
-      clearTimeout: () => undefined,
-      letagentsDesktop: {
-        supervisor: {
-          listAgents: () => observedStop.promise,
-          setDesiredState: async () => entry({ desiredState: "stopped", observedState: "stopping" }),
-          onLaunchEvent: () => () => { unsubscribed += 1; },
-          getLaunchEvents: async () => [],
-        },
-      },
+  const feed = pushedEntries([entry()]);
+  launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    setDesiredState: async () => {
+      // The daemon persists the stop intent and pushes the changed manifest entry.
+      const stopping = entry({ desiredState: "stopped", observedState: "stopping" });
+      feed.entries.value = [stopping];
+      return stopping;
     },
+    onLaunchEvent: () => () => { unsubscribed += 1; },
+    getLaunchEvents: async () => [],
   });
-  const launch = useSupervisedAgentLaunch({
-    open: () => true,
-    roomIdentifier: () => "room-1",
-    roomLabel: () => "Room one",
-    providerId: () => "codex",
-    authCommand: () => null,
-    authCommandForProvider: () => null,
-    currentVersion: () => 0,
-    isCurrentRequest: () => true,
-    onChooseRepo: () => undefined,
-    onCopyAuthCommand: () => undefined,
-    onRetry: () => undefined,
-    onMessage: (message) => { messages.push(message); },
-  });
+  const launch = pushedLaunch(feed, { onMessage: (message) => { messages.push(message); } });
 
   launch.begin();
   launch.complete(entry());
   await launch.stop();
+  await nextTick();
 
   assert.equal(launch.conflict.value?.observedState, "stopping");
   assert.equal(launch.view.value?.status, "stopping");
@@ -807,9 +999,7 @@ test("explicit supervised stop performs deterministic terminal cleanup", async (
   assert.equal(unsubscribed, 0, "persisting stop intent does not yet prove the provider is fenced");
   assert.equal(messages.some((message) => message?.startsWith("Stopping ")), false, "the card solely owns the cancelling announcement");
 
-  observedStop.resolve([entry({ desiredState: "stopped", observedState: "stopped" })]);
-  await Promise.resolve();
-  await Promise.resolve();
+  feed.entries.value = [entry({ desiredState: "stopped", observedState: "stopped" })];
   await nextTick();
 
   assert.equal(launch.view.value, null);
@@ -817,50 +1007,31 @@ test("explicit supervised stop performs deterministic terminal cleanup", async (
   assert.equal(launch.stoppingEntryId.value, null);
   assert.equal(unsubscribed, 1);
   assert.match(messages.at(-1) ?? "", /is stopped/);
+  assert.equal(reads, 0, "the stop is observed through pushed entries, not reads");
 });
 
 test("a failed supervised stop exits Cancelling and remains retryable", async () => {
-  const pendingRefresh = deferred<DesktopSupervisorManifestEntry[]>();
   const messages: Array<string | null> = [];
+  const feed = pushedEntries([entry()]);
   let stopRequests = 0;
   let unsubscribed = 0;
-  Object.assign(globalThis, {
-    window: {
-      crypto: { randomUUID: () => "launch-1" },
-      sessionStorage: memorySessionStorage(),
-      setTimeout: () => 1,
-      clearTimeout: () => undefined,
-      letagentsDesktop: {
-        supervisor: {
-          listAgents: () => pendingRefresh.promise,
-          setDesiredState: async () => {
-            stopRequests += 1;
-            return entry({
-              desiredState: "stopped",
-              observedState: "failed",
-              lastError: "provider did not exit",
-            });
-          },
-          onLaunchEvent: () => () => { unsubscribed += 1; },
-          getLaunchEvents: async () => [],
-        },
-      },
+  let reads = 0;
+  launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    setDesiredState: async () => {
+      stopRequests += 1;
+      const failedStop = entry({
+        desiredState: "stopped",
+        observedState: "failed",
+        lastError: "provider did not exit",
+      });
+      feed.entries.value = [failedStop];
+      return failedStop;
     },
+    onLaunchEvent: () => () => { unsubscribed += 1; },
+    getLaunchEvents: async () => [],
   });
-  const launch = useSupervisedAgentLaunch({
-    open: () => true,
-    roomIdentifier: () => "room-1",
-    roomLabel: () => "Room one",
-    providerId: () => "codex",
-    authCommand: () => null,
-    authCommandForProvider: () => null,
-    currentVersion: () => 0,
-    isCurrentRequest: () => true,
-    onChooseRepo: () => undefined,
-    onCopyAuthCommand: () => undefined,
-    onRetry: () => undefined,
-    onMessage: (message) => { messages.push(message); },
-  });
+  const launch = pushedLaunch(feed, { onMessage: (message) => { messages.push(message); } });
 
   launch.begin();
   launch.complete(entry());
@@ -871,63 +1042,120 @@ test("a failed supervised stop exits Cancelling and remains retryable", async ()
   assert.equal(launch.view.value?.stopFailed, true);
   assert.equal(launch.view.value?.recovery, null, "the launch retry action must not replace a failed stop");
   assert.equal(launch.stoppingEntryId.value, null);
-  assert.equal(unsubscribed, 1, "a failed stop is terminal for active polling");
+  assert.equal(unsubscribed, 1, "a failed stop is terminal for the watch over pushed entries");
   assert.equal(messages.at(-1), null, "failure detail is owned by the live card, not duplicated globally");
 
   await launch.stop();
   assert.equal(stopRequests, 2, "the conflict action can retry the same stop request");
+  assert.equal(reads, 0, "a failed stop is observed through pushed entries, not reads");
+  launch.cleanup();
+});
+
+test("a pushed copy that predates the stop result is ignored until the daemon's push catches up", async () => {
+  const feed = pushedEntries([entry()]);
+  const messages: Array<string | null> = [];
+  let reads = 0;
+  let unsubscribed = 0;
+  launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    // The stop result returns before the daemon pushes the changed entry, so
+    // the pushed list still says desiredState "running".
+    setDesiredState: async () => entry({ desiredState: "stopped", observedState: "stopping" }),
+    onLaunchEvent: () => () => { unsubscribed += 1; },
+    getLaunchEvents: async () => [],
+  });
+  const launch = pushedLaunch(feed, { onMessage: (message) => { messages.push(message); } });
+
+  launch.begin();
+  launch.complete(entry());
+  await launch.stop();
+  await nextTick();
+
+  assert.equal(feed.entries.value[0]?.desiredState, "running", "the pushed list predates the stop");
+  assert.equal(launch.conflict.value?.desiredState, "stopped", "the card keeps the stop result");
+  assert.equal(launch.conflict.value?.observedState, "stopping");
+  assert.equal(launch.stoppingEntryId.value, "supervised_launch-1");
+  assert.equal(launch.view.value?.status, "stopping");
+  assert.equal(unsubscribed, 0);
+
+  feed.entries.value = [entry({ desiredState: "stopped", observedState: "stopped" })];
+  await nextTick();
+
+  assert.equal(launch.view.value, null);
+  assert.equal(launch.conflict.value, null);
+  assert.equal(launch.stoppingEntryId.value, null);
+  assert.equal(unsubscribed, 1);
+  assert.match(messages.at(-1) ?? "", /is stopped/);
+  assert.equal(reads, 0, "the stop result and the later push need no read");
+});
+
+test("a pushed copy that predates a retry result neither clears the card nor blocks the next push", async () => {
+  const stoppedCopy = entry({ desiredState: "stopped", observedState: "stopped" });
+  const feed = pushedEntries([stoppedCopy]);
+  const messages: Array<string | null> = [];
+  let reads = 0;
+  let unsubscribed = 0;
+  launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    onLaunchEvent: () => () => { unsubscribed += 1; },
+    getLaunchEvents: async () => [],
+  });
+  const launch = pushedLaunch(feed, { onMessage: (message) => { messages.push(message); } });
+
+  launch.begin();
+  launch.complete(entry({
+    desiredState: "stopped",
+    observedState: "failed",
+    lastError: "provider did not exit",
+  }));
+  assert.equal(launch.view.value?.stopFailed, true, "the card holds the failed stop");
+  const unsubscribedBeforeRetry = unsubscribed;
+
+  // The user retries; the result arrives while the pushed list still holds the earlier stop.
+  launch.begin();
+  launch.complete(entry({ desiredState: "running", observedState: "starting" }));
+  await nextTick();
+
+  assert.equal(feed.entries.value[0]?.desiredState, "stopped", "the pushed list predates the retry");
+  assert.equal(launch.conflict.value?.desiredState, "running", "the card keeps the retry result");
+  assert.notEqual(launch.view.value, null, "the stale stopped copy does not clear the card");
+  assert.equal(launch.view.value?.stopFailed, false);
+  assert.equal(launch.stoppingEntryId.value, null);
+  assert.equal(messages.some((message) => /is stopped/.test(message ?? "")), false);
+  assert.equal(unsubscribed, unsubscribedBeforeRetry, "the stale copy does not end the watch");
+
+  feed.entries.value = [entry(READY_ENTRY_FIELDS)];
+  await nextTick();
+
+  assert.equal(launch.conflict.value?.observedState, "working", "a push with the same desired state is applied");
+  assert.equal(launch.view.value?.ready, true);
+  assert.equal(unsubscribed, unsubscribedBeforeRetry + 1, "the applied push ends the watch");
+  assert.equal(reads, 0);
   launch.cleanup();
 });
 
 test("reopening restores an unfinished stop and keeps the launch fence visible", async () => {
-  const observedStop = deferred<DesktopSupervisorManifestEntry[]>();
+  const stopping = entry({ desiredState: "stopped", observedState: "stopping" });
+  const feed = pushedEntries([stopping]);
   let reads = 0;
-  Object.assign(globalThis, {
-    window: {
-      sessionStorage: memorySessionStorage(),
-      setTimeout: () => 1,
-      clearTimeout: () => undefined,
-      letagentsDesktop: {
-        supervisor: {
-          listAgents: () => {
-            reads += 1;
-            return reads === 1
-              ? Promise.resolve([entry({ desiredState: "stopped", observedState: "stopping" })])
-              : observedStop.promise;
-          },
-          onLaunchEvent: () => () => undefined,
-          getLaunchEvents: async () => [],
-        },
-      },
-    },
+  launchWindow({
+    listAgents: async () => { reads += 1; return [stopping]; },
+    onLaunchEvent: () => () => undefined,
+    getLaunchEvents: async () => [],
   });
-  const launch = useSupervisedAgentLaunch({
-    open: () => true,
-    roomIdentifier: () => "room-1",
-    roomLabel: () => "Room one",
-    providerId: () => "codex",
-    authCommand: () => null,
-    authCommandForProvider: () => null,
-    currentVersion: () => 0,
-    isCurrentRequest: () => true,
-    onChooseRepo: () => undefined,
-    onCopyAuthCommand: () => undefined,
-    onRetry: () => undefined,
-    onMessage: () => undefined,
-  });
+  const launch = pushedLaunch(feed);
 
   await launch.detectRecoverableLaunch();
   assert.equal(launch.conflict.value?.observedState, "stopping");
   assert.equal(launch.stoppingEntryId.value, "supervised_launch-1");
   assert.equal(launch.view.value?.status, "stopping");
 
-  observedStop.resolve([entry({ desiredState: "stopped", observedState: "stopped" })]);
-  await Promise.resolve();
-  await Promise.resolve();
+  feed.entries.value = [entry({ desiredState: "stopped", observedState: "stopped" })];
   await nextTick();
 
   assert.equal(launch.conflict.value, null);
   assert.equal(launch.stoppingEntryId.value, null);
+  assert.equal(reads, 1, "only the recovery scan reads; the stop finishes through pushed entries");
 });
 
 test("reopening restores a failed stop with Retry stop enabled", async () => {
@@ -957,6 +1185,9 @@ test("reopening restores a failed stop with Retry stop enabled", async () => {
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -971,62 +1202,37 @@ test("reopening restores a failed stop with Retry stop enabled", async () => {
   launch.cleanup();
 });
 
-test("an attached launch adopts stop intent published after local stop state was lost", async () => {
-  const timers: Array<() => void> = [];
+test("an attached launch adopts stop intent pushed after local stop state was lost", async () => {
+  const feed = pushedEntries([entry()]);
   let reads = 0;
-  Object.assign(globalThis, {
-    window: {
-      crypto: { randomUUID: () => "launch-1" },
-      sessionStorage: memorySessionStorage(),
-      setTimeout: (callback: () => void) => { timers.push(callback); return timers.length; },
-      clearTimeout: () => undefined,
-      letagentsDesktop: {
-        supervisor: {
-          listAgents: async () => {
-            reads += 1;
-            return [entry({
-              desiredState: "stopped",
-              observedState: reads === 1 ? "stopping" : "stopped",
-            })];
-          },
-          onLaunchEvent: () => () => undefined,
-          getLaunchEvents: async () => [],
-        },
-      },
-    },
+  const { timers } = launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    onLaunchEvent: () => () => undefined,
+    getLaunchEvents: async () => [],
   });
-  const launch = useSupervisedAgentLaunch({
-    open: () => true,
-    roomIdentifier: () => "room-1",
-    roomLabel: () => "Room one",
-    providerId: () => "codex",
-    authCommand: () => null,
-    authCommandForProvider: () => null,
-    currentVersion: () => 0,
-    isCurrentRequest: () => true,
-    onChooseRepo: () => undefined,
-    onCopyAuthCommand: () => undefined,
-    onRetry: () => undefined,
-    onMessage: () => undefined,
-  });
+  const launch = pushedLaunch(feed);
 
   launch.begin();
   launch.complete(entry());
-  await Promise.resolve();
-  await Promise.resolve();
+  await nextTick();
+  assert.equal(launch.stoppingEntryId.value, null, "the card has no stop state of its own");
+  assert.equal(launch.conflict.value?.desiredState, "running");
+
+  // A stop made elsewhere reaches the shell as a new pushed list.
+  feed.entries.value = [entry({ desiredState: "stopped", observedState: "stopping" })];
   await nextTick();
 
+  assert.equal(launch.conflict.value?.desiredState, "stopped", "a later push is applied even when it changes the desired state");
   assert.equal(launch.stoppingEntryId.value, "supervised_launch-1");
   assert.equal(launch.view.value?.status, "stopping");
-  assert.equal(timers.length, 1);
 
-  timers.shift()!();
-  await Promise.resolve();
-  await Promise.resolve();
+  feed.entries.value = [entry({ desiredState: "stopped", observedState: "stopped" })];
   await nextTick();
 
   assert.equal(launch.conflict.value, null);
   assert.equal(launch.stoppingEntryId.value, null);
+  assert.equal(reads, 0, "the stop converges through pushed entries, not reads");
+  assert.equal(timers.length, 0);
 });
 
 test("a missing entry during stop does not poison the next launch controls", async () => {
@@ -1054,6 +1260,9 @@ test("a missing entry during stop does not poison the next launch controls", asy
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1061,6 +1270,8 @@ test("a missing entry during stop does not poison the next launch controls", asy
     onMessage: () => undefined,
   });
 
+  // The pushed list is empty and ready, so the watch confirms the loss with
+  // one read while the stop request is still in flight.
   launch.begin();
   launch.complete(entry());
   await launch.stop();
@@ -1117,6 +1328,9 @@ test("recovery detection is passive and explicit recovery revalidates stale term
     authCommand: () => "codex login --device-auth",
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1186,6 +1400,9 @@ test("recovery discovery ignores an established agent whose current liveness deg
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1230,6 +1447,9 @@ test("reopening after explicit recovery automatically restores the same live lau
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [entry()],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1302,6 +1522,9 @@ test("a remounted modal restores its remembered launch ahead of newer entries", 
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => entries,
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1349,6 +1572,9 @@ test("closing before supervised creation resolves still restores the requested l
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [entry({ id: "supervised_pending-launch" })],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1392,6 +1618,9 @@ test("recovery discovery only offers the selected provider's launch", async () =
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1425,6 +1654,9 @@ test("a late result from another provider cannot block current recovery discover
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1467,6 +1699,9 @@ test("provider switching restarts an in-flight recovery scan for the selected pr
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1501,6 +1736,9 @@ test("provider switching demotes an active unfinished launch back to a recovery 
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1542,6 +1780,9 @@ test("closing during explicit recovery discards the stale response", async () =>
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1586,6 +1827,9 @@ test("provider switching cancels an in-flight recovery while preserving its cand
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1633,6 +1877,9 @@ test("provider changes cannot strand an in-flight explicit recovery", async () =
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1678,6 +1925,9 @@ test("a transient recovery lookup error keeps the candidate retryable", async ()
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1712,6 +1962,9 @@ test("a create result arriving after provider reset becomes a passive candidate"
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1745,6 +1998,9 @@ test("an ambiguously rejected create can recover its durable entry passively", a
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 1,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => false,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1779,6 +2035,9 @@ test("an authoritatively absent ambiguous create clears its pending attachment",
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1814,6 +2073,9 @@ test("an older absent lookup cannot clear a newer retry's attachment", async () 
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1859,6 +2121,9 @@ test("an ambiguous create lookup cannot cancel an explicit recovery", async () =
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -1891,6 +2156,9 @@ test("recovered launches use their own provider's authentication command", () =>
     authCommand: () => "codex login --device-auth",
     authCommandForProvider: (providerId) => providerId === "claude-code" ? "claude auth login" : null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: (command) => { copiedCommand = command; },
@@ -1922,6 +2190,9 @@ test("copying an auth recovery command advances the card to an explicit retry", 
     authCommand: () => "codex login --device-auth",
     authCommandForProvider: () => "codex login --device-auth",
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: (command) => { copiedCommand = command; },
@@ -1956,6 +2227,9 @@ test("recovered launches never fall back to another provider's authentication co
     authCommand: () => "codex login --device-auth",
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: (command) => { copiedCommand = command; },
@@ -2000,6 +2274,9 @@ test("a ready Codex card can be released for another request without stopping it
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -2176,6 +2453,9 @@ test("switching away from Codex revokes the shared Add-another eligibility and h
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => [],
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -2203,37 +2483,31 @@ test("switching away from Codex revokes the shared Add-another eligibility and h
 
 
 test("launch compaction clears on a failed refresh and returns only with fresh native progress", async () => {
-  const timers: Array<() => void> = [];
-  let reads = 0;
   const compacting = entry({ provider: "claude-code", workspacePath: "/tmp/worktree",
     providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
-  Object.assign(globalThis, { window: {
-    crypto: { randomUUID: () => "launch-1" }, sessionStorage: memorySessionStorage(),
-    setTimeout: (callback: () => void) => { timers.push(callback); return timers.length; },
-    clearTimeout: () => undefined,
-    letagentsDesktop: { supervisor: {
-      listAgents: async () => { if (++reads === 2) throw new Error("daemon unavailable"); return [compacting]; },
-      onLaunchEvent: () => () => undefined, getLaunchEvents: async () => [],
-    } },
-  } });
-  const launch = useSupervisedAgentLaunch({
-    open: () => true, roomIdentifier: () => "room-1", roomLabel: () => "Room one",
-    providerId: () => "claude-code", authCommand: () => null, authCommandForProvider: () => null,
-    currentVersion: () => 0, isCurrentRequest: () => true, onChooseRepo: () => undefined,
-    onCopyAuthCommand: () => undefined, onRetry: () => { throw new Error("must not retry"); }, onMessage: () => undefined,
+  const feed = pushedEntries([compacting]);
+  let reads = 0;
+  const { timers } = launchWindow({
+    listAgents: async () => { reads += 1; return []; },
+    onLaunchEvent: () => () => undefined, getLaunchEvents: async () => [],
   });
-  const pump = async () => { for (let n = 0; n < 10; n++) await Promise.resolve(); await nextTick(); };
+  const launch = pushedLaunch(feed, {
+    providerId: () => "claude-code",
+    onRetry: () => { throw new Error("must not retry"); },
+  });
   try {
-    launch.begin(); launch.complete(compacting); await pump();
+    launch.begin(); launch.complete(compacting); await nextTick();
     assert.equal(launch.view.value?.headline, "Compacting conversation");
-    timers.shift()!(); await pump();
+    feed.state.value = "error"; await nextTick();
     assert.notEqual(launch.view.value?.headline, "Compacting conversation");
     assert.equal(launch.conflict.value?.id, compacting.id);
     assert.equal(launch.view.value?.ready, false);
     assert.equal(launch.conflictLookupTone.value, "warning");
-    timers.shift()!(); await pump();
+    feed.entries.value = [{ ...compacting }]; feed.state.value = "ready"; await nextTick();
     assert.equal(launch.view.value?.headline, "Compacting conversation");
     assert.equal(launch.conflictLookupError.value, null);
     assert.equal(launch.view.value?.ready, false);
+    assert.equal(reads, 0);
+    assert.equal(timers.length, 0);
   } finally { launch.cleanup(); }
 });
