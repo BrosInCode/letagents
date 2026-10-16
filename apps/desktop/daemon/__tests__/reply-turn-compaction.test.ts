@@ -88,6 +88,7 @@ for (const mode of ["during-turn", "during-turn-reply", "reporting-failure", "be
       daemonGeneration: 1, ...scope, providerConnection: { ...connection },
       handle: { ...scope, pid: 1, providerConnection: { ...connection }, observedState: "working" } };
     let allowed = true, runs = 0, yields = 0, noReplies = 0, publications = 0, subscriptions = 0, disposals = 0;
+    const silentYieldKinds: unknown[] = [];
     let checkingCompaction = false;
     let listener: ((event: ProviderActionStreamEvent) => void) | null = null;
     const reported = deferred();
@@ -144,8 +145,14 @@ for (const mode of ["during-turn", "during-turn-reply", "reporting-failure", "be
       poll: async () => ({}), publish: async () => { publications++; return { messageId: "msg_2", roomId: agent.roomId }; },
       reportNoReply: async ({ sourceMessageId }) => { noReplies++; if (sourceMessageId === "msg_2") nextSettled.resolve(); },
       yieldReplyTurn: async ({ signal }) => {
-        yields++;
         const row = await store.getBySourceMessage(agent.agentId, agent.roomId, "msg_1");
+        if (row?.outcome) {
+          // A later durable silent ending is a separate scheduling boundary.
+          // It must not satisfy the pre-terminal compaction proof below.
+          silentYieldKinds.push(JSON.parse(row.outcome).kind);
+          return;
+        }
+        yields++;
         assert.equal(row?.provider_turn_id, "turn");
         assert.equal(row?.state, "dispatching", "yield has not terminalized or requeued native work");
         assert.equal(row?.outcome, null);
@@ -205,6 +212,8 @@ for (const mode of ["during-turn", "during-turn-reply", "reporting-failure", "be
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(runs, mode === "user-stop-during-http" ? 2 : 1);
       assert.equal(yields, shouldYield ? 1 : 0);
+      assert.ok(silentYieldKinds.length <= 1, "at most one additional hint follows the durable silent ending");
+      assert.ok(silentYieldKinds.every(kind => kind === "no_reply"));
       assert.equal(subscriptions, mode === "independent" ? 0 : 1);
       assert.equal(disposals, mode === "registration-failure" ? 0 : subscriptions, "observer is retired with this invocation");
       if (mode === "during-turn-reply") {
