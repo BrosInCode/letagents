@@ -402,7 +402,7 @@ test("host approval reads wait for scheduled startup preparation and daemon read
     child.emit("message", { type: "state_recovery_ready" });
     const [status, earlySnapshot, bootstrapSnapshot] = await Promise.all([startup, earlyRead, bootstrapRead]);
     assert.deepEqual(beforePreparation, { settled: false, spawns: 0, signerLoads: 0 });
-    assert.deepEqual(beforeReady, { settled: false, spawns: 1, signerLoads: 0 });
+    assert.deepEqual(beforeReady, { settled: false, spawns: 1, signerLoads: 1 });
     assert.equal(status.generation, 42);
     for (const snapshot of [earlySnapshot, bootstrapSnapshot]) {
       assert.equal(snapshot.available, true);
@@ -482,6 +482,73 @@ test("host approval client reports unenrolled or absent daemon without startup o
     assert.match(result.error!, /not enrolled.*Unlock.*restart/); assert.equal(loads, 0);
     assert.deepEqual(wire.requests.map(request => request.method), ["supervisor.host_approval_challenge"]);
   } finally { await closeServer(wire?.server ?? null, env.socketPath); await env.cleanup(); }
+});
+
+test("new daemon births prepare signing before the verifier deadline and keep maintenance fenced", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  try {
+    for (const mode of ["available", "locked", "maintenance"] as const) await t.test(mode, async () => {
+      const env = await fixture();
+      const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+      let release!: (value: typeof signer) => void;
+      let deny!: (error: Error) => void;
+      const loading = new Promise<typeof signer>((resolve, reject) => { release = resolve; deny = reject; });
+      let entered!: () => void;
+      const didLoad = new Promise<void>(resolve => { entered = resolve; });
+      let loads = 0; let spawns = 0;
+      const retained: { wire: Awaited<ReturnType<typeof startWireDaemon>> | null } = { wire: null };
+      const child = new EventEmitter() as ChildProcess;
+      Object.defineProperty(child, "connected", { value: true });
+      const sent: Array<{ type?: string; publicKey?: string | null }> = [];
+      child.send = ((message: typeof sent[number], callback: () => void) => {
+        sent.push(message); callback();
+        setImmediate(() => child.emit("message", { type: "state_recovery_ready" }));
+        return true;
+      }) as ChildProcess["send"];
+      const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+        loadApprovalSigner: async () => { loads++; entered(); return loading; },
+        spawnDaemon: () => {
+          spawns++;
+          void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42).then(value => {
+            retained.wire = value;
+            child.emit("message", { type: "host_approval_verifier_request", id: "00000000-0000-4000-8000-000000000000" });
+          });
+          return child;
+        },
+      });
+      const startup = client.ensureRunning();
+      void startup.catch(() => undefined);
+      try {
+        await didLoad;
+        assert.equal(client.ensureRunning(), startup, "concurrent callers share the same preparation");
+        assert.equal(spawns, 0, "secure storage finishes before the child begins its verifier deadline");
+        if (mode === "maintenance") await client.stopForMaintenance().catch(() => undefined);
+        if (mode === "locked") deny(new Error("private-storage-error")); else release(signer);
+        if (mode === "maintenance") {
+          await assert.rejects(startup, /restart|paused/i);
+          assert.equal(spawns, 0, "maintenance requested during signing prevents a late spawn");
+        } else {
+          assert.equal((await startup).generation, 42);
+          assert.deepEqual(sent, [{ type: "host_approval_verifier", id: "00000000-0000-4000-8000-000000000000",
+            publicKey: mode === "available" ? signer.publicKey : null }]);
+          assert.equal(spawns, 1); assert.equal(loads, 1);
+          assert.doesNotMatch(JSON.stringify(sent), /private-storage-error/);
+          await client.ensureRunning();
+          assert.equal(loads, 1, "attaching to a compatible daemon does not unseal signing again");
+        }
+      } finally {
+        release(signer);
+        child.emit("message", { type: "state_recovery_ready" });
+        await startup.catch(() => undefined);
+        await closeServer(retained.wire?.server ?? null, env.socketPath);
+        await env.cleanup();
+      }
+    });
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+  }
 });
 
 test("host approval identity is OS-sealed, private, exclusive across creators, and stable on reopen", async () => {
@@ -894,6 +961,9 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
     database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
   }
   const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  // Newer Node versions protect sqlite_master by default. Only this disposable
+  // historical-schema fixture intentionally rewrites it; production keeps protection.
+  database.enableDefensive?.(false);
   database.exec("PRAGMA writable_schema=ON");
   database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
   database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
@@ -902,6 +972,7 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
   );
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
     UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
+  database.enableDefensive?.(true);
   database.close();
   await chmod(statePath, 0o600);
   const mainModule = new URL("../../daemon/main.ts", import.meta.url).href;
@@ -3194,7 +3265,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.249");
+    assert.equal(status.implementationVersion, "2.0.258");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

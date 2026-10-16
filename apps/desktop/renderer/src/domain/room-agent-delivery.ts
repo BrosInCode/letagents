@@ -139,6 +139,18 @@ export function roomAgentDeliverySummary(
   return "Online";
 }
 
+/** A failed sandbox inspection is a refused start, not a credential handoff. */
+export function roomAgentSandboxStartupBlocked(
+  agent: Pick<DesktopSupervisorManifestEntry,
+    "provider" | "deliveryMode" | "desiredState" | "observedState" | "condition" | "runtimeRecovery" | "lastError">,
+): boolean {
+  return agent.provider === "codex" && agent.deliveryMode === "daemon_inbox" && agent.desiredState === "running"
+    && agent.observedState === "recovering" && agent.condition === "coordination_blocked"
+    && !agent.runtimeRecovery
+    && /Codex did not answer when LetAgents asked for its settings .*so LetAgents will not start it at a sandboxed access level\./i
+      .test(agent.lastError ?? "");
+}
+
 /**
  * Credential reconnect never creates a replacement. Render it only when the
  * renderer still has an exact current provider generation and worker binding
@@ -148,7 +160,7 @@ export function canReconnectRoomAgent(
   agent: Pick<DesktopSupervisorManifestEntry,
     "provider" | "deliveryMode" | "desiredState" | "observedState" | "nativeLiveness" | "roomAgentState" | "workAttemptId"
     | "agentSessionId" | "agentSessionBindingState" | "executionGenerationId"
-    | "providerContinuationId" | "providerPid" | "lastError">,
+    | "providerContinuationId" | "providerPid" | "lastError" | "condition" | "runtimeRecovery">,
 ): boolean {
   const automaticRecoveryIsActive = /retrying automatically/i.test(agent.lastError ?? "")
     && !/use reconnect to retry now/i.test(agent.lastError ?? "");
@@ -159,6 +171,7 @@ export function canReconnectRoomAgent(
     && agent.observedState !== "failed"
     && agent.nativeLiveness?.state !== "terminal"
     && !providerIsKnownStopped
+    && !roomAgentSandboxStartupBlocked(agent)
     && agent.roomAgentState?.inbox.state === "waiting_for_desktop_credentials"
     && !isBlockedIdleCursor(agent)
     && !automaticRecoveryIsActive

@@ -448,7 +448,8 @@ export class ProviderCheckpointCoordinator {
         timing.mark("generation");
       }
       if (authority.daemonGeneration !== this.authority.currentDaemonGeneration()) return false;
-      const entry = await this.store.getEntry(authority.agentId);
+      // Authority uses runtime/configuration fields, never retained output payloads.
+      const entry = await this.store.getEntry(authority.agentId, "summary");
       timing.mark("manifest");
       const handle = this.liveHandles.get(authority.agentId);
       if (!entry

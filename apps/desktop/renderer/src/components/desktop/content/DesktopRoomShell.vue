@@ -210,11 +210,12 @@
         :workers="workers"
         :supervisor-entries="supervisorEntries"
         :agent-projections="agentInspectorProjections"
+        :agent-roster-state="agentRosterState"
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetailRequest"
         @open-agent-correction="openAgentCorrectionOrInspector"
-        @refresh-room="emit('refresh-room')"
+        @refresh-room="refreshRoomAgents"
         @reveal-message="revealRecordedWorkMessage"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
       />
@@ -585,6 +586,11 @@ const agentPauseRequests = useAgentPauseRequests(supervisorEntries);
 const supervisorEntriesState = ref<SupervisorEntriesResource["state"]>("loading");
 const supervisorEntriesError = ref<string | null>(null);
 const supervisorEntriesHaveLoaded = ref(false);
+const agentRosterState = computed(() => {
+  if (supervisorEntriesState.value === "error" || props.sourceStates?.presence.status === "error") return "error";
+  if (props.roomLoading || supervisorEntriesState.value === "loading") return "loading";
+  return supervisorEntriesState.value;
+});
 const supervisorEntriesUpdatedAt = ref<string | null>(null);
 const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
 let supervisorStatusRequestToken = 0;
@@ -1588,6 +1594,16 @@ function retryAgentInspectorState(): void {
   void refreshSupervisorEntries();
 }
 
+function refreshRoomAgents(): void {
+  supervisorEntriesState.value = supervisorEntriesHaveLoaded.value ? "refreshing" : "loading";
+  supervisorEntriesError.value = null;
+  // Renew the existing subscription so Retry also repairs a failed daemon
+  // read, even when its previous subscription still appeared fresh.
+  supervisorStateSubscription.sync();
+  void refreshSupervisorEntries();
+  emit("refresh-room");
+}
+
 async function performSupervisorEntriesRefresh(): Promise<void> {
   if (!supervisorEntriesRefreshOwnerActive || !props.room.identifier) return;
   const roomIdentifier = props.room.identifier;
@@ -1637,7 +1653,11 @@ async function performSupervisorEntriesRefresh(): Promise<void> {
     supervisorEntriesUpdatedAt.value = new Date().toISOString();
     supervisorEntriesState.value = "ready";
     supervisorEntriesError.value = null;
-  } else if (!supervisorStateSubscription.state().active || !supervisorEntriesHaveLoaded.value) {
+  } else if (!supervisorEntriesHaveLoaded.value || supervisorStateSubscriptionNeedsRepair({
+    active: supervisorStateSubscription.state().active,
+    lastSnapshotAtMs: supervisorStateSubscription.state().lastSnapshotAtMs,
+    nowMs: Date.now(),
+  })) {
     // Keep the last successfully loaded entries. Consumers receive an error
     // resource instead of an empty list, so supervised identity cannot be
     // reclassified as external during a transient daemon failure.

@@ -46,7 +46,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.249";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.258";
 /**
  * The room-level state channel carries activity summaries, not history. Keep in
  * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
@@ -1684,13 +1684,23 @@ export class SupervisorDaemonClient {
     await access(this.daemonScriptPath);
     this.stopAttachedDaemonObservation();
     await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
+    // OS-backed signing may wait for disk or a Keychain dialog. Finish that
+    // before the child starts its bounded verifier handshake, rather than
+    // racing secure storage against the child's one-second IPC deadline.
+    const signer = hold ? null : await this.loadApprovalSigner().catch(() => null);
+    const approvalPublicKey = signer?.publicKey ?? null;
     this.assertNotRestarting();
+    if (signer) this.approvalSigner = {
+      fingerprint: createHash("sha256").update(Buffer.from(signer.publicKey, "base64")).digest("hex"),
+      promise: Promise.resolve(signer),
+    };
     const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory, spawnEnvironment);
     if (child.pid) {
       const identity = this.safeInspectDaemon(child.pid);
       if (identity?.state === "live" && identity.pid === child.pid) this.maintenanceTarget = { ...identity, expectedScriptPath: this.daemonScriptPath };
     }
-    const statePreparation = prepareSupervisorState(child, undefined, this.statePreparationWaitMs);
+    const statePreparation = prepareSupervisorState(child, undefined, this.statePreparationWaitMs,
+      async () => approvalPublicKey);
     const childPid = Number.isSafeInteger(child.pid) && (child.pid ?? 0) > 0 ? child.pid! : null;
     const owned = {
       pid: childPid,
