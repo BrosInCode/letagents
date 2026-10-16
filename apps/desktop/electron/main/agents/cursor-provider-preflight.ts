@@ -32,6 +32,7 @@ import {
   type LetAgentsMcpRuntime,
 } from "./letagents-mcp-runtime.js";
 import { managedAgentPermissionProfileForProvider } from "./managed-agent-permission-profiles.js";
+import { cachedProbe, probeKey } from "./provider-probe-cache.js";
 import { assertSupervisedWorkspaceGenerationSupported } from "./supervised-workspace-generation.js";
 import { apiUrl as desktopApiUrl, workspaceRoot as sourceWorkspaceRoot } from "../paths.js";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
@@ -79,7 +80,8 @@ export async function runDesktopCursorProviderPreflight(
   const command = runtimeEnv.LETAGENTS_CURSOR_AGENT_BIN ||
     provider.runtimeCommand ||
     "cursor-agent";
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv });
+  const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
+    execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {
     return missingExternalRuntimePreflight(provider, mcpStatus);
   }
@@ -128,11 +130,12 @@ export async function runDesktopCursorProviderPreflight(
     };
   }
   const launchOptions = cursorLaunchOptionsForPermissionProfile(permissionProfile.id);
-  const flagResult = await execFileWithTimeout(command, ["--help"], {
-    cwd: workspaceRoot ?? undefined,
-    env: runtimeEnv,
-    timeoutMs,
-  });
+  const flagResult = await cachedProbe(probeKey(command, ["--help"], workspaceRoot), () =>
+    execFileWithTimeout(command, ["--help"], {
+      cwd: workspaceRoot ?? undefined,
+      env: runtimeEnv,
+      timeoutMs,
+    }));
   if (!flagResult.ok || !cursorHelpSupportsLaunchOptions(flagResult, launchOptions)) {
     return {
       providerId: provider.id,

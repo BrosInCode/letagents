@@ -13,7 +13,6 @@ import type {
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
   DesktopGitRoomInfo,
-  DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfile,
   DesktopSecureStorageStatus,
 } from "../../../../../../electron/ipc-types";
@@ -32,6 +31,14 @@ import { contextualAddAgentError, type AddAgentFeedbackTone } from "./add-agent-
 
 const MODEL_PREFLIGHT_DEBOUNCE_MS = 400;
 
+/** One preflight request on its way to the main process; identical requests share it. */
+interface InFlightPreflight {
+  key: string;
+  version: number;
+  requestId: number;
+  promise: Promise<void>;
+}
+
 interface SetupBindings {
   open: () => boolean;
   roomIdentifier: () => string;
@@ -44,7 +51,6 @@ interface SetupBindings {
   externalJoinPrompt: ComputedRef<string | null>;
   selectedModel: ComputedRef<string | null>;
   selectedModelSource: ComputedRef<DesktopAgentProviderModelSource | null>;
-  selectedEffort: Ref<DesktopManagedAgentEffort | "">;
   loadOpenModelSettings: () => Promise<void>;
   loadProviderModels: (options?: { refresh?: boolean }) => Promise<void>;
   syncPermissionProfileSelection: () => void;
@@ -79,6 +85,7 @@ export function useAddAgentSetup() {
   let providerRequestId = 0;
   let worktreeRequestId = 0;
   let modelPreflightTimer: number | null = null;
+  let inFlightPreflight: InFlightPreflight | null = null;
   let setupActionInFlight = false;
   let worktreeOperationInFlight = false;
   let secureStorageFocusRecheckArmed = false;
@@ -138,53 +145,77 @@ export function useAddAgentSetup() {
       if (!selectedProviderId.value) return;
       clearScheduledModelPreflight();
       const providerId = selectedProviderId.value;
-      const version = setupVersion;
-      const requestId = ++preflightRequestId;
+      const request = {
+        roomIdentifier: bindings.roomIdentifier(),
+        roomGitRoom: bindings.roomGitRoom(),
+        repoRootPath: bindings.repoRootPath(),
+        // A room with no git binding and no repo path is genuinely repo-less:
+        // the agent runs in a private scratch workspace, so preflight must not
+        // demand a repo. This never relaxes a repo-backed room (gitRoom set) or
+        // a durable-project room (repoRootPath set).
+        roomOnly: bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim(),
+        permissionProfileId: bindings.selectedPermissionProfile.value?.id ?? null,
+        model: bindings.selectedModel.value,
+        modelSource: bindings.selectedModelSource.value,
+        refreshModels: options.refreshModels,
+        refreshEnvironment: options.refreshEnvironment,
+      };
+      // Opening the modal fires the same preflight from several watchers in
+      // one burst (provider list, provider sync, profile sync). An identical
+      // request that is still in flight is shared instead of repeated. The
+      // caller may have invalidated the current result first, which bumps the
+      // request id, so the shared run is made current again here.
+      const key = JSON.stringify([providerId, request]);
+      const shared = inFlightPreflight;
+      if (shared && shared.key === key && shared.version === setupVersion
+        && !options.refreshModels && !options.refreshEnvironment) {
+        shared.requestId = ++preflightRequestId;
+        loadingPreflight.value = true;
+        return shared.promise;
+      }
+      const record: InFlightPreflight = {
+        key,
+        version: setupVersion,
+        requestId: ++preflightRequestId,
+        promise: Promise.resolve(),
+      };
+      const isCurrent = (): boolean =>
+        isCurrentRequest(record.version) && record.requestId === preflightRequestId;
       loadingPreflight.value = true;
       loadError.value = null;
       setupConfirmation.value = null;
-      try {
-        const [result, storageStatus] = await Promise.all([
-          desktopIpc.workers.runAgentProviderPreflight(providerId, {
-          roomIdentifier: bindings.roomIdentifier(),
-          roomGitRoom: bindings.roomGitRoom(),
-          repoRootPath: bindings.repoRootPath(),
-          // A room with no git binding and no repo path is genuinely repo-less:
-          // the agent runs in a private scratch workspace, so preflight must not
-          // demand a repo. This never relaxes a repo-backed room (gitRoom set) or
-          // a durable-project room (repoRootPath set).
-          roomOnly: bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim(),
-          permissionProfileId: bindings.selectedPermissionProfile.value?.id ?? null,
-          model: bindings.selectedModel.value,
-          modelSource: bindings.selectedModelSource.value,
-          effort: bindings.selectedEffort.value || null,
-          refreshModels: options.refreshModels,
-          refreshEnvironment: options.refreshEnvironment,
-          }),
-          // Secure credential storage matters only to a supervised launch.
-          hasSupervisedRuntime(bindings.selectedProvider.value)
-            ? desktopIpc.supervisorGrant.getStorageStatus()
-            : Promise.resolve(null),
-        ]);
-        if (isCurrentRequest(version) && requestId === preflightRequestId && selectedProviderId.value === providerId) {
-          preflight.value = result;
-          secureStorageStatus.value = storageStatus;
-          if (storageStatus?.available && secureStorageRecoveryMessage.value) {
-            if (setupMessage.value === secureStorageRecoveryMessage.value) setSetupMessage(null);
-            secureStorageRecoveryMessage.value = null;
+      record.promise = (async () => {
+        try {
+          const [result, storageStatus] = await Promise.all([
+            desktopIpc.workers.runAgentProviderPreflight(providerId, request),
+            // Secure credential storage matters only to a supervised launch.
+            hasSupervisedRuntime(bindings.selectedProvider.value)
+              ? desktopIpc.supervisorGrant.getStorageStatus()
+              : Promise.resolve(null),
+          ]);
+          if (isCurrent() && selectedProviderId.value === providerId) {
+            preflight.value = result;
+            secureStorageStatus.value = storageStatus;
+            if (storageStatus?.available && secureStorageRecoveryMessage.value) {
+              if (setupMessage.value === secureStorageRecoveryMessage.value) setSetupMessage(null);
+              secureStorageRecoveryMessage.value = null;
+            }
           }
+        } catch (error) {
+          if (isCurrent() && selectedProviderId.value === providerId) {
+            loadError.value = contextualAddAgentError(
+              `Couldn't check ${bindings.selectedProvider.value?.name || "provider"} setup`,
+              error,
+              "Provider readiness could not be checked.",
+            );
+          }
+        } finally {
+          if (isCurrent()) loadingPreflight.value = false;
+          if (inFlightPreflight === record) inFlightPreflight = null;
         }
-      } catch (error) {
-        if (isCurrentRequest(version) && requestId === preflightRequestId && selectedProviderId.value === providerId) {
-          loadError.value = contextualAddAgentError(
-            `Couldn't check ${bindings.selectedProvider.value?.name || "provider"} setup`,
-            error,
-            "Provider readiness could not be checked.",
-          );
-        }
-      } finally {
-        if (isCurrentRequest(version) && requestId === preflightRequestId) loadingPreflight.value = false;
-      }
+      })();
+      inFlightPreflight = record;
+      return record.promise;
     }
 
     async function refreshSelectedProvider(options: { forceModels?: boolean; refreshEnvironment?: boolean } = {}): Promise<void> {

@@ -25,6 +25,7 @@ import {
   sensitiveCodexAppServerEnvValues,
 } from "./codex-app-server.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
+import { cachedProbe, clearProbeCache, probeKey } from "./provider-probe-cache.js";
 import {
   openCodeInstallCommand,
   resolveOpenCodeBinary,
@@ -181,7 +182,8 @@ async function codexPreflight(
 ): Promise<DesktopAgentProviderPreflight> {
   const runtimeEnv = desktopRuntimeEnvironment();
   const resolvedCommand = resolveCodexExecutable({ env: runtimeEnv });
-  const versionResult = await execFileWithTimeout(resolvedCommand, ["--version"], { timeoutMs, env: runtimeEnv });
+  const versionResult = await cachedProbe(probeKey(resolvedCommand, ["--version"]), () =>
+    execFileWithTimeout(resolvedCommand, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {
     return missingExternalRuntimePreflight(provider, mcpStatus);
   }
@@ -199,7 +201,8 @@ async function codexPreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const authResult = await execFileWithTimeout(resolvedCommand, ["login", "status"], { timeoutMs, env: runtimeEnv });
+  const authResult = await cachedProbe(probeKey(resolvedCommand, ["login", "status"]), () =>
+    execFileWithTimeout(resolvedCommand, ["login", "status"], { timeoutMs, env: runtimeEnv }));
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -248,7 +251,8 @@ async function claudeCodePreflight(
 ): Promise<DesktopAgentProviderPreflight> {
   const runtimeEnv = desktopRuntimeEnvironment();
   const command = resolveClaudeCodeExecutable(runtimeEnv, provider.runtimeCommand || "claude");
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv });
+  const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
+    execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv }));
   if (commandMissing(versionResult)) {
     return missingExternalRuntimePreflight(provider, mcpStatus);
   }
@@ -279,7 +283,8 @@ async function claudeCodePreflight(
       mcpStatus,
     };
   }
-  const authResult = await execFileWithTimeout(command, ["auth", "status"], { timeoutMs, env: runtimeEnv });
+  const authResult = await cachedProbe(probeKey(command, ["auth", "status"]), () =>
+    execFileWithTimeout(command, ["auth", "status"], { timeoutMs, env: runtimeEnv }));
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -325,7 +330,8 @@ async function openModelPreflight(
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
   const command = resolveOpenCodeBinary();
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
+  const versionResult = await cachedProbe(probeKey(command, ["--version"]), () =>
+    execFileWithTimeout(command, ["--version"], { timeoutMs }));
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
@@ -410,10 +416,15 @@ export async function runDesktopAgentProviderPreflight(
   options: DesktopAgentProviderPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
   if (input.refreshEnvironment) {
+    // "Check again": the user may have installed or signed in since the last
+    // probe. Clear again after the refresh, because a preflight that ran in the
+    // meantime may have memoised answers from the old environment.
+    clearProbeCache();
     await refreshDesktopShellEnvironment();
     if (process.platform === "darwin" || process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1") {
       await supervisorDaemonClient.restartForEnvironmentRefresh();
     }
+    clearProbeCache();
   } else {
     await desktopShellEnvironmentReady();
   }
@@ -577,7 +588,24 @@ async function installOpenCodeRuntime(
   };
 }
 
+/**
+ * A setup action changes what the probes report. The memo is cleared before
+ * and after it: a preflight can run while an install is in progress and
+ * memoise the old answer, and the clear after the action forgets that too.
+ */
 export async function runDesktopAgentProviderSetup(
+  providerId: DesktopAgentProviderId,
+  input: DesktopAgentProviderSetupInput,
+): Promise<DesktopAgentProviderSetupResult> {
+  clearProbeCache();
+  try {
+    return await performDesktopAgentProviderSetup(providerId, input);
+  } finally {
+    clearProbeCache();
+  }
+}
+
+async function performDesktopAgentProviderSetup(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderSetupInput,
 ): Promise<DesktopAgentProviderSetupResult> {
