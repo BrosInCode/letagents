@@ -15,7 +15,7 @@ import {
   type JevRoutingMode,
 } from "../../messages/jev-conversation-routing.js";
 import { db } from "../client.js";
-import { message_agent_receipts, messages, room_agent_sessions, room_settings, rooms } from "../schema.js";
+import { id_sequences, message_agent_receipts, messages, room_agent_sessions, room_settings, rooms } from "../schema.js";
 import type { MessageRecipientAgentTarget } from "../types.js";
 import { MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { chooseAnsweringSession } from "../../rooms/answering-session.js";
@@ -27,6 +27,8 @@ const MAX_JEV_ROUTING_SESSIONS = 200;
 const RECENT_MESSAGE_WINDOW = 40;
 const RECENT_CONVERSATION_ENTRIES = 15;
 const AGENT_SNIPPETS_PER_AGENT = 2;
+// SQL BTRIM defaults to ASCII space; the shared prompt predicate uses JS trim().
+const JS_TRIM_CHARACTERS = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
 /** Room activity that is context noise for a responder decision. */
 const EXCLUDED_CONTEXT_SOURCES = new Set(["system", WAKE_NOTICE_SOURCE, "github", "managed_agent_failure"]);
 
@@ -240,10 +242,17 @@ export async function applyDeferredJevReceipts(
   plan: DeferredJevRoutingPlan,
   decision: { reason: string; agentKeys: readonly string[] },
 ): Promise<MessageRecipientAgentTarget[]> {
+  // Share the send transaction's existing room fence. Without it a newer
+  // send and a late older election can each miss the other's uncommitted holds.
+  await tx.select({ name: id_sequences.name }).from(id_sequences)
+    .where(eq(id_sequences.name, `messages:${plan.roomId}`)).for("update");
   const wanted = new Set(decision.agentKeys.slice(0, MAX_ACCOUNT_ROUTING_TARGETS));
   const publisherAgentKey = plan.message.publisher_agent_key?.trim() || null;
   const [visible] = await tx.select({
     number: messages.number,
+    source: messages.source, text: messages.text, promptKind: messages.agent_prompt_kind,
+    account: messages.publisher_account_id, agentKey: messages.publisher_agent_key,
+    agentSession: messages.publisher_agent_session_id,
     // ISO form, as create.ts plans with; the column's text form is not one.
     sent_at: sql<string>`to_char(${messages.timestamp} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`,
   }).from(messages).where(and(
@@ -251,6 +260,8 @@ export async function applyDeferredJevReceipts(
     sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`,
   ));
   if (!visible) return [];
+  const freshHumanRequest = visible.source === "browser" && Boolean(visible.account?.trim())
+    && !visible.agentKey && !visible.agentSession && !isPromptOnlyAgentMessage(visible.text, visible.promptKind);
   const sessions = await tx
     .select({
       session_id: room_agent_sessions.session_id,
@@ -333,14 +344,14 @@ export async function applyDeferredJevReceipts(
       agent_session_id: message_agent_receipts.agent_session_id,
       turn_position: message_agent_receipts.turn_position,
     });
-  // A parallel deferred receipt is a direct activation: it ends the agent's
-  // earlier held turns, as at send time. A sequenced one never does. The
-  // caller's message_routed wakes every worker of the room after commit;
-  // the per-agent hold frontier keeps positions 2 and later hidden.
+  // A human's new question must pass older holds without flattening its
+  // own sequence. Bound parallel results too: a late older singleton must
+  // never release a newer message's positions.
   await releaseAgentReplyTurnHoldsTx(
     tx,
     plan.roomId,
-    inserted.filter((receipt) => receipt.turn_position === null).map((receipt) => receipt.agent_key),
+    inserted.filter((receipt) => freshHumanRequest || receipt.turn_position === null).map((receipt) => receipt.agent_key),
+    plan.message.number,
   );
   // The send-time rule (a direct activation ends the agent's holds) ran
   // before these holds existed. An agent that was mentioned, replied to or
@@ -357,10 +368,19 @@ export async function applyDeferredJevReceipts(
        AND held.hold_release_after IS NOT NULL
        AND EXISTS (
          SELECT 1 FROM ${message_agent_receipts} AS later
+          JOIN ${messages} AS later_message
+            ON later_message.room_id = later.message_room_id AND later_message.number = later.message_number
           WHERE later.message_room_id = held.message_room_id
             AND later.agent_key = held.agent_key
             AND later.message_number > held.message_number
-            AND later.turn_position IS NULL
+            AND (later.turn_position IS NULL OR (
+              later_message.source = 'browser'
+              AND NULLIF(BTRIM(later_message.publisher_account_id, ${JS_TRIM_CHARACTERS}), '') IS NOT NULL
+              AND later_message.publisher_agent_key IS NULL AND later_message.publisher_agent_session_id IS NULL
+              AND later_message.visibility IS NULL AND later_message.rental_session_id IS NULL
+              AND NOT (LOWER(BTRIM(COALESCE(later_message.agent_prompt_kind, ''), ${JS_TRIM_CHARACTERS})) = 'auto'
+                AND BTRIM(COALESCE(later_message.text, ''), ${JS_TRIM_CHARACTERS}) = '')
+            ))
        )
   `);
   return inserted.map((receipt) => ({
