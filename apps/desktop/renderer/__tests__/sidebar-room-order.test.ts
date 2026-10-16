@@ -7,6 +7,7 @@ import {
   applySidebarRoomOrder,
   isSidebarRoomReorderEnabled,
   orderedSidebarChildRooms,
+  promoteSidebarProject,
   readStoredSidebarRoomOrder,
   rememberSidebarRoomOrder,
   reorderSidebarChildRooms,
@@ -48,6 +49,23 @@ function project(
 }
 
 describe("sidebar room order", () => {
+  it("promotes an explicit project open above saved manual order without changing pins or child order", () => {
+    const projects = [project("new"), project("a", { focuses: ["a1", "a2"] }), project("b"),
+      project("pin-a", { pinned: true }), project("pin-b", { pinned: true })];
+    const order: SidebarRoomOrder = { pinnedParentIds: ["pin-b", "pin-a"], roomParentIds: ["b", "a"],
+      childIdsByProject: { a: ["a2", "a1"] } };
+    const promoted = promoteSidebarProject(projects, order, "new")!;
+    assert.deepEqual(promoted.roomParentIds, ["new", "b", "a"]);
+    assert.deepEqual(promoted.pinnedParentIds, order.pinnedParentIds);
+    assert.deepEqual(promoted.childIdsByProject, order.childIdsByProject);
+    assert.deepEqual(promoteSidebarProject(projects, promoted, "new"), promoted);
+    assert.deepEqual(promoteSidebarProject(projects, promoted, "a")?.roomParentIds, ["a", "new", "b"]);
+    assert.deepEqual(promoteSidebarProject(projects, promoted, "pin-a")?.pinnedParentIds, ["pin-a", "pin-b"]);
+    assert.deepEqual(promoteSidebarProject(projects, promoted, "pin-a")?.roomParentIds, promoted.roomParentIds);
+    assert.equal(promoteSidebarProject(projects, promoted, "missing"), null);
+    // Merely receiving a room still honors manual ordering; promotion is explicit.
+    assert.deepEqual(applySidebarRoomOrder(projects, order).map((entry) => entry.id), ["pin-b", "pin-a", "b", "a", "new"]);
+  });
   it("reads only valid persisted room ids and tolerates broken storage", () => {
     const parsed = readStoredSidebarRoomOrder({
       getItem: () => JSON.stringify({

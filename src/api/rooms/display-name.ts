@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { repositoryRoomName } from "../../../shared/project-room-name.mjs";
 
 const ADJECTIVES = [
   "amber",
@@ -132,6 +133,18 @@ export function generateRoomDisplayName(roomId: string): string {
   const adjective = ADJECTIVES[digest[0] % ADJECTIVES.length];
   const noun = NOUNS[digest[1] % NOUNS.length];
   return `${adjective}-${noun}`;
+}
+
+export function defaultRoomDisplayName(roomId: string): string {
+  return repositoryRoomName(roomId) || generateRoomDisplayName(roomId);
+}
+
+/** Read old generated project labels without rewriting room IDs or custom names. */
+export function resolveRoomDisplayName(roomId: string, displayName: string, kind: string): string {
+  const repositoryName = kind === "main" ? repositoryRoomName(roomId) : null;
+  return repositoryName && displayName === generateRoomDisplayName(roomId)
+    ? repositoryName
+    : displayName;
 }
 
 export function normalizeRoomDisplayName(value: string): string {

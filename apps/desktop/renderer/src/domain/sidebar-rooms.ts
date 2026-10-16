@@ -4,6 +4,8 @@ import type {
   DesktopRoomSnapshot,
 } from "../../../electron/ipc-types";
 import type { ProjectGroup, RoomEntry } from "../components/desktop/types";
+import { projectRoomName } from "./project-room-name";
+import { repositoryRoomName } from "../../../../../shared/project-room-name.mjs";
 
 export type RecentRootRoom = {
   identifier: string;
@@ -95,7 +97,10 @@ export function upsertRecentRootRoomSnapshot(input: {
     identifier,
     kind,
     rootPath,
-    displayName: input.displayName
+    displayName: kind === "project" || input.snapshot.room?.gitRoom || repositoryRoomName(identifier)
+      ? projectRoomName({ roomIdentifier: identifier, gitRoom: input.snapshot.room?.gitRoom, rootPath,
+        fallback: input.snapshot.room?.displayName || input.displayName })
+      : input.displayName
       || input.snapshot.room?.displayName
       || input.snapshot.room?.name
       || input.snapshot.roomIdentifier
@@ -509,7 +514,9 @@ function accountRoomToEntry(room: DesktopAccountRoomEntry): RoomEntry {
     type: "room",
     kind: "parent",
     roomIdentifier: room.roomIdentifier,
-    title: room.displayName,
+    title: room.gitRoom || repositoryRoomName(room.roomIdentifier)
+      ? projectRoomName({ roomIdentifier: room.roomIdentifier, gitRoom: room.gitRoom, fallback: room.displayName })
+      : room.displayName,
     meta: gitMeta?.meta || accountRoomMeta(room),
     sectionLabel: gitMeta ? "Git Room" : "Account room",
     headline: gitMeta?.headline || "Open this room from your account history.",

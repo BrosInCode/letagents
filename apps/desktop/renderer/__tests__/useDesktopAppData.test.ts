@@ -1284,6 +1284,7 @@ function createHarness(options: {
   deliveryRepairRetryMs?: number;
   snapshotTimeoutMs?: number;
   openedRoom?: DesktopRepoRoomSelection;
+  selectedRootRoomIdentifier?: string;
 } = {}): {
   accountRooms: Ref<DesktopAccountRoomEntry[]>;
   authStatus: Ref<DesktopAuthStatus | null>;
@@ -1362,7 +1363,7 @@ function createHarness(options: {
     },
     sessionGeneration,
     selectedMcpTargetIds: ref<DesktopMcpInstallTargetId[]>([]),
-    selectedRootRoomIdentifier: ref("room_parent"),
+    selectedRootRoomIdentifier: ref(options.selectedRootRoomIdentifier || "room_parent"),
     selectedSnapshot,
     settingsAccountRooms,
     deliveryRepairRetryMs: options.deliveryRepairRetryMs,
@@ -1538,6 +1539,34 @@ it("keeps watcher statistics when room refresh finishes later and when reopening
 });
 
 describe("useDesktopAppData root room refresh", () => {
+  it("restores an alias-only selection after the API renames its project, without a folder or workspace fallback", async () => {
+    const canonical = "github.com/brosincode/letagents";
+    const harness = createHarness({ selectedRootRoomIdentifier: "sky-lake" });
+    harness.rootRoomSnapshot.value = null;
+    harness.activeEntry.value = { ...parentEntry(), roomIdentifier: canonical };
+    harness.nextAccountRooms = [accountRoomEntry(canonical, { displayName: "letagents", name: "sky-lake" })];
+    const canonicalSnapshot = roomSnapshot(canonical);
+    canonicalSnapshot.room!.displayName = "letagents";
+    const bridge = harness.windowBridge as { letagentsDesktop: { room: {
+      getSnapshot: (identifier: string | null) => Promise<DesktopRoomSnapshot>;
+    } } };
+    bridge.letagentsDesktop.room.getSnapshot = async (identifier) => {
+      harness.getSnapshotRequests.push(identifier);
+      if (identifier === "sky-lake") {
+        const missing = nonReadySnapshot(identifier, "unavailable");
+        missing.access.httpStatus = 404;
+        return missing;
+      }
+      assert.equal(identifier, canonical, "must not fall back to another workspace room");
+      return canonicalSnapshot;
+    };
+    await withDesktopBridge(harness.windowBridge, () => harness.state.refresh());
+    assert.deepEqual(harness.getSnapshotRequests, ["sky-lake", canonical]);
+    assert.equal(harness.rootRoomSnapshot.value?.roomIdentifier, canonical);
+    assert.equal(harness.selectedSnapshot.value?.roomIdentifier, canonical);
+    assert.equal(harness.rootRoomSnapshot.value?.room?.displayName, "letagents");
+  });
+
   it("keeps live tasks, reasoning and artifacts when a board action refreshes the root room", async () => {
     const harness = createHarness();
     harness.activeEntry.value = parentEntry();

@@ -88,6 +88,21 @@ export function orderedSidebarChildRooms(project: ProjectGroup | null | undefine
   );
 }
 
+/** Explicit New room navigation promotes only this project, within its current pin section. */
+export function promoteSidebarProject(
+  projects: readonly ProjectGroup[],
+  order: SidebarRoomOrder,
+  projectId: string,
+): SidebarRoomOrder | null {
+  const project = projects.find((candidate) => candidate.id === projectId);
+  if (!project) return null;
+  const key = project.parent.pinned ? "pinnedParentIds" : "roomParentIds";
+  const sectionIds = applySidebarRoomOrder(projects, order)
+    .filter((candidate) => candidate.parent.pinned === project.parent.pinned)
+    .map((candidate) => candidate.id);
+  return { ...order, [key]: [projectId, ...sectionIds.filter((id) => id !== projectId)] };
+}
+
 export function isSidebarRoomReorderEnabled(
   selectionActive: boolean,
   batchActionBusy: boolean,

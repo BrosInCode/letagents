@@ -74,6 +74,7 @@
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
+          :reveal-request="sidebarRevealRequest"
           :settings-entry="settingsEntry"
           :rental-request-count="rentalRequestCount"
           :needs-you-count="needsYouCount"
@@ -298,10 +299,14 @@
         v-model:storage="newRoomStorage"
         :step="newRoomStep"
         :busy="newRoomBusy"
+        :can-dismiss="newRoomCanDismiss"
         :active-action="newRoomActiveAction"
         :feedback="newRoomFeedback"
         :feedback-state="newRoomFeedbackState"
         v-model:project-path="newRoomProjectPath"
+        v-model:project-name="newRoomProjectName"
+        v-model:project-parent="newRoomProjectParent"
+        :project-creation-error="newRoomProjectCreationError"
         :project-selection="newRoomProjectSelection"
         :project-path-error="newRoomProjectPathError"
         :recent-project-folders="newRoomRecentProjectFolders"
@@ -313,11 +318,14 @@
         @back="backFromSubstep"
         @choose-join="chooseJoinIntent"
         @choose-project="chooseProjectIntent"
+        @choose-new-project="chooseNewProjectIntent"
         @choose-standalone="chooseStandaloneIntent"
         @close="closeNewRoomModal"
         @confirm-project="confirmProjectRoomFromModal"
         @copy-code="copyInviteCode"
         @create-standalone="createStandaloneRoom"
+        @create-project="createProjectRoomFromModal"
+        @pick-project-parent="pickNewProjectParent"
         @dismiss-success="dismissSuccess"
         @open-project="openProjectRoomFromModal"
         @open-project-path="openProjectRoomFromPath"
@@ -486,6 +494,7 @@ import {
 import {
   applySidebarRoomOrder,
   orderedSidebarChildRooms,
+  promoteSidebarProject,
   readStoredSidebarRoomOrder,
   rememberSidebarRoomOrder,
   reorderSidebarChildRooms,
@@ -568,6 +577,7 @@ const readRoomMessageIds = ref<Record<string, string>>({});
 let accountReadStorageKey: string | null = null;
 const sidebarWidth = ref(readStoredSidebarWidth());
 const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
+const sidebarRevealRequest = ref<{ entryId: string; sequence: number } | null>(null);
 const isSidebarResizing = ref(false);
 const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
 const chatScrollPositionsByRoom = ref<Record<string, ChatScrollPosition>>({});
@@ -1643,15 +1653,18 @@ const {
   canSubmitStandalone,
   chooseJoinIntent,
   chooseProjectIntent,
+  chooseNewProjectIntent,
   chooseStandaloneIntent,
   closeNewRoomModal,
   confirmProjectRoomFromModal,
   copyInviteCode,
   createStandaloneRoom,
+  createProjectRoomFromModal,
   dismissSuccess,
   joinRoomCodeFromModal,
   newRoomActiveAction,
   newRoomBusy,
+  newRoomCanDismiss,
   newRoomFeedback,
   newRoomFeedbackState,
   newRoomJoinCode,
@@ -1659,6 +1672,9 @@ const {
   newRoomModalOpen,
   newRoomName,
   newRoomProjectPath,
+  newRoomProjectName,
+  newRoomProjectParent,
+  newRoomProjectCreationError,
   newRoomProjectPathError,
   newRoomProjectSelection,
   newRoomStatusMessage,
@@ -1667,11 +1683,31 @@ const {
   newRoomSuccess,
   openProjectRoomFromModal,
   openProjectRoomFromPath,
+  pickNewProjectParent,
   openSuccessRoom,
   retryLastAction,
   selectNewRoomEntry,
 } = useDesktopNewRoomModal({
-  openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
+  openRoomSnapshot: (snapshot, options) => {
+    openRoomSnapshot(snapshot, options);
+    if (options?.kind !== "project") return;
+    const entryId = activeEntry.value.id;
+    const project = sidebarProjectEntries.value.find((candidate) =>
+      [candidate.parent, ...candidate.branchRooms, ...candidate.focusRooms]
+        .some((entry) => entry.id === entryId));
+    if (project) {
+      const order = promoteSidebarProject(sidebarProjectEntries.value, sidebarRoomOrder.value, project.id);
+      if (order) {
+        sidebarRoomOrder.value = order;
+        rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, order);
+      }
+    }
+    sidebarMode.value = "expanded";
+    sidebarRevealRequest.value = {
+      entryId,
+      sequence: (sidebarRevealRequest.value?.sequence || 0) + 1,
+    };
+  },
   setRepoStatus: (status) => {
     if (status) repoStatus.value = preserveRoomRepoStatistics(repoStatus.value, status);
   },

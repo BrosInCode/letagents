@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
 
@@ -24,11 +25,17 @@ test("opening a fetched repo room preserves its identity without calculating bra
 
   let fetchedSnapshot: unknown;
   let integrationPayload: Record<string, unknown> = {};
-  t.mock.module("electron", { defaultExport: {} });
+  let dialogResult: Promise<Electron.OpenDialogReturnValue> = Promise.resolve({ canceled: true, filePaths: [] });
+  const pickerCalls: unknown[][] = [];
+  const parentWindow = { isDestroyed: () => false };
+  t.mock.module("electron", { defaultExport: { dialog: { showOpenDialog: (...args: unknown[]) => {
+    pickerCalls.push(args);
+    return dialogResult;
+  } } } });
   t.mock.module("../main/auth.js", { namedExports: {
     apiFetch: async () => integrationPayload,
   } });
-  t.mock.module("../main/window.js", { namedExports: { focusMainWindow() {} } });
+  t.mock.module("../main/window.js", { namedExports: { focusMainWindow() {}, getMainWindow: () => parentWindow } });
   t.mock.module("../main/rooms/snapshot.js", {
     namedExports: {
       fetchRoomSnapshot: async (roomIdentifier: string) => {
@@ -38,17 +45,26 @@ test("opening a fetched repo room preserves its identity without calculating bra
     },
   });
   const unused = () => { throw new Error("Unexpected room storage mutation"); };
+  let allowLocalCreation = false;
+  const createdRooms: Array<{ roomIdentifier: string; displayName: string }> = [];
+  const localModes: Array<[string, string]> = [];
   t.mock.module("../main/rooms/local-store.js", {
     namedExports: {
       resolveLocalAwareRoomStorageMode: async () => ({ effectiveMode: "cloud" }),
       cloudRoomIdentifierForStorage: (_storage: unknown, identifier: string) => identifier,
-      createLocalRoom: unused,
+      createLocalRoom: async (input: { roomIdentifier: string; displayName: string }) => {
+        if (!allowLocalCreation) unused();
+        createdRooms.push(input);
+      },
       localRoomIdentifierForStorage: unused,
-      setLocalAwareRoomStorageMode: unused,
+      setLocalAwareRoomStorageMode: async (identifier: string, mode: string) => {
+        if (!allowLocalCreation) unused();
+        localModes.push([identifier, mode]);
+      },
       updateLocalRoomDisplayName: unused,
     },
   });
-  const { openRepoRoomFromPath, getDesktopGitHubIntegrationStatus } = await import("../main/rooms/repo.js");
+  const { createProjectRoom, pickNewProjectParent, pickRepoRoom, openRepoRoomFromPath, getDesktopGitHubIntegrationStatus } = await import("../main/rooms/repo.js");
   const tracePath = join(repoPath, ".git", "room-opening-trace.jsonl");
   const previousTrace = process.env.GIT_TRACE2_EVENT;
   try {
@@ -162,6 +178,58 @@ test("opening a fetched repo room preserves its identity without calculating bra
       } finally {
         if (previousHome === undefined) delete process.env.HOME;
         else process.env.HOME = previousHome;
+      }
+    });
+    await t.test("native folder cancellation is parented and releases the picker for retry", async () => {
+      const canceled = await pickRepoRoom();
+      assert.equal(canceled.canceled, true);
+      assert.equal(canceled.snapshot, null);
+      assert.strictEqual(pickerCalls[0][0], parentWindow);
+      assert.deepEqual((pickerCalls[0][1] as Electron.OpenDialogOptions).properties, ["openDirectory"]);
+      assert.equal(await pickNewProjectParent(), null);
+
+      let resolvePicker!: (result: Electron.OpenDialogReturnValue) => void;
+      dialogResult = new Promise((resolve) => { resolvePicker = resolve; });
+      const pending = pickNewProjectParent();
+      await assert.rejects(pickRepoRoom(), /Finish or cancel the open folder picker/);
+      resolvePicker({ canceled: true, filePaths: [] });
+      assert.equal(await pending, null);
+      dialogResult = Promise.resolve({ canceled: false, filePaths: [repoPath] });
+      assert.equal(await pickNewProjectParent(), repoPath);
+    });
+    await t.test("new projects create an empty named local folder without overwriting existing data", async () => {
+      const parent = realpathSync(mkdtempSync(join(tmpdir(), "letagents-new-project-")));
+      allowLocalCreation = true;
+      try {
+        const created = await createProjectRoom(parent, "  My project  ");
+        const path = join(parent, "My project");
+        assert.equal(created.error, null);
+        assert.equal(created.source, "local_folder");
+        assert.equal(created.repoPath, path);
+        assert.equal(created.repoStatus?.isGitRepo, false);
+        assert.equal(created.projectBinding?.rootPath, path);
+        assert.deepEqual(readdirSync(path), [], "No Git repo or generated files are created");
+        assert.equal(createdRooms.at(-1)?.displayName, "My project");
+        assert.deepEqual(localModes.at(-1), [created.roomIdentifier, "local"]);
+        const roomCount = createdRooms.length;
+
+        writeFileSync(join(path, "keep.txt"), "keep my work");
+        assert.match((await createProjectRoom(parent, "My project")).error || "", /already exists/);
+        assert.equal(readFileSync(join(path, "keep.txt"), "utf8"), "keep my work");
+        writeFileSync(join(parent, "existing-file"), "original");
+        assert.match((await createProjectRoom(parent, "existing-file")).error || "", /already exists/);
+        symlinkSync(path, join(parent, "existing-link"));
+        assert.match((await createProjectRoom(parent, "existing-link")).error || "", /already exists/);
+        for (const name of ["", ".", "..", "../escape", "nested/project", "nested\\project", "bad\u0000name"]) {
+          assert.match((await createProjectRoom(parent, name)).error || "", /folder name/);
+        }
+        assert.match((await createProjectRoom(join(parent, "missing"), "Nope")).error || "", /No folder exists/);
+        assert.match((await createProjectRoom(repoPath, "Nested project")).error || "", /outside an existing Git repository/);
+        assert.equal(existsSync(join(repoPath, "Nested project")), false);
+        assert.equal(createdRooms.length, roomCount, "Rejected inputs never create or reuse a room");
+      } finally {
+        allowLocalCreation = false;
+        rmSync(parent, { recursive: true, force: true });
       }
     });
   } finally {

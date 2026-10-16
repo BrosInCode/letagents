@@ -3,6 +3,7 @@ import { normalizeAgentPromptKind } from "../../shared/room-agent-prompts.js";
 import { buildRoomActivitySourceFlags, deriveRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts } from "../repo-workflow.js";
 import { isInviteCode } from "../rooms/routing.js";
+import { resolveRoomDisplayName } from "../rooms/display-name.js";
 import { board_intents, board_manager_assignments, github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, room_board_settings, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import { formatAttachmentId, formatMessageId, formatTaskId } from "./utils.js";
 import type { MessageReaction } from "../../../shared/message-reactions.mjs";
@@ -13,7 +14,7 @@ export function toProject(row: typeof rooms.$inferSelect): Project {
   return {
     id: row.id,
     code: inviteRoom ? row.id : null,
-    display_name: row.display_name,
+    display_name: resolveRoomDisplayName(row.id, row.display_name, row.kind),
     name: inviteRoom ? undefined : row.id,
     kind: row.kind as RoomKind,
     parent_room_id: row.parent_room_id,
