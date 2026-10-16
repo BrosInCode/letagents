@@ -209,6 +209,7 @@
               <Transition name="room-settings-progress">
                 <span v-if="storageBusy" class="room-settings-progress" aria-hidden="true" />
               </Transition>
+              <p v-if="storageFeedback" :role="storageFeedback.error ? 'alert' : 'status'">{{ storageFeedback.message }}</p>
             </div>
           </SmoothHeight>
 
@@ -400,6 +401,7 @@ const props = defineProps<{
   githubEventsAvailable: boolean;
   githubEventsVisible: boolean;
   storageBusy: boolean;
+  storageFeedback?: { message: string; error: boolean } | null;
 }>();
 
 const emit = defineEmits<{
@@ -460,14 +462,14 @@ const notificationShortLabel = computed(() => {
 const localGitRoom = computed(() => isLocalGitRoom(props.room));
 const cloudStorageUnavailableReason = computed(() =>
   localGitRoom.value
-    ? "No Git provider is attached to this room. Add an origin remote, then reopen the repository to use Cloud."
+    ? "Add a GitHub origin remote, then use Publish to cloud to connect this room's history before switching to Cloud."
     : null,
 );
 
 const storageDescription = computed(() => {
   if (props.storage.effectiveMode === "local") {
     if (localGitRoom.value) {
-      return "Connect this project to a repository hosted online before sharing its room.";
+      return "Publishing uploads this room's messages and tasks to its GitHub repository room. Adding a remote or connecting a folder does not upload anything.";
     }
     const target = props.storage.localRoom?.cloudRoomIdentifier;
     return target
@@ -619,7 +621,7 @@ const githubFriendlyError = computed(() => {
 });
 
 const canPublishLocalRoom = computed(() =>
-  props.storage.effectiveMode === "local" && !localGitRoom.value
+  props.storage.effectiveMode === "local"
 );
 const githubIntegrationAvailable = computed(() => roomSupportsGitHubIntegration(props.room));
 

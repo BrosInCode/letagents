@@ -4,6 +4,7 @@ import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mj
 registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { mkdtemp, realpath, rename } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -23,6 +24,7 @@ const nodeRequire = createRequire(import.meta.url);
 const { tempDir } = createElectronTestEnv({
   prefix: "letagents-desktop-local-chat-",
   paths: ["chatStorage", "localChatDb", "localProfile"],
+  extraEnvFiles: { LETAGENTS_PROJECT_BINDINGS_PATH: "project-bindings.sqlite" },
 });
 
 const {
@@ -60,6 +62,7 @@ const {
   importLocalTasks,
   localRoomIdentifierForStorage,
   listLocalRoomEntries,
+  linkLocalRoomToCloud,
   listLocalTasks,
   markLocalTaskSynced,
   releaseLocalTaskPublishClaim,
@@ -80,6 +83,7 @@ const {
 } = await import("../main/rooms/artifacts/local-store.js");
 const {
   resolveLocalCloudPublishAuthority,
+  syncDesktopLocalChatRoom,
 } = await import("../main/rooms/messages.js");
 
 test("local cloud sync preserves exact worker provenance and never promotes it to human control", () => {
@@ -1639,4 +1643,167 @@ test("human publisher avatars and identity survive local acknowledgement, cloud 
   assert.deepEqual((await getLocalChatMessages("room_imported_profile")).messages[0]?.sender_profile, profile);
   await importLocalChatMessages("room_imported_profile", [{ ...imported, sender_profile: { ...profile, avatar_url: null } }]);
   assert.deepEqual((await getLocalChatMessages("room_imported_profile")).messages[0]?.sender_profile, { ...profile, avatar_url: null });
+});
+
+async function localGitPublishFixture(branch = "feature/local-history") {
+  const root = await mkdtemp(join(tempDir, "publish-project-"));
+  const git = (...args: string[]) => execFileAsync("git", ["-C", root, ...args]);
+  await git("init", "-b", branch);
+  const { resolveRoomIdentifierFromPath } = await import("../repo-status.js");
+  const resolved = await resolveRoomIdentifierFromPath(root);
+  const room = await createLocalRoom({ roomIdentifier: resolved.roomIdentifier, displayName: "My original project", gitRoom: resolved.gitRoom });
+  await setRoomStorageMode(room.roomIdentifier, "local");
+  const { bindProjectRoot } = await import("../main/project-bindings-store.js");
+  await bindProjectRoot({ context: { roomIdentifier: room.roomIdentifier, gitRoom: room.gitRoom }, rootPath: root, source: "local_git" });
+  const slug = root.split("/").at(-1)!;
+  const repository = `github.com/example/${slug.toLowerCase()}`;
+  const hostedGit: DesktopGitRoomInfo = { ...room.gitRoom!, provider: "github", host: "github.com",
+    repository: { id: slug, fullName: `example/${slug.toLowerCase()}`, owner: "example", name: slug.toLowerCase() },
+    ref: { ...room.gitRoom!.ref, defaultBranch: "main" }, visibility: "private", accessMode: "private", source: "github" };
+  return { root, git, room, repository, hostedGit, async addOrigin() {
+    await git("remote", "add", "origin", `https://${repository}.git`);
+    await git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+  } };
+}
+
+test("explicit Publish connects original local branch history to GitHub without switching storage or renumbering messages", async () => {
+  const fixture = await localGitPublishFixture();
+  const rootMessage = await addLocalChatMessage(fixture.room.roomIdentifier, { sender: "Human", text: "Original", source: "browser", control_authorized: true });
+  const reply = await addLocalChatMessage(fixture.room.roomIdentifier, { sender: "Human", text: "Reply", source: "browser", control_authorized: true, reply_to: rootMessage.id, thread_root_id: rootMessage.id });
+  await fixture.addOrigin();
+  await fixture.git("symbolic-ref", "HEAD", "refs/heads/main");
+  const { buildGitHubBranchRoomIdentifier } = await import("../repo-status.js");
+  const target = buildGitHubBranchRoomIdentifier(fixture.repository, "feature/local-history")!;
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const path = decodeURIComponent(new URL(String(url)).pathname);
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    calls.push({ path, body });
+    if (path.endsWith("/join")) return Response.json({ room_id: path === `/rooms/${fixture.repository}/join` ? fixture.repository : target, authenticated: true, git_room: fixture.hostedGit });
+    assert.equal(path, `/rooms/${target}/messages`);
+    return Response.json({ id: `msg_${100 + calls.length}` });
+  };
+  try {
+    assert.equal((await getLocalRoomIncludingArchived(fixture.room.roomIdentifier))?.cloudRoomIdentifier, null, "adding origin never publishes");
+    const result = await syncDesktopLocalChatRoom(fixture.room.roomIdentifier);
+    assert.equal(result.cloudRoomIdentifier, target);
+    assert.equal(result.syncedCount, 2);
+    assert.equal(calls[0]?.path, `/rooms/${fixture.repository}/join`, "GitHub supplies authoritative repository metadata");
+    assert.equal(calls[1]?.path, `/rooms/${target}/join`, "the room's original branch wins over the current checkout");
+    assert.equal(calls[3]?.body.reply_to, "msg_103");
+    assert.equal(calls[3]?.body.thread_root_id, "msg_103");
+    const preserved = await getLocalRoomIncludingArchived(fixture.room.roomIdentifier);
+    assert.equal(preserved?.displayName, "My original project");
+    assert.equal(preserved?.gitRoom?.host, "github.com");
+    const { listProjectBindings } = await import("../main/project-bindings-store.js");
+    const { findProjectBinding } = await import("../project-bindings.js");
+    assert.equal(findProjectBinding(await listProjectBindings(), { roomIdentifier: target, gitRoom: fixture.hostedGit })?.rootPath, await realpath(fixture.root),
+      "the hosted snapshot still resolves the same connected project");
+    assert.deepEqual((await getLocalChatMessages(fixture.room.roomIdentifier)).messages.map(message => message.id), [rootMessage.id, reply.id]);
+    assert.equal((await resolveLocalAwareRoomStorageMode(target)).effectiveMode, "local");
+    const retry = await syncDesktopLocalChatRoom(fixture.room.roomIdentifier);
+    assert.equal(retry.syncedCount, 0, "retry uses existing sync records");
+    assert.equal(calls.length, 4, "retry neither creates another room nor republishes messages");
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("local Git Publish without origin or with a replaced project never writes cloud history", async () => {
+  const fixture = await localGitPublishFixture("main");
+  const previousFetch = globalThis.fetch;
+  let networkCalls = 0;
+  globalThis.fetch = async () => { networkCalls++; throw new Error("Unexpected network"); };
+  try {
+    await assert.rejects(syncDesktopLocalChatRoom(fixture.room.roomIdentifier), /Add this project's GitHub origin/);
+    await fixture.addOrigin();
+    await rename(join(fixture.root, ".git"), join(fixture.root, ".original-git"));
+    await fixture.git("init", "-b", "main");
+    await fixture.git("remote", "add", "origin", `https://${fixture.repository}.git`);
+    await assert.rejects(syncDesktopLocalChatRoom(fixture.room.roomIdentifier), /Connect this room to its project folder/);
+    assert.equal(networkCalls, 0);
+    assert.equal((await getLocalRoomIncludingArchived(fixture.room.roomIdentifier))?.cloudRoomIdentifier, null);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("linking local Git history refuses competing local histories and preserves the original link", async () => {
+  const fixture = await localGitPublishFixture("main");
+  await createLocalRoom({ roomIdentifier: fixture.repository });
+  await assert.rejects(linkLocalRoomToCloud({ roomIdentifier: fixture.room.roomIdentifier, cloudRoomIdentifier: fixture.repository, gitRoom: fixture.hostedGit }), /separate local history/);
+  const untouched = await getLocalRoomIncludingArchived(fixture.room.roomIdentifier);
+  assert.equal(untouched?.cloudRoomIdentifier, null);
+  assert.equal(untouched?.gitRoom?.accessMode, "local");
+  const target = `${fixture.repository}/focus/git:branch:b3RoZXI`;
+  await linkLocalRoomToCloud({ roomIdentifier: fixture.room.roomIdentifier, cloudRoomIdentifier: target, gitRoom: fixture.hostedGit });
+  const competing = await createLocalRoom({ displayName: "Other local history" });
+  await assert.rejects(linkLocalRoomToCloud({ roomIdentifier: competing.roomIdentifier, cloudRoomIdentifier: target }), /separate local history/);
+  await assert.rejects(linkLocalRoomToCloud({ roomIdentifier: fixture.room.roomIdentifier, cloudRoomIdentifier: `${fixture.repository}-other` }), /already linked/);
+  assert.equal((await getLocalRoomIncludingArchived(fixture.room.roomIdentifier))?.cloudRoomIdentifier, target);
+});
+
+test("a project created as a plain folder publishes to its new repository rather than an unrelated standalone room", async () => {
+  const root = await mkdtemp(join(tempDir, "publish-folder-"));
+  const { resolveRoomIdentifierFromPath } = await import("../repo-status.js");
+  const { bindProjectRoot } = await import("../main/project-bindings-store.js");
+  const resolved = await resolveRoomIdentifierFromPath(root);
+  const room = await createLocalRoom({ roomIdentifier: resolved.roomIdentifier, displayName: "New project" });
+  await setRoomStorageMode(room.roomIdentifier, "local");
+  await bindProjectRoot({ context: { roomIdentifier: room.roomIdentifier }, rootPath: root, source: "local_folder" });
+  await execFileAsync("git", ["-C", root, "init", "-b", "main"]);
+  await assert.rejects(syncDesktopLocalChatRoom(room.roomIdentifier), /Add this project's GitHub origin/);
+  const repository = `github.com/example/${root.split("/").at(-1)!.toLowerCase()}`;
+  await execFileAsync("git", ["-C", root, "remote", "add", "origin", `https://${repository}.git`]);
+  const gitRoom: DesktopGitRoomInfo = { provider: "github", host: "github.com", repository: { id: "new-folder", fullName: repository.slice(11), owner: "example", name: "new-folder" },
+    ref: { type: "default_branch", name: "main", defaultBranch: "main", baseRef: "main", headRef: null, headRepository: null }, visibility: "private", accessMode: "private", isDefault: true, source: "github" };
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async url => {
+    assert.equal(decodeURIComponent(new URL(String(url)).pathname), `/rooms/${repository}/join`);
+    return Response.json({ room_id: repository, authenticated: true, git_room: gitRoom });
+  };
+  try {
+    const result = await syncDesktopLocalChatRoom(room.roomIdentifier);
+    assert.equal(result.cloudRoomIdentifier, repository);
+    assert.equal((await getLocalRoomIncludingArchived(room.roomIdentifier))?.displayName, "New project");
+    assert.equal((await resolveLocalAwareRoomStorageMode(repository)).effectiveMode, "local");
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("failed hosted authorization and origin changes during Publish preserve unlinked local history", async () => {
+  for (const scenario of ["auth", "origin"] as const) {
+    const fixture = await localGitPublishFixture("main");
+    await fixture.addOrigin();
+    const previousFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async url => {
+      calls++;
+      assert.equal(decodeURIComponent(new URL(String(url)).pathname), `/rooms/${fixture.repository}/join`);
+      if (scenario === "origin") await fixture.git("remote", "set-url", "origin", "https://github.com/example/foreign.git");
+      return Response.json({ room_id: fixture.repository, authenticated: scenario !== "auth", git_room: fixture.hostedGit });
+    };
+    try {
+      await assert.rejects(syncDesktopLocalChatRoom(fixture.room.roomIdentifier), scenario === "auth" ? /Sign in with access/ : /project changed/);
+      assert.equal(calls, 1, "no message or task upload follows a failed target proof");
+      const room = await getLocalRoomIncludingArchived(fixture.room.roomIdentifier);
+      assert.equal(room?.cloudRoomIdentifier, null);
+      assert.equal(room?.gitRoom?.accessMode, "local");
+    } finally { globalThis.fetch = previousFetch; }
+  }
+});
+
+test("Publish uses GitHub's default branch when an initial push has no origin HEAD", async () => {
+  const fixture = await localGitPublishFixture("master");
+  await fixture.addOrigin();
+  await fixture.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD");
+  const { buildGitHubBranchRoomIdentifier } = await import("../repo-status.js");
+  const target = buildGitHubBranchRoomIdentifier(fixture.repository, "master")!;
+  const calls: string[] = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async url => {
+    const path = decodeURIComponent(new URL(String(url)).pathname);
+    calls.push(path);
+    return Response.json({ room_id: calls.length === 1 ? fixture.repository : target, authenticated: true, git_room: fixture.hostedGit });
+  };
+  try {
+    assert.equal((await syncDesktopLocalChatRoom(fixture.room.roomIdentifier)).cloudRoomIdentifier, target);
+    assert.deepEqual(calls, [`/rooms/${fixture.repository}/join`, `/rooms/${target}/join`]);
+  } finally { globalThis.fetch = previousFetch; }
 });

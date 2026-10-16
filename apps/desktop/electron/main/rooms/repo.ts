@@ -1,5 +1,5 @@
 import electron from "electron";
-import { realpath, stat } from "node:fs/promises";
+import { mkdir, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, parse, resolve } from "node:path";
 import type {
@@ -12,14 +12,15 @@ import type {
   DesktopProjectConnectionResult,
 } from "../../ipc-types.js";
 import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../../repo-status.js";
-import { projectContextsCompatibleForConnection } from "../../project-bindings.js";
+import { findProjectBinding, projectContextsCompatibleForConnection } from "../../project-bindings.js";
 import { ensureRepoWorktree } from "./worktrees.js";
 import { apiFetch } from "../auth.js";
 import { openAllowedExternalUrl } from "../external-url.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
-import { focusMainWindow } from "../window.js";
+import { focusMainWindow, getMainWindow } from "../window.js";
 import {
   bindProjectRoot,
+  listProjectBindings,
 } from "../project-bindings-store.js";
 import { fetchRoomSnapshot } from "./snapshot.js";
 import {
@@ -38,14 +39,33 @@ import {
 
 const { dialog } = electron as typeof import("electron");
 
+let folderPickerOpen = false;
+
+async function pickProjectFolder(title: string, buttonLabel: string): Promise<Electron.OpenDialogReturnValue> {
+  if (folderPickerOpen) throw new Error("Finish or cancel the open folder picker first.");
+  folderPickerOpen = true;
+  try {
+    focusMainWindow();
+    const parent = getMainWindow();
+    const options: Electron.OpenDialogOptions = { title, buttonLabel, properties: ["openDirectory"] };
+    // A sheet belongs to its window, so macOS cannot leave the picker behind
+    // the renderer's modal. Cancellation is returned without any room work.
+    return await (parent && !parent.isDestroyed()
+      ? dialog.showOpenDialog(parent, options)
+      : dialog.showOpenDialog(options));
+  } finally {
+    folderPickerOpen = false;
+    focusMainWindow();
+  }
+}
+
+export async function pickNewProjectParent(): Promise<string | null> {
+  const result = await pickProjectFolder("Choose where to create the project", "Choose parent folder");
+  return result.canceled ? null : result.filePaths[0] || null;
+}
+
 export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
-  const options: Electron.OpenDialogOptions = {
-    title: "Choose a repository",
-    buttonLabel: "Open",
-    properties: ["openDirectory"],
-  };
-  focusMainWindow();
-  const result = await dialog.showOpenDialog(options);
+  const result = await pickProjectFolder("Choose a project folder", "Open");
 
   if (result.canceled || !result.filePaths[0]) {
     return {
@@ -62,6 +82,40 @@ export async function pickRepoRoom(): Promise<DesktopRepoRoomSelection> {
   }
 
   return openRepoRoomFromPath(result.filePaths[0], { newProjectRoom: true });
+}
+
+/** Create only a new directory; an existing file, folder or symlink is never reused. */
+export async function createProjectRoom(parentPath: string, name: string): Promise<DesktopRepoRoomSelection> {
+  const projectName = name.trim();
+  if (!projectName || projectName === "." || projectName === ".." || /[\\/:\u0000-\u001f\u007f]/.test(projectName)) {
+    return repoRoomSelectionError("Enter a folder name without slashes or control characters.");
+  }
+  const parent = expandHomePath(parentPath.trim());
+  const pathError = await projectFolderPathError(parent);
+  if (pathError) return repoRoomSelectionError(pathError);
+  const resolvedParent = await realpath(parent);
+  const parentRoom = await resolveRoomIdentifierFromPath(resolvedParent);
+  if (parentRoom.repoRoot) {
+    return repoRoomSelectionError("Choose a parent folder outside an existing Git repository for a new project.");
+  }
+  const projectPath = join(resolvedParent, projectName);
+  try {
+    await mkdir(projectPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return repoRoomSelectionError(code === "EEXIST"
+      ? "A file or folder with that name already exists. Choose another name or open the existing folder."
+      : code === "EACCES" || code === "EPERM"
+        ? "LetAgents doesn’t have permission to create a folder there."
+        : "LetAgents couldn’t create that folder.");
+  }
+  try {
+    return await openRepoRoomFromPath(projectPath, { newProjectRoom: true });
+  } catch (error) {
+    // The folder now belongs to the user. Keep it even if opening its room
+    // fails, and make the recovery path explicit instead of deleting data.
+    return repoRoomSelectionError(`Created ${projectPath}, but couldn’t open its room. Use Open project folder to retry. ${error instanceof Error ? error.message : ""}`.trim());
+  }
 }
 
 export async function openRepoRoomFromPath(
@@ -201,10 +255,16 @@ export async function connectProjectToRoom(
       roomIdentifier: resolved.roomIdentifier,
       gitRoom: resolved.gitRoom,
     };
+    const selectedRepoStatus = await buildRepoStatus(resolved.repoRoot || result.filePaths[0], { includeBranchDeltas: false });
+    const rootPath = await realpath(selectedRepoStatus.isGitRepo
+      ? selectedRepoStatus.mainRootPath || selectedRepoStatus.rootPath
+      : result.filePaths[0]);
+    const existingBinding = findProjectBinding(await listProjectBindings(), context);
     if (!projectContextsCompatibleForConnection(
       context,
       resolvedContext,
       resolved.source || "local_folder",
+      existingBinding?.rootPath === rootPath,
     )) {
       return {
         canceled: false,
@@ -213,14 +273,12 @@ export async function connectProjectToRoom(
         error: "That folder belongs to a different project room.",
       };
     }
-    const selectedRepoStatus = await buildRepoStatus(resolved.repoRoot || result.filePaths[0]);
-    const rootPath = selectedRepoStatus.isGitRepo
-      ? selectedRepoStatus.mainRootPath || selectedRepoStatus.rootPath
-      : result.filePaths[0];
     const binding = await bindProjectRoot({
       context: {
         roomIdentifier: context.roomIdentifier || resolved.roomIdentifier,
-        gitRoom: context.gitRoom || resolved.gitRoom,
+        // Reconnect preserves the existing room's identity, including a plain
+        // folder room that did not have Git metadata when it was created.
+        gitRoom: context.roomIdentifier ? context.gitRoom || null : resolved.gitRoom,
       },
       rootPath,
       source: resolved.source || "local_folder",

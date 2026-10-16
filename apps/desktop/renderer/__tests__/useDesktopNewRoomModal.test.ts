@@ -317,6 +317,89 @@ test("project cancel returns to project step without losing modal", async () => 
   assert.equal(modal.newRoomStep.value, "project");
   assert.equal(modal.newRoomModalOpen.value, true);
   assert.equal(modal.newRoomProjectSelection.value, null);
+  assert.equal(modal.newRoomBusy.value, false);
+  modal.closeNewRoomModal();
+  assert.equal(modal.newRoomModalOpen.value, false);
+});
+
+test("a pending picker can be dismissed and its late reply cannot change a reopened modal", async () => {
+  let resolvePicker!: (value: unknown) => void;
+  let resolveParent!: (value: string | null) => void;
+  stubDesktopBridge({
+    pickRoom: () => new Promise((resolve) => { resolvePicker = resolve; }),
+    pickProjectParent: () => new Promise((resolve) => { resolveParent = resolve; }),
+  });
+  const opened: unknown[] = [];
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: (snapshot) => opened.push(snapshot), setRepoStatus: () => undefined });
+  modal.selectNewRoomEntry();
+  modal.chooseProjectIntent();
+  const oldPicker = modal.openProjectRoomFromModal();
+  assert.equal(modal.newRoomStep.value, "project", "The usable project view stays in place");
+  assert.equal(modal.newRoomCanDismiss.value, true);
+  modal.closeNewRoomModal();
+  assert.equal(modal.newRoomModalOpen.value, false);
+  assert.equal(modal.newRoomBusy.value, false);
+  modal.selectNewRoomEntry();
+  modal.chooseNewProjectIntent();
+  modal.newRoomProjectName.value = "New work";
+  const newPicker = modal.pickNewProjectParent();
+  resolvePicker({ canceled: false, repoPath: "/old", repoStatus: null, source: "local_folder",
+    snapshot: snapshotFixture("old-room", "Old room"), error: null, warning: null });
+  await oldPicker;
+  assert.equal(modal.newRoomStep.value, "new_project");
+  assert.equal(modal.newRoomBusy.value, true, "The old finally block cannot clear a newer request");
+  assert.equal(modal.newRoomProjectSelection.value, null);
+  assert.equal(opened.length, 0);
+  resolveParent("/Users/test/Projects");
+  await newPicker;
+  assert.equal(modal.newRoomProjectParent.value, "/Users/test/Projects");
+  assert.equal(modal.newRoomBusy.value, false);
+});
+
+test("new project parent cancellation preserves inputs and permits retry, creation opens the exact folder", async () => {
+  let picks = 0;
+  const opened: unknown[] = [];
+  const creations: unknown[] = [];
+  stubDesktopBridge({
+    pickProjectParent: async () => ++picks === 1 ? null : "/Users/test/Projects",
+    createProject: async (parent: string, name: string) => {
+      creations.push({ parent, name });
+      return { canceled: false, repoPath: `${parent}/${name}`, repoStatus: null, source: "local_folder",
+        snapshot: snapshotFixture("local-new-work", name), error: null, warning: null };
+    },
+  });
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: (snapshot, options) => opened.push({ snapshot, options }), setRepoStatus: () => undefined });
+  modal.selectNewRoomEntry();
+  modal.chooseNewProjectIntent();
+  modal.newRoomProjectName.value = "New work";
+  modal.newRoomProjectParent.value = "/previous";
+  await modal.pickNewProjectParent();
+  assert.equal(modal.newRoomProjectName.value, "New work");
+  assert.equal(modal.newRoomProjectParent.value, "/previous");
+  assert.equal(modal.newRoomStep.value, "new_project");
+  assert.equal(modal.newRoomBusy.value, false);
+  await modal.pickNewProjectParent();
+  await modal.createProjectRoomFromModal();
+  assert.deepEqual(creations, [{ parent: "/Users/test/Projects", name: "New work" }]);
+  assert.equal(modal.newRoomModalOpen.value, false);
+  assert.equal((opened[0] as { options: { rootPath: string } }).options.rootPath, "/Users/test/Projects/New work");
+});
+
+test("a rejected new project keeps both inputs and allows correction", async () => {
+  stubDesktopBridge({ createProject: async () => ({ error: "A file or folder with that name already exists.", snapshot: null }) });
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: () => assert.fail("Must not navigate on failure"), setRepoStatus: () => undefined });
+  modal.selectNewRoomEntry();
+  modal.chooseNewProjectIntent();
+  await modal.createProjectRoomFromModal();
+  assert.match(modal.newRoomProjectCreationError.value || "", /name and choose/);
+  modal.newRoomProjectName.value = "Keep me";
+  modal.newRoomProjectParent.value = "/Users/test/Projects";
+  await modal.createProjectRoomFromModal();
+  assert.match(modal.newRoomProjectCreationError.value || "", /already exists/);
+  assert.equal(modal.newRoomProjectName.value, "Keep me");
+  assert.equal(modal.newRoomProjectParent.value, "/Users/test/Projects");
+  assert.equal(modal.newRoomBusy.value, false);
+  assert.equal(modal.newRoomStep.value, "new_project");
 });
 
 test("a typed project path opens the same preview as the folder picker", async () => {
@@ -440,6 +523,8 @@ function stubDesktopBridge(input: {
   createLocalRoom?: (input?: { displayName?: string | null }) => Promise<unknown>;
   getSnapshot?: (code: string) => Promise<DesktopRoomSnapshot>;
   pickRoom?: () => Promise<unknown>;
+  pickProjectParent?: () => Promise<string | null>;
+  createProject?: (parent: string, name: string) => Promise<unknown>;
   openRoom?: (path: string, options?: unknown) => Promise<unknown>;
   rename?: (roomIdentifier: string, displayName: string) => Promise<unknown>;
 }): void {
@@ -461,6 +546,8 @@ function stubDesktopBridge(input: {
   desktop.repos = {
     ...((desktop.repos as object) || {}),
     pickRoom: input.pickRoom,
+    pickProjectParent: input.pickProjectParent,
+    createProject: input.createProject,
     openRoom: input.openRoom,
   };
   root.letagentsDesktop = desktop;

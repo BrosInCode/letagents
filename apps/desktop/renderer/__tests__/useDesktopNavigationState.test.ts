@@ -17,6 +17,68 @@ import {
 } from "../src/domain/sidebar-rooms";
 
 describe("useDesktopNavigationState", () => {
+  it("keeps one project entry and its folder when explicit publishing gives the local room a hosted identity", () => {
+    withLocalStorage(() => {
+      const localIdentifier = "git-room:local:1234567890abcdef:branch:bWFzdGVy";
+      const hostedIdentifier = "github.com/EmmyMay/scene-finder";
+      const rootPath = "/Projects/Scene Finder";
+      const recentRootRooms = ref<RecentRootRoom[]>([{
+        identifier: localIdentifier, kind: "project", rootPath, displayName: "Scene Finder",
+        meta: "master", updatedAt: "2026-10-16T00:00:00.000Z",
+      }]);
+      const localSnapshot = roomSnapshot(localIdentifier);
+      const state = useDesktopNavigationState({
+        accountRooms: ref([]), activeEntryStorageKey: "active-entry", appInfo: ref(null), recentRootRooms,
+        recentRootRoomsStorageKey: "recent-root-rooms", repoStatus: ref(null),
+        rootRoomSnapshot: ref(localSnapshot), selectedRootRoomIdentifier: ref(localIdentifier),
+        selectedSnapshot: ref(localSnapshot),
+      });
+      const published = roomSnapshot(hostedIdentifier, { gitRoom: gitRoom({ isDefault: true }) });
+      published.storage = { ...published.storage, effectiveMode: "local", localRoom: {
+        roomIdentifier: localIdentifier, cloudRoomIdentifier: hostedIdentifier,
+        displayName: "Scene Finder", publishStatus: "published", createdAt: "2026-10-16T00:00:00.000Z",
+        updatedAt: "2026-10-16T01:00:00.000Z", publishedAt: "2026-10-16T01:00:00.000Z",
+        gitRoom: published.room!.gitRoom,
+      } };
+      state.rememberRootRoomSnapshot(published);
+      assert.equal(recentRootRooms.value.length, 1);
+      assert.equal(recentRootRooms.value[0].identifier, hostedIdentifier);
+      assert.equal(recentRootRooms.value[0].rootPath, rootPath);
+      assert.equal(recentRootRooms.value[0].kind, "project");
+      state.rememberRootRoomSnapshot(published);
+      assert.equal(recentRootRooms.value.length, 1);
+      assert.equal(recentRootRooms.value[0].rootPath, rootPath);
+    });
+  });
+  it("uses fresh project names instead of cached aliases and preserves intentional room renames", () => {
+    withLocalStorage(() => {
+      const identifier = "github.com/BrosInCode/letagents";
+      const recentRootRooms = ref<RecentRootRoom[]>([{
+        identifier, kind: "project", rootPath: "/Projects/different-checkout-folder", displayName: "sky-lake",
+        meta: "staging", updatedAt: "2026-10-16T00:00:00.000Z",
+      }]);
+      const snapshot = roomSnapshot(identifier, { displayName: "letagents", gitRoom: gitRoom({ isDefault: true }) });
+      const selectedSnapshot = ref<DesktopRoomSnapshot | null>(snapshot);
+      const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(snapshot);
+      const state = useDesktopNavigationState({
+        accountRooms: ref([accountRoom(identifier, "letagents", { gitRoom: snapshot.room!.gitRoom })]),
+        activeEntryStorageKey: "active-entry", appInfo: ref(null), recentRootRooms,
+        recentRootRoomsStorageKey: "recent-root-rooms", repoStatus: ref(null), rootRoomSnapshot,
+        selectedRootRoomIdentifier: ref(identifier), selectedSnapshot,
+      });
+      assert.equal(state.repoName.value, "letagents");
+      assert.equal(state.selectedRoomInfo.value.displayName, "letagents");
+      state.rememberRootRoomSnapshot(snapshot);
+      assert.equal(recentRootRooms.value[0].displayName, "letagents");
+
+      const renamed = roomSnapshot(identifier, { displayName: "Release planning", gitRoom: snapshot.room!.gitRoom });
+      state.openRoomSnapshot(renamed, { kind: "project", rootPath: "/Projects/different-checkout-folder" });
+      assert.equal(state.repoName.value, "Release planning");
+      assert.equal(state.selectedRoomInfo.value.displayName, "Release planning");
+      assert.equal(recentRootRooms.value[0].displayName, "Release planning");
+      assert.equal(state.currentParentRoom.value.roomIdentifier, identifier);
+    });
+  });
   it("returns from Settings to the focus room, even after changing settings sections", () => {
     withLocalStorage(() => {
       const { state, selectedSnapshot } = settingsNavigationFixture();

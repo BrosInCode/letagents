@@ -516,6 +516,59 @@ test("mutable hosted names never merge distinct stable repository identities", a
   }
 });
 
+test("a local project stays connected when Git and its first remote are added", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-project-published-"));
+  const rootPath = join(temporary, "Scene Finder");
+  const options = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
+  mkdirSync(rootPath);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: rootPath, stdio: "ignore" });
+  try {
+    const plain = await resolveRoomIdentifierFromPath(rootPath);
+    const plainBinding = await bindProjectRoot({
+      context: { roomIdentifier: plain.roomIdentifier }, rootPath, source: "local_folder",
+    }, options);
+    git("init", "-b", "main");
+    const local = await resolveRoomIdentifierFromPath(rootPath);
+    const localContext = { roomIdentifier: local.roomIdentifier, gitRoom: local.gitRoom };
+    const localBinding = await bindProjectRoot({ context: localContext, rootPath, source: "local_git" }, options);
+    assert.ok(findProjectBinding(await listProjectBindings(options), { roomIdentifier: plain.roomIdentifier }),
+      "initializing Git must not detach the original folder room");
+    git("remote", "add", "origin", "https://github.com/example/scene-finder.git");
+    const published = await listProjectBindings(options);
+    assert.equal(findProjectBinding(published, { roomIdentifier: plain.roomIdentifier })?.id, plainBinding.id);
+    assert.equal(findProjectBinding(published, localContext)?.id, localBinding.id);
+    assert.equal(published.length, 2, "both existing rooms retain their own identity and history");
+    for (const binding of published) {
+      assert.ok(binding.verificationKeys.includes("project-room:github.com/example/scene-finder"));
+    }
+    assert.deepEqual(await listProjectBindings(options), published, "the verified transition is persisted");
+    git("remote", "set-url", "origin", "https://github.com/other/unrelated.git");
+    assert.deepEqual(await listProjectBindings(options), [], "a later remote replacement still fails closed");
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("publishing cannot recover a local binding whose Git directory was replaced", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-project-replaced-git-"));
+  const rootPath = join(temporary, "project");
+  const options = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
+  mkdirSync(rootPath);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: rootPath, stdio: "ignore" });
+  try {
+    git("init", "-b", "main");
+    const local = await resolveRoomIdentifierFromPath(rootPath);
+    await bindProjectRoot({ context: { roomIdentifier: local.roomIdentifier, gitRoom: local.gitRoom },
+      rootPath, source: "local_git" }, options);
+    rmSync(join(rootPath, ".git"), { recursive: true, force: true });
+    git("init", "-b", "main");
+    git("remote", "add", "origin", "https://github.com/example/scene-finder.git");
+    assert.deepEqual(await listProjectBindings(options), []);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("a folder replaced at the same path loses its old binding", async () => {
   const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-replaced-"));
   const storePath = join(temporary, "bindings.json");

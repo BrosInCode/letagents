@@ -309,6 +309,24 @@ function replaceVerificationKeysIfCurrent(
   }
 }
 
+function sameLocalProjectAfterGitSetup(
+  binding: DesktopProjectBinding,
+  current: FilesystemVerification,
+  source: DesktopProjectBindingSource,
+): boolean {
+  if (source !== "local_git" && source !== "git_remote") return false;
+  const identityKeys = binding.verificationKeys.filter((key) => !key.startsWith("fs-"));
+  const localRoomKey = /^(?:project-room:(?:git-room:local:[a-f0-9]+|local-[a-z0-9-]+-[a-f0-9]{10}|local\/.+)|repository-id:local:.+)$/;
+  if (!identityKeys.length || !identityKeys.every((key) => localRoomKey.test(key))) return false;
+  const filesystemKeys = binding.verificationKeys.filter((key) => key.startsWith("fs-"));
+  // A remote is new metadata on the same project, not a replacement folder.
+  // Require every saved object (including .git, when present) to still match.
+  // Persisting the hosted verification keys ends this local-only exception;
+  // subsequent remote replacements must pass the ordinary strict check.
+  return filesystemKeys.some((key) => key.startsWith("fs-root:"))
+    && compareVerificationKeys(filesystemKeys, current).matches;
+}
+
 async function validateProjectBinding(
   binding: DesktopProjectBinding,
   options: ProjectBindingsStoreOptions,
@@ -320,8 +338,9 @@ async function validateProjectBinding(
     const derived = await deriveFilesystemContext(rootPath);
     const current = await filesystemVerificationKeys(rootPath, derived.context, options, namespaceCache);
     const comparison = compareVerificationKeys(binding.verificationKeys, current);
-    if (!comparison.matches) return null;
-    if (!comparison.shouldUpgrade) return binding;
+    const gitSetup = !comparison.matches && sameLocalProjectAfterGitSetup(binding, current, derived.source);
+    if (!comparison.matches && !gitSetup) return null;
+    if (!comparison.shouldUpgrade && !gitSetup) return binding;
     try {
       if (replaceVerificationKeysIfCurrent(binding, current.keys, options)) {
         return { ...binding, verificationKeys: current.keys };

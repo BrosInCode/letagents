@@ -343,6 +343,8 @@ const api: DesktopApi = {
     },
     openRoom: (rootPath, options) => ipcRenderer.invoke("desktop:repos:open-room", rootPath, options ?? null),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
+    pickProjectParent: () => ipcRenderer.invoke("desktop:repos:pick-project-parent"),
+    createProject: (parentPath, name) => ipcRenderer.invoke("desktop:repos:create-project", parentPath, name),
     listProjectBindings: () => ipcRenderer.invoke("desktop:repos:list-project-bindings"),
     migrateProjectBindings: (candidates) =>
       ipcRenderer.invoke("desktop:repos:migrate-project-bindings", candidates),

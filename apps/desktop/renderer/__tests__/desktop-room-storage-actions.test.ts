@@ -126,20 +126,25 @@ async function renderPanel(overrides: Record<string, unknown> = {}): Promise<str
   }));
 }
 
-test("local Git Rooms disable Cloud and explain how to unlock it", async () => {
+test("local Git Rooms offer explicit publishing and explain its effect before enabling Cloud", async () => {
   const html = await renderPanel();
 
-  assert.match(html, /No Git provider is attached to this room/);
-  assert.match(html, /Add an origin remote, then reopen the repository to use Cloud/);
-  assert.match(html, /Connect this project to a repository hosted online before sharing its room/);
+  assert.match(html, /Add a GitHub origin remote, then use Publish to cloud/);
+  assert.match(html, /Publishing uploads this room&#39;s messages and tasks/);
+  assert.match(html, /Adding a remote or connecting a folder does not upload anything/);
   // Unavailable, yet reachable: the reason is read out to someone who lands on it.
   assert.match(storageChoice(html, "cloud"), /aria-disabled="true"/);
   assert.match(storageChoice(html, "cloud"), /aria-describedby="room-settings-storage-cloud-reason"/);
   assert.doesNotMatch(storageChoice(html, "cloud"), / disabled/);
-  assert.match(html, /<span id="room-settings-storage-cloud-reason" class="sr-only">No Git provider is attached to this room/);
+  assert.match(html, /<span id="room-settings-storage-cloud-reason" class="sr-only">Add a GitHub origin remote/);
   assert.match(storageChoice(html, "cloud"), /aria-checked="false"/);
   assert.match(storageChoice(html, "local"), /aria-checked="true"/);
-  assert.doesNotMatch(html, /Publish to cloud/);
+  assert.match(html, /class="room-settings-button room-settings-publish"[^>]*>Publish to cloud/);
+});
+
+test("room publishing surfaces failures and skipped-history feedback", async () => {
+  assert.match(await renderPanel({ storageFeedback: { error: true, message: "Connect the project first." } }), /role="alert">Connect the project first\./);
+  assert.match(await renderPanel({ storageFeedback: { error: false, message: "2 items remain local." } }), /role="status">2 items remain local\./);
 });
 
 test("provider-backed rooms keep the Cloud control enabled", async () => {

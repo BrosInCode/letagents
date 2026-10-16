@@ -405,6 +405,8 @@ export interface DesktopApi {
     /** `newProjectRoom` is the creation flow: it refuses the home folder and the disk root. */
     openRoom: (rootPath: string, options?: { newProjectRoom?: boolean }) => Promise<DesktopRepoRoomSelection>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
+    pickProjectParent: () => Promise<string | null>;
+    createProject: (parentPath: string, name: string) => Promise<DesktopRepoRoomSelection>;
     listProjectBindings: () => Promise<DesktopProjectBinding[]>;
     migrateProjectBindings: (
       candidates: DesktopLegacyProjectBindingCandidate[],

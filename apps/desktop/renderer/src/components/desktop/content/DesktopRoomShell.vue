@@ -42,6 +42,7 @@
       :github-events-available="githubEventsAvailable"
       :github-events-visible="githubEventsVisible"
       :storage-busy="storageBusy"
+      :storage-feedback="storageFeedback"
       :search-summary="searchSummary"
       :search-results-count="searchResults.length" @show-search-result="revealRoomMessage"
       @copy-room-link="copyRoomLink"
@@ -578,6 +579,8 @@ const boardGovernanceSection = ref<"pending" | null>(null);
 const activityHistoryRequest = ref(0);
 const artifactTimelineTaskFilterId = ref<string | null>(null);
 const storageBusy = ref(false);
+const storageFeedback = ref<{ message: string; error: boolean } | null>(null);
+watch(() => props.room.identifier, () => { storageFeedback.value = null; });
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const environmentPanelOpen = ref(readEnvironmentPanelOpen(props.room.identifier));
 const refreshedEnvironmentRepoStatus = ref<RepoStatus | null>(null);
@@ -1299,10 +1302,23 @@ async function publishLocalRoom(): Promise<void> {
   const bridge = desktopIpc.chatStorage;
   if (!bridge?.publishLocalRoom || storageBusy.value) return;
   storageBusy.value = true;
+  storageFeedback.value = null;
+  const roomIdentifier = props.room.identifier;
   try {
-    await bridge.publishLocalRoom(props.room.identifier);
-    const snapshot = await desktopIpc.room?.getSnapshot?.(props.room.identifier);
+    const result = await bridge.publishLocalRoom(roomIdentifier);
+    if (props.room.identifier !== roomIdentifier) return;
+    const snapshot = await desktopIpc.room?.getSnapshot?.(roomIdentifier);
+    if (props.room.identifier !== roomIdentifier) return;
     emit("refresh-room", snapshot);
+    await nextTick();
+    if (props.room.identifier !== roomIdentifier && props.room.identifier !== snapshot?.roomIdentifier) return;
+    const skipped = result.skippedCount + result.skippedTaskCount;
+    storageFeedback.value = { error: false, message: `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks.${skipped ? ` ${skipped} items remain local and can be retried.` : ""} Storage remains Local until you choose Cloud.` };
+  } catch (error) {
+    if (props.room.identifier === roomIdentifier) storageFeedback.value = {
+      error: true,
+      message: error instanceof Error ? error.message : "Local chat could not be published. Your history is still on this device.",
+    };
   } finally {
     storageBusy.value = false;
   }
