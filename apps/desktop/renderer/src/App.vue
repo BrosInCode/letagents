@@ -74,6 +74,7 @@
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
+          :reveal-request="sidebarRevealRequest"
           :settings-entry="settingsEntry"
           :rental-request-count="rentalRequestCount"
           :needs-you-count="needsYouCount"
@@ -298,10 +299,14 @@
         v-model:storage="newRoomStorage"
         :step="newRoomStep"
         :busy="newRoomBusy"
+        :can-dismiss="newRoomCanDismiss"
         :active-action="newRoomActiveAction"
         :feedback="newRoomFeedback"
         :feedback-state="newRoomFeedbackState"
         v-model:project-path="newRoomProjectPath"
+        v-model:project-name="newRoomProjectName"
+        v-model:project-parent="newRoomProjectParent"
+        :project-creation-error="newRoomProjectCreationError"
         :project-selection="newRoomProjectSelection"
         :project-path-error="newRoomProjectPathError"
         :recent-project-folders="newRoomRecentProjectFolders"
@@ -313,11 +318,14 @@
         @back="backFromSubstep"
         @choose-join="chooseJoinIntent"
         @choose-project="chooseProjectIntent"
+        @choose-new-project="chooseNewProjectIntent"
         @choose-standalone="chooseStandaloneIntent"
         @close="closeNewRoomModal"
         @confirm-project="confirmProjectRoomFromModal"
         @copy-code="copyInviteCode"
         @create-standalone="createStandaloneRoom"
+        @create-project="createProjectRoomFromModal"
+        @pick-project-parent="pickNewProjectParent"
         @dismiss-success="dismissSuccess"
         @open-project="openProjectRoomFromModal"
         @open-project-path="openProjectRoomFromPath"
@@ -486,6 +494,8 @@ import {
 import {
   applySidebarRoomOrder,
   orderedSidebarChildRooms,
+  promoteSidebarProject,
+  replaceSidebarProjectId,
   readStoredSidebarRoomOrder,
   rememberSidebarRoomOrder,
   reorderSidebarChildRooms,
@@ -568,6 +578,7 @@ const readRoomMessageIds = ref<Record<string, string>>({});
 let accountReadStorageKey: string | null = null;
 const sidebarWidth = ref(readStoredSidebarWidth());
 const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
+const sidebarRevealRequest = ref<{ entryId: string; sequence: number } | null>(null);
 const isSidebarResizing = ref(false);
 const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
 const chatScrollPositionsByRoom = ref<Record<string, ChatScrollPosition>>({});
@@ -1643,15 +1654,18 @@ const {
   canSubmitStandalone,
   chooseJoinIntent,
   chooseProjectIntent,
+  chooseNewProjectIntent,
   chooseStandaloneIntent,
   closeNewRoomModal,
   confirmProjectRoomFromModal,
   copyInviteCode,
   createStandaloneRoom,
+  createProjectRoomFromModal,
   dismissSuccess,
   joinRoomCodeFromModal,
   newRoomActiveAction,
   newRoomBusy,
+  newRoomCanDismiss,
   newRoomFeedback,
   newRoomFeedbackState,
   newRoomJoinCode,
@@ -1659,6 +1673,9 @@ const {
   newRoomModalOpen,
   newRoomName,
   newRoomProjectPath,
+  newRoomProjectName,
+  newRoomProjectParent,
+  newRoomProjectCreationError,
   newRoomProjectPathError,
   newRoomProjectSelection,
   newRoomStatusMessage,
@@ -1667,11 +1684,31 @@ const {
   newRoomSuccess,
   openProjectRoomFromModal,
   openProjectRoomFromPath,
+  pickNewProjectParent,
   openSuccessRoom,
   retryLastAction,
   selectNewRoomEntry,
 } = useDesktopNewRoomModal({
-  openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
+  openRoomSnapshot: (snapshot, options) => {
+    openRoomSnapshot(snapshot, options);
+    if (options?.kind !== "project") return;
+    const entryId = activeEntry.value.id;
+    const project = sidebarProjectEntries.value.find((candidate) =>
+      [candidate.parent, ...candidate.branchRooms, ...candidate.focusRooms]
+        .some((entry) => entry.id === entryId));
+    if (project) {
+      const order = promoteSidebarProject(sidebarProjectEntries.value, sidebarRoomOrder.value, project.id);
+      if (order) {
+        sidebarRoomOrder.value = order;
+        rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, order);
+      }
+    }
+    sidebarMode.value = "expanded";
+    sidebarRevealRequest.value = {
+      entryId,
+      sequence: (sidebarRevealRequest.value?.sequence || 0) + 1,
+    };
+  },
   setRepoStatus: (status) => {
     if (status) repoStatus.value = preserveRoomRepoStatistics(repoStatus.value, status);
   },
@@ -2465,6 +2502,7 @@ async function setChatStorageMode(mode: DesktopChatStorageSettings["mode"]): Pro
 
 async function syncLocalChat(): Promise<void> {
   const roomIdentifier = selectedRoomIdentifier.value || selectedRootRoomIdentifier.value;
+  const generation = sessionGeneration.value;
   if (!roomIdentifier) {
     chatStorageFeedback.value = {
       state: "error",
@@ -2478,6 +2516,8 @@ async function syncLocalChat(): Promise<void> {
     const bridge = getChatStorageBridge();
     if (!bridge) return;
     const result = await bridge.syncLocalRoom(roomIdentifier);
+    if (generation !== sessionGeneration.value
+      || (selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) !== roomIdentifier) return;
     chatStorageFeedback.value = {
       state: result.skippedCount > 0 || result.skippedTaskCount > 0 ? "info" : "success",
       message:
@@ -2485,7 +2525,15 @@ async function syncLocalChat(): Promise<void> {
           ? `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks. ${result.skippedCount + result.skippedTaskCount} items were skipped.`
           : `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks.`,
     };
+    if ((selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) === roomIdentifier) {
+      const snapshot = await desktopIpc.room.getSnapshot(roomIdentifier);
+      if (generation !== sessionGeneration.value
+        || (selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) !== roomIdentifier) return;
+      await handleRoomShellRefresh(snapshot);
+    }
   } catch (error) {
+    if (generation !== sessionGeneration.value
+      || (selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) !== roomIdentifier) return;
     chatStorageFeedback.value = {
       state: "error",
       message:
@@ -2504,17 +2552,42 @@ function handleOwnMessageSent(message: Parameters<typeof handleMessageSent>[0]):
 }
 
 async function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): Promise<void> {
+  const generation = sessionGeneration.value;
+  const selectedIdentifier = selectedSnapshot.value?.roomIdentifier;
+  const rootIdentifier = selectedRootRoomIdentifier.value;
+  const entryId = activeEntry.value.id;
+  const localIdentifier = normalizeRoomIdentifier(snapshot?.storage?.localRoom?.roomIdentifier);
+  const previousProject = localIdentifier && sidebarProjectEntries.value.find((project) =>
+    [project.parent, ...project.branchRooms, ...project.focusRooms]
+      .some((entry) => normalizeRoomIdentifier(entry.roomIdentifier) === localIdentifier));
+  const identityChanged = snapshot?.roomIdentifier
+    && snapshot.roomIdentifier !== selectedSnapshot.value?.roomIdentifier;
   const storageChanged = snapshot?.storage
     && snapshot.storage.effectiveMode !== roomHistoryMode(snapshot.roomIdentifier);
   if (storageChanged) {
-    const generation = sessionGeneration.value;
     await loadChatStorageSettings();
-    if (generation !== sessionGeneration.value) return;
+    if (generation !== sessionGeneration.value
+      || selectedIdentifier !== selectedSnapshot.value?.roomIdentifier
+      || rootIdentifier !== selectedRootRoomIdentifier.value
+      || entryId !== activeEntry.value.id) return;
     sidebarLatestMessages.value = {};
   }
   handleRefreshRoom(snapshot);
   if (!snapshot?.roomIdentifier) return;
+  if (identityChanged && previousProject) {
+    const nextProject = sidebarProjectEntries.value.find((project) =>
+      [project.parent, ...project.branchRooms, ...project.focusRooms]
+        .some((entry) => normalizeRoomIdentifier(entry.roomIdentifier) === normalizeRoomIdentifier(snapshot.roomIdentifier)));
+    if (nextProject && previousProject.id !== nextProject.id) {
+      sidebarRoomOrder.value = replaceSidebarProjectId(sidebarRoomOrder.value, previousProject.id, nextProject.id);
+      rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, sidebarRoomOrder.value);
+    }
+  }
   void syncSelectedRoomStream(snapshot.roomIdentifier);
+  if (identityChanged) {
+    await refreshProjectBindings();
+    await refreshSidebarRoomMetadata();
+  }
   if (storageChanged) await refreshSidebarLatestMessages();
 }
 

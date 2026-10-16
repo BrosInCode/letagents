@@ -37,7 +37,7 @@
             class="desktop-modal-close"
             type="button"
             aria-label="Close new room dialog"
-            :disabled="busy"
+            :disabled="!canDismiss"
             @click="requestClose"
           >
             <X aria-hidden="true" />
@@ -78,7 +78,17 @@
             data-testid="new-room-open-project"
             @click="emit('openProject')"
           >
-            {{ projectSelection ? "Change folder" : "Choose project folder" }}
+            {{ activeAction === 'pick_project' ? "Choosing folder…" : projectSelection ? "Change folder" : "Choose project folder" }}
+          </button>
+
+          <button
+            class="desktop-new-room-action-button desktop-new-room-full-button"
+            type="button"
+            :disabled="busy"
+            data-testid="new-room-new-project"
+            @click="emit('chooseNewProject')"
+          >
+            Create a new project folder
           </button>
 
           <form
@@ -187,6 +197,67 @@
             </button>
           </div>
         </div>
+
+        <!-- New project -->
+        <form
+          v-else-if="step === 'new_project'"
+          class="desktop-new-room-step"
+          data-testid="new-room-create-project-step"
+          @submit.prevent="emit('createProject')"
+        >
+          <label class="desktop-new-room-field">
+            <span>Project name</span>
+            <input
+              v-model="projectName"
+              type="text"
+              maxlength="80"
+              placeholder="My project"
+              autocomplete="off"
+              :disabled="busy"
+              data-testid="new-room-project-name"
+            />
+          </label>
+          <div class="desktop-new-room-field">
+            <label for="new-room-project-parent">Parent folder</label>
+            <div class="desktop-new-room-path-row">
+              <input
+                id="new-room-project-parent"
+                v-model="projectParent"
+                type="text"
+                placeholder="~/Projects"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                :disabled="busy"
+                data-testid="new-room-project-parent"
+              />
+              <button
+                class="desktop-new-room-action-button"
+                type="button"
+                :disabled="busy"
+                data-testid="new-room-pick-project-parent"
+                @click="emit('pickProjectParent')"
+              >
+                {{ activeAction === 'pick_project_parent' ? "Choosing…" : "Browse" }}
+              </button>
+            </div>
+            <small class="desktop-new-room-hint">
+              Creates a new empty folder and a room on this Mac.
+            </small>
+          </div>
+          <p v-if="projectParent.trim() && projectName.trim()" class="desktop-new-room-hint" data-testid="new-room-project-destination">
+            {{ projectParent.trim().replace(/\/$/, "") }}/{{ projectName.trim() }}
+          </p>
+          <p v-if="projectCreationError" class="desktop-new-room-field-error" role="alert">{{ projectCreationError }}</p>
+          <button
+            class="desktop-new-room-action-button primary desktop-new-room-full-button"
+            type="submit"
+            :disabled="busy || !projectName.trim() || !projectParent.trim()"
+            data-testid="new-room-create-project"
+          >
+            {{ activeAction === 'create_project' ? "Creating project…" : "Create project" }}
+          </button>
+        </form>
 
         <!-- Standalone -->
         <form
@@ -416,11 +487,13 @@ import {
 const props = defineProps<{
   step: NewRoomStep;
   busy: boolean;
+  canDismiss: boolean;
   activeAction: NewRoomActiveAction;
   feedback: string | null;
   feedbackState: "info" | "error" | "success";
   projectSelection: PendingProjectRoomSelection | null;
   projectPathError: string | null;
+  projectCreationError: string | null;
   recentProjectFolders: readonly NewRoomRecentProjectFolder[];
   success: NewRoomSuccessState | null;
   statusMessage: string | null;
@@ -433,20 +506,25 @@ const joinCode = defineModel<string>("joinCode", { required: true });
 const roomName = defineModel<string>("roomName", { required: true });
 const storage = defineModel<NewRoomStorageChoice>("storage", { required: true });
 const projectPath = defineModel<string>("projectPath", { default: "" });
+const projectName = defineModel<string>("projectName", { default: "" });
+const projectParent = defineModel<string>("projectParent", { default: "" });
 
 const emit = defineEmits<{
   back: [];
   chooseJoin: [];
   chooseProject: [];
+  chooseNewProject: [];
   chooseStandalone: [];
   close: [];
   confirmProject: [];
   copyCode: [];
   createStandalone: [];
+  createProject: [];
   dismissSuccess: [];
   join: [];
   openProject: [];
   openProjectPath: [path?: string];
+  pickProjectParent: [];
   openSuccess: [];
   retry: [];
 }>();
@@ -503,6 +581,8 @@ const title = computed(() => {
   switch (props.step) {
     case "project":
       return "Work on a project";
+    case "new_project":
+      return "Create a project";
     case "standalone":
       return "Start a standalone room";
     case "join":
@@ -522,6 +602,8 @@ const description = computed(() => {
   switch (props.step) {
     case "project":
       return "Choose or enter a folder, confirm the detected room, then open it.";
+    case "new_project":
+      return "Name your project and choose where its new folder belongs.";
     case "standalone":
       return "Name the room and pick how it should be stored.";
     case "join":
@@ -541,6 +623,7 @@ const description = computed(() => {
 
 const showBack = computed(() =>
   props.step === "project" ||
+  props.step === "new_project" ||
   props.step === "standalone" ||
   props.step === "join" ||
   props.step === "error"
@@ -559,7 +642,7 @@ function handleIntent(event: IntentEvent): void {
 }
 
 function requestClose(): void {
-  if (props.busy) return;
+  if (!props.canDismiss) return;
   emit("close");
 }
 

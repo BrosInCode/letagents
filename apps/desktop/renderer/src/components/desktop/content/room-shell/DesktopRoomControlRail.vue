@@ -17,6 +17,7 @@
       :github-events-available="githubEventsAvailable"
       :github-events-visible="githubEventsVisible"
       :storage-busy="storageBusy"
+      :storage-feedback="storageFeedback"
       @copy-room-link="emit('copyRoomLink')"
       @open-rules="emit('openRules')"
       @toggle-sound="emit('toggleSound')"
@@ -109,6 +110,7 @@ const props = defineProps<{
   githubEventsAvailable: boolean;
   githubEventsVisible: boolean;
   storageBusy: boolean;
+  storageFeedback?: { message: string; error: boolean } | null;
   searchSummary: string;
   searchResultsCount: number;
 }>();

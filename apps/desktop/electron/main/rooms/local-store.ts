@@ -1133,16 +1133,32 @@ export async function importLocalTasks(
 export async function linkLocalRoomToCloud(input: {
   roomIdentifier: string;
   cloudRoomIdentifier: string;
+  gitRoom?: DesktopGitRoomInfo;
 }): Promise<void> {
   const database = await getDb();
   const now = new Date().toISOString();
-  database
-    .prepare(`
+  beginImmediate(database);
+  try {
+    const room = database.prepare("SELECT cloud_room_id FROM local_rooms WHERE room_id = ?").get(input.roomIdentifier) as { cloud_room_id: string | null } | undefined;
+    if (!room) throw new Error("The local room no longer exists.");
+    if (room.cloud_room_id && room.cloud_room_id !== input.cloudRoomIdentifier) {
+      throw new Error("This local history is already linked to a different cloud room.");
+    }
+    const other = database.prepare("SELECT room_id FROM local_rooms WHERE room_id != ? AND (room_id = ? OR cloud_room_id = ?) LIMIT 1")
+      .get(input.roomIdentifier, input.cloudRoomIdentifier, input.cloudRoomIdentifier);
+    if (other) throw new Error("This cloud room already has separate local history on this device. Your histories have been kept separate.");
+    database.prepare(`
       UPDATE local_rooms
-      SET cloud_room_id = ?, published_at = COALESCE(published_at, ?), updated_at = ?
+      SET cloud_room_id = ?, published_at = COALESCE(published_at, ?), updated_at = ?,
+          git_room_json = COALESCE(?, git_room_json)
       WHERE room_id = ?
     `)
-    .run(input.cloudRoomIdentifier, now, now, input.roomIdentifier);
+      .run(input.cloudRoomIdentifier, now, now, input.gitRoom ? JSON.stringify(input.gitRoom) : null, input.roomIdentifier);
+    database.exec("COMMIT");
+  } catch (error) {
+    rollback(database);
+    throw error;
+  }
 }
 
 export async function claimLocalTasksForPublish(
