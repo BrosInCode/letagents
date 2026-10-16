@@ -1,11 +1,20 @@
-import { inject, type InjectionKey } from "vue";
+import { inject, type InjectionKey, type Ref } from "vue";
+import type { DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
+import type { SupervisorEntriesResource } from "../../../../domain/agent-inspector-identity";
 
 /**
- * Lets the add-agent flow ask the room shell to refresh its supervisor entries
- * and daemon status. New entries normally arrive by push; the refresh polls
- * the daemon only when that push is stale.
+ * The room shell's view of the daemon's supervisor entries, shared with the
+ * add-agent flow. The daemon pushes every manifest change to the shell, which
+ * polls only when that push goes stale, so a launch card follows `entries`
+ * instead of running a read loop of its own. `refresh` asks the shell to read
+ * the entries and the daemon status again; it polls only when the push is
+ * stale.
  */
 export interface SupervisorEntriesContext {
+  entries: Readonly<Ref<readonly DesktopSupervisorManifestEntry[]>>;
+  state: Readonly<Ref<SupervisorEntriesResource["state"]>>;
+  /** Why the shell's last read failed, while `state` is "error". */
+  error: Readonly<Ref<string | null>>;
   refresh: () => Promise<void>;
 }
 

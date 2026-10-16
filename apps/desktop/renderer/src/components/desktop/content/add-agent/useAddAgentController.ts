@@ -227,6 +227,9 @@ const supervisedLaunch = useSupervisedAgentLaunch({
   authCommandForProvider,
   currentVersion: setup.currentVersion,
   isCurrentRequest: (version) => props.open && version === setup.currentVersion(),
+  entries: () => supervisorEntries.entries.value,
+  entriesState: () => supervisorEntries.state.value,
+  entriesError: () => supervisorEntries.error.value,
   onChooseRepo: () => setSetupMessage(
     "Connect this room to its local project before adding an agent.",
     "warning",

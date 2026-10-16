@@ -4,6 +4,7 @@ import type {
   DesktopLaunchRecoveryAction,
   DesktopSupervisorManifestEntry,
 } from "../../../../../../electron/ipc-types";
+import type { SupervisorEntriesResource } from "../../../../domain/agent-inspector-identity";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { foldLaunchJourney } from "../../../../domain/launch-journey";
 import { supervisedLaunchProgress } from "../../../../domain/supervised-launch";
@@ -13,7 +14,7 @@ import {
 import { contextualAddAgentError, type AddAgentFeedbackTone } from "./add-agent-errors";
 import { createSupervisedLaunchAttachments } from "./supervised-launch-attachments";
 import { useSupervisedLaunchEventStream } from "./useSupervisedLaunchEventStream";
-import { useSupervisedRuntimePolling } from "./useSupervisedRuntimePolling";
+import { useSupervisedRuntimeWatch } from "./useSupervisedRuntimeWatch";
 import { useSupervisedLaunchRecovery } from "./useSupervisedLaunchRecovery";
 
 export function canAddAnotherSupervisedAgent(input: {
@@ -34,6 +35,10 @@ export function useSupervisedAgentLaunch(options: {
   authCommandForProvider: (providerId: string | null) => string | null;
   isCurrentRequest: (version: number) => boolean;
   currentVersion: () => number;
+  /** The room shell's supervisor entries, pushed by the daemon. The launch card follows them. */
+  entries: () => readonly DesktopSupervisorManifestEntry[];
+  entriesState: () => SupervisorEntriesResource["state"];
+  entriesError: () => string | null;
   onChooseRepo: () => void;
   onCopyAuthCommand: (command: string) => void;
   onRetry: () => void | Promise<void>;
@@ -86,11 +91,14 @@ export function useSupervisedAgentLaunch(options: {
     if (conflict.value) return options.authCommandForProvider(conflict.value.provider);
     return options.authCommandForProvider(toValue(options.providerId)) ?? toValue(options.authCommand);
   }
-  const runtimePolling = useSupervisedRuntimePolling({
+  const runtimeWatch = useSupervisedRuntimeWatch({
     open: () => toValue(options.open),
     roomIdentifier: () => toValue(options.roomIdentifier),
     currentVersion: options.currentVersion,
     isCurrentRequest: options.isCurrentRequest,
+    entries: options.entries,
+    entriesState: options.entriesState,
+    entriesError: options.entriesError,
     conflict,
     stoppingEntryId,
     activeLaunchId,
@@ -106,9 +114,9 @@ export function useSupervisedAgentLaunch(options: {
     },
     onMessage: options.onMessage,
   });
-  const startRuntimeRefresh = runtimePolling.startPolling;
-  const stopRuntimeRefresh = runtimePolling.stopPolling;
-  const stop = runtimePolling.stopEntry;
+  const startRuntimeWatch = runtimeWatch.startWatching;
+  const stopRuntimeWatch = runtimeWatch.stopWatching;
+  const stop = runtimeWatch.stopEntry;
   const recovery = useSupervisedLaunchRecovery({
     open: () => toValue(options.open),
     roomIdentifier: () => toValue(options.roomIdentifier),
@@ -157,7 +165,10 @@ export function useSupervisedAgentLaunch(options: {
     conflictLookupError.value = null;
     signInCommandCopiedForEntryId.value = null;
     options.onMessage(null);
-    subscribe(creationRequestId.value);
+    // The listener is attached before createAgent is called, so no event is
+    // missed. The journey folds from the latest launch.requested, which this
+    // launch is about to emit, so older history (a retried id) is not needed.
+    subscribe(creationRequestId.value, { replay: false });
     return creationRequestId.value;
   }
 
@@ -183,11 +194,11 @@ export function useSupervisedAgentLaunch(options: {
       || (progress.failed && !progress.recoverableBlocked)
       || (progress.stopped && !stopConverging)
     ) {
-      stopRuntimeRefresh();
+      stopRuntimeWatch();
       unsubscribe();
       return;
     }
-    startRuntimeRefresh(entry.id);
+    startRuntimeWatch(entry.id);
   }
 
   async function recoverFailedCreation(error?: unknown): Promise<void> {
@@ -262,7 +273,7 @@ export function useSupervisedAgentLaunch(options: {
 
   function clearActiveLaunch(): void {
     clearLaunchEventStream();
-    stopRuntimeRefresh();
+    stopRuntimeWatch();
     launchStarted.value = false;
     conflict.value = null;
     conflictLookupError.value = null;
@@ -385,7 +396,7 @@ export function useSupervisedAgentLaunch(options: {
     if (activeEntry && (next.ready || next.stopped)) {
       forgetLaunch(activeEntry.roomId, activeEntry.id);
     }
-    stopRuntimeRefresh();
+    stopRuntimeWatch();
     unsubscribe();
   });
   if (getCurrentInstance()) onBeforeUnmount(cleanup);

@@ -316,7 +316,7 @@ import { mergeRoomResponseParticipants } from "../../../domain/room-response-par
 import { useRoomResponseParticipants } from "../../../composables/useRoomResponseParticipants";
 import { roomAgentRecoveryAction } from "../../../domain/room-agent-delivery";
 import { GitBranch } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, toRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, readonly, ref, shallowReadonly, toRef, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentProvider,
@@ -698,7 +698,12 @@ const selectedAgentInspectorWorkArtifacts = computed(() => {
   return projection ? agentInspectorWorkArtifacts(projection.assignedWork, props.roomArtifacts) : [];
 });
 const deliveryReceiptsByMessage = computed(() => roomMessageDeliveryReceipts(supervisorEntries.value));
-provide(supervisorEntriesKey, { refresh: refreshSupervisorEntries });
+provide(supervisorEntriesKey, {
+  entries: shallowReadonly(supervisorEntries),
+  state: readonly(supervisorEntriesState),
+  error: readonly(supervisorEntriesError),
+  refresh: refreshSupervisorEntries,
+});
 let supervisorEntriesRefreshTimer: number | null = null;
 let supervisorEntriesRefreshRequestId = 0;
 let supervisorEntriesMutationVersion = 0;
