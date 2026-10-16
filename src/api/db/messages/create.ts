@@ -974,12 +974,17 @@ export async function addMessageWithCreateStatus(
       // The transaction hook may restrict the persisted message. MessageRow
       // deliberately omits these fields, so inspect the row after that hook
       // rather than treating absent projection fields as public visibility.
-      const [visibleSharedRequest] = sharedHumanThreadCandidate
-        ? await tx.select({ number: messages.number }).from(messages).where(and(
+      const [visibleHumanRequest] = createdMessage.source === "browser"
+        ? await tx.select({ text: messages.text, promptKind: messages.agent_prompt_kind, account: messages.publisher_account_id }).from(messages).where(and(
           eq(messages.room_id, roomId), eq(messages.number, createdMessage.number),
+          eq(messages.source, "browser"),
+          sql`${messages.publisher_account_id} IS NOT NULL`,
+          sql`${messages.publisher_agent_key} IS NULL`, sql`${messages.publisher_agent_session_id} IS NULL`,
           sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`,
         )).limit(1) : [];
-      const sharedHumanThread = Boolean(visibleSharedRequest);
+      const freshHumanRequest = Boolean(visibleHumanRequest?.account?.trim()
+        && !isPromptOnlyAgentMessage(visibleHumanRequest.text, visibleHumanRequest.promptKind));
+      const sharedHumanThread = sharedHumanThreadCandidate && freshHumanRequest;
       // Several agents woken by one broadcast or small-room message answer
       // one after another only in a room whose admin turned sequential replies
       // on (NULL is parallel). The setting is read only when the receipts
@@ -1034,7 +1039,7 @@ export async function addMessageWithCreateStatus(
       // A newer human correction must get past older holds, while retaining
       // its own reply order. The bound is essential: releasing all holds after
       // insertion would also release the sequence just created above.
-      if (sharedHumanThread) releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
+      if (freshHumanRequest) releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
         tx, roomId, receiptRowsToInsert.filter(receipt => receipt.turn_position !== null)
           .map(receipt => receipt.agent_key), createdMessage.number,
       ));
@@ -1042,9 +1047,8 @@ export async function addMessageWithCreateStatus(
       // must not stay behind an earlier held turn: the frontier would hide it
       // too. Automatic participation in a peer's thread reply is different:
       // keep that receipt, but do not let it release unrelated queued turns.
-      // Sequenced receipts never release, not even position 1: a quick
-      // follow-up broadcast must not let an agent answer the previous message
-      // out of turn. It waits behind that hold like everything else.
+      // Public human sequences released only older holds above. Their new
+      // sequence stays intact; peer/system sequences gain no such bypass.
       releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
         tx,
         roomId,
