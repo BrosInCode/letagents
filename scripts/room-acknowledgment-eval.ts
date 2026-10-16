@@ -13,7 +13,7 @@ const options = new Map<string, string>();
 for (let i = 0; i < args.length; i++) {
   const name = args[i]!;
   if (!["--runs", "--json", "--dry-run", "--suite"].includes(name) || options.has(name)) {
-    console.error("Unknown or duplicate option. Use --runs N, --json PATH, --suite baseline|holdout, or --dry-run."); process.exit(2);
+    console.error("Unknown or duplicate option. Use --runs N, --json PATH, --suite baseline|holdout|long-context, or --dry-run."); process.exit(2);
   }
   if (name === "--dry-run") { options.set(name, "true"); continue; }
   const value = args[++i];
@@ -26,8 +26,8 @@ const runs = Number(options.get("--runs") ?? "3");
 const output = options.get("--json") ?? "";
 const dry = options.has("--dry-run");
 const suite = options.get("--suite") ?? "baseline";
-if (suite !== "baseline" && suite !== "holdout") {
-  console.error("--suite must be baseline or holdout"); process.exit(2);
+if (suite !== "baseline" && suite !== "holdout" && suite !== "long-context") {
+  console.error("--suite must be baseline, holdout or long-context"); process.exit(2);
 }
 if (!Number.isInteger(runs) || runs < 1 || runs > 10) {
   console.error("--runs must be an integer from 1 to 10"); process.exit(2);
@@ -37,9 +37,12 @@ if (!config && !dry) {
   console.error("Configure TYPESAFE_API_KEY or AI_GATEWAY_API_KEY in this process environment. No requests were sent.");
   process.exit(2);
 }
+// Long cases use synthetic padding to stress complete context and late
+// instructions; they are not a representative natural-conversation benchmark.
 const cases: Array<{ id: string; expect: "independent_acknowledgment" | "keep_turn_order"; input: AcknowledgmentInput }> =
   JSON.parse(await readFile(new URL(suite === "baseline"
-    ? "./room-acknowledgment-eval.cases.json" : "./room-acknowledgment-eval.holdout.json", import.meta.url), "utf8"));
+    ? "./room-acknowledgment-eval.cases.json" : suite === "holdout"
+      ? "./room-acknowledgment-eval.holdout.json" : "./room-acknowledgment-eval.long-context.json", import.meta.url), "utf8"));
 const results = [];
 let failures = 0;
 let mismatches = 0;

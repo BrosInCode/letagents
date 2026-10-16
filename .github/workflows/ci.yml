@@ -19,6 +19,7 @@ on:
         options:
           - baseline
           - holdout
+          - long-context
   pull_request:
     branches:
       - dev
@@ -738,7 +739,7 @@ jobs:
           script: |
             set -eu
             umask 077
-            case "$ROOM_ACK_EVAL_SUITE" in baseline|holdout) ;; *) exit 2 ;; esac
+            case "$ROOM_ACK_EVAL_SUITE" in baseline|holdout|long-context) ;; *) exit 2 ;; esac
             task_dir=$(mktemp -d /tmp/letagents-ack-eval.XXXXXXXX)
             container_id=""
             cleanup() {

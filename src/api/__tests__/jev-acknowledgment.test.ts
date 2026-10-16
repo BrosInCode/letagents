@@ -13,7 +13,7 @@ test("only a complete human text request can be evaluated", () => {
   for (const invalid of [
     { source: "agent" as const }, { attachmentCount: 1 }, { attachmentCount: -1 },
     { text: " " }, { text: "x".repeat(1201) },
-    { recentConversation: [{ kind: "agent" as const, text: "x".repeat(1201) }] },
+    { recentConversation: [{ kind: "agent" as const, text: "x".repeat(7201) }] },
     { recentConversation: Array.from({ length: 7 }, () => ({ kind: "human" as const, text: "hello" })) },
   ]) assert.equal(buildAcknowledgmentRequest({ ...input, ...invalid }), null);
   const text = "x".repeat(1200);
@@ -35,6 +35,17 @@ test("both question scores must satisfy conservative thresholds", () => {
   assert.equal(assessAcknowledgment({ answers: {
     acknowledgment_only: { noul: .99 }, substantive_or_ambiguous: { noul: .01 },
   } }).decision, "independent_acknowledgment");
+});
+
+test("complete long replies share the existing total context budget without losing a decisive tail", () => {
+  const text = "A complete explanation. ".repeat(100) + " Shall I deploy the update now?";
+  const context = [{ kind: "agent" as const, text }];
+  assert.deepEqual(buildAcknowledgmentRequest({ ...input, text: "Yes, go ahead.", recentConversation: context })
+    ?.state.recent_conversation, context);
+  const boundary = [{ kind: "agent" as const, text: "x".repeat(7_199) }, { kind: "human" as const, text: "y" }];
+  assert.deepEqual(buildAcknowledgmentRequest({ ...input, recentConversation: boundary })?.state.recent_conversation, boundary);
+  assert.equal(buildAcknowledgmentRequest({ ...input, recentConversation: [...boundary.slice(0, 1),
+    { kind: "human", text: "yy" }] }), null, "overflow rejects the whole request instead of shortening context");
 });
 
 test("missing, malformed and contradictory provider fields fail closed and are not valid measurements", () => {
