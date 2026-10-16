@@ -908,6 +908,14 @@ export class SupervisedAgentInboxStore {
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
   }
+  /** Reuse the queue's exact no-dispatch/retry/control-history boundary. */
+  async untouchedPending(inboxItemId: string): Promise<SupervisedInboxItem | null> {
+    return this.read(async database => {
+      const row = database.prepare(`SELECT i.* FROM supervised_agent_inbox i WHERE i.inbox_item_id=? AND ${UNTOUCHED_PENDING_SQL}`)
+        .get(inboxItemId) as Row | undefined;
+      return row ? rowToItem(row) : null;
+    });
+  }
   /** Read one stable room-source identity, including terminal legacy rows. */
   async getBySourceMessage(agentId: string, roomId: string, sourceMessageId: string): Promise<SupervisedInboxItem | null> {
     this.require(agentId, "agent_id"); this.require(roomId, "room_id"); this.require(sourceMessageId, "source_message_id");
