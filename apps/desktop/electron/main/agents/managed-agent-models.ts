@@ -78,17 +78,6 @@ export function normalizeManagedAgentEffort(
     : null;
 }
 
-export function normalizeManagedAgentEffortForProvider(
-  providerId: DesktopAgentProviderId,
-  value: DesktopManagedAgentEffort | string | null | undefined,
-): DesktopManagedAgentEffort | null {
-  const effort = normalizeManagedAgentEffort(value);
-  if (!effort) return null;
-  if (providerId === "claude-code") return effort;
-  if (providerId === "codex") return effort === "max" ? null : effort;
-  return null;
-}
-
 export async function listDesktopAgentProviderModels(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderPreflightInput = {},

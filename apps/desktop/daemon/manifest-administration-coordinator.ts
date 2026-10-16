@@ -74,15 +74,6 @@ export type ManifestAdministrationStore = {
     outcome: "updated" | "conflict" | "invalid";
     configuration?: StoredAgentConfiguration;
   }>;
-  appendActivity(
-    expectedGeneration: number,
-    entryId: string,
-    event: DaemonActivityEvent,
-    observedState: DaemonManifestEntry["observed_state"],
-    nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]>,
-    limit: number,
-    commitFence: CommitFence,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }>;
   appendActivityOnly(
     expectedGeneration: number,
     entryId: string,
@@ -170,6 +161,9 @@ export class ManifestAdministrationCoordinator {
     if (!["running", "paused", "stopped"].includes(entry.desired_state)) {
       throw new Error("Invalid desired state.");
     }
+    if (entry.delivery_mode !== undefined && !["mcp_polling", "daemon_inbox"].includes(entry.delivery_mode)) {
+      throw new Error("Invalid delivery mode.");
+    }
   }
 
   /**
@@ -254,41 +248,6 @@ export class ManifestAdministrationCoordinator {
       );
       this.options.authority.acceptManifestGeneration(next.generation);
       return updated;
-    });
-  }
-
-  async appendActivity(id: string, event: DaemonActivityEvent): Promise<DaemonManifestEntry> {
-    if (!event || typeof event !== "object" || !event.observed_at) {
-      throw new Error("A bounded activity event is required.");
-    }
-    const sanitizedEvent = this.options.policies.sanitizeActivity(event);
-    return this.options.authority.serialize(async () => {
-      await this.options.authority.assertCurrent();
-      const entry = await this.options.store.getActivityState(id);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      const lastSequence = entry.last_sequence;
-      if (sanitizedEvent.sequence <= lastSequence) {
-        throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${lastSequence}.`);
-      }
-      const observedState = sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing"
-        ? "working"
-        : sanitizedEvent.status === "blocked" ? entry.observed_state : "idle";
-      const nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]> = {
-        state: sanitizedEvent.status === "idle" ? "idle" : "active",
-        observed_at: sanitizedEvent.observed_at,
-        detail: sanitizedEvent.summary,
-      };
-      const next = await this.options.store.appendActivity(
-        this.options.authority.currentManifestGeneration(),
-        id,
-        sanitizedEvent,
-        observedState,
-        nativeLiveness,
-        200,
-        this.options.authority.fenceCommit,
-      );
-      this.options.authority.acceptManifestGeneration(next.generation);
-      return next.entry;
     });
   }
 

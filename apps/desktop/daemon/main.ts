@@ -891,7 +891,6 @@ export class SupervisorDaemon {
       cancelDeliveryDrain: (input) => this.deliveryCutoverExecution.cancelDrain(input),
       acknowledgeInspectorRoomMoveSourceRevocation: (input) => this.roomMoves.acknowledgeSourceRevocation(input),
       applyAgentConfiguration: (input) => this.runtimeConfigurationApply.apply(input),
-      appendActivity: this.appendActivity.bind(this),
       bindWorkerSession: this.workerAuthority.bindWorkerSession.bind(this.workerAuthority),
       bootstrapRoomIngress: (input) => this.userAction(input.initial_message === undefined ? null : input.entry_id,
         () => this.beginBootstrap(this.workerAuthority.bootstrapRoomIngress.bind(this.workerAuthority), input)),
@@ -1286,10 +1285,6 @@ export class SupervisorDaemon {
 
   private admitNewTurnControl(entryId: string): void {
     this.turnControls.admitNew(entryId);
-  }
-
-  private async appendActivity(id: string, event: DaemonActivityEvent): Promise<DaemonManifestEntry> {
-    return this.manifestAdministration.appendActivity(id, event);
   }
 
   private async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null, observedAt: string): Promise<DaemonManifestEntry> {

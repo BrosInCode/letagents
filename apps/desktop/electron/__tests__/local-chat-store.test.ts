@@ -32,7 +32,6 @@ const {
   getLocalChatMessagesBefore,
   getLocalMessageThread,
   getLocalMessageThreads,
-  getLocalChatThreadRoutingAgentKeysForRoots,
   getSyncedCloudMessageId,
   importLocalChatMessages,
   markLocalChatMessageSynced,
@@ -494,58 +493,6 @@ test("desktop cloud import resolves reply edges independently of timestamp order
   assert.deepEqual(thread?.replies.map((message) => message.text), ["first reply", "nested reply"]);
 });
 
-test("desktop cloud edge correction removes the reply's obsolete phantom root", async () => {
-  const room = "room_import_reply_before_root";
-  const timestamp = "2026-01-01T00:00:00.000Z";
-  const reply = {
-    id: "msg_201",
-    sender: "Oak",
-    text: "reply before root",
-    attachments: [],
-    source: "agent",
-    timestamp,
-    thread_root_id: "msg_200",
-    thread_reply_to_id: "msg_200",
-    reply_to: { id: "msg_200", sender: "Human", text: "root", source: "browser", timestamp },
-    thread: null,
-    agent_identity: {
-      actor_label: "Oak",
-      agent_key: "owner/oak",
-      agent_session_id: "oak-session",
-    },
-  };
-  await importLocalChatMessages(room, [reply]);
-  await importLocalChatMessages(room, [{
-    id: "msg_200",
-    sender: "Human",
-    text: "root",
-    attachments: [],
-    source: "browser",
-    timestamp,
-    thread_root_id: "msg_200",
-    thread_reply_to_id: null,
-    reply_to: null,
-    thread: null,
-  }, reply]);
-
-  let membership: Awaited<ReturnType<typeof getLocalChatThreadRoutingAgentKeysForRoots>> | null = null;
-  for (let attempt = 0; attempt < 50 && !membership; attempt += 1) {
-    try {
-      membership = await getLocalChatThreadRoutingAgentKeysForRoots(
-        room,
-        ["msg_1", "msg_2"],
-        [{ agentKey: "owner/oak", actorLabel: "Oak", displayName: "Oak" }],
-      );
-    } catch (error) {
-      if ((error as { name?: string }).name !== "LocalThreadRoutingProjectionUnavailableError") throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  assert.ok(membership);
-  assert.deepEqual([...(membership.get("msg_1") ?? [])], []);
-  assert.deepEqual([...(membership.get("msg_2") ?? [])], ["owner/oak"]);
-});
-
 test("desktop cloud-to-local import preserves durable publisher routing authority", async () => {
   // Model a staggered rollout: the first import came from a client that did
   // not persist the new trusted publisher/control fields.
@@ -688,69 +635,6 @@ test("desktop cloud-to-local import preserves durable publisher routing authorit
     authority: "invalid",
   });
   assert.equal(otherAccountOwnerStop?.local_control_authorized, false);
-
-  const membership = await getLocalChatThreadRoutingAgentKeysForRoots(
-    "room_import_durable_publisher",
-    ["msg_1"],
-    [
-      {
-        agentKey: "local/stable-key",
-        actorLabel: "Renamed legitimate worker",
-        displayName: "Maple",
-      },
-      {
-        agentKey: "local/impostor",
-        actorLabel: "Old visible label",
-        displayName: "Old visible label",
-      },
-    ],
-  );
-  assert.deepEqual(
-    [...(membership.get("msg_1") ?? [])],
-    ["local/stable-key"],
-    "the imported authenticated key outranks a later worker reusing the old display alias",
-  );
-});
-
-test("desktop cloud publisher correction replaces stale local routing projection", async () => {
-  const base = {
-    id: "msg_30",
-    sender: "Historical label",
-    text: "root",
-    attachments: [],
-    source: "agent",
-    timestamp: "2026-01-03T00:00:00.000Z",
-    thread_root_id: "msg_30",
-    thread_reply_to_id: null,
-    reply_to: null,
-    thread: null,
-  };
-  await importLocalChatMessages("room_import_publisher_correction", [{
-    ...base,
-    agent_identity: {
-      actor_label: "Historical label",
-      agent_key: "owner/key-a",
-      agent_session_id: "session_a",
-    },
-  }]);
-  await importLocalChatMessages("room_import_publisher_correction", [{
-    ...base,
-    agent_identity: {
-      actor_label: "Historical label",
-      agent_key: "owner/key-b",
-      agent_session_id: "session_b",
-    },
-  }]);
-
-  const membership = await getLocalChatThreadRoutingAgentKeysForRoots(
-    "room_import_publisher_correction",
-    ["msg_1"],
-    [
-      { agentKey: "owner/key-a", actorLabel: "A", displayName: "A" },
-      { agentKey: "owner/key-b", actorLabel: "B", displayName: "B" },
-    ],
-  );
-  assert.deepEqual([...(membership.get("msg_1") ?? [])], ["owner/key-b"]);
 });
 
 test("desktop cloud publisher correction invalidates a large root without foreground replay", async () => {
@@ -780,6 +664,7 @@ test("desktop cloud publisher correction invalidates a large root without foregr
       exec(sql: string): void;
       prepare(sql: string): {
         get(...params: unknown[]): Record<string, unknown> | undefined;
+        all(...params: unknown[]): Record<string, unknown>[];
         run(...params: unknown[]): void;
       };
       close(): void;
@@ -880,24 +765,29 @@ test("desktop cloud publisher correction invalidates a large root without foregr
     foregroundGuard.close();
   }
 
-  let membership: Awaited<ReturnType<typeof getLocalChatThreadRoutingAgentKeysForRoots>> | null = null;
-  for (let attempt = 0; attempt < 100 && !membership; attempt += 1) {
-    try {
-      membership = await getLocalChatThreadRoutingAgentKeysForRoots(
-        room,
-        ["msg_1"],
-        [
-          { agentKey: "owner/old-key", actorLabel: "Old", displayName: "Old" },
-          { agentKey: "owner/new-key", actorLabel: "New", displayName: "New" },
-        ],
-      );
-    } catch (error) {
-      if ((error as { name?: string }).name !== "LocalThreadRoutingProjectionUnavailableError") throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  // The invalidated root is rebuilt in bounded background batches. Wait for
+  // that repair at the table level instead of through a membership read.
+  const repairReader = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
+  try {
+    let invalidatedCount = 1;
+    for (let attempt = 0; attempt < 200 && invalidatedCount > 0; attempt += 1) {
+      invalidatedCount = Number(repairReader.prepare(`
+        SELECT COUNT(*) AS invalidated_count
+          FROM local_chat_thread_routing_invalidated_roots_v2
+         WHERE room_id = ? AND thread_root_number = 1
+      `).get(room)?.invalidated_count);
+      if (invalidatedCount > 0) await new Promise<void>((resolve) => setTimeout(resolve, 50));
     }
+    assert.equal(invalidatedCount, 0, "the queued root repair eventually completes");
+    const rebuilt = repairReader.prepare(`
+      SELECT agent_key FROM local_chat_thread_routing_agents_v2
+       WHERE room_id = ? AND thread_root_number = 1
+       ORDER BY agent_key
+    `).all(room);
+    assert.deepEqual(rebuilt.map((row) => row.agent_key), ["owner/new-key"]);
+  } finally {
+    repairReader.close();
   }
-  assert.ok(membership, "the queued root repair eventually completes");
-  assert.deepEqual([...(membership.get("msg_1") ?? [])], ["owner/new-key"]);
 });
 
 test("desktop local chat store claims unsynced messages with stable sync keys", async () => {

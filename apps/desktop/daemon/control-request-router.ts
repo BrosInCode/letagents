@@ -1,5 +1,5 @@
 import { retiredRuntimeEvidenceListSchema } from "./runtime-recovery-journal.js";
-import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
+import type { DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
 import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
 import type { CustodialForwardRequest, DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
 import type { createHostApprovalBridge } from "./host-approval-broker.js";
@@ -71,7 +71,6 @@ export interface DaemonControlOperations {
   resolveTurnControl(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; actionId: string; resolution: "not_applied" | "applied";
   }): unknown;
-  appendActivity(id: string, event: DaemonActivityEvent): unknown;
   updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null, observedAt: string): unknown;
   bindWorkerSession(input: WorkerSessionCoordinates & { agent_session_token: string; api_url: string }): unknown;
   verifyWorkerSession(input: WorkerSessionCoordinates & { agent_session_token: string; api_url: string }): unknown;
@@ -117,7 +116,7 @@ export interface DaemonControlContext {
 // retain authority. New owner lifecycle actions wait until the update is deferred.
 const HANDOFF_DRAIN_METHODS = new Set<string>([
   "daemon.negotiate", "daemon.status", "daemon.prepare_handoff",
-  "manifest.list", "manifest.watch_state", "manifest.append_activity", "manifest.update_workplace_liveness",
+  "manifest.list", "manifest.watch_state", "manifest.update_workplace_liveness",
   "local_board.watch", "attempt.read", "supervisor.watch_agent_stream", "supervisor.get_agent_inspector_detail",
   "supervisor.get_agent_configuration", "supervisor.get_room_move", "supervisor.get_current_room_move",
   "supervisor.get_delivery_drain", "supervisor.get_polling_activation",
@@ -615,10 +614,6 @@ export function createDaemonControlRequestHandler(
         actionId: String(params.action_id ?? ""),
         resolution: String(params.resolution ?? "") as "not_applied" | "applied",
       });
-    }
-    if (request.method === "manifest.append_activity") {
-      const params = paramsRecord(request.params);
-      return operations.appendActivity(String(params.id ?? ""), params.event as DaemonActivityEvent);
     }
     if (request.method === "manifest.update_workplace_liveness") {
       const params = paramsRecord(request.params);

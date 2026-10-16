@@ -303,7 +303,6 @@ test("the closed release policy gives supported daemon-owned provider births typ
   for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
     assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed");
     assert.equal(lifecycleAuthorityModeForProvider(provider, "mcp_polling"), "typed_shadow");
-    assert.equal(lifecycleAuthorityModeForProvider(provider, "desktop_events"), "typed_shadow");
   }
 });
 

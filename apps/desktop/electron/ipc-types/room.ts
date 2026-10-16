@@ -528,11 +528,12 @@ export interface DesktopRoomSnapshot {
   sourceStates: DesktopSnapshotSourceStates;
 }
 
-/** Durable snapshot deltas replayed only to managed agents after a live gap. */
+/**
+ * The renderer's acknowledgement that its authoritative snapshot landed after
+ * a live gap. The stream's event cursor may advance once it arrives.
+ */
 export interface DesktopRoomDeliveryRepair {
   token: number;
-  messages: DesktopRoomMessage[];
-  tasks: DesktopTaskSummary[];
 }
 
 /**

@@ -31,7 +31,7 @@ export type SupervisedIngressAgent = {
   provider: string;
   charter?: string;
   /** Daemon ingress is legal only after durable ownership commits. */
-  deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
+  deliveryMode?: "mcp_polling" | "daemon_inbox";
   /** Bound worker API origin; never inferred from a persisted credential. */
   apiUrl: string;
   agentSessionId: string;

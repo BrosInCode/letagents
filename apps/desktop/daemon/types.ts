@@ -168,7 +168,7 @@ export type DaemonAgentConfiguration = {
 };
 
 /** Durable owner of room ingress for one supervised provider execution. */
-export type DaemonAgentDeliveryMode = "mcp_polling" | "desktop_events" | "daemon_inbox";
+export type DaemonAgentDeliveryMode = "mcp_polling" | "daemon_inbox";
 
 /** Durable one-way handoff from legacy polling to daemon-owned ingress. */
 export type DaemonDeliveryCutover = {

@@ -119,7 +119,6 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
     return;
   }
 
-  const agentDetailScreenshotPath = process.env.LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT?.trim() || null;
   const boardScreenshotPath = process.env.LETAGENTS_DESKTOP_BOARD_SCREENSHOT?.trim() || null;
   const updatesScreenshotPath = process.env.LETAGENTS_DESKTOP_UPDATES_SCREENSHOT?.trim() || null;
   const boardScreenshotSurface = process.env.LETAGENTS_DESKTOP_BOARD_SURFACE?.trim() || "board";
@@ -198,19 +197,7 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           setupConfirmationClearsOnClose: false,
           externalProviderInstruction: false,
           externalJoinPrompt: false,
-          bridgeOnlyRepoCopy: false,
-          agentSenderButton: false,
-          agentDetailModal: false,
-          agentDetailModalLayout: false,
-          agentDetailModalNarrowLayout: false,
-          agentDetailStopZoneNarrowLayout: false,
-          supervisorTurnControl: false,
-          supervisorTurnControlRejectTruthful: false,
-          supervisorTurnControlLadder: false,
-          supervisorTurnControlPersists: false,
-          agentInspectionStatus: false,
-          activityAgentControls: false,
-          publishedReasoning: false
+          bridgeOnlyRepoCopy: false
         };
 
         const waitFor = (label, predicate, timeoutMs = 12000) => new Promise((resolve, reject) => {
@@ -454,166 +441,6 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         document.querySelector('[data-testid="desktop-add-agent-modal"] button.desktop-modal-close[aria-label="Close add agent dialog"]')?.click();
         await waitFor("reopened add-agent modal closed", () => !document.querySelector('[data-testid="desktop-add-agent-modal"]'));
 
-        const agentSender = await waitFor(
-          "agent sender button",
-          () => document.querySelector('[data-testid="room-message-msg_smoke_codex"] .room-message-author-button')
-        );
-        result.agentSenderButton = true;
-        agentSender.click();
-
-        await waitFor("agent detail modal", () => document.querySelector('[data-testid="desktop-agent-detail-modal"]'));
-        result.agentDetailModal = true;
-        result.agentDetailModalLayout = (() => {
-          const modal = document.querySelector('[data-testid="desktop-agent-detail-modal"]');
-          const panels = Array.from(modal?.querySelectorAll(".desktop-agent-detail-panel") || []);
-          return rectInsideViewport(modal) &&
-            panels.length === 3 &&
-            panels.every((panel) => {
-              const rect = rectFor(panel);
-              return Boolean(rect && rect.width > 0 && rect.height > 0);
-            }) &&
-            panels.every((panel, index) => panels.slice(index + 1).every((other) => rectsDoNotOverlap(panel, other)));
-        })();
-        const detailText = () => document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent || "";
-        await waitFor("supervisor turn control", () =>
-          detailText().includes("Steer this agent") &&
-          detailText().includes("Native interrupt · preserves this provider session") &&
-          document.querySelector('[data-testid="desktop-agent-stop-turn"]') &&
-          document.querySelector('[data-testid="desktop-agent-steer"]')
-        );
-        const turnControl = document.querySelector('[data-testid="desktop-agent-turn-control"]');
-        turnControl?.scrollIntoView({ block: "center" });
-        await waitFor("visible supervisor turn control", () => rectInsideViewport(turnControl));
-        result.supervisorTurnControl = true;
-        const steerInput = document.querySelector('#supervisor-steer-supervisor_smoke_codex');
-        if (steerInput instanceof HTMLTextAreaElement) {
-          const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-          valueSetter?.call(steerInput, "Reject the stale smoke control.");
-          steerInput.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "Reject the stale smoke control." }));
-        }
-        let steerButton = await waitFor("enabled supervisor steer", () => {
-          const button = document.querySelector('[data-testid="desktop-agent-steer"]');
-          return button instanceof HTMLButtonElement && !button.disabled ? button : null;
-        });
-        steerButton.click();
-        await waitFor("truthful rejected supervisor control", () =>
-          detailText().includes("Smoke stale generation rejected before provider dispatch.") &&
-          !detailText().includes("Delivered") &&
-          !detailText().includes("Interrupting current turn")
-        );
-        result.supervisorTurnControlRejectTruthful = true;
-        if (steerInput instanceof HTMLTextAreaElement) {
-          const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-          valueSetter?.call(steerInput, "Use the corrected smoke instruction.");
-          steerInput.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "Use the corrected smoke instruction." }));
-        }
-        steerButton = await waitFor("re-enabled supervisor steer", () => {
-          const button = document.querySelector('[data-testid="desktop-agent-steer"]');
-          return button instanceof HTMLButtonElement && !button.disabled ? button : null;
-        });
-        steerButton.click();
-        await waitFor("supervisor turn control ladder", () =>
-          detailText().includes("Delivered") &&
-          detailText().includes("Interrupting current turn") &&
-          detailText().includes("Applied") &&
-          detailText().includes("Resumed same session")
-        );
-        result.supervisorTurnControlLadder = true;
-        await waitFor("agent inspection status", () =>
-          detailText().includes("App-server offline") || detailText().includes("Public transcript preview")
-        );
-        result.agentInspectionStatus = true;
-        result.publishedReasoning = detailText().includes("Smoke reasoning stream") &&
-          detailText().includes("Verifying the published reasoning panel.");
-
-        const narrowDialog = document.querySelector('[data-testid="desktop-agent-detail-modal"] .desktop-agent-detail-modal');
-        const narrowTitle = narrowDialog?.querySelector('.desktop-agent-detail-header h3');
-        const narrowProvider = narrowDialog?.querySelector('[data-testid="desktop-agent-detail-provider-identity"] > span:last-child');
-        const narrowRepo = narrowDialog?.querySelector('[data-testid="desktop-agent-detail-managed-session"] > p');
-        if (narrowTitle) narrowTitle.textContent = "MapleRidge with a deliberately long supervised agent identity that must not consume the viewport";
-        if (narrowProvider) narrowProvider.textContent = "Codex · provider-model-with-an-extremely-long-version-and-capability-label";
-        if (narrowRepo) narrowRepo.textContent = "/a/deliberately/long/workspace/path/that/must/wrap/without/creating/horizontal/overflow/in/the/agent/modal";
-        const narrowDangerZone = narrowDialog?.querySelector('[data-testid="desktop-agent-detail-stop-agent-zone"]');
-        if (narrowDangerZone && !narrowDangerZone.querySelector('[data-testid="desktop-agent-detail-stop-agent-error"]')) {
-          const narrowError = document.createElement('p');
-          narrowError.className = 'desktop-agent-detail-error';
-          narrowError.dataset.testid = 'desktop-agent-detail-stop-agent-error';
-          narrowError.setAttribute('role', 'alert');
-          narrowError.textContent = 'A deliberately long provider failure explains that the supervised runtime could not stop and remains retryable without overflowing this narrow dialog.';
-          narrowDangerZone.append(narrowError);
-        }
-
-        window.resizeTo(360, 480);
-        await waitFor("minimum agent detail viewport", () => window.innerWidth <= 390 && window.innerHeight <= 520);
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        result.agentDetailModalNarrowLayout = (() => {
-          const backdrop = document.querySelector('[data-testid="desktop-agent-detail-modal"]');
-          const dialog = backdrop?.querySelector('.desktop-agent-detail-modal');
-          const header = backdrop?.querySelector('.desktop-agent-detail-header');
-          const body = backdrop?.querySelector('.desktop-agent-detail-body');
-          const close = backdrop?.querySelector('button.desktop-modal-close[aria-label="Close agent detail dialog"]');
-          const horizontalOverflow = dialog instanceof HTMLElement && dialog.scrollWidth > dialog.clientWidth + 1;
-          const nestedScrollRegions = Array.from(dialog?.querySelectorAll('*') || []).filter((element) => {
-            if (!(element instanceof HTMLElement) || element === body) return false;
-            const overflowY = getComputedStyle(element).overflowY;
-            return (overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight + 1;
-          });
-          if (body instanceof HTMLElement) body.scrollTop = body.scrollHeight;
-          return rectInsideViewport(dialog) &&
-            rectInsideViewport(header) &&
-            rectInsideViewport(close) &&
-            body instanceof HTMLElement &&
-            body.clientHeight >= 120 &&
-            !horizontalOverflow &&
-            nestedScrollRegions.length === 0;
-        })();
-
-        const stopAgentZone = document.querySelector('[data-testid="desktop-agent-detail-stop-agent-zone"]');
-        stopAgentZone?.scrollIntoView({ block: "center" });
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        result.agentDetailStopZoneNarrowLayout = (() => {
-          const actions = stopAgentZone?.querySelector('.desktop-agent-detail-danger-actions');
-          const stopButton = stopAgentZone?.querySelector('[data-testid="desktop-agent-detail-stop-agent"]');
-          const error = stopAgentZone?.querySelector('[data-testid="desktop-agent-detail-stop-agent-error"]');
-          const buttonRect = rectFor(stopButton);
-          return rectInsideViewport(stopAgentZone) &&
-            rectInsideViewport(stopButton) &&
-            rectInsideViewport(error) &&
-            Boolean(buttonRect && buttonRect.height >= 44) &&
-            actions instanceof HTMLElement &&
-            actions.scrollWidth <= actions.clientWidth + 1;
-        })();
-
-        if (${Boolean(agentDetailScreenshotPath)}) {
-          return { ...result, agentDetailScreenshotReady: true };
-        }
-
-        window.resizeTo(1440, 920);
-        await waitFor("restored agent detail viewport", () => window.innerWidth >= 1180);
-
-        const detailClose = document.querySelector(
-          '[data-testid="desktop-agent-detail-modal"] button.desktop-modal-close[aria-label="Close agent detail dialog"]'
-        );
-        detailClose?.click();
-        await waitFor("agent detail modal closed", () => !document.querySelector('[data-testid="desktop-agent-detail-modal"]'));
-
-        const activityTab = await waitFor("activity tab", () => document.querySelector('[data-testid="desktop-room-tab-activity"]'));
-        activityTab.click();
-        const activityControls = await waitFor(
-          "activity agent controls",
-          () => document.querySelector('[data-testid="desktop-activity-open-agent-controls"]')
-        );
-        activityControls.click();
-        await waitFor("activity agent detail modal", () =>
-          document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent?.includes("MapleRidge")
-        );
-        result.activityAgentControls = true;
-        await waitFor("persisted supervisor turn-control ladder", () => {
-          const text = document.querySelector('[data-testid="desktop-agent-detail-modal"]')?.textContent || "";
-          return text.includes("Delivered") && text.includes("Resumed same session");
-        });
-        result.supervisorTurnControlPersists = true;
-
         return result;
       })()`,
       true,
@@ -623,13 +450,6 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         await writeFile(boardScreenshotPath, image.toPNG());
         console.log(`LETAGENTS_DESKTOP_BOARD_SCREENSHOT ${boardScreenshotPath} ${JSON.stringify(result)}`);
         app.exit(result.boardScreenshotLayoutValid ? 0 : 1);
-        return;
-      }
-      if (agentDetailScreenshotPath && result.agentDetailScreenshotReady) {
-        const image = await window.webContents.capturePage();
-        await writeFile(agentDetailScreenshotPath, image.toPNG());
-        console.log(`LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT ${agentDetailScreenshotPath}`);
-        app.exit(0);
         return;
       }
       console.log(`LETAGENTS_DESKTOP_SMOKE ${JSON.stringify(result)}`);

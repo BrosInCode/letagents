@@ -816,7 +816,8 @@ test("the owner's own setup is offered only for an owner's Codex and Claude Code
 test("an agent that collects its own room messages never gets the owner's own setup, whatever is stored", () => {
   const stored = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, ...OWN_SETUP, ...changedAt(4) };
   // The daemon can hold an agent back from its next turn only when it delivers the room's messages itself.
-  for (const deliveryMode of ["mcp_polling", "desktop_events", undefined, null, "", "DAEMON_INBOX", "daemon_inbox "]) {
+  // "desktop_events" is a retired mode, so it is an unknown value now and counts as polling like the rest.
+  for (const deliveryMode of ["mcp_polling", undefined, null, "", "DAEMON_INBOX", "daemon_inbox ", "desktop_events"]) {
     for (const provider of ["codex", "claude-code"]) {
       const agent = { id: "supervised_abc", provider, deliveryMode };
       assert.equal(homeHarnessAvailability(agent), "polling", `${provider}/${String(deliveryMode)}`);

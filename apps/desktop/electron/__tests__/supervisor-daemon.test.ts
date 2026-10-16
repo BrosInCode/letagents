@@ -1611,10 +1611,6 @@ async function startWireDaemon(
       } else if (request.method === "attempt.read") {
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         result = { entry_id: entry.id, work_attempt_id: null, workspace_path: entry.workspace_path, last_terminal: null, restart_count: 0, activity: entry.activity };
-      } else if (request.method === "manifest.append_activity") {
-        const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
-        entry.activity.push(request.params!.event);
-        result = entry;
       } else if (request.method === "supervisor.retry_room_delivery") {
         result = { accepted: true };
       } else if (request.method === "supervisor.install_host_grant") {

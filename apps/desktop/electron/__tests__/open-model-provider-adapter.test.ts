@@ -590,7 +590,7 @@ test("Open Model freezes lifecycle authority across spawn, attach, and resume", 
   await assert.rejects(adapter.spawn(spawnRequest({
     workAttemptId: "typed-non-daemon",
     lifecycleAuthorityMode: "typed",
-    deliveryMode: "desktop_events",
+    deliveryMode: "mcp_polling",
   })), /Typed Open Model lifecycle authority requires daemon-inbox delivery/);
   assert.equal(harness.launches.length, 1);
 });

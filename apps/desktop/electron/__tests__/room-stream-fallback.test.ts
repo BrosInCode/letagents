@@ -93,7 +93,7 @@ const {
   startDesktopRoomStream,
   stopDesktopRoomStream,
   getActiveRoomIdentifier,
-  repairDesktopRoomStreamManagedDelivery,
+  acknowledgeDesktopRoomStreamGapRepair,
   setExecutionDelegationInvalidationHandler,
 } =
   await import("../main/room-stream.js");
@@ -527,11 +527,7 @@ test("unterminated SSE frame overflow clears the broker cursor and repairs autho
     if (gap?.type !== "open" || gap.deliveryRepairToken === undefined) {
       throw new Error("expected an overflow repair token");
     }
-    repairDesktopRoomStreamManagedDelivery(ROOM, {
-      token: gap.deliveryRepairToken,
-      messages: [],
-      tasks: [],
-    });
+    acknowledgeDesktopRoomStreamGapRepair(ROOM, { token: gap.deliveryRepairToken });
     await waitUntil(() => router.streamCalls.length >= 2);
     assert.equal(
       router.streamCalls[1]?.headers.get("Last-Event-ID"),
@@ -891,11 +887,7 @@ test("SSE reconnect preserves the last broker event cursor", async () => {
     ).length > verifiedGapCount);
     const resetRepairToken = lastDeliveryRepairToken();
     assert.equal(typeof resetRepairToken, "number");
-    repairDesktopRoomStreamManagedDelivery("focus_cursor_room", {
-      token: resetRepairToken as number,
-      messages: [],
-      tasks: [],
-    });
+    acknowledgeDesktopRoomStreamGapRepair("focus_cursor_room", { token: resetRepairToken as number });
     await waitUntil(() => router.pollCalls.filter((call) => call.timeout === "0").length >= 2);
     reconnected.error();
     await waitUntil(() => router.streamCalls.length === 3, 4_000);
@@ -1181,46 +1173,11 @@ test("a live broker gap keeps later live cursors staged until the renderer snaps
       updated_at: "2026-08-11T10:00:30.000Z",
     }, "broker_repair_4");
 
-    const recoveredTask = {
-      id: "task_recovered",
-      title: "Recovered task",
-      description: null,
-      status: "accepted",
-      assignee: "Codex",
-      assigneeAgentKey: "emmymay/codex",
-      createdBy: "EmmyMay",
-      prUrl: null,
-      workflowArtifacts: [],
-      workflowRefs: [],
-      activeLeases: [],
-      activeLocks: [],
-      stalePromptState: null,
-      createdAt: "2026-08-11T09:00:00.000Z",
-      updatedAt: "2026-08-11T10:01:00.000Z",
-    };
     const deliveryRepairToken = lastDeliveryRepairToken();
     assert.equal(typeof deliveryRepairToken, "number");
-    const repair: DesktopRoomDeliveryRepair = {
-      token: deliveryRepairToken as number,
-      messages: [{
-        id: "msg_3",
-        sender: "EmmyMay",
-        source: "browser",
-        text: "recovered target",
-        timestamp: "2026-08-11T10:01:00.000Z",
-        agentPromptKind: "mention",
-        actorLabel: "EmmyMay",
-        agentIdentity: null,
-        replyTo: null,
-        threadRootId: "",
-        threadReplyToId: null,
-        thread: null,
-        attachments: [],
-      }],
-      tasks: [recoveredTask],
-    };
-    repairDesktopRoomStreamManagedDelivery(ROOM, repair);
-    repairDesktopRoomStreamManagedDelivery(ROOM, repair);
+    const repair: DesktopRoomDeliveryRepair = { token: deliveryRepairToken as number };
+    acknowledgeDesktopRoomStreamGapRepair(ROOM, repair);
+    acknowledgeDesktopRoomStreamGapRepair(ROOM, repair);
 
     router.enqueueCatchUp([]);
     sse.error();
