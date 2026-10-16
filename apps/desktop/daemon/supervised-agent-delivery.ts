@@ -91,7 +91,7 @@ export interface SupervisedDeliveryHttp {
   reportNoReply?(input: {
     roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
   }): Promise<void>;
-  /** Relinquish only the speaking position for blocked preparation or proven active native compaction. */
+  /** Relinquish only the speaking position for blocked preparation, native compaction or durable silence. */
   yieldReplyTurn?(input: {
     roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
   }): Promise<void>;
@@ -2014,6 +2014,11 @@ export class SupervisedAgentDelivery {
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
       const { acceptedResult: result } = await checkpointTerminalResult(providerResult);
+      // A durable silent ending can release the remote speaking position while
+      // capture finishes. This does not ACK the receipt or release local FIFO.
+      if (!recovering && result.outcome === "no_reply") {
+        void this.reportReplyTurnReceipt(agent, item, turnController, "settlement_yield").catch(() => {});
+      }
       // Review capture and a successful reply may travel together. Keep this
       // lane occupied until capture finishes, before ACK or another local turn.
       const workspaceCapture = observeWorkspace(result.text);
@@ -2284,12 +2289,17 @@ export class SupervisedAgentDelivery {
   }
 
   private reportReplyTurnReceipt(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController,
-    kind: "no_reply" | "yield" | "compaction_yield", compaction?: CompactionReplyTurnAuthority): Promise<void> {
+    kind: "no_reply" | "yield" | "compaction_yield" | "settlement_yield", compaction?: CompactionReplyTurnAuthority): Promise<void> {
     const report = kind === "no_reply" ? this.http.reportNoReply : this.http.yieldReplyTurn;
     if (kind !== "no_reply" && !item.activation.turn) return Promise.resolve();
     if (!report || this.fenced || this.isStopping(agent.agentId) || parent.signal.aborted
       || isLocalRoomApi(agent.apiUrl) || item.room_id !== agent.roomId
       || !/^msg_[1-9]\d*$/.test(item.source_message_id)) return Promise.resolve();
+    const silence = kind === "settlement_yield" ? {
+      active: this.activeTurns.get(agent.agentId), handle: agent.handle,
+      connection: agent.providerConnection ? { ...agent.providerConnection } : null,
+      continuation: agent.providerContinuationId, origin: agent.executionGenerationId,
+    } : null;
     // The pump can finish before this optional request. Give it its own
     // tracked lifetime so Stop and service handoff still cancel and join it.
     const controller = new AbortController();
@@ -2299,6 +2309,16 @@ export class SupervisedAgentDelivery {
     controllers.add(controller);
     this.auxiliaryControllers.set(agent.agentId, controllers);
     const operation = Promise.resolve().then(async () => {
+      const exactSilence = () => Boolean(silence?.active && silence.handle && silence.connection && silence.continuation
+        && !controller.signal.aborted && !this.fenced && !this.isStopping(agent.agentId)
+        && this.activeTurns.get(agent.agentId) === silence.active && silence.active.phase === "responding"
+        && silence.active.recoveryContext === this.recoveryContext(agent)
+        && silence.active.inboxItemId === item.inbox_item_id && silence.active.providerTurnId
+        && agent.handle === silence.handle && agent.executionGenerationId === silence.origin
+        && agent.providerContinuationId === silence.continuation
+        && agent.handle.providerContinuationId === silence.continuation
+        && sameProviderActionConnectionIdentity(silence.connection, agent.providerConnection)
+        && sameProviderActionConnectionIdentity(silence.connection, agent.handle.providerConnection));
       const exactCompaction = () => {
         const active = this.activeTurns.get(agent.agentId);
         return compaction && compaction.proof.isCompacting()
@@ -2312,9 +2332,22 @@ export class SupervisedAgentDelivery {
       const settled = await this.inbox.get(item.inbox_item_id);
       const eligible = kind === "no_reply" ? settled?.state === "acknowledged_no_reply"
         : kind === "yield" ? settled?.state === "blocked" && !settled.provider_turn_id && !settled.outcome
+        : kind === "settlement_yield" ? exactSilence()
+          && settled?.provider_turn_id === silence!.active!.providerTurnId
+          && ["dispatching", "awaiting_result"].includes(settled.state)
+          && persistedAcceptedTerminal(settled.outcome)?.kind === "no_reply"
         : exactCompaction() && settled?.provider_turn_id === compaction!.proof.providerTurnId
           && !settled.outcome && ["dispatching", "awaiting_result"].includes(settled.state);
       if (!eligible || !await this.hasLaneAuthority(agent, controller)) return;
+      if (kind === "settlement_yield") {
+        const binding = await this.inbox.providerTurnBinding(item.inbox_item_id);
+        if (!binding || binding.agent_id !== agent.agentId || binding.room_id !== agent.roomId
+          || binding.work_attempt_id !== agent.workAttemptId
+          || binding.origin_execution_generation_id !== silence!.origin
+          || binding.provider_continuation_id !== silence!.continuation
+          || binding.provider_turn_id !== silence!.active!.providerTurnId
+          || !await this.hasExecutionAuthority(agent, controller) || !exactSilence()) return;
+      }
       if (kind === "compaction_yield") {
         const binding = await this.inbox.providerTurnBinding(item.inbox_item_id);
         if (!compaction || !binding || binding.agent_id !== agent.agentId || binding.room_id !== agent.roomId
