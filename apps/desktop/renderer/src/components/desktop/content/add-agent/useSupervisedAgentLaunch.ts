@@ -157,7 +157,10 @@ export function useSupervisedAgentLaunch(options: {
     conflictLookupError.value = null;
     signInCommandCopiedForEntryId.value = null;
     options.onMessage(null);
-    subscribe(creationRequestId.value);
+    // The listener is attached before createAgent is called, so no event is
+    // missed. The journey folds from the latest launch.requested, which this
+    // launch is about to emit, so older history (a retried id) is not needed.
+    subscribe(creationRequestId.value, { replay: false });
     return creationRequestId.value;
   }
 
