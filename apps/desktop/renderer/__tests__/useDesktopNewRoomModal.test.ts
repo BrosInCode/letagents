@@ -47,7 +47,7 @@ test("validateJoinRoomInput rejects foreign absolute URLs", () => {
   assert.equal(validateJoinRoomInput("/in/focus_31").normalized, "focus_31");
 });
 
-test("new room modal starts on chooser and navigates intents", () => {
+test("new room modal starts with a new project and navigates tabs", () => {
   const modal = useDesktopNewRoomModal({
     openRoomSnapshot: () => undefined,
     setRepoStatus: () => undefined,
@@ -56,7 +56,7 @@ test("new room modal starts on chooser and navigates intents", () => {
 
   modal.selectNewRoomEntry();
   assert.equal(modal.newRoomModalOpen.value, true);
-  assert.equal(modal.newRoomStep.value, "chooser");
+  assert.equal(modal.newRoomStep.value, "new_project");
   assert.equal(modal.newRoomStorage.value, "cloud");
   assert.ok(modal.newRoomName.value.length > 0);
 
@@ -64,10 +64,21 @@ test("new room modal starts on chooser and navigates intents", () => {
   assert.equal(modal.newRoomStep.value, "standalone");
 
   modal.backFromSubstep();
-  assert.equal(modal.newRoomStep.value, "chooser");
+  assert.equal(modal.newRoomStep.value, "new_project");
 
   modal.chooseJoinIntent();
   assert.equal(modal.newRoomStep.value, "join");
+});
+
+test("blank room storage choice survives tab changes even when the app defaults to local", () => {
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: () => undefined, setRepoStatus: () => undefined, getDefaultStorageMode: () => "local" });
+  modal.selectNewRoomEntry();
+  modal.chooseStandaloneIntent();
+  assert.equal(modal.newRoomStorage.value, "local");
+  modal.newRoomStorage.value = "cloud";
+  modal.chooseProjectIntent();
+  modal.chooseStandaloneIntent();
+  assert.equal(modal.newRoomStorage.value, "cloud");
 });
 
 test("shared create patches stale snapshot name after successful rename", async () => {
@@ -144,9 +155,9 @@ test("shared create keeps invite code when rename fails and surfaces warning", a
   assert.equal(modal.newRoomFeedbackState.value, "info");
   assert.equal(modal.newRoomBusy.value, false);
 
-  // Success with naming warning is not an error-step retry trap; Back returns to chooser.
+  // Success with naming warning is not an error-step retry trap; Back returns to Project.
   modal.backFromSubstep();
-  assert.equal(modal.newRoomStep.value, "chooser");
+  assert.equal(modal.newRoomStep.value, "new_project");
   assert.equal(modal.newRoomSuccess.value, null);
 });
 
@@ -436,6 +447,23 @@ test("a typed project path opens the same preview as the folder picker", async (
   assert.equal(modal.newRoomStep.value, "project");
   assert.equal(modal.newRoomProjectSelection.value?.folderLabel, "project");
   assert.equal(modal.newRoomProjectSelection.value?.sourceLabel, "Git remote");
+
+  // Switching room types or project modes must not discard a selected folder or drafts.
+  const selection = modal.newRoomProjectSelection.value;
+  modal.chooseNewProjectIntent();
+  modal.newRoomProjectName.value = "Draft project";
+  modal.newRoomProjectParent.value = "/Users/test/Projects";
+  modal.chooseJoinIntent();
+  modal.newRoomJoinCode.value = "ABCD-1234";
+  modal.chooseStandaloneIntent();
+  modal.newRoomName.value = "Planning";
+  modal.chooseProjectIntent();
+  assert.equal(modal.newRoomProjectSelection.value, selection);
+  assert.equal(modal.newRoomProjectPath.value, "  ~/code/project ");
+  assert.equal(modal.newRoomProjectName.value, "Draft project");
+  assert.equal(modal.newRoomProjectParent.value, "/Users/test/Projects");
+  assert.equal(modal.newRoomJoinCode.value, "ABCD-1234");
+  assert.equal(modal.newRoomName.value, "Planning");
 
   // A recent folder fills the field with its path and opens it the same way.
   await modal.openProjectRoomFromPath("/Users/test/code/other");
