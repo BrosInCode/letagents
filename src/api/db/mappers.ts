@@ -211,6 +211,8 @@ export function toMessageAttachmentUpload(row: MessageAttachmentUploadRow): Mess
     attached_message_number: row.attached_message_number,
     created_at: row.created_at,
     attached_at: row.attached_at,
+    uploader_account_id: row.uploader_account_id,
+    uploader_agent_session_id: row.uploader_agent_session_id,
   };
 }
 
