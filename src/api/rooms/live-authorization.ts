@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { githubRepoAccessInvalidationEvents } from "../github/repo-access.js";
 import { parseCookies, type AuthenticatedRequest } from "../http/helpers.js";
 import { roomEventBridgeLossEvents } from "../server/bridged-emitter.js";
+import { isRepoBackedRoomId } from "./room-ids.js";
 import type { RoomAgentDeliveryCredentialFence } from "../../shared/agent-presence.js";
 import {
   roomAgentCredentialInvalidationEvents,
@@ -40,10 +41,15 @@ export interface LiveRoomAuthorizationLease {
 
 const leases = new Map<string, SharedAuthorizationLease>();
 
-function invalidateAuthorizationLeases(roomName: string | null, login: string | null): void {
+function invalidateAuthorizationLeases(
+  roomName: string | null,
+  login: string | null,
+  shouldInvalidate: (lease: SharedAuthorizationLease) => boolean = () => true,
+): void {
   for (const lease of leases.values()) {
     if (roomName && lease.roomName !== roomName) continue;
     if (login && lease.login !== login) continue;
+    if (!shouldInvalidate(lease)) continue;
     lease.invalidated = true;
     lease.invalidationGeneration += 1;
     for (const handler of lease.invalidationHandlers) {
@@ -74,7 +80,12 @@ roomEventBridgeLossEvents.on("loss", (payload: unknown) => {
   // A dropped cross-instance frame may itself have been a revocation. Treat
   // the compact durable loss marker as a global authorization invalidation;
   // leases still coalesce the resulting fresh checks per room/credential.
-  invalidateAuthorizationLeases(null, null);
+  // Only repository access and worker credential retirements travel over the
+  // bridge. A session or owner token in a room without a repository is revoked
+  // in the database alone, so a lost frame says nothing about it; the periodic
+  // recheck covers it without a forced read on every bridge flap.
+  invalidateAuthorizationLeases(null, null, (lease) =>
+    Boolean(lease.credentialFingerprint) || isRepoBackedRoomId(lease.roomName));
 });
 
 roomAgentCredentialInvalidationEvents.on("invalidate", (payload: unknown) => {
@@ -121,6 +132,8 @@ export function acquireLiveRoomAuthorization(input: {
   authorize: () => Promise<boolean>;
   deliveryCredentialFence?: RoomAgentDeliveryCredentialFence | null;
   initiallyAllowed?: boolean;
+  /** The caller's entry check was exact (no cache), so the first body needs no recheck. */
+  freshAtEntry?: boolean;
   now?: () => number;
 }): LiveRoomAuthorizationLease {
   const now = input.now ?? Date.now;
@@ -139,8 +152,9 @@ export function acquireLiveRoomAuthorization(input: {
       checkedAt: now(),
       // The entry route may have used a visibility/access cache. Force one
       // fresh shared check before the first live body so reconnecting cannot
-      // keep extending a stale allow decision indefinitely.
-      invalidated: true,
+      // keep extending a stale allow decision indefinitely. A caller whose
+      // entry check was itself exact seeds the lease as fresh instead.
+      invalidated: !input.freshAtEntry,
       credentialFingerprint,
       credentialRetired: false,
       invalidationGeneration: 1,
