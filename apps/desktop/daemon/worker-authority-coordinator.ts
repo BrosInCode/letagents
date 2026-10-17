@@ -251,6 +251,14 @@ export type WorkerAuthorityCoordinatorOptions = {
   delivery: {
     stop(entryId: string): Promise<void>;
     start(entryId: string): Promise<void>;
+    /**
+     * The server revokes a live bearer when it mints the successor. The lane
+     * holds its polls until it adopts that successor; the returned function
+     * ends the hold early when no successor will come.
+     */
+    holdIngressForBearerRotation?(entryId: string): () => void;
+    /** The successor of a held bearer is about to be bound; see holdIngressForBearerRotation. */
+    bearerSuccessorBinding?(entryId: string): void;
   };
   convergence: {
     request(entryId: string, kind?: ConvergenceRequestKind): void;
@@ -637,6 +645,16 @@ export class WorkerAuthorityCoordinator {
       && isCursorChildConnection(handleProviderConnection)
       && pid === handleProviderConnection.pid;
     await assertAuthorityCurrent();
+    // Only the credential changes: the lane's authority check fails from this
+    // bind until the lane adopts the new bearer, and the lane waits for that.
+    if (currentBinding && !exactCurrentBinding
+      && currentBinding.entry_id === input.entry_id
+      && currentBinding.room_id === input.room_id
+      && currentBinding.work_attempt_id === input.work_attempt_id
+      && currentBinding.execution_generation_id === input.execution_generation_id
+      && currentBinding.agent_session_id === input.agent_session_id) {
+      this.options.delivery.bearerSuccessorBinding?.(input.entry_id);
+    }
     const binding = exactCurrentBinding && currentBinding
       ? currentBinding
       : await this.options.bindings.bind(input, await this.pollingContract(entry) ? {
@@ -1139,7 +1157,16 @@ export class WorkerAuthorityCoordinator {
       agentSession: cached.agentSession,
       authority,
     };
-    const minted = await this.mintWorkerSessionWithRetry(entry, grant, signal, budget);
+    const abandonIngressHold = this.options.delivery.holdIngressForBearerRotation?.(entry.id) ?? (() => {});
+    let minted: Awaited<ReturnType<SupervisorGrantHttp["createWorkerSession"]>>;
+    try {
+      minted = await this.mintWorkerSessionWithRetry(entry, grant, signal, budget);
+    } catch (error) {
+      // A refused mint leaves the old bearer valid. One that timed out or met a
+      // server failure may have minted, so its hold stands until its deadline.
+      if (!(error instanceof WorkerCredentialMintError && error.retryable)) abandonIngressHold();
+      throw error;
+    }
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
       || !this.options.custody.hostGrantIsCurrent(entry.id, grant)) {
       this.revokeHostGrantIfCurrent(entry.id, grant);

@@ -579,6 +579,133 @@ test("a room that refuses the worker bearer is shown to the owner and asks the s
   }
 });
 
+test("a rotation that revokes the bearer before the lane adopts its successor is neither a refusal nor a reason to replace the lane", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-rotating-bearer-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  /** The credential the binding holds; like production, authority holds only for it. */
+  let bound = "bearer-1";
+  /** Bearers the server has revoked; a poll with one is refused. */
+  const revoked = new Set<string>();
+  const polledWith: string[] = [];
+  const wakes: string[] = [];
+  let openPoll: { bearer: string; refuse: () => void; answer: () => void } | null = null;
+  const delivery: SupervisedAgentDelivery = new SupervisedAgentDelivery(store, roomTurnPort(async () => { throw new Error("not used"); }), {
+    poll: async ({ bearer, signal }) => {
+      polledWith.push(bearer);
+      if (revoked.has(bearer)) throw new SupervisedRoomAuthorizationError("Supervised room poll failed with HTTP 401.", 401);
+      // A long poll stays open until it times out, is answered, or its bearer is revoked.
+      const outcome = await new Promise<"answer" | "refuse">((resolve) => {
+        openPoll = { bearer, refuse: () => resolve("refuse"), answer: () => resolve("answer") };
+        setTimeout(() => resolve("answer"), 5);
+        signal.addEventListener("abort", () => resolve("answer"), { once: true });
+      });
+      openPoll = null;
+      if (outcome === "refuse") throw new SupervisedRoomAuthorizationError("Supervised room poll failed with HTTP 401.", 401);
+      return {};
+    },
+    publish: async () => { throw new Error("not used"); },
+  }, async (authority) => authority.bearer === bound, 10, undefined,
+  (_delayMs, signal) => pause(2, signal),
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  (agentId) => { wakes.push(agentId); });
+  const healthWrites: string[] = [];
+  const setIngressHealth = store.setIngressHealth.bind(store);
+  store.setIngressHealth = async (input) => { healthWrites.push(input.state); return setIngressHealth(input); };
+  const refused = () => delivery.roomRefusesAccess("agent-1");
+  const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  /** Polls with `bearer` after position `from`; at most the one refused is allowed for a revoked bearer. */
+  const pollsWith = (bearer: string, from: number) => polledWith.slice(from).filter((used) => used === bearer).length;
+  /** The server revokes `bearer`: an open poll with it is refused, and so is any later one. */
+  const revoke = (bearer: string) => {
+    revoked.add(bearer);
+    const open = openPoll as { bearer: string; refuse: () => void } | null;
+    if (open?.bearer === bearer) open.refuse();
+    return polledWith.length;
+  };
+  const adopt = async (bearer: string) => {
+    await delivery.refresh({ ...deliveryAgent(null), bearer });
+    assert.ok(await eventually(() => polledWith.at(-1) === bearer), `the lane polls with ${bearer}`);
+  };
+  try {
+    await store.bootstrapCursor({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "0" });
+    await delivery.start(deliveryAgent(null));
+    assert.ok(await eventually(() => polledWith.length >= 2));
+
+    // Production order: the hold is taken before the mint, the lane keeps
+    // polling while the old bearer is valid, the mint revokes it and refuses
+    // the open poll, and the successor is bound before the lane adopts it.
+    const releaseFirst = delivery.holdIngressForBearerRotation("agent-1");
+    const heldAt = polledWith.length;
+    assert.ok(await eventually(() => polledWith.length >= heldAt + 2), "a valid bearer keeps polling while its mint is pending");
+    const revokedAt = revoke("bearer-1");
+    await settle(60);
+    assert.ok(pollsWith("bearer-1", revokedAt) <= 1, "a revoked bearer is not used again");
+    bound = "bearer-2";
+    await settle(60);
+    assert.ok(pollsWith("bearer-1", revokedAt) <= 1, "the lane waits for its successor once it is bound");
+    assert.equal(polledWith.length - revokedAt, pollsWith("bearer-1", revokedAt));
+    assert.equal(refused(), false, "the refusal of the revoked bearer is not the room's");
+    await adopt("bearer-2");
+    releaseFirst();
+    assert.deepEqual(wakes, [], "a rotation asks convergence for nothing");
+
+    // The successor is bound before any poll is refused: the open poll ends normally.
+    const releaseSecond = delivery.holdIngressForBearerRotation("agent-1");
+    delivery.bearerSuccessorBinding("agent-1");
+    bound = "bearer-3";
+    const boundAt = polledWith.length;
+    (openPoll as { answer: () => void } | null)?.answer();
+    await settle(60);
+    assert.ok(pollsWith("bearer-2", boundAt) <= 1, "a bearer the binding no longer holds is not used again");
+    await adopt("bearer-3");
+    releaseSecond();
+
+    assert.ok(healthWrites.every((state) => state === "starting" || state === "observing"),
+      `two rotations: the lane was never stopped, blocked or backed off (${healthWrites.join(", ")})`);
+    assert.equal(healthWrites.filter((state) => state === "starting").length, 1, "both successors were adopted in place");
+
+    // A second caller keeps the first deadline, and a refusal after it is the room's.
+    const releaseShort = delivery.holdIngressForBearerRotation("agent-1", 40);
+    await settle(25);
+    const releaseLate = delivery.holdIngressForBearerRotation("agent-1", 60_000);
+    revoke("bearer-3");
+    assert.ok(await eventually(refused), "a refusal that outlasts the first deadline is reported");
+    assert.ok(await eventually(async () => (await store.ingressHealth("agent-1"))?.state === "blocked"));
+    releaseShort();
+    releaseLate();
+
+    // While any caller holds the rotation, a refusal is not the room's; once all release it, it is.
+    bound = "bearer-4";
+    await adopt("bearer-4");
+    assert.equal(refused(), false);
+    const releaseA = delivery.holdIngressForBearerRotation("agent-1");
+    const releaseB = delivery.holdIngressForBearerRotation("agent-1");
+    releaseA();
+    const revokedFourAt = revoke("bearer-4");
+    await settle(60);
+    assert.ok(pollsWith("bearer-4", revokedFourAt) <= 1);
+    assert.equal(refused(), false, "one caller releasing does not end another caller's rotation");
+    releaseB();
+    assert.ok(await eventually(refused), "with every caller released, the refusal is the room's");
+
+    // Authority ending for any other reason while a rotation is pending still ends the lane at once.
+    bound = "bearer-5";
+    await adopt("bearer-5");
+    const releaseLoss = delivery.holdIngressForBearerRotation("agent-1");
+    bound = "elsewhere";
+    // ensureStarted fills only an absent lane: it starts one once the old lane has ended.
+    assert.ok(await eventually(async () => {
+      await delivery.ensureStarted({ ...deliveryAgent(null), bearer: "elsewhere" });
+      return polledWith.at(-1) === "elsewhere";
+    }), "the old lane ended without waiting out the hold, so a new one could start");
+    releaseLoss();
+  } finally {
+    await delivery.fenceAndDrain().catch(() => undefined);
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the production room poll tells a refused bearer apart from any other failure", async () => {
   const previousFetch = globalThis.fetch;
   const poll = () => productionSupervisedDeliveryHttp.poll({

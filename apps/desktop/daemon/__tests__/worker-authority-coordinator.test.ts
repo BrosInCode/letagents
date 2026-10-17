@@ -179,6 +179,8 @@ type HarnessOptions = {
   publishNative?: (entryId: string, method: string, status: "working" | "idle") => Promise<void>;
   delegationCommitMutation?: "generation" | "control" | "grant" | "clock" | "native" | "request_expiry";
   pacing?: WorkerAuthorityCoordinatorOptions["pacing"];
+  holdIngressForBearerRotation?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["holdIngressForBearerRotation"]>;
+  bearerSuccessorBinding?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["bearerSuccessorBinding"]>;
 };
 
 function fixture(options: HarnessOptions = {}) {
@@ -460,6 +462,8 @@ function fixture(options: HarnessOptions = {}) {
     delivery: {
       stop: async () => { deliveryStops += 1; events.push("delivery:stop"); },
       start: async () => { deliveryStarts += 1; events.push("delivery:start"); },
+      ...(options.holdIngressForBearerRotation ? { holdIngressForBearerRotation: options.holdIngressForBearerRotation } : {}),
+      ...(options.bearerSuccessorBinding ? { bearerSuccessorBinding: options.bearerSuccessorBinding } : {}),
     },
     convergence: {
       request: (_entryId, kind) => { convergenceRequests += 1; convergenceKinds.push(kind); events.push("convergence:request"); },
@@ -745,6 +749,45 @@ test("worker mint durably marks uncertainty before HTTP and exact public identit
   assert.equal(harness.custody.workerAuthorization("agent-1")?.workAttemptId, "attempt-1");
   assert.deepEqual(harness.timerDelays, [10_000], "constructor captures the supplied direct timer function");
   assert.equal(harness.clearedTimers, 1, "the paired supplied clear function receives the mint timer");
+});
+
+test("a worker mint holds the lane from before the server call, and ends the hold itself only when the mint was refused", async () => {
+  const steps: string[] = [];
+  let refuse: false | 403 | 503 = false;
+  const harness = fixture({
+    holdIngressForBearerRotation: (entryId) => {
+      steps.push(`hold:${entryId}`);
+      return () => { steps.push("hold:abandoned"); };
+    },
+    createWorkerSession: async () => {
+      steps.push("http:mint");
+      if (refuse) throw new SupervisorGrantRequestError(refuse, "mint");
+      return { sessionId: "session-minted", bearer: "minted-secret", bearerId: "bearer-id-minted", expiresAt: new Date(now + 30 * 60_000).toISOString() };
+    },
+  });
+  harness.custody.installHostGrant(hostGrant());
+
+  const minted = await harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, true);
+  assert.equal(minted?.bearer, "minted-secret");
+  assert.deepEqual(steps, ["hold:agent-1", "http:mint"],
+    "the server revokes the old bearer at this call, so the hold starts first; the lane ends it when it adopts the new bearer");
+
+  steps.length = 0;
+  refuse = 403;
+  await assert.rejects(harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, true), /HTTP 403/);
+  assert.deepEqual(steps, ["hold:agent-1", "http:mint", "hold:abandoned"],
+    "a refused mint leaves the old bearer valid, so a refusal of it is the room's again at once");
+
+  steps.length = 0;
+  refuse = 503;
+  await assert.rejects(harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, true), /failed after 3 attempts/);
+  assert.deepEqual(steps, ["hold:agent-1", "http:mint", "http:mint", "http:mint"],
+    "a server failure may have minted and revoked the old bearer, so its hold stands until its deadline");
+  refuse = false;
+
+  steps.length = 0;
+  await harness.subject.mintHostWorkerAuthorization(harness.entry);
+  assert.deepEqual(steps, [], "a cached, still-fresh credential reaches no server and holds nothing");
 });
 
 test("the name the room assigned replaces the name this machine requested", async () => {
@@ -1242,6 +1285,25 @@ test("binding publishes before clearing recovery and commits exact public metada
   assert.equal(harness.entry.last_worker_binding?.agent_session_id, "session-new");
   assert.equal(JSON.stringify(harness.entry).includes("raw-secret"), false);
   assert.equal(harness.deliveryStarts, 1);
+});
+
+test("binding a new credential for the same worker session tells the lane, before the bind, that its successor is coming", async () => {
+  const harness = fixture({ bearerSuccessorBinding: (entryId) => { harness.events.push(`successor:${entryId}`); } });
+  const input: BindWorkerSessionInput = {
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+    agent_session_id: "session-1", agent_session_token: "worker-secret", api_url: "https://letagents.test",
+  };
+  const successors = () => harness.events.filter((event) => event.startsWith("successor:"));
+  await harness.subject.bindWorkerSession(input);
+  assert.deepEqual(successors(), [], "binding the credential the lane already holds is no rotation");
+
+  await harness.subject.bindWorkerSession({ ...input, agent_session_token: "rotated-secret", credential_ref: "rotated-ref" });
+  assert.deepEqual(successors(), ["successor:agent-1"], "a new credential for the same session is the lane's successor");
+  assert.ok(harness.events.lastIndexOf("successor:agent-1") < harness.events.lastIndexOf("binding:bind"),
+    "the lane hears of it before its own authority check can fail");
+
+  await harness.subject.bindWorkerSession({ ...input, agent_session_id: "session-other", agent_session_token: "other-secret" });
+  assert.deepEqual(successors(), ["successor:agent-1"], "another session is not this lane's successor");
 });
 
 test("binding adopts a provided credential reference even when the worker bearer is unchanged", async () => {
