@@ -73,6 +73,7 @@ import { WorkerAuthorityCoordinator, type BootstrapOperation } from "./worker-au
 import { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
+import { RoomTurnAttachmentStager } from "./room-turn-attachments.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "./supervised-delivery-lifecycle-coordinator.js";
 import { supervisedToolRuntime, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 import { TurnControlCoordinator } from "./turn-control-coordinator.js";
@@ -138,6 +139,8 @@ export class SupervisorDaemon {
   private readonly continuationRepairs: ContinuationRepairCoordinator;
   private readonly roomMoves: RoomMoveCoordinator;
   private readonly supervisedDelivery: SupervisedAgentDelivery | null;
+  /** Images on the message that wakes an agent, staged for one turn under the daemon's own folder. */
+  private readonly roomTurnAttachments: RoomTurnAttachmentStager;
   private readonly supervisedDeliveryLifecycle: SupervisedDeliveryLifecycleCoordinator;
   private readonly turnControls: TurnControlCoordinator;
   private readonly roomDeliveryControl: RoomDeliveryControl;
@@ -242,6 +245,7 @@ export class SupervisorDaemon {
       nowMs: () => this.nowMs(),
     });
     const root = paths.workspaceRoot ?? dirname(paths.manifestPath);
+    this.roomTurnAttachments = new RoomTurnAttachmentStager(join(root, "room-turn-attachments"));
     const gitCommand = createGitCommand(root);
     this.gitCommand = gitCommand;
     this.durability = new WorkDurabilityStore(
@@ -631,6 +635,7 @@ export class SupervisorDaemon {
         (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),
         async (agentId) => { await this.providerExecution?.archiveEndedRuntimes(agentId); },
         this.replyAttachmentSpool,
+        this.roomTurnAttachments,
       ) : null;
     this.readModel = new DaemonReadModel({
       readUsage: (handle) => this.providerPort?.readUsage?.(handle) ?? Promise.resolve(null),
@@ -1042,6 +1047,8 @@ export class SupervisorDaemon {
     await this.lifecycleAdministration.recoverEphemeralWorkspaces();
     await restoreLocalRoomAuthorities((await this.store.load()).entries, this.singleton.currentGeneration, this.workerRuntimeCustody);
     await this.socket.start();
+    // Images an earlier process staged for turns that have long ended.
+    void this.roomTurnAttachments.sweep();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
       if (await this.store.unresolvedDeliveryDrain(entry.id) || await this.store.unresolvedPollingActivation(entry.id)) {
