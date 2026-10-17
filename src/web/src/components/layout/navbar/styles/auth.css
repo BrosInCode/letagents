@@ -29,7 +29,7 @@
 .nav-username {
   font-size: 0.8rem;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--l-text, var(--text));
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -41,16 +41,16 @@
   border-radius: var(--radius-sm);
   font-size: 0.72rem;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.35);
+  color: var(--l-text-dim, var(--text-secondary));
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--l-glass-border, var(--border));
   cursor: pointer;
   transition: all var(--duration-fast);
   letter-spacing: 0;
 }
 
 .nav-signout:hover {
-  color: rgba(255, 255, 255, 0.8);
-  border-color: rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.04);
+  color: var(--l-text, var(--text));
+  border-color: var(--l-glass-border-strong, var(--border-strong));
+  background: var(--accent-dim);
 }
