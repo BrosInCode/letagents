@@ -323,6 +323,8 @@ export class SupervisorDaemon {
       delivery: {
         stop: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
         start: (entryId) => this.startSupervisedDelivery(entryId),
+        holdIngressForBearerRotation: (entryId) => this.supervisedDelivery?.holdIngressForBearerRotation(entryId) ?? (() => {}),
+        bearerSuccessorBinding: (entryId) => this.supervisedDelivery?.bearerSuccessorBinding(entryId),
       },
       convergence: {
         request: (entryId, kind) => this.requestConvergence(entryId, kind),
