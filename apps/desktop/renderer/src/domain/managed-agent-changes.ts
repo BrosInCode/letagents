@@ -24,7 +24,7 @@ export function isManagedAgentChangeSummaryAttachment(
 }
 
 export function decodeManagedAgentChangeSummaryAttachment(
-  attachment: Pick<DesktopRoomMessageAttachment, "contentBase64" | "dataUrl">,
+  attachment: Pick<DesktopRoomMessageAttachment, "href">,
 ): DesktopManagedAgentPublicChangeSummary | null {
   const json = attachmentJsonText(attachment);
   if (!json) return null;
@@ -32,10 +32,10 @@ export function decodeManagedAgentChangeSummaryAttachment(
 }
 
 export async function fetchManagedAgentChangeSummaryAttachment(
-  attachment: Pick<DesktopRoomMessageAttachment, "downloadUrl" | "url">,
+  attachment: Pick<DesktopRoomMessageAttachment, "href">,
 ): Promise<DesktopManagedAgentPublicChangeSummary | null> {
-  const href = attachment.downloadUrl || attachment.url;
-  if (!href) return null;
+  const href = attachment.href;
+  if (!href || href.startsWith("data:")) return null;
   const response = await fetch(href);
   if (!response.ok) return null;
   return parseManagedAgentChangeSummaryPayload(await response.text());
@@ -99,16 +99,11 @@ export function managedAgentChangedFileStateLabel(
 }
 
 function attachmentJsonText(
-  attachment: Pick<DesktopRoomMessageAttachment, "contentBase64" | "dataUrl">,
+  attachment: Pick<DesktopRoomMessageAttachment, "href">,
 ): string | null {
-  if (attachment.contentBase64) {
-    return base64ToUtf8(attachment.contentBase64);
-  }
-  if (attachment.dataUrl?.startsWith("data:")) {
-    const [, encoded] = attachment.dataUrl.split(",", 2);
-    return encoded ? base64ToUtf8(encoded) : null;
-  }
-  return null;
+  if (!attachment.href?.startsWith("data:")) return null;
+  const [, encoded] = attachment.href.split(",", 2);
+  return encoded ? base64ToUtf8(encoded) : null;
 }
 
 function base64ToUtf8(value: string): string | null {

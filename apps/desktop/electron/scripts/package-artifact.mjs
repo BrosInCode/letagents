@@ -222,6 +222,7 @@ const required = [
     "shared/codex-owner-isolation.mjs",
     "shared/codex-read-only-room-tools.mjs",
     "shared/live-activity-summary.mjs",
+    "shared/message-attachments.mjs",
     "shared/message-contracts.mjs",
     "shared/message-link-previews.mjs",
     "shared/message-pins.mjs",
