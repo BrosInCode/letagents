@@ -202,7 +202,7 @@
 
 /* Tabbed room creation. */
 .desktop-new-room-flow {
-  color-scheme: normal;
+  color-scheme: inherit;
   gap: 0;
   width: min(620px, 100%);
   max-height: calc(100dvh - 48px);
