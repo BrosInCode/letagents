@@ -141,8 +141,8 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   function selectNewRoomEntry() {
     projectRequest += 1;
     newRoomModalOpen.value = true;
-    newRoomStep.value = "chooser";
-    newRoomReturnStep.value = "chooser";
+    newRoomStep.value = "new_project";
+    newRoomReturnStep.value = "new_project";
     newRoomJoinCode.value = "";
     newRoomJoinError.value = null;
     newRoomName.value = generateDefaultRoomName();
@@ -159,7 +159,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     if (!newRoomCanDismiss.value) return;
     projectRequest += 1;
     newRoomModalOpen.value = false;
-    newRoomStep.value = "chooser";
+    newRoomStep.value = "new_project";
     newRoomJoinCode.value = "";
     newRoomJoinError.value = null;
     newRoomName.value = "";
@@ -173,8 +173,8 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
 
   function goToChooser(): void {
     if (newRoomBusy.value) return;
-    newRoomStep.value = "chooser";
-    newRoomReturnStep.value = "chooser";
+    newRoomStep.value = "new_project";
+    newRoomReturnStep.value = "new_project";
     newRoomProjectSelection.value = null;
     newRoomSuccess.value = null;
     resetTransientState();
@@ -195,7 +195,6 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     if (!newRoomName.value.trim()) {
       newRoomName.value = generateDefaultRoomName();
     }
-    newRoomStorage.value = options.getDefaultStorageMode?.() === "local" ? "local" : newRoomStorage.value;
     newRoomSuccess.value = null;
     resetTransientState();
   }
@@ -204,7 +203,6 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     if (newRoomBusy.value) return;
     newRoomStep.value = "new_project";
     newRoomReturnStep.value = "new_project";
-    newRoomProjectSelection.value = null;
     newRoomSuccess.value = null;
     resetTransientState();
   }
@@ -590,7 +588,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     }
     options.openRoomSnapshot(success.snapshot, success.openOptions);
     newRoomModalOpen.value = false;
-    newRoomStep.value = "chooser";
+    newRoomStep.value = "new_project";
     newRoomJoinCode.value = "";
     newRoomProjectSelection.value = null;
     newRoomSuccess.value = null;
@@ -600,7 +598,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   function dismissSuccess(): void {
     if (newRoomBusy.value) return;
     newRoomModalOpen.value = false;
-    newRoomStep.value = "chooser";
+    newRoomStep.value = "new_project";
     newRoomSuccess.value = null;
     resetTransientState();
   }
