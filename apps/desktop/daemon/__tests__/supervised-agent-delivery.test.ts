@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,7 @@ import {
   supervisedReplyTargetForSourceMessage,
 } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { ReplyAttachmentSpool } from "../reply-attachment-spool.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
 import {
   claudeApiFailureClass, defaultFollowUpDelayMs, followUpOrigin, FOLLOW_UP_REASONS, FOLLOW_UP_UNCERTAIN_RESOLVED_DETAIL, MAX_AUTOMATIC_FOLLOW_UPS, NO_REPLY_FOLLOW_UP_DETAIL, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL,
@@ -3555,6 +3556,131 @@ async function recordThreadIntent(path: string, store: SupervisedAgentInboxStore
     mcp_request_id: "thread-choice", tool_name: "set_reply_thread", request: {}, mutation: true });
   assert.equal(intent.effect.state, "completed");
 }
+
+async function recordReplyIntent(path: string, store: SupervisedAgentInboxStore, turnId: string, toolName: string, request: unknown): Promise<void> {
+  const manifest = new ManifestStore(path);
+  try {
+    const loaded = await manifest.load();
+    await manifest.write(loaded.generation, [{
+      id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: "codex", model: null,
+      charter: "test", desired_state: "running", observed_state: "working", condition: "none",
+      permission_profile_id: null, delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",
+      created_at: new Date().toISOString(), work_attempt_id: agent.workAttemptId,
+      provider_ref: { work_attempt_id: agent.workAttemptId, execution_generation_id: agent.executionGenerationId,
+        provider_continuation_id: agent.providerContinuationId, provider_connection: agent.providerConnection },
+    }]);
+  } finally { await manifest.close(); }
+  const intent = await store.prepareEffect({ agent_id: agent.agentId, room_id: agent.roomId,
+    execution_generation_id: agent.executionGenerationId, current_execution_generation_id: agent.executionGenerationId,
+    provider_turn_id: turnId, provider_continuation_id: agent.providerContinuationId, work_attempt_id: agent.workAttemptId,
+    mcp_request_id: `${toolName}-choice`, tool_name: toolName, request, mutation: true });
+  assert.equal(intent.effect.state, "completed");
+}
+
+test("reply attachments are uploaded with the worker's bearer just before the reply, and a file that cannot be uploaded never blocks it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-reply-attachments-"));
+  const path = join(root, "state.sqlite");
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  await writeFile(join(workspace, "result.png"), "png bytes");
+  await writeFile(join(workspace, "build.log"), "log lines");
+  const spool = new ReplyAttachmentSpool(join(root, "spool"));
+  const store = new SupervisedAgentInboxStore(path);
+  const staged: Array<{ fileName: string; mimeType: string; bytes: string; bearer: string }> = [];
+  const publications: Array<{ text: string; attachments: Array<{ upload_id: string }> | null }> = [];
+  const http = {
+    poll: async () => ({}),
+    stageAttachment: async (input: { fileName: string; mimeType: string; bytes: Uint8Array; bearer: string }) => {
+      staged.push({ fileName: input.fileName, mimeType: input.mimeType, bytes: Buffer.from(input.bytes).toString(), bearer: input.bearer });
+      if (input.fileName === "build.log") throw new Error("Supervised attachment staging failed with HTTP 500.");
+      return { uploadId: `upl_${staged.length}` };
+    },
+    publish: async (input: { text: string; roomId: string; attachments?: Array<{ upload_id: string }> }) => {
+      publications.push({ text: input.text, attachments: input.attachments ?? null });
+      return { messageId: "msg_81", roomId: input.roomId };
+    },
+  };
+  let inboxItemId = "";
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    await options?.checkpointTurnStarted?.("native-turn");
+    // What the coordinator journals after it copied the files at call time.
+    const recorded = await spool.snapshot({ workspacePath: workspace, inboxItemId, agentId: agent.agentId,
+      providerTurnId: "native-turn", mcpRequestId: "set_reply_attachments-choice", files: ["result.png", "build.log"] });
+    await recordReplyIntent(path, store, "native-turn", "set_reply_attachments", recorded);
+    await writeFile(join(workspace, "result.png"), "edited after the call");
+    return { turnId: "native-turn", outcome: "reply", text: "Here is the new layout." };
+  }), http, currentAuthority, 0,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  undefined, undefined, undefined, undefined, undefined, undefined, spool);
+  try {
+    const [item] = await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "msg_80",
+      messages: [{ source_message_id: "msg_80", source_message: { id: "msg_80", text: "Show me the layout" }, activation: {} }] });
+    inboxItemId = item!.inbox_item_id;
+    await delivery.pump(agent);
+    assert.deepEqual(staged, [
+      { fileName: "result.png", mimeType: "image/png", bytes: "png bytes", bearer: agent.bearer },
+      { fileName: "build.log", mimeType: "application/octet-stream", bytes: "log lines", bearer: agent.bearer },
+      { fileName: "build.log", mimeType: "application/octet-stream", bytes: "log lines", bearer: agent.bearer },
+    ], "a failed upload is retried once");
+    assert.deepEqual(publications, [{
+      text: "Here is the new layout.\n\n(Could not attach: build.log)",
+      attachments: [{ upload_id: "upl_1" }],
+    }]);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+    assert.deepEqual(await readdir(join(root, "spool")), [], "a published reply's copies are removed");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("staged reply attachments are discarded when the post fails or the lane loses the reply, and retried uploads still attach", async () => {
+  for (const ending of ["post_fails", "authority_lost"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-reply-attachment-discard-"));
+    const path = join(root, "state.sqlite");
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    await writeFile(join(workspace, "result.png"), "png bytes");
+    const spool = new ReplyAttachmentSpool(join(root, "spool"));
+    const store = new SupervisedAgentInboxStore(path);
+    let stageCalls = 0;
+    let ownsLane = true;
+    const discarded: string[] = [];
+    const posted: Array<Array<{ upload_id: string }> | null> = [];
+    const http = {
+      poll: async () => ({}),
+      stageAttachment: async () => {
+        stageCalls++;
+        if (stageCalls === 1) throw new Error("Supervised attachment staging failed with HTTP 503.");
+        if (ending === "authority_lost") ownsLane = false;
+        return { uploadId: `upl_${stageCalls}` };
+      },
+      discardAttachment: async (input: { uploadId: string }) => { discarded.push(input.uploadId); },
+      publish: async (input: { roomId: string; attachments?: Array<{ upload_id: string }> }) => {
+        posted.push(input.attachments ?? null);
+        if (ending === "post_fails") throw new Error("Room publication failed with HTTP 500.");
+        return { messageId: "msg_91", roomId: input.roomId };
+      },
+    };
+    let inboxItemId = "";
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.checkpointTurnStarted?.("native-turn");
+      const recorded = await spool.snapshot({ workspacePath: workspace, inboxItemId, agentId: agent.agentId,
+        providerTurnId: "native-turn", mcpRequestId: "set_reply_attachments-choice", files: ["result.png"] });
+      await recordReplyIntent(path, store, "native-turn", "set_reply_attachments", recorded);
+      return { turnId: "native-turn", outcome: "reply", text: "Done." };
+    }), http, async () => ownsLane, 0,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, spool);
+    try {
+      const [item] = await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "msg_90",
+        messages: [{ source_message_id: "msg_90", source_message: { id: "msg_90", text: "Show me" }, activation: {} }] });
+      inboxItemId = item!.inbox_item_id;
+      await delivery.pump(agent);
+      assert.equal(stageCalls >= 2, true, ending);
+      assert.equal(discarded.includes("upl_2"), true, `${ending}: the unused upload is discarded`);
+      if (ending === "post_fails") assert.deepEqual(posted[0], [{ upload_id: "upl_2" }], "the retried upload was attached");
+      else assert.deepEqual(posted, [], "a lane that lost the reply posts nothing");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
 
 test("an intercepted thread choice survives publication failure and restart without another provider turn", async () => {
   for (const { toolName, effectState, existingRoot } of [
