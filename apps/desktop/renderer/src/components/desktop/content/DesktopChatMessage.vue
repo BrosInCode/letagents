@@ -973,11 +973,11 @@ function messageCopyText(): string {
   const text = visibleText.value.trim();
   if (text) return text;
   if (props.message.attachments.length === 1) {
-    return props.message.attachments[0]?.fileName || props.message.attachments[0]?.name || "1 attachment";
+    return props.message.attachments[0]?.fileName || "1 attachment";
   }
   if (props.message.attachments.length > 1) {
     return props.message.attachments
-      .map((attachment) => attachment.fileName || attachment.name || "attachment")
+      .map((attachment) => attachment.fileName)
       .join("\n");
   }
   return "";

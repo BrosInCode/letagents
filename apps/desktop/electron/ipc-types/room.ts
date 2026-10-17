@@ -275,16 +275,14 @@ export interface DesktopRoomMessageThreadSummary {
   lastReadMessageId: string | null;
 }
 
+/** One shape for every attachment the screen shows, whatever room storage it came from. */
 export interface DesktopRoomMessageAttachment {
   id: string | null;
-  name: string | null;
-  fileName: string | null;
-  mimeType: string | null;
+  fileName: string;
+  mimeType: string;
   sizeBytes: number | null;
-  url: string | null;
-  downloadUrl: string | null;
-  dataUrl: string | null;
-  contentBase64: string | null;
+  /** The one link the screen loads, or null when the file is gone. */
+  href: string | null;
 }
 
 /** Public Message-info projection (cloud rooms). Mirrors GET /rooms/:room/messages/:id/info. */
