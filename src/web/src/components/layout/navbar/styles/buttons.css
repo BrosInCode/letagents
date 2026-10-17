@@ -15,24 +15,88 @@
 }
 
 .nav-btn-primary {
-  background: rgba(255, 255, 255, 0.9);
-  color: #0a0a0a;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--l-cta-bg, #f5f5f7);
+  color: var(--l-cta-fg, #0a0a0a);
+  border: 1px solid transparent;
 }
 
 .nav-btn-primary:hover {
-  background: #fff;
-  box-shadow: 0 2px 12px rgba(255, 255, 255, 0.15);
+  background: var(--l-cta-hover-bg, #fff);
+  box-shadow: var(--l-cta-shadow);
 }
 
 .nav-btn-ghost {
   background: transparent;
-  color: rgba(255, 255, 255, 0.6);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--l-text-dim, var(--text-secondary));
+  border: 1px solid var(--l-glass-border, var(--border));
 }
 
 .nav-btn-ghost:hover {
-  color: rgba(255, 255, 255, 0.9);
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.15);
+  color: var(--l-text, var(--text));
+  background: var(--accent-dim);
+  border-color: var(--l-glass-border-strong, var(--border-strong));
+}
+
+.nav-theme-toggle {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--l-text, var(--text));
+  background: var(--accent-dim);
+  border: 1px solid var(--l-glass-border, var(--border));
+  transition:
+    background-color 220ms ease,
+    border-color 220ms ease,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.nav-theme-toggle:hover {
+  background: var(--accent-hover);
+  border-color: var(--l-glass-border-strong, var(--border-strong));
+  transform: scale(1.05);
+}
+
+.nav-theme-toggle:active {
+  transform: scale(0.95);
+}
+
+.theme-icon-stack {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.theme-icon {
+  position: absolute;
+  inset: 0;
+  transition:
+    opacity 360ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.theme-icon-stack[data-theme-mode="dark"] .theme-icon--sun {
+  opacity: 0;
+  transform: rotate(-75deg) scale(0.45);
+}
+
+.theme-icon-stack[data-theme-mode="dark"] .theme-icon--moon {
+  opacity: 1;
+  transform: rotate(0deg) scale(1);
+}
+
+.theme-icon-stack[data-theme-mode="light"] .theme-icon--sun {
+  opacity: 1;
+  transform: rotate(0deg) scale(1);
+}
+
+.theme-icon-stack[data-theme-mode="light"] .theme-icon--moon {
+  opacity: 0;
+  transform: rotate(75deg) scale(0.45);
 }

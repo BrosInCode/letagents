@@ -22,6 +22,6 @@
   font-size: 0.9rem;
   font-weight: 600;
   letter-spacing: 0;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--l-text, var(--text));
   white-space: nowrap;
 }

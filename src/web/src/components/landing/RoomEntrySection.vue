@@ -1,56 +1,42 @@
 <template>
-  <section id="start" class="section entry-section">
-    <span class="section-label">Open a Room</span>
-    <h2 class="entry-title">Jump straight in.</h2>
+  <section id="start" class="entry-section">
+    <h2 class="entry-title">Step into a room.</h2>
     <p class="entry-sub">
-      Enter an invite code or GitHub repo path to join a room — or spin up a fresh one instantly.
+      Paste a GitHub repo or invite code—or start a brand new room in one click.
     </p>
 
     <div class="entry-card">
-      <label class="join-label" for="room-identifier">Invite code or GitHub repository</label>
       <form class="join-row" @submit.prevent="handleJoin">
-        <div class="input-wrap">
-          <svg class="input-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
-            <polyline points="10 17 15 12 10 7"/>
-            <line x1="15" y1="12" x2="3" y2="12"/>
-          </svg>
-          <input
-            v-model="identifier"
-            id="room-identifier"
-            type="text"
-            class="join-input"
-            placeholder="ABCX-7291"
-            aria-describedby="room-identifier-hint"
-            autocapitalize="none"
-            :spellcheck="false"
-            enterkeyhint="go"
-            :disabled="loading"
-          />
-        </div>
+        <input
+          v-model="identifier"
+          id="room-identifier"
+          type="text"
+          class="join-input"
+          placeholder="github.com/owner/repo or invite code"
+          aria-label="Invite code or GitHub repository"
+          autocapitalize="none"
+          :spellcheck="false"
+          enterkeyhint="go"
+          :disabled="loading"
+        />
         <button class="join-btn" type="submit" :disabled="!identifier.trim() || loading">
-          {{ loading ? 'Joining…' : 'Join →' }}
+          {{ loading ? 'Opening…' : 'Open Room →' }}
         </button>
       </form>
-      <p id="room-identifier-hint" class="join-hint">Or paste a repo path like github.com/owner/repo.</p>
 
       <div class="divider-row">
         <span class="divider-line" />
-        <span class="divider-text">OR</span>
+        <span class="divider-text">or</span>
         <span class="divider-line" />
       </div>
 
-      <button class="create-btn" :disabled="creating" @click="handleCreate">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <line x1="12" y1="5" x2="12" y2="19"/>
-          <line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        {{ creating ? 'Creating…' : 'Create New Room' }}
+      <button class="create-btn" type="button" :disabled="creating" @click="handleCreate">
+        {{ creating ? 'Creating…' : 'Create a New Room' }}
       </button>
     </div>
 
     <p class="entry-hint">
-      Public and invite rooms need no account. Private repo rooms require GitHub sign-in.
+      Public and invite rooms need no account. Private repos use GitHub sign-in.
     </p>
 
     <p v-if="error" class="entry-error">{{ error }}</p>
@@ -68,14 +54,11 @@ const creating = ref(false)
 const error = ref('')
 
 function handleJoin() {
-  const value = identifier.value.trim()
+  const value = identifier.value.trim().replace(/^https?:\/\/(letagents\.chat\/)?/i, '')
   if (!value) return
 
   error.value = ''
   loading.value = true
-
-  // Force a full document navigation so repo-backed room redirects and auth
-  // checks happen on the server entry path, not only inside the SPA.
   window.location.assign(`/in/${encodeURIComponent(value)}`)
 }
 
@@ -99,110 +82,92 @@ async function handleCreate() {
 
 <style scoped>
 .entry-section {
-  padding: 120px 40px;
-  max-width: var(--max-width);
+  position: relative;
+  z-index: 2;
+  padding: 140px 32px;
+  max-width: 640px;
   margin: 0 auto;
+  text-align: center;
+  scroll-margin-top: 92px;
+}
+
+.eyebrow {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--l-mint);
+  margin-bottom: 14px;
 }
 
 .entry-title {
-  font-size: 3rem;
+  font-size: clamp(2.5rem, 5vw, 4.2rem);
   font-weight: 800;
-  letter-spacing: -0.03em;
-  line-height: 1.15;
-  margin-bottom: var(--space-md);
-  color: var(--text);
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+  margin-bottom: 16px;
+  color: var(--l-text);
 }
 
 .entry-sub {
-  font-size: 1.08rem;
-  color: var(--text-secondary);
-  max-width: 560px;
-  line-height: 1.7;
-  margin-bottom: var(--space-2xl);
+  font-size: 1.18rem;
+  color: var(--l-text-dim);
+  line-height: 1.55;
+  margin-bottom: 40px;
+  text-wrap: balance;
 }
 
 .entry-card {
   border-radius: 28px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background: #161616;
-  padding: 40px 36px;
+  border: 1px solid var(--l-glass-border);
+  background: var(--l-glass-bg);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  padding: 28px;
+  box-shadow: var(--l-glass-shadow);
 }
 
 .join-row {
   display: flex;
-  align-items: stretch;
-  gap: var(--space-sm);
-}
-
-.join-label {
-  display: block;
-  margin-bottom: var(--space-sm);
-  color: var(--text-secondary);
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-
-.join-hint {
-  margin-top: var(--space-sm);
-  color: var(--text-tertiary);
-  font-size: 0.8rem;
-  overflow-wrap: anywhere;
-}
-
-.input-wrap {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: 0 var(--space-md);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border);
-  transition: border-color var(--duration-fast);
-}
-
-.input-wrap:focus-within {
-  border-color: var(--border-accent);
-}
-
-.input-icon {
-  flex-shrink: 0;
-  color: var(--text-tertiary);
+  gap: 10px;
 }
 
 .join-input {
   flex: 1;
   min-width: 0;
-  padding: 14px 0;
-  font-size: 1rem;
-  color: var(--text);
-  background: transparent;
-  border: none;
+  padding: 14px 18px;
+  border-radius: 999px;
+  font-size: 0.94rem;
+  color: var(--l-text);
+  background: var(--l-glass-bg-elevated);
+  border: 1px solid var(--l-glass-border);
   outline: none;
   font-family: inherit;
+  transition: border-color 200ms ease, background 200ms ease;
+}
+
+.join-input:focus {
+  border-color: var(--l-glass-border-strong);
 }
 
 .join-input::placeholder {
-  color: var(--text-tertiary);
+  color: var(--l-text-dim);
 }
 
 .join-btn {
-  padding: 12px 20px;
-  border-radius: var(--radius-md);
-  font-size: 0.85rem;
+  padding: 0 24px;
+  border-radius: 999px;
+  font-size: 0.9rem;
   font-weight: 600;
-  color: var(--bg);
-  background: var(--text);
-  border: none;
-  cursor: pointer;
+  color: var(--l-cta-fg);
+  background: var(--l-cta-bg);
   white-space: nowrap;
-  transition: opacity var(--duration-fast);
+  transition: transform 200ms ease, opacity 200ms ease, background 200ms ease, color 200ms ease;
 }
 
 .join-btn:hover:not(:disabled) {
-  opacity: 0.9;
+  background: var(--l-cta-hover-bg);
+  transform: scale(1.02);
 }
 
 .join-btn:disabled {
@@ -213,77 +178,61 @@ async function handleCreate() {
 .divider-row {
   display: flex;
   align-items: center;
-  gap: var(--space-md);
-  margin: var(--space-xl) 0;
+  gap: 14px;
+  margin: 20px 0;
 }
 
 .divider-line {
   flex: 1;
   height: 1px;
-  background: var(--border);
+  background: var(--l-hairline);
 }
 
 .divider-text {
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  color: var(--text-tertiary);
+  font-size: 0.78rem;
+  color: var(--l-text-dim);
 }
 
 .create-btn {
   width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-xs);
   padding: 14px;
-  border-radius: var(--radius-md);
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: transparent;
-  border: 1px solid var(--border);
-  cursor: pointer;
-  transition: all var(--duration-fast);
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--l-text);
+  background: var(--l-glass-bg-elevated);
+  border: 1px solid var(--l-glass-border);
+  transition: background 200ms ease, border-color 200ms ease;
 }
 
 .create-btn:hover:not(:disabled) {
-  color: var(--text);
-  border-color: var(--border-strong);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.create-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+  background: var(--l-glass-bg-hover);
+  border-color: var(--l-glass-border-strong);
 }
 
 .entry-hint {
-  margin-top: var(--space-lg);
-  font-size: 0.88rem;
-  color: var(--text-tertiary);
+  margin-top: 20px;
+  font-size: 0.84rem;
+  color: var(--l-text-dim);
 }
 
 .entry-error {
-  overflow-wrap: anywhere;
-  margin-top: var(--space-md);
-  font-size: 0.82rem;
-  color: #ef4444;
-}
-
-@media (max-width: 768px) {
-  .entry-section { padding: 80px 20px; }
-  .entry-title { font-size: 2.2rem; }
-  .entry-card { border-radius: 20px; padding: 16px 18px; }
-}
-
-@media (max-width: 480px) {
-  .entry-section { padding: 64px 16px; }
-  .entry-card { border-radius: 16px; padding: 14px 16px; }
+  margin-top: 14px;
+  font-size: 0.84rem;
+  color: var(--red-text, #f87171);
 }
 
 @media (max-width: 600px) {
-  .join-row { flex-direction: column; }
-  .join-btn, .create-btn { min-height: 44px; }
+  .entry-section {
+    padding: 96px 20px;
+  }
+
+  .join-row {
+    flex-direction: column;
+  }
+
+  .join-btn {
+    min-height: 46px;
+  }
 }
 </style>

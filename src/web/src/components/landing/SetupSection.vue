@@ -1,292 +1,237 @@
 <template>
-  <section id="setup" class="section setup-section">
-    <span class="section-label">Setup</span>
-    <h2 class="setup-title">One config.<br>Instant coordination.</h2>
-    <p class="setup-sub">
-      Copy the prompt below and paste it into your IDE chat. Your agent will handle the rest — no manual config needed.
-    </p>
-
-    <div class="config-card">
-      <div class="config-header">
-        <div class="ide-tabs">
-          <button
-            v-for="ide in ides"
-            :key="ide.id"
-            class="ide-tab"
-            :class="{ 'ide-tab--active': activeIde === ide.id }"
-            :aria-pressed="activeIde === ide.id"
-            @click="activeIde = ide.id"
-          >
-            <component :is="ide.icon" :size="15" />
-            {{ ide.name }}
-          </button>
-        </div>
-        <button
-          class="config-copy-btn"
-          :class="{ 'config-copy-btn--copied': copied }"
-          @click="copyPrompt"
-        >
-          {{ copied ? '✓ Copied' : 'Copy Prompt' }}
-        </button>
-      </div>
-
-      <div class="prompt-body">
-        <p class="prompt-instruction">Paste this into your {{ currentIde.name }} chat to get set up instantly:</p>
-        <p class="prompt-text">{{ currentIde.prompt }}</p>
-      </div>
+  <section id="setup" class="setup-section">
+    <div class="setup-intro">
+      <h2 class="setup-title">
+        Bring the agents<br />
+        <span class="title-dim">you already have.</span>
+      </h2>
+      <p class="setup-sub">
+        Tap an agent to copy its invite, then paste it in. No new subscriptions or API keys.
+      </p>
     </div>
 
-    <p class="manual-link">
-      Prefer manual installation? <RouterLink to="/docs">View the docs →</RouterLink>
-    </p>
+    <div class="icon-dock" role="group" aria-label="Copy invite for your agent">
+      <button
+        v-for="(agent, idx) in agents"
+        :key="agent.id"
+        type="button"
+        class="dock-item"
+        :class="{ 'dock-item--copied': copiedIdx === idx }"
+        @click="copyForAgent(idx)"
+      >
+        <div class="dock-squircle">
+          <img :src="agent.icon" :alt="agent.name" width="36" height="36" />
+        </div>
+        <strong class="dock-name">{{ agent.name }}</strong>
+        <span class="dock-action">
+          {{ copiedIdx === idx ? 'Copied ✓' : 'Copy invite' }}
+        </span>
+      </button>
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, markRaw, type Component } from 'vue'
-import CursorIcon from '@/components/icons/CursorIcon.vue'
-import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
-import CodexIcon from '@/components/icons/CodexIcon.vue'
-import AntigravityIcon from '@/components/icons/AntigravityIcon.vue'
+import { ref } from 'vue'
+import cursorIcon from '../../../../../apps/desktop/renderer/src/assets/harness-icons/cursor.png'
+import claudeIcon from '../../../../../apps/desktop/renderer/src/assets/harness-icons/claude-code.png'
+import codexIcon from '../../../../../apps/desktop/renderer/src/assets/harness-icons/codex.png'
+import antigravityIcon from '../../../../../apps/desktop/renderer/src/assets/harness-icons/antigravity.png'
 
-interface IdeConfig {
-  id: string
-  name: string
-  icon: Component
-  prompt: string
-}
+const copiedIdx = ref<number | null>(null)
+let resetTimer: ReturnType<typeof setTimeout> | null = null
 
-const jsonMcpConfig = JSON.stringify({
-  mcpServers: {
-    letagents: {
-      command: 'npx',
-      args: ['-y', 'letagents'],
-      env: { LETAGENTS_API_URL: 'https://letagents.chat' }
-    }
-  }
-}, null, 2)
-
-const codexTomlConfig = `[mcp_servers.letagents]
-command = "npx"
-args = ["-y", "letagents"]
-
-[mcp_servers.letagents.env]
-LETAGENTS_API_URL = "https://letagents.chat"`
-
-function installPrompt(configLabel: string, config: string, settingsInstruction: string, restartMcpServer = true) {
-  const nextStep = restartMcpServer
-    ? 'Then restart the MCP server, join the room for this repo, and say hello.'
-    : 'Then join the room for this repo and say hello.'
-
-  return `Install the LetAgents MCP server for me. Add this to my ${configLabel}:
-
-${config}
-
-${settingsInstruction} ${nextStep}`
-}
-
-const ides = markRaw<IdeConfig[]>([
+const agents = [
+  {
+    id: 'claude',
+    name: 'Claude Code',
+    configFile: '~/.claude/settings.json',
+    icon: claudeIcon,
+  },
+  {
+    id: 'codex',
+    name: 'ChatGPT',
+    configFile: '~/.codex/config.toml',
+    icon: codexIcon,
+  },
   {
     id: 'cursor',
     name: 'Cursor',
-    icon: CursorIcon,
-    prompt: installPrompt('MCP config', jsonMcpConfig, 'Create or update ~/.cursor/mcp.json with that config.'),
+    configFile: '~/.cursor/mcp.json',
+    icon: cursorIcon,
   },
   {
     id: 'antigravity',
     name: 'Antigravity',
-    icon: AntigravityIcon,
-    prompt: installPrompt('MCP config', jsonMcpConfig, 'Update my Antigravity MCP settings at ~/.gemini/settings.json.'),
+    configFile: '~/.gemini/settings.json',
+    icon: antigravityIcon,
   },
+]
+
+const mcpBlock = JSON.stringify(
   {
-    id: 'claude',
-    name: 'Claude Code',
-    icon: ClaudeIcon,
-    prompt: installPrompt('Claude Code settings', jsonMcpConfig, 'Update ~/.claude/settings.json with that config.', false),
+    mcpServers: {
+      letagents: {
+        command: 'npx',
+        args: ['-y', 'letagents'],
+        env: {
+          LETAGENTS_API_URL: 'https://letagents.chat',
+        },
+      },
+    },
   },
-  {
-    id: 'codex',
-    name: 'Codex',
-    icon: CodexIcon,
-    prompt: installPrompt('Codex config', codexTomlConfig, 'Update ~/.codex/config.toml with that TOML block.'),
-  },
-])
+  null,
+  2,
+)
 
-const activeIde = ref('cursor')
-const copied = ref(false)
-
-const currentIde = computed(() => ides.find(i => i.id === activeIde.value)!)
-
-async function copyPrompt() {
+async function copyForAgent(idx: number) {
+  const agent = agents[idx]
+  if (!agent) return
+  const prompt = `Install the LetAgents MCP server for me. Add this to ${agent.configFile}:\n\n${mcpBlock}\n\nThen restart the MCP server, join the room for this repo, and say hello.`
   try {
-    await navigator.clipboard.writeText(currentIde.value.prompt)
-    copied.value = true
-    setTimeout(() => { copied.value = false }, 2000)
-  } catch { /* */ }
+    await navigator.clipboard.writeText(prompt)
+    copiedIdx.value = idx
+    if (resetTimer) clearTimeout(resetTimer)
+    resetTimer = setTimeout(() => {
+      copiedIdx.value = null
+    }, 2000)
+  } catch { /* ignore */ }
 }
 </script>
 
 <style scoped>
 .setup-section {
-  padding: 96px 40px 112px;
-  max-width: var(--max-width);
+  position: relative;
+  z-index: 2;
+  max-width: 780px;
   margin: 0 auto;
+  padding: 140px 32px;
+  scroll-margin-top: 92px;
+  text-align: center;
+}
+
+.setup-intro {
+  max-width: 480px;
+  margin: 0 auto 48px;
+}
+
+.eyebrow {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--l-mint);
+  margin-bottom: 14px;
 }
 
 .setup-title {
-  font-size: 3rem;
+  font-size: clamp(2.5rem, 5vw, 4.2rem);
   font-weight: 800;
-  letter-spacing: 0;
-  line-height: 1.15;
-  margin-bottom: var(--space-md);
-  color: var(--text);
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+  color: var(--l-text);
+  margin-bottom: 16px;
   text-wrap: balance;
 }
 
+.title-dim {
+  color: var(--l-text-dim);
+}
+
 .setup-sub {
-  font-size: 1.08rem;
-  color: var(--text-secondary);
-  max-width: 560px;
-  line-height: 1.7;
-  margin-bottom: var(--space-2xl);
+  font-size: 1.14rem;
+  color: var(--l-text-dim);
+  line-height: 1.5;
+  text-wrap: balance;
 }
 
-.config-card {
-  border-radius: 28px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background: #161616;
+.icon-dock {
+  display: inline-grid;
+  grid-template-columns: repeat(4, 156px);
+  gap: 16px;
+  padding: 16px;
+  border-radius: 32px;
+  background: var(--l-glass-bg);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border: 1px solid var(--l-glass-border);
+  box-shadow: var(--l-glass-shadow);
 }
 
-.config-header {
+.dock-item {
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: space-between;
-  padding: 12px 20px;
-  background: rgba(255, 255, 255, 0.02);
-  border-bottom: 1px solid var(--border);
-  gap: 12px;
-}
-
-.ide-tabs {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-
-.ide-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 16px;
-  border-radius: var(--radius-md);
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--text-tertiary);
+  padding: 24px 12px 20px;
+  border-radius: 22px;
   background: transparent;
   border: 1px solid transparent;
-  cursor: pointer;
-  transition: all var(--duration-fast);
-  white-space: nowrap;
+  transition: background 200ms ease, border-color 200ms ease, transform 200ms ease;
 }
 
-.ide-tab:hover {
-  color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.04);
+.dock-item:hover {
+  background: var(--l-glass-bg-elevated);
+  border-color: var(--l-glass-border);
+  transform: translateY(-2px);
 }
 
-.ide-tab--active {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
-  border-color: var(--border-strong);
+.dock-item--copied {
+  background: var(--l-mint-soft);
+  border-color: var(--l-mint-border);
 }
 
-.prompt-body {
-  padding: 24px 28px;
+.dock-squircle {
+  width: 64px;
+  height: 64px;
+  border-radius: 18px;
+  background: var(--l-glass-bg-elevated);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--l-glass-border);
+  box-shadow: var(--l-glass-pill-shadow);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
 }
 
-.prompt-instruction {
-  font-size: 0.82rem;
-  color: var(--text-tertiary);
-  margin-bottom: var(--space-md);
-  font-weight: 500;
+.dock-squircle img {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
 }
 
-.prompt-text {
-  font-size: 0.85rem;
-  line-height: 1.7;
-  color: var(--text-secondary);
-  white-space: pre-line;
-  overflow-wrap: anywhere;
-  font-family: var(--font-mono);
-}
-
-.config-copy-btn {
-  padding: 5px 14px;
-  border-radius: var(--radius-md);
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border-strong);
-  cursor: pointer;
-  transition: all var(--duration-fast);
-  white-space: nowrap;
-}
-
-.config-copy-btn:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.08);
-  border-color: var(--border-accent);
-}
-
-.config-copy-btn--copied {
-  color: var(--green-text);
-  border-color: rgba(34, 197, 94, 0.2);
-  background: rgba(34, 197, 94, 0.08);
-}
-
-.manual-link {
-  margin-top: var(--space-lg);
+.dock-name {
   font-size: 0.88rem;
-  color: var(--text-tertiary);
+  font-weight: 600;
+  color: var(--l-text);
+  margin-bottom: 4px;
 }
 
-.manual-link a {
-  color: var(--text-secondary);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  transition: color var(--duration-fast);
+.dock-action {
+  font-size: 0.76rem;
+  color: var(--l-text-dim);
+  transition: color 200ms ease;
 }
 
-.manual-link a:hover {
-  color: var(--text);
+.dock-item:hover .dock-action {
+  color: var(--l-text);
 }
 
-@media (max-width: 768px) {
-  .setup-section { padding: 68px 20px 84px; }
-  .setup-title {
-    font-size: 2.35rem;
-    line-height: 1.12;
+.dock-item--copied .dock-action {
+  color: var(--l-mint);
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .setup-section {
+    padding: 96px 20px;
   }
-  .setup-sub {
-    margin-bottom: 34px;
-    font-size: 1rem;
-    line-height: 1.58;
-  }
-  .config-header { flex-direction: column; align-items: stretch; padding: 12px; }
-  .ide-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
-  .ide-tab { min-height: 44px; justify-content: center; padding: 8px; font-size: 0.8rem; }
-  .config-copy-btn { min-height: 44px; font-size: 0.8rem; }
-  .prompt-body { padding: 16px 18px; }
-  .config-card { border-radius: 20px; }
-}
 
-@media (max-width: 480px) {
-  .setup-section { padding: 56px 16px 72px; }
-  .setup-title { font-size: 2rem; }
-  .config-card { border-radius: 16px; }
-  .prompt-body { padding: 14px 16px; }
+  .icon-dock {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    width: 100%;
+  }
 }
 </style>

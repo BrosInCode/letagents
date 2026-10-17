@@ -1,5 +1,5 @@
 <template>
-  <div class="landing">
+  <div class="landing" :data-focus="symbiosisBridge.focus">
     <section v-if="repoAccessBanner" class="repo-access-banner" :class="repoAccessBanner.kind">
       <div class="repo-access-copy">
         <span class="repo-access-eyebrow">Repo Room Access</span>
@@ -25,49 +25,33 @@
     </section>
 
     <HeroSection />
+    <SymbiosisSection />
     <SetupSection />
-
-    <!-- Use Case 1: Cross-IDE Collaboration -->
-    <UseCaseSection
-      title="Your agents. Same room. Different IDEs."
-      description="Your Antigravity agent and your Codex agent coordinate through a shared LetAgents room — claiming tasks, reviewing PRs, and merging work. No copy-paste. No context switching."
-      variant="left"
-    >
-      <template #visual>
-        <CrossIdeVisual />
-      </template>
-    </UseCaseSection>
-
-    <!-- Use Case 2: Lend Your Agent -->
-    <UseCaseSection
-      title="Lend your agent. Ship together."
-      description="Your friend needs help on their repo. Drop them a room link, and your agent joins their project — reviewing code, writing tests, and merging PRs alongside theirs. No access tokens. No repo cloning. Just real-time coordination."
-      variant="right"
-    >
-      <template #visual>
-        <TeamBoardVisual />
-      </template>
-    </UseCaseSection>
-
+    <ComputeLendingSection />
+    <SwarmOrchestrationSection />
     <RoomEntrySection />
     <FeaturesSection />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from '@/composables/useAuth'
 import HeroSection from '@/components/landing/HeroSection.vue'
-import RoomEntrySection from '@/components/landing/RoomEntrySection.vue'
+import SymbiosisSection from '@/components/landing/SymbiosisSection.vue'
 import SetupSection from '@/components/landing/SetupSection.vue'
+import ComputeLendingSection from '@/components/landing/ComputeLendingSection.vue'
+import SwarmOrchestrationSection from '@/components/landing/SwarmOrchestrationSection.vue'
+import RoomEntrySection from '@/components/landing/RoomEntrySection.vue'
 import FeaturesSection from '@/components/landing/FeaturesSection.vue'
-import UseCaseSection from '@/components/landing/UseCaseSection.vue'
-import CrossIdeVisual from '@/components/landing/CrossIdeVisual.vue'
-import TeamBoardVisual from '@/components/landing/TeamBoardVisual.vue'
+import { symbiosisBridge } from '@/components/landing/symbiosisData'
 
 const auth = useAuth()
 const route = useRoute()
+
+let revealObserver: IntersectionObserver | null = null
+
 const repoAccessBanner = computed(() => {
   const reason = typeof route.query.reason === 'string' ? route.query.reason : ''
   const room = typeof route.query.room === 'string' ? route.query.room : ''
@@ -106,6 +90,28 @@ const repoAccessBanner = computed(() => {
 
 onMounted(() => {
   auth.checkSession()
+
+  if (typeof IntersectionObserver !== 'undefined') {
+    const sections = document.querySelectorAll('.landing > section:not(.hero)')
+    revealObserver = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('section-revealed')
+          }
+        }
+      },
+      { threshold: 0.1, rootMargin: '0px 0px -6% 0px' },
+    )
+    sections.forEach((sec) => {
+      sec.classList.add('section-scroll-reveal')
+      revealObserver?.observe(sec)
+    })
+  }
+})
+
+onUnmounted(() => {
+  revealObserver?.disconnect()
 })
 
 function retryRepoRoom(room: string) {
@@ -120,7 +126,28 @@ function retryRepoRoom(room: string) {
   min-height: 100vh;
 }
 
+.landing > :deep(section:not(.hero)) {
+  position: relative;
+  z-index: 2;
+}
+
+/* ─── Scroll-Triggered Section Reveal Choreography ─── */
+:deep(.section-scroll-reveal) {
+  opacity: 0;
+  transform: translateY(28px);
+  transition:
+    opacity 900ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 900ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+:deep(.section-scroll-reveal.section-revealed) {
+  opacity: 1;
+  transform: none;
+}
+
 .repo-access-banner {
+  position: relative;
+  z-index: 3;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -137,7 +164,7 @@ function retryRepoRoom(room: string) {
 .repo-access-eyebrow {
   display: inline-flex;
   margin-bottom: 10px;
-  color: #f59e0b;
+  color: var(--l-mint);
   font-size: 0.74rem;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -146,7 +173,7 @@ function retryRepoRoom(room: string) {
 
 .repo-access-title {
   margin: 0 0 8px;
-  color: var(--text, #fafafa);
+  color: var(--l-text, var(--text));
   font-size: 1.4rem;
   font-weight: 800;
 }
@@ -154,7 +181,7 @@ function retryRepoRoom(room: string) {
 .repo-access-body {
   overflow-wrap: anywhere;
   margin: 0;
-  color: var(--text-secondary, #d4d4d8);
+  color: var(--l-text-secondary, var(--text-secondary));
   line-height: 1.65;
 }
 
@@ -168,23 +195,31 @@ function retryRepoRoom(room: string) {
   padding: 0 16px;
   border: none;
   border-radius: 999px;
-  background: #f8fafc;
-  color: #09090b;
+  background: var(--l-cta-bg);
+  color: var(--l-cta-fg);
   font-size: 0.84rem;
   font-weight: 700;
   cursor: pointer;
 }
 
 .repo-access-btn.secondary {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text, #fafafa);
-  border: 1px solid var(--border, #27272a);
+  background: var(--l-glass-bg);
+  color: var(--l-text);
+  border: 1px solid var(--l-glass-border);
 }
 
 @media (max-width: 820px) {
   .repo-access-banner {
     flex-direction: column;
     padding: 96px 20px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :deep(.section-scroll-reveal) {
+    opacity: 1;
+    transform: none;
+    transition: none;
   }
 }
 </style>
