@@ -2459,3 +2459,70 @@ test("a new database rejects the retired desktop_events delivery mode like any u
     ]);
   } finally { await env.cleanup(); }
 });
+
+for (const previous of [44, 45, 46, 47, 48, 49] as const) {
+  test(`v${previous} database gains the image input column off for every existing agent when it opens`, async () => {
+    assert.ok(DAEMON_STATE_SCHEMA_VERSION >= 50, "the image input column shipped in schema v50");
+    const env = await fixture();
+    try {
+      insertAgentConfigurationRow(env.database, "open-model-agent", 0, "daemon_inbox");
+      insertAgentConfigurationRow(env.database, "other-agent", 1, "mcp_polling");
+      if (previous === 44) restoreV44ClosureFixture(env.database);
+      env.database.exec(`ALTER TABLE agent_configurations DROP COLUMN image_input;
+        UPDATE manifest_metadata SET schema_version=${previous} WHERE singleton=1; PRAGMA user_version=${previous}`);
+      assert.equal(env.database.prepare("SELECT 1 FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get(), undefined);
+      const rowsBefore = env.database.prepare("SELECT agent_id,provider,model,charter,permission_profile_id,delivery_mode,config_revision FROM agent_configurations ORDER BY agent_id")
+        .all().map((row) => ({ ...row }));
+
+      const opened = await openDaemonStateDatabase(env.path, (database) => new DaemonStateSchema().createSchema(database));
+      try {
+        assert.deepEqual(versionPair(opened).map((row) => ({ ...(row as Row) })), [
+          { user_version: DAEMON_STATE_SCHEMA_VERSION },
+          { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION },
+        ]);
+        assert.deepEqual({ ...opened.prepare("SELECT type,\"notnull\" AS required,dflt_value FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get() },
+          { type: "INTEGER", required: 1, dflt_value: "0" });
+        assert.deepEqual(opened.prepare("SELECT agent_id,image_input FROM agent_configurations ORDER BY agent_id").all().map((row) => ({ ...row })), [
+          { agent_id: "open-model-agent", image_input: 0 },
+          { agent_id: "other-agent", image_input: 0 },
+        ]);
+        assert.deepEqual(opened.prepare("SELECT agent_id,provider,model,charter,permission_profile_id,delivery_mode,config_revision FROM agent_configurations ORDER BY agent_id")
+          .all().map((row) => ({ ...row })), rowsBefore, "no other configuration value changes");
+        assert.throws(() => opened.prepare("UPDATE agent_configurations SET image_input=2").run(), /CHECK/);
+        opened.prepare("UPDATE agent_configurations SET image_input=1 WHERE agent_id='open-model-agent'").run();
+        assert.deepEqual(opened.prepare("PRAGMA foreign_key_check").all(), []);
+      } finally { opened.close(); }
+
+      const reopened = await openDaemonStateDatabase(env.path, (database) => new DaemonStateSchema().createSchema(database));
+      try {
+        assert.equal(reopened.prepare("SELECT image_input FROM agent_configurations WHERE agent_id='open-model-agent'").get()!.image_input, 1,
+          "a later open keeps the owner's choice");
+      } finally { reopened.close(); }
+    } finally { await env.cleanup(); }
+  });
+}
+
+for (const damage of ["missing", "nullable", "defaults_on", "out_of_range"] as const) {
+  test(`a current database with a ${damage.replaceAll("_", " ")} image input column fails closed for the schema and the observation opener`, async () => {
+    const env = await fixture();
+    try {
+      insertAgentConfigurationRow(env.database, "agent", 0, "mcp_polling");
+      if (damage !== "out_of_range") env.database.exec("ALTER TABLE agent_configurations DROP COLUMN image_input");
+      if (damage === "nullable") env.database.exec("ALTER TABLE agent_configurations ADD COLUMN image_input INTEGER DEFAULT 0");
+      if (damage === "defaults_on") env.database.exec("ALTER TABLE agent_configurations ADD COLUMN image_input INTEGER NOT NULL DEFAULT 1");
+      if (damage === "out_of_range") env.database.exec("PRAGMA ignore_check_constraints=ON; UPDATE agent_configurations SET image_input=2; PRAGMA ignore_check_constraints=OFF");
+      env.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      const before = await readFile(env.path);
+      const versions = versionPair(env.database);
+      const refusal = /invalid image input column/;
+      // SQLite's own integrity check can see a broken CHECK constraint before the column check runs.
+      assert.throws(() => new DaemonStateSchema().createSchema(env.database),
+        damage === "out_of_range" ? /invalid image input column|failed SQLite integrity validation/ : refusal, "a current schema is never silently repaired");
+      assert.throws(() => openDaemonStateObservationDatabase(env.path), refusal);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.deepEqual(versionPair(env.database), versions);
+      assert.equal(!!env.database.prepare("SELECT 1 FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get(), damage !== "missing");
+      if (damage === "out_of_range") assert.equal(env.database.prepare("SELECT image_input FROM agent_configurations").get()!.image_input, 2, "the bad value is left as found");
+    } finally { await env.cleanup(); }
+  });
+}

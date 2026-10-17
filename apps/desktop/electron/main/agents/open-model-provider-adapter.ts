@@ -1,4 +1,4 @@
-import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -28,6 +28,7 @@ import {
   type ProviderRoomTurnOptions,
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnRequest,
+  type RoomTurnImageDelivery,
   type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
@@ -58,6 +59,7 @@ import {
   openCodeAuthContent,
   openCodeConfig,
   parseConfiguredOpenModel,
+  parseConfiguredOpenModelImageInput,
   seedOpenCodeConfigHome,
   shieldOwnerInstructions,
   supervisedOpenCodeMcpEnvironment,
@@ -154,6 +156,18 @@ export type OpenCodePermissionObservation =
   | { type: "snapshot"; requests: OpenCodePermissionRequest[] }
   | { type: "degraded" }
   | { type: "unavailable"; reason: HardControlEvidence | "handle_replaced" };
+
+/**
+ * OpenCode takes an image as a file part with a data URL, and resizes a large
+ * one before it is saved with the session. Each image follows a short label.
+ */
+function roomTurnImageParts(request: ProviderRoomTurnRequest): Array<Record<string, unknown>> {
+  return includedRoomTurnImages(request.attachments).flatMap(image => image.data ? [
+    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}` },
+    { type: "file", mime: image.mimeType, filename: image.fileName,
+      url: `data:${image.mimeType};base64,${Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString("base64")}` },
+  ] : []);
+}
 
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
@@ -540,6 +554,8 @@ class OpenModelHandle implements ProviderHandle {
   controlLoss: HardControlEvidence | null = null;
   observedTurn: { id: string; terminal: TurnOutcome | "lost" | null } | null = null;
   launchNotices: readonly string[] = [];
+  /** This runtime was started with image input for its model, so it takes the activating message's images. */
+  imageInput = false;
 
   constructor(
     readonly workAttemptId: string,
@@ -697,6 +713,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       mcpCommand,
       mcpEnvironment,
       permissionProfileId: supervisedOpenCodePermissionProfileId(req.permissionProfileId),
+      imageInput: req.imageInput === true,
     });
     const port = await this.deps.allocatePort();
     const url = `http://127.0.0.1:${port}`;
@@ -836,6 +853,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       this.deps.now,
     );
     handle.nativeOrderingVerified = true;
+    handle.imageInput = req.imageInput === true;
     if (launchNotice) handle.launchNotices = [launchNotice];
     this.handles.set(req.workAttemptId, handle);
     this.observeTerminal(handle, launch.exited);
@@ -884,7 +902,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     if (!sessions.some((session) => session.id === ref.providerContinuationId)) {
       throw new ProviderContinuationMissingError(ref.providerContinuationId);
     }
-    const configuredModel = parseConfiguredOpenModel(await client.config());
+    const runtimeConfig = await client.config();
+    const configuredModel = parseConfiguredOpenModel(runtimeConfig);
     if (!configuredModel) throw new Error("The attached OpenCode runtime has no configured Open Model.");
     // OpenCode looks for its instruction files again on every turn, so a
     // runtime launched before the shield existed gains it here. Unlike a
@@ -907,6 +926,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       "idle",
       this.deps.now,
     );
+    // The runtime keeps the configuration it started with, whatever was saved since.
+    handle.imageInput = parseConfiguredOpenModelImageInput(runtimeConfig);
     this.handles.set(ref.workAttemptId, handle);
     this.observeTerminal(handle, this.deps.observeProcessExit(connection.pid, connection.processIdentity));
     if (recoveredLegacyConnection) {
@@ -1003,6 +1024,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     throw new Error("Open Model does not support mid-turn message injection.");
   }
 
+  /** Only a runtime started with image input for its model takes images. */
+  roomTurnImageDelivery(rawHandle: ProviderHandle): RoomTurnImageDelivery {
+    try { return this.required(rawHandle).imageInput ? "memory" : null; } catch { return null; }
+  }
+
   async runRoomTurn(
     rawHandle: ProviderHandle,
     request: ProviderRoomTurnRequest,
@@ -1023,7 +1049,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         providerID: OPEN_MODEL_OPENCODE_PROVIDER_ID,
         modelID: handle.configuredModel,
       },
-      parts: [{ type: "text", text: boundedRoomTurnPrompt(request) }],
+      parts: [{ type: "text", text: boundedRoomTurnPrompt(request) }, ...(handle.imageInput ? roomTurnImageParts(request) : [])],
     }).catch((error) => {
       handle.setState("idle");
       throw error;
