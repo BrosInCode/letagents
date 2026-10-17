@@ -162,6 +162,8 @@ export interface MessageAttachmentUpload {
   attached_message_number: number | null;
   created_at: string;
   attached_at: string | null;
+  uploader_account_id: string | null;
+  uploader_agent_session_id: string | null;
 }
 
 export interface MessageRow {
@@ -270,4 +272,6 @@ export interface MessageAttachmentUploadRow {
   attached_message_number: number | null;
   created_at: string;
   attached_at: string | null;
+  uploader_account_id: string | null;
+  uploader_agent_session_id: string | null;
 }
