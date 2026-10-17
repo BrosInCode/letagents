@@ -101,6 +101,22 @@ for (const status of ["rejected", "allowed"]) test(`Claude status-only ${status}
   assert.equal(tracker.snapshot("session").account.windows[0]?.resetsAt, new Date(1791669600 * 1000).toISOString());
 });
 
+test("Claude reads every window from unifiedWindows when the top level has no utilization", () => {
+  const tracker = new ProviderUsageTracker("session");
+  tracker.claude({ type: "rate_limit_event", session_id: "session", rate_limit_info: { status: "allowed", resetsAt: 1792272000, rateLimitType: "five_hour",
+    overageStatus: "rejected", overageDisabledReason: "org_level_disabled", isUsingOverage: false,
+    unifiedWindows: { five_hour: { utilization: 0.01, resetsAt: 1792272000 }, seven_day: { utilization: 0.43, resetsAt: 1792407600 } } } }, at);
+  const account = tracker.snapshot("session").account;
+  assert.equal(account.state, "available");
+  assert.deepEqual(account.windows.map(w => [w.id, w.label, w.usedPercent, w.resetsAt]), [
+    ["five_hour", "5 hours", 1, new Date(1792272000 * 1000).toISOString()],
+    ["seven_day", "Weekly", 43, new Date(1792407600 * 1000).toISOString()],
+  ]);
+  tracker.claude({ type: "rate_limit_event", session_id: "session", rate_limit_info: { status: "allowed", rateLimitType: "five_hour",
+    unifiedWindows: { five_hour: { utilization: 0.05 } } } }, at);
+  assert.deepEqual(tracker.snapshot("session").account.windows.map(w => [w.id, w.usedPercent]), [["seven_day", 43], ["five_hour", 5]]);
+});
+
 test("Claude synthetic notices and API errors do not replace measured context with zero", () => {
   const tracker = new ProviderUsageTracker("session");
   tracker.claude({ type: "assistant", session_id: "session", message: { model: "opus", usage: { input_tokens: 12000 } } }, at);
