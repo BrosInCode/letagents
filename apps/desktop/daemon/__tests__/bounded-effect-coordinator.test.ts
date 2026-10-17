@@ -136,11 +136,14 @@ type HarnessOptions = {
   missingEntry?: boolean;
   execute?: SupervisedToolRuntime["executeDaemonTool"];
   complete?: BoundedEffectCoordinatorOptions["journal"]["complete"];
+  replyAttachments?: BoundedEffectCoordinatorOptions["replyAttachments"];
+  apiUrl?: string;
 };
 
 function harness(options: HarnessOptions = {}) {
   const events: string[] = [];
   const context = boundedContext(options.provider, options.permissionProfileId === undefined ? "full_access" : options.permissionProfileId);
+  if (options.apiUrl) context.agent.apiUrl = options.apiUrl;
   let contextCalls = 0;
   let capturedPrepare: Record<string, unknown> | null = null;
   let capturedRoomMove: Record<string, unknown> | null = null;
@@ -249,6 +252,7 @@ function harness(options: HarnessOptions = {}) {
       },
     },
     policy: { structuredRoomTurnCompletion },
+    ...(options.replyAttachments ? { replyAttachments: options.replyAttachments } : {}),
   });
   return {
     subject,
@@ -714,6 +718,47 @@ test("raw daemon thread intent rejects arguments before admitting a journal effe
     assert.equal(h.events.includes("journal:prepare"), false);
     assert.equal(h.events.includes("runtime:execute"), false);
   }
+});
+
+test("reply attachments are copied before anything is journaled, and the journal never gets a path", async () => {
+  const snapshots: unknown[] = [];
+  const kept: Array<[string, readonly string[]]> = [];
+  const recorded = { files: [{ spool_id: "a".repeat(32), name: "shot.png", mime_type: "image/png", size_bytes: 3, sha256: "b".repeat(64) }] };
+  const h = harness({
+    replyAttachments: {
+      snapshot: async (input) => { snapshots.push(input); return recorded; },
+      keepOnly: async (inboxItemId, spoolIds) => { kept.push([inboxItemId, spoolIds]); },
+    },
+    prepareResult: { created: true, effect: effect({ tool_name: "set_reply_attachments", request: recorded, state: "completed", result: { ok: true } }) },
+  });
+  await h.subject.execute(executeInput({ toolName: "set_reply_attachments", input: { files: ["shots/shot.png"] } }));
+  assert.deepEqual(snapshots, [{ workspacePath: "/workspace/a", inboxItemId: "inbox-a", agentId: "agent-a",
+    providerTurnId: "turn-a", mcpRequestId: "request-a", files: ["shots/shot.png"] }]);
+  assert.deepEqual(h.capturedPrepare?.request, recorded);
+  assert.deepEqual(kept, [["inbox-a", ["a".repeat(32)]]], "a journaled choice drops the copies it replaced");
+
+  const cleared = harness({ replyAttachments: {
+    snapshot: async () => { throw new Error("must not copy to clear"); },
+    keepOnly: async (inboxItemId, spoolIds) => { kept.push([inboxItemId, spoolIds]); },
+  },
+    prepareResult: { created: true, effect: effect({ tool_name: "set_reply_attachments", request: { files: null }, state: "completed", result: {} }) } });
+  await cleared.subject.execute(executeInput({ toolName: "set_reply_attachments", input: { files: null } }));
+  assert.deepEqual(cleared.capturedPrepare?.request, { files: null });
+  assert.deepEqual(kept.at(-1), ["inbox-a", []], "clearing the choice drops every copy");
+});
+
+test("reply attachments refuse bad input, local rooms and a daemon without a spool before anything is journaled", async () => {
+  const spool = { snapshot: async () => { throw new Error("must not copy"); }, keepOnly: async () => {} };
+  for (const input of [{ files: [] }, { files: ["a.png"], room_id: "other" }, { paths: ["a.png"] }, { files: ["a", "b", "c", "d", "e"] }, { files: [""] }]) {
+    const h = harness({ replyAttachments: spool });
+    await assert.rejects(h.subject.execute(executeInput({ toolName: "set_reply_attachments", input })), /takes \{ files/);
+    assert.equal(h.events.includes("journal:prepare"), false);
+  }
+  const local = harness({ replyAttachments: spool, apiUrl: "letagents-local://rooms" });
+  await assert.rejects(local.subject.execute(executeInput({ toolName: "set_reply_attachments", input: { files: ["a.png"] } })), /need a cloud room/);
+  const old = harness();
+  await assert.rejects(old.subject.execute(executeInput({ toolName: "set_reply_attachments", input: { files: ["a.png"] } })), /cannot attach files yet/);
+  for (const h of [local, old]) assert.equal(h.events.includes("journal:prepare"), false);
 });
 
 /** Every room tool the room server registers for a supervised turn, by its own registration code. */

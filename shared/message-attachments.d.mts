@@ -39,3 +39,15 @@ export declare function discardCloudMessageAttachment(
   transport: MessageAttachmentTransport,
   input: { roomPath: string; uploadId: string },
 ): Promise<void>;
+
+export declare function validReplyAttachmentsRequest(value: unknown): value is { files: string[] | null };
+
+export interface RecordedReplyAttachment {
+  spool_id: string;
+  name: string;
+  mime_type: string;
+  size_bytes: number;
+  sha256: string;
+}
+
+export declare function validRecordedReplyAttachments(value: unknown): value is { files: RecordedReplyAttachment[] | null };
