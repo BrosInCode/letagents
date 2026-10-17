@@ -238,12 +238,9 @@ async function projectFolderPathError(path: string): Promise<string | null> {
 export async function connectProjectToRoom(
   context: DesktopProjectBindingContext,
 ): Promise<DesktopProjectConnectionResult> {
-  focusMainWindow();
-  const result = await dialog.showOpenDialog({
-    title: "Connect this room to a project",
-    buttonLabel: "Connect project",
-    properties: ["openDirectory"],
-  });
+  // Same sheet and one-picker guard as the New room pickers, so this picker
+  // cannot be lost behind the window either.
+  const result = await pickProjectFolder("Connect this room to a project", "Connect project");
   if (result.canceled || !result.filePaths[0]) {
     return { canceled: true, binding: null, repoStatus: null, error: null };
   }
