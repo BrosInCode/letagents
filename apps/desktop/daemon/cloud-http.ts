@@ -5,7 +5,7 @@ import type { WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
 import { SupervisedRoomAuthorizationError, type SupervisedDeliveryHttp, type SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
 import type { RemoteExecutionDelegationRevision } from "./execution-delegation-journal.js";
-import { RoomAttachmentDownloadError } from "./room-turn-attachments.js";
+import { LOCAL_ROOM_ATTACHMENT_ID, RoomAttachmentDownloadError } from "./room-turn-attachments.js";
 import {
   parseExecutionDelegationDecisionIntent,
   type ExecutionDelegationDecisionIntent,
@@ -237,24 +237,63 @@ export async function storageResolvesToThisMachine(hostname: string, signal: Abo
   } finally { detach(); }
 }
 
+/** The work's result, or the abort reason as soon as `signal` aborts; the work itself goes on. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 /**
  * Two hops, so the worker bearer never leaves the room API: the room route
  * answers with a redirect to presigned object storage, and that address is
  * fetched with no credential and no further redirect. Every failure, a 401 or
  * 403 included, is only this file being unavailable: an older server that
  * does not grant workers this route must not mark the room as refused.
+ *
+ * A local room's route is in this process and answers with the bytes: its
+ * file is read from the local files folder, never from a path the message
+ * names, and only when it fits in `maxBytes`.
  */
 export async function downloadRoomAttachment(input: {
   roomId: string; apiUrl: string; bearer: string; messageId: string; attachmentId: string;
   maxBytes: number; signal: AbortSignal;
 }): Promise<Uint8Array> {
-  if (isLocalRoomApi(input.apiUrl) || !/^msg_[1-9]\d*$/.test(input.messageId) || !/^att_[1-9]\d*$/.test(input.attachmentId)) {
+  const localRoom = isLocalRoomApi(input.apiUrl);
+  if (!/^msg_[1-9]\d*$/.test(input.messageId) || !Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1
+    || !(localRoom ? LOCAL_ROOM_ATTACHMENT_ID.test(input.attachmentId) : /^att_[1-9]\d*$/.test(input.attachmentId))) {
     throw new RoomAttachmentDownloadError("unavailable");
   }
   const unavailable = (): never => {
     input.signal.throwIfAborted();
     throw new RoomAttachmentDownloadError("unavailable");
   };
+  if (localRoom) {
+    // A file read in this process cannot be cancelled, so Stop and the deadline end the wait for it.
+    const response = await untilAborted(roomRequest(`${LOCAL_ROOM_API_ORIGIN}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.messageId}/attachments/${encodeURIComponent(input.attachmentId)}?max_bytes=${input.maxBytes}`, {
+      headers: { authorization: `Bearer ${input.bearer}` }, signal: input.signal,
+    }), input.signal).catch(unavailable);
+    if (response.status === 413) {
+      await response.body?.cancel().catch(() => {});
+      throw new RoomAttachmentDownloadError("too_large");
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      unavailable();
+    }
+    try {
+      return await boundedBody(response, input.maxBytes);
+    } catch (error) {
+      if (error instanceof RoomAttachmentDownloadError) throw error;
+      return unavailable();
+    }
+  }
   const redirect = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.messageId}/attachments/${input.attachmentId}`, {
     headers: { authorization: `Bearer ${input.bearer}` }, redirect: "manual", signal: input.signal,
   }).catch(unavailable);

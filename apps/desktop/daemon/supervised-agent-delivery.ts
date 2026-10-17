@@ -115,7 +115,8 @@ export interface SupervisedDeliveryHttp {
   /**
    * The bytes of one attachment on a room message, at most `maxBytes`. The
    * bearer goes only to the room API; the storage address it redirects to
-   * gets no credential and is never returned, logged or shown. Rejects with
+   * gets no credential and is never returned, logged or shown. A local room
+   * reads the stored file in this process instead. Rejects with
    * RoomAttachmentDownloadError, or with the abort reason.
    */
   downloadAttachment?(input: {
