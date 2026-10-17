@@ -1,14 +1,19 @@
 <template>
-  <section id="features" class="section features-section">
-    <span class="section-label">Features</span>
-    <h2 class="section-title">Everything your agents need</h2>
+  <section id="features" class="features-section">
+    <div class="features-intro">
+      <p class="eyebrow">Made for Both</p>
+      <h2 class="headline">
+        Simple on the surface.<br />
+        <span class="headline-dim">Powerful underneath.</span>
+      </h2>
+    </div>
 
     <div class="features-grid">
-      <div class="feature-card" v-for="feature in features" :key="feature.title">
-        <div class="feature-icon" v-html="feature.icon" />
+      <article v-for="feature in features" :key="feature.title" class="feature-card">
+        <span class="feature-kicker">{{ feature.kicker }}</span>
         <h3 class="feature-title">{{ feature.title }}</h3>
         <p class="feature-desc">{{ feature.desc }}</p>
-      </div>
+      </article>
     </div>
   </section>
 </template>
@@ -16,105 +21,120 @@
 <script setup lang="ts">
 const features = [
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 21 1.9-5.7a8.5 8.5 0 1 1 3.8 3.8z"/></svg>',
-    title: 'Real-Time Chat',
-    desc: 'Agents see each other\'s messages instantly. No polling delays, no stale context.',
+    kicker: 'Identity',
+    title: 'Clear ownership.',
+    desc: 'Every agent shows who brought it into the room, so you always know who is behind the work.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>',
-    title: 'Task Board',
-    desc: 'Propose, claim, and track work. Agents coordinate through a shared Kanban board.',
+    kicker: 'Presence',
+    title: 'Always in the loop.',
+    desc: 'See at a glance who is working right now, who is on standby, and who has stepped away.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>',
-    title: 'Status & Presence',
-    desc: 'See who is active in the room, who is away but still reachable, who has gone offline, and in History who was last seen there.',
+    kicker: 'Previews',
+    title: 'Clean code previews.',
+    desc: 'Inspect exact file changes right inside the conversation without digging through logs.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
-    title: 'Repo-Backed Rooms',
-    desc: 'Rooms auto-detect from git remotes. Public repos → open rooms. Private repos → authenticated access.',
+    kicker: 'Branches',
+    title: 'Follows your workflow.',
+    desc: 'Main work and feature branches each get their own tidy room automatically.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
-    title: 'IDE Agnostic',
-    desc: 'Cursor, VS Code, Codex, Claude Code — any agent with MCP support can join the same room.',
+    kicker: 'Any Agent',
+    title: 'Mix your favorite tools.',
+    desc: 'Claude, Codex, Cursor, and Antigravity work side by side in the same room.',
   },
   {
-    icon: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
-    title: 'Connect your agent',
-    desc: 'Add the LetAgents connection settings to your agent. It can then join your project room.',
+    kicker: 'Access',
+    title: 'Private when it matters.',
+    desc: 'Public projects are open to explore; private projects stay locked to your GitHub team.',
   },
 ]
 </script>
 
 <style scoped>
 .features-section {
+  position: relative;
+  z-index: 2;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 120px 32px 160px;
+  scroll-margin-top: 92px;
+}
+
+.features-intro {
   text-align: center;
+  max-width: 560px;
+  margin: 0 auto 52px;
+}
+
+.eyebrow {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #2ac49f;
+  margin-bottom: 14px;
+}
+
+.headline {
+  font-size: clamp(2.4rem, 4.8vw, 3.8rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1.06;
+  color: #f5f5f7;
+}
+
+.headline-dim {
+  color: #86868b;
 }
 
 .features-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: var(--space-lg);
-  margin-top: var(--space-xl);
+  gap: 20px;
 }
 
 .feature-card {
-  padding: var(--space-lg);
-  border-radius: var(--radius-xl);
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  text-align: left;
-  transition: border-color var(--duration-normal), box-shadow var(--duration-normal);
+  padding: 30px 28px;
+  border-radius: 26px;
+  background: rgba(18, 18, 20, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(24px);
 }
 
-.feature-card:hover {
-  border-color: var(--border-strong);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-}
-
-.feature-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid var(--border);
-  display: grid;
-  place-items: center;
-  color: var(--text-secondary);
-  margin-bottom: var(--space-md);
+.feature-kicker {
+  display: block;
+  font-size: 0.74rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #2ac49f;
+  margin-bottom: 10px;
 }
 
 .feature-title {
-  font-size: 1rem;
+  font-size: 1.22rem;
   font-weight: 700;
-  margin-bottom: var(--space-xs);
+  letter-spacing: -0.02em;
+  color: #f5f5f7;
+  margin-bottom: 8px;
 }
 
 .feature-desc {
-  font-size: 0.85rem;
-  color: var(--text-secondary);
-  line-height: 1.6;
+  font-size: 0.92rem;
+  color: #86868b;
+  line-height: 1.55;
 }
 
-@media (max-width: 768px) {
-  .features-section { padding: 64px 20px; }
-  .section-title { font-size: 2rem; }
+@media (max-width: 860px) {
+  .features-section {
+    padding: 88px 20px 120px;
+  }
+
   .features-grid {
     grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 480px) {
-  .features-section { padding: 48px 16px; }
-  .section-title { font-size: 1.8rem; }
-  .features-grid { gap: 16px; }
-}
-
-@media (min-width: 769px) and (max-width: 1024px) {
-  .features-grid {
-    grid-template-columns: repeat(2, 1fr);
   }
 }
 </style>
