@@ -40,6 +40,7 @@ import {
 import type {
   ProviderSpawnRequest,
   ProviderActivityEvent,
+  ProviderRoomTurnRequest,
   ProviderRoomTurnResult,
   ProviderStreamEvent,
   ProviderTerminalPayload,
@@ -1967,6 +1968,96 @@ test("daemon-owned Claude runs one exact bounded room turn and checkpoints befor
   });
   assert.deepEqual(calls, ["intent", `turn:${frame.uuid}`, `terminal:${frame.uuid}`]);
   assert.equal(handle.observedState(), "idle");
+});
+
+test("daemon-owned Claude receives the included room images as labelled base64 blocks after the prompt", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  assert.equal(adapter.roomTurnImageDelivery(), "memory");
+
+  // The bytes are a view into a larger buffer, as a download slice would be.
+  const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 250, 251]);
+  const backing = new Uint8Array([9, 9, ...pngBytes, 9]);
+  const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 4, 5, 6]);
+  const pending = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-claude-images",
+    actionId: "action-claude-images",
+    sourceMessage: { id: "msg-source", text: "What is wrong in these?" },
+    activation: { kind: "mention" },
+    attachments: [
+      { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "not_image" },
+      { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: pngBytes.length, status: "image",
+        image: { mimeType: "image/png", data: backing.subarray(2, 2 + pngBytes.length) } },
+      { index: 3, fileName: "photo.jpg", mimeType: "image/jpeg", sizeBytes: jpegBytes.length, status: "image",
+        image: { mimeType: "image/jpeg", data: jpegBytes } },
+    ],
+  }, {
+    beforeNativeDispatch: async () => {},
+    checkpointTurnStarted: async () => {},
+  });
+  await flush();
+
+  const frame = JSON.parse(child.written.at(-1)!) as { uuid: string; message: { role: string; content: Array<Record<string, any>> } };
+  assert.equal(frame.message.role, "user");
+  const [prompt, ...rest] = frame.message.content;
+  assert.equal(prompt!.type, "text");
+  assert.deepEqual(rest, [
+    { type: "text", text: 'Image 1: "shot \\"1\\".png"' },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: Buffer.from(pngBytes).toString("base64") } },
+    { type: "text", text: 'Image 2: "photo.jpg"' },
+    { type: "image", source: { type: "base64", media_type: "image/jpeg", data: Buffer.from(jpegBytes).toString("base64") } },
+  ], "labels and images follow the prompt in the order the notes number them; the view's own bytes only");
+  const lines = String(prompt!.text).split("\n");
+  const header = lines.indexOf("Files attached to the source message (LetAgents prepared them for this turn; do not try to download them):");
+  assert.ok(header > 0, "the prompt lists the attached files");
+  assert.deepEqual(lines.slice(header + 1, header + 4), [
+    '- Attachment 1: "notes.pdf" (application/pdf, 500 bytes). Not shown: only images (PNG, JPEG, GIF, WebP) reach agents.',
+    `- Attachment 2: "shot \\"1\\".png" (image/png, ${pngBytes.length} bytes). Included after this text as image 1.`,
+    `- Attachment 3: "photo.jpg" (image/jpeg, ${jpegBytes.length} bytes). Included after this text as image 2.`,
+  ]);
+  assert.equal(JSON.stringify(rest).includes("notes.pdf"), false, "a file that is not an image is only a note in the text");
+
+  child.emit({
+    type: "result", subtype: "success", is_error: false,
+    session_id: handle.providerContinuationId,
+    user_message_uuid: frame.uuid,
+    result: "Both look fine.",
+  });
+  assert.deepEqual(await pending, { turnId: frame.uuid, outcome: "reply", text: "Both look fine.", evidence: "stream" });
+});
+
+test("daemon-owned Claude adds no image blocks when there are no images with bytes in memory", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  const options = { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} };
+  const turns: Array<{ attachments?: ProviderRoomTurnRequest["attachments"] }> = [
+    {},
+    { attachments: [] },
+    { attachments: [
+      { index: 1, fileName: "huge.png", mimeType: "image/png", sizeBytes: 11 * 1024 * 1024, status: "too_large" },
+      { index: 2, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
+        image: { mimeType: "image/png", path: "/scratch/turn-1/image-1.png" } },
+    ] },
+  ];
+  for (const [position, turn] of turns.entries()) {
+    const pending = adapter.runRoomTurn!(handle, {
+      inboxItemId: `inbox-no-images-${position}`, actionId: `action-no-images-${position}`,
+      sourceMessage: {}, activation: {}, ...turn,
+    }, options);
+    await flush();
+    const frame = JSON.parse(child.written.at(-1)!) as { uuid: string; message: { content: Array<{ type: string; text: string }> } };
+    assert.equal(frame.message.content.length, 1, `turn ${position} sends the prompt text block alone`);
+    assert.equal(frame.message.content[0]!.type, "text");
+    child.emit({
+      type: "result", subtype: "success", is_error: false,
+      session_id: handle.providerContinuationId, user_message_uuid: frame.uuid, result: "Done.",
+    });
+    await pending;
+  }
 });
 
 test("Claude bounded turns use the exact no-reply sentinel and never infer it from extra text", async () => {

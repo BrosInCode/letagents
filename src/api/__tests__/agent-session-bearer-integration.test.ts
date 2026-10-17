@@ -102,6 +102,7 @@ test("worker bearer route registry is default-deny and semantic", () => {
   const allowed: Array<[string, string, string]> = [
     ["GET", "/rooms/room_1/messages", "messages.read"],
     ["POST", "/rooms/room_1/messages", "messages.write"],
+    ["GET", "/rooms/room_1/messages/msg_4/attachments/att_2", "messages.read"],
     ["GET", "/rooms/room_1/artifacts", "artifacts.read"],
     ["POST", "/rooms/room_1/artifacts", "artifacts.self_write"],
     ["GET", "/rooms/room_1/tasks", "coordination.read"],
@@ -123,6 +124,8 @@ test("worker bearer route registry is default-deny and semantic", () => {
     ["POST", "/rooms/room_1/tasks/task_1/focus-room"], ["POST", "/rooms/room_1/participants/clear-disconnected"],
     ["PATCH", "/rooms/room_1"], ["POST", "/rooms/room_1/artifacts/future-action"],
     ["GET", "/rental/provider/requests"], ["POST", "/rental/sessions/rental_1/complete"],
+    ["DELETE", "/rooms/room_1/messages/msg_4/attachments/att_2"], ["GET", "/rooms/room_1/messages/msg_4/attachments/att_2/extra"],
+    ["GET", "/rooms/room_1/messages/msg_4/attachments/upl_2"],
   ]) assert.equal(requiredAgentSessionRouteCapability(method, route), null, `${method} ${route} must remain default-deny`);
 });
 
@@ -136,6 +139,8 @@ test("worker bearer routes authorize multi-segment room ids exactly like the roo
   const allowed: Array<[string, string, string]> = [
     ["GET", `/rooms/${gitRoom}/messages`, "messages.read"],
     ["GET", `/rooms/${gitRoom}/messages/poll`, "messages.read"],
+    ["GET", `/rooms/${encodeURIComponent(gitRoom)}/messages/msg_7/attachments/att_1`, "messages.read"],
+    ["GET", `/api/rooms/${gitRoom}/messages/msg_7/attachments/att_1`, "messages.read"],
     ["POST", `/rooms/${gitRoom}/messages`, "messages.write"],
     ["GET", `/rooms/${gitRoom}/presence`, "coordination.read"],
     ["POST", `/rooms/${gitRoom}/agent-sessions/agent_session_9/native-activity`, "coordination.self_write"],
