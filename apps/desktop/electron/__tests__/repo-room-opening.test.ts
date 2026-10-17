@@ -214,7 +214,10 @@ test("opening a fetched repo room preserves its identity without calculating bra
           execFileSync("git", ["init", "-b", "main"], { cwd: path, stdio: "ignore" });
         }
         dialogResult = Promise.resolve({ canceled: false, filePaths: [localPath] });
+        const callsBeforeConnect = pickerCalls.length;
         assert.equal((await connectProjectToRoom(plainContext)).binding?.identityKey, plainBinding.identityKey);
+        assert.strictEqual(pickerCalls[callsBeforeConnect]?.[0], parentWindow,
+          "the connect-project picker is a sheet on the main window");
         const local = await resolveRoomIdentifierFromPath(localPath);
         const context = { roomIdentifier: local.roomIdentifier, gitRoom: local.gitRoom };
         const original = await bindProjectRoot({ context, rootPath: localPath, source: "local_git" });
