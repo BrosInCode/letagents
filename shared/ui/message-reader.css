@@ -68,6 +68,11 @@ html:has(.message-reader[open]) { overflow: hidden; }
 .message-reader-prose pre { max-width: 100%; font: .8em/1.8 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 1.3em 0; padding: 16px 18px; border: 1px solid var(--reader-line); border-radius: 9px; background: var(--reader-code); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .message-reader-prose code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .83em; background: var(--reader-code); padding: 2px 5px; border-radius: 4px; }
 .message-reader-prose pre code { font-size: inherit; padding: 0; background: none; }
+/* Rendered Markdown has its own fenced-code wrapper. Keep its toolbar and syntax
+   colours, but let the reading size and wrapping apply to its content too. */
+.message-reader-prose .fenced-code-block { font-size: 1em; }
+.message-reader-prose .fenced-code-block pre { font-size: .8em; white-space: pre-wrap; }
+.message-reader-prose .fenced-code-block code.fenced-code-block-content { white-space: pre-wrap; overflow-wrap: anywhere; }
 .message-reader-prose table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: .86em; margin: 1.3em 0; }
 .message-reader-prose th { text-align: left; font-weight: 550; color: var(--reader-text); }
 .message-reader-prose :is(th, td) { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--reader-line); vertical-align: top; }
