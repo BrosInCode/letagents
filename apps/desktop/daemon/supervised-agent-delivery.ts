@@ -3,6 +3,7 @@ import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { ReplyTurnCompactionObserver, type ReplyTurnCompactionProof } from "./reply-turn-compaction.js";
 import { RoomLatencyTrace } from "./room-latency-trace.js";
+import { turnStartLatency } from "./turn-start-latency.js";
 import { queuedDeliveryKind, roomArrival } from "./queued-delivery-order.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
@@ -782,6 +783,10 @@ export class SupervisedAgentDelivery {
         observed_messages: observedMessages(response.messages ?? []),
         onInserted: ids => { for (const id of ids) newlyInserted.add(id); onInserted?.(ids); },
       });
+      for (const item of received) {
+        if (!newlyInserted.has(item.source_message_id)) continue;
+        turnStartLatency.received({ agentId: agent.agentId, item, busy: this.activeTurns.has(agent.agentId), liveHandle: Boolean(agent.handle) });
+      }
       // Ingest can be deliberately slow. Do not create detached delivery work
       // after a stop/rebind changed authority while its commit was pending.
       if (!await this.hasIngressAuthority(agent, controller)) return;
@@ -1611,6 +1616,7 @@ export class SupervisedAgentDelivery {
       try { disposeCompactionStream?.(); } catch { /* Optional scheduling observation. */ }
       disposeCompactionStream = null;
     };
+    const startTrace = recovering ? null : turnStartLatency.begin(agent.agentId, item.inbox_item_id, agent.provider);
     try {
       if (await this.inbox.nativeFailure(item.inbox_item_id)) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
@@ -1905,7 +1911,9 @@ export class SupervisedAgentDelivery {
       };
       let baselineObserved = false;
       const beforeDispatch = async () => {
+        const firstDispatch = !nativeDispatchEntered;
         nativeDispatchEntered = true;
+        if (firstDispatch) startTrace?.mark("provider_entry");
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         const continuation = await this.inbox.taskContinuation(item.inbox_item_id);
         if (continuation) {
@@ -1921,10 +1929,13 @@ export class SupervisedAgentDelivery {
         }
         if (!baselineObserved) {
           baselineObserved = true;
+          startTrace?.mark("dispatch_checks");
           try { workspaceBaseline = await this.observeStartingWorkspace?.(agent, item.source_message_id, item.inbox_item_id) || null; } catch { /* Optional observation. */ }
+          startTrace?.mark("workspace_begin");
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         await this.inbox.checkpointDispatchIntent(item.inbox_item_id, this.http.ownedTasks ? agent.agentSessionId : undefined, observedContext);
+        if (firstDispatch) startTrace?.mark("dispatch_intent");
       };
       // A turn the execution record holds open is closed there by its ending.
       // One the record never saw start has nothing to close, and its ending
@@ -1952,6 +1963,8 @@ export class SupervisedAgentDelivery {
         } catch { closeCompactionObservation(); }
         if (!await hasProviderAuthority()) return;
       }
+      if (startTrace) startTrace.providerCalled();
+      else turnStartLatency.unmeasuredTurnStarted(agent.agentId);
       providerCallEntered = true;
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
@@ -1973,6 +1986,7 @@ export class SupervisedAgentDelivery {
         await beforeDispatch();
         setActive("responding");
       }, checkpointTurnStarted: async (turnId) => {
+        startTrace?.mark("provider_start");
         // A provider that already entered its native operation may receive an
         // exact turn id while a full pump retirement is draining it. Commit
         // that recovery key before the successor starts. User Stop aborts only
@@ -1999,6 +2013,7 @@ export class SupervisedAgentDelivery {
           origin_execution_generation_id: agent.executionGenerationId,
           provider_continuation_id: providerContinuationId,
         });
+        startTrace?.mark("turn_checkpoint");
         admittedProviderTurnId = turnId;
         this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, turnId);
         // Only an acknowledged exact provider turn is projected responding.
@@ -2025,6 +2040,7 @@ export class SupervisedAgentDelivery {
         () => !providerTurnDurablyStarted,
         providerTurnDurable,
       );
+      if (providerResult) startTrace?.providerEnded(providerResult.outcome);
       closeCompactionObservation();
       if (!providerResult) throw new Error("Provider does not support bounded room turns.");
       if (settledCursorEnding) return;
@@ -2261,6 +2277,8 @@ export class SupervisedAgentDelivery {
       }
       await retryFailure({ domain: "pre_dispatch", error: message });
     } finally {
+      if (startTrace) startTrace.end();
+      else if (providerCallEntered) turnStartLatency.unmeasuredTurnEnded(agent.agentId);
       closeCompactionObservation();
       try { await this.releaseWorkspace?.(agent, item.source_message_id, item.inbox_item_id); } catch { /* Optional retention cleanup. */ }
       controller.signal.removeEventListener("abort", relayPumpAbort);

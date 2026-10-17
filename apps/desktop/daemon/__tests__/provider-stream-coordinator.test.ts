@@ -22,6 +22,7 @@ import { WorkerRuntimeCustody, type InstalledHostGrant } from "../worker-runtime
 import { LiveActivitySummaryRelay } from "../live-activity-summary-relay.js";
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { LifecycleProjectionObservation } from "../lifecycle-projection-ledger.js";
+import { setTurnStartLatencyReporter, turnStartLatency, type StartLatencyRecord } from "../turn-start-latency.js";
 
 const cleanLifecycleProjection = () => ({
   available: true,
@@ -1321,6 +1322,32 @@ test("provider stream events are FIFO per entry and stale handles are ignored", 
   );
   assert.deepEqual(calls, ["item/first", "item/second"]);
   await harness.coordinator.disposeAll();
+});
+
+test("the first projected live-display event ends the agent's turn start-up timing", async () => {
+  const records: StartLatencyRecord[] = [];
+  const displayed: DaemonActivityEvent[] = [];
+  setTurnStartLatencyReporter(record => { records.push(record); });
+  const harness = coordinatorHarness({ pushStream: event => displayed.push(event) });
+  try {
+    await harness.coordinator.install("agent-1", handle, "generation-2");
+    turnStartLatency.received({ agentId: "agent-1", item: { inbox_item_id: "inbox-1", source_message_id: "msg_1", source_message: { source: "browser" } }, busy: false, liveHandle: true });
+    turnStartLatency.begin("agent-1", "inbox-1", "codex")!.providerCalled();
+    const now = new Date().toISOString();
+    const delta = (sequence: number, method: string, payload: Record<string, unknown>): ProviderActionStreamEvent => ({
+      ...streamEvent(sequence, method), observedAt: now,
+      payload: { threadId: "continuation-1", turnId: "turn-1", ...payload },
+    });
+    await harness.coordinator.enqueue("agent-1", handle, { ...delta(1, "thread/read", {}), kind: "item_lifecycle" });
+    assert.deepEqual(records, [], "a protocol event is not output");
+    await harness.coordinator.enqueue("agent-1", handle, delta(2, "item/agentMessage/delta", { itemId: "item-1", delta: "Hello" }));
+    assert.deepEqual(displayed.map(event => event.method), ["item/agentMessage/delta"]);
+    assert.deepEqual(records.map(record => [record.event, record.event === "turn_start_latency" ? record.sample.first_output : null]),
+      [["turn_start_latency", "text"]]);
+  } finally {
+    setTurnStartLatencyReporter(null);
+    await harness.coordinator.disposeAll();
+  }
 });
 
 test("each human-visible working event gives the room the owner's live line, from the bound runtime only", async () => {
