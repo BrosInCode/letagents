@@ -30,6 +30,7 @@ import type { PollingActivationRecord } from "../custodial-polling-activation.js
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
 import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordinator.js";
+import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -748,6 +749,44 @@ test("a provider whose process is up returns its launch slot before its remote b
   finishBootstrap!();
   await converging;
   assert.equal(runtime.installed.length, 1);
+});
+
+test("a completed launch reports its start-up phases, split at the native ready signal; a stopped one reports nothing", async () => {
+  const records: StartLatencyRecord[] = [];
+  setTurnStartLatencyReporter(record => { records.push(record); });
+  try {
+    for (const nativeSignal of [true, false]) {
+      records.length = 0;
+      const runtime = harness({ provider: provider({ spawn: async (request) => {
+        if (nativeSignal) request.onNativeStarted?.();
+        return returnedHandle;
+      } }) });
+      await runtime.coordinator.converge("agent-1");
+      assert.equal(runtime.installed.length, 1);
+      assert.deepEqual(records.map(record => [record.event, record.sample.provider, "launch" in record.sample ? record.sample.launch : null,
+        Object.keys(record.sample.phases_ms)]), [["provider_launch_latency", "codex", "fresh",
+        ["prepare", "slot_wait", "admission", "process", ...(nativeSignal ? ["bootstrap"] : []), "install"]]]);
+    }
+
+    records.length = 0;
+    let admit: (() => void) | null = null;
+    const runtime = harness({ provider: provider({ spawn: async () => returnedHandle }) });
+    const coordinator = new ProviderExecutionCoordinator({
+      ...runtime.options,
+      pacing: {
+        acquire: async () => { await new Promise<void>((resolve) => { admit = resolve; }); return () => {}; },
+        run: async () => { throw new Error("launches pace through acquire"); },
+      },
+    });
+    const converging = coordinator.converge("agent-1");
+    for (let turn = 0; turn < 20 && !admit; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    runtime.bumpControlEpoch();
+    admit!();
+    await converging;
+    assert.deepEqual(records, []);
+  } finally {
+    setTurnStartLatencyReporter(null);
+  }
 });
 
 test("delivery handoff freezes convergence and draining never creates a successor", async () => {

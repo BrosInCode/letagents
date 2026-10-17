@@ -62,6 +62,7 @@ import { ACTIVITY_RECORD_CONTINUED_NOTICE, ACTIVITY_RECORD_STOPPED_NOTICE } from
 import { EXIT_UNSETTLED_NOTICE } from "./provider-terminal-coordinator.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 import type { ConvergencePacing } from "./convergence-pacer.js";
+import { turnStartLatency } from "./turn-start-latency.js";
 
 // A live generation with no attachable handle resolves on its own once the
 // old process exits or answers again. Re-check with capped backoff so the
@@ -1565,6 +1566,7 @@ export class ProviderExecutionCoordinator {
     if (await this.options.store.pendingRuntimeRecovery(initialEntry.id)
       || await this.options.store.unresolvedDeliveryDrain(initialEntry.id)
       || await this.options.store.unresolvedPollingActivation(initialEntry.id)) return;
+    const launchTiming = turnStartLatency.beginLaunch(initialEntry.id, initialEntry.provider);
     let entry = initialEntry;
     let launchControlEpoch = initialControlEpoch;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id!);
@@ -1783,7 +1785,10 @@ export class ProviderExecutionCoordinator {
       onProgress: () => this.options.notifyProgressChanged?.(),
       // A provider whose remaining startup is a remote model turn (Claude's
       // bootstrap) returns its launch slot as soon as its process is up.
-      onNativeStarted: () => releaseLaunchSlot(),
+      onNativeStarted: () => {
+        launchTiming?.mark("process");
+        releaseLaunchSlot();
+      },
       workAttemptId: attempt.work_attempt_id,
       roomId: entry.room_id,
       cwd: attempt.workspace_path,
@@ -1846,7 +1851,9 @@ export class ProviderExecutionCoordinator {
       // final authority check below, so a launch that queued behind other
       // agents is checked again, and its own startup budget starts only once
       // it is admitted. It covers the local process start; see onNativeStarted.
+      launchTiming?.mark("prepare");
       releaseLaunchSlot = this.options.pacing ? await this.options.pacing.acquire("launch", entry.id) : () => {};
+      launchTiming?.mark("slot_wait");
       // Capture consumed inputs before the final existing authority check. No
       // new await is inserted between that check and native dispatch.
       const admission = await this.launchAdmission(initialEntry, launchControlEpoch, launchConfiguration,
@@ -1869,9 +1876,11 @@ export class ProviderExecutionCoordinator {
       try {
         try {
           try {
+            launchTiming?.mark("admission");
             handle = resumed
               ? await this.options.provider.resume(ref!, { ...spawn, resumeFrom: ref })
               : await this.options.provider.spawn(spawn);
+            launchTiming?.markProcessReturned();
           } catch (error) {
             if (admission) this.failedLaunchAdmissions.set(entry.id, admission);
             throw error;
@@ -1989,6 +1998,8 @@ export class ProviderExecutionCoordinator {
             launchControlEpoch,
           );
           if (control === "handoff" || control === "fenced") return;
+          launchTiming?.mark("install");
+          launchTiming?.complete(resumed ? "resume" : "fresh");
         } catch (error) {
           if (providerDispatched && !providerPersisted && handle) {
             try {

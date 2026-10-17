@@ -7,15 +7,17 @@ import {
   statSync,
   writeSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { redactCredentialText } from "./credential-redaction.js";
 import { setRoomLatencyReporter } from "./room-latency-trace.js";
+import { setTurnStartLatencyReporter } from "./turn-start-latency.js";
 
 const MAX_LIFECYCLE_LOG_BYTES = 256 * 1024;
 
 export type DaemonLifecycleEvent = {
-  event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit" | "room_latency";
+  event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit" | "room_latency"
+    | "turn_start_latency" | "provider_launch_latency";
   detail?: string | null;
   exitCode?: number | null;
 };
@@ -87,12 +89,22 @@ export class DaemonLifecycleLog {
 export function startDaemonLifecycleDiagnostics(path: string): DaemonLifecycleLog {
   const lifecycle = new DaemonLifecycleLog(path);
   setRoomLatencyReporter(sample => lifecycle.append({ event: "room_latency", detail: JSON.stringify(sample) }));
+  // One start-up sample per turn would soon push process failures out of the
+  // lifecycle file, so they get a sibling file, created at the first sample.
+  const turnLatencyPath = join(dirname(path), "daemon-turn-latency.jsonl");
+  let turnLatency: DaemonLifecycleLog | null = null;
+  setTurnStartLatencyReporter(record => {
+    turnLatency ??= new DaemonLifecycleLog(turnLatencyPath);
+    turnLatency.append({ event: record.event, detail: JSON.stringify(record.sample) });
+  });
   lifecycle.append({ event: "daemon_starting" });
   process.on("uncaughtExceptionMonitor", error => {
     lifecycle.append({ event: "fatal_exception", detail: daemonLifecycleErrorDetail(error) });
   });
   process.on("exit", exitCode => {
     setRoomLatencyReporter(null);
+    setTurnStartLatencyReporter(null);
+    turnLatency?.close();
     lifecycle.append({ event: "process_exit", exitCode });
     lifecycle.close();
   });

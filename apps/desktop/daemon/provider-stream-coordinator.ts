@@ -42,6 +42,7 @@ import {
   type LifecycleProjectionProvider,
 } from "./lifecycle-projection-ledger.js";
 import type { LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+import { turnStartLatency } from "./turn-start-latency.js";
 
 /** Immutable identity for one exact durable provider installation. */
 export type ProviderInstallationToken = Readonly<{
@@ -1376,6 +1377,7 @@ export class ProviderStreamCoordinator {
       }
       for (const projected of display.project(sanitizedEvent, event.nativeLifecyclePhase)) {
         this.options.streams.push(entryId, projected);
+        turnStartLatency.observeOutput(entryId, projected.method, event.observedAt);
       }
       await this.options.serializeEntry(entryId, async () => {
         if (!this.isCurrentInstallation(installation)) return;
