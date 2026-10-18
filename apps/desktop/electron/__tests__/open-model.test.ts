@@ -10,6 +10,7 @@ import {
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
 } from "../main/agents/managed-agent-permission-profiles.js";
+import { resolveOpenModelLimits } from "../main/agents/open-model-limits.js";
 import { openCodeConfig, parseConfiguredOpenModelImageInput } from "../main/agents/opencode-launch-contract.js";
 import {
   OPENCODE_RUNTIME_VERSION,
@@ -247,6 +248,7 @@ test("Open Model preflight checks OpenCode and accepts a per-agent model", async
 
 test("OpenCode config exposes product tools without embedding the provider key", () => {
   const config = openCodeConfig({
+    limits: { context: 262144, output: 8192 },
     model: "qwen/qwen3-coder",
     baseUrl: "https://openrouter.ai/api/v1",
     pluginUrl: "file:///tmp/credential-boundary.mjs",
@@ -272,6 +274,7 @@ test("OpenCode config exposes product tools without embedding the provider key",
   assert.equal(config.formatter, false);
   assert.equal(config.lsp, false);
   assert.deepEqual(config.permission, { "*": "allow" });
+  assert.equal((configuredModel.limit as Record<string, unknown>).context, 262144);
   assert.equal((provider.options as Record<string, unknown>).baseURL, "https://openrouter.ai/api/v1");
   assert.equal(
     (configuredModel.limit as Record<string, unknown>).output,
@@ -286,6 +289,7 @@ test("OpenCode config exposes product tools without embedding the provider key",
   assert.doesNotMatch(serialized, /provider-secret|apiKey|api_key/);
 
   assert.deepEqual(openCodeConfig({
+    limits: { context: 262144, output: 8192 },
     model: "qwen/qwen3-coder",
     baseUrl: "https://openrouter.ai/api/v1",
     pluginUrl: "file:///tmp/credential-boundary.mjs",
@@ -299,6 +303,7 @@ test("OpenCode config exposes product tools without embedding the provider key",
 test("OpenCode config lists image input for the model only when the owner says it reads images", () => {
   const input = {
     model: "qwen/qwen3-coder",
+    limits: { context: 262144, output: 8192 },
     baseUrl: "https://openrouter.ai/api/v1",
     pluginUrl: "file:///tmp/credential-boundary.mjs",
     cwd: "/repo",
@@ -420,4 +425,49 @@ test("supervised provider admission declares provider-neutral daemon delivery", 
   assert.equal(supervisedDeliveryModeForProvider("open-model"), "daemon_inbox");
   assert.equal(supervisedDeliveryModeForProvider("claude-code"), "daemon_inbox");
   assert.equal(supervisedDeliveryModeForProvider("cursor"), "daemon_inbox");
+});
+
+
+test("Open Model resolves the exact endpoint model's capacity and output budget", async () => {
+  const metadata = async (url: string, init?: RequestInit) => {
+    assert.equal(url, "https://provider.example/v1/models?region=us");
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer secret");
+    assert.equal(init?.redirect, "error");
+    return Response.json({ data: [
+      { id: "small", context_length: 16000, max_output_tokens: 2000 },
+      { id: "glm-5.3", context_length: 262144, top_provider: { context_length: 262144, max_completion_tokens: 32768 } },
+    ] });
+  };
+  const input = { baseUrl: "https://provider.example/v1?region=us", apiKey: "secret", model: "glm-5.3" };
+  assert.deepEqual(await resolveOpenModelLimits(input, metadata), { context: 262144, output: 8192 });
+  assert.deepEqual(await resolveOpenModelLimits({ ...input, model: "small" }, metadata), { context: 16000, output: 2000 });
+  await assert.rejects(resolveOpenModelLimits({ ...input, model: "glm-5.3-alias" }, metadata), /context window/);
+  assert.deepEqual(await resolveOpenModelLimits({ ...input, contextWindow: 32000 }, async () => assert.fail("explicit limit needs no network")),
+    { context: 32000, output: 8000 });
+});
+
+test("Open Model requires an explicit limit when endpoint metadata is missing or invalid", async () => {
+  const input = { baseUrl: "https://provider.example/v1", apiKey: null, model: "local" };
+  for (const value of [undefined, 0, -1, 2.5, "262144", 1]) {
+    await assert.rejects(resolveOpenModelLimits(input, async () => Response.json({ data: [{ id: "local", context_length: value }] })), /Set its context window/);
+  }
+  await assert.rejects(resolveOpenModelLimits(input, async () => Response.json({ data: [{
+    id: "local", context_length: 262144, top_provider: { context_length: 1 },
+  }] })), /Set its context window/);
+  await assert.rejects(resolveOpenModelLimits(input, async () => { throw new Error("api_key=secret"); }), (error: unknown) => {
+    assert.doesNotMatch(String(error), /api_key|secret/); return true;
+  });
+  await assert.rejects(resolveOpenModelLimits({ ...input, contextWindow: NaN }), /whole number/);
+});
+
+test("saved context limits stay with their endpoint and model", async () => {
+  const storePath = await tempSettingsPath();
+  const options = { storePath, secretStorage };
+  const saved = await saveOpenModelSettings({ baseUrl: "https://provider.example/v1", model: "glm-5.3", contextWindow: 262144 }, options);
+  assert.equal(saved.contextWindow, 262144);
+  assert.equal((await saveOpenModelSettings({ apiKey: "new-key" }, options)).contextWindow, 262144);
+  assert.equal((await saveOpenModelSettings({ model: "smaller-model" }, options)).contextWindow, null);
+  await saveOpenModelSettings({ contextWindow: 32000 }, options);
+  assert.equal((await saveOpenModelSettings({ baseUrl: "http://localhost:8000/v1" }, options)).contextWindow, null);
+  await assert.rejects(saveOpenModelSettings({ contextWindow: -1 }, options), /whole number/);
 });

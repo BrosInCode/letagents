@@ -26,6 +26,19 @@
       />
     </label>
     <label>
+      <small>Context window in tokens (optional)</small>
+      <input
+        :value="contextWindow"
+        type="number"
+        min="2"
+        step="1"
+        placeholder="Detect from provider"
+        data-testid="desktop-add-agent-open-model-context-window"
+        @input="emit('update:contextWindow', ($event.target as HTMLInputElement).value)"
+      />
+      <small>Set the saved model’s limit if your endpoint does not report it.</small>
+    </label>
+    <label>
       <small>API key {{ hasApiKey ? "(saved - paste to replace)" : "(optional for local endpoints)" }}</small>
       <input
         :value="apiKey"
@@ -56,6 +69,7 @@ import AddAgentFeedback from "./AddAgentFeedback.vue";
 defineProps<{
   baseUrl: string;
   model: string;
+  contextWindow: string;
   apiKey: string;
   hasApiKey: boolean;
   saving: boolean;
@@ -64,6 +78,7 @@ defineProps<{
 const emit = defineEmits<{
   "update:baseUrl": [value: string];
   "update:model": [value: string];
+  "update:contextWindow": [value: string];
   "update:apiKey": [value: string];
   save: [];
   "clear-key": [];

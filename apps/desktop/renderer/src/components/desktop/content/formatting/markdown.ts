@@ -32,9 +32,14 @@ export function renderInlineMarkdown(value: string, options: DesktopMarkdownOpti
   };
   // File references are display text here. Only the receipt's verified file actions
   // may open a local workspace; never turn a path supplied in prose into a URL.
-  let tokenized = value.replace(/\u0000/g, "").replace(/`([^`\n]+)`/g, (_match, code: string) =>
-    markdownToken(tokens, `<code>${escapeHtml(options.preservePaths ? code : localFileName(code) ?? code)}</code>`)
-  );
+  let tokenized = value.replace(/\u0000/g, "").replace(/`([^`\n]+)`/g, (_match, code: string) => {
+    // A URL on its own is still a link when an agent wraps it in backticks.
+    // Commands containing URLs and fenced code retain their literal rendering.
+    if (/^https?:\/\/[^\s<>"']+$/i.test(code)) {
+      return linkToken(code, `<code><a href="${escapeAttr(code)}" target="_blank" rel="noopener noreferrer">${escapeHtml(code)}</a></code>`);
+    }
+    return markdownToken(tokens, `<code>${escapeHtml(options.preservePaths ? code : localFileName(code) ?? code)}</code>`);
+  });
   tokenized = tokenized.replace(/\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)/g, (match, label: string, target: string) => {
     const path = target.replace(/^<|>$/g, "");
     if (/^https?:\/\/[^\s]+$/.test(path)) {

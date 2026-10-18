@@ -272,6 +272,7 @@ export function supervisedOpenCodeMcpEnvironment(
 
 export function openCodeConfig(input: {
   model: string;
+  limits: { context: number; output: number };
   baseUrl: string;
   pluginUrl: string;
   cwd: string;
@@ -314,10 +315,7 @@ export function openCodeConfig(input: {
             temperature: true,
             tool_call: true,
             release_date: "2025-01-01",
-            limit: {
-              context: 1_000_000,
-              output: SUPERVISED_OPEN_MODEL_OUTPUT_TOKEN_LIMIT,
-            },
+            limit: input.limits,
             cost: { input: 0, output: 0 },
             options: {},
             ...(input.imageInput === true ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),

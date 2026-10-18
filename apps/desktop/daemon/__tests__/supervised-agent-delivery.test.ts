@@ -4079,7 +4079,7 @@ test("each re-block of a still unreadable turn is recorded, including after Retr
     assert.equal(receipt.state, "blocked");
     assert.deepEqual(receipt.timeline.slice(-4).map((event) => event.phase),
       ["blocked", "queued", "result_unreadable", "blocked"]);
-    assert.match(receipt.timeline.at(-1)!.detail ?? "", /re-read and was not rerun/);
+    assert.match(receipt.timeline.at(-1)!.detail ?? "", /No new model turn was started/);
     assert.equal(runs, 1, "Retry re-reads the completed turn and never reruns it");
     assert.equal(recoveries, 3);
     assert.deepEqual(saidSavedAsUnreadable, [true, undefined, true],

@@ -2120,9 +2120,9 @@ export class SupervisedAgentDelivery {
         }
         if (result.outcome === "unreadable") {
           if (item.state === "result_recovery") {
-            await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
+            await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The result of this turn is still unavailable after re-reading it. No new model turn was started." });
           } else {
-            await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The provider completed, but its final answer could not be read. Re-reading the same completed turn." });
+            await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The result of this turn is unavailable. Checking the existing provider turn without starting a new one." });
           }
           return;
         }
