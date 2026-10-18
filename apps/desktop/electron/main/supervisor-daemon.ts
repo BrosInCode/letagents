@@ -46,7 +46,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.261";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.262";
 /**
  * The room-level state channel carries activity summaries, not history. Keep in
  * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
@@ -1553,6 +1553,7 @@ export class SupervisorDaemonClient {
     apiKey: string | null;
     baseUrl: string;
     model: string;
+    contextWindow?: number | null;
     daemonGeneration: number;
   }): Promise<"installed" | "stale"> {
     if (!input.baseUrl.trim() || !input.model.trim()) {
@@ -1567,6 +1568,7 @@ export class SupervisorDaemonClient {
         api_key: input.apiKey,
         base_url: input.baseUrl,
         model: input.model,
+        ...(input.contextWindow != null ? { context_window: input.contextWindow } : {}),
         daemon_generation: input.daemonGeneration,
       },
     );

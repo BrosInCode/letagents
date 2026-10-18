@@ -1825,6 +1825,8 @@ export class ProviderExecutionCoordinator {
           apiKey: openModelCredential.apiKey,
           baseUrl: openModelCredential.baseUrl,
           model: launchSnapshot.model?.trim() || openModelCredential.model,
+          ...((!launchSnapshot.model?.trim() || launchSnapshot.model.trim() === openModelCredential.model)
+            && openModelCredential.contextWindow != null ? { contextWindow: openModelCredential.contextWindow } : {}),
         },
       } : {}),
     };

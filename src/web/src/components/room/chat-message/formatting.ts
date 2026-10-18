@@ -207,9 +207,14 @@ function renderMessageInline(value: string, onLink?: (url: string) => void): str
     links.set(tokens.length - 1, url)
     return token
   }
-  const tokenized = value.replace(/`([^`\n]+)`/g, (_match, code: string) =>
-    markdownToken(tokens, `<code>${escapeHtml(code)}</code>`)
-  )
+  const tokenized = value.replace(/`([^`\n]+)`/g, (_match, code: string) => {
+    // A URL on its own is still a link when an agent wraps it in backticks.
+    // Commands containing URLs and fenced code retain their literal rendering.
+    if (/^https?:\/\/[^\s<>"']+$/i.test(code)) {
+      return linkToken(code, `<code><a href="${escapeAttribute(code)}" target="_blank" rel="noopener noreferrer">${escapeHtml(code)}</a></code>`)
+    }
+    return markdownToken(tokens, `<code>${escapeHtml(code)}</code>`)
+  })
   let rendered = escapeHtml(tokenized)
 
   rendered = rendered.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_match, label: string, url: string) => {
