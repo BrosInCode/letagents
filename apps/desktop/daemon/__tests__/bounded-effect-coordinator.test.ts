@@ -410,6 +410,11 @@ test("prepare preserves idempotent terminal, uncertain, duplicate, and final-ans
 
   for (const [toolName, input] of [
     ["send_message", { text: "answer" }],
+    ["send_message", { reply_to: "", text: "answer" }],
+    ["send_message", { reply_to: "  ", text: "answer" }],
+    ["send_message", { thread_parent_id: "  ", text: "answer" }],
+    ["send_message", { thread_parent_id: "  ", reply_to: "source-a", text: "answer" }],
+    ["send_message", { reply_to: " source-a ", text: "answer" }],
     ["send_message", { reply_to: "source-a", text: "answer" }],
     ["send_message", { thread_parent_id: "source-a", text: "answer" }],
     ["send_thread_message", { thread_parent_id: "source-a", text: "answer" }],
@@ -441,6 +446,7 @@ test("untargeted room answers use final publication instead of sending an answer
 
   for (const [toolName, input] of [
     ["send_message", { reply_to: "other-message", text: "A separate reply." }],
+    ["send_message", { thread_parent_id: "  ", reply_to: " other-message ", text: "A separate reply." }],
     ["send_message", { thread_parent_id: "other-message", text: "A separate thread reply." }],
     ["send_thread_message", { thread_parent_id: "other-message", text: "A separate thread reply." }],
   ] as const) {

@@ -457,11 +457,9 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
         throw new Error("The prior supervised effect is still executing; refusing a duplicate side effect.");
       }
     }
-    const targetMessage = typeof args.thread_parent_id === "string"
-      ? args.thread_parent_id
-      : typeof args.reply_to === "string"
-        ? args.reply_to
-        : null;
+    const threadParentId = typeof args.thread_parent_id === "string" ? args.thread_parent_id.trim() : "";
+    const replyTo = typeof args.reply_to === "string" ? args.reply_to.trim() : "";
+    const targetMessage = threadParentId || replyTo || null;
     // An untargeted post during a bounded turn is also the activating answer.
     // Otherwise it can send once here and again as a final "answered in the room" recap.
     // Separate tool messages must explicitly target another message or thread.
