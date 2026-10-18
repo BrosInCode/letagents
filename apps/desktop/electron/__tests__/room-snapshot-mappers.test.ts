@@ -14,6 +14,7 @@ const emptySnapshotData: RoomSnapshotData = {
   participantsData: { participants: [], hidden_count: 0 },
   presenceData: { presence: [] },
   reasoningData: { sessions: [], reasoning_sessions: [] },
+  liveActivityData: { sessions: [] },
   activityHistoryData: { entries: [] },
   roomArtifactsData: { artifacts: [] },
   boardSettingsData: {

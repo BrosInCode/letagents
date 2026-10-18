@@ -47,6 +47,27 @@ const runStreamCheckpoint = createBoundedExecutor({
 const MAX_STREAM_CAPABILITY_VALUES = 16;
 const MAX_STREAM_CAPABILITY_BYTES = 512;
 
+/**
+ * The SSE frame of a reasoning change. A live session (an agent's turn, shared
+ * by its owner) has its own event names, so clients that read reasoning
+ * sessions, older ones included, never receive one.
+ */
+export function reasoningStreamFrame(
+  projectId: string,
+  event: Extract<RoomEvent, { kind: "reasoning_updated" | "reasoning_removed" }>,
+): { name: string; data: Record<string, unknown> } {
+  if (event.kind === "reasoning_removed") {
+    return {
+      name: event.sessionKind === "live" ? "live_activity_remove" : "reasoning_remove",
+      data: { room_id: projectId, session_id: event.sessionId },
+    };
+  }
+  if (event.session.kind === "live") {
+    return { name: "live_activity_update", data: { room_id: projectId, session: event.session } };
+  }
+  return { name: "reasoning_update", data: { room_id: projectId, session: event.session, update: event.update } };
+}
+
 function streamSupports(req: AuthenticatedRequest, capability: string): boolean {
   const raw = req.query?.stream_capability;
   const values = typeof raw === "string"
@@ -284,18 +305,11 @@ export function registerMessageStreamRoute(
           })}\n\n`);
           return;
         case "reasoning_updated":
-          await writeEvent(`${eventId}event: reasoning_update\ndata: ${JSON.stringify({
-            room_id: projectId,
-            session: event.session,
-            update: event.update,
-          })}\n\n`);
+        case "reasoning_removed": {
+          const frame = reasoningStreamFrame(projectId, event);
+          await writeEvent(`${eventId}event: ${frame.name}\ndata: ${JSON.stringify(frame.data)}\n\n`);
           return;
-        case "reasoning_removed":
-          await writeEvent(`${eventId}event: reasoning_remove\ndata: ${JSON.stringify({
-            room_id: projectId,
-            session_id: event.sessionId,
-          })}\n\n`);
-          return;
+        }
         case "artifact_updated":
           await writeEvent(`${eventId}event: artifact_update\ndata: ${JSON.stringify({
             room_id: projectId,

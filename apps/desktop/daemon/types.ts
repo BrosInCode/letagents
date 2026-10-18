@@ -165,6 +165,13 @@ export type DaemonAgentConfiguration = {
   delivery_cutover?: DaemonDeliveryCutover | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;
+  /**
+   * Whether the owner shares this agent's live activity with the room; while
+   * "withdrawing", the room may still show earlier turns that the daemon must
+   * remove. Off unless the owner turns it on in the desktop app;
+   * database-owned, like the revisions, so never taken from the flat manifest.
+   */
+  live_sharing?: "off" | "on" | "withdrawing";
 };
 
 /** Durable owner of room ingress for one supervised provider execution. */

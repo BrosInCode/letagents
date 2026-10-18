@@ -269,6 +269,8 @@ export class SupervisedAgentDelivery {
     private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent, demand: object) => Promise<boolean>,
     /** Archive, in the agent's execution record, what its ended runtimes left open and no message still needs. */
     private readonly archiveEndedRuntimes?: (agentId: string) => Promise<void>,
+    /** Told when a delivered turn starts (for a room message) and when it ends, for the room's live view. */
+    private readonly observeTurn?: (agentId: string, change: { inboxItemId: string; sourceMessageId: string } | { ended: string | null }) => void,
   ) {}
 
   /**
@@ -662,7 +664,9 @@ export class SupervisedAgentDelivery {
     }
     this.startupRecovered.delete(agentId);
     this.refreshCalls.delete(agentId);
-    this.activeTurns.delete(agentId);
+    if (this.activeTurns.delete(agentId)) {
+      try { this.observeTurn?.(agentId, { ended: null }); } catch { /* observation only */ }
+    }
     this.activeTurnAborts.delete(agentId);
     const health = await this.inbox.ingressHealth(agentId);
     if (health) await this.inbox.setIngressHealth({ agent_id: agentId, room_id: health.room_id, execution_generation_id: health.execution_generation_id, state: "stopped", detail: "Ingress stopped by the supervisor." });
@@ -1583,6 +1587,7 @@ export class SupervisedAgentDelivery {
         phase,
         agent,
       });
+      try { this.observeTurn?.(agent.agentId, { inboxItemId: item.inbox_item_id, sourceMessageId: item.source_message_id }); } catch { /* observation only */ }
     };
     const retryFailure = async (failure: Parameters<SupervisedAgentInboxStore["recordRetryFailure"]>[1]): Promise<void> => {
       if (!await this.hasLaneAuthority(agent, turnController)) return;
@@ -2297,7 +2302,10 @@ export class SupervisedAgentDelivery {
       const active = this.activeTurns.get(agent.agentId);
       if (active?.invocationId === invocationId
         && active.recoveryContext === recoveryContext
-        && active.inboxItemId === item.inbox_item_id) this.activeTurns.delete(agent.agentId);
+        && active.inboxItemId === item.inbox_item_id) {
+        this.activeTurns.delete(agent.agentId);
+        try { this.observeTurn?.(agent.agentId, { ended: item.inbox_item_id }); } catch { /* observation only */ }
+      }
       await restoreProvenUndispatchedClaim();
       const interrupt = this.interruptReservations.get(agent.agentId);
       if (interrupt?.reservation.invocationId === invocationId

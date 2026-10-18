@@ -188,6 +188,7 @@ const expectedDirectChannels = [
   "desktop:supervisor:retry-room-delivery",
   "desktop:supervisor:revoke-host-tool-rule",
   "desktop:supervisor:set-agent-home-harness",
+  "desktop:supervisor:set-agent-live-sharing",
   "desktop:supervisor:set-desired-state",
   "desktop:supervisor:skip-room-delivery",
   "desktop:supervisor:update-agent-configuration",

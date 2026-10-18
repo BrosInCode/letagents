@@ -454,6 +454,7 @@ export interface DesktopApi {
     getAgentConfiguration: (input: { entryId: string; daemonGeneration: number }) => Promise<DesktopSupervisorAgentConfiguration>;
     updateAgentConfiguration: (input: DesktopSupervisorAgentConfigurationUpdateInput) => Promise<DesktopSupervisorAgentConfigurationUpdateResult>;
     setAgentHomeHarness?: (input: import("./agents.js").DesktopSupervisorAgentHomeHarnessInput) => Promise<import("./agents.js").DesktopSupervisorAgentHomeHarnessResult>;
+    setAgentLiveSharing?: (input: import("./agents.js").DesktopSupervisorAgentLiveSharingInput) => Promise<import("./agents.js").DesktopSupervisorAgentConfigurationUpdateResult>;
     applyAgentConfiguration: (input: DesktopSupervisorAgentConfigurationApplyInput) => Promise<DesktopSupervisorAgentConfigurationApplyResult>;
     prepareRoomMove: (input: DesktopSupervisorRoomMovePrepareInput) => Promise<DesktopSupervisorRoomMove>;
     commitRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;

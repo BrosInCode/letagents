@@ -42,7 +42,20 @@ export type StoredAgentConfiguration = {
   polling_contract?: DaemonAgentConfiguration["polling_contract"];
   /** How room messages reach the agent. Absent is read as the older polling delivery. */
   delivery_mode?: string;
+  /** Whether the owner shares this agent's live activity with its room. Absent from an older store: off. */
+  live_sharing?: "off" | "on" | "withdrawing";
 };
+
+/**
+ * Whether an agent's live activity can be shared with its room. Only a turn
+ * the daemon delivers has a room message to point at and a clear start and
+ * end; a rented agent works for someone else, so its owner shares nothing.
+ */
+export type LiveSharingAvailability = "available" | "rental" | "polling";
+export function liveSharingAvailability(agent: { id: string; deliveryMode: string | null | undefined }): LiveSharingAvailability {
+  if (agent.id.startsWith("supervised_rental_")) return "rental";
+  return agent.deliveryMode === "daemon_inbox" ? "available" : "polling";
+}
 
 export type ManifestAdministrationStore = {
   load(): Promise<DaemonManifest>;
@@ -57,6 +70,7 @@ export type ManifestAdministrationStore = {
     commitFence: CommitFence,
   ): Promise<Pick<DaemonManifest, "generation">>;
   getAgentConfiguration(entryId: string): Promise<StoredAgentConfiguration | undefined>;
+  setAgentLiveSharing?(input: { agentId: string; enabled: boolean }, commitFence: CommitFence): Promise<"off" | "on" | "withdrawing" | null>;
   updateAgentConfiguration(
     expectedGeneration: number,
     input: {
@@ -127,6 +141,11 @@ export type ManifestAdministrationCoordinatorOptions = {
   policies: ManifestAdministrationPolicies;
   convergence: {
     request(entryId: string): void;
+  };
+  /** Told after every change of an agent's live sharing, so publication follows it at once. */
+  liveSharing?: {
+    /** `saved` is the stored state: "withdrawing" asks for what the room shows to be removed. */
+    changed(entryId: string, saved: "off" | "on" | "withdrawing"): void;
   };
 };
 
@@ -362,7 +381,49 @@ export class ManifestAdministrationCoordinator {
       home_harness_pending: availability === "available"
         && homeHarnessDiffersFromSaved(configuration.provider_launch_policy, configuration.runtime_configuration_revision),
       home_harness_availability: availability,
+      share_live_activity: configuration.live_sharing === "on",
+      live_sharing_availability: liveSharingAvailability({ id: entryId, deliveryMode: configuration.delivery_mode }),
     };
+  }
+
+  /**
+   * Turn sharing of one agent's live activity with its room on or off.
+   * Reached only through the desktop app's signed request, so only the
+   * agent's owner can change it. It is not a launch setting: the agent keeps
+   * running, and the publisher follows the change at once.
+   */
+  async setLiveSharing(input: { entryId: string; daemonGeneration: number; enabled: unknown }) {
+    if (!input.entryId || input.daemonGeneration !== this.options.authority.currentDaemonGeneration()) {
+      return { outcome: "invalid" as const, error: "Agent configuration is fenced by a stale daemon generation." };
+    }
+    if (typeof input.enabled !== "boolean") {
+      return { outcome: "invalid" as const, error: "Choose whether to share this agent's live activity with the room." };
+    }
+    const setSharing = this.options.store.setAgentLiveSharing?.bind(this.options.store);
+    const current = await this.options.store.getAgentConfiguration(input.entryId);
+    if (!current || !setSharing) return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
+    const availability = liveSharingAvailability({ id: input.entryId, deliveryMode: current.delivery_mode });
+    if (input.enabled && availability !== "available") {
+      return {
+        outcome: "invalid" as const,
+        error: availability === "rental"
+          ? "A rented agent works for someone else, so its live activity is not shared from here."
+          : "Not available for this agent: it fetches its own room messages, so LetAgents cannot tell where its turns begin and end.",
+      };
+    }
+    const enabled = input.enabled;
+    let saved = current.live_sharing ?? "off";
+    if (enabled ? saved !== "on" : saved === "on") {
+      const written = await this.options.authority.serialize(async () => {
+        await this.options.authority.assertCurrent();
+        return setSharing({ agentId: input.entryId, enabled }, this.options.authority.fenceCommit);
+      });
+      if (!written) return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
+      saved = written;
+    }
+    // Also when nothing changed: turning it off again retries removing what the room still shows.
+    this.options.liveSharing?.changed(input.entryId, saved);
+    return { outcome: "updated" as const, configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration) };
   }
 
   /**

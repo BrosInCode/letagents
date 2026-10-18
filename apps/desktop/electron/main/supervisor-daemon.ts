@@ -1348,6 +1348,37 @@ export class SupervisorDaemonClient {
     return { outcome: result.outcome, configuration: mapAgentConfiguration(record(result.configuration) ?? {}, value.entryId, value.daemonGeneration), ...restart };
   }
 
+  /**
+   * Share one agent's live activity with its room, or stop. Signed like the
+   * owner's-setup choice, so nothing else that reaches the daemon's socket,
+   * an agent included, can share an agent's work with its room.
+   */
+  async setAgentLiveSharing(
+    input: import("../ipc-types/agents.js").DesktopSupervisorAgentLiveSharingInput,
+    assertCaller?: () => void,
+  ): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationUpdateResult> {
+    const value = z.strictObject({
+      entryId: approvalId, daemonGeneration: z.number().int().positive().safe(), enabled: z.boolean(),
+    }).parse(input);
+    assertCaller?.();
+    await this.waitForStartup();
+    const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+    if (rawChallenge === null) {
+      return { outcome: "invalid", error: "This app could not prove the change came from you. Unlock secure storage and restart the background service, then try again." };
+    }
+    const challenge = approvalChallenge.parse(rawChallenge);
+    const signer = await this.signerForApproval(challenge);
+    assertCaller?.();
+    const result = record(await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "set_live_sharing", value),
+      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller)) ?? {};
+    if (result.outcome === "invalid") {
+      if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
+      return { outcome: "invalid", error: result.error };
+    }
+    if (result.outcome !== "updated") throw new Error("Supervisor returned an invalid configuration update result.");
+    return { outcome: "updated", configuration: mapAgentConfiguration(record(result.configuration) ?? {}, value.entryId, value.daemonGeneration) };
+  }
+
   async applyAgentConfiguration(input: import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyResult> {
     if (!input || !nonEmptyString(input.entryId)
       || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1
@@ -2282,7 +2313,14 @@ function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, 
     permissionProfileId: value.permission_profile_id as string | null,
     supervisedPermissionProfiles: value.supervised_permission_profiles.map((profile) => mapSupervisedPermissionProfile(profile)),
     providerLaunchPolicy: value.provider_launch_policy, configRevision: value.config_revision as number, runtimeConfigurationRevision: value.runtime_configuration_revision as number,
-    ...mapHomeHarness(value) };
+    ...mapHomeHarness(value), ...mapLiveSharing(value) };
+}
+
+/** Absent from an older background service, and anything unreadable is off. */
+function mapLiveSharing(value: Record<string, unknown>): Pick<import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration, "liveSharing"> {
+  const availability = value.live_sharing_availability;
+  if (availability !== "available" && availability !== "rental" && availability !== "polling") return {};
+  return { liveSharing: { enabled: value.share_live_activity === true, availability } };
 }
 
 /** Absent from an older background service, and anything unreadable is off. */
