@@ -30,7 +30,7 @@ export {
 /** Current native-owner progress, never inferred from saved activity or a timer. */
 export function agentCompactionProgress(entry: Pick<DesktopSupervisorManifestEntry,
   "provider" | "providerProgress" | "desiredState" | "observedState" | "condition">) {
-  return entry.provider === "claude-code" && entry.desiredState === "running"
+  return ["claude-code", "open-model"].includes(entry.provider) && entry.desiredState === "running"
     && entry.condition === "none" && !["stopped", "stopping", "failed"].includes(entry.observedState)
     && entry.providerProgress?.state === "compacting" ? entry.providerProgress : null;
 }

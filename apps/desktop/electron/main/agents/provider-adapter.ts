@@ -296,6 +296,7 @@ export interface ProviderSpawnRequest {
     apiKey: string | null;
     baseUrl: string;
     model: string;
+    contextWindow?: number | null;
   };
 }
 

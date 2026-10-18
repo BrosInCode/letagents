@@ -830,6 +830,7 @@ export interface DesktopOpenModelSettingsStatus {
   savedAt: string | null;
   settingsPath: string;
   error: string | null;
+  contextWindow?: number | null;
 }
 
 export interface DesktopOpenModelSaveSettingsInput {
@@ -837,6 +838,7 @@ export interface DesktopOpenModelSaveSettingsInput {
   model?: string | null;
   /** A string saves a new key, null clears the saved key, undefined keeps the current key. */
   apiKey?: string | null;
+  contextWindow?: number | null;
 }
 
 export interface DesktopAgentCommitIdentitySettings {
