@@ -995,6 +995,8 @@ test("turn control is available only for the exact responding provider turn", ()
   });
   assert.equal(openModelControl?.capability, "native_interrupt");
   assert.equal(openModelControl?.canStop, true);
+  assert.equal(projectAgentInspectorTurnControl({ ...responding, provider: "open-model",
+    roomAgentState: { ...responding.roomAgentState!, turn: { ...responding.roomAgentState!.turn, state: "retrying" } } }), null);
   assert.equal(openModelControl?.canCorrect, true);
 
   const uncheckpointed = projectAgentInspectorTurnControl(entry({
@@ -1776,15 +1778,17 @@ test("duplicate supervised names resolve to exact canonical agent mentions", () 
 
 
 test("inspector shows current compaction during startup and work, hiding it after failure or stale reads", () => {
-  const compacting = entry({ provider: "claude-code", providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
-  for (const observedState of ["starting", "working"] as const) {
-    const result = projectAgentInspector({ ...compacting, observedState }, { roomId: "focus_1" });
-    assert.equal(result?.now?.summary, "Compacting conversation");
-    assert.equal(result?.overallDetail, "Compacting conversation", "agent list shows the same current progress");
+  for (const provider of ["claude-code", "open-model"] as const) {
+    const compacting = entry({ provider, providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+    for (const observedState of ["starting", "working"] as const) {
+      const result = projectAgentInspector({ ...compacting, observedState }, { roomId: "focus_1" });
+      assert.equal(result?.now?.summary, "Compacting conversation");
+      assert.equal(result?.overallDetail, "Compacting conversation", "agent list shows the same current progress");
+    }
+    assert.notEqual(projectAgentInspector(compacting, { roomId: "focus_1", resourceFreshness: "stale" })?.now?.summary, "Compacting conversation");
+    assert.notEqual(projectAgentInspector({ ...compacting, condition: "coordination_blocked" }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
+    assert.notEqual(projectAgentInspector({ ...compacting, providerProgress: null }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
   }
-  assert.notEqual(projectAgentInspector(compacting, { roomId: "focus_1", resourceFreshness: "stale" })?.now?.summary, "Compacting conversation");
-  assert.notEqual(projectAgentInspector({ ...compacting, condition: "coordination_blocked" }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
-  assert.notEqual(projectAgentInspector({ ...compacting, providerProgress: null }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
 });
 
 test('Overview signal distinguishes responding, compaction and stale observations', async () => {
