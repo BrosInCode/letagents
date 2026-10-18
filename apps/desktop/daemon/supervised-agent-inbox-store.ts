@@ -1,5 +1,6 @@
 import { RoomLatencyTrace } from "./room-latency-trace.js";
 import { normalizeRoomGif, validReplyGifIntent, type RoomGif } from "../../../shared/room-expressions.mjs";
+import { validRecordedReplyAttachments, type RecordedReplyAttachment } from "../../../shared/message-attachments.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { SUPERVISED_READ_ONLY_TOOLS } from "../../../shared/supervised-read-tools.mjs";
 import { PreparedReadStatements } from "./prepared-reads.js";
@@ -905,6 +906,20 @@ export class SupervisedAgentInboxStore {
       return row ? normalizeRoomGif(JSON.parse(String(row.request_json)).gif) : null;
     });
   }
+  /** The last attachment choice for this exact bound turn; files:null clears an earlier one. */
+  async replyAttachments(inboxItemId: string): Promise<RecordedReplyAttachment[]> {
+    return this.read(async (database) => {
+      const row = database.prepare(`SELECT e.request_json FROM supervised_agent_inbox i
+        JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
+          AND b.agent_id=i.agent_id AND b.room_id=i.room_id AND b.provider_turn_id=i.provider_turn_id
+        JOIN supervised_agent_effects e ON e.agent_id=b.agent_id AND e.room_id=b.room_id
+          AND e.execution_generation_id=b.origin_execution_generation_id AND e.provider_turn_id=b.provider_turn_id
+        WHERE i.inbox_item_id=? AND e.state='completed' AND e.tool_name='set_reply_attachments'
+        ORDER BY e.created_at DESC, e.rowid DESC LIMIT 1`).get(inboxItemId) as Row | undefined;
+      const request = row ? JSON.parse(String(row.request_json)) as unknown : null;
+      return validRecordedReplyAttachments(request) ? request.files ?? [] : [];
+    });
+  }
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
   }
@@ -1488,6 +1503,7 @@ export class SupervisedAgentInboxStore {
       throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
     }
     if (input.tool_name === "set_reply_gif" && !validReplyGifIntent(input.request)) throw new Error("Invalid GIF reply intent.");
+    if (input.tool_name === "set_reply_attachments" && !validRecordedReplyAttachments(input.request)) throw new Error("Invalid reply attachments intent.");
     const expectedMutation = !SUPERVISED_READ_ONLY_TOOLS.has(input.tool_name);
     if (input.mutation !== undefined && input.mutation !== expectedMutation) {
       throw new Error("The supervised effect classification does not match the registered tool policy.");
@@ -1621,6 +1637,22 @@ export class SupervisedAgentInboxStore {
         const result = serializeEffectJson({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload }, "result");
         // Keep a receipt per request id so reusing any id for a different tool
         // still fails. Existing admission limits bound repeated distinct calls.
+        this.assertEffectAdmissionCapacity(database, input, requestJson);
+        run(database.prepare(`INSERT INTO supervised_agent_effects
+          (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?,?,1,'completed',?,NULL,?,?)`),
+        effectId, input.agent_id, input.room_id, input.execution_generation_id, input.provider_turn_id,
+        input.mcp_request_id, input.tool_name, requestJson, result, timestamp, timestamp);
+        return { created: true, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row) };
+      }
+      if (input.tool_name === "set_reply_attachments") {
+        // Any turn that ends in a published reply may carry files, synthetic task turns included.
+        const recorded = validRecordedReplyAttachments(input.request) ? input.request.files ?? [] : [];
+        const payload = { code: "REPLY_ATTACHMENTS_RECORDED", files: recorded.map((file) => file.name),
+          instruction: recorded.length
+            ? "Attachment choice recorded and the files were copied; later edits are not sent. Continue working, then finish with an ordinary reply and meaningful text. No message has been sent. A no_reply outcome sends nothing."
+            : "Attachment choice cleared. No message has been sent." };
+        const result = serializeEffectJson({ content: [{ type: "text", text: JSON.stringify(payload) }], structuredContent: payload }, "result");
         this.assertEffectAdmissionCapacity(database, input, requestJson);
         run(database.prepare(`INSERT INTO supervised_agent_effects
           (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)

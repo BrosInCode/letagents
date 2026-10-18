@@ -4078,6 +4078,41 @@ test("GIF intent survives restart, can be replaced or cleared, and never complet
   } finally { await store.close(); await env.cleanup(); }
 });
 
+test("reply attachment intent survives restart, can be replaced or cleared, journals no path, and never completes a turn", async () => {
+  const env = await fixture();
+  let store = new SupervisedAgentInboxStore(env.database);
+  const authority = { agent_id: "files-agent", room_id: "room", execution_generation_id: "generation",
+    provider_turn_id: "native-turn", work_attempt_id: "attempt", current_execution_generation_id: "generation",
+    provider_continuation_id: "continuation" };
+  const file = (name: string) => ({ spool_id: "c".repeat(32), name, mime_type: "image/png", size_bytes: 9, sha256: "d".repeat(64) });
+  try {
+    const [item] = await store.ingestPoll({ agent_id: authority.agent_id, room_id: "room", last_observed_message_id: "msg_1",
+      messages: [{ source_message_id: "msg_1", source_message: { id: "msg_1", text: "Show me" }, activation: {} }] });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, authority.provider_turn_id, TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, { agentId: authority.agent_id, roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation" });
+    const request = { ...authority, mcp_request_id: "files", tool_name: "set_reply_attachments", request: { files: [file("before.png")] }, mutation: true };
+    assert.deepEqual(await store.replyAttachments(item!.inbox_item_id), []);
+    const first = await store.prepareEffect(request);
+    assert.equal(first.effect.state, "completed");
+    assert.match(JSON.stringify(first.effect.result), /REPLY_ATTACHMENTS_RECORDED/);
+    assert.deepEqual(await store.replyAttachments(item!.inbox_item_id), [file("before.png")]);
+    assert.equal((await store.get(item!.inbox_item_id))!.state, "dispatching");
+    await store.close(); store = new SupervisedAgentInboxStore(env.database);
+    assert.deepEqual(await store.prepareEffect(request), { created: false, effect: first.effect });
+    await store.prepareEffect({ ...request, mcp_request_id: "replace", request: { files: [file("after.png")] } });
+    assert.deepEqual(await store.replyAttachments(item!.inbox_item_id), [file("after.png")]);
+    await store.prepareEffect({ ...request, mcp_request_id: "clear", request: { files: null } });
+    assert.deepEqual(await store.replyAttachments(item!.inbox_item_id), []);
+    for (const invalid of [{ files: ["/Users/owner/.ssh/id_ed25519"] }, { files: [{ ...file("a.png"), path: "/workspace/a.png" }] }, { files: [file("a/b.png")] }]) {
+      await assert.rejects(store.prepareEffect({ ...request, mcp_request_id: `invalid-${JSON.stringify(invalid).length}`, request: invalid }), /Invalid reply attachments/);
+    }
+    await store.prepareEffect({ ...authority, mcp_request_id: "finish", tool_name: "complete_room_turn", request: { outcome: "no_reply" } });
+    await assert.rejects(store.prepareEffect({ ...request, mcp_request_id: "too-late" }), /already complete/);
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("reply-thread intent commits atomically, deduplicates exact requests and permits later work", async () => {
   const env = await fixture();
   let store = new SupervisedAgentInboxStore(env.database);

@@ -19,6 +19,9 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   { method: "GET", path: /^\/rooms\/.+\/messages\/(?:poll|stream|threads|msg_\d+|msg_\d+\/thread|msg_\d+\/info)$/, capability: "messages.read" },
   { method: "PUT", path: /^\/rooms\/.+\/messages\/read$/, capability: "messages.read" },
   { method: "POST", path: /^\/rooms\/.+\/messages$/, capability: "messages.write" },
+  // A supervised agent's reply can carry files: the daemon stages each one first.
+  { method: "POST", path: /^\/rooms\/.+\/attachments\/uploads$/, capability: "messages.write" },
+  { method: "DELETE", path: /^\/rooms\/.+\/attachments\/uploads\/[^/]+$/, capability: "messages.write" },
   { method: "GET", path: /^\/rooms\/.+\/artifacts$/, capability: "artifacts.read" },
   { method: "GET", path: /^\/rooms\/.+\/(?:presence|participants|activity-history|reasoning|reasoning-sessions|reasoning-sessions\/[^/]+|tasks|tasks\/github-status|tasks\/[^/]+|board-governance|board-settings|board-intents|artifacts)$/, capability: "coordination.read" },
   { method: "POST", path: /^\/rooms\/.+\/(?:presence|reasoning-sessions|reasoning-sessions\/[^/]+\/updates|agent-sessions\/[^/]+\/(?:disconnect|failures|desktop-heartbeat|native-activity|desktop-pause)|tasks\/[^/]+\/(?:lease-action|review-lease-action|review-verdict))$/, capability: "coordination.self_write" },

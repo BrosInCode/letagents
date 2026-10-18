@@ -92,3 +92,36 @@ export async function stageCloudMessageAttachment(transport, input) {
 export async function discardCloudMessageAttachment(transport, input) {
   await transport.requestJson(`${input.roomPath}/attachments/uploads/${encodeURIComponent(input.uploadId)}`, { method: "DELETE" });
 }
+
+function exactKeys(value, keys) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+/** What an agent passes to set_reply_attachments: 1 to 4 workspace paths, or null to clear its choice. */
+export function validReplyAttachmentsRequest(value) {
+  if (!exactKeys(value, ["files"])) return false;
+  if (value.files === null) return true;
+  return Array.isArray(value.files) && value.files.length >= 1 && value.files.length <= MESSAGE_ATTACHMENT_LIMITS.maxFiles
+    && value.files.every((file) => typeof file === "string" && file.trim().length > 0 && file.length <= 4096 && !file.includes("\0"));
+}
+
+const RECORD_KEYS = ["spool_id", "name", "mime_type", "size_bytes", "sha256"];
+
+/** What the daemon journals after it copies the files: no path, only the spool copy's identity. */
+export function validRecordedReplyAttachments(value) {
+  if (!exactKeys(value, ["files"])) return false;
+  if (value.files === null) return true;
+  if (!Array.isArray(value.files) || value.files.length < 1 || value.files.length > MESSAGE_ATTACHMENT_LIMITS.maxFiles) return false;
+  let total = 0;
+  for (const file of value.files) {
+    if (!exactKeys(file, RECORD_KEYS)
+      || typeof file.spool_id !== "string" || !/^[0-9a-f]{32}$/.test(file.spool_id)
+      || typeof file.name !== "string" || !file.name || file.name.length > 160 || /[\\/\u0000-\u001f\u007f]/.test(file.name)
+      || typeof file.mime_type !== "string" || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(file.mime_type)
+      || !Number.isInteger(file.size_bytes) || file.size_bytes <= 0 || file.size_bytes > MESSAGE_ATTACHMENT_LIMITS.maxFileBytes
+      || typeof file.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(file.sha256)) return false;
+    total += file.size_bytes;
+  }
+  return total <= MESSAGE_ATTACHMENT_LIMITS.maxTotalBytes;
+}

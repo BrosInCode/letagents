@@ -151,6 +151,7 @@
           :html="renderedText"
           :message-id="message.id"
           :room-identifier="roomIdentifier"
+          :sender="readerSender"
           @message-reference-click="$emit('scroll-to-message', $event)"
           @task-reference-click="$emit('open-task', $event)"
         />
@@ -664,6 +665,16 @@ const viewer = useMessageViewer();
 const senderRole = computed(() => chatSenderRole({ human: ownerKind.value === 'human', agent: ownerKind.value === 'agent',
   viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey, outgoing: Boolean(props.message.outgoing) }));
 const avatarUrl = computed(() => props.message.senderProfile?.avatarUrl || (props.message.outgoing ? viewer.value?.avatar_url : null));
+const readerSender = computed(() => ({
+  name: displayName.value,
+  context: senderRole.value === 'own-agent' ? 'Your agent' : senderRole.value === 'self' ? 'You'
+    : ownerKind.value === 'agent' ? ownerAttribution.value || 'Agent' : ownerKind.value === 'human' ? 'Human' : 'Room',
+  timestamp: props.message.timestamp,
+  avatarUrl: avatarUrl.value,
+  agent: ownerKind.value === 'agent',
+  provider: ideLabel.value,
+  agentKey: props.message.agentIdentity?.agentKey,
+}));
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source));
 const ownerKind = computed(() => {
   if (isSystem.value) return "system";
