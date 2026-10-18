@@ -1,4 +1,5 @@
 import type { RoomGif } from "../../../shared/room-expressions.mjs";
+import type { RecordedReplyAttachment } from "../../../shared/message-attachments.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { ReplyTurnCompactionObserver, type ReplyTurnCompactionProof } from "./reply-turn-compaction.js";
@@ -118,11 +119,30 @@ export interface SupervisedDeliveryHttp {
     text: string;
     clientMessageId: string;
     gif?: RoomGif | null;
+    attachments?: Array<{ upload_id: string }>;
     replyTo: string | null;
     threadRootId: string | null;
     signal: AbortSignal;
   }): Promise<{ messageId: string; roomId: string }>;
+  /** Stage one file for the next publication with the worker's own bearer. */
+  stageAttachment?(input: {
+    roomId: string;
+    apiUrl: string;
+    bearer: string;
+    fileName: string;
+    mimeType: string;
+    bytes: Uint8Array;
+    signal: AbortSignal;
+  }): Promise<{ uploadId: string }>;
+  /** Discard a staged upload the reply did not use; a staged upload otherwise stays until it expires. */
+  discardAttachment?(input: { roomId: string; apiUrl: string; bearer: string; uploadId: string; signal: AbortSignal }): Promise<void>;
 }
+
+/** The daemon-owned copies of reply attachments; see ReplyAttachmentSpool. */
+export type SupervisedReplyAttachmentSpool = {
+  read(inboxItemId: string, file: RecordedReplyAttachment): Promise<Uint8Array>;
+  remove(inboxItemId: string): Promise<void>;
+};
 
 export type SupervisedPollWait = (delayMs: number, signal: AbortSignal) => Promise<void>;
 export type SupervisedRoomMoveCommitter = (input: {
@@ -269,6 +289,7 @@ export class SupervisedAgentDelivery {
     private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent, demand: object) => Promise<boolean>,
     /** Archive, in the agent's execution record, what its ended runtimes left open and no message still needs. */
     private readonly archiveEndedRuntimes?: (agentId: string) => Promise<void>,
+    private readonly replyAttachmentSpool?: SupervisedReplyAttachmentSpool,
     /** Told when a delivered turn starts (for a room message) and when it ends, for the room's live view. */
     private readonly observeTurn?: (agentId: string, change: { inboxItemId: string; sourceMessageId: string } | { ended: string | null }) => void,
   ) {}
@@ -2433,24 +2454,79 @@ export class SupervisedAgentDelivery {
       }
       if (!await this.hasLaneAuthority(agent, parent)) return false;
       const gif = await this.inbox.replyGif(item.inbox_item_id);
+      const attached = await this.stageReplyAttachments(agent, item, controller);
+      // Uploads can take minutes; post only if this lane still owns the reply.
+      if (!await this.hasLaneAuthority(agent, parent)) {
+        await this.discardReplyAttachments(agent, attached.uploads);
+        return false;
+      }
       const publication = await this.track(controller, this.http.publish({
         roomId: agent.roomId,
         apiUrl: agent.apiUrl,
         bearer: agent.bearer,
-        text,
+        text: attached.unavailable.length ? `${text}\n\n(Could not attach: ${attached.unavailable.join(", ")})` : text,
         ...(gif ? { gif } : {}),
+        ...(attached.uploads.length ? { attachments: attached.uploads } : {}),
         clientMessageId: item.reply_client_message_id,
         replyTo: replyTarget.replyTo,
         threadRootId: replyTarget.threadRootId,
         signal: controller.signal,
-      }));
+      })).catch(async (error: unknown) => {
+        // The next attempt stages fresh copies, so these uploads would only wait to expire.
+        await this.discardReplyAttachments(agent, attached.uploads);
+        throw error;
+      });
       if (!publication.messageId?.trim() || !publication.roomId?.trim() || publication.roomId !== agent.roomId) throw new Error("Room publication did not return a nonempty canonical message id in the matching room.");
+      await this.replyAttachmentSpool?.remove(item.inbox_item_id).catch(() => undefined);
       this.publishedIds.set(item.inbox_item_id, publication.messageId);
       const current = await this.hasLaneAuthority(agent, parent);
       if (!current) this.publishedIds.delete(item.inbox_item_id);
       return current;
     } catch (error) { this.publishedIds.delete(item.inbox_item_id); throw error; }
     finally { parent.signal.removeEventListener("abort", relayAbort); }
+  }
+  /**
+   * Upload the files the agent attached, just before the reply is posted:
+   * a staged upload expires after 15 minutes, and a turn can run longer.
+   * A file that cannot be uploaded never blocks the reply; the reply names it.
+   */
+  private async stageReplyAttachments(agent: SupervisedIngressAgent, item: SupervisedInboxItem, controller: AbortController): Promise<{
+    uploads: Array<{ upload_id: string }>;
+    unavailable: string[];
+  }> {
+    const recorded = await this.inbox.replyAttachments(item.inbox_item_id);
+    const uploads: Array<{ upload_id: string }> = [];
+    const unavailable: string[] = [];
+    const spool = this.replyAttachmentSpool;
+    const stage = this.http.stageAttachment?.bind(this.http);
+    for (const file of recorded) {
+      if (!spool || !stage) { unavailable.push(file.name); continue; }
+      const bytes = await spool.read(item.inbox_item_id, file).catch(() => null);
+      if (!bytes) { unavailable.push(file.name); continue; }
+      let staged: { uploadId: string } | null = null;
+      // One retry covers a dropped connection or a busy server; a lasting refusal fails twice.
+      for (let attempt = 0; attempt < 2 && !staged; attempt++) {
+        try {
+          staged = await this.track(controller, stage({
+            roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer,
+            fileName: file.name, mimeType: file.mime_type, bytes, signal: controller.signal,
+          }));
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          if (attempt === 0) await this.sleep(this.retryDelayMs);
+        }
+      }
+      if (staged) uploads.push({ upload_id: staged.uploadId });
+      else unavailable.push(file.name);
+    }
+    return { uploads, unavailable };
+  }
+
+  private async discardReplyAttachments(agent: SupervisedIngressAgent, uploads: Array<{ upload_id: string }>): Promise<void> {
+    if (!this.http.discardAttachment) return;
+    await Promise.all(uploads.map(({ upload_id }) => this.http.discardAttachment!({
+      roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, uploadId: upload_id, signal: AbortSignal.timeout(5_000),
+    }).catch(() => undefined)));
   }
   private async publishedMessageId(agent: SupervisedIngressAgent, item: SupervisedInboxItem): Promise<string> {
     const id = this.publishedIds.get(item.inbox_item_id);
