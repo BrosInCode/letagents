@@ -1,11 +1,12 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { localFilesPath } from "../chat-storage/settings.js";
-import { realLocalAttachmentPath } from "./links.js";
+import { localAttachmentRelativePath, realLocalAttachmentPath } from "./links.js";
 import type { RoomMessageAttachmentPayload } from "./mappers.js";
 import { stagedAttachment, type AttachmentFile, type AttachmentStore } from "./store.js";
 
@@ -106,6 +107,54 @@ export async function readLocalAttachmentBytes(attachment: RoomMessageAttachment
     return Buffer.from(attachment.content_base64, "base64");
   }
   throw new Error("Local attachment file is no longer available.");
+}
+
+const AGENT_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|gif|webp);base64,/i;
+
+/**
+ * A local attachment's bytes for an agent's turn, read only when they fit in
+ * `maxBytes`. A row with a file URL is read from that file alone, and only
+ * inside the local files folder, both as written and after symlinks; an
+ * older row without one may hold an inline copy (a base64 image data URL, or
+ * bare base64). Only a regular file is read, and opening never waits (a named
+ * pipe is refused, not opened for a writer). The caller still decides from
+ * the bytes whether they are an image.
+ */
+export async function readLocalAttachmentBytesWithin(
+  attachment: RoomMessageAttachmentPayload,
+  maxBytes: number,
+): Promise<{ bytes: Buffer } | "too_large" | "unavailable"> {
+  if (attachment.url?.startsWith("file:")) {
+    // The written path is checked first, so a row naming a path elsewhere
+    // (an automounted network folder, say) is never touched.
+    if (localAttachmentRelativePath(attachment.url) === null) return "unavailable";
+    const realPath = await realLocalAttachmentPath(fileURLToPath(attachment.url));
+    if (!realPath) return "unavailable";
+    const handle = await open(realPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => null);
+    if (!handle) return "unavailable";
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) return "unavailable";
+      if (info.size > maxBytes) return "too_large";
+      const bytes = Buffer.alloc(info.size);
+      const { bytesRead } = await handle.read(bytes, 0, info.size, 0);
+      return { bytes: bytes.subarray(0, bytesRead) };
+    } catch {
+      return "unavailable";
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  }
+  const dataUrl = attachment.data_url?.trim() ?? "";
+  const encoded = (AGENT_IMAGE_DATA_URL.test(dataUrl)
+    ? dataUrl.slice(dataUrl.indexOf(",") + 1)
+    : attachment.content_base64 ?? "").replace(/\s+/g, "");
+  if (!encoded) return "unavailable";
+  // Four base64 characters hold three bytes; refuse before decoding what cannot fit.
+  if (Math.floor((encoded.length * 3) / 4) - 2 > maxBytes) return "too_large";
+  const bytes = Buffer.from(encoded, "base64");
+  if (bytes.byteLength > maxBytes) return "too_large";
+  return bytes.byteLength ? { bytes } : "unavailable";
 }
 
 function safePathSegment(value: string): string {

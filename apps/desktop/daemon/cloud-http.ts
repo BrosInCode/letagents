@@ -1,9 +1,12 @@
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { roomRequest, isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "./local-room-runtime.js";
 import type { WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
 import { stageCloudMessageAttachment } from "../../../shared/message-attachments.mjs";
 import { SupervisedRoomAuthorizationError, type SupervisedDeliveryHttp, type SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
 import type { RemoteExecutionDelegationRevision } from "./execution-delegation-journal.js";
+import { LOCAL_ROOM_ATTACHMENT_ID, RoomAttachmentDownloadError } from "./room-turn-attachments.js";
 import {
   parseExecutionDelegationDecisionIntent,
   type ExecutionDelegationDecisionIntent,
@@ -132,6 +135,186 @@ export function hostGrantApiOrigin(value: string): string {
     throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP.");
   }
   return url.origin;
+}
+
+const ATTACHMENT_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Read at most `maxBytes` of a response body. The declared length is a hint;
+ * the counted bytes decide.
+ */
+async function boundedBody(response: Response, maxBytes: number): Promise<Uint8Array> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => {});
+    throw new RoomAttachmentDownloadError("too_large");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    length += value.byteLength;
+    if (length > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new RoomAttachmentDownloadError("too_large");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return bytes;
+}
+
+/**
+ * An address on this machine or only on its link: loopback, unspecified or
+ * link-local (cloud metadata lives there). Private networks are not in it,
+ * because self-hosted object storage may live on one.
+ */
+export function isThisMachineAddress(address: string): boolean {
+  const bare = address.replace(/^\[|\]$/g, "").toLowerCase();
+  // An IPv4-mapped address, in either the dotted form or the hex form a URL normalizes it to.
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(bare);
+  const v4 = hex ? [parseInt(hex[1]!, 16) >> 8, parseInt(hex[1]!, 16) & 255, parseInt(hex[2]!, 16) >> 8, parseInt(hex[2]!, 16) & 255].join(".")
+    : bare.startsWith("::ffff:") && isIP(bare.slice(7)) === 4 ? bare.slice(7) : bare;
+  if (isIP(v4) === 4) {
+    const [first, second] = v4.split(".").map(Number);
+    return first === 127 || first === 0 || (first === 169 && second === 254);
+  }
+  return isIP(bare) === 6 && (bare === "::1" || bare === "::" || /^fe[89ab]/.test(bare));
+}
+
+function namesThisMachine(hostname: string): boolean {
+  const bare = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return bare === "localhost" || bare.endsWith(".localhost") || isThisMachineAddress(bare);
+}
+
+/** A room API in development runs on loopback itself; a link-local one is another device. */
+function isLoopbackApi(apiUrl: string): boolean {
+  const bare = new URL(apiUrl).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return bare === "localhost" || bare.endsWith(".localhost") || bare === "::1" || (isIP(bare) === 4 && bare.startsWith("127."));
+}
+
+/**
+ * The storage address the room API redirected to: absolute and HTTPS. Only a
+ * room API on this machine (development) may send the daemon to this
+ * machine, over HTTP too; a remote one may not point it at local services.
+ */
+export function attachmentStorageUrl(location: string | null, apiUrl: string): URL {
+  let url: URL;
+  try { url = new URL(location ?? ""); } catch { throw new RoomAttachmentDownloadError("unavailable"); }
+  const localApi = isLoopbackApi(apiUrl);
+  if (url.username || url.password || (namesThisMachine(url.hostname) && !localApi)
+    || !(url.protocol === "https:" || (url.protocol === "http:" && localApi && namesThisMachine(url.hostname)))) {
+    throw new RoomAttachmentDownloadError("unavailable");
+  }
+  return url;
+}
+
+/**
+ * Whether a storage host name resolves to this machine. Checked before the
+ * request for a remote room API; a name that does not resolve is refused too.
+ * A resolver that answers differently a moment later is not covered.
+ */
+export async function storageResolvesToThisMachine(hostname: string, signal: AbortSignal,
+  resolve: (hostname: string) => Promise<Array<{ address: string }>> = (name) => lookup(name, { all: true, verbatim: true })): Promise<boolean> {
+  const bare = hostname.replace(/^\[|\]$/g, "");
+  if (isIP(bare)) return isThisMachineAddress(bare);
+  signal.throwIfAborted();
+  // The system resolver cannot be cancelled, so Stop and the deadline stop the wait for it.
+  let detach = () => {};
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    detach = () => signal.removeEventListener("abort", onAbort);
+  });
+  try {
+    const addresses = await Promise.race([resolve(bare), aborted]);
+    return !addresses.length || addresses.some(({ address }) => isThisMachineAddress(address));
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return true;
+  } finally { detach(); }
+}
+
+/** The work's result, or the abort reason as soon as `signal` aborts; the work itself goes on. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+/**
+ * Two hops, so the worker bearer never leaves the room API: the room route
+ * answers with a redirect to presigned object storage, and that address is
+ * fetched with no credential and no further redirect. Every failure, a 401 or
+ * 403 included, is only this file being unavailable: an older server that
+ * does not grant workers this route must not mark the room as refused.
+ *
+ * A local room's route is in this process and answers with the bytes: its
+ * file is read from the local files folder, never from a path the message
+ * names, and only when it fits in `maxBytes`.
+ */
+export async function downloadRoomAttachment(input: {
+  roomId: string; apiUrl: string; bearer: string; messageId: string; attachmentId: string;
+  maxBytes: number; signal: AbortSignal;
+}): Promise<Uint8Array> {
+  const localRoom = isLocalRoomApi(input.apiUrl);
+  if (!/^msg_[1-9]\d*$/.test(input.messageId) || !Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1
+    || !(localRoom ? LOCAL_ROOM_ATTACHMENT_ID.test(input.attachmentId) : /^att_[1-9]\d*$/.test(input.attachmentId))) {
+    throw new RoomAttachmentDownloadError("unavailable");
+  }
+  const unavailable = (): never => {
+    input.signal.throwIfAborted();
+    throw new RoomAttachmentDownloadError("unavailable");
+  };
+  if (localRoom) {
+    // A file read in this process cannot be cancelled, so Stop and the deadline end the wait for it.
+    const response = await untilAborted(roomRequest(`${LOCAL_ROOM_API_ORIGIN}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.messageId}/attachments/${encodeURIComponent(input.attachmentId)}?max_bytes=${input.maxBytes}`, {
+      headers: { authorization: `Bearer ${input.bearer}` }, signal: input.signal,
+    }), input.signal).catch(unavailable);
+    if (response.status === 413) {
+      await response.body?.cancel().catch(() => {});
+      throw new RoomAttachmentDownloadError("too_large");
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      unavailable();
+    }
+    try {
+      return await boundedBody(response, input.maxBytes);
+    } catch (error) {
+      if (error instanceof RoomAttachmentDownloadError) throw error;
+      return unavailable();
+    }
+  }
+  const redirect = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.messageId}/attachments/${input.attachmentId}`, {
+    headers: { authorization: `Bearer ${input.bearer}` }, redirect: "manual", signal: input.signal,
+  }).catch(unavailable);
+  await redirect.body?.cancel().catch(() => {});
+  if (!ATTACHMENT_REDIRECT_STATUSES.has(redirect.status)) unavailable();
+  const storage = attachmentStorageUrl(redirect.headers.get("location"), input.apiUrl);
+  if (!isLoopbackApi(input.apiUrl) && await storageResolvesToThisMachine(storage.hostname, input.signal)) unavailable();
+  const response = await fetch(storage, { redirect: "error", signal: input.signal }).catch(unavailable);
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    unavailable();
+  }
+  try {
+    return await boundedBody(response, input.maxBytes);
+  } catch (error) {
+    if (error instanceof RoomAttachmentDownloadError) throw error;
+    return unavailable();
+  }
 }
 
 export function lastRoomMessageId(messages: readonly Record<string, unknown>[]): string | null {
@@ -399,6 +582,7 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     if (!response.ok) throw new Error(`Supervised room tail read failed with HTTP ${response.status}.`);
     return await response.json() as { messages?: Array<Record<string, unknown>> };
   },
+  downloadAttachment: downloadRoomAttachment,
   async joinRoom(input) {
     const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/join`, {
       method: "POST", headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" }, body: "{}", signal: boundedCloudSignal(input.signal),

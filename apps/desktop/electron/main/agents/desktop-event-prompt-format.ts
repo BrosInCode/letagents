@@ -1,6 +1,7 @@
 import type { DesktopTaskSummary } from "../../ipc-types.js";
-import type { ProviderRoomTurnRequest } from "./provider-adapter.js";
+import type { ProviderRoomTurnAttachment, ProviderRoomTurnRequest, RoomTurnImageMimeType } from "./provider-adapter.js";
 import { ROOM_EXPRESSION_GUIDANCE } from "../../../../../shared/room-expressions.mjs";
+import { withoutInlineFileBytes } from "../attachments/inline-bytes.js";
 import { isDeepStrictEqual } from "node:util";
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -11,9 +12,9 @@ function isRoomMessage(value: Record<string, unknown>): boolean {
   return typeof value.id === "string" && /^msg_[1-9]\d*$/.test(value.id) && typeof value.text === "string";
 }
 
-/** Preserve conversation content and unknown fields; omit only known UI summaries. */
+/** Preserve conversation content and unknown fields; omit only known UI summaries and inline file bytes. */
 function conversationMessage(message: unknown): unknown {
-  const value = record(message);
+  const value = record(withoutInlineFileBytes(message));
   if (!value) return message;
   const { activation: _activation, ...context } = value;
   if (!isRoomMessage(context)) return context;
@@ -36,7 +37,7 @@ function conversationMessage(message: unknown): unknown {
 /** Routing guidance belongs to this turn, not to every historical message.
  * This compacts one prompt, never assumes that an earlier turn retained context.
  */
-export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "observedContext" | "sourceMessage" | "activation">): string[] {
+export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "observedContext" | "sourceMessage" | "activation" | "attachments">): string[] {
   const source = conversationMessage(request.sourceMessage);
   const sourceRecord = record(source);
   const context = (request.observedContext ?? []).map(conversationMessage).filter(message =>
@@ -44,7 +45,7 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
   const supplied = [...context, source].map(record).filter((value): value is Record<string, unknown> => value !== null && isRoomMessage(value));
   const reference = (value: unknown): unknown => {
     const quote = record(conversationMessage(value));
-    if (!quote || !isRoomMessage(quote)) return value;
+    if (!quote || !isRoomMessage(quote)) return withoutInlineFileBytes(value);
     // A reference may contain fewer fields than a full message. Do not erase
     // a different edit, author, GIF, attachment or other substantive field.
     const candidates = supplied.filter(message => message.id === quote.id);
@@ -79,8 +80,53 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
   return [
     `Recent bounded room context: ${JSON.stringify(context.map(compact))}`,
     `Source message: ${JSON.stringify(compact(source))}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    `Activation: ${JSON.stringify(withoutInlineFileBytes(request.activation))}`,
+    ...formatRoomTurnAttachments(request.attachments),
   ];
+}
+
+function formatByteSize(bytes: number | null): string | null {
+  if (bytes === null) return null;
+  if (bytes < 1024) return `${bytes} bytes`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The images an adapter gives the provider, numbered in the order the notes name them. */
+export function includedRoomTurnImages(attachments: readonly ProviderRoomTurnAttachment[] | undefined): Array<{
+  number: number; fileName: string; mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string;
+}> {
+  return (attachments ?? []).filter(file => file.status === "image" && file.image && (file.image.data || file.image.path))
+    .map((file, position) => ({ number: position + 1, fileName: file.fileName, ...file.image! }));
+}
+
+/**
+ * One note per file on the activating message, so an agent knows what was
+ * sent even when it cannot see it. The daemon downloaded what it could; the
+ * agent has no way to fetch the rest and must not try.
+ */
+export function formatRoomTurnAttachments(attachments: readonly ProviderRoomTurnAttachment[] | undefined): string[] {
+  if (!attachments?.length) return [];
+  let image = 0;
+  const notes = attachments.map(file => {
+    const facts = [file.mimeType, formatByteSize(file.sizeBytes)].filter(Boolean).join(", ");
+    const name = `Attachment ${file.index}: ${JSON.stringify(file.fileName)}${facts ? ` (${facts})` : ""}.`;
+    // An image the adapter has nothing to give is described as unavailable, so the numbering matches what is sent.
+    const status = file.status === "image" && !(file.image?.data || file.image?.path) ? "unavailable" : file.status;
+    switch (status) {
+      case "image": {
+        image += 1;
+        const gif = file.image?.mimeType === "image/gif" ? " Only its first frame may be visible." : "";
+        return `- ${name} Included after this text as image ${image}.${gif}`;
+      }
+      case "not_image": return `- ${name} Not shown: only images (PNG, JPEG, GIF, WebP) reach agents.`;
+      case "too_large": return `- ${name} Not shown: it is larger than the 10 MB image limit.`;
+      case "turn_limit": return `- ${name} Not shown: the images of this message reached the 20 MB limit for one turn.`;
+      case "provider_unsupported": return `- ${name} Not shown: this agent cannot view images. If its content matters, ask the sender to describe it.`;
+      default: return `- ${name} Not shown: it could not be downloaded.`;
+    }
+  });
+  return ["Files attached to the source message (LetAgents prepared them for this turn; do not try to download them):", ...notes];
 }
 
 /** Optional optimization for a continuously observed native conversation.

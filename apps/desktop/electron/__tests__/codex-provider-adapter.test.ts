@@ -33,6 +33,7 @@ import type {
   ProviderConnectionRef,
   ProviderContinuationRef,
   ProviderHandle,
+  ProviderRoomTurnRequest,
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
@@ -2522,6 +2523,83 @@ test("Codex bounded room turn waits for its exact terminal event and publishes o
   });
   assert.equal(handle.pid, 4100);
   assert.equal(handle.providerContinuationId, "thread-1", "the bounded delivery retains the original app-server thread");
+});
+
+/** Runs one bounded room turn and returns the exact `input` Codex received in `turn/start`. */
+async function codexRoomTurnInput(attachments: ProviderRoomTurnRequest["attachments"]) {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  let input: Array<Record<string, unknown>> | null = null;
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") {
+      input = (params as { input: Array<Record<string, unknown>> }).input;
+      return { turn: { id: "turn-images" } } as T;
+    }
+    if (method === "thread/read") return {
+      thread: { id: handle.providerContinuationId, turns: [{ id: "turn-images", status: "completed", items: [
+        { type: "agentMessage", phase: "final", text: "Seen." },
+      ] }] },
+    } as T;
+    return originalRequest<T>(method, params);
+  };
+  const pending = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-images", actionId: "action-images",
+    sourceMessage: { id: "message-1", text: "What is in these?" },
+    activation: { for_current_agent: { reason: "mention" } },
+    ...(attachments ? { attachments } : {}),
+  }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+  await flush();
+  client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId: "turn-images" } });
+  assert.deepEqual(await pending, { turnId: "turn-images", outcome: "reply", text: "Seen.", evidence: "transcript" });
+  return { adapter, input: input! };
+}
+
+test("Codex bounded room turn passes included images as labelled local image paths after the prompt", async () => {
+  const { adapter, input } = await codexRoomTurnInput([
+    { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "not_image" },
+    { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: 2048, status: "image",
+      image: { mimeType: "image/png", path: "/scratch/turn-1/image-1.png" } },
+    { index: 3, fileName: "photo.jpg", mimeType: "image/jpeg", sizeBytes: 4096, status: "image",
+      image: { mimeType: "image/jpeg", path: "/scratch/turn-1/image-2.jpg" } },
+  ]);
+  assert.equal(adapter.roomTurnImageDelivery(), "file");
+  const [prompt, ...rest] = input;
+  assert.equal(prompt!.type, "text");
+  assert.deepEqual(prompt!.text_elements, []);
+  assert.deepEqual(rest, [
+    { type: "text", text: 'Image 1: "shot \\"1\\".png"', text_elements: [] },
+    { type: "localImage", path: "/scratch/turn-1/image-1.png" },
+    { type: "text", text: 'Image 2: "photo.jpg"', text_elements: [] },
+    { type: "localImage", path: "/scratch/turn-1/image-2.jpg" },
+  ], "labels and paths follow the prompt in the order the notes number them");
+  const lines = String(prompt!.text).split("\n");
+  const header = lines.indexOf("Files attached to the source message (LetAgents prepared them for this turn; do not try to download them):");
+  assert.ok(header > 0, "the prompt lists the attached files");
+  assert.deepEqual(lines.slice(header + 1, header + 4), [
+    '- Attachment 1: "notes.pdf" (application/pdf, 500 bytes). Not shown: only images (PNG, JPEG, GIF, WebP) reach agents.',
+    '- Attachment 2: "shot \\"1\\".png" (image/png, 2 KB). Included after this text as image 1.',
+    '- Attachment 3: "photo.jpg" (image/jpeg, 4 KB). Included after this text as image 2.',
+  ]);
+  assert.equal(JSON.stringify(rest).includes("notes.pdf"), false, "a file that is not an image is only a note in the text");
+});
+
+test("Codex bounded room turn adds nothing for an image without a file path or for a turn without images", async () => {
+  const withoutPath = await codexRoomTurnInput([
+    { index: 1, fileName: "inline.png", mimeType: "image/png", sizeBytes: 3, status: "image",
+      image: { mimeType: "image/png", data: new Uint8Array([1, 2, 3]) } },
+    { index: 2, fileName: "huge.png", mimeType: "image/png", sizeBytes: 11 * 1024 * 1024, status: "too_large" },
+  ]);
+  assert.equal(withoutPath.input.length, 1, "bytes in memory are not an input Codex reads; only the prompt text is sent");
+  assert.equal(withoutPath.input[0]!.type, "text");
+  const none = await codexRoomTurnInput(undefined);
+  assert.equal(none.input.length, 1);
+  assert.doesNotMatch(String(none.input[0]!.text), /Files attached to the source message/);
+  const empty = await codexRoomTurnInput([]);
+  assert.equal(empty.input.length, 1);
+  assert.doesNotMatch(String(empty.input[0]!.text), /Files attached to the source message/);
 });
 
 test("Codex bounded room turn verifies its exact terminal state when thread idle arrives without a turn terminal event", async () => {

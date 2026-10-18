@@ -18,6 +18,7 @@ import {
   PROCESS_ENDED_DURING_TURN,
   ProviderTurnControlError,
   type ProviderHandle,
+  type ProviderRoomTurnRequest,
   type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStreamEvent,
@@ -75,6 +76,7 @@ function createHarness() {
   let assistantText = "OpenCode bounded reply.";
   let includeAssistantText = true;
   let holdTurnOpen = false;
+  let configBody: Record<string, unknown> = { model: "letagents-open-model/qwen/qwen3-coder" };
   let nativeStatus: Record<string, unknown> = { type: "busy" };
   let statusReads = 0;
   let statusReadsHeldAfterAbort = 0;
@@ -159,9 +161,7 @@ function createHarness() {
           headers: { "content-type": "text/event-stream" },
         });
       }
-      if (url.pathname === "/config") {
-        return json({ model: "letagents-open-model/qwen/qwen3-coder" });
-      }
+      if (url.pathname === "/config") return json(configBody);
       if (url.pathname === "/session" && init?.method === "POST") {
         const id = nextSession === 1 ? "session-open-model-1" : `session-open-model-${nextSession}`;
         nextSession += 1;
@@ -294,6 +294,10 @@ function createHarness() {
     },
     setStreamEvents(events: Array<Record<string, unknown>>) {
       streamEvents = events;
+    },
+    /** What a running OpenCode serves from `/config`. */
+    setConfig(value: Record<string, unknown>) {
+      configBody = value;
     },
     setPromptFailure(error: Error) {
       promptFailure = error;
@@ -839,6 +843,148 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
   assert.deepEqual(lifecycleFrames.map((event) => event.nativeEventId),
     lifecycleFacts.map((event) => event.fact.nativeEventId),
     "typed and legacy shadow witnesses use the same exact native checkpoints");
+});
+
+/** A PNG signature and a few more bytes, as a view into a larger buffer the way a download slice would be. */
+function pngView() {
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 250, 251]);
+  const backing = new Uint8Array([9, 9, ...bytes, 9]);
+  return { bytes, view: backing.subarray(2, 2 + bytes.length) };
+}
+
+function imageTurn(png = pngView()): ProviderRoomTurnRequest {
+  return {
+    inboxItemId: "inbox-open-model-images",
+    actionId: "action-open-model-images",
+    sourceMessage: { id: "message-1", text: "What is in these?" },
+    activation: { decision: "activate" },
+    attachments: [
+      { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "not_image" },
+      { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: png.bytes.length, status: "image",
+        image: { mimeType: "image/png", data: png.view } },
+      { index: 3, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
+        image: { mimeType: "image/png", path: "/scratch/turn-1/image-2.png" } },
+    ],
+  };
+}
+
+function launchedModalities(harness: ReturnType<typeof createHarness>) {
+  const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+    provider: Record<string, { models: Record<string, { modalities?: unknown }> }>;
+  };
+  return config.provider["letagents-open-model"]!.models["qwen/qwen3-coder"]!.modalities;
+}
+
+test("Open Model sends included images as labelled data-URL file parts when its owner says the model reads images", async () => {
+  const { adapter, handle, harness } = await spawnAdapter({ imageInput: true });
+  assert.deepEqual(launchedModalities(harness), { input: ["text", "image"], output: ["text"] },
+    "the runtime is started with image input for this model");
+  assert.equal(adapter.roomTurnImageDelivery(handle), "memory");
+  const png = pngView();
+
+  const result = await adapter.runRoomTurn(handle, imageTurn(png));
+
+  assert.equal(result.outcome, "reply");
+  assert.equal(harness.promptBodies.length, 1);
+  const [prompt, ...rest] = harness.promptBodies[0]!.parts as Array<Record<string, unknown>>;
+  assert.equal(prompt!.type, "text");
+  assert.match(String(prompt!.text), /Included after this text as image 1\./);
+  assert.match(String(prompt!.text), /Attachment 1: "notes\.pdf" \(application\/pdf, 500 bytes\)\. Not shown: only images/);
+  assert.deepEqual(rest, [
+    { type: "text", text: 'Image 1: "shot \\"1\\".png"' },
+    { type: "file", mime: "image/png", filename: 'shot "1".png', url: `data:image/png;base64,${Buffer.from(png.bytes).toString("base64")}` },
+  ], "only the image with bytes in memory is sent, after its label; the view's own bytes only");
+  assert.equal(JSON.stringify(rest).includes("notes.pdf"), false, "a file that is not an image is only a note in the text");
+  assert.equal(JSON.stringify(rest).includes("/scratch/turn-1"), false, "a file path is never sent to OpenCode");
+});
+
+test("Open Model sends only the prompt text, even when attachments carry bytes, unless its owner says the model reads images", async () => {
+  for (const overrides of [{}, { imageInput: false }] as Array<Partial<ProviderSpawnRequest>>) {
+    const { adapter, handle, harness } = await spawnAdapter(overrides);
+    assert.equal(launchedModalities(harness), undefined, "the runtime is not told this model reads images");
+    assert.equal(adapter.roomTurnImageDelivery(handle), null);
+
+    await adapter.runRoomTurn(handle, imageTurn());
+
+    const parts = harness.promptBodies[0]!.parts as Array<Record<string, unknown>>;
+    assert.equal(parts.length, 1, "a model that cannot read images gets no file part");
+    assert.equal(parts[0]!.type, "text");
+    assert.equal(JSON.stringify(parts).includes("data:image"), false);
+  }
+});
+
+test("Open Model sends no image parts when the turn has no included image bytes", async () => {
+  const { adapter, handle, harness } = await spawnAdapter({ imageInput: true });
+  await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-open-model-no-bytes", actionId: "action-open-model-no-bytes",
+    sourceMessage: {}, activation: {},
+    attachments: [
+      { index: 1, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
+        image: { mimeType: "image/png", path: "/scratch/turn-1/image-1.png" } },
+      { index: 2, fileName: "huge.png", mimeType: "image/png", sizeBytes: 11 * 1024 * 1024, status: "too_large" },
+    ],
+  });
+  assert.equal((harness.promptBodies[0]!.parts as unknown[]).length, 1);
+});
+
+test("Open Model image delivery follows its own current handle and nothing else", async () => {
+  const withImages = await spawnAdapter({ imageInput: true });
+  const without = await spawnAdapter({ imageInput: false });
+  assert.equal(withImages.adapter.roomTurnImageDelivery(withImages.handle), "memory");
+  assert.equal(without.adapter.roomTurnImageDelivery(without.handle), null);
+  assert.equal(withImages.adapter.roomTurnImageDelivery(without.handle), null, "a handle this adapter does not hold is not trusted");
+  assert.equal(withImages.adapter.roomTurnImageDelivery({ workAttemptId: "unknown" } as ProviderHandle), null);
+});
+
+test("Open Model reattaches with image input exactly as the running runtime was configured", async () => {
+  const born = await spawnAdapter({ imageInput: true });
+  const launched = JSON.parse(born.harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as Record<string, unknown>;
+  const reattach = async (served: Record<string, unknown>) => {
+    born.harness.setConfig(served);
+    const replacement = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot: born.runtimeRoot,
+      dependencies: born.harness.dependencies,
+      startTimeoutMs: LAUNCH_BUDGET_MS,
+      turnTimeoutMs: 100,
+    });
+    const attached = await replacement.attach({
+      workAttemptId: born.handle.workAttemptId,
+      providerContinuationId: born.handle.providerContinuationId!,
+      providerConnection: null,
+    });
+    assert.ok(attached && !("state" in attached));
+    return { replacement, attached };
+  };
+
+  const same = await reattach(launched);
+  assert.equal(same.replacement.roomTurnImageDelivery(same.attached), "memory", "the served configuration lists image input");
+  await same.replacement.runRoomTurn(same.attached, imageTurn());
+  const parts = born.harness.promptBodies.at(-1)!.parts as Array<Record<string, unknown>>;
+  assert.deepEqual(parts.slice(1).map(part => part.type), ["text", "file"]);
+
+  // A runtime started before the owner turned image input on keeps its old configuration.
+  const old = await reattach({ model: "letagents-open-model/qwen/qwen3-coder" });
+  assert.equal(old.replacement.roomTurnImageDelivery(old.attached), null);
+  const before = born.harness.promptBodies.length;
+  await old.replacement.runRoomTurn(old.attached, imageTurn());
+  assert.equal((born.harness.promptBodies.at(-1)!.parts as unknown[]).length, 1);
+  assert.equal(born.harness.promptBodies.length, before + 1);
+
+  // The spawn request's setting does not outlive the runtime: a runtime that was started without image input stays without.
+  const plain = await spawnAdapter({ imageInput: false });
+  plain.harness.setConfig(JSON.parse(plain.harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}"));
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode", runtimeRoot: plain.runtimeRoot, dependencies: plain.harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100,
+  });
+  const attached = await replacement.attach({
+    workAttemptId: plain.handle.workAttemptId,
+    providerContinuationId: plain.handle.providerContinuationId!,
+    providerConnection: null,
+  });
+  assert.ok(attached && !("state" in attached));
+  assert.equal(replacement.roomTurnImageDelivery(attached), null);
 });
 
 test("Open Model does not mint lifecycle evidence when native prompt dispatch is rejected", async () => {

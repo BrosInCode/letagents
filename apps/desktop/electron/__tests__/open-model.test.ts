@@ -10,7 +10,7 @@ import {
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
 } from "../main/agents/managed-agent-permission-profiles.js";
-import { openCodeConfig } from "../main/agents/opencode-launch-contract.js";
+import { openCodeConfig, parseConfiguredOpenModelImageInput } from "../main/agents/opencode-launch-contract.js";
 import {
   OPENCODE_RUNTIME_VERSION,
   openCodeInstallCommand,
@@ -294,6 +294,71 @@ test("OpenCode config exposes product tools without embedding the provider key",
     mcpEnvironment: {},
     permissionProfileId: "ask_before_write",
   }).permission, { "*": "allow", edit: "ask", bash: "ask" });
+});
+
+test("OpenCode config lists image input for the model only when the owner says it reads images", () => {
+  const input = {
+    model: "qwen/qwen3-coder",
+    baseUrl: "https://openrouter.ai/api/v1",
+    pluginUrl: "file:///tmp/credential-boundary.mjs",
+    cwd: "/repo",
+    mcpCommand: ["node", "/app/mcp.js"],
+    mcpEnvironment: {},
+  };
+  const modelOf = (config: ReturnType<typeof openCodeConfig>) =>
+    ((config.provider as Record<string, Record<string, unknown>>)["letagents-open-model"]!
+      .models as Record<string, Record<string, unknown>>)["qwen/qwen3-coder"]!;
+
+  for (const config of [openCodeConfig(input), openCodeConfig({ ...input, imageInput: false })]) {
+    assert.equal("modalities" in modelOf(config), false, "a model is never claimed to read images by default");
+    assert.equal(parseConfiguredOpenModelImageInput(config), false);
+  }
+  const withImages = openCodeConfig({ ...input, imageInput: true });
+  assert.deepEqual(modelOf(withImages).modalities, { input: ["text", "image"], output: ["text"] });
+  assert.equal(parseConfiguredOpenModelImageInput(withImages), true);
+  assert.equal(
+    parseConfiguredOpenModelImageInput(JSON.parse(JSON.stringify(withImages))),
+    true,
+    "the setting survives the JSON the runtime serves back from /config",
+  );
+  assert.deepEqual(
+    { ...modelOf(withImages), modalities: undefined },
+    { ...modelOf(openCodeConfig(input)), modalities: undefined },
+    "image input changes nothing else about the model",
+  );
+});
+
+test("a runtime configuration reads as image input only for its own configured model with an image modality", () => {
+  const config = (overrides: Record<string, unknown>) => ({
+    model: "letagents-open-model/qwen/qwen3-coder",
+    provider: { "letagents-open-model": { models: { "qwen/qwen3-coder": {} } } },
+    ...overrides,
+  }) as unknown as Parameters<typeof parseConfiguredOpenModelImageInput>[0];
+  const withModalities = (modalities: unknown, model = "qwen/qwen3-coder") => config({
+    provider: { "letagents-open-model": { models: { [model]: { modalities } } } },
+  });
+
+  assert.equal(parseConfiguredOpenModelImageInput(withModalities({ input: ["text", "image"], output: ["text"] })), true);
+  assert.equal(parseConfiguredOpenModelImageInput(withModalities({ input: ["text"], output: ["text"] })), false);
+  assert.equal(parseConfiguredOpenModelImageInput(withModalities({ input: "image" })), false, "input must be a list");
+  assert.equal(parseConfiguredOpenModelImageInput(withModalities({ output: ["image"] })), false, "output modalities do not count");
+  assert.equal(parseConfiguredOpenModelImageInput(withModalities(null)), false);
+  assert.equal(
+    parseConfiguredOpenModelImageInput(withModalities({ input: ["image"] }, "another/model")),
+    false,
+    "another model's modalities do not count",
+  );
+  assert.equal(parseConfiguredOpenModelImageInput(config({})), false);
+  assert.equal(parseConfiguredOpenModelImageInput(config({ provider: undefined })), false);
+  assert.equal(parseConfiguredOpenModelImageInput(config({ model: undefined })), false, "no configured Open Model");
+  assert.equal(
+    parseConfiguredOpenModelImageInput({
+      model: "other-provider/qwen/qwen3-coder",
+      provider: { "other-provider": { models: { "qwen/qwen3-coder": { modalities: { input: ["image"] } } } } },
+    } as never),
+    false,
+    "only the Open Model provider counts",
+  );
 });
 
 test("OpenCode runtime resolution and install command stay pinned", () => {
