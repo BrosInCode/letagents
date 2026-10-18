@@ -462,8 +462,11 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       : typeof args.reply_to === "string"
         ? args.reply_to
         : null;
+    // An untargeted post during a bounded turn is also the activating answer.
+    // Otherwise it can send once here and again as a final "answered in the room" recap.
+    // Separate tool messages must explicitly target another message or thread.
     if ((input.toolName === "send_message" || input.toolName === "send_thread_message")
-      && targetMessage === context.active.sourceMessageId) {
+      && (targetMessage === null || targetMessage === context.active.sourceMessageId)) {
       return withExactRoom({
         state: "prepared",
         effect_id: prepared.effect.effect_id,
