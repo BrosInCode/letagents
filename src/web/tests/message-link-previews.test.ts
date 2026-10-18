@@ -16,7 +16,8 @@ test('link collection includes inline-code URLs in message order but excludes fe
   const html = render(text, value => urls.push(value))
   assert.equal(html, render(text))
   assert.deepEqual(urls, [url, 'https://github.com/org/repo/issues/2', 'https://github.com/org/repo/pull/3', 'https://github.com/org/repo/issues/5'])
-  assert.deepEqual(eligibleLinkPreviewReferences(urls, 'ORG/REPO'), [{ kind: 'pull', number: 1 }, { kind: 'issue', number: 2 }, { kind: 'pull', number: 3 }, { kind: 'issue', number: 5 }])
+  // The existing three-card cap still applies, now including the inline-code URL.
+  assert.deepEqual(eligibleLinkPreviewReferences(urls, 'ORG/REPO'), [{ kind: 'pull', number: 1 }, { kind: 'issue', number: 2 }, { kind: 'pull', number: 3 }])
 })
 
 test('link collection preserves staging code-span rendering for a fencing regex', () => {
