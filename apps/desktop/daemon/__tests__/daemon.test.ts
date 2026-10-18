@@ -7146,6 +7146,7 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
     }, {
       endWorkerSession: async input => {
         assert.equal(input.sessionId, "retired-worker");
+        assert.equal(input.restarting, true, "recovery starts the agent again in the same room");
         if (recoveryFailure === "end") throw new Error("injected worker retirement failure");
         leaseEvents.push("retire");
       },

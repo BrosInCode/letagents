@@ -57,7 +57,7 @@ function session(overrides: Partial<ReasoningSession> = {}): ReasoningSession {
   };
 }
 
-const worker = { actor_label: "Ada | Codex", agent_key: "agent_ada", session_kind: "worker" };
+const worker = { actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: "ses_ada", session_kind: "worker" };
 
 function routes(options: {
   store?: Partial<RoomReasoningStore>;
@@ -140,6 +140,7 @@ test("a live session stores the bounded snapshot under the worker's own agent an
     room_id: ROOM,
     actor_label: "Ada | Codex",
     agent_key: "agent_ada",
+    agent_session_id: "ses_ada",
     snapshot: {
       summary: "Ran a shell command",
       status: "working",
@@ -148,6 +149,16 @@ test("a live session stores the bounded snapshot under the worker's own agent an
   });
   assert.deepEqual(emitted.map((event) => event.name), ["reasoning:removed", "reasoning:updated"]);
   assert.deepEqual(emitted[0]!.payload, { projectId: ROOM, session_id: "rs_old", kind: "live" });
+});
+
+test("a start from a worker session that ended meanwhile is refused", async () => {
+  const { LiveActivityWorkerEndedError } = await import("../db/reasoning.js");
+  const { call, emitted } = routes({
+    store: { createLiveActivitySession: (async () => { throw new LiveActivityWorkerEndedError(); }) as never },
+  });
+  const res = await call(CREATE, { body: { kind: "live", summary: "Working", live: liveSnapshot() } });
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(emitted, []);
 });
 
 test("the server refuses live snapshots outside the stored shape and bounds", async () => {

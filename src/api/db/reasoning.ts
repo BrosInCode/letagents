@@ -1,9 +1,9 @@
-import { and, asc, desc, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 
 import type { RoomLiveSnapshot } from "../../../shared/agent-live-trace.mjs";
 
 import { db } from "./client.js";
-import { reasoning_session_updates, reasoning_sessions } from "./schema.js";
+import { reasoning_session_updates, reasoning_sessions, room_agent_sessions } from "./schema.js";
 import type { ReasoningSessionKind, ReasoningSnapshot } from "./schema.js";
 import { clampLimit, reasoningId } from "./utils.js";
 import { toReasoningSession, toReasoningSessionUpdate } from "./mappers.js";
@@ -267,15 +267,47 @@ function liveUpdatePayload(snapshot: LiveActivitySnapshot): ReasoningSnapshot {
   return { summary: snapshot.summary, status: snapshot.status ?? null };
 }
 
+type Transaction = Parameters<Parameters<(typeof db)["transaction"]>[0]>[0];
+
+/** The worker session that tried to share a turn has ended. */
+export class LiveActivityWorkerEndedError extends Error {
+  constructor() {
+    super("The worker session has ended.");
+  }
+}
+
+/** Serializes every start and removal of one agent's live sessions in a room. */
+async function lockLiveActivityTx(tx: Transaction, input: { room_id: string; agent_key: string }): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(["live_activity", input.room_id, input.agent_key])}, 0))`);
+}
+
+async function deleteLiveActivitySessionsTx(
+  tx: Transaction | typeof db,
+  input: { room_id: string; agent_key: string },
+): Promise<string[]> {
+  const rows = await tx
+    .delete(reasoning_sessions)
+    .where(and(
+      eq(reasoning_sessions.room_id, input.room_id),
+      eq(reasoning_sessions.agent_key, input.agent_key),
+      eq(reasoning_sessions.kind, "live"),
+    ))
+    .returning({ id: reasoning_sessions.id });
+  return rows.map((row) => row.id);
+}
+
 /**
  * Start the live session of an agent's turn. The agent's earlier live
  * sessions in the room are removed in the same transaction, so a room holds
- * at most one per agent: the turn other members may see.
+ * at most one per agent: the turn other members may see. Throws
+ * LiveActivityWorkerEndedError when the worker session has ended.
  */
 export async function createLiveActivitySession(input: {
   room_id: string;
   actor_label: string;
   agent_key: string;
+  /** The agent's worker session that shares the turn. */
+  agent_session_id: string;
   snapshot: LiveActivitySnapshot;
 }): Promise<{ session: ReasoningSession; update: ReasoningSessionUpdate; removed_session_ids: string[] }> {
   const now = new Date().toISOString();
@@ -307,18 +339,24 @@ export async function createLiveActivitySession(input: {
   };
   const removed = await db.transaction(async (tx) => {
     // Two starts of the same agent's turn never both survive: the second waits and replaces the first.
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(["live_activity", input.room_id, input.agent_key])}, 0))`);
-    const earlier = await tx
-      .delete(reasoning_sessions)
+    await lockLiveActivityTx(tx, input);
+    // A start that was in flight when the worker session ended does not
+    // bring the turn back: the end removed it under the same lock.
+    const [worker] = await tx
+      .select({ session_id: room_agent_sessions.session_id })
+      .from(room_agent_sessions)
       .where(and(
-        eq(reasoning_sessions.room_id, input.room_id),
-        eq(reasoning_sessions.agent_key, input.agent_key),
-        eq(reasoning_sessions.kind, "live"),
+        eq(room_agent_sessions.session_id, input.agent_session_id),
+        eq(room_agent_sessions.room_id, input.room_id),
+        eq(room_agent_sessions.agent_key, input.agent_key),
+        isNull(room_agent_sessions.ended_at),
       ))
-      .returning({ id: reasoning_sessions.id });
+      .limit(1);
+    if (!worker) throw new LiveActivityWorkerEndedError();
+    const earlier = await deleteLiveActivitySessionsTx(tx, input);
     await tx.insert(reasoning_sessions).values(sessionRow);
     await tx.insert(reasoning_session_updates).values(updateRow);
-    return earlier.map((row) => row.id);
+    return earlier;
   });
   return {
     session: toReasoningSession(sessionRow),
@@ -396,15 +434,65 @@ export async function updateLiveActivitySession(input: {
 
 /** Remove every live session of one agent in a room, with its update rows. Returns the removed ids. */
 export async function deleteLiveActivitySessions(input: { room_id: string; agent_key: string }): Promise<string[]> {
-  const rows = await db
-    .delete(reasoning_sessions)
+  return deleteLiveActivitySessionsTx(db, input);
+}
+
+/**
+ * Remove the agent's live sessions in a room once no worker session of the
+ * agent is live there, so the room stops showing a turn nobody will update.
+ * Runs in the transaction that ends a worker session. Returns the removed
+ * ids, for the room to be told after the commit.
+ */
+export async function deleteLiveActivityOfDepartedAgentTx(
+  tx: Transaction,
+  input: { room_id: string; agent_key: string },
+): Promise<string[]> {
+  // Under the lock, a concurrent end of the agent's other session sees this one's end.
+  await lockLiveActivityTx(tx, input);
+  const [liveWorker] = await tx
+    .select({ session_id: room_agent_sessions.session_id })
+    .from(room_agent_sessions)
     .where(and(
-      eq(reasoning_sessions.room_id, input.room_id),
-      eq(reasoning_sessions.agent_key, input.agent_key),
-      eq(reasoning_sessions.kind, "live"),
+      eq(room_agent_sessions.room_id, input.room_id),
+      eq(room_agent_sessions.agent_key, input.agent_key),
+      eq(room_agent_sessions.session_kind, "worker"),
+      isNull(room_agent_sessions.ended_at),
     ))
-    .returning({ id: reasoning_sessions.id });
-  return rows.map((row) => row.id);
+    .limit(1);
+  if (liveWorker) return [];
+  return deleteLiveActivitySessionsTx(tx, input);
+}
+
+/** deleteLiveActivityOfDepartedAgentTx for each room and agent, each in its own transaction. */
+export async function deleteLiveActivityOfDepartedAgents(input: {
+  room_ids: readonly string[];
+  agent_keys: readonly string[];
+}): Promise<Array<{ room_id: string; session_ids: string[] }>> {
+  const removed: Array<{ room_id: string; session_ids: string[] }> = [];
+  for (const room_id of new Set(input.room_ids)) {
+    for (const agent_key of new Set(input.agent_keys)) {
+      const sessionIds = await db.transaction((tx) => deleteLiveActivityOfDepartedAgentTx(tx, { room_id, agent_key }));
+      if (sessionIds.length > 0) removed.push({ room_id, session_ids: sessionIds });
+    }
+  }
+  return removed;
+}
+
+/**
+ * After the commit: tell each room its removed live sessions are gone. A
+ * room that misses the event drops them at its next read, so a failure is
+ * only logged.
+ */
+export async function announceRemovedLiveActivity(
+  removals: ReadonlyArray<{ room_id: string; session_ids: readonly string[] }>,
+): Promise<void> {
+  if (removals.length === 0) return;
+  // Dynamic import: the server event modules import the database modules.
+  await import("../server/live-activity-cleanup.js")
+    .then(({ announceLiveActivityRemoved }) => {
+      for (const removal of removals) announceLiveActivityRemoved(removal);
+    })
+    .catch((error: unknown) => console.error("[live activity] failed to tell a room its live sessions were removed", error));
 }
 
 /**

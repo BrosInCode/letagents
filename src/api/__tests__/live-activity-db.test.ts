@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
@@ -57,18 +58,36 @@ function store() {
   return { ...dbModule, ...reasoningModule };
 }
 
+/** A live worker session of the agent in the room: only one can share the agent's turn. */
+async function worker(roomId: string, agentKey: string, instanceId = `instance_${agentKey}`): Promise<string> {
+  const db = store();
+  const now = new Date().toISOString();
+  await dbClientModule!.pool.query(
+    "INSERT INTO accounts (id, provider, provider_user_id, login, display_name, avatar_url, created_at, updated_at) VALUES ('owner_live', 'github', 'owner_live', 'owner_live', 'Owner', NULL, $1, $1) ON CONFLICT (id) DO NOTHING",
+    [now],
+  );
+  const session = await db.createRoomAgentSession({
+    room_id: roomId, session_kind: "worker", runtime: "test", actor_label: `${agentKey} ${instanceId}`,
+    agent_key: agentKey, agent_instance_id: instanceId, display_name: `${agentKey} ${instanceId}`,
+    owner_account_id: "owner_live", owner_label: "Owner", ide_label: "Agent",
+  });
+  return session.session_id;
+}
+
 test("a room keeps one live session per agent, and reasoning reads never include it", { concurrency: false, skip }, async () => {
   const db = store();
   const room = await db.createProjectWithName("live-room");
-  const first = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", snapshot: snapshot("Ran a shell command") });
+  const adaWorker = await worker(room.id, "agent_ada");
+  const boWorker = await worker(room.id, "agent_bo");
+  const first = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: adaWorker, snapshot: snapshot("Ran a shell command") });
   assert.equal(first.session.kind, "live");
   assert.equal(first.session.anchor_message_id, "msg_7");
   assert.deepEqual(first.removed_session_ids, []);
   // An update row keeps the line and the status, never the turn's entries.
   assert.deepEqual(first.update.payload, { summary: "Ran a shell command", status: "working" });
 
-  const other = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Bo | Claude", agent_key: "agent_bo", snapshot: snapshot("Edited a file") });
-  const second = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", snapshot: snapshot("Read a file") });
+  const other = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Bo | Claude", agent_key: "agent_bo", agent_session_id: boWorker, snapshot: snapshot("Edited a file") });
+  const second = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: adaWorker, snapshot: snapshot("Read a file") });
   assert.deepEqual(second.removed_session_ids, [first.session.id]);
   assert.equal(await db.getReasoningSessionById(room.id, first.session.id), undefined);
 
@@ -85,7 +104,8 @@ test("a room keeps one live session per agent, and reasoning reads never include
 test("a live session takes snapshots only from its own agent and caps its update rows", { concurrency: false, skip }, async () => {
   const db = store();
   const room = await db.createProjectWithName("live-cap-room");
-  const created = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", snapshot: snapshot("Ran a shell command") });
+  const adaWorker = await worker(room.id, "agent_ada");
+  const created = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: adaWorker, snapshot: snapshot("Ran a shell command") });
   assert.equal(await db.updateLiveActivitySession({ room_id: room.id, session_id: created.session.id, agent_key: "agent_bo", snapshot: snapshot("Hijack") }), null);
 
   let lastWithRow = 0;
@@ -113,8 +133,10 @@ test("withdrawal and retention remove live sessions with their update rows", { c
   const db = store();
   const pool = dbClientModule!.pool;
   const room = await db.createProjectWithName("live-withdraw-room");
-  const ada = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", snapshot: snapshot("Ran a shell command") });
-  const bo = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Bo | Claude", agent_key: "agent_bo", snapshot: snapshot("Edited a file") });
+  const adaWorker = await worker(room.id, "agent_ada");
+  const boWorker = await worker(room.id, "agent_bo");
+  const ada = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: adaWorker, snapshot: snapshot("Ran a shell command") });
+  const bo = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Bo | Claude", agent_key: "agent_bo", agent_session_id: boWorker, snapshot: snapshot("Edited a file") });
   const reasoning = await db.createReasoningSession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", snapshot: { summary: "Plan" } });
 
   assert.deepEqual(await db.deleteLiveActivitySessions({ room_id: room.id, agent_key: "agent_ada" }), [ada.session.id]);
@@ -130,9 +152,79 @@ test("withdrawal and retention remove live sessions with their update rows", { c
 test("concurrent starts of one agent's turn leave one live session", { concurrency: false, skip }, async () => {
   const db = store();
   const room = await db.createProjectWithName("live-race-room");
+  const adaWorker = await worker(room.id, "agent_ada");
   const starts = await Promise.all(Array.from({ length: 6 }, (_, index) =>
-    db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", snapshot: snapshot(`Start ${index}`) })));
+    db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: adaWorker, snapshot: snapshot(`Start ${index}`) })));
   const live = await db.getReasoningSessions(room.id, { open_only: true, kind: "live" });
   assert.equal(live.length, 1, "every start replaced the one before it");
   assert.ok(starts.some((start) => start.session.id === live[0]!.id));
+});
+
+test("only a live worker session of the agent can start its live session", { concurrency: false, skip }, async () => {
+  const db = store();
+  const room = await db.createProjectWithName("live-worker-room");
+  const adaWorker = await worker(room.id, "agent_ada");
+  const boWorker = await worker(room.id, "agent_bo");
+  await assert.rejects(
+    db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: boWorker, snapshot: snapshot("Borrowed session") }),
+    db.LiveActivityWorkerEndedError,
+  );
+  const turn = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: adaWorker, snapshot: snapshot("Ran a shell command") });
+  // A restart in the same room keeps the turn for the next session.
+  await db.endRoomAgentSession({ session_id: adaWorker, room_id: room.id, restarting: true });
+  assert.deepEqual((await db.getReasoningSessions(room.id, { open_only: true, kind: "live" })).map((row) => row.id), [turn.session.id]);
+  // The ended session cannot start another turn.
+  await assert.rejects(
+    db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: adaWorker, snapshot: snapshot("Late start") }),
+    db.LiveActivityWorkerEndedError,
+  );
+  assert.deepEqual((await db.getReasoningSessions(room.id, { open_only: true, kind: "live" })).map((row) => row.id), [turn.session.id]);
+});
+
+test("a start waiting while the worker session ends does not bring the turn back", { concurrency: false, skip }, async () => {
+  const db = store();
+  const room = await db.createProjectWithName("live-end-race-room");
+  const adaWorker = await worker(room.id, "agent_ada");
+  // Hold what the end holds: the agent's live-activity lock, and the session ended but not committed.
+  const ending = await dbClientModule!.pool.connect();
+  try {
+    await ending.query("BEGIN");
+    await ending.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [JSON.stringify(["live_activity", room.id, "agent_ada"])]);
+    await ending.query("UPDATE room_agent_sessions SET ended_at = now() WHERE session_id = $1", [adaWorker]);
+    let settled = false;
+    const start = db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: adaWorker, snapshot: snapshot("In flight") })
+      .finally(() => { settled = true; });
+    start.catch(() => undefined);
+    await delay(200);
+    assert.equal(settled, false, "the start waits for the end");
+    await ending.query("COMMIT");
+    await assert.rejects(start, db.LiveActivityWorkerEndedError);
+  } finally {
+    ending.release();
+  }
+  assert.deepEqual(await db.getReasoningSessions(room.id, { open_only: true, kind: "live" }), []);
+});
+
+test("the agent's two sessions ending together leave no turn behind", { concurrency: false, skip }, async () => {
+  const db = store();
+  const room = await db.createProjectWithName("live-double-end-room");
+  const first = await worker(room.id, "agent_ada", "instance_one");
+  const second = await worker(room.id, "agent_ada", "instance_two");
+  await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: second, snapshot: snapshot("Ran a shell command") });
+  // The end of `first`, not yet committed, holds the lock: it still sees `second` live and keeps the turn.
+  const ending = await dbClientModule!.pool.connect();
+  try {
+    await ending.query("BEGIN");
+    await ending.query("UPDATE room_agent_sessions SET ended_at = now() WHERE session_id = $1", [first]);
+    await ending.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [JSON.stringify(["live_activity", room.id, "agent_ada"])]);
+    const endSecond = db.endRoomAgentSession({ session_id: second, room_id: room.id });
+    endSecond.catch(() => undefined);
+    await delay(200);
+    await ending.query("COMMIT");
+    // The end of `second` waited for the lock, so it sees `first` ended and removes the turn.
+    assert.ok(await endSecond);
+  } finally {
+    ending.release();
+  }
+  assert.deepEqual(await db.getReasoningSessions(room.id, { open_only: true, kind: "live" }), []);
 });
