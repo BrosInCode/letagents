@@ -2122,6 +2122,8 @@ const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused"> = {
   react_to_message: "approved",       // room communication under the agent's identity
   // Runs git in a folder the caller names, on this Mac and outside Codex's sandbox.
   check_repo: "refused",
+  // The daemon reads the named files on this Mac, outside Codex's sandbox, and posts them to the room.
+  set_reply_attachments: "refused",
   // Runs git, then asks GitHub, GitLab or Bitbucket about the repository: another machine.
   check_repo_visibility: "refused",
   // Runs git and writes .letagents.json into the repository.

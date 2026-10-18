@@ -1,6 +1,8 @@
 import { validReplyGifIntent } from "../../../shared/room-expressions.mjs";
+import { validReplyAttachmentsRequest } from "../../../shared/message-attachments.mjs";
 import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../shared/codex-read-only-room-tools.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
+import type { ReplyAttachmentSnapshotInput } from "./reply-attachment-spool.js";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import type {
   SupervisedEffectRecord,
@@ -146,6 +148,12 @@ export type BoundedEffectCoordinatorOptions = {
   };
   policy: {
     structuredRoomTurnCompletion(value: unknown): unknown | null;
+  };
+  /** Copies the files an agent attaches to its final reply; absent in daemons without a spool. */
+  replyAttachments?: {
+    snapshot(input: ReplyAttachmentSnapshotInput): Promise<{ files: Array<{ spool_id: string }> | null }>;
+    /** Drop the copies a newly journaled choice replaced. */
+    keepOnly(inboxItemId: string, spoolIds: readonly string[]): Promise<void>;
   };
 };
 
@@ -350,6 +358,25 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
     }
     if (input.toolName === "set_reply_gif" && !validReplyGifIntent(input.input)) throw new Error("Invalid GIF reply intent.");
+    let request = input.input;
+    if (input.toolName === "set_reply_attachments") {
+      if (isLocalRoomApi(context.agent.apiUrl)) throw new Error("Reply attachments need a cloud room.");
+      if (!validReplyAttachmentsRequest(input.input)) {
+        throw new Error("set_reply_attachments takes { files: [1 to 4 workspace paths] }, or { files: null } to clear them.");
+      }
+      if (input.input.files) {
+        if (!this.options.replyAttachments) throw new Error("This LetAgents daemon cannot attach files yet.");
+        // Copy the files now: the journal keeps the copies' identities, never the agent's paths.
+        request = await this.options.replyAttachments.snapshot({
+          workspacePath: context.entry.workspace_path,
+          inboxItemId: context.inbox.inbox_item_id,
+          agentId: input.entryId,
+          providerTurnId: context.inbox.provider_turn_id!,
+          mcpRequestId: input.mcpRequestId,
+          files: input.input.files,
+        });
+      }
+    }
     if (input.toolName === "complete_room_turn") {
       if (context.entry.provider !== "cursor") {
         throw new Error("The structured room-turn completion channel is reserved for supervised Cursor turns.");
@@ -404,10 +431,14 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       provider_turn_id: context.inbox.provider_turn_id!,
       mcp_request_id: input.mcpRequestId,
       tool_name: input.toolName,
-      request: input.input,
+      request,
       mutation: input.mutation,
     }, (commit) => this.options.authority.fenceCommit(commit));
     if (prepared.effect.state === "completed") {
+      if (input.toolName === "set_reply_attachments" && prepared.created) {
+        const kept = (request as { files?: Array<{ spool_id: string }> | null }).files ?? [];
+        await this.options.replyAttachments?.keepOnly(context.inbox.inbox_item_id, kept.map((file) => file.spool_id)).catch(() => undefined);
+      }
       return withExactRoom({ state: "completed", result: prepared.effect.result });
     }
     if (!prepared.created) {

@@ -2,6 +2,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { roomRequest, isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "./local-room-runtime.js";
 import type { WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
+import { stageCloudMessageAttachment } from "../../../shared/message-attachments.mjs";
 import { SupervisedRoomAuthorizationError, type SupervisedDeliveryHttp, type SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
 import type { RemoteExecutionDelegationRevision } from "./execution-delegation-journal.js";
@@ -42,6 +43,8 @@ const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
 const LIVENESS_GRACE_MS = 30_000;
 export const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
 const CLOUD_REQUEST_TIMEOUT_MS = 20_000;
+/** A 25 MB attachment upload to object storage needs longer than an API call. */
+const ATTACHMENT_UPLOAD_TIMEOUT_MS = 120_000;
 const EXECUTION_DELEGATION_INVENTORY_PAGE_SIZE = 100;
 
 export type CloudWorkLease = {
@@ -598,6 +601,7 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
         sender: "supervised-daemon",
         text: input.text,
         ...(gif ? { gif } : {}),
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
         client_message_id: input.clientMessageId,
         ...(input.replyTo && input.threadRootId
           ? { reply_to: input.replyTo, thread_root_id: input.threadRootId }
@@ -618,6 +622,34 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     const roomId = typeof message.room_id === "string" && message.room_id.trim() ? message.room_id : null;
     if (!messageId || !roomId || roomId !== input.roomId) throw new Error("Supervised room publication response omitted its canonical message identity.");
     return { messageId, roomId };
+  },
+  async stageAttachment(input) {
+    const staged = await stageCloudMessageAttachment({
+      requestJson: async (path, init) => {
+        const response = await roomRequest(`${input.apiUrl}${path}`, {
+          ...init,
+          headers: { ...init.headers, authorization: `Bearer ${input.bearer}` },
+          signal: boundedCloudSignal(input.signal),
+        });
+        // The caller turns any staging failure into a note on the reply, so a
+        // server without worker upload routes still gets the reply text.
+        if (!response.ok) throw new Error(`Supervised attachment staging failed with HTTP ${response.status}.`);
+        return response.status === 204 ? undefined : await response.json();
+      },
+      fetch: (url, init) => fetch(url, { ...init, signal: boundedCloudSignal(input.signal, ATTACHMENT_UPLOAD_TIMEOUT_MS) }),
+    }, {
+      roomPath: `/rooms/${supervisedRoomPath(input.roomId)}`,
+      fileName: input.fileName,
+      mimeType: input.mimeType,
+      bytes: input.bytes,
+    });
+    return { uploadId: staged.uploadId };
+  },
+  async discardAttachment(input) {
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/attachments/uploads/${encodeURIComponent(input.uploadId)}`, {
+      method: "DELETE", headers: { authorization: `Bearer ${input.bearer}` }, signal: boundedCloudSignal(input.signal),
+    });
+    if (!response.ok) throw new Error(`Supervised attachment discard failed with HTTP ${response.status}.`);
   },
 };
 

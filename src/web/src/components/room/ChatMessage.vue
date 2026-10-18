@@ -97,6 +97,8 @@
           :text="visibleText"
           :html="renderedMessage.html"
           :messageId="message.id"
+          :sender="readerSender"
+          :room-identifier="roomIdentifier"
           @taskReferenceClick="emit('openTask', $event)"
         />
         <GitHubEventCard
@@ -186,6 +188,7 @@
 <script setup lang="ts">
 import { roomGifPageUrl } from '../../../../../shared/room-expressions.mjs'
 import ChatAvatar from '../../../../../shared/ui/ChatAvatar.vue'
+import type { MessageReaderSender } from '../../../../../shared/ui/message-reader'
 import { chatSenderRole } from '../../../../../shared/chat-appearance'
 import '../../../../../shared/ui/chat-palette.css'
 import { useAuth } from '@/composables/useAuth'
@@ -512,6 +515,19 @@ const ideLabel = computed(() => {
   if (fromParsed && fromParsed !== 'Agent') return fromParsed
   return null
 })
+
+const readerSender = computed<MessageReaderSender>(() => ({
+  name: displayName.value,
+  context: senderRole.value === 'own-agent' ? 'Your agent'
+    : senderRole.value === 'self' ? 'You'
+      : senderRole.value === 'other-agent' ? identity.value.ownerAttribution || 'Agent'
+        : senderRole.value === 'human' ? 'Human' : null,
+  timestamp: props.message.timestamp,
+  avatarUrl: props.message.sender_profile?.avatar_url,
+  agent: Boolean(senderRole.value?.endsWith('agent')),
+  provider: ideLabel.value,
+  agentKey: props.message.agent_identity?.agent_key,
+}))
 
 const replyDisplayName = computed(() => {
   const reply = props.message.reply_to
