@@ -51,6 +51,14 @@
           :saved-rules="toolRules.length"
           @changed="reloadSettings"
         />
+        <AgentInspectorLiveSharing
+          v-if="resource.configuration.liveSharing && desktopIpc.supervisor?.setAgentLiveSharing"
+          :configuration="resource.configuration"
+          :state="resource.configuration.liveSharing"
+          :disabled="busy || !settingsEditable || retired"
+          :unsaved-edits="unsavedEdits"
+          @changed="reloadSettings"
+        />
         <section v-if="desktopIpc.supervisor?.listHostToolRules" class="agent-inspector-permissions" aria-label="Always allowed tools">
           <strong>Always allowed</strong>
           <p v-if="toolRulesLoading" class="agent-inspector-settings-note" role="status">Loading…</p>
@@ -126,6 +134,7 @@ import { supervisedPermissionProfileLimits } from "../../../../domain/managed-ag
 import { desktopIpc } from "../../../../ipc";
 import type { HostToolRule } from "../../../../../../shared/host-tool-rules";
 import AgentInspectorHomeHarness from "./AgentInspectorHomeHarness.vue";
+import AgentInspectorLiveSharing from "./AgentInspectorLiveSharing.vue";
 const props = defineProps<{ entryId: string; displayName: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; applyPending: boolean; conflict: boolean; deliveryMode?: string; permissionPending?: boolean }>();
 const emit = defineEmits<{ patch: [patch: Partial<AgentInspectorConfigurationDraft>]; save: [overwrite: boolean]; apply: []; reload: []; "prepare-move": [destination: string]; "commit-move": []; retire: []; purge: [] }>();
 const destination = ref(""); const purgeConfirmation = ref(""); const confirmRetire = ref(false);
