@@ -18,8 +18,8 @@ import {
   supervisedReplyTargetForSourceMessage,
 } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import { RoomAttachmentDownloadError, RoomTurnAttachmentStager, STAGED_FOLDER_MAX_AGE_MS } from "../room-turn-attachments.js";
 import { ReplyAttachmentSpool } from "../reply-attachment-spool.js";
+import { RoomAttachmentDownloadError, RoomTurnAttachmentStager, STAGED_FOLDER_MAX_AGE_MS } from "../room-turn-attachments.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
 import {
   claudeApiFailureClass, defaultFollowUpDelayMs, followUpOrigin, FOLLOW_UP_REASONS, FOLLOW_UP_UNCERTAIN_RESOLVED_DETAIL, MAX_AUTOMATIC_FOLLOW_UPS, NO_REPLY_FOLLOW_UP_DETAIL, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL,

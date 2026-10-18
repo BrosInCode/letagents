@@ -102,9 +102,9 @@ test("worker bearer route registry is default-deny and semantic", () => {
   const allowed: Array<[string, string, string]> = [
     ["GET", "/rooms/room_1/messages", "messages.read"],
     ["POST", "/rooms/room_1/messages", "messages.write"],
-    ["GET", "/rooms/room_1/messages/msg_4/attachments/att_2", "messages.read"],
     ["POST", "/rooms/room_1/attachments/uploads", "messages.write"],
     ["DELETE", "/rooms/room_1/attachments/uploads/upl_1", "messages.write"],
+    ["GET", "/rooms/room_1/messages/msg_4/attachments/att_2", "messages.read"],
     ["GET", "/rooms/room_1/artifacts", "artifacts.read"],
     ["POST", "/rooms/room_1/artifacts", "artifacts.self_write"],
     ["GET", "/rooms/room_1/tasks", "coordination.read"],
