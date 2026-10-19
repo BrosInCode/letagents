@@ -103,7 +103,7 @@ import type {
 
 type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
-type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"]; delivery_mode: string };
+type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"]; delivery_mode: string; image_input: boolean };
 type PreMembershipRoomMoveCancellation = { agentId: string; detail: string };
 export type PendingTypedLifecycleEffect = {
   factId: string; agentId: string; factSequence: number;
@@ -849,9 +849,9 @@ export class ManifestStore {
 
   async getAgentConfiguration(agentId: string): Promise<StoredAgentConfiguration | undefined> {
     const database = await this.getDatabase();
-    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract,delivery_mode FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
+    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract,delivery_mode,image_input FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
     if (!row) return undefined;
-    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"], delivery_mode: String(row.delivery_mode) };
+    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"], delivery_mode: String(row.delivery_mode), image_input: bool(row.image_input) };
   }
 
   /** Explicit operator request only; startup and credential recovery never create this journal. */
@@ -1363,7 +1363,7 @@ export class ManifestStore {
     return { attachedWorkAttemptId, preservedWorkspacePath };
   }
 
-  async updateAgentConfiguration(expectedGeneration: number, input: { agentId: string; expectedRevision: number; model: string | null; reasoningEffort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permissionProfileId: string | null; providerLaunchPolicy: unknown }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; outcome: "updated" | "conflict" | "invalid"; configuration?: StoredAgentConfiguration }> {
+  async updateAgentConfiguration(expectedGeneration: number, input: { agentId: string; expectedRevision: number; model: string | null; reasoningEffort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permissionProfileId: string | null; providerLaunchPolicy: unknown; imageInput: boolean }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; outcome: "updated" | "conflict" | "invalid"; configuration?: StoredAgentConfiguration }> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
       const currentGeneration = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
@@ -1381,7 +1381,7 @@ export class ManifestStore {
         assertNoPollingActivation(database, input.agentId);
         const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
         if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during configuration update.");
-        const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.agentId, input.expectedRevision);
+        const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,image_input=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.imageInput ? 1 : 0, input.agentId, input.expectedRevision);
         if (Number(changed.changes) !== 1) throw new ManifestConflictError("Agent configuration revision changed during update.");
         database.exec("COMMIT"); transactionOpen = false; committed = true;
       };
@@ -2955,6 +2955,7 @@ export class ManifestStore {
     projection.configuration.permission_profile_id = nullableString(row.permission_profile_id);
     projection.configuration.config_revision = Number(row.config_revision);
     projection.configuration.runtime_configuration_revision = Number(row.runtime_configuration_revision);
+    projection.configuration.image_input = bool(row.image_input);
     if (bool(row.provider_launch_policy_present)) {
       projection.configuration.provider_launch_policy = bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json);
     } else {
@@ -2978,9 +2979,9 @@ export class ManifestStore {
     run(database.prepare(`
       INSERT INTO agent_configurations(
         agent_id, provider, model, reasoning_effort, charter, permission_profile_id, config_revision, runtime_configuration_revision, delivery_mode, delivery_cutover_json,
-        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json, polling_contract
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null, configuration.polling_contract ?? null);
+        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json, polling_contract, image_input
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null, configuration.polling_contract ?? null, configuration.image_input === true ? 1 : 0);
     const sourcePresent = Object.hasOwn(launch, "source_repo_path");
     run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
 

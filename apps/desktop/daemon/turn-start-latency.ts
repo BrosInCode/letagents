@@ -11,7 +11,8 @@ import { queuedDeliveryKind, type QueuedDeliveryKind } from "./queued-delivery-o
  * Phases, in order, each measured from the previous mark (daemon clock):
  * - inbox_wait: inbox commit -> the delivery is admitted with a live handle.
  *   Includes waiting behind an older turn and waiting for a cold launch.
- * - context: archive, observed context and the fresh room context read.
+ * - context: archive, observed context, the fresh room context read and the
+ *   activating message's image downloads.
  * - provider_entry: provider call -> its dispatch callback (Codex readiness).
  * - dispatch_checks: execution authority and task continuation checks.
  * - workspace_begin: the starting workspace snapshot.

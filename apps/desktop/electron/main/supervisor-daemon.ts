@@ -1303,6 +1303,7 @@ export class SupervisorDaemonClient {
     const result = await this.request<Record<string, unknown>>("supervisor.update_agent_configuration", { entry_id: input.entryId, daemon_generation: input.daemonGeneration, expected_revision: input.expectedRevision, configuration: {
       model: input.configuration.model, reasoning_effort: input.configuration.reasoningEffort, charter: input.configuration.charter,
       permission_profile_id: input.configuration.permissionProfileId,
+      ...(typeof input.configuration.imageInput === "boolean" ? { image_input: input.configuration.imageInput } : {}),
     } });
     if (result.outcome === "invalid") {
       if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
@@ -2284,7 +2285,9 @@ function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, 
     permissionProfileId: value.permission_profile_id as string | null,
     supervisedPermissionProfiles: value.supervised_permission_profiles.map((profile) => mapSupervisedPermissionProfile(profile)),
     providerLaunchPolicy: value.provider_launch_policy, configRevision: value.config_revision as number, runtimeConfigurationRevision: value.runtime_configuration_revision as number,
-    ...mapHomeHarness(value) };
+    ...mapHomeHarness(value),
+    // Only an agent app that asks has the choice; anything unreadable is off.
+    ...(value.image_input_available === true ? { imageInput: value.image_input === true } : {}) };
 }
 
 /** Absent from an older background service, and anything unreadable is off. */
