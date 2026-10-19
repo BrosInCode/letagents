@@ -1462,8 +1462,8 @@ export async function endRoomAgentSession(input: {
     unavailableReceiptRoom = (row as RoomAgentSessionRow).room_id;
     // The agent left the room (retired, purged, moved, disconnected, its
     // grant revoked): the turn it shared there would only read "Stopped
-    // updating" until retention removes it.
-    if (!input.restarting) {
+    // updating" until retention removes it. Only a worker session shares.
+    if (!input.restarting && row.session_kind === "worker") {
       const sessionIds = await deleteLiveActivityOfDepartedAgentTx(tx, { room_id: row.room_id, agent_key: row.agent_key });
       if (sessionIds.length > 0) removedLiveActivity = { room_id: row.room_id, session_ids: sessionIds };
     }

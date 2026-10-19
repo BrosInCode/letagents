@@ -181,6 +181,22 @@ test("only a live worker session of the agent can start its live session", { con
   assert.deepEqual((await db.getReasoningSessions(room.id, { open_only: true, kind: "live" })).map((row) => row.id), [turn.session.id]);
 });
 
+test("only the end of a worker session removes the agent's turn", { concurrency: false, skip }, async () => {
+  const db = store();
+  const room = await db.createProjectWithName("live-controller-end-room");
+  const adaWorker = await worker(room.id, "agent_ada");
+  const turn = await db.createLiveActivitySession({ room_id: room.id, actor_label: "Ada | Codex", agent_key: "agent_ada", agent_session_id: adaWorker, snapshot: snapshot("Ran a shell command") });
+  await db.endRoomAgentSession({ session_id: adaWorker, room_id: room.id, restarting: true });
+  // Before the next worker mints, another kind of session with the agent's key ends.
+  const controller = await db.createRoomAgentSession({
+    room_id: room.id, session_kind: "controller", runtime: "test", actor_label: "agent_ada controller",
+    agent_key: "agent_ada", agent_instance_id: "controller_ada", display_name: "agent_ada controller",
+    owner_account_id: "owner_live", owner_label: "Owner", ide_label: "Agent",
+  });
+  await db.endRoomAgentSession({ session_id: controller.session_id, room_id: room.id });
+  assert.deepEqual((await db.getReasoningSessions(room.id, { open_only: true, kind: "live" })).map((row) => row.id), [turn.session.id]);
+});
+
 test("a start waiting while the worker session ends does not bring the turn back", { concurrency: false, skip }, async () => {
   const db = store();
   const room = await db.createProjectWithName("live-end-race-room");

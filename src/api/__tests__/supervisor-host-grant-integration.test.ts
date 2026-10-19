@@ -1132,6 +1132,57 @@ test("retiring an agent whose restart never came back removes the turn it shared
   assert.deepEqual(live.removed, [{ projectId: room.id, session_id: turn, kind: "live" }]);
 });
 
+test("a repository revocation revokes every grant even when one cannot remove its agent's turn", { skip: requiresDatabase }, async (t) => {
+  const lifecycle = await setupLifecycle();
+  const { room, agent, grantResult } = lifecycle;
+  const live = await liveSharingHarness(lifecycle);
+  t.after(live.dispose);
+  const now = new Date().toISOString();
+  await client!.db.insert(schema!.room_git_bindings).values({
+    room_id: room.id, provider: "github", host: "github.com", repository_id: "repo_live_sweep",
+    repository_full_name: "BrosInCode/live-sweep", repository_owner: "BrosInCode", repository_name: "live-sweep",
+    ref_type: "default_branch", ref_name: "main", default_branch: "main", base_ref: null, head_ref: null,
+    head_repository_id: null, head_repository_full_name: null, head_repository_owner: null, head_repository_name: null,
+    visibility: "private", is_default: true, source: "webhook", created_at: now, updated_at: now,
+  });
+  // The first agent restarted and never came back; its turn waits for a sweep.
+  const stuck = await live.start("daemon:entry-stuck");
+  const stuckTurn = await live.share(stuck.session_id, "Ran the tests");
+  await live.end(stuck.session_id, { restarting: true });
+  // A second agent of the owner works in the room under its own grant.
+  const second = await authDb!.registerAgentIdentity({ canonical_key: "owner/second-agent", name: "second-agent", display_name: "Second Agent", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  const secondGrant = await authDb!.createSupervisorHostGrant({
+    owner_account_id: "owner_route", host_id: "host_route", installation_id: "install_route_second",
+    allowed_room_ids: [room.id], allowed_agent_keys: [second.canonical_key],
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const mint = lifecycle.handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions");
+  const minted = recorder();
+  await mint({ ...live.asGrant(secondGrant.grant), body: { generation: 1, room_id: room.id, agent_key: second.canonical_key, agent_instance_id: "daemon:entry-second" } }, minted);
+  assert.equal(minted.statusCode, 201, JSON.stringify(minted.body));
+  const secondTurn = await live.share((minted.body as any).session_id, "Edited a file", room.id, second.canonical_key);
+
+  // Another transaction holds the first agent's live-activity lock, so its sweep times out.
+  const holder = await client!.pool.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [JSON.stringify(["live_activity", room.id, agent.canonical_key])]);
+    const revoked = await authDb!.revokeSupervisorGrantsForRepositoryAccessChange({
+      repository_full_name: "BrosInCode/live-sweep",
+      canonical_room_id: "github.com/brosincode/live-sweep",
+      owner_login: "owner_route",
+    });
+    assert.deepEqual(new Set(revoked.revoked_grant_ids), new Set([grantResult.grant.grant_id, secondGrant.grant.grant_id]));
+    assert.deepEqual(revoked.ended_session_ids, [(minted.body as any).session_id]);
+  } finally {
+    await holder.query("ROLLBACK");
+    holder.release();
+  }
+  // The second agent's turn went with its session; the first keeps its turn until retention.
+  assert.deepEqual(await live.shared(), [stuckTurn]);
+  assert.deepEqual(live.removed, [{ projectId: room.id, session_id: secondTurn, kind: "live" }]);
+});
+
 test("moving a supervised agent removes the turn it shared from the room it left", { skip: requiresDatabase }, async (t) => {
   const lifecycle = await setupLifecycle();
   const { room, agent } = lifecycle;

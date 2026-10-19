@@ -463,7 +463,12 @@ export async function deleteLiveActivityOfDepartedAgentTx(
   return deleteLiveActivitySessionsTx(tx, input);
 }
 
-/** deleteLiveActivityOfDepartedAgentTx for each room and agent, each in its own transaction. */
+/**
+ * deleteLiveActivityOfDepartedAgentTx for each room and agent, each in its
+ * own transaction. Best effort, and it never throws: a room it cannot clean
+ * (a database error, or the agent's lock held past the timeout) is logged
+ * and keeps the turn until retention removes it.
+ */
 export async function deleteLiveActivityOfDepartedAgents(input: {
   room_ids: readonly string[];
   agent_keys: readonly string[];
@@ -471,8 +476,15 @@ export async function deleteLiveActivityOfDepartedAgents(input: {
   const removed: Array<{ room_id: string; session_ids: string[] }> = [];
   for (const room_id of new Set(input.room_ids)) {
     for (const agent_key of new Set(input.agent_keys)) {
-      const sessionIds = await db.transaction((tx) => deleteLiveActivityOfDepartedAgentTx(tx, { room_id, agent_key }));
-      if (sessionIds.length > 0) removed.push({ room_id, session_ids: sessionIds });
+      try {
+        const sessionIds = await db.transaction(async (tx) => {
+          await tx.execute(sql`SET LOCAL lock_timeout = '2s'`);
+          return deleteLiveActivityOfDepartedAgentTx(tx, { room_id, agent_key });
+        });
+        if (sessionIds.length > 0) removed.push({ room_id, session_ids: sessionIds });
+      } catch (error) {
+        console.error("[live activity] could not remove a departed agent's live sessions", { room_id, agent_key }, error);
+      }
     }
   }
   return removed;
