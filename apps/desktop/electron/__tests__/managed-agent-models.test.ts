@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -327,4 +327,48 @@ test("Cursor model discovery caches failures briefly and refreshModels bypasses 
   assert.equal(refreshed.status, "error");
   assert.equal(existsSync(counterPath), true);
   assert.equal(readFileSync(counterPath, "utf8"), "2");
+});
+
+test("a fresh Cursor model list is returned before the managed profile is prepared", async () => {
+  const cursorBin = join(tempDir, "cursor-agent-models-profile-skip");
+  const managedHome = join(tempDir, "profile-skip", "home");
+  writeFileSync(cursorBin, "#!/usr/bin/env node\nconsole.log('fast - Fast Model (default)');\n", { mode: 0o755 });
+  process.env.LETAGENTS_CURSOR_AGENT_BIN = cursorBin;
+  process.env.LETAGENTS_CURSOR_MANAGED_HOME = managedHome;
+  process.env.LETAGENTS_CURSOR_SOURCE_HOME = join(tempDir, "cursor-source-home");
+  process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+  const repoRootPath = join(tempDir, "profile-skip-repo");
+  mkdirSync(repoRootPath, { recursive: true });
+
+  assert.equal((await listDesktopAgentProviderModels("cursor", { repoRootPath })).status, "ready");
+  assert.equal(existsSync(managedHome), true, "a miss prepares the managed profile");
+  rmSync(join(tempDir, "profile-skip"), { recursive: true, force: true });
+  // Before: every call prepared the profile (about 30 sync fs calls) first.
+  assert.equal((await listDesktopAgentProviderModels("cursor", { repoRootPath })).status, "ready");
+  assert.equal(existsSync(managedHome), false, "a hit never touches the profile");
+  process.env.LETAGENTS_CURSOR_MANAGED_HOME = join(tempDir, "profile-skip", "other-home");
+  await listDesktopAgentProviderModels("cursor", { repoRootPath });
+  assert.equal(existsSync(join(tempDir, "profile-skip", "other-home")), true, "a different profile location is a different key");
+  process.env.LETAGENTS_CURSOR_MANAGED_HOME = managedHome;
+  await listDesktopAgentProviderModels("cursor", { repoRootPath, refreshModels: true });
+  assert.equal(existsSync(managedHome), true, "refreshModels prepares the profile again");
+});
+
+test("the model list cache drops long-expired entries and stays bounded", async (t) => {
+  const cursorBin = join(tempDir, "cursor-agent-models-prune");
+  writeFileSync(cursorBin, "#!/usr/bin/env node\nconsole.log('one - One (default)');\n", { mode: 0o755 });
+  process.env.LETAGENTS_CURSOR_AGENT_BIN = cursorBin;
+  delete process.env.LETAGENTS_CURSOR_MANAGED_HOME;
+  process.env.LETAGENTS_CURSOR_SOURCE_HOME = join(tempDir, "cursor-source-home");
+  process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+  const { modelListCacheSizeForTest } = await import("../main/agents/managed-agent-models.js");
+  let now = Date.now() + 60 * 60_000;
+  t.mock.method(Date, "now", () => now);
+  const roots = Array.from({ length: 70 }, (_, index) => join(tempDir, `prune-${index}`));
+  for (const root of roots) mkdirSync(root, { recursive: true });
+  for (const root of roots) await listDesktopAgentProviderModels("cursor", { repoRootPath: root });
+  assert.equal(modelListCacheSizeForTest(), 64, "the cache never holds more than 64 lists");
+  now += 12 * 60_000;
+  await listDesktopAgentProviderModels("cursor", { repoRootPath: roots[0] });
+  assert.equal(modelListCacheSizeForTest(), 1, "a write drops lists expired past the stale-retention window");
 });
