@@ -240,17 +240,18 @@ test("bounded supervised defaults never tell providers to own polling and Claude
   assert.match(presentationSource, /return "Managed at launch"/);
   assert.match(
     configurationSource,
-    /Join the room, check the board, and help move the available work forward/,
+    /You are part of this room's team\. Work on the tasks assigned to you/,
   );
   assert.match(presentationSource, /showEffortSelector = computed\(\(\) =>\s*selectedProviderId\.value === "codex"\s*\)/);
   assert.doesNotMatch(presentationSource, /showEffortSelector[\s\S]{0,160}claude-code/);
 });
 
-test("supervised creation presents the first task as a one-time message", () => {
-  assert.match(runtimeSettingsSource, /<small>First task<\/small>/);
+test("supervised creation presents the first message as a one-time message, not a task", () => {
+  assert.match(runtimeSettingsSource, /<small>First message<\/small>/);
+  assert.doesNotMatch(runtimeSettingsSource, /<small>First task<\/small>/);
   assert.match(runtimeSettingsSource, /It is sent once/);
   assert.doesNotMatch(runtimeSettingsSource, /<small>Charter<\/small>/);
-  assert.match(actionBarSource, /Add a first task to start the agent/);
+  assert.match(actionBarSource, /Add a first message to start the agent/);
 });
 
 test("supervised providers expose their supervised permission presentation instead of forcing read-only", () => {

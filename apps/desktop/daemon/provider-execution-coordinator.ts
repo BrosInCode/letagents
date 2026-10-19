@@ -205,6 +205,12 @@ export type ProviderExecutionCoordinatorOptions = {
     serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   };
   notifyProgressChanged?(): void;
+  /**
+   * Called inside the commit lane right after a retiring daemon checkpointed
+   * an entry's provider birth outside the manifest lane: batched activity
+   * admitted earlier must never be written over that record.
+   */
+  retirePendingActivity?(entryId: string): void;
   updateManifestEntry(
     entryId: string,
     update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
@@ -930,6 +936,7 @@ export class ProviderExecutionCoordinator {
             }
             await this.options.authority.assertCurrent();
             await commit();
+            this.options.retirePendingActivity?.(entryId);
           }),
         );
         this.options.authority.acceptManifestGeneration(next.generation);

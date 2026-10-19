@@ -49,6 +49,8 @@ export interface DaemonControlOperations {
   applyAgentConfiguration(input: {
     entryId: string; daemonGeneration: number; expectedConfigurationRevision: number;
   }): unknown;
+  /** Only the desktop app's signed request reaches this. */
+  setLiveSharing(input: { entryId: string; daemonGeneration: number; enabled: boolean }): unknown;
   prepareInspectorRoomMove(input: { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }): unknown;
   commitInspectorRoomMove(input: RoomMoveIdentity): unknown;
   acknowledgeInspectorRoomMoveSourceRevocation(input: RoomMoveIdentity & { sourceAgentSessionId: string }): unknown;
@@ -272,6 +274,17 @@ export function createDaemonControlRequestHandler(
           // The choice is saved. A restart that failed is reported as not done.
         }
         return { ...result, apply: typeof apply?.outcome === "string" ? apply.outcome : "unavailable" };
+      }
+      if (authenticated.operation === "set_live_sharing") {
+        // The signature proves the desktop app sent this: no agent or other
+        // local caller of this socket can share an agent's activity with its room.
+        const error = "Sharing an agent's live activity requires an exact agent, the current daemon generation and a choice.";
+        if (!input || Object.keys(input).length !== 3 || typeof input.enabled !== "boolean") throw new Error(error);
+        return operations.setLiveSharing({
+          entryId: requiredStringParam(input, "entryId", error),
+          daemonGeneration: positiveIntegerParam(input, "daemonGeneration", error),
+          enabled: input.enabled,
+        });
       }
       if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
       return operations.hostApprovals.decide(input);

@@ -80,10 +80,22 @@ test("manual evaluation cannot run CI publishing/deployment jobs or forward appl
   assert.deepEqual(workflow.on.workflow_dispatch.inputs.purpose.options, ["checks", "room-ack-evaluation"]);
   assert.deepEqual(workflow.on.workflow_dispatch.inputs.ack_suite.options, ["baseline", "holdout"]);
   assert.equal(workflow.on.workflow_dispatch.inputs.ack_suite.default, "baseline");
-  for (const name of ["build", "integration-tests", "npm-publish", "docker", "deploy"]) {
-    assert.equal(workflow.jobs[name].if, ["build", "integration-tests"].includes(name)
-      ? "inputs.purpose != 'room-ack-evaluation'"
-      : "github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'");
+  const checks = "inputs.purpose != 'room-ack-evaluation'";
+  const gate = "${{ always() && inputs.purpose != 'room-ack-evaluation' }}";
+  const staging = "github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'";
+  const conditions = {
+    "build-checks": checks,
+    "desktop-tests": checks,
+    build: gate,
+    "integration-db-tests": checks,
+    "integration-tests": gate,
+    "npm-publish": staging,
+    docker: staging,
+    deploy: staging,
+  };
+  assert.deepEqual(Object.keys(workflow.jobs).sort(), [...Object.keys(conditions), "room-ack-evaluation"].sort());
+  for (const [name, condition] of Object.entries(conditions)) {
+    assert.equal(workflow.jobs[name].if, condition, name);
   }
   const job = workflow.jobs["room-ack-evaluation"];
   assert.equal(job.if, "github.event_name == 'workflow_dispatch' && inputs.purpose == 'room-ack-evaluation'");

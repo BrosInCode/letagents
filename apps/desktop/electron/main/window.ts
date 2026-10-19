@@ -42,8 +42,11 @@ export function hasOpenWindows(): boolean {
 }
 
 export function focusMainWindow(): void {
-  mainWindow?.show();
-  mainWindow?.focus();
+  // show() on a destroyed BrowserWindow throws "Object has been destroyed",
+  // which would stop a picker from opening at all.
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.show();
+  mainWindow.focus();
 }
 
 export function emitToMainWindow(channel: string, payload: unknown): void {

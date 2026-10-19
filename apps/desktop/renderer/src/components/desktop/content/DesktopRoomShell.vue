@@ -138,7 +138,7 @@
       @stop-agent-turn="stopAgentTurnForApproval"
       @post-agent-answer-now="postAgentAnswerNow"
       @open-events="openEventsTab"
-      @open-github-event="openGitHubEventFromChat"
+      @open-github-event="openGitHubEventFromChat" @open-person="(target, position) => personActions?.open(target, position)"
       @open-task="openBoardTask"
       @dismiss-event-preview="dismissComposerGitHubEventPreview"
       @scroll-position="rememberChatScrollPosition"
@@ -215,7 +215,7 @@
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetailRequest"
-        @open-agent-correction="openAgentCorrectionOrInspector"
+        @open-agent-correction="openAgentCorrectionOrInspector" @open-person="(target, position, action) => personActions?.open(target, position, action)" :viewer-login="viewerLogin"
         @refresh-room="refreshRoomAgents"
         @reveal-message="revealRecordedWorkMessage"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
@@ -273,6 +273,7 @@
       :request-version="selectedAgentDetailRequestVersion"
       :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId }"
       :reasoning-sessions="reasoningSessions"
+      :live-activity-sessions="liveActivitySessions ?? []"
       :correction-request="agentInspectorCorrectionRequest"
       @close="closeAgentDetail"
       @retry="retryAgentInspectorState"
@@ -285,6 +286,7 @@
       @work-retry="loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId, true)"
       @work-source-select="selectAgentInspectorWorkSource"
       @reveal-message="revealAgentInspectorWorkMessage"
+      @reveal-live-request="revealSharedLiveRequest"
       @settings-selected="openAgentInspectorSettings"
       @settings-patch="patchAgentInspectorSettings"
       @settings-save="saveAgentInspectorSettings"
@@ -296,6 +298,7 @@
       @purge="purgeAgentInspectorAgent"
     />
 
+    <PersonActionsHost ref="personActions" :viewer-login="viewerLogin" :room-identifier="room.identifier" @open-messages-with="emit('open-messages-with', $event)" @work-open="selectedAgentDetailRequest && closeAgentDetail(); selectedReasoningSessionId && closeReasoningInspector()" />
     <AddAgentModal
       :room-storage-mode="storage.effectiveMode"
       :open="addAgentModalOpen"
@@ -318,6 +321,7 @@ import { useRoomResponseParticipants } from "../../../composables/useRoomRespons
 import { roomAgentRecoveryAction } from "../../../domain/room-agent-delivery";
 import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, readonly, ref, shallowReadonly, toRef, watch } from "vue";
+import { useNow } from "../../../composables/useNow";
 import type {
   DesktopActivityEntry,
   DesktopAgentProvider,
@@ -436,6 +440,7 @@ import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
+import PersonActionsHost from "./PersonActionsHost.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import { canManageRoomBoard } from "./room-board/board-presentation";
@@ -489,6 +494,8 @@ const props = defineProps<{
   participantHiddenCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
+  /** Agents' turns their owners share with the room. Absent: none. */
+  liveActivitySessions?: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   roomArtifacts: DesktopRoomSharedArtifact[];
   roomAgentWork: DesktopRoomAgentWork[];
@@ -512,6 +519,8 @@ const props = defineProps<{
   onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
 const { pushActionToast } = useDesktopActionToasts();
+const personActions = ref<InstanceType<typeof PersonActionsHost> | null>(null);
+
 const emit = defineEmits<{
   "attention-opened": [];
   "cycle-sidebar": [];
@@ -529,7 +538,7 @@ const emit = defineEmits<{
   /** Placeholder until the daemon exposes a receipt retry control endpoint. */
   "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
   "message-reveal-unavailable": [messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"];
-  "open-inbox": [];
+  "open-inbox": []; "open-messages-with": [target: { login: string; displayName: string; avatarUrl: string | null }];
 }>();
 const roomRef = toRef(props, "room");
 const messagesRef = toRef(props, "messages");
@@ -907,13 +916,15 @@ const pendingResponseParticipants = useRoomResponseParticipants(() => ({
   entries: supervisorEntries.value, presence: props.presence,
   fresh: supervisorEntriesResourceFreshness(supervisorEntriesState.value) === "fresh",
 }));
+// The 90 s "recently working" window needs the clock, not only new presence data.
+const workWindowNow = useNow(30_000);
 const localAgentWork = computed(() =>
   mergeRoomResponseParticipants([
     ...waitingAgentIndicators(supervisorEntries.value, props.room.identifier),
     ...supervisedAgentWorkIndicators(supervisorEntries.value, props.presence, props.room.identifier,
       supervisorEntriesResourceFreshness(supervisorEntriesState.value)),
   ], [...pendingResponseParticipants.value, /* other members' agents, last */ ...remoteAgentWorkIndicators(props.presence,
-    supervisorEntries.value)], props.messages)
+    supervisorEntries.value, [], workWindowNow.value)], props.messages)
 );
 function openBoardTask(taskId: string): void {
   boardSelectedTaskId.value = taskId;
@@ -1812,7 +1823,7 @@ async function openAgentDetailFromParticipant(target: AgentModalTarget): Promise
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
   agentInspectorInitialTab.value = inspectorInitialTab(request.target);
   selectedAgentDetailRequestVersion.value += 1;
-  selectedAgentDetailRequest.value = request;
+  selectedAgentDetailRequest.value = request; personActions.value?.close();
   agentInspectorActionState.value = null;
   releaseAgentCorrectionRequest({ restoreComposerText: true });
   agentInspectorWorkRequestToken += 1;
@@ -2429,6 +2440,13 @@ async function loadAgentInspectorWorkDetail(
 
 /** A wake message is an ordinary room message: show it in the chat. */
 async function revealWakeMessage(messageId: string): Promise<void> {
+  activeTab.value = "chat";
+  await revealRoomMessage(messageId);
+  if (agentInspectorCompact.value) closeAgentDetail();
+}
+
+/** The room message a shared live view says the agent is answering. */
+async function revealSharedLiveRequest(messageId: string): Promise<void> {
   activeTab.value = "chat";
   await revealRoomMessage(messageId);
   if (agentInspectorCompact.value) closeAgentDetail();

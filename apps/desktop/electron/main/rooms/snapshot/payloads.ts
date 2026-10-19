@@ -157,6 +157,7 @@ export interface ActivityEntryPayload {
     kind: "human" | "agent";
     actor_label?: string | null;
     agent_key?: string | null;
+    github_login?: string | null;
     owner_label?: string | null;
     ide_label?: string | null;
     repo_branch?: string | null;
@@ -228,6 +229,8 @@ export interface RoomSnapshotData {
   participantsData: ParticipantsResponse;
   presenceData: PresenceResponse;
   reasoningData: ReasoningResponse;
+  /** Live sessions; an older server answers with reasoning sessions, which the mapper leaves out. */
+  liveActivityData: ReasoningResponse;
   activityHistoryData: ActivityHistoryResponse;
   roomArtifactsData: RoomArtifactsResponse;
   boardSettingsData: BoardSettingsResponse;

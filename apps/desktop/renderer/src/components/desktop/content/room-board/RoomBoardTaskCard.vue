@@ -19,7 +19,7 @@
       <span class="desktop-task-card-header">
         <span class="desktop-task-id" :title="task.id">{{ shortTaskId(task.id) }}</span>
         <span class="desktop-task-updated" :title="`Updated ${task.updatedAt || task.createdAt}`">
-          {{ relativeTime(task.updatedAt || task.createdAt) }}
+          {{ relativeTime(task.updatedAt || task.createdAt, now) }}
         </span>
       </span>
       <span class="desktop-task-card-title">{{ task.title }}</span>
@@ -88,6 +88,10 @@ import { computed } from "vue";
 import { CircleCheck, GitPullRequest, Link, LockKeyhole, ScanEye, UserRound } from "@lucide/vue";
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
+import { useNow } from "../../../../composables/useNow";
+
+// Labels such as "2m ago" move on with the shared clock even when the data is unchanged.
+const now = useNow(30_000);
 import {
   secondaryLeases,
   executionAuthorityState,

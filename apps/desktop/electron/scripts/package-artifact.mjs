@@ -221,6 +221,7 @@ const required = [
   ...[
     "shared/agent-branch.mjs",
     "shared/agent-codenames.mjs",
+    "shared/agent-live-trace.mjs",
     "shared/codex-owner-isolation.mjs",
     "shared/codex-read-only-room-tools.mjs",
     "shared/live-activity-summary.mjs",

@@ -587,11 +587,14 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       res.status(403).json({ error: "Grant does not authorize that worker session." });
       return;
     }
+    const body = (req.body ?? {}) as { retired?: unknown; restarting?: unknown };
     let ended;
     try {
       ended = await endRoomAgentSession({
         session_id: sessionId, owner_account_id: grant.owner_account_id,
         supervisor_grant_id: grant.grant_id, supervisor_grant_fence: fence(grant),
+        // The daemon restarts the agent in this room: the turn it shared there stays.
+        restarting: body.restarting === true && body.retired !== true,
       });
     } catch (error) {
       if (respondToStaleSupervisorGrantFence(res, error)) return;
@@ -600,7 +603,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
     // The owner retired this agent from the desktop: it will not read answers
     // to its open requests, so they are closed for the owner. A move or a
     // credential rotation ends a session without `retired` and keeps them.
-    if (ended && (req.body as { retired?: unknown }).retired === true && !grant.rental_session_id) {
+    if (ended && body.retired === true && !grant.rental_session_id) {
       const owner = await accountKnowledgeActor(grant.owner_account_id).catch(() => null);
       if (owner) await closeRequestsOfRetiredAgent({ room_id: session.room_id, agent_key: session.agent_key, session_id: session.session_id, person: owner });
     }

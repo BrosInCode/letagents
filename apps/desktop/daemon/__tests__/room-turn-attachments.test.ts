@@ -114,15 +114,66 @@ test("only images an agent can take are downloaded; every other file gets a reas
   });
 });
 
-test("an agent that cannot take images, and a local room, download nothing", async () => {
+test("an agent that cannot take images downloads nothing", async () => {
   await withRoot(async (root) => {
     const downloads: Download[] = [];
     const stager = new RoomTurnAttachmentStager(root);
     const unsupported = await stager.prepare(prepareInput({ delivery: null }, downloads));
     assert.deepEqual(unsupported.attachments.map(file => file.status), ["provider_unsupported"]);
-    const local = await stager.prepare(prepareInput({ localRoom: true }, downloads));
-    assert.deepEqual(local.attachments.map(file => file.status), ["local_room_unsupported"]);
+    const local = await stager.prepare(prepareInput({ delivery: null, localRoom: true,
+      sourceMessage: { id: "msg_7", text: "Look", attachments: [attachment("local:3f1c")] } }, downloads));
+    assert.deepEqual(local.attachments.map(file => file.status), ["provider_unsupported"]);
     assert.equal(downloads.length, 0);
+  });
+});
+
+test("a local room's images are read by their local ids and checked like hosted ones", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const fake = new TextEncoder().encode("<svg xmlns='http://www.w3.org/2000/svg'/>");
+    const big = new Uint8Array(9 * 1024 * 1024); big.set(PNG);
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(prepareInput({
+      localRoom: true, roomId: "local_room", apiUrl: "letagents-local://rooms", bearer: "local-worker-bearer",
+      sourceMessage: { id: "msg_7", text: "Local files", attachments: [
+        attachment("local:3f1c0a62-1111-4222-8333-944455556666", { filename: undefined, file_name: "shot.png", content_type: undefined, mime_type: "image/png", byte_size: undefined, size_bytes: PNG.byteLength }),
+        attachment("8d2e47a0-1111-4222-8333-944455556666"),
+        attachment("att_4"),
+        attachment("local:fake"),
+        attachment("local:big", { byte_size: big.byteLength }),
+        attachment("local:big-2", { byte_size: big.byteLength }),
+        attachment("local:big-3", { byte_size: big.byteLength }),
+        attachment("../../etc/passwd"),
+        attachment("local:gone"),
+      ] },
+    }, downloads, (id) => id === "local:fake" ? fake : id.startsWith("local:big") ? big
+      : id === "local:gone" ? new RoomAttachmentDownloadError("unavailable") : PNG));
+    assert.deepEqual(prepared.attachments.map(file => [file.fileName, file.status]), [
+      ["shot.png", "image"], ["8d2e47a0-1111-4222-8333-944455556666.png", "image"], ["att_4.png", "image"],
+      ["local:fake.png", "not_image"], ["local:big.png", "image"], ["local:big-2.png", "image"], ["local:big-3.png", "turn_limit"],
+      ["../../etc/passwd.png", "unavailable"], ["local:gone.png", "unavailable"],
+    ]);
+    assert.deepEqual(prepared.attachments[0], { index: 1, fileName: "shot.png", mimeType: "image/png", sizeBytes: PNG.byteLength,
+      status: "image", image: { mimeType: "image/png", data: PNG } });
+    assert.deepEqual(downloads.map(item => item.attachmentId), ["local:3f1c0a62-1111-4222-8333-944455556666",
+      "8d2e47a0-1111-4222-8333-944455556666", "att_4", "local:fake", "local:big", "local:big-2", "local:gone"]);
+    assert.ok(downloads.every(item => item.messageId === "msg_7" && item.bearer === "local-worker-bearer"));
+    await assert.rejects(lstat(root), { code: "ENOENT" }, "memory delivery writes nothing in a local room either");
+  });
+});
+
+test("a local room stages a file for a provider that reads one", async () => {
+  await withRoot(async (root) => {
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(prepareInput({
+      delivery: "file", localRoom: true, apiUrl: "letagents-local://rooms",
+      sourceMessage: { id: "msg_7", text: "Local", attachments: [attachment("local:abc", { content_type: "image/jpeg" })] },
+    }, [], () => JPEG));
+    const [file] = prepared.attachments;
+    assert.equal(file?.status, "image");
+    assert.equal(file?.image?.mimeType, "image/jpeg");
+    assert.match(file?.image?.path ?? "", /\/1\.jpg$/);
+    assert.deepEqual(new Uint8Array(await readFile(file!.image!.path!)), JPEG);
+    await prepared.release();
+    await assert.rejects(lstat(file!.image!.path!), { code: "ENOENT" });
   });
 });
 
@@ -140,6 +191,21 @@ test("the images of one message share a 20 MB turn budget", async () => {
     assert.deepEqual(downloads.map(item => [item.attachmentId, item.maxBytes]), [
       ["att_1", ROOM_TURN_IMAGE_MAX_BYTES], ["att_2", ROOM_TURN_IMAGE_MAX_BYTES], ["att_4", 2 * 1024 * 1024],
     ]);
+  });
+});
+
+test("a file after the turn budget is spent exactly is over the turn limit, with no request", async () => {
+  await withRoot(async (root) => {
+    const downloads: Download[] = [];
+    const full = new Uint8Array(ROOM_TURN_IMAGE_MAX_BYTES); full.set(PNG);
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(prepareInput({
+      sourceMessage: { id: "msg_7", text: "Three", attachments: [
+        attachment("att_1", { byte_size: full.byteLength }), attachment("att_2", { byte_size: full.byteLength }),
+        attachment("att_3", { byte_size: null }), attachment("att_4", { byte_size: 0 }),
+      ] },
+    }, downloads, () => full));
+    assert.deepEqual(prepared.attachments.map(file => file.status), ["image", "image", "turn_limit", "turn_limit"]);
+    assert.deepEqual(downloads.map(item => item.attachmentId), ["att_1", "att_2"]);
   });
 });
 
@@ -306,10 +372,14 @@ test("a body over the limit is refused, by its declared length or by its counted
   });
 });
 
-test("a malformed message or attachment id and a local room make no request", async () => {
+test("a malformed message or attachment id makes no request, in a hosted or a local room", async () => {
   await withServers(async ({ api, apiRequests }) => {
-    for (const overrides of [{ messageId: "msg_0" }, { attachmentId: "../att_1" }, { apiUrl: "letagents-local://rooms" }]) {
-      await assert.rejects(downloadRoomAttachment(downloadInput(api, overrides)), RoomAttachmentDownloadError);
+    const local = { apiUrl: "letagents-local://rooms", attachmentId: "local:3f1c" };
+    for (const overrides of [{ messageId: "msg_0" }, { attachmentId: "../att_1" }, { attachmentId: "local:3f1c" }, { maxBytes: 0 },
+      { ...local, attachmentId: "../local-files/x.png" }, { ...local, attachmentId: "local:a/b" }, { ...local, attachmentId: "" },
+      { ...local, messageId: "msg_0" }, { ...local, maxBytes: 1.5 }]) {
+      await assert.rejects(downloadRoomAttachment(downloadInput(api, overrides)), (error: unknown) =>
+        error instanceof RoomAttachmentDownloadError && error.reason === "unavailable");
     }
     assert.equal(apiRequests.length, 0);
   });

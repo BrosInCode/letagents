@@ -187,6 +187,7 @@
           :participant-hidden-count="selectedSnapshot?.participantHiddenCount || 0"
           :presence="selectedSnapshot?.presence || []"
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
+          :live-activity-sessions="selectedSnapshot?.liveActivitySessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :room-artifacts="selectedSnapshot?.roomArtifacts || []"
           :room-agent-work="roomAgentWork"
@@ -216,6 +217,7 @@
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
           :attention="roomAttention"
           @open-inbox="openNeedsYou(selectedRoomInfo.identifier)"
+          @open-messages-with="openMessagesWithPerson"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
           @cycle-sidebar="cycleSidebar"
@@ -407,7 +409,7 @@ import { invalidateRoomMessageLinkPreviews, setMessageLinkPreviewViewer } from "
 import { invalidateRoomMessagePins, setMessagePinViewer } from "./composables/useRoomMessagePins";
 import { receiveRoomTyping, setTypingAccount } from "./composables/useRoomTyping";
 import { invalidateRoomMessageReactions, setMessageReactionViewer } from "./composables/useRoomMessageReactions";
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppAgentActionMetadata,
@@ -438,6 +440,7 @@ import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRo
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount } from "./domain/desktop-message-drafts";
 import { preserveRoomRepoStatistics } from "./domain/repo-status";
+import { reuseUnchanged } from "./domain/reuse-unchanged";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
@@ -467,6 +470,8 @@ import {
 } from "./composables/useDesktopAccountRoomSettings";
 import { provideAgentRoomAudience } from "./composables/useAgentRoomAudience";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
+import type { PersonTarget } from "./domain/person-target";
+import { openConversationWithPerson } from "./domain/open-conversation-with-person";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { clearDesktopMessageOutbox } from "./domain/message-outbox";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
@@ -615,6 +620,28 @@ const messagesUnread = ref(0);
 const openConversationId = ref<string | null>(null);
 const openConversationNonce = ref(0);
 function openMessages(id?: string) { openConversationId.value = typeof id === 'string' ? id : null; openConversationNonce.value += 1; activeEntry.value = { id: 'messages', type: 'messages', title: 'Messages', description: 'Private conversations', sectionLabel: 'LetAgents' }; }
+/** Open the private conversation with a room participant. Create it if it does not exist yet. */
+async function openMessagesWithPerson(target: PersonTarget): Promise<void> {
+  const viewerLogin = authStatus.value?.authenticated ? authStatus.value.account?.login ?? null : null;
+  const result = await openConversationWithPerson(target, viewerLogin, desktopIpc.conversations);
+  if (result.status === "self") {
+    pushActionToast("That is you.", "info");
+    return;
+  }
+  if (result.status === "not_found") {
+    pushActionToast(`${target.displayName} is not available for messages.`, "info");
+    return;
+  }
+  if (result.status === "ambiguous") {
+    pushActionToast("More than one account uses this login. Open Messages and search for the person.", "info");
+    return;
+  }
+  if (result.status === "failed") {
+    pushActionToast(result.message, "error");
+    return;
+  }
+  openMessages(result.conversationId);
+}
 const inboxSection = ref<InboxSection>('needs-you');
 const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
 useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
@@ -1242,7 +1269,7 @@ async function refreshSidebarLatestMessages(): Promise<void> {
 
   if (generation !== sessionGeneration.value || !authStatus.value?.authenticated) return;
   if (storageSettings !== JSON.stringify(chatStorageSettings.value)) return;
-  sidebarLatestMessages.value = nextLatestMessages;
+  sidebarLatestMessages.value = reuseUnchanged(toRaw(sidebarLatestMessages.value), nextLatestMessages);
   seedReadMarkersForKnownRooms();
   markActiveRoomRead();
   void refreshUnreadCounts();
@@ -2741,6 +2768,9 @@ watch(
     () => settingsAccountRooms.value,
     () => selectedRootRoomIdentifier.value,
     () => rootRoomSnapshot.value?.roomIdentifier || null,
+    // The room list keeps its identity when a poll finds no change, so opening
+    // an already-archived room must re-run the check by itself.
+    () => activeEntry.value.type === "room" ? [...currentActiveRoomAliases()].sort().join("|") : "",
   ],
   () => {
     void leaveArchivedSelectedRoomFromSettingsList();
@@ -2806,6 +2836,9 @@ onMounted(() => {
   // A connected account activity stream still avoids routine room-list polling.
   accountRoomsRefreshInterval = window.setInterval(() => {
     void refreshUnreadCounts();
+    // Retry leaving an archived active room: the room list keeps its identity
+    // on an unchanged poll, so its watcher does not fire again by itself.
+    void leaveArchivedSelectedRoomFromSettingsList();
     // While the activity stream is open it pushes messages and work as they
     // happen; the room list is then refreshed only rarely, to pick up rooms
     // that were renamed or created elsewhere.

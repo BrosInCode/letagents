@@ -475,8 +475,7 @@ export class RuntimeRecoveryCoordinator {
       if (sessionId) {
         const grant = this.workerAuthority.currentHostGrant(current);
         if (!grant || !this.supervisorGrantHttp.endWorkerSession) throw new Error("Desktop credentials are needed to finish recovery. Reconnect the desktop and retry.");
-        await this.supervisorGrantHttp.endWorkerSession({ apiUrl: grant.apiUrl, grantId: grant.grantId,
-          supervisorGrant: grant.supervisorGrant, grantGeneration: grant.grantGeneration, sessionId });
+        await this.endWorkerSessionForRestart(grant, sessionId);
       }
       await assertAuthority();
       if (binding) await this.bindings.unbind(entryId, binding.agent_session_id, binding.execution_generation_id);
@@ -496,6 +495,21 @@ export class RuntimeRecoveryCoordinator {
       return updated;
     });
     return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(entry) };
+  }
+
+  /** Recovery starts the agent again in the same room, so the room keeps the turn it shared. */
+  private async endWorkerSessionForRestart(
+    grant: NonNullable<ReturnType<WorkerAuthorityCoordinator["currentHostGrant"]>>,
+    sessionId: string,
+  ): Promise<void> {
+    await this.supervisorGrantHttp.endWorkerSession!({
+      apiUrl: grant.apiUrl,
+      grantId: grant.grantId,
+      supervisorGrant: grant.supervisorGrant,
+      grantGeneration: grant.grantGeneration,
+      sessionId,
+      restarting: true,
+    });
   }
 
   private async recoverAgentRuntimeExclusive(entryId: string, daemonGeneration: number) {
@@ -632,13 +646,7 @@ export class RuntimeRecoveryCoordinator {
         if (!grant || !this.supervisorGrantHttp.endWorkerSession) {
           throw new Error("Desktop credentials are required before this provider can be safely recovered.");
         }
-        await this.supervisorGrantHttp.endWorkerSession({
-          apiUrl: grant.apiUrl,
-          grantId: grant.grantId,
-          supervisorGrant: grant.supervisorGrant,
-          grantGeneration: grant.grantGeneration,
-          sessionId: retainedSessionId,
-        });
+        await this.endWorkerSessionForRestart(grant, retainedSessionId);
         if (stoppedCursorLane && interruptedDelivery && ref && binding
           && binding.entry_id === entryId && binding.room_id === entry.room_id
           && binding.work_attempt_id === ref.work_attempt_id

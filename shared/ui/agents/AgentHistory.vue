@@ -102,6 +102,15 @@
             ><span v-if="person.firstSeen"
               >First seen {{ historyTime(person.firstSeen) }}</span
             >
+            <button
+              v-if="person.kind === 'human' && person.login"
+              type="button"
+              class="agents-quiet agents-person-more"
+              :aria-label="`More about ${person.name}`"
+              @click="openPerson(person, $event)"
+            >
+              …
+            </button>
           </div>
           <h3 class="agents-detail-label">
             Saved work <span>{{ workFor(person.id).length }}</span>
@@ -199,6 +208,10 @@ const emit = defineEmits<{
   "update:mode": [mode: "past" | "history"];
   "update:query": [query: string];
   back: [event: MouseEvent];
+  "open-person": [
+    target: { login: string; displayName: string; avatarUrl: string | null },
+    event: MouseEvent,
+  ];
 }>();
 const heading = ref<HTMLElement>();
 const content = ref<HTMLElement>();
@@ -234,6 +247,15 @@ function switchMode(event: MouseEvent) {
   animate(event);
   void nextTick(() => heading.value?.focus({ preventScroll: true }));
 }
+function openPerson(person: AgentHistoryPerson, event: MouseEvent) {
+  if (!person.login) return;
+  emit("open-person", {
+    login: person.login,
+    displayName: person.name,
+    avatarUrl: person.avatarUrl ?? null,
+  }, event);
+}
+
 function showRecords(id: string, event: MouseEvent) {
   personFilter.value = id;
   recordTab.value = "Work";

@@ -188,6 +188,7 @@ const expectedDirectChannels = [
   "desktop:supervisor:retry-room-delivery",
   "desktop:supervisor:revoke-host-tool-rule",
   "desktop:supervisor:set-agent-home-harness",
+  "desktop:supervisor:set-agent-live-sharing",
   "desktop:supervisor:set-desired-state",
   "desktop:supervisor:skip-room-delivery",
   "desktop:supervisor:update-agent-configuration",
@@ -415,6 +416,7 @@ test("host approval sender accepts only the live trusted main frame", async () =
   let destroyed = false;
   let closeWindow: ((event: { preventDefault(): void }) => void) | undefined;
   let hidden = false;
+  let shown = 0;
   let contentsDestroyed = false;
   const frame = { url: "http://127.0.0.1:4310/room" };
   const contents = { mainFrame: frame, isDestroyed: () => contentsDestroyed,
@@ -426,13 +428,15 @@ test("host approval sender accepts only the live trusted main frame", async () =
       async loadURL() {}
       on(event: string, listener: typeof closeWindow) { if (event === "close") closeWindow = listener; }
       hide() { hidden = true; }
+      show() { if (destroyed) throw new Error("Object has been destroyed"); shown += 1; }
+      focus() { if (destroyed) throw new Error("Object has been destroyed"); }
     } } }),
     mock.module("../main/paths.js", { namedExports: { devServerUrl: "http://127.0.0.1:4310",
       electronMainDir: "/test", rendererDistPath: "/test/index.html" } }),
     mock.module("../main/external-url.js", { namedExports: { openExternalWebUrl: async () => {} } }),
   ];
   try {
-    const { assertHostApprovalSender, createWindow, allowMainWindowQuit } = await import("../main/window.js");
+    const { assertHostApprovalSender, createWindow, allowMainWindowQuit, focusMainWindow } = await import("../main/window.js");
     const event = { sender: contents, senderFrame: frame } as never;
     assert.throws(() => assertHostApprovalSender(event), /main application window/);
     createWindow();
@@ -455,8 +459,13 @@ test("host approval sender accepts only the live trusted main frame", async () =
     frame.url = "http://127.0.0.1:4310/room";
     contentsDestroyed = true;
     assert.throws(() => assertHostApprovalSender(event), /main application window/);
-    contentsDestroyed = false; destroyed = true;
+    contentsDestroyed = false;
+    focusMainWindow();
+    assert.equal(shown, 1, "a live main window is shown");
+    destroyed = true;
     assert.throws(() => assertHostApprovalSender(event), /main application window/);
+    assert.doesNotThrow(() => focusMainWindow(), "a destroyed main window is skipped, not shown");
+    assert.equal(shown, 1);
   } finally { for (const stub of mocks.reverse()) stub.restore(); }
 });
 

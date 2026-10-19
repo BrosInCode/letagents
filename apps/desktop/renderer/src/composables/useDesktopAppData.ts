@@ -1,4 +1,4 @@
-import { computed, getCurrentScope, onScopeDispose, ref, watch, type ComputedRef, type Ref } from "vue";
+import { computed, getCurrentScope, onScopeDispose, ref, toRaw, watch, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
@@ -16,15 +16,18 @@ import type {
   WorkerSnapshot,
 } from "../../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
+import { reuseUnchanged } from "../domain/reuse-unchanged";
 import {
   appendSnapshotMessage,
   mergeDesktopRoomMessages,
   mergeRoomSnapshotMessages,
   messageReferencesMissingThreadContext,
+  removeSnapshotLiveActivitySession,
   removeSnapshotReasoningSession,
   replaceSnapshotRoomArtifacts,
   roomSnapshotsMatch,
   snapshotMatchesRoom,
+  upsertSnapshotLiveActivitySession,
   upsertSnapshotReasoningSession,
   upsertSnapshotGitHubEvent,
   upsertSnapshotRoomArtifact,
@@ -433,8 +436,15 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     const allAccountRooms =
       (await desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => [])) || [];
     if (!sessionIsCurrent(sessionGeneration)) return;
-    options.settingsAccountRooms.value = allAccountRooms;
-    options.accountRooms.value = allAccountRooms.filter((room) => !room.archived);
+    // The two lists are separate arrays; their room objects are shared only
+    // when unchanged. Never mutate a room entry in place.
+    // An unchanged poll keeps the previous references, so the sidebar and
+    // Settings do not recompute when the room list did not change.
+    options.settingsAccountRooms.value = reuseUnchanged(toRaw(options.settingsAccountRooms.value), allAccountRooms);
+    options.accountRooms.value = reuseUnchanged(
+      toRaw(options.accountRooms.value),
+      allAccountRooms.filter((room) => !room.archived),
+    );
   }
 
   function selectedRootPath(): string | null {
@@ -771,6 +781,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     if (event.type === "reasoning_remove") {
       setSelectedSnapshot(removeSnapshotReasoningSession(options.selectedSnapshot.value, event.sessionId));
+      return;
+    }
+
+    if (event.type === "live_activity_update") {
+      setSelectedSnapshot(upsertSnapshotLiveActivitySession(options.selectedSnapshot.value, event.session));
+      return;
+    }
+
+    if (event.type === "live_activity_remove") {
+      setSelectedSnapshot(removeSnapshotLiveActivitySession(options.selectedSnapshot.value, event.sessionId));
       return;
     }
 
@@ -1111,6 +1131,7 @@ function createOptimisticSelectedSnapshot(
     participantHiddenCount: 0,
     presence: [],
     reasoningSessions: [],
+    liveActivitySessions: [],
     recentActivity: [],
     roomArtifacts: [],
     boardSettings: baseRootSnapshot.boardSettings,

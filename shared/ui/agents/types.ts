@@ -22,6 +22,9 @@ export interface AgentHistoryPerson {
   firstSeen: string | null;
   lastSeen: string | null;
   past: boolean;
+  /** GitHub login for a human participant. Null when the participant has none. */
+  login?: string | null;
+  avatarUrl?: string | null;
 }
 export interface AgentHistoryWork {
   id: string;

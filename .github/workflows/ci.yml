@@ -29,14 +29,26 @@ on:
       - dev
       - staging
       - main
+  # GitHub's merge queue runs the required checks on each queued pull request
+  # merged onto the latest base branch, before that result is merged.
+  merge_group:
+    types:
+      - checks_requested
+    branches:
+      - dev
+      - staging
+      - main
 
-# Prevent overlapping deploys on staging
+# Prevent overlapping deploys on staging. A newer push to a pull request
+# replaces that pull request's unfinished run instead of waiting behind it.
 concurrency:
   group: deploy-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build:
+  # Everything the required "build" check covers except the desktop test
+  # suites, which run in parallel in desktop-tests below.
+  build-checks:
     if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     steps:
@@ -52,6 +64,9 @@ jobs:
 
       - name: Test workflow supply-chain policy
         run: npm run test:workflow-supply-chain
+
+      - name: Test CI test shard selection
+        run: node --test scripts/select-test-shard.test.mjs
 
       - name: Test production Docker context
         run: npm run test:docker-context
@@ -152,15 +167,6 @@ jobs:
       - name: Lint desktop Vue components
         run: npm --prefix apps/desktop run lint:vue-components
 
-      - name: Test desktop
-        # Pin the API base URL to an unroutable local address so the desktop
-        # runtime tests (which seed fixture sessions and fire a background
-        # heartbeat/pause timer) can never reach the production API. Nothing
-        # listens on port 9, so a stray call fails fast instead of hitting prod.
-        env:
-          LETAGENTS_API_URL: http://127.0.0.1:9
-        run: npm --prefix apps/desktop test
-
       - name: Build desktop
         run: npm --prefix apps/desktop run build
 
@@ -173,6 +179,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           BEFORE_SHA: ${{ github.event.before }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           base=""
@@ -183,6 +190,10 @@ jobs:
           elif [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
             if git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"; then
               base="${BEFORE_SHA}"
+            fi
+          elif [ -n "${MERGE_GROUP_BASE_SHA}" ]; then
+            if git fetch --no-tags --depth=1 origin "${MERGE_GROUP_BASE_SHA}"; then
+              base="${MERGE_GROUP_BASE_SHA}"
             fi
           fi
           run=true
@@ -226,11 +237,130 @@ jobs:
         timeout-minutes: 5
         run: cd apps/desktop && node electron/scripts/opencode-runtime-contract-smoke.mjs
 
+  # The desktop suites ran in series in one job and took most of its time.
+  # Each runs here in its own job, with the commands `npm test` runs in
+  # apps/desktop, after the same dependency checks as build-checks.
+  desktop-tests:
+    name: desktop-tests (${{ matrix.suite }})
+    if: inputs.purpose != 'room-ack-evaluation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The electron files are split by size into shards. Every electron
+        # entry names the same shard total; change them together.
+        suite:
+          - renderer
+          - daemon
+          - electron 1/3
+          - electron 2/3
+          - electron 3/3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Enforce dependency cooldown
+        run: npm run verify:dependency-age
+
+      - name: Install dependencies without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts --no-audit
+          npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify dependency signatures
+        run: |
+          npm audit signatures
+          npm audit signatures --prefix apps/desktop
+
+      - name: Install pinned dependency audit client
+        run: |
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+
+      - name: Audit dependency advisories
+        run: node scripts/verify-dependency-advisories.mjs . apps/desktop apps/desktop/electron/runtime/letagents
+
+      - name: Run verified dependency lifecycle scripts
+        run: |
+          npm rebuild
+          npm rebuild --prefix apps/desktop
+          npm exec --prefix apps/desktop -- install-electron
+
+      - name: Test desktop (${{ matrix.suite }})
+        # Pin the API base URL to an unroutable local address so the desktop
+        # runtime tests (which seed fixture sessions and fire a background
+        # heartbeat/pause timer) can never reach the production API. Nothing
+        # listens on port 9, so a stray call fails fast instead of hitting prod.
+        env:
+          LETAGENTS_API_URL: http://127.0.0.1:9
+          SUITE: ${{ matrix.suite }}
+        run: |
+          set -euo pipefail
+          case "${SUITE}" in
+            renderer)
+              npm --prefix apps/desktop run test:renderer
+              npm --prefix apps/desktop run test:packaging
+              ;;
+            daemon)
+              npm --prefix apps/desktop run test:daemon
+              ;;
+            "electron "*)
+              shard="${SUITE#electron }"
+              cd apps/desktop
+              node ../../scripts/select-test-shard.mjs --shard "${shard}" electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt"
+              mapfile -t files < "${RUNNER_TEMP}/electron-shard.txt"
+              if [ "${#files[@]}" -eq 0 ]; then
+                echo "Electron shard ${shard} has no test files." >&2
+                exit 1
+              fi
+              echo "Electron shard ${shard} runs ${#files[@]} files:"
+              printf '  %s\n' "${files[@]}"
+              npm run test:electron:files -- "${files[@]}"
+              ;;
+            *)
+              echo "Unknown desktop test suite '${SUITE}'." >&2
+              exit 1
+              ;;
+          esac
+
+  # The required "build" check. GitHub counts a skipped check as passing, so
+  # this gate runs even after a failure or cancellation, and passes only when
+  # every job it waits for succeeded.
+  build:
+    needs: [build-checks, desktop-tests]
+    if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every job this check waits for to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "${NEEDS}"
+          jq -e 'length > 0 and all(.[]; .result == "success")' <<< "${NEEDS}" > /dev/null
+
   # ── DB-backed integration tests ──
-  integration-tests:
+  # Four parallel groups, each with its own database. Every test step names
+  # its group; the groups are balanced by measured step time.
+  integration-db-tests:
+    name: integration-db-tests (group ${{ matrix.group }})
     if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
     services:
       postgres:
         image: docker.io/library/postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
@@ -277,42 +407,59 @@ jobs:
         run: npm rebuild
 
       - name: Test private conversations and app credentials
+        if: matrix.group == 3
         run: node --import tsx --test src/api/__tests__/private-conversations-db.test.ts
 
       - name: Test opt-in conversation routing and recovery
+        if: matrix.group == 1
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/jev-room-routing-db.test.ts
 
       - name: Test sequential reply turns
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/sequential-reply-turns.test.ts src/api/__tests__/sequential-reply-turns-db.test.ts
 
       - name: Test room memory and human request persistence
+        if: matrix.group == 1
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-knowledge-routes.test.ts src/api/__tests__/room-knowledge-db.test.ts
 
       - name: Test the sidebar's account activity stream
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/account-activity-hub.test.ts src/api/__tests__/account-activity-stream.test.ts src/api/__tests__/account-activity-db.test.ts
 
       - name: Test room settings, event filters and agent guidelines
+        if: matrix.group == 1
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-settings-routes.test.ts src/api/__tests__/room-settings-delivery.test.ts src/api/__tests__/room-settings-db.test.ts
 
       - name: Test agent wake rules and room resource invalidation
+        if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wake-rules-contract.test.ts src/api/__tests__/wake-rules-evaluate.test.ts src/api/__tests__/wake-rules-db.test.ts src/api/__tests__/room-event-broker.test.ts
 
+      - name: Test shared live activity sessions
+        if: matrix.group == 4
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-reasoning-routes.test.ts src/api/__tests__/live-activity-routes.test.ts src/api/__tests__/live-activity-db.test.ts
+
       - name: Test message link previews
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-link-previews.test.ts src/api/__tests__/message-link-previews-routes.test.ts src/api/__tests__/message-link-previews-db.test.ts src/api/__tests__/room-message-routes.test.ts
 
       - name: Test message pins
+        if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-pins-routes.test.ts src/api/__tests__/message-pin-store.test.ts src/api/__tests__/message-pins-db.test.ts
 
       - name: Test message reactions and optional GIFs
+        if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/giphy-client.test.ts src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
 
       - name: Test room message search
+        if: matrix.group == 3
         run: node --import tsx --test src/api/__tests__/message-search-routes.test.ts src/api/__tests__/message-search-db.test.ts src/api/__tests__/message-search-controller.test.ts
 
       - name: Test ephemeral room typing and stream isolation
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-typing.test.ts src/api/__tests__/room-message-routes.test.ts src/api/__tests__/sse.test.ts src/api/__tests__/event-bridge.test.ts src/api/__tests__/event-bridge-domains.test.ts src/api/__tests__/event-bridge-pg.test.ts
 
       - name: Run message attachment tests
+        if: matrix.group == 2
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -321,6 +468,7 @@ jobs:
           src/api/__tests__/message-attachments-db.test.ts
 
       - name: Run thread inbox parity tests
+        if: matrix.group == 2
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -330,6 +478,7 @@ jobs:
           src/api/__tests__/human-thread-audience-db.test.ts
 
       - name: Run desktop push worker database tests
+        if: matrix.group == 1
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -341,6 +490,7 @@ jobs:
           src/api/__tests__/message-reminders-routes.test.ts
 
       - name: Run webhook integration tests
+        if: matrix.group == 1
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -348,6 +498,7 @@ jobs:
           src/api/__tests__/github-webhook-integration.test.ts
 
       - name: Run repo room access integration tests
+        if: matrix.group == 4
         timeout-minutes: 5
         run: >-
           node
@@ -356,7 +507,15 @@ jobs:
           src/api/__tests__/repo-room-access-integration.test.ts
           src/api/__tests__/github-repo-access.test.ts
 
+      # Own step: DB-backed files in one node --test run start in parallel
+      # processes and drop the same schema.
+      - name: Test live room rechecks and leases after a credential is revoked
+        if: matrix.group == 1
+        timeout-minutes: 5
+        run: node --import tsx --test src/api/__tests__/room-access-live-recheck-db.test.ts src/api/__tests__/live-room-authorization.test.ts
+
       - name: Run repo migration tests
+        if: matrix.group == 1
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -366,6 +525,7 @@ jobs:
           src/api/__tests__/github-repo-migration.test.ts
 
       - name: Run workflow lookup tests
+        if: matrix.group == 4
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -373,6 +533,7 @@ jobs:
           src/api/__tests__/repo-workflow-lookup.test.ts
 
       - name: Run coordination DB tests
+        if: matrix.group == 2
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -380,6 +541,7 @@ jobs:
           src/api/__tests__/coordination-db.test.ts
 
       - name: Run room agent presence tests
+        if: matrix.group == 3
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -387,6 +549,7 @@ jobs:
           src/api/__tests__/room-agent-presence.test.ts
 
       - name: Run board manager failover tests
+        if: matrix.group == 1
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -395,6 +558,7 @@ jobs:
           src/api/__tests__/board-manager-failover-db.test.ts
 
       - name: Run board intent escalation tests
+        if: matrix.group == 1
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -402,15 +566,8 @@ jobs:
           src/api/__tests__/board-intent-escalation-sweep.test.ts
           src/api/__tests__/board-intent-escalation-db.test.ts
 
-      - name: Run room stall watchdog tests
-        run: >-
-          node
-          --import ./node_modules/tsx/dist/loader.mjs
-          --test
-          src/api/__tests__/room-stall-sweep.test.ts
-          src/api/__tests__/room-stall-db.test.ts
-
       - name: Run worker session auth tests
+        if: matrix.group == 3
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -418,6 +575,7 @@ jobs:
           src/api/__tests__/worker-session-auth-integration.test.ts
 
       - name: Run worker bearer auth tests
+        if: matrix.group == 3
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -425,6 +583,7 @@ jobs:
           src/api/__tests__/agent-session-bearer-integration.test.ts
 
       - name: Run supervisor host grant tests
+        if: matrix.group == 4
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -432,6 +591,7 @@ jobs:
           src/api/__tests__/supervisor-host-grant-integration.test.ts
 
       - name: Run execution delegation grant tests
+        if: matrix.group == 3
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -439,6 +599,7 @@ jobs:
           src/api/__tests__/execution-delegation-grants-integration.test.ts
 
       - name: Run execution delegation decision tests
+        if: matrix.group == 2
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -446,6 +607,7 @@ jobs:
           src/api/__tests__/execution-delegation-decisions-integration.test.ts
 
       - name: Run task lease rebind tests
+        if: matrix.group == 4
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -453,6 +615,7 @@ jobs:
           src/api/__tests__/task-lease-rebind-integration.test.ts
 
       - name: Run task PATCH fence boundary tests
+        if: matrix.group == 3
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -460,6 +623,7 @@ jobs:
           src/api/__tests__/task-patch-fence-boundary-integration.test.ts
 
       - name: Run task-record fence wiring test
+        if: matrix.group == 3
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -467,6 +631,7 @@ jobs:
           src/api/__tests__/task-record-fence-wiring.test.ts
 
       - name: Run artifact fence wiring test
+        if: matrix.group == 4
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
@@ -474,6 +639,7 @@ jobs:
           src/api/__tests__/artifact-fence-wiring.test.ts
 
       - name: Run focus room tests
+        if: matrix.group == 3
         timeout-minutes: 5
         run: >-
           node
@@ -482,11 +648,27 @@ jobs:
           src/api/__tests__/focus-rooms.test.ts
 
       - name: Run focus lineage repair tests
+        if: matrix.group == 3
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs
           --test
           src/api/__tests__/focus-lineage-repair.test.ts
+
+  # The required "integration-tests" check, gated like "build" above.
+  integration-tests:
+    needs: [integration-db-tests]
+    if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every job this check waits for to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "${NEEDS}"
+          jq -e 'length > 0 and all(.[]; .result == "success")' <<< "${NEEDS}" > /dev/null
 
   # ── Publish the letagents package to npm when the version bumps ──
   # No-op unless package.json holds a version that npm doesn't have yet, so a

@@ -99,8 +99,8 @@ export function registerTaskBoardTools(server: McpServer): void {
   server.tool(
     "get_board",
     "Get the current task board for the room. By default shows only actionable tasks " +
-      "(including merged closeout work, but not done/cancelled). Agents should check this on startup and when idle to " +
-      "see if there is unassigned work to claim.",
+      "(including merged closeout work, but not done/cancelled). Read it on startup and when a task event arrives so " +
+      "you know the work in flight and who holds it; work starts when a task is assigned to you.",
     {
       status: z.enum(TASK_STATUSES).optional().describe("Filter by specific status"),
       open_only: z.boolean().optional().describe("If true (default), only show actionable tasks, including merged closeout work but not done/cancelled"),

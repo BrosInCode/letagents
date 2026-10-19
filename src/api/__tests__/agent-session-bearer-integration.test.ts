@@ -180,7 +180,7 @@ test("bearer route handlers enforce self scope for reasoning and session control
   const principal = { bearer_id: "agent_bearer_1", bearer_generation: 1, capabilities: ["coordination.self_write"], room_id: "room_1", agent_session_id: "agent_session_1", actor_label: "Worker", agent_key: "owner/worker", agent_instance_id: null, session_kind: "worker" as const, runtime: "codex", display_name: "Worker", owner_label: "Owner", ide_label: "Agent", repo_branch: null, expires_at: new Date(Date.now() + 60_000).toISOString() };
   const reasoningHandlers = new Map<string, (...args: any[]) => Promise<void>>();
   const reasoningPatchHandlers: Array<(...args: any[]) => Promise<void>> = [];
-  registerRoomReasoningRoutes({ get() {}, post(path: RegExp, handler: any) { reasoningHandlers.set(path.source, handler); }, patch(_path: RegExp, handler: any) { reasoningPatchHandlers.push(handler); } } as never, {
+  registerRoomReasoningRoutes({ get() {}, post(path: RegExp, handler: any) { reasoningHandlers.set(path.source, handler); }, patch(_path: RegExp, handler: any) { reasoningPatchHandlers.push(handler); }, delete() {} } as never, {
     reasoningEvents: { emit() {} }, resolveCanonicalRoomRequestId: async () => "room_1", resolveRoomOrReply: async () => ({ id: "room_1" }), requireParticipant: async () => true,
     reasoningStore: { getReasoningSessionById: async () => ({ actor_label: "Other" }) },
   } as never);
@@ -197,7 +197,7 @@ test("bearer route handlers enforce self scope for reasoning and session control
   const presenceHandlers = new Map<string, (...args: any[]) => Promise<void>>();
   registerRoomPresenceRoutes({ get() {}, post(path: RegExp, handler: any) { presenceHandlers.set(path.source, handler); } } as never, {
     resolveCanonicalRoomRequestId: async () => "room_1", resolveRoomOrReply: async () => ({ id: "room_1" }), requireParticipant: async () => true, requireAdmin: async () => false,
-    rememberAgentRoomParticipant: async () => {}, maybeEmitStaleWorkPrompt: async () => {}, emitProjectMessage: async () => ({}),
+    rememberAgentRoomParticipant: async () => {}, emitProjectMessage: async () => ({}),
   } as never);
   const disconnect = [...presenceHandlers.entries()].find(([source]) => source.includes("agent-sessions") && source.includes("disconnect"))?.[1];
   assert.ok(disconnect);
@@ -311,7 +311,6 @@ test("native activity accepts the scoped worker bearer without a legacy session 
     requireParticipant: async () => { throw new Error("scoped native activity must not require owner participation"); },
     requireAdmin: async () => true,
     rememberAgentRoomParticipant: async () => {},
-    maybeEmitStaleWorkPrompt: async () => {},
     emitProjectMessage: async () => { throw new Error("native activity must not emit room chat"); },
   } as never);
   const handler = [...handlers.entries()].find(([route]) => route.includes("native-activity"))?.[1];
@@ -420,7 +419,6 @@ test("native harness session-token self-auth survives flag-off/expired bearers a
     requireParticipant: async () => { throw new Error("native worker bearer route must not require an owner participant session"); },
     requireAdmin: async () => true,
     rememberAgentRoomParticipant: async () => {},
-    maybeEmitStaleWorkPrompt: async () => {},
     emitProjectMessage: async () => { throw new Error("native activity must not emit room chat"); },
   } as never);
   const handler = [...handlers.entries()].find(([path]) => path.includes("native-activity"))?.[1];
