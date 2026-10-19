@@ -12,6 +12,7 @@ import {
   getReasoningSessions,
   updateLiveActivitySession,
   updateReasoningSession,
+  LiveActivityWorkerEndedError,
   type LiveActivitySnapshot,
   type Project,
   type ReasoningSession,
@@ -229,7 +230,7 @@ export function registerRoomReasoningRoutes(
     const workerIdentity = agentSessionIdentity?.ok ? agentSessionIdentity.identity : null;
     if (body.kind === "live") {
       // Only the agent's own worker session, which its owner's desktop holds, shares its live activity.
-      if (!workerIdentity || workerIdentity.session_kind !== "worker") {
+      if (!workerIdentity || workerIdentity.session_kind !== "worker" || !workerIdentity.agent_session_id) {
         res.status(403).json({ error: "Only an agent's own worker session can share its live activity." });
         return;
       }
@@ -239,6 +240,7 @@ export function registerRoomReasoningRoutes(
           room_id: project.id,
           actor_label: workerIdentity.actor_label,
           agent_key: workerIdentity.agent_key,
+          agent_session_id: workerIdentity.agent_session_id,
           snapshot,
         });
         for (const sessionId of result.removed_session_ids) {
@@ -253,6 +255,10 @@ export function registerRoomReasoningRoutes(
         );
         res.status(201).json({ room_id: project.id, session: result.session, update: result.update });
       } catch (error) {
+        if (error instanceof LiveActivityWorkerEndedError) {
+          res.status(403).json({ error: "This worker session has ended." });
+          return;
+        }
         respondWithBadRequest(res, "POST /rooms/:room_id/reasoning-sessions", error, "Live activity could not be shared.");
       }
       return;

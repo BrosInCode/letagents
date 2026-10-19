@@ -6,9 +6,10 @@ export const LIVE_ACTIVITY_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /**
  * How long a live session is kept after its last snapshot. A working agent's
  * desktop replaces the session every turn and refreshes it every few seconds,
- * so only an agent whose desktop stopped publishing (it was retired, its
- * owner's computer is off, a withdrawal could not reach the server) keeps one
- * this long.
+ * and the end of the agent's last worker session in the room removes it, so
+ * only an agent whose desktop stopped publishing (its owner's computer is
+ * off, a withdrawal could not reach the server, a restart never came back)
+ * keeps one this long.
  */
 export const LIVE_ACTIVITY_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const LIVE_ACTIVITY_CLEANUP_BATCH = 100;
@@ -20,12 +21,17 @@ export interface LiveActivityCleanupDeps {
   removed(input: { room_id: string; session_id: string }): void;
 }
 
+/** Tell a room that live sessions are gone, so its members stop showing them. */
+export function announceLiveActivityRemoved(input: { room_id: string; session_ids: readonly string[] }): void {
+  for (const sessionId of input.session_ids) {
+    reasoningEvents.emit("reasoning:removed", { projectId: input.room_id, session_id: sessionId, kind: "live" });
+  }
+}
+
 const defaultDeps: LiveActivityCleanupDeps = {
   now: () => Date.now(),
   deleteStale: deleteStaleLiveActivitySessions,
-  removed: ({ room_id, session_id }) => {
-    reasoningEvents.emit("reasoning:removed", { projectId: room_id, session_id, kind: "live" });
-  },
+  removed: ({ room_id, session_id }) => announceLiveActivityRemoved({ room_id, session_ids: [session_id] }),
 };
 
 /**
