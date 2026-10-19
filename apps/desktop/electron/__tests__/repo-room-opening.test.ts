@@ -196,6 +196,20 @@ test("opening a fetched repo room preserves its identity without calculating bra
       assert.equal(await pending, null);
       dialogResult = Promise.resolve({ canceled: false, filePaths: [repoPath] });
       assert.equal(await pickNewProjectParent(), repoPath);
+
+      // A second connect while a picker is open is a plain error result, not
+      // a rejected IPC call, and the first picker is not disturbed.
+      dialogResult = new Promise((resolve) => { resolvePicker = resolve; });
+      const firstConnect = connectProjectToRoom({ roomIdentifier: "room_connect", gitRoom: null });
+      const secondConnect = await connectProjectToRoom({ roomIdentifier: "room_connect", gitRoom: null });
+      assert.deepEqual(secondConnect, {
+        canceled: false,
+        binding: null,
+        repoStatus: null,
+        error: "Finish or cancel the open folder picker first.",
+      });
+      resolvePicker({ canceled: true, filePaths: [] });
+      assert.equal((await firstConnect).canceled, true);
     });
     await t.test("reconnecting a published local project keeps its original room and never publishes chat", async () => {
       const { resolveRoomIdentifierFromPath } = await import("../repo-status.js");
