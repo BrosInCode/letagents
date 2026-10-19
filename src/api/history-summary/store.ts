@@ -11,6 +11,7 @@ import {
   type RoomHistorySummaryState,
 } from "../../../shared/room-history-summary.mjs";
 import { db } from "../db/client.js";
+import { replyTurnHoldFrontier } from "../db/messages/routing-frontier.js";
 import { formatMessageId } from "../db/utils.js";
 import { planRoomHistoryView, type RoomHistoryPart } from "./view-plan.js";
 
@@ -25,8 +26,18 @@ const eligible = (alias: string): SQL => sql.raw(`${alias}.visibility IS NULL
 const INGEST_BATCH = 256;
 /** A room with nothing to do is looked at again after this long, in case a wake was lost. */
 const IDLE_RECHECK = sql`interval '10 minutes'`;
-/** How long one worker turn may hold a room before another process may take it. */
-const LEASE = sql`interval '3 minutes'`;
+/** A room with summaries off is looked at about daily; turning them on wakes it at once. */
+const OFF_RECHECK = sql`interval '1 day'`;
+/**
+ * How long one worker turn may hold a room before another process may take
+ * it. A turn starts no new calls after ROOM_HISTORY_TURN_BUDGET_MS, and a
+ * call ends within its timeout (at most 60 s, twice for a long line), so a
+ * turn ends well inside the lease and no second process repeats its calls.
+ */
+const LEASE = sql`interval '10 minutes'`;
+export const ROOM_HISTORY_TURN_BUDGET_MS = 120_000;
+/** Two lines joined as they are, when they fit in one, keep their boundary visible. */
+export const ROOM_HISTORY_JOIN = " | ";
 
 const iso = (value: unknown): string => value instanceof Date ? value.toISOString() : new Date(String(value)).toISOString();
 const rows = async (executor: Executor, query: SQL): Promise<Row[]> => (await executor.execute(query)).rows as Row[];
@@ -90,7 +101,7 @@ async function addParents(tx: Executor, roomId: string, startLevel: number, star
       FROM room_history_summary_nodes WHERE room_id = ${roomId} AND level = ${level} AND idx IN (${left}, ${left + 1})
       ORDER BY idx`);
     if (pair.length !== 2 || pair.some((node) => node.text === null)) return;
-    const combined = `${pair[0]!.text} ${pair[1]!.text}`;
+    const combined = `${pair[0]!.text}${ROOM_HISTORY_JOIN}${pair[1]!.text}`;
     const text = utf8Bytes(combined) <= ROOM_HISTORY_LINE_BYTES ? combined : null;
     await tx.execute(sql`INSERT INTO room_history_summary_nodes
       (room_id, level, idx, first_number, last_number, first_at, last_at, text, built_at)
@@ -106,17 +117,20 @@ async function addParents(tx: Executor, roomId: string, startLevel: number, star
 /**
  * Reads new messages into the tree as leaves, oldest first. A message that
  * fits in one line is its own line; a longer one waits for the summarizer.
- * Only the newest ROOM_HISTORY_BACKFILL_MESSAGES are ever read: a room that
- * starts (or turns summaries back on) with more skips the older ones.
+ * A room's first read starts at its newest ROOM_HISTORY_BACKFILL_MESSAGES;
+ * after that every new message is read, in order and without gaps.
  */
 export async function ingestRoomHistoryMessages(claim: RoomHistoryClaim): Promise<number> {
   return db.transaction(async (tx) => {
     const state = await holdsClaim(tx, claim);
     if (!state) return 0;
-    const [floor] = await rows(tx, sql`SELECT m.number FROM messages m
-      WHERE m.room_id = ${claim.roomId} AND ${eligible("m")}
-      ORDER BY m.number DESC OFFSET ${ROOM_HISTORY_BACKFILL_MESSAGES - 1} LIMIT 1`);
-    const from = Math.max(Number(state.next_number), floor ? Number(floor.number) : 0);
+    let from = Number(state.next_number);
+    if (Number(state.leaf_count) === 0) {
+      const [floor] = await rows(tx, sql`SELECT m.number FROM messages m
+        WHERE m.room_id = ${claim.roomId} AND ${eligible("m")}
+        ORDER BY m.number DESC OFFSET ${ROOM_HISTORY_BACKFILL_MESSAGES - 1} LIMIT 1`);
+      from = Math.max(from, floor ? Number(floor.number) : 0);
+    }
     const batch = await rows(tx, sql`SELECT m.number, m.sender, COALESCE(m.display_text, m.text) AS text,
         m.thread_root_number, m.timestamp
       FROM messages m WHERE m.room_id = ${claim.roomId} AND m.number >= ${from} AND ${eligible("m")}
@@ -195,13 +209,33 @@ export async function roomHistoryHasWork(roomId: string): Promise<boolean> {
 }
 
 /**
- * Ends a worker turn. After a failure the room waits, longer each time (30 s
- * doubling to 30 min; a refused key waits 30 min at once), and the wait and
- * its reason are shown in the room's setting.
+ * Summaries were turned back on: the room goes on from its newest message.
+ * Messages posted while they were off are never read, so they never leave
+ * the server. The tree keeps what it had.
+ */
+export async function skipRoomHistoryToNow(roomId: string): Promise<void> {
+  await db.execute(sql`UPDATE room_history_summary_state
+    SET next_number = GREATEST(next_number, COALESCE((SELECT max(m.number) + 1 FROM messages m WHERE m.room_id = ${roomId}), 0)),
+        available_at = now(), failures = 0, last_error = NULL, updated_at = now()
+    WHERE room_id = ${roomId}`);
+}
+
+const hasWorkCondition = (roomId: string): SQL => sql`(
+  EXISTS (SELECT 1 FROM room_history_summary_nodes n WHERE n.room_id = ${roomId} AND n.text IS NULL)
+  OR EXISTS (SELECT 1 FROM messages m WHERE m.room_id = ${roomId}
+    AND m.number >= room_history_summary_state.next_number AND ${eligible("m")}))`;
+
+/**
+ * Ends a worker turn. "settle" decides in the same statement whether the
+ * room has more to do: a wake that came while the room was held waits for
+ * this row and then finds it unheld, and a message committed before this
+ * statement is seen by it, so no wake is lost. After a failure the room
+ * waits, longer each time (30 s doubling to 30 min; a refused key waits
+ * 30 min at once), and the wait and its reason are shown in the setting.
  */
 export async function releaseRoomHistoryRoom(
   claim: RoomHistoryClaim,
-  outcome: { kind: "more" | "idle" } | { kind: "failed"; error: string; auth: boolean },
+  outcome: { kind: "settle" | "off" } | { kind: "failed"; error: string; auth: boolean },
 ): Promise<void> {
   if (outcome.kind === "failed") {
     await db.execute(sql`UPDATE room_history_summary_state
@@ -213,7 +247,8 @@ export async function releaseRoomHistoryRoom(
   }
   await db.execute(sql`UPDATE room_history_summary_state
     SET claim_token = NULL, failures = 0, last_error = NULL, updated_at = now(),
-        available_at = ${outcome.kind === "more" ? sql`now()` : sql`now() + ${IDLE_RECHECK}`}
+        available_at = ${outcome.kind === "off" ? sql`now() + ${OFF_RECHECK}`
+          : sql`CASE WHEN ${hasWorkCondition(claim.roomId)} THEN now() ELSE now() + ${IDLE_RECHECK} END`}
     WHERE room_id = ${claim.roomId} AND claim_token = ${claim.token}`);
 }
 
@@ -269,11 +304,28 @@ async function pendingLeafTexts(roomId: string, numbers: number[]): Promise<Map<
   }), ROOM_HISTORY_LINE_BYTES)]));
 }
 
-export async function readRoomHistoryView(roomId: string, maxLines: number): Promise<{
+/**
+ * The first message held for this agent's sequential reply turn, if any.
+ * The agent must not see it or anything after it, summarized or not.
+ */
+async function holdFrontier(roomId: string, holdAgentKey: string | null | undefined): Promise<number | null> {
+  if (!holdAgentKey) return null;
+  const [row] = await rows(db, sql`SELECT ${replyTurnHoldFrontier(roomId, holdAgentKey)} AS frontier`);
+  return row?.frontier === null || row?.frontier === undefined ? null : Number(row.frontier);
+}
+
+export async function readRoomHistoryView(roomId: string, maxLines: number, options: { holdAgentKey?: string | null } = {}): Promise<{
   lines: RoomHistoryLine[]; omitted_older_lines: number; covered_through_message_id: string | null;
 }> {
   const [state] = await rows(db, sql`SELECT leaf_count FROM room_history_summary_state WHERE room_id = ${roomId}`);
-  const leafCount = state ? Number(state.leaf_count) : 0;
+  let leafCount = state ? Number(state.leaf_count) : 0;
+  const frontier = await holdFrontier(roomId, options.holdAgentKey);
+  if (frontier !== null && leafCount) {
+    // Leaves are in message order, so the view covers only those before the hold.
+    const [visible] = await rows(db, sql`SELECT count(*) AS leaves FROM room_history_summary_nodes
+      WHERE room_id = ${roomId} AND level = 0 AND first_number < ${frontier}`);
+    leafCount = Number(visible?.leaves ?? 0);
+  }
   if (!leafCount) return { lines: [], omitted_older_lines: 0, covered_through_message_id: null };
   const unbuilt = (await rows(db, sql`SELECT level, idx FROM room_history_summary_nodes
     WHERE room_id = ${roomId} AND text IS NULL`)).map((node) => ({ level: Number(node.level), idx: Number(node.idx) }));
@@ -295,12 +347,14 @@ async function readNodes(roomId: string, parts: readonly RoomHistoryPart[]): Pro
 }
 
 /** The two lines a node was made from, or, for a single message, the message. Null for no such node. */
-export async function readRoomHistoryExpansion(roomId: string, level: number, idx: number): Promise<{
+export async function readRoomHistoryExpansion(roomId: string, level: number, idx: number, options: { holdAgentKey?: string | null } = {}): Promise<{
   lines: RoomHistoryLine[];
   message: { id: string; sender: string; text: string; timestamp: string; thread_root_id: string | null } | null;
 } | null> {
   const [node] = await readNodes(roomId, [{ level, idx }]);
   if (!node) return null;
+  const frontier = await holdFrontier(roomId, options.holdAgentKey);
+  if (frontier !== null && Number(node.last_number) >= frontier) return null;
   if (level === 0) {
     const [message] = await rows(db, sql`SELECT number, sender, COALESCE(display_text, text) AS text, timestamp, thread_root_number
       FROM messages WHERE room_id = ${roomId} AND number = ${node.first_number}`);

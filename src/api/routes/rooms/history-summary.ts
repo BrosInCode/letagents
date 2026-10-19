@@ -15,14 +15,17 @@ import { readRoomHistorySummarizer } from "../../history-summary/summarizer.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { isHumanAppWrite } from "../../request/app-session.js";
 import type { RoomSettingsRouteDeps } from "./settings.js";
+import { replyTurnHoldAgentKey, resolveMessageActivationIdentity } from "./messages/activation-identity.js";
 import { resolveParticipantRoom } from "./messages/helpers.js";
 import type { RoomMessageRouteDeps } from "./messages/types.js";
 
 export type RoomHistorySummaryRouteDeps = Pick<RoomSettingsRouteDeps,
   "resolveCanonicalRoomRequestId" | "resolveRoomOrReply" | "requireAdmin" | "resolveProjectRole" | "requireParticipant"> & {
   settings?: Pick<typeof settings, "getRoomHistorySummaryEnabled" | "setRoomHistorySummaryEnabled">;
-  history?: Pick<typeof history, "startOrWakeRoomHistory" | "readRoomHistoryStatus" | "readRoomHistoryView" | "readRoomHistoryExpansion">;
+  history?: Pick<typeof history, "startOrWakeRoomHistory" | "skipRoomHistoryToNow" | "readRoomHistoryStatus" | "readRoomHistoryView" | "readRoomHistoryExpansion">;
   summarizerConfigured?: () => boolean;
+  /** The worker agent making a read, if any: it sees nothing held for its sequential reply turn. */
+  resolveHoldAgentKey?: (req: AuthenticatedRequest, roomId: string) => Promise<string | null>;
 };
 
 /**
@@ -35,6 +38,8 @@ export function registerRoomHistorySummaryRoutes(app: Express, deps: RoomHistory
   const store = deps.settings ?? settings;
   const tree = deps.history ?? history;
   const configured = deps.summarizerConfigured ?? (() => readRoomHistorySummarizer() !== null);
+  const holdAgentKey = deps.resolveHoldAgentKey
+    ?? (async (req: AuthenticatedRequest, roomId: string) => replyTurnHoldAgentKey(await resolveMessageActivationIdentity(req, roomId)));
   const room = (req: AuthenticatedRequest, res: Response) =>
     resolveParticipantRoom(req, res, deps as unknown as RoomMessageRouteDeps);
   const isPerson = (req: AuthenticatedRequest) => isHumanAppWrite(req, req.body ?? {});
@@ -75,7 +80,10 @@ export function registerRoomHistorySummaryRoutes(app: Express, deps: RoomHistory
         return;
       }
       if (typeof req.body?.enabled !== "boolean") { res.status(400).json({ error: "enabled must be a boolean" }); return; }
+      const wasEnabled = await store.getRoomHistorySummaryEnabled(project.id);
       await store.setRoomHistorySummaryEnabled(project.id, req.body.enabled);
+      // Messages posted while summaries were off never leave the server.
+      if (req.body.enabled && !wasEnabled) await tree.skipRoomHistoryToNow(project.id);
       res.json(await settingResponse(req, project));
     } catch (error) { fail(res, error); }
   });
@@ -87,7 +95,8 @@ export function registerRoomHistorySummaryRoutes(app: Express, deps: RoomHistory
       const current = await status(project);
       const view = current.state === "off" || current.state === "unavailable"
         ? { lines: [], omitted_older_lines: 0, covered_through_message_id: null }
-        : await tree.readRoomHistoryView(project.id, clampRoomHistoryViewLines(Number(req.query.max_lines ?? Number.NaN)));
+        : await tree.readRoomHistoryView(project.id, clampRoomHistoryViewLines(Number(req.query.max_lines ?? Number.NaN)),
+          { holdAgentKey: await holdAgentKey(req, project.id) });
       res.json({ room_id: project.id, state: current.state, note: ROOM_HISTORY_SUMMARY_NOTE, ...view } satisfies RoomHistorySummaryView
         & { omitted_older_lines: number });
     } catch (error) { fail(res, error); }
@@ -103,7 +112,7 @@ export function registerRoomHistorySummaryRoutes(app: Express, deps: RoomHistory
         res.status(409).json({ error: "History summaries are off in this room." });
         return;
       }
-      const expansion = await tree.readRoomHistoryExpansion(project.id, level, idx);
+      const expansion = await tree.readRoomHistoryExpansion(project.id, level, idx, { holdAgentKey: await holdAgentKey(req, project.id) });
       if (!expansion) { res.status(404).json({ error: "No such history summary line." }); return; }
       res.json({ room_id: project.id, node: formatRoomHistoryNodeId(level, idx), ...expansion } satisfies RoomHistoryExpansion);
     } catch (error) { fail(res, error); }

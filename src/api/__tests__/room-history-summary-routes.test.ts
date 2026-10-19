@@ -13,7 +13,9 @@ function harness(options: { role?: "admin" | "participant"; configured?: boolean
   const routes: Array<{ method: string; path: RegExp; handler: Function }> = [];
   const enabled = new Map<string, boolean>();
   const started: string[] = [];
+  const skipped: string[] = [];
   const viewLines: number[] = [];
+  const holdKeys: Array<string | null | undefined> = [];
   const app = Object.fromEntries(["get", "put"].map((method) => [method,
     (path: RegExp, handler: Function) => routes.push({ method, path, handler })])) as unknown as Express;
   registerRoomHistorySummaryRoutes(app, {
@@ -27,15 +29,18 @@ function harness(options: { role?: "admin" | "participant"; configured?: boolean
     },
     resolveProjectRole: async () => role,
     summarizerConfigured: () => options.configured ?? true,
+    resolveHoldAgentKey: async (req) => req.authKind === "agent_session" ? "agent-b" : null,
     settings: {
       getRoomHistorySummaryEnabled: async (id) => enabled.get(id) ?? true,
       setRoomHistorySummaryEnabled: async (id, value) => { enabled.set(id, value); },
     },
     history: {
       startOrWakeRoomHistory: async (id) => { started.push(id); },
+      skipRoomHistoryToNow: async (id) => { skipped.push(id); },
       readRoomHistoryStatus: async () => ({ state: "ready", summarized_messages: 3, pending_lines: 0, retry_at: null, last_error: null }),
-      readRoomHistoryView: async (_id, maxLines) => {
+      readRoomHistoryView: async (_id, maxLines, viewOptions) => {
         viewLines.push(maxLines);
+        holdKeys.push(viewOptions?.holdAgentKey);
         return { lines: [{ node: "1:0", level: 1, first_message_id: "msg_1", last_message_id: "msg_2", first_at: "a", last_at: "b",
           messages: 2, text: "Emmy and Ada agreed the plan.", pending: false }], omitted_older_lines: 0, covered_through_message_id: "msg_2" };
       },
@@ -54,7 +59,7 @@ function harness(options: { role?: "admin" | "participant"; configured?: boolean
     await route.handler(req, res);
     return res;
   }
-  return { request, started, viewLines };
+  return { request, started, skipped, viewLines, holdKeys };
 }
 
 test("history summaries are on by default, and only a person who is an admin turns them off", async () => {
@@ -75,6 +80,12 @@ test("history summaries are on by default, and only a person who is an admin tur
   assert.equal(view.body.state, "off");
   assert.deepEqual(view.body.lines, []);
   assert.equal((await api.request("get", `/rooms/${room}/history-summary/nodes/0:0`)).code, 409);
+  // On again: the summary goes on from now, so nothing said while off is ever sent.
+  assert.deepEqual(api.skipped, []);
+  assert.equal((await api.request("put", `/rooms/${room}/history-summary/setting`, { enabled: true })).body.enabled, true);
+  assert.deepEqual(api.skipped, [room]);
+  await api.request("put", `/rooms/${room}/history-summary/setting`, { enabled: true });
+  assert.deepEqual(api.skipped, [room], "an on that was already on skips nothing");
 });
 
 test("without a summarizer key the setting says so and nothing starts", async () => {
@@ -92,6 +103,7 @@ test("the view and the expansion are read by people and agents alike", async () 
   assert.equal(view.body.covered_through_message_id, "msg_2");
   assert.match(view.body.note, /lossy summary/);
   assert.deepEqual(api.viewLines, [40]);
+  assert.deepEqual(api.holdKeys, ["agent-b"], "a worker's read honours its reply-turn hold");
   await api.request("get", `/rooms/${room}/history-summary`, {}, "session", { max_lines: "100000" });
   assert.equal(api.viewLines.at(-1), 400, "the line budget is clamped");
   const leaf = await api.request("get", `/rooms/${room}/history-summary/nodes/0:4`);

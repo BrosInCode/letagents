@@ -16,9 +16,11 @@ export interface RoomHistoryPart { level: number; idx: number }
  *    (span / distance from the end) into its two children. So recent
  *    messages get one line each and older stretches broader lines, each line
  *    covering about as many messages as it is old, scaled to fit the budget.
- * 3. If waiting leaves push the view past the budget, keep the newest lines.
+ * 3. If waiting leaves push the view past the budget, the oldest waiting
+ *    leaves are left out, never a written line: a summarizer outage hides
+ *    some unsummarized messages (read_messages has them), not the room's past.
  *    The budget is never below the fewest lines that cover a fully written
- *    tree (top + 1), so no written stretch is ever dropped for budget alone.
+ *    tree (top + 1).
  */
 export function planRoomHistoryView(
   leafCount: number,
@@ -79,6 +81,11 @@ export function planRoomHistoryView(
     const part = parts[best]!;
     parts.splice(best, 1, { level: part.level - 1, idx: part.idx * 2 }, { level: part.level - 1, idx: part.idx * 2 + 1 });
   }
-  const omittedOlderLines = Math.max(0, parts.length - budget);
-  return { parts: parts.slice(omittedOlderLines), omittedOlderLines };
+  let excess = Math.max(0, parts.length - budget);
+  const omittedOlderLines = excess;
+  const kept = parts.filter((part) => {
+    if (excess > 0 && part.level === 0 && !built(part)) { excess -= 1; return false; }
+    return true;
+  });
+  return { parts: kept.slice(excess), omittedOlderLines };
 }

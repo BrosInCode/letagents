@@ -26,7 +26,8 @@ export function readRoomHistorySummarizer(env: NodeJS.ProcessEnv = process.env):
     apiKey,
     baseUrl: (env.LETAGENTS_ROOM_HISTORY_BASE_URL?.trim() || ROOM_HISTORY_DEFAULT_BASE_URL).replace(/\/+$/, ""),
     model: env.LETAGENTS_ROOM_HISTORY_MODEL?.trim() || ROOM_HISTORY_DEFAULT_MODEL,
-    timeoutMs: Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 120_000) : ROOM_HISTORY_DEFAULT_TIMEOUT_MS,
+    // At most 60 s: a worker turn must end well inside its lease.
+    timeoutMs: Number.isFinite(timeout) && timeout > 0 ? Math.min(timeout, 60_000) : ROOM_HISTORY_DEFAULT_TIMEOUT_MS,
   };
 }
 
@@ -64,7 +65,7 @@ function userPrompt(task: RoomHistoryTask): string {
 
 /** What a line falls back to when the model gives none (a refusal or an empty answer). */
 export function fallbackRoomHistoryLine(task: RoomHistoryTask): string {
-  const source = task.kind === "message" ? `${task.sender}: ${task.text}` : `${task.left} ${task.right}`;
+  const source = task.kind === "message" ? `${task.sender}: ${task.text}` : `${task.left} | ${task.right}`;
   return clipUtf8(singleLine(source), ROOM_HISTORY_LINE_BYTES) || "(empty)";
 }
 

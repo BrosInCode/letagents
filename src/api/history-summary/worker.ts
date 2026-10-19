@@ -2,11 +2,11 @@ import { formatMessageId } from "../db/utils.js";
 import { getRoomHistorySummaryEnabled } from "../db/room-settings.js";
 import { messageEvents, type MessageCreatedEvent } from "../server/events.js";
 import {
+  ROOM_HISTORY_TURN_BUDGET_MS,
   claimRoomHistoryRooms,
   ingestRoomHistoryMessages,
   nextRoomHistoryWork,
   releaseRoomHistoryRoom,
-  roomHistoryHasWork,
   startOrWakeRoomHistory,
   writeRoomHistoryLine as storeRoomHistoryLine,
   type RoomHistoryClaim,
@@ -43,23 +43,27 @@ export interface RoomHistoryWorkerDeps {
   config: RoomHistorySummarizerConfig;
   write?: typeof writeRoomHistoryLine;
   isEnabled?: (roomId: string) => Promise<boolean>;
+  now?: () => number;
 }
 
 /**
  * One turn for one claimed room: read new messages in, write up to
  * LINES_PER_TURN waiting lines, then release the room. A summarizer failure
- * stops the turn; the room waits and the lines are asked again later.
+ * stops the turn; the room waits and the lines are asked again later. No new
+ * calls start after ROOM_HISTORY_TURN_BUDGET_MS, so the turn ends inside its lease.
  */
 export async function runRoomHistoryTurn(claim: RoomHistoryClaim, deps: RoomHistoryWorkerDeps): Promise<void> {
   const write = deps.write ?? writeRoomHistoryLine;
+  const now = deps.now ?? Date.now;
+  const deadline = now() + ROOM_HISTORY_TURN_BUDGET_MS;
   try {
     if (!await (deps.isEnabled ?? getRoomHistorySummaryEnabled)(claim.roomId)) {
-      await releaseRoomHistoryRoom(claim, { kind: "idle" });
+      await releaseRoomHistoryRoom(claim, { kind: "off" });
       return;
     }
     await ingestRoomHistoryMessages(claim);
     const work = await nextRoomHistoryWork(claim.roomId, LINES_PER_TURN);
-    for (let start = 0; start < work.length; start += CALLS_AT_ONCE) {
+    for (let start = 0; start < work.length && now() < deadline; start += CALLS_AT_ONCE) {
       const results = await Promise.allSettled(work.slice(start, start + CALLS_AT_ONCE).map(async (item) => {
         const task = taskFor(item);
         const line = typeof task === "string" ? task : await write(deps.config, task);
@@ -76,7 +80,7 @@ export async function runRoomHistoryTurn(claim: RoomHistoryClaim, deps: RoomHist
         return;
       }
     }
-    await releaseRoomHistoryRoom(claim, { kind: await roomHistoryHasWork(claim.roomId) ? "more" : "idle" });
+    await releaseRoomHistoryRoom(claim, { kind: "settle" });
   } catch (error) {
     console.error("[room history] turn failed", claim.roomId, error);
     await releaseRoomHistoryRoom(claim, { kind: "failed", error: "The summary could not be saved.", auth: false })

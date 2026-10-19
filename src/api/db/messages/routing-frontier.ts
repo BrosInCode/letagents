@@ -18,7 +18,12 @@ export function settledRoutingCondition(waitForRouting?: boolean) {
  * evaluates the subquery once per read from the held-only partial index.
  */
 export function replyTurnHoldCondition(roomId: string, holdAgentKey?: string | null) {
-  return holdAgentKey ? sql`${messages.number} < COALESCE((
+  return holdAgentKey ? sql`${messages.number} < COALESCE(${replyTurnHoldFrontier(roomId, holdAgentKey)}, 2147483648)` : sql`TRUE`;
+}
+
+/** The first message held for this agent's reply turn, or NULL: the agent sees only messages before it. */
+export function replyTurnHoldFrontier(roomId: string, holdAgentKey: string) {
+  return sql`(
     SELECT min(held.message_number) FROM ${message_agent_receipts} held
     WHERE held.message_room_id = ${roomId}
       AND held.agent_key = ${holdAgentKey}
@@ -26,5 +31,5 @@ export function replyTurnHoldCondition(roomId: string, holdAgentKey?: string | n
       AND held.hold_release_after IS NOT NULL
       -- A hold ends at its deadline even when no sweep has run.
       AND held.hold_release_after > now()
-  ), 2147483648)` : sql`TRUE`;
+  )`;
 }

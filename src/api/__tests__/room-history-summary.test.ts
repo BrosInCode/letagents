@@ -47,12 +47,19 @@ test("a line waiting for the summarizer is never shown; its messages are", () =>
   assert.deepEqual(covered(higher), Array.from({ length: 16 }, (_, index) => index));
 });
 
-test("more waiting messages than the budget keep the newest lines", () => {
+test("more waiting messages than the budget leave out the oldest waiting ones, never a written line", () => {
   const waiting = Array.from({ length: 50 }, (_, idx) => ({ level: 0, idx }));
   const { parts, omittedOlderLines } = planRoomHistoryView(50, waiting, 10);
   assert.equal(parts.length, 10);
   assert.equal(omittedOlderLines, 40);
   assert.deepEqual(parts.map((part) => part.idx), [40, 41, 42, 43, 44, 45, 46, 47, 48, 49]);
+  // 1,000 written messages, then 200 waiting: the written past stays, the oldest waiting go.
+  const outage = Array.from({ length: 200 }, (_, offset) => ({ level: 0, idx: 1000 + offset }));
+  const mixed = planRoomHistoryView(1200, outage, 40);
+  assert.equal(mixed.parts.length, 40);
+  assert.equal(mixed.parts[0]!.idx * 2 ** mixed.parts[0]!.level, 0, "the first written line still covers the start");
+  assert.equal(mixed.parts.at(-1)!.idx, 1199, "the newest waiting message is kept");
+  assert.ok(mixed.parts.filter((part) => part.level > 0).length >= 1);
 });
 
 test("node ids and UTF-8 clipping", () => {
@@ -117,7 +124,7 @@ test("a line too long is asked for once more, then clipped; a refusal gives the 
   assert.equal(await writeRoomHistoryLine(config, { ...message, text: "secret plans" }, { fetchImpl: refused.fetchImpl }), "Emmy: secret plans");
   const empty = fakeFetch([{ content: "   " }]);
   assert.equal(await writeRoomHistoryLine(config, { kind: "merge", firstMessageId: "msg_1", lastMessageId: "msg_4", left: "a", right: "b" },
-    { fetchImpl: empty.fetchImpl }), "a b");
+    { fetchImpl: empty.fetchImpl }), "a | b");
 });
 
 test("provider failures throw for a later retry, and never carry the provider's body", async () => {
