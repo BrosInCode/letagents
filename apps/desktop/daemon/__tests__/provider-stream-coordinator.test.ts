@@ -140,6 +140,8 @@ const streamEvent = (sequence: number, method: string): ProviderActionStreamEven
 
 function coordinatorHarness(input: {
   appendActivity?: (method: string) => Promise<void>;
+  appendedActivity?: (event: DaemonActivityEvent) => void;
+  getRecentEntry?: (manifest: DaemonManifestEntry) => Promise<DaemonManifestEntry | undefined>;
   appendActivityOnly?: (method: string) => Promise<void>;
   stop?: () => Promise<void>;
   durabilityAttempt?: { execution_generations: Array<Record<string, unknown>>; checkpoints?: unknown[] };
@@ -210,6 +212,7 @@ function coordinatorHarness(input: {
     },
     manifest: {
       getEntry: async () => manifestAvailable ? manifest : undefined,
+      ...(input.getRecentEntry ? { getRecentEntry: async () => manifestAvailable ? input.getRecentEntry!(manifest) : undefined } : {}),
       load: async () => ({ entries: [manifest] }),
       updateEntry: async (_entryId, update) => {
         manifest = update(manifest);
@@ -252,8 +255,10 @@ function coordinatorHarness(input: {
     transition: async (_entryId, observed_state, condition) => {
       manifest = { ...manifest, observed_state, condition };
     },
-    appendNativeActivity: async (_entryId, event, activityOnly) => activityOnly
-      ? input.appendActivityOnly?.(event.method) : input.appendActivity?.(event.method),
+    appendNativeActivity: async (_entryId, event, activityOnly) => {
+      input.appendedActivity?.(event);
+      return activityOnly ? input.appendActivityOnly?.(event.method) : input.appendActivity?.(event.method);
+    },
     publishNativeActivity: async (entryId, method, status) => input.publishNativeActivity?.(entryId, method, status),
     observeActivitySummary: input.observeActivitySummary,
     handleTerminal: async () => {},
@@ -1321,6 +1326,28 @@ test("provider stream events are FIFO per entry and stale handles are ignored", 
     streamEvent(3, "item/stale"),
   );
   assert.deepEqual(calls, ["item/first", "item/second"]);
+  await harness.coordinator.disposeAll();
+});
+
+test("each stream event reads its entry through getRecentEntry when the manifest offers it", async () => {
+  const recentReads: string[] = [];
+  const appended: DaemonActivityEvent[] = [];
+  const harness = coordinatorHarness({
+    appendedActivity: (event) => appended.push(event),
+    getRecentEntry: async (current) => {
+      recentReads.push(current.id);
+      return { ...current, activity: [{
+        observed_at: "2026-08-26T00:00:00.000Z", sequence: 41, provider: "codex", kind: "tool", method: "item/earlier",
+        summary: "earlier", status: "working", payload: {}, payload_truncated: false, payload_redacted: false,
+        durable_payload_ref: null,
+      }] };
+    },
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.enqueue("agent-1", handle, streamEvent(1, "item/first"));
+  assert.deepEqual(recentReads, ["agent-1"]);
+  // The next sequence follows the recent read's activity, not the event's own.
+  assert.equal(appended.at(-1)?.sequence, 42);
   await harness.coordinator.disposeAll();
 });
 

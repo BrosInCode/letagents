@@ -22,15 +22,59 @@ const PRIVATE_KEY = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END
 
 export type RedactionResult<T = unknown> = { value: T; redacted: boolean; truncated: boolean };
 
+/**
+ * Literal text that each pattern cannot match without, with the pattern's own
+ * flags (so the same case rules). A pattern whose hint finds nothing cannot
+ * match, so it is not run; when no hint finds anything, which is usual for
+ * long tool output, the text is scanned once instead of six times. The result
+ * is the same.
+ *
+ * Testing the original text is enough. A replacement keeps only text the
+ * pattern itself matched and inserts "[REDACTED]", so it never joins text into
+ * a new hint match: no hint contains "[" or "]", or fits inside "REDACTED".
+ */
+const PRIVATE_KEY_HINT = /PRIVATE KEY-----/;
+const AUTHORIZATION_SCHEME_HINT = /bearer|basic/i;
+const AUTHORIZATION_ASSIGNMENT_HINT = /authorization/i;
+const EMBEDDED_ASSIGNMENT_HINT = /cookie|credential|passw(?:or)?d|secret|api[_-]?key|private[_-]?key|token/i;
+const KNOWN_TOKEN_HINT = /las(?:b|hg)_|github_pat_|gh[pousr]_|sk-|akia/i;
+const URL_PASSWORD_HINT = /:\/\//;
+const ANY_CASELESS_HINT = new RegExp([AUTHORIZATION_SCHEME_HINT, AUTHORIZATION_ASSIGNMENT_HINT,
+  EMBEDDED_ASSIGNMENT_HINT, KNOWN_TOKEN_HINT].map((hint) => hint.source).join("|"), "i");
+
 export function redactCredentialText(value: string, maxChars = MAX_STRING_CHARS): RedactionResult<string> {
+  return redactText(value, maxChars, true);
+}
+
+/** Every pattern run whatever the hints say: the result redactCredentialText must equal. For tests. */
+export function redactCredentialTextWithoutHints(value: string, maxChars = MAX_STRING_CHARS): RedactionResult<string> {
+  return redactText(value, maxChars, false);
+}
+
+function redactText(value: string, maxChars: number, useHints: boolean): RedactionResult<string> {
+  const hinted = (hint: RegExp) => !useHints || hint.test(value);
   let redacted = false;
-  let output = value
-    .replace(PRIVATE_KEY, () => { redacted = true; return REDACTED; })
-    .replace(AUTHORIZATION_SCHEME_VALUE, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; })
-    .replace(AUTHORIZATION_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; })
-    .replace(EMBEDDED_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; })
-    .replace(KNOWN_TOKEN, () => { redacted = true; return REDACTED; })
-    .replace(URL_PASSWORD, (_match, prefix: string, _password: string, suffix: string) => { redacted = true; return `${prefix}${REDACTED}${suffix}`; });
+  let output = value;
+  if (hinted(PRIVATE_KEY_HINT)) {
+    output = output.replace(PRIVATE_KEY, () => { redacted = true; return REDACTED; });
+  }
+  if (hinted(ANY_CASELESS_HINT)) {
+    if (hinted(AUTHORIZATION_SCHEME_HINT)) {
+      output = output.replace(AUTHORIZATION_SCHEME_VALUE, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; });
+    }
+    if (hinted(AUTHORIZATION_ASSIGNMENT_HINT)) {
+      output = output.replace(AUTHORIZATION_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; });
+    }
+    if (hinted(EMBEDDED_ASSIGNMENT_HINT)) {
+      output = output.replace(EMBEDDED_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; });
+    }
+    if (hinted(KNOWN_TOKEN_HINT)) {
+      output = output.replace(KNOWN_TOKEN, () => { redacted = true; return REDACTED; });
+    }
+  }
+  if (hinted(URL_PASSWORD_HINT)) {
+    output = output.replace(URL_PASSWORD, (_match, prefix: string, _password: string, suffix: string) => { redacted = true; return `${prefix}${REDACTED}${suffix}`; });
+  }
   const truncated = output.length > maxChars;
   if (truncated) output = `${output.slice(0, maxChars)}…`;
   return { value: output, redacted, truncated };

@@ -414,6 +414,7 @@ export class SupervisorDaemon {
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
         getEntry: (entryId) => this.activityWrites.overlayEntry(this.store.getEntry(entryId)),
+        getRecentEntry: (entryId) => this.activityWrites.readRecentEntry(entryId),
         load: () => this.activityWrites.overlayManifest(this.store.load()),
         updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
         readRuntimeLifecycleAuthority: (input) => this.store.readRuntimeLifecycleAuthority(input),
