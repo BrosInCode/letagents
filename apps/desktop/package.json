@@ -4,7 +4,7 @@
   "private": true,
   "version": "0.1.121",
   "description": "A desktop control plane for collaborating AI agents.",
-  "license": "BUSL-1.1",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/BrosInCode/letagents.git"

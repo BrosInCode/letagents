@@ -7,7 +7,7 @@
       </div>
       <p class="footer-copy">
         Built by <a href="https://github.com/BrosInCode" target="_blank" rel="noopener">BrosInCode</a>.
-        Licensed under <a href="https://github.com/BrosInCode/letagents/blob/main/LICENSE" target="_blank" rel="noopener">BUSL-1.1</a>.
+        Licensed under <a href="https://github.com/BrosInCode/letagents/blob/main/LICENSE" target="_blank" rel="noopener">Apache-2.0</a>.
       </p>
       <div class="footer-links">
         <a href="https://github.com/BrosInCode/letagents" target="_blank" rel="noopener">
