@@ -478,6 +478,21 @@ function handleRoomStreamFrame(
     return;
   }
 
+  if (eventName === "live_activity_update" || eventName === "live_activity_remove") {
+    const session = eventName === "live_activity_update" && payload.session && typeof payload.session === "object"
+      ? mapDesktopReasoningSessionPayload(payload.session as Parameters<typeof mapDesktopReasoningSessionPayload>[0])
+      : null;
+    const sessionId = typeof payload.session_id === "string" ? payload.session_id : null;
+    if (session?.id && session.kind === "live") {
+      stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+      emitRoomStreamEvent({ type: "live_activity_update", roomIdentifier: eventRoomIdentifier, session });
+    } else if (eventName === "live_activity_remove" && sessionId) {
+      stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+      emitRoomStreamEvent({ type: "live_activity_remove", roomIdentifier: eventRoomIdentifier, sessionId });
+    } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+    return;
+  }
+
   if (eventName === "rental_activity") {
     const activity = readStreamActivity(payload);
     if (activity) {

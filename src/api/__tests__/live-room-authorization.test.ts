@@ -269,3 +269,75 @@ test("exact credential retirement closes only the predecessor generation", async
   predecessor.release();
   successor.release();
 });
+
+test("a lease seeded fresh at entry serves the first body without a recheck, then expires normally", async () => {
+  let now = 0;
+  let checks = 0;
+  const lease = acquireLiveRoomAuthorization({
+    req: authenticatedRequest("fresh-at-entry-credential"),
+    roomId: "room_auth_fresh_entry",
+    accessRoomName: "room_auth_fresh_entry",
+    authorize: async () => {
+      checks += 1;
+      return true;
+    },
+    freshAtEntry: true,
+    now: () => now,
+  });
+  try {
+    assert.equal(await lease.check(), true);
+    assert.equal(checks, 0, "the entry check of the same request already made this decision");
+    now = 60_001;
+    assert.equal(await lease.check(), true);
+    assert.equal(checks, 1, "the periodic recheck still runs once the lease window expires");
+  } finally {
+    lease.release();
+  }
+});
+
+test("a bridge loss marker leaves human leases in rooms without a repository alone", async () => {
+  const checks = { adHoc: 0, repo: 0 };
+  const adHoc = acquireLiveRoomAuthorization({
+    req: authenticatedRequest("bridge-loss-ad-hoc-credential"),
+    roomId: "room_auth_bridge_loss_ad_hoc",
+    accessRoomName: "room_auth_bridge_loss_ad_hoc",
+    authorize: async () => {
+      checks.adHoc += 1;
+      return true;
+    },
+  });
+  const repo = acquireLiveRoomAuthorization({
+    req: authenticatedRequest("bridge-loss-repo-credential"),
+    roomId: "room_auth_bridge_loss_repo",
+    accessRoomName: "github.com/example/bridge-loss-scope",
+    authorize: async () => {
+      checks.repo += 1;
+      return true;
+    },
+  });
+  const invalidated = { adHoc: 0, repo: 0 };
+  const removeAdHoc = adHoc.onInvalidated(() => { invalidated.adHoc += 1; });
+  const removeRepo = repo.onInvalidated(() => { invalidated.repo += 1; });
+  try {
+    assert.deepEqual(await Promise.all([adHoc.check(), repo.check()]), [true, true]);
+    assert.deepEqual(checks, { adHoc: 1, repo: 1 });
+
+    roomEventBridgeLossEvents.emit("loss", {
+      epoch: 2,
+      reason: "listener_disconnected",
+      roomId: null,
+    });
+    assert.deepEqual(invalidated, { adHoc: 0, repo: 1 }, "only bridge-borne authorization is retired");
+    assert.deepEqual(await Promise.all([adHoc.check(), repo.check()]), [true, true]);
+    assert.deepEqual(
+      checks,
+      { adHoc: 1, repo: 2 },
+      "a session revoked in the database never travels over the bridge, so no forced read is needed",
+    );
+  } finally {
+    removeAdHoc();
+    removeRepo();
+    adHoc.release();
+    repo.release();
+  }
+});

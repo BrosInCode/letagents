@@ -1,6 +1,6 @@
-import type { DesktopTaskSummary } from "../../ipc-types.js";
 import type { ProviderRoomTurnAttachment, ProviderRoomTurnRequest, RoomTurnImageMimeType } from "./provider-adapter.js";
 import { ROOM_EXPRESSION_GUIDANCE } from "../../../../../shared/room-expressions.mjs";
+import { withoutInlineFileBytes } from "../attachments/inline-bytes.js";
 import { isDeepStrictEqual } from "node:util";
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -11,9 +11,9 @@ function isRoomMessage(value: Record<string, unknown>): boolean {
   return typeof value.id === "string" && /^msg_[1-9]\d*$/.test(value.id) && typeof value.text === "string";
 }
 
-/** Preserve conversation content and unknown fields; omit only known UI summaries. */
+/** Preserve conversation content and unknown fields; omit only known UI summaries and inline file bytes. */
 function conversationMessage(message: unknown): unknown {
-  const value = record(message);
+  const value = record(withoutInlineFileBytes(message));
   if (!value) return message;
   const { activation: _activation, ...context } = value;
   if (!isRoomMessage(context)) return context;
@@ -44,7 +44,7 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
   const supplied = [...context, source].map(record).filter((value): value is Record<string, unknown> => value !== null && isRoomMessage(value));
   const reference = (value: unknown): unknown => {
     const quote = record(conversationMessage(value));
-    if (!quote || !isRoomMessage(quote)) return value;
+    if (!quote || !isRoomMessage(quote)) return withoutInlineFileBytes(value);
     // A reference may contain fewer fields than a full message. Do not erase
     // a different edit, author, GIF, attachment or other substantive field.
     const candidates = supplied.filter(message => message.id === quote.id);
@@ -79,7 +79,7 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
   return [
     `Recent bounded room context: ${JSON.stringify(context.map(compact))}`,
     `Source message: ${JSON.stringify(compact(source))}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    `Activation: ${JSON.stringify(withoutInlineFileBytes(request.activation))}`,
     ...formatRoomTurnAttachments(request.attachments),
   ];
 }
@@ -122,7 +122,6 @@ export function formatRoomTurnAttachments(attachments: readonly ProviderRoomTurn
       case "too_large": return `- ${name} Not shown: it is larger than the 10 MB image limit.`;
       case "turn_limit": return `- ${name} Not shown: the images of this message reached the 20 MB limit for one turn.`;
       case "provider_unsupported": return `- ${name} Not shown: this agent cannot view images. If its content matters, ask the sender to describe it.`;
-      case "local_room_unsupported": return `- ${name} Not shown: images in local rooms do not reach agents yet.`;
       default: return `- ${name} Not shown: it could not be downloaded.`;
     }
   });
@@ -203,87 +202,3 @@ export const MANAGED_ROOM_WORK_INSTRUCTIONS = [
   "You are responsible for committing, pushing, opening PRs, and merging when authorized using the available repository tools. The daemon's chat reply publication does not publish code or create PRs. Arrange independent review with another agent; do not treat your own tests as a review.",
   "Honor the user's existing authorization, including standing merge approval. After independent review and required checks pass, perform an authorized merge and update the task board instead of asking the user to click Merge. Ask for approval only when the next action exceeds that authorization or needs a new human decision; never bypass repository rules or permissions.",
 ] as const;
-
-export function summarizeTaskEvent(task: DesktopTaskSummary): string {
-  return [
-    `Task id: ${task.id}`,
-    `Title: ${task.title}`,
-    `Status: ${task.status}`,
-    `Assignee: ${task.assignee || "none"}`,
-    `Assignee agent key: ${task.assigneeAgentKey || "none"}`,
-    `Created by: ${task.createdBy || "unknown"}`,
-    task.prUrl ? `Pull request: ${task.prUrl}` : null,
-    `Created: ${task.createdAt || "unknown"}`,
-    `Updated: ${task.updatedAt || "unknown"}`,
-    "",
-    "Active leases:",
-    ...formatLeases(task),
-    "",
-    "Workflow refs:",
-    ...formatWorkflowRefs(task),
-    "",
-    "Workflow artifacts:",
-    ...formatWorkflowArtifacts(task),
-    "",
-    "Active locks:",
-    ...formatLocks(task),
-    task.stalePromptState?.isStale
-      ? `Stale prompt: ${task.stalePromptState.reason || "stale"} for ${task.stalePromptState.staleForMs ?? "unknown"}ms`
-      : null,
-    "",
-    "Description:",
-    task.description || "(empty)",
-  ].filter((line): line is string => line !== null).join("\n");
-}
-
-function formatLeases(task: DesktopTaskSummary): string[] {
-  if (!task.activeLeases.length) {
-    return ["- none"];
-  }
-
-  return task.activeLeases.slice(0, 8).map((lease) => [
-    `- ${lease.kind}`,
-    lease.holderLabel ? `holder=${lease.holderLabel}` : null,
-    lease.agentKey ? `agentKey=${lease.agentKey}` : null,
-    lease.agentSessionId ? `agentSession=${lease.agentSessionId}` : null,
-    `status=${lease.status}`,
-    lease.updatedAt ? `updated=${lease.updatedAt}` : null,
-  ].filter(Boolean).join(" "));
-}
-
-function formatWorkflowRefs(task: DesktopTaskSummary): string[] {
-  if (!task.workflowRefs.length) {
-    return ["- none"];
-  }
-
-  return task.workflowRefs.slice(0, 6).map((ref) =>
-    `- ${ref.provider}/${ref.kind}: ${ref.label} ${ref.url}`
-  );
-}
-
-function formatWorkflowArtifacts(task: DesktopTaskSummary): string[] {
-  if (!task.workflowArtifacts.length) {
-    return ["- none"];
-  }
-
-  return task.workflowArtifacts.slice(0, 6).map((artifact) => [
-    `- ${artifact.provider}/${artifact.kind}`,
-    artifact.number !== null ? `#${artifact.number}` : null,
-    artifact.title || artifact.ref || artifact.id,
-    artifact.state ? `state=${artifact.state}` : null,
-    artifact.url || null,
-  ].filter(Boolean).join(" "));
-}
-
-function formatLocks(task: DesktopTaskSummary): string[] {
-  if (!task.activeLocks.length) {
-    return ["- none"];
-  }
-
-  return task.activeLocks.slice(0, 6).map((lock) => [
-    `- ${lock.scope}`,
-    lock.reason ? `reason=${lock.reason}` : null,
-    lock.message ? `message=${lock.message}` : null,
-    lock.createdBy ? `createdBy=${lock.createdBy}` : null,
-  ].filter(Boolean).join(" "));
-}

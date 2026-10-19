@@ -806,6 +806,13 @@
       "when": 1792240000000,
       "tag": "0114_message_attachment_upload_owner",
       "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1792330000000,
+      "tag": "0115_live_activity_sessions",
+      "breakpoints": true
     }
   ]
 }

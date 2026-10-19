@@ -6,7 +6,9 @@ import type { AgentMessageActivation } from "../../../../../shared/activation-ro
 import { parseWorkspaceReviewPage } from "../../../../../shared/workspace-review.mjs";
 import { parseRoomAgentWorkSummary } from "../../../../../shared/room-agent-work.mjs";
 import { addLocalChatMessage, getLocalChatMessages, getLatestLocalChatMessages,
-  getLocalChatMessagesBefore, getLocalMessageThread } from "./messages/local-store.js";
+  getLocalChatMessagesBefore, getLocalMessageAttachment, getLocalMessageThread } from "./messages/local-store.js";
+import { readLocalAttachmentBytesWithin } from "../attachments/local-store.js";
+import { withoutInlineFileBytes } from "../attachments/inline-bytes.js";
 import type { RoomMessagePayload } from "./messages/mappers.js";
 import { getLocalRoom, listLocalTasks, addLocalTask, updateLocalTask, claimLocalTaskReviewLease,
   claimLocalTaskWorkLease, changeLocalTaskWorkLease } from "./local-store.js";
@@ -17,6 +19,9 @@ import { localSupervisionDatabase, authorizeLocalHost, authorizeLocalWorker,
   createLocalSupervisorSession, endLocalSupervisorSession } from "./local-supervision-authority.js";
 export { prepareLocalSupervisorGrant } from "./local-supervision-authority.js";
 export { executeLocalBoardMutation, watchLocalBoard } from "./local-board-service.js";
+
+/** The daemon's per-image limit; no caller of the local attachment route reads more. */
+const LOCAL_AGENT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): ObjectValue => value && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : {};
@@ -115,12 +120,31 @@ export async function requestLocalSupervisor(rawUrl: string, init: RequestInit =
     return json({ error: "This operation is unavailable for local room authority." }, 404);
   }
   if (parts[0] !== "rooms") return json({ error: "Unknown local room operation." }, 404);
-  const resource = parts.reduce((found, part, index) => index > 1 && ["messages", "agent-sessions", "tasks", "join"].includes(part) ? index : found, -1);
+  // An attachment id may be any word, so its route is matched from the end.
+  const attachmentRoute = parts.length >= 6 && parts.at(-4) === "messages" && parts.at(-2) === "attachments";
+  const resource = attachmentRoute ? parts.length - 4
+    : parts.reduce((found, part, index) => index > 1 && ["messages", "agent-sessions", "tasks", "join"].includes(part) ? index : found, -1);
   if (resource < 0) return json({ error: "Unknown local room resource." }, 404);
   const roomId = parts.slice(1, resource).join("/");
   const session = await authorizeLocalWorker(roomId, bearer);
   const operation = parts.slice(resource);
   if (operation[0] === "join") return json({ room_id: roomId });
+  if (attachmentRoute) {
+    // The local counterpart of the hosted attachment route: the bytes
+    // themselves, since no storage redirect exists, and never more than the
+    // caller can take.
+    const maxBytes = Number(url.searchParams.get("max_bytes"));
+    if ((init.method ?? "GET") !== "GET") return json({ error: "Unknown local room operation." }, 404);
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) return json({ error: "max_bytes must be a positive integer." }, 400);
+    const attachment = await getLocalMessageAttachment(roomId, operation[1]!, operation[3]!);
+    const read = attachment
+      ? await readLocalAttachmentBytesWithin(attachment, Math.min(maxBytes, LOCAL_AGENT_ATTACHMENT_MAX_BYTES), roomId)
+      : "unavailable";
+    if (read === "too_large") return json({ error: "The attachment is larger than the requested limit." }, 413);
+    if (read === "unavailable") return json({ error: "This attachment is not available." }, 404);
+    return new Response(new Uint8Array(read.bytes), { headers: {
+      "content-type": "application/octet-stream", "content-length": String(read.bytes.byteLength) } });
+  }
   if (operation[0] === "messages") {
     if (init.method === "POST") {
       const message = await addLocalChatMessage(roomId, { sender: session.actor_label,
@@ -257,7 +281,8 @@ export async function executeLocalSupervisorTool(input: LocalToolInput) {
       error: `${input.toolName} is not available in local rooms. Continue with the available room tools.` }) }] };
     return { liveResult: result, durableResult: result };
   }
-  const value = await localToolHandlers[operation]!({ input, args, worker, leaseWorker });
+  // An older local row can still hold a file's bytes inline; a tool result gives the agent its metadata only.
+  const value = withoutInlineFileBytes(await localToolHandlers[operation]!({ input, args, worker, leaseWorker }));
   const liveResult = { content: [{ type: "text", text: JSON.stringify(value) }] };
   const readOnly = ["get_current_room", "read_messages", "get_board", "get_room_artifacts", "get_message_thread"].includes(input.toolName);
   return { liveResult, durableResult: !readOnly || Buffer.byteLength(JSON.stringify(liveResult)) <= 16_384 ? liveResult

@@ -356,6 +356,20 @@ export interface DesktopSupervisorAgentConfiguration {
    * applies the next time the agent starts. Absent from an older background service.
    */
   imageInput?: boolean;
+  /**
+   * Whether other members of the agent's room see its live activity, and
+   * whether it can be shared at all: not for a rented agent, and not for an
+   * agent that fetches its own room messages. Absent from an older
+   * background service.
+   */
+  liveSharing?: { enabled: boolean; availability: "available" | "rental" | "polling" };
+}
+
+/** Changed on its own, by the owner in the desktop app, never as part of a saved draft. */
+export interface DesktopSupervisorAgentLiveSharingInput {
+  entryId: string;
+  daemonGeneration: number;
+  enabled: boolean;
 }
 
 /** Changed on its own, by the owner in the desktop app, never as part of a saved draft. */

@@ -434,6 +434,10 @@ jobs:
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wake-rules-contract.test.ts src/api/__tests__/wake-rules-evaluate.test.ts src/api/__tests__/wake-rules-db.test.ts src/api/__tests__/room-event-broker.test.ts
 
+      - name: Test shared live activity sessions
+        if: matrix.group == 4
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-reasoning-routes.test.ts src/api/__tests__/live-activity-routes.test.ts src/api/__tests__/live-activity-db.test.ts
+
       - name: Test message link previews
         if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-link-previews.test.ts src/api/__tests__/message-link-previews-routes.test.ts src/api/__tests__/message-link-previews-db.test.ts src/api/__tests__/room-message-routes.test.ts
@@ -503,6 +507,13 @@ jobs:
           src/api/__tests__/repo-room-access-integration.test.ts
           src/api/__tests__/github-repo-access.test.ts
 
+      # Own step: DB-backed files in one node --test run start in parallel
+      # processes and drop the same schema.
+      - name: Test live room rechecks and leases after a credential is revoked
+        if: matrix.group == 1
+        timeout-minutes: 5
+        run: node --import tsx --test src/api/__tests__/room-access-live-recheck-db.test.ts src/api/__tests__/live-room-authorization.test.ts
+
       - name: Run repo migration tests
         if: matrix.group == 1
         run: >-
@@ -554,15 +565,6 @@ jobs:
           --test
           src/api/__tests__/board-intent-escalation-sweep.test.ts
           src/api/__tests__/board-intent-escalation-db.test.ts
-
-      - name: Run room stall watchdog tests
-        if: matrix.group == 2
-        run: >-
-          node
-          --import ./node_modules/tsx/dist/loader.mjs
-          --test
-          src/api/__tests__/room-stall-sweep.test.ts
-          src/api/__tests__/room-stall-db.test.ts
 
       - name: Run worker session auth tests
         if: matrix.group == 3

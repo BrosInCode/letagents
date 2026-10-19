@@ -1,5 +1,5 @@
 import type { AgentPresenceStatus } from "../../../shared/agent-presence.js";
-import type { ReasoningSnapshot } from "../schema.js";
+import type { ReasoningSessionKind, ReasoningSnapshot } from "../schema.js";
 
 export interface ReasoningSession {
   id: string;
@@ -8,6 +8,7 @@ export interface ReasoningSession {
   anchor_message_id: string | null;
   actor_label: string;
   agent_key: string | null;
+  kind: ReasoningSessionKind;
   status: AgentPresenceStatus | null;
   summary: string;
   latest_payload: ReasoningSnapshot;
@@ -35,6 +36,7 @@ export interface ReasoningSessionRow {
   anchor_message_id: string | null;
   actor_label: string;
   agent_key: string | null;
+  kind: ReasoningSessionKind;
   status: AgentPresenceStatus | null;
   summary: string;
   latest_payload: ReasoningSnapshot;

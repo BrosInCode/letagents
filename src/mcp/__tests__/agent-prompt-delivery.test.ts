@@ -41,13 +41,24 @@ test("every prompt variant teaches agents to act on liveness signals", () => {
     const full = buildRoomAgentPrompt(kind);
     assert.match(full, /Resilience:/);
     assert.match(full, /never reply that you are waiting/);
-    assert.match(full, /register_task_create_intent/);
+    assert.match(full, /A person or the Board Manager reassigns its unfinished work/);
     assert.match(full, /list_board_intents/);
   }
   for (const kind of ["inline", "auto"] as const) {
     assert.match(
       buildCompactRoomAgentPrompt(kind),
-      /offline\/failover\/stall system messages as actionable/
+      /offline\/failover system messages as actionable/
     );
+  }
+});
+
+test("room agent prompts never nudge an agent toward unassigned or abandoned work", () => {
+  for (const kind of ["join", "inline", "auto"] as const) {
+    for (const prompt of [buildRoomAgentPrompt(kind), buildCompactRoomAgentPrompt(kind)]) {
+      assert.doesNotMatch(prompt, /pick up its (unfinished )?work/);
+      assert.doesNotMatch(prompt, /stalled board/);
+      assert.doesNotMatch(prompt, /file the next task/);
+      assert.match(prompt, /unassigned tasks (alone|are not yours)/);
+    }
   }
 });
