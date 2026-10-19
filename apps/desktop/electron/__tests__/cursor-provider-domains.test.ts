@@ -28,7 +28,10 @@ const adapterModuleSources = [
   "turn-recovery", "workspace-generation",
 ].map((name) => read(`../main/agents/cursor/${name}.ts`));
 const identitySource = read("../main/agents/cursor-identity.ts");
-const launcherSource = read("../main/agents/cursor/turn-launcher.ts");
+// The launcher composes its wrapper program from ordered cursor/ slices.
+const launcherSource = [
+  "turn-launcher", "turn-wrapper-setup", "turn-wrapper-mcp", "turn-wrapper-proxies", "turn-wrapper-start",
+].map((name) => read(`../main/agents/cursor/${name}.ts`)).join("\n");
 const sandboxSource = read("../main/agents/cursor-sandbox-policy.ts");
 
 test("Cursor's public adapter facade preserves the extracted runtime identities", () => {
