@@ -26,3 +26,5 @@ export * from "./schema/wake-rules.js";
 export * from "./schema/room-notification-preferences.js";
 
 export * from "./schema/message-reminders.js";
+
+export * from "./schema/agent-asks.js";

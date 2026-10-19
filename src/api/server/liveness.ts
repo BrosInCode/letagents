@@ -42,6 +42,7 @@ import {
 } from "../rooms/board-intent-escalation-sweep.js";
 import { emitProjectMessage } from "./events.js";
 import { workflowEffectBroker } from "../workflow-effects/runtime.js";
+import { sweepAgentAsks } from "../agent-asks/store.js";
 
 /** Fence lost inside the failover transaction: roll the announcement back quietly. */
 class BoardManagerFailoverLostRace extends Error {
@@ -344,6 +345,11 @@ export function startLivenessSweep(): void {
       await workflowEffectBroker.sweepOnce();
       } catch (error) {
       console.error("Workflow effect reconciliation sweep failed:", error);
+      }
+      try {
+      await sweepAgentAsks();
+      } catch (error) {
+      console.error("Agent ask sweep failed:", error);
       }
     })();
     const pending = run.finally(() => {
