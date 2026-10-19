@@ -51,6 +51,7 @@ function workflowJobsFromText(workflow) {
         condition: null,
         continueOnError: null,
         name: jobMatch[1],
+        needs: [],
         steps: [],
       };
       jobs.push(currentJob);
@@ -64,6 +65,11 @@ function workflowJobsFromText(workflow) {
     const jobCondition = line.match(/^ {4}if\s*:\s*(.+)$/);
     if (jobCondition) {
       currentJob.condition = jobCondition[1].trim();
+      continue;
+    }
+    const jobNeeds = line.match(/^ {4}needs\s*:\s*(.+)$/);
+    if (jobNeeds) {
+      currentJob.needs = jobNeeds[1].replace(/^\[|\]$/g, "").split(",").map((need) => need.trim()).filter(Boolean);
       continue;
     }
     const jobContinueOnError = line.match(/^ {4}continue-on-error\s*:\s*(.+)$/);
@@ -367,8 +373,8 @@ test("dependency advisory checks use the pinned supported audit client", () => {
         script ===
         'npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2\necho "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"',
     ).length,
-    3,
-    "build, integration and evaluator jobs must install isolated pinned audit clients",
+    4,
+    "build, desktop test, integration and evaluator jobs must install isolated pinned audit clients",
   );
   assert.equal(
     releaseScripts.filter(
@@ -384,6 +390,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs src/web",
     "node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents",
+    "node scripts/verify-dependency-advisories.mjs . apps/desktop apps/desktop/electron/runtime/letagents",
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs .",
   ];
@@ -403,6 +410,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "npm audit signatures",
     "cd src/web && npm audit signatures",
     "npm audit signatures --prefix apps/desktop",
+    "npm audit signatures\nnpm audit signatures --prefix apps/desktop",
     "npm audit signatures",
     "npm audit signatures",
     "npm audit signatures",
@@ -417,6 +425,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
       "npm ci --ignore-scripts --no-audit",
       "cd src/web && npm ci --ignore-scripts --no-audit",
       "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "npm ci --ignore-scripts --no-audit\nnpm ci --ignore-scripts --no-audit --prefix apps/desktop",
       "npm ci --ignore-scripts --no-audit",
       "npm ci --ignore-scripts --no-audit",
       "npm ci --ignore-scripts --no-audit",
@@ -434,11 +443,11 @@ test("dependency advisory checks use the pinned supported audit client", () => {
 });
 
 test("the OpenCode runtime contract steps are exactly the reviewed ones", () => {
-  const build = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === "build");
-  assert.ok(build, "ci.yml must define the build job");
+  const build = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === "build-checks");
+  assert.ok(build, "ci.yml must define the build-checks job");
   const step = (name) => {
     const found = build.steps.filter((candidate) => candidate.name === name);
-    assert.equal(found.length, 1, `the build job must define "${name}" once`);
+    assert.equal(found.length, 1, `the build-checks job must define "${name}" once`);
     return found[0];
   };
   const detect = step("Detect OpenCode runtime contract changes");
@@ -485,4 +494,62 @@ test("the OpenCode runtime contract steps are exactly the reviewed ones", () => 
   }
   assert.equal(build.condition, "inputs.purpose != 'room-ack-evaluation'");
   assert.equal(build.continueOnError, null);
+});
+
+function workflowJobText(workflow, name) {
+  const start = workflow.indexOf(`\n  ${name}:\n`);
+  assert.ok(start >= 0, `ci.yml must define the ${name} job`);
+  const next = workflow.slice(start + 1).search(/\n {2}\S/);
+  return next === -1 ? workflow.slice(start) : workflow.slice(start, start + 1 + next);
+}
+
+test("the required checks wait for every check job and fail closed", () => {
+  const jobs = workflowJobs(".github/workflows/ci.yml");
+  const job = (name) => {
+    const found = jobs.find((candidate) => candidate.name === name);
+    assert.ok(found, `ci.yml must define the ${name} job`);
+    return found;
+  };
+  const gates = ["build"].map(job);
+
+  // A skipped required check counts as passing, so each gate runs after any
+  // outcome and passes only when every job it waits for succeeded.
+  for (const gate of gates) {
+    assert.equal(gate.condition, "${{ always() && inputs.purpose != 'room-ack-evaluation' }}", gate.name);
+    assert.equal(gate.continueOnError, null, gate.name);
+    assert.equal(gate.steps.length, 1, gate.name);
+    assert.equal(
+      gate.steps[0].run,
+      'echo "${NEEDS}"\njq -e \'length > 0 and all(.[]; .result == "success")\' <<< "${NEEDS}" > /dev/null',
+      gate.name,
+    );
+    assert.equal(gate.steps[0].condition, null, gate.name);
+    assert.equal(gate.steps[0].shell, null, gate.name);
+  }
+
+  const notChecks = new Set(["build", "integration-tests", "npm-publish", "docker", "deploy", "room-ack-evaluation"]);
+  assert.deepEqual(
+    gates.flatMap((gate) => gate.needs).sort(),
+    jobs.map((candidate) => candidate.name).filter((name) => !notChecks.has(name)).sort(),
+    "every check job must sit behind a required check",
+  );
+  for (const name of ["npm-publish", "docker"]) {
+    assert.deepEqual(job(name).needs, ["build", "integration-tests"], `${name} must wait for both required checks`);
+  }
+});
+
+test("the electron shards together cover every shard of one total", () => {
+  const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
+  const suites = [...workflowJobText(workflow, "desktop-tests").matchAll(/^ {10}- (.+)$/gm)].map((match) => match[1].trim());
+  const shards = suites.flatMap((suite) => {
+    const match = suite.match(/^electron (\d+)\/(\d+)$/);
+    return match ? [{ index: Number(match[1]), total: Number(match[2]) }] : [];
+  });
+
+  assert.deepEqual(suites.filter((suite) => !suite.startsWith("electron ")).sort(), ["daemon", "renderer"]);
+  assert.ok(shards.length > 0, "desktop-tests must run the electron suite");
+  assert.deepEqual(
+    shards.map(({ index, total }) => `${index}/${total}`).sort(),
+    Array.from({ length: shards[0].total }, (_, index) => `${index + 1}/${shards[0].total}`).sort(),
+  );
 });

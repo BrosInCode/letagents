@@ -29,14 +29,26 @@ on:
       - dev
       - staging
       - main
+  # GitHub's merge queue runs the required checks on each queued pull request
+  # merged onto the latest base branch, before that result is merged.
+  merge_group:
+    types:
+      - checks_requested
+    branches:
+      - dev
+      - staging
+      - main
 
-# Prevent overlapping deploys on staging
+# Prevent overlapping deploys on staging. A newer push to a pull request
+# replaces that pull request's unfinished run instead of waiting behind it.
 concurrency:
   group: deploy-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build:
+  # Everything the required "build" check covers except the desktop test
+  # suites, which run in parallel in desktop-tests below.
+  build-checks:
     if: inputs.purpose != 'room-ack-evaluation'
     runs-on: ubuntu-latest
     steps:
@@ -52,6 +64,9 @@ jobs:
 
       - name: Test workflow supply-chain policy
         run: npm run test:workflow-supply-chain
+
+      - name: Test CI test shard selection
+        run: node --test scripts/select-test-shard.test.mjs
 
       - name: Test production Docker context
         run: npm run test:docker-context
@@ -152,15 +167,6 @@ jobs:
       - name: Lint desktop Vue components
         run: npm --prefix apps/desktop run lint:vue-components
 
-      - name: Test desktop
-        # Pin the API base URL to an unroutable local address so the desktop
-        # runtime tests (which seed fixture sessions and fire a background
-        # heartbeat/pause timer) can never reach the production API. Nothing
-        # listens on port 9, so a stray call fails fast instead of hitting prod.
-        env:
-          LETAGENTS_API_URL: http://127.0.0.1:9
-        run: npm --prefix apps/desktop test
-
       - name: Build desktop
         run: npm --prefix apps/desktop run build
 
@@ -225,6 +231,112 @@ jobs:
         if: steps.opencode_contract.outputs.run == 'true'
         timeout-minutes: 5
         run: cd apps/desktop && node electron/scripts/opencode-runtime-contract-smoke.mjs
+
+  # The desktop suites ran in series in one job and took most of its time.
+  # Each runs here in its own job, with the commands `npm test` runs in
+  # apps/desktop, after the same dependency checks as build-checks.
+  desktop-tests:
+    name: desktop-tests (${{ matrix.suite }})
+    if: inputs.purpose != 'room-ack-evaluation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The electron files are split by size into shards. Every electron
+        # entry names the same shard total; change them together.
+        suite:
+          - renderer
+          - daemon
+          - electron 1/3
+          - electron 2/3
+          - electron 3/3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Enforce dependency cooldown
+        run: npm run verify:dependency-age
+
+      - name: Install dependencies without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts --no-audit
+          npm ci --ignore-scripts --no-audit --prefix apps/desktop
+
+      - name: Verify dependency signatures
+        run: |
+          npm audit signatures
+          npm audit signatures --prefix apps/desktop
+
+      - name: Install pinned dependency audit client
+        run: |
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+
+      - name: Audit dependency advisories
+        run: node scripts/verify-dependency-advisories.mjs . apps/desktop apps/desktop/electron/runtime/letagents
+
+      - name: Run verified dependency lifecycle scripts
+        run: |
+          npm rebuild
+          npm rebuild --prefix apps/desktop
+          npm exec --prefix apps/desktop -- install-electron
+
+      - name: Test desktop (${{ matrix.suite }})
+        # Pin the API base URL to an unroutable local address so the desktop
+        # runtime tests (which seed fixture sessions and fire a background
+        # heartbeat/pause timer) can never reach the production API. Nothing
+        # listens on port 9, so a stray call fails fast instead of hitting prod.
+        env:
+          LETAGENTS_API_URL: http://127.0.0.1:9
+          SUITE: ${{ matrix.suite }}
+        run: |
+          set -euo pipefail
+          case "${SUITE}" in
+            renderer)
+              npm --prefix apps/desktop run test:renderer
+              npm --prefix apps/desktop run test:packaging
+              ;;
+            daemon)
+              npm --prefix apps/desktop run test:daemon
+              ;;
+            "electron "*)
+              shard="${SUITE#electron }"
+              cd apps/desktop
+              node ../../scripts/select-test-shard.mjs --shard "${shard}" electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt"
+              mapfile -t files < "${RUNNER_TEMP}/electron-shard.txt"
+              echo "Electron shard ${shard} runs ${#files[@]} files:"
+              printf '  %s\n' "${files[@]}"
+              npm run test:electron:files -- "${files[@]}"
+              ;;
+            *)
+              echo "Unknown desktop test suite '${SUITE}'." >&2
+              exit 1
+              ;;
+          esac
+
+  # The required "build" check. GitHub counts a skipped check as passing, so
+  # this gate runs even after a failure or cancellation, and passes only when
+  # every job it waits for succeeded.
+  build:
+    needs: [build-checks, desktop-tests]
+    if: ${{ always() && inputs.purpose != 'room-ack-evaluation' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every job this check waits for to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "${NEEDS}"
+          jq -e 'length > 0 and all(.[]; .result == "success")' <<< "${NEEDS}" > /dev/null
 
   # ── DB-backed integration tests ──
   integration-tests:
