@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  type BigIntStats,
   closeSync,
   constants,
   existsSync,
@@ -81,7 +82,7 @@ export function resolveLetAgentsMcpRuntime(input: {
       const expectedTreeSha256 = input.expectedBundledTreeSha256
         ?? LETAGENTS_MCP_RUNTIME_TREE_SHA256;
       assertUnredirectedRuntimePath(runtimeRoot, bundledEntry);
-      const actualTreeSha256 = computeLetAgentsMcpRuntimeTreeSha256(join(runtimeRoot, "node_modules"));
+      const actualTreeSha256 = verifiedRuntimeTreeSha256(join(runtimeRoot, "node_modules"), expectedTreeSha256);
       if (actualTreeSha256 !== expectedTreeSha256) {
         throw new Error(
           `The bundled LetAgents MCP runtime failed its complete tree integrity check (expected ${expectedTreeSha256}, found ${actualTreeSha256}).`,
@@ -96,14 +97,93 @@ export function resolveLetAgentsMcpRuntime(input: {
   );
 }
 
+/**
+ * Fingerprints of trees that already matched their sealed digest, keyed by
+ * (dependency root, expected digest). The fingerprint covers the lstat
+ * metadata (device, inode, mode, size, mtime and ctime in nanoseconds) of
+ * every entry.
+ *
+ * Every resolution still walks the complete tree and applies every structural
+ * rule (no symlinks, regular files only, entry and byte bounds). Only the file
+ * reads and the SHA-256 are skipped, and only while every entry's metadata is
+ * identical to the walk that produced the matching digest. Any write, rename,
+ * replacement or chmod changes ctime, which an unprivileged process cannot
+ * set, so it forces a full re-hash. Measured on the shipped tree (7.6k
+ * entries, 45 MB): about 180 ms warm for the hash, about 35 ms for the walk.
+ *
+ * Racy entries (git's "racily clean" rule): a filesystem with coarse
+ * timestamps could hide a same-size write made in the same tick as the walk,
+ * so a tree with any ctime this close to the walk is never remembered.
+ *
+ * TOCTOU: the window is unchanged. The tree can still change between this
+ * check and the moment Node loads a file, exactly as before; because the
+ * metadata walk runs on every resolution, the memo does not widen it.
+ */
+const verifiedRuntimeTrees = new Map<string, string>();
+const VERIFIED_RUNTIME_TREE_LIMIT = 8;
+const RACY_CTIME_WINDOW_NS = 2_000_000_000n;
+
+/** Test-only: forget every verified tree fingerprint. */
+export function clearLetAgentsMcpRuntimeVerificationCacheForTest(): void {
+  verifiedRuntimeTrees.clear();
+}
+
+/** Test-only counters: how many complete-tree hashes and metadata walks ran. */
+export const letAgentsMcpRuntimeTreeWalkCountsForTest = { hashes: 0, metadataWalks: 0 };
+
+function verifiedRuntimeTreeSha256(nodeModulesRoot: string, expectedTreeSha256: string): string {
+  const key = JSON.stringify([resolve(nodeModulesRoot), expectedTreeSha256]);
+  const remembered = verifiedRuntimeTrees.get(key);
+  if (remembered !== undefined) {
+    if (walkLetAgentsMcpRuntimeTree(nodeModulesRoot, false).fingerprint === remembered) {
+      return expectedTreeSha256;
+    }
+    verifiedRuntimeTrees.delete(key);
+  }
+  const { digest, fingerprint, newestCtimeNs, startedNs } = walkLetAgentsMcpRuntimeTree(nodeModulesRoot, true);
+  if (digest === expectedTreeSha256 && newestCtimeNs + RACY_CTIME_WINDOW_NS < startedNs) {
+    if (verifiedRuntimeTrees.size >= VERIFIED_RUNTIME_TREE_LIMIT) {
+      const oldest = verifiedRuntimeTrees.keys().next().value;
+      if (oldest !== undefined) verifiedRuntimeTrees.delete(oldest);
+    }
+    verifiedRuntimeTrees.set(key, fingerprint);
+  }
+  return digest ?? "";
+}
+
 /** Compute the deterministic digest used to seal the complete runtime tree. */
 export function computeLetAgentsMcpRuntimeTreeSha256(nodeModulesRoot: string): string {
+  return walkLetAgentsMcpRuntimeTree(nodeModulesRoot, true).digest ?? "";
+}
+
+function walkLetAgentsMcpRuntimeTree(
+  nodeModulesRoot: string,
+  readContents: boolean,
+): { digest: string | null; fingerprint: string; newestCtimeNs: bigint; startedNs: bigint } {
+  const startedNs = BigInt(Date.now()) * 1_000_000n;
+  let newestCtimeNs = 0n;
+  if (readContents) letAgentsMcpRuntimeTreeWalkCountsForTest.hashes += 1;
+  else letAgentsMcpRuntimeTreeWalkCountsForTest.metadataWalks += 1;
   const logicalRoot = resolve(nodeModulesRoot);
-  const rootStat = lstatSync(logicalRoot);
+  const rootStat = lstatSync(logicalRoot, { bigint: true });
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error("The LetAgents MCP runtime dependency root must be a real directory.");
   }
-  const hash = createHash("sha256");
+  const hash = readContents ? createHash("sha256") : null;
+  const metadata = createHash("sha256");
+  const recordMetadata = (relativePath: string, stat: BigIntStats): void => {
+    if (stat.ctimeNs > newestCtimeNs) newestCtimeNs = stat.ctimeNs;
+    metadata.update(JSON.stringify([
+      relativePath,
+      String(stat.dev),
+      String(stat.ino),
+      String(stat.mode),
+      String(stat.size),
+      String(stat.mtimeNs),
+      String(stat.ctimeNs),
+    ]));
+  };
+  recordMetadata("", rootStat);
   let entries = 0;
   let bytes = 0;
 
@@ -127,10 +207,13 @@ export function computeLetAgentsMcpRuntimeTreeSha256(nodeModulesRoot: string): s
       }
       const path = join(directory, name);
       const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
-      const stat = lstatSync(path);
+      // Metadata is taken before any read: a write after this point changes
+      // ctime, so a later resolution cannot reuse this walk's verdict.
+      const stat = lstatSync(path, { bigint: true });
       if (stat.isSymbolicLink()) {
         throw new Error(`The LetAgents MCP runtime contains a redirected entry: ${relativePath}`);
       }
+      recordMetadata(relativePath, stat);
       if (stat.isDirectory()) {
         walk(path, relativePath);
         continue;
@@ -138,11 +221,13 @@ export function computeLetAgentsMcpRuntimeTreeSha256(nodeModulesRoot: string): s
       if (!stat.isFile()) {
         throw new Error(`The LetAgents MCP runtime contains a non-file entry: ${relativePath}`);
       }
-      bytes += stat.size;
+      const size = Number(stat.size);
+      bytes += size;
       if (bytes > MAX_RUNTIME_TREE_BYTES) {
         throw new Error("The LetAgents MCP runtime exceeds its complete tree size bound.");
       }
-      const data = readRuntimeFileNoFollow(path, stat.size);
+      if (!hash) continue;
+      const data = readRuntimeFileNoFollow(path, size);
       const pathBytes = Buffer.from(relativePath, "utf8");
       const header = Buffer.allocUnsafe(16);
       header.writeBigUInt64BE(BigInt(pathBytes.length), 0);
@@ -153,7 +238,12 @@ export function computeLetAgentsMcpRuntimeTreeSha256(nodeModulesRoot: string): s
     }
   };
   walk(logicalRoot, "");
-  return hash.digest("hex");
+  return {
+    digest: hash ? hash.digest("hex") : null,
+    fingerprint: metadata.digest("hex"),
+    newestCtimeNs,
+    startedNs,
+  };
 }
 
 function assertUnredirectedRuntimePath(runtimeRoot: string, entryPath: string): void {

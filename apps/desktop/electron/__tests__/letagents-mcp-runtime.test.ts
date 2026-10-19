@@ -6,7 +6,9 @@ import test from "node:test";
 import { createElectronTestEnv } from "./harness.js";
 import {
   LETAGENTS_MCP_RUNTIME_VERSION,
+  clearLetAgentsMcpRuntimeVerificationCacheForTest,
   computeLetAgentsMcpRuntimeTreeSha256,
+  letAgentsMcpRuntimeTreeWalkCountsForTest,
   resolveLetAgentsMcpRuntime,
 } from "../main/agents/letagents-mcp-runtime.js";
 
@@ -125,6 +127,44 @@ test("MCP runtime resolution fails closed for missing artifacts, wrong versions,
     () => resolveLetAgentsMcpRuntime({ devEntryPath: wrongEntry, env: {} }),
     /explicit desktop development mode/,
   );
+});
+
+test("a sealed runtime tree is hashed once while every entry's metadata is unchanged", async () => {
+  const resources = join(tempDir, "memo-resources");
+  const nodeModules = join(resources, "app", "runtime", "letagents", "node_modules");
+  const packageRoot = join(nodeModules, "letagents");
+  writeRuntimePackage(packageRoot, LETAGENTS_MCP_RUNTIME_VERSION);
+  const dependencyFile = join(nodeModules, "dependency", "index.js");
+  mkdirSync(join(nodeModules, "dependency"), { recursive: true });
+  writeFileSync(dependencyFile, "module.exports = 1;\n");
+  const expectedBundledTreeSha256 = computeLetAgentsMcpRuntimeTreeSha256(nodeModules);
+  const resolveOnce = () => resolveLetAgentsMcpRuntime({ resourcesPath: resources, env: {}, expectedBundledTreeSha256 });
+  const counts = letAgentsMcpRuntimeTreeWalkCountsForTest;
+  clearLetAgentsMcpRuntimeVerificationCacheForTest();
+
+  // A tree written within the racy window is hashed on every resolution.
+  const racy = { ...counts };
+  resolveOnce();
+  resolveOnce();
+  assert.equal(counts.hashes - racy.hashes, 2, "a just-written tree is never remembered");
+
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+  const before = { ...counts };
+  // Before this memo: every resolution read and hashed the whole tree.
+  for (let index = 0; index < 5; index += 1) resolveOnce();
+  assert.equal(counts.hashes - before.hashes, 1, "five resolutions cost one complete hash");
+  assert.equal(counts.metadataWalks - before.metadataWalks, 4, "later resolutions still walk the complete tree");
+
+  // Same size, deep in a dependency: only the metadata (ctime) reveals it.
+  writeFileSync(dependencyFile, "module.exports = 2;\n");
+  const tampered = { ...counts };
+  assert.throws(resolveOnce, /complete tree integrity check/);
+  assert.equal(counts.hashes - tampered.hashes, 1, "changed metadata forces a complete re-hash");
+  assert.throws(resolveOnce, /complete tree integrity check/, "a failed tree is never remembered");
+
+  writeFileSync(dependencyFile, "module.exports = 1;\n");
+  symlinkSync(dependencyFile, join(nodeModules, "dependency", "link.js"));
+  assert.throws(resolveOnce, /redirected entry/, "structural rules run on every resolution");
 });
 
 function writeRuntimePackage(packageRoot: string, version: string): string {
