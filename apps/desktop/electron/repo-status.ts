@@ -19,6 +19,12 @@ export type RepoStatusBuildOptions = {
   includeBranchDeltas?: boolean;
   /** Project ownership checks must derive identity from Git, never repository config. */
   ignoreConfiguredRoom?: boolean;
+  /**
+   * Receives exactly what `git remote get-url origin` returned while the room
+   * was derived (stdout, or the failure), so a caller can prove which origin
+   * a decision was based on.
+   */
+  onOriginRemoteRead?: (read: { stdout: string } | { error: unknown }) => void;
 };
 
 function throwIfAborted(options: RepoStatusBuildOptions): void {
@@ -870,7 +876,14 @@ export async function resolveRoomIdentifierFromPath(
   }
 
   try {
-    const stdout = await runGitInPath(repoRoot, ["remote", "get-url", "origin"], options);
+    let stdout: string;
+    try {
+      stdout = await runGitInPath(repoRoot, ["remote", "get-url", "origin"], options);
+    } catch (error) {
+      options.onOriginRemoteRead?.({ error });
+      throw error;
+    }
+    options.onOriginRemoteRead?.({ stdout });
     const repoRoom = normalizeGitRemoteToRoomIdentifier(stdout);
     if (repoRoom) {
       return {
