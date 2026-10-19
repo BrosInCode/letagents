@@ -207,6 +207,7 @@ import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoom
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
 import { computed, nextTick, onBeforeUnmount, provide, ref, toRef, watch } from "vue";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
+import { useStableIdSet } from "../../../composables/useStableIdSet";
 import PinnedMessages from "../../../../../../../shared/ui/PinnedMessages.vue";
 import { provideRoomMessagePins, useRoomMessagePins } from "../../../composables/useRoomMessagePins";
 import { provideRoomMessageReactions, useRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
@@ -348,9 +349,7 @@ const { chips: presenceChips } = useAgentPresenceChips({
 const threadLayoutAnimationMs = 260;
 const readingThreadLatest = ref(false);
 const threadScrollPositions = new Map<string, number>();
-const taskReferenceIds = computed<ReadonlySet<string>>(() =>
-  new Set(props.tasks.map((task) => task.id))
-);
+const taskReferenceIds = useStableIdSet(() => props.tasks.map((task) => task.id));
 const activeThreadParentId = ref<string | null>(null);
 const threadRevealTargetId = ref<string | null>(null);
 const { quote: replyTarget } = useDesktopMessageDraft(() => props.messageNamespace);
