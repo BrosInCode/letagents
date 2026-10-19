@@ -32,7 +32,7 @@
           <span class="agent-live-icon" aria-hidden="true"><component :is="entry.kind === 'note' ? NotebookPen : MessageSquare" :size="14" :stroke-width="1.6" /></span>
           <div class="agent-live-note">
             <span class="agent-live-caption">{{ entry.kind === 'note' ? 'Work note' : 'Agent update' }}</span>
-            <div class="agent-live-prose" v-html="renderDesktopMarkdown(entry.text, { block: true, mentions: false })"></div>
+            <MarkdownBlock class="agent-live-prose" :text="entry.text" :mentions="false" />
           </div>
         </template>
       </li>
@@ -54,7 +54,7 @@
 import { computed, type Component } from "vue";
 import { useNow } from "../../../../composables/useNow";
 import { Bot, Check, CircleAlert, FilePenLine, FileText, Globe, Hourglass, ListChecks, MessageSquare, NotebookPen, Search, SquareTerminal, Wrench } from "@lucide/vue";
-import { renderDesktopMarkdown } from "../formatting/markdown";
+import MarkdownBlock from "../formatting/MarkdownBlock.vue";
 import { formatFullTimestamp } from "../../../../domain/time";
 import { liveActionStatus } from "../../../../domain/agent-inspector-live-trace";
 import { formatLiveWorkDuration } from "../../../../domain/agent-inspector-live";
