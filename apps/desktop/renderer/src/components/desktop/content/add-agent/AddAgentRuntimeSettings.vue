@@ -6,7 +6,7 @@
     data-testid="desktop-add-agent-execution"
   >
     <label class="desktop-add-agent-model-custom-input">
-      <small>First task</small>
+      <small>First message</small>
       <!-- An edit can arrive with only a change event, e.g. a value set through
            accessibility automation. Without this the form kept the old task, and
            the next re-render (choosing an access level re-runs setup) wrote it

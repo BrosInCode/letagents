@@ -289,31 +289,6 @@ test("accepted native harness activity pushes the indexed delivery deadline", sk
   assert.ok(Date.parse(due) >= before + 4 * 60_000);
 });
 
-test("a stale stall claim cannot fence a drain after new work opens", skipOptions, async () => {
-  const { createProjectWithName, createTask, listStalledRoomCandidates, markRoomStallNudgedTx } = dbModule!;
-  const room = await createProjectWithName!("due-stall-race");
-  const task = await createTask!(room.id, "old drain", "EmmyMay");
-  await pool!.query(
-    `UPDATE tasks SET status = 'done', updated_at = now() - interval '45 minutes'
-      WHERE room_id = $1 AND number = $2`,
-    [room.id, Number(task.id.replace("task_", ""))],
-  );
-  await pool!.query(
-    `UPDATE room_board_settings
-        SET last_task_closed_at = now() - interval '45 minutes',
-            stall_check_at = now() - interval '15 minutes'
-      WHERE room_id = $1`,
-    [room.id],
-  );
-  const candidate = (await listStalledRoomCandidates!({})).find((row) => row.room_id === room.id);
-  assert.ok(candidate);
-  await createTask!(room.id, "new cycle", "EmmyMay");
-  assert.equal(await markRoomStallNudgedTx!(db!, {
-    room_id: room.id,
-    epoch: candidate!.last_closed_at,
-  }), false, "reopened work must defeat the old drain fence");
-});
-
 test("due room context batches manager, delivery, and suppression state", skipOptions, async () => {
   const { createProjectWithName, createRoomAgentSession, markRoomAgentDeliveryConnected, setRoomLiveAgentSuppressed,
     assignBoardManager, upsertAccount } = dbModule!;
@@ -368,72 +343,4 @@ test("due room context batches manager, delivery, and suppression state", skipOp
     context.reachable_manager_room_ids.has(room.id),
     "reminder suppression must not erase exact manager reachability authority",
   );
-});
-
-test("a dead assigned manager cannot permanently disable a drained-room nudge", skipOptions, async () => {
-  const { assignBoardManager, createProjectWithName, createRoomAgentSession, createTask,
-    listStalledRoomCandidates, markRoomAgentDeliveryConnected,
-    markRoomStallNudgedTx, upsertAccount } = dbModule!;
-  const { getDueRoomOperationalContext } = dueContextModule!;
-  const room = await createProjectWithName!("due-dead-manager-stall");
-  const account = await upsertAccount!({
-    provider: "github",
-    provider_user_id: "due-dead-manager-account",
-    login: "EmmyMay",
-    display_name: "EmmyMay",
-  });
-  const createWorker = (name: string) => createRoomAgentSession!({
-    room_id: room.id,
-    session_kind: "worker",
-    runtime: "codex",
-    actor_label: `${name} | EmmyMay's agent | Codex`,
-    agent_key: `EmmyMay/${name.toLowerCase()}`,
-    display_name: name,
-    owner_account_id: account.id,
-    owner_label: "EmmyMay",
-    ide_label: "Codex",
-  });
-  const [manager, helper] = await Promise.all([createWorker("Oak"), createWorker("Pine")]);
-  for (const worker of [manager, helper]) {
-    await markRoomAgentDeliveryConnected!({
-      room_id: room.id,
-      actor_label: worker.actor_label,
-      agent_session_id: worker.session_id,
-      session_kind: "worker",
-      display_name: worker.display_name,
-      credential_fence: { kind: "session_token", token_hash: utilsModule!.hashToken(worker.session_token) },
-      transport: "long_poll",
-    });
-  }
-  await assignBoardManager!({ room_id: room.id, agent_session_id: manager.session_id, assigned_by: "EmmyMay" });
-  const task = await createTask!(room.id, "finished phase", "EmmyMay");
-  await pool!.query(`UPDATE tasks SET status = 'done' WHERE room_id = $1 AND number = $2`, [
-    room.id,
-    Number(task.id.replace("task_", "")),
-  ]);
-  await pool!.query(
-    `UPDATE room_board_settings
-        SET last_task_closed_at = now() - interval '45 minutes',
-            stall_check_at = now() - interval '15 minutes'
-      WHERE room_id = $1`,
-    [room.id],
-  );
-  await pool!.query(
-    `UPDATE room_agent_delivery_sessions
-        SET active_connection_count = 0,
-            reconnect_grace_expires_at = now() - interval '10 minutes',
-            updated_at = now() - interval '10 minutes'
-      WHERE room_id = $1 AND agent_session_id = $2`,
-    [room.id, manager.session_id],
-  );
-
-  const context = await getDueRoomOperationalContext!([room.id]);
-  assert.equal(context.reachable_manager_room_ids.has(room.id), false);
-  assert.deepEqual(context.live_worker_labels_by_room.get(room.id), [helper.actor_label]);
-  const candidate = (await listStalledRoomCandidates!({})).find((entry) => entry.room_id === room.id);
-  assert.ok(candidate, "unreachable assignment must leave the drained room due");
-  assert.equal(await markRoomStallNudgedTx!(db!, {
-    room_id: room.id,
-    epoch: candidate!.last_closed_at,
-  }), true, "the final fence must reject only a reachable manager");
 });

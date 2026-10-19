@@ -320,6 +320,7 @@ import { useRoomResponseParticipants } from "../../../composables/useRoomRespons
 import { roomAgentRecoveryAction } from "../../../domain/room-agent-delivery";
 import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, provide, readonly, ref, shallowReadonly, toRef, watch } from "vue";
+import { useNow } from "../../../composables/useNow";
 import type {
   DesktopActivityEntry,
   DesktopAgentProvider,
@@ -911,13 +912,15 @@ const pendingResponseParticipants = useRoomResponseParticipants(() => ({
   entries: supervisorEntries.value, presence: props.presence,
   fresh: supervisorEntriesResourceFreshness(supervisorEntriesState.value) === "fresh",
 }));
+// The 90 s "recently working" window needs the clock, not only new presence data.
+const workWindowNow = useNow(30_000);
 const localAgentWork = computed(() =>
   mergeRoomResponseParticipants([
     ...waitingAgentIndicators(supervisorEntries.value, props.room.identifier),
     ...supervisedAgentWorkIndicators(supervisorEntries.value, props.presence, props.room.identifier,
       supervisorEntriesResourceFreshness(supervisorEntriesState.value)),
   ], [...pendingResponseParticipants.value, /* other members' agents, last */ ...remoteAgentWorkIndicators(props.presence,
-    supervisorEntries.value)], props.messages)
+    supervisorEntries.value, [], workWindowNow.value)], props.messages)
 );
 function openBoardTask(taskId: string): void {
   boardSelectedTaskId.value = taskId;

@@ -315,6 +315,33 @@ describe("applyRoomLiveMetadata", () => {
   it("is a no-op on a null snapshot", () => {
     assert.equal(applyRoomLiveMetadata(null, liveMetadata({})), null);
   });
+
+  it("returns the same snapshot object when an equal payload arrives again", () => {
+    const first = liveMetadata({
+      participants: [{ participantKey: "a" }, { participantKey: "b" }] as unknown as DesktopRoomLiveMetadata["participants"],
+      presence: [{ actorLabel: "agent:river" }] as unknown as DesktopRoomLiveMetadata["presence"],
+    });
+    const current = applyRoomLiveMetadata(roomSnapshot("cloud", "hello", "msg_1"), first)!;
+    const again = applyRoomLiveMetadata(current, structuredClone(first));
+    assert.equal(again, current);
+  });
+
+  it("replaces only the changed section and keeps the other references", () => {
+    const first = liveMetadata({
+      participants: [{ participantKey: "a" }] as unknown as DesktopRoomLiveMetadata["participants"],
+      presence: [{ actorLabel: "agent:river", status: "online" }] as unknown as DesktopRoomLiveMetadata["presence"],
+    });
+    const current = applyRoomLiveMetadata(roomSnapshot("cloud", "hello", "msg_1"), first)!;
+    const changed = structuredClone(first);
+    (changed.presence as unknown as Array<{ status: string }>)[0]!.status = "away";
+    const next = applyRoomLiveMetadata(current, changed)!;
+    assert.notEqual(next, current);
+    assert.notEqual(next.presence, current.presence);
+    assert.equal(next.participants, current.participants);
+    assert.equal(next.focusRooms, current.focusRooms);
+    assert.equal(next.boardSettings, current.boardSettings);
+    assert.equal(next.messages, current.messages);
+  });
 });
 
 function liveMetadata(

@@ -1,9 +1,10 @@
-import { computed, onBeforeUnmount, onScopeDispose, ref, watch, type Ref } from 'vue';
+import { computed, onBeforeUnmount, onScopeDispose, ref, toRaw, watch, type Ref } from 'vue';
 import type { DesktopAccountActivityState } from '../../../electron/ipc-types';
 import type { DesktopAttentionRoom, DesktopNeedsYou } from '../../../electron/ipc-types/knowledge.js';
 import type { DesktopRoomThreadInboxPage } from '../../../electron/ipc-types.js';
 import { desktopBridgeUpgradeMessage, desktopIpc } from '../ipc/index.js';
 import { roomReadKey } from '../domain/desktop-room-read-state';
+import { reuseUnchanged } from '../domain/reuse-unchanged';
 
 export function useNeedsYou() {
   const data = ref<DesktopNeedsYou | null>(null);
@@ -33,7 +34,8 @@ export function useNeedsYou() {
             ? data.value?.rooms.find(item => item.roomIdentifier === room.roomIdentifier) : undefined;
           if (newer) Object.assign(room, requestsOf(newer)); else roomReadAt.set(room.roomIdentifier, startedAt);
         }
-        data.value = result; error.value = '';
+        // A poll that found nothing new keeps every reference, so Inbox does not re-render.
+        data.value = reuseUnchanged(toRaw(data.value), result); error.value = '';
       }
     } catch (cause) { if (current === generation) error.value = cause instanceof Error ? cause.message : 'Unable to load Inbox.'; }
     finally {

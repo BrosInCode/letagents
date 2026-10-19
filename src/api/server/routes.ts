@@ -214,7 +214,6 @@ import {
   enforceTaskAdmissionPreconditions,
   enforceTaskCoordinationMutation,
   isTrustedAgentCreator,
-  maybeEmitStaleWorkPrompt,
   rememberAgentRoomParticipant,
   rememberHumanRoomParticipant,
   rememberRoomParticipantFromMessage,
@@ -363,7 +362,6 @@ export function registerApiRoutes(app: Express): void {
     requireAdmin,
     requireParticipant,
     rememberAgentRoomParticipant,
-    maybeEmitStaleWorkPrompt,
     emitProjectMessage,
   } satisfies RoomPresenceRouteDeps;
 

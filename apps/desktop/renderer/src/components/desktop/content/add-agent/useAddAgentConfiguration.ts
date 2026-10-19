@@ -17,7 +17,7 @@ import { contextualAddAgentError, type AddAgentFeedbackTone } from "./add-agent-
 
 export type AddAgentModelSelectionMode = "default" | "option" | "custom";
 
-export const defaultSupervisedCharter = "Join the room, check the board, and help move the available work forward.";
+export const defaultSupervisedCharter = "You are part of this room's team. Work on the tasks assigned to you, answer when you are addressed, and coordinate with the team in the room.";
 
 interface ConfigurationBindings {
   open: () => boolean;

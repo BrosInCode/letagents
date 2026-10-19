@@ -51,7 +51,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch, type Component } from "vue";
+import { computed, type Component } from "vue";
+import { useNow } from "../../../../composables/useNow";
 import { Bot, Check, CircleAlert, FilePenLine, FileText, Globe, Hourglass, ListChecks, MessageSquare, NotebookPen, Search, SquareTerminal, Wrench } from "@lucide/vue";
 import { renderDesktopMarkdown } from "../formatting/markdown";
 import { formatFullTimestamp } from "../../../../domain/time";
@@ -69,17 +70,10 @@ const props = defineProps<{ view: SharedLiveView; presence: string }>();
 const emit = defineEmits<{ "reveal-request": [messageId: string] }>();
 
 const state = computed(() => sharedLiveState(props.view.snapshot, props.presence));
-const now = ref(Date.now());
-let timer: ReturnType<typeof setInterval> | null = null;
-function syncTimer(): void {
-  if (timer) clearInterval(timer);
-  timer = null;
-  now.value = Date.now();
-  if (state.value === "working") timer = setInterval(() => { now.value = Date.now(); }, 1_000);
-}
-onMounted(syncTimer);
-watch(state, syncTimer);
-onUnmounted(() => { if (timer) clearInterval(timer); });
+// One shared 1 s clock, running only while the agent works. The max keeps the
+// value fresh when the clock was idle.
+const clock = useNow(1_000, () => state.value === "working");
+const now = computed(() => Math.max(clock.value, Date.now()));
 
 const stateLabel = computed(() => ({ working: "In progress", finished: "Finished", delayed: "Updates delayed", attention: "Needs attention", stopped: "Stopped updating" })[state.value]);
 const durationLabel = computed(() => {

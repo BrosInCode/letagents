@@ -122,7 +122,7 @@
       {{ externalInstruction }}
     </span>
     <span v-else-if="supervisedProvider && charterMissing" class="desktop-add-agent-confirmation">
-      Add a first task to start the agent.
+      Add a first message to start the agent.
     </span>
     <span v-else-if="supervisedProvider && recoveryScanStatus !== 'ready'" class="desktop-add-agent-confirmation">
       {{ recoveryScanStatus === "error"
