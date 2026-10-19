@@ -112,6 +112,56 @@ export function resolveThreadParent(
   };
 }
 
+function sameThreadLatest(left: DesktopRoomMessage | null, right: DesktopRoomMessage | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.id === right.id && left.sender === right.sender && left.source === right.source
+    && left.text === right.text && left.displayText === right.displayText
+    && left.timestamp === right.timestamp && left.actorLabel === right.actorLabel
+    && left.agentIdentity === right.agentIdentity;
+}
+
+export function sameThreadIndicatorSummary(left: ThreadIndicatorSummary, right: ThreadIndicatorSummary): boolean {
+  return left.count === right.count
+    && left.unreadCount === right.unreadCount
+    && left.latestPreview === right.latestPreview
+    && left.latestTimestamp === right.latestTimestamp
+    && left.hasPartialHistory === right.hasPartialHistory
+    && left.loadingEarlier === right.loadingEarlier
+    && sameThreadLatest(left.latest, right.latest)
+    && left.participants.length === right.participants.length
+    && left.participants.every((participant, index) => {
+      const other = right.participants[index]!;
+      return participant.key === other.key && participant.displayName === other.displayName && participant.color === other.color;
+    });
+}
+
+/**
+ * Keeps the same summary object for a message while its content is equal.
+ * A new object each render makes Vue re-render the message row, because a
+ * changed prop identity counts as a change.
+ *
+ * Invalidation rule: an entry is replaced when the new summary differs by
+ * value. Size bound: `retain` drops entries for messages that left the list.
+ */
+export function createThreadIndicatorMemo() {
+  const entries = new Map<string, ThreadIndicatorSummary>();
+  return {
+    stable(messageId: string, next: ThreadIndicatorSummary): ThreadIndicatorSummary {
+      const previous = entries.get(messageId);
+      if (previous && sameThreadIndicatorSummary(previous, next)) return previous;
+      entries.set(messageId, next);
+      return next;
+    },
+    retain(messages: readonly { id: string }[]): void {
+      if (entries.size <= messages.length) return;
+      const live = new Set(messages.map(message => message.id));
+      for (const id of entries.keys()) if (!live.has(id)) entries.delete(id);
+    },
+    get size(): number { return entries.size; },
+  };
+}
+
 export function buildThreadIndicatorSummary(
   parent: DesktopRoomMessage,
   fallback: ThreadSummary | null,

@@ -2759,9 +2759,11 @@ watch(
   { immediate: true }
 );
 
+// The list is only ever replaced, never edited in place, so an identity watch sees
+// every change without walking each room.
 watch(recentRootRooms, () => {
   void refreshProjectBindings();
-}, { deep: true });
+});
 
 watch(
   [
@@ -2775,7 +2777,8 @@ watch(
   () => {
     void leaveArchivedSelectedRoomFromSettingsList();
   },
-  { deep: true, immediate: true }
+  // No `deep`: the settings room list is replaced on every refresh, not edited in place.
+  { immediate: true }
 );
 
 watch(

@@ -6,6 +6,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import {
   compareRoomMessages,
+  createMessageIdentityVersion,
   isHiddenChatMessage,
   mergeRoomMessages,
 } from "./messages";
@@ -50,7 +51,13 @@ export function useDesktopRoomMessages(options: {
     return mergeRoomMessages(olderMessages.value, options.messages.value);
   });
   const visibleMessages = computed(() => {
-    return mergeRoomMessages(loadedServerMessages.value, localMessages.value)
+    // `loadedServerMessages` is already merged, hidden-filtered and sorted. With
+    // no unsent local messages a second merge would return the same list, so it
+    // is skipped. The merge stays for the pending-send case.
+    const merged = localMessages.value.length
+      ? mergeRoomMessages(loadedServerMessages.value, localMessages.value)
+      : loadedServerMessages.value;
+    return merged
       .filter((message) =>
         options.githubEventsVisible.value || !isGitHubRoomMessage(message)
       );
@@ -68,8 +75,9 @@ export function useDesktopRoomMessages(options: {
     [...olderMessages.value, ...options.messages.value, ...localMessages.value].sort(compareRoomMessages)
   );
 
+  const messageIdentityVersion = createMessageIdentityVersion();
   watch(
-    () => options.messages.value.map((message) => `${message.id}:${message.clientMessageId || ""}`).join("|"),
+    () => messageIdentityVersion(options.messages.value),
     () => {
       autoHistoryBackfillCount.value = 0;
       reconcileDesktopMessageOutbox(options.room.value.identifier, options.messages.value, options.messageNamespace?.value ?? null);

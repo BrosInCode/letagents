@@ -9,6 +9,8 @@ export interface DesktopMarkdownOptions {
   mentions?: boolean;
   preservePaths?: boolean;
   onLink?: (url: string) => void;
+  /** Skip the render cache, e.g. for an editor preview that changes on every keystroke. */
+  noCache?: boolean;
 }
 
 const MAX_BLOCKQUOTE_DEPTH = 8;
@@ -16,10 +18,81 @@ const MAX_CONTAINER_DEPTH = 16;
 const MAX_INDENT_COLUMNS = 64;
 
 export function renderDesktopMarkdown(value: string, options: DesktopMarkdownOptions = {}): string {
+  // Output is a pure function of (text, block, mentions, preservePaths). A call that
+  // passes `onLink` has a side effect per link and `highlightQuery` varies with the
+  // search box, so neither is cached.
+  const cacheable = !options.onLink && !options.highlightQuery && !options.noCache;
+  const key = cacheable ? markdownCacheKey(value, options) : null;
+  if (key !== null) {
+    const hit = markdownCache.get(key);
+    if (hit !== undefined) return hit;
+  }
+  const fallbacksBefore = desktopHighlighter.budgetFallbacks;
   const html = options.block
     ? renderBlockMarkdown(value, options)
     : renderInlineMarkdown(value, options).replace(/\n/g, "<br>");
-  return sanitizeMarkdownHtml(html);
+  const sanitized = sanitizeMarkdownHtml(html);
+  // A code block that fell back to plain text (highlight budget spent) is not cached
+  // by the highlighter, so a later render may colour it. Keep that true here too.
+  if (key !== null && desktopHighlighter.budgetFallbacks === fallbacksBefore) markdownCache.set(key, sanitized);
+  return sanitized;
+}
+
+export const MARKDOWN_CACHE_MAX_ENTRIES = 500;
+export const MARKDOWN_CACHE_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Bounded LRU of rendered markdown. A hit moves the entry to the newest slot; the
+ * oldest entries go first when the count or the approximate size (UTF-16 bytes of key
+ * plus value) passes the bound. One entry larger than the byte bound is never stored.
+ */
+export class MarkdownRenderCache {
+  private readonly entries = new Map<string, string>();
+  private bytes = 0;
+  hits = 0;
+  misses = 0;
+
+  constructor(
+    private readonly maxEntries = MARKDOWN_CACHE_MAX_ENTRIES,
+    private readonly maxBytes = MARKDOWN_CACHE_MAX_BYTES,
+  ) {}
+
+  get size(): number { return this.entries.size; }
+
+  get(key: string): string | undefined {
+    const value = this.entries.get(key);
+    if (value === undefined) { this.misses += 1; return undefined; }
+    this.hits += 1;
+    this.entries.delete(key);
+    this.entries.set(key, value);
+    return value;
+  }
+
+  set(key: string, value: string): void {
+    const cost = (key.length + value.length) * 2;
+    if (cost > this.maxBytes) return;
+    const previous = this.entries.get(key);
+    if (previous !== undefined) {
+      this.bytes -= (key.length + previous.length) * 2;
+      this.entries.delete(key);
+    }
+    this.entries.set(key, value);
+    this.bytes += cost;
+    while (this.entries.size > this.maxEntries || this.bytes > this.maxBytes) {
+      const oldest = this.entries.keys().next().value as string;
+      this.bytes -= (oldest.length + this.entries.get(oldest)!.length) * 2;
+      this.entries.delete(oldest);
+    }
+  }
+
+  clear(): void { this.entries.clear(); this.bytes = 0; this.hits = 0; this.misses = 0; }
+}
+
+export const markdownCache = new MarkdownRenderCache();
+
+function markdownCacheKey(value: string, options: DesktopMarkdownOptions): string {
+  const flags = `${options.block ? 1 : 0}${options.mentions === false ? 0 : 1}${options.preservePaths ? 1 : 0}`;
+  return `${flags}:${value}`;
 }
 
 export function renderInlineMarkdown(value: string, options: DesktopMarkdownOptions = {}): string {

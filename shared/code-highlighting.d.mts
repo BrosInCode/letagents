@@ -69,6 +69,8 @@ export interface CodeHighlighterOptions {
 export interface CodeHighlighter {
   renderCodeBlock(code: string, rawTag?: string): string;
   cache: CodeHighlightCache;
+  /** Blocks rendered as plain text because the time budget was spent (never cached). */
+  readonly budgetFallbacks: number;
   resolveLanguage(rawTag?: string): ResolvedLanguage | null;
 }
 

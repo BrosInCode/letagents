@@ -13,7 +13,7 @@
       <button v-if="canEdit" type="button" class="desktop-task-detail-button" title="Edit task" aria-label="Edit task" :disabled="busyAction !== null" @click="emit('edit')"><Pencil :size="16" aria-hidden="true" /></button>
     </header>
 
-    <div v-if="task.description" class="task-markdown-preview" v-html="renderDesktopMarkdown(task.description, { block: true, mentions: false, preservePaths: true })"></div>
+    <MarkdownBlock v-if="task.description" class="task-markdown-preview" :text="task.description" :mentions="false" preserve-paths />
     <p v-else class="desktop-task-detail-muted">No task description yet.</p>
     <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
 
@@ -172,7 +172,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { Pencil } from '@lucide/vue';
-import { renderDesktopMarkdown } from '../formatting/markdown';
+import MarkdownBlock from '../formatting/MarkdownBlock.vue';
 import type { DesktopAgentPresence, DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
 import { useNow } from "../../../../composables/useNow";

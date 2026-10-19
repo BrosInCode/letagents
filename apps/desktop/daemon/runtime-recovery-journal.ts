@@ -170,8 +170,11 @@ export function readRuntimeRecovery(database: DatabaseSync, operationId: string)
   return database.prepare("SELECT * FROM agent_runtime_recoveries WHERE operation_id=?").get(operationId) as RuntimeRecoveryRecord | undefined ?? null;
 }
 
+/** The pending-recovery read, shared with the store's prepared read statements. */
+export const PENDING_RUNTIME_RECOVERY_SQL = "SELECT * FROM agent_runtime_recoveries WHERE agent_id=? AND phase <> 'complete'";
+
 export function pendingRuntimeRecovery(database: DatabaseSync, agentId: string): RuntimeRecoveryRecord | null {
-  return database.prepare("SELECT * FROM agent_runtime_recoveries WHERE agent_id=? AND phase <> 'complete'").get(agentId) as RuntimeRecoveryRecord | undefined ?? null;
+  return database.prepare(PENDING_RUNTIME_RECOVERY_SQL).get(agentId) as RuntimeRecoveryRecord | undefined ?? null;
 }
 
 export function assertRecoveryCoordinates(entry: DaemonManifestEntry | undefined, request: RuntimeRestartRequest): asserts entry is DaemonManifestEntry {

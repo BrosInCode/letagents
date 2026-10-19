@@ -27,7 +27,7 @@
           <span class="agent-live-icon" aria-hidden="true"><component :is="entry.kind === 'reasoning' ? NotebookPen : MessageSquare" :size="14" :stroke-width="1.6" /></span>
           <div class="agent-live-note">
             <span class="agent-live-caption">{{ entry.kind === 'reasoning' ? 'Work note' : 'Agent update' }}</span>
-            <div class="agent-live-prose" v-html="renderDesktopMarkdown(entry.text, { block: true, mentions: false })"></div>
+            <MarkdownBlock class="agent-live-prose" :text="entry.text" :mentions="false" />
           </div>
         </template>
       </li>
@@ -47,11 +47,12 @@
 </template>
 
 <script setup lang="ts">
+import { formatDate } from "../../../../domain/formatters";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useNow } from "../../../../composables/useNow";
 import { ArrowDown, MessageSquare, NotebookPen } from "@lucide/vue";
 import AgentInspectorLiveActions from "./AgentInspectorLiveActions.vue";
-import { renderDesktopMarkdown } from "../formatting/markdown";
+import MarkdownBlock from "../formatting/MarkdownBlock.vue";
 import { followAgentLiveScroll } from "../../../../domain/agent-inspector-live-scroll";
 import { formatFullTimestamp } from "../../../../domain/time";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
@@ -113,7 +114,7 @@ const actionCount = computed(() => transcript.value.items.filter(item => item.ki
 const lastUpdateLabel = computed(() => {
   const value = transcript.value.lastActivityAt;
   if (!value || !Number.isFinite(Date.parse(value))) return null;
-  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatDate("clockTime", value);
 });
 
 const workDurationLabel = computed(() => {

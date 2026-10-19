@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -411,6 +411,41 @@ test("capture preserves a pre-existing birth mode and rejects policy mismatch", 
       .get(runtimeGenerationId)?.authority_mode, "typed", "capture cannot rewrite the exact birth to the current release policy");
     assert.equal(f.admission(), "unavailable",
       "the installed typed-shadow expectation never silently adopts a different frozen mode");
+  } finally { f.capture.close(); }
+});
+
+test("drain remembers a found runtime birth but never a missing one", async (t) => {
+  const f = fixture();
+  try {
+    const statement = Object.getPrototypeOf(f.db.prepare("SELECT 1")) as StatementSync;
+    const get = statement.get;
+    let lookups = 0;
+    t.mock.method(statement, "get", function (this: StatementSync, ...values: SQLInputValue[]) {
+      if (this.sourceSQL.startsWith("SELECT runtime_generation_id,authority_mode,config_revision FROM execution_runtime_generations")) lookups++;
+      return get.apply(this, values);
+    });
+    f.bindTurn(); await f.install();
+    f.emit(ready); f.emit(active);
+    for (let index = 0; index < 20; index++) {
+      f.emit({ ...nativeTurn, domain: "execution", kind: "started", executionId: `command-${index}`, operation: "command", sideEffects: "possible" });
+    }
+    await flush();
+    assert.equal(f.facts().length, 22);
+    assert.ok(lookups <= 2, `a found birth is looked up once, not per fact (${lookups} lookups for 22 facts)`);
+
+    // A birth with no runtime row yet is refused, and looked up again once it exists.
+    const late = "late-birth";
+    f.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" }, late);
+    await flush();
+    assert.equal(f.facts().length, 22, "an unknown birth is refused");
+    assert.ok(f.diagnostics.includes("identity_unavailable"));
+    const before = lookups;
+    new ExecutionShadowStore(f.db).registerRuntime({ agentId: "agent", executionGenerationId: "generation",
+      runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", "codex_app_server", 42, late),
+      provider: "codex", authorityMode: "typed_shadow", configRevision: 2, createdAtMs: Date.parse(now) });
+    f.capture.refresh("agent"); await flush();
+    assert.ok(lookups > before, "the earlier miss was not remembered");
+    assert.equal(f.facts().length, 23, "the late birth's fact is captured");
   } finally { f.capture.close(); }
 });
 
