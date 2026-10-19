@@ -935,6 +935,41 @@ test("a ready daemon answers repeated ensureRunning calls from a short cache tha
   }
 });
 
+test("a stale-generation answer or a capability rejection clears the cached ready status, even with no connection error", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const spawnDaemon = () => { throw new Error("healthy daemon must be reused"); };
+  let wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 61);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 60_000, spawnDaemon });
+    assert.equal((await client.ensureRunning()).generation, 61);
+    // Another party replaces the daemon. Each request opens a new socket, so no connection error is raised.
+    await closeServer(wire.server, env.socketPath);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 62);
+    assert.equal((await client.ensureRunning()).generation, 61, "the cache still answers");
+    assert.equal(await client.bootstrapRoomIngress("entry-1", 62), "stale", "the caller sees the generation mismatch");
+    assert.equal((await client.ensureRunning()).generation, 62, "and the mismatch cleared the cache");
+
+    // Capability rejection from a cached status of an older daemon.
+    await closeServer(wire.server, env.socketPath);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 63, undefined, undefined, 0, false, false);
+    const old = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, readyStatusTtlMs: 60_000, spawnDaemon });
+    assert.equal((await old.ensureRunning()).capabilities.agentLifecycle, false);
+    await closeServer(wire.server, env.socketPath);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 64);
+    await assert.rejects(old.setDesiredState("entry-1", "paused"), /too old/);
+    const refreshed = await old.ensureRunning();
+    assert.equal(refreshed.capabilities.agentLifecycle, true, "the rejection cleared the cache");
+    assert.equal(refreshed.generation, 64);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("a failed spawn without a PID releases startup ownership for a later retry", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;

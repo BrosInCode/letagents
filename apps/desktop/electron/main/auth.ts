@@ -299,10 +299,24 @@ function serializeAuthMutation<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 export async function readStoredAuth(): Promise<StoredDesktopAuth> {
+  return readStoredAuthInternal(false);
+}
+
+/**
+ * Read for a read-modify-write. It never uses the negative cache and never
+ * answers "signed out" for a failed decrypt: it throws instead, so a write cannot
+ * be built from an empty copy and replace ciphertext that is only temporarily
+ * unreadable.
+ */
+async function readStoredAuthForUpdate(): Promise<StoredDesktopAuth> {
+  return readStoredAuthInternal(true);
+}
+
+async function readStoredAuthInternal(forUpdate: boolean): Promise<StoredDesktopAuth> {
   if (cachedAuth) {
     return cachedAuth;
   }
-  if (Date.now() < decryptFailureUntil) return emptyStoredAuth();
+  if (!forUpdate && Date.now() < decryptFailureUntil) return emptyStoredAuth();
   const generation = authGeneration;
   try {
     const raw = await readFile(getAuthStorePath(), "utf8");
@@ -322,8 +336,9 @@ export async function readStoredAuth(): Promise<StoredDesktopAuth> {
     decryptFailureUntil = 0;
     return storedAuth;
   } catch (error) {
-    if (error instanceof AuthStorageUnavailableError && generation === authGeneration) {
-      decryptFailureUntil = Date.now() + decryptFailureTtlMs;
+    if (error instanceof AuthStorageUnavailableError) {
+      if (generation === authGeneration) decryptFailureUntil = Date.now() + decryptFailureTtlMs;
+      if (forUpdate) throw error;
     }
     // Only a missing file (= signed out) is a cacheable outcome. A transient
     // read failure (EPERM/EIO disk hiccup at startup, etc.) must NOT latch the
@@ -379,7 +394,7 @@ async function updateStoredAuth(
   generation = authGeneration,
 ): Promise<StoredDesktopAuth> {
   return serializeAuthMutation(async () => {
-    const current = await readStoredAuth();
+    const current = await readStoredAuthForUpdate();
     if (generation !== authGeneration) return current;
     const nextAuth: StoredDesktopAuth = {
       ...current,

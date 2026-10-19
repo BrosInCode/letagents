@@ -65,23 +65,70 @@ test("a failed listing keeps the fast poll so recovery stays quick", async () =>
   assert.equal(reads, 11);
 });
 
-test("a supervisor state push lists approvals at once, throttled, and ignores empty pushes", async () => {
+const turn = (state: string) => ({ desiredState: "running", roomAgentState: { turn: { state } } });
+
+test("a push inside the active period lists once at its end, never lost and never repeated", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   await refreshHostApprovals(ROOM);
   const stop = watchHostApprovalPushes(ROOM);
   assert.ok(pushListener);
   now += 1_000;
   pushListener!({ entries: [{}] });
+  pushListener!({ entries: [{}] });
   await Promise.resolve();
-  assert.equal(reads, 1, "inside the active period a push does not repeat the listing");
-  now += 2_500;
+  assert.equal(reads, 1, "the push waits for the end of the active period");
+  now += 2_000;
+  context.mock.timers.tick(2_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 2, "exactly one trailing listing");
+  context.mock.timers.tick(10_000);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 2, "no further listing");
+  now += 3_500;
   pushListener!({ entries: [] });
   await Promise.resolve();
-  assert.equal(reads, 1, "a heartbeat with no agents of this room is ignored");
+  assert.equal(reads, 2, "a heartbeat with no agents of this room is ignored");
   pushListener!({ entries: [{}] });
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(reads, 2, "a push with this room's agents lists approvals before the slow tick");
+  assert.equal(reads, 3, "a push after the period lists at once");
   stop();
   assert.equal(pushListener, null);
+});
+
+test("a push during a listing runs one more listing right after it", async () => {
+  let release!: () => void;
+  let first = true;
+  (globalThis as unknown as { window: { letagentsDesktop: { supervisor: { listHostApprovals: unknown } } } })
+    .window.letagentsDesktop.supervisor.listHostApprovals = async () => {
+      reads += 1;
+      if (first) { first = false; await new Promise<void>(resolve => { release = resolve; }); }
+      return { available: true, approvals: structuredClone(approvals), error: null };
+    };
+  watchHostApprovalPushes(ROOM);
+  const inFlight = refreshHostApprovals(ROOM);
+  await Promise.resolve();
+  pushListener!({ entries: [{}] });
+  pushListener!({ entries: [{}] });
+  assert.equal(reads, 1);
+  release();
+  await inFlight;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(reads, 2, "one rerun for any number of pushes during the listing");
+});
+
+test("a room with an agent in a running turn keeps the 3 s poll until a push shows it quiet", async () => {
+  watchHostApprovalPushes(ROOM);
+  pushListener!({ entries: [turn("responding")] });
+  await new Promise(resolve => setImmediate(resolve));
+  reads = 0;
+  await runTicks(30);
+  assert.equal(reads, 11, "3 s while a turn runs");
+  pushListener!({ entries: [turn("idle")] });
+  await new Promise(resolve => setImmediate(resolve));
+  reads = 0;
+  now += 100_000;
+  await runTicks(30);
+  assert.equal(reads <= 3, true, "15 s once the room is quiet");
 });
 
 test("an unchanged listing keeps the same array and approval objects", async () => {

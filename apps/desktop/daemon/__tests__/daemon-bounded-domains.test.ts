@@ -193,6 +193,15 @@ test("daemon policy and projection domains remain extracted", () => {
   assert.ok(mainSource.split("\n").length < 1_678, "main.ts must remain a thin composition root");
 });
 
+test("a host approval request or resolution wakes the desktop state watch", () => {
+  // The broker calls onPermissionChanged for every request, closure and resolution
+  // (host-approval-broker.test.ts). The composition root must turn that into a state notify,
+  // or the desktop only learns of a new approval on its next poll.
+  const mainSource = read("../main.ts");
+  const handler = /onPermissionChanged: entryId => \{([\s\S]*?)\n      \},/.exec(mainSource)?.[1] ?? "";
+  assert.match(handler, /this\.stateWatch\.notify\(\)/);
+});
+
 function read(relativePath: string): string {
   return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
 }
