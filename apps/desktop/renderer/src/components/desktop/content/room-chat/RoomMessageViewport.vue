@@ -14,7 +14,7 @@
         {{ loadingOlderMessages ? "Loading earlier messages..." : olderMessagesError ? "Retry loading earlier messages" : "Load earlier messages" }}
       </button>
 
-      <template v-for="entry in timelineEntries" :key="`${messageNamespace}:${entry.type === 'message' ? entry.message.clientMessageId || entry.id : entry.id}`">
+      <template v-for="entry in mountedEntries" :key="`${messageNamespace}:${entry.type === 'message' ? entry.message.clientMessageId || entry.id : entry.id}`">
         <div
           v-if="entry.type === 'date'"
           class="room-date-separator"
@@ -69,6 +69,15 @@
         </template>
         </RoomGitHubUpdates>
       </template>
+      <!-- Newer loaded rows below a detached window mount when this gap nears the view. -->
+      <div
+        v-if="!windowReachesLatest"
+        ref="windowGapElement"
+        class="room-message-window-gap"
+        data-testid="room-message-window-gap"
+        aria-hidden="true"
+        :style="{ height: `${windowGapHeight}px` }"
+      ></div>
 
       <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
         <div
@@ -214,7 +223,7 @@ import { provide } from "vue";
 import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
-import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, shallowRef, watch } from "vue";
 import { injectRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import { injectRoomMessageReactions } from "../../../../composables/useRoomMessageReactions";
 import { attentionResponseAgentNamesKey } from "../../../../domain/attention-response";
@@ -249,6 +258,18 @@ import { useStableIdSet } from "../../../../composables/useStableIdSet";
 import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, createThreadIndicatorMemo, threadParentId, threadQuotePreview } from "./thread-utils";
 import { buildMessageTimelineEntries, type MessageTimelineEntry } from "./timeline";
+import {
+  anchoredScrollTop,
+  firstMessageIdFrom,
+  grownDownwardState,
+  grownUpwardState,
+  indexEntriesByMessageId,
+  resolveWindowBounds,
+  windowStateFor,
+  windowStateIncluding,
+  type MessageWindowState,
+  type WindowEntry,
+} from "./message-window";
 
 interface ThreadActivityNotice {
   parentId: string;
@@ -393,7 +414,8 @@ let anchorElementsById = new Map<string, HTMLElement>();
 
 // The timeline is vertically ordered. Cache its nodes between renders, but read
 // current geometry so image loads, resizing and thread-panel reflow stay correct.
-onUpdated(() => { anchorElements = null; });
+onUpdated(() => { anchorElements = null; rememberRenderedWindow(); });
+onMounted(rememberRenderedWindow);
 
 function getAnchorElements(): HTMLElement[] {
   if (!anchorElements) {
@@ -416,6 +438,132 @@ const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
 const buildGroupedTimeline = createGitHubTimeline<MessageTimelineEntry, DesktopRoomMessage>();
 const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork),
   entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
+// Bounded mount window (see message-window.ts): only a contiguous range of
+// the timeline is mounted.
+const windowState = shallowRef<MessageWindowState>({ kind: "latest" });
+const windowEntries = () => timelineEntries.value as readonly WindowEntry[];
+const entryIndexByMessageId = computed(() => indexEntriesByMessageId(windowEntries()));
+const windowBounds = computed(() => resolveWindowBounds(
+  windowEntries(), windowState.value, entryIndexByMessageId.value, [props.activeThreadParentId],
+));
+const mountedEntries = computed(() => {
+  const { start, end } = windowBounds.value;
+  return start === 0 && end === timelineEntries.value.length ? timelineEntries.value : timelineEntries.value.slice(start, end);
+});
+const windowReachesLatest = computed(() => windowBounds.value.end >= timelineEntries.value.length);
+/** Rough height for the rows below a detached window, so the reader can scroll into them. */
+const windowGapHeight = computed(() => Math.min(4000, Math.max(800, (timelineEntries.value.length - windowBounds.value.end) * 72)));
+const windowGapElement = ref<HTMLElement | null>(null);
+// First message of the rendered window, read before the next render so a
+// sliding "latest" window can be fixed where the reader sees it.
+let renderedWindowStartId: string | null = null;
+let windowGrowthPending = false;
+let windowJumpRequest = 0;
+
+// False until a window has rendered, so the first message load cannot fix it.
+let renderedWindowAtTop = false;
+
+function rememberRenderedWindow(): void {
+  renderedWindowStartId = firstMessageIdFrom(windowEntries(), windowBounds.value.start);
+  renderedWindowAtTop = windowBounds.value.start === 0 && timelineEntries.value.length > 0;
+}
+
+/**
+ * Stops a "latest" window from sliding while the reader is above the bottom.
+ * `rendered` uses the window on screen (before a pending render), otherwise
+ * the current one. A window at the top of history stays open upward, so
+ * older pages mount as they arrive.
+ */
+function freezeWindow(rendered = true): void {
+  if (windowState.value.kind !== "latest") return;
+  if (rendered ? renderedWindowAtTop : windowBounds.value.start === 0) {
+    windowState.value = { kind: "range", start: null, end: null };
+    return;
+  }
+  const startId = rendered ? renderedWindowStartId : firstMessageIdFrom(windowEntries(), windowBounds.value.start);
+  if (!startId) return;
+  const index = entryIndexByMessageId.value.get(startId);
+  if (index === undefined) return;
+  windowState.value = windowStateFor(windowEntries(), index, timelineEntries.value.length);
+}
+
+/** True when a reset to the newest entries would mount the same rows. */
+function windowMatchesLatest(): boolean {
+  const latest = resolveWindowBounds(windowEntries(), { kind: "latest" }, entryIndexByMessageId.value, [props.activeThreadParentId]);
+  return latest.start === windowBounds.value.start && latest.end === windowBounds.value.end;
+}
+
+function resetWindowToLatest(): void {
+  windowGrowthPending = false;
+  windowJumpRequest++;
+  if (windowState.value.kind !== "latest") windowState.value = { kind: "latest" };
+}
+
+/**
+ * At the bottom the window returns to the newest entries. Rows leave only
+ * above the reader, and the visible row is put back in place after the render.
+ */
+function trimWindowWhileFollowing(): void {
+  if (windowState.value.kind === "latest" || !isScrolledToBottom) return;
+  const anchor = captureScrollAnchor();
+  const revision = scrollRevision;
+  resetWindowToLatest();
+  void nextTick(() => {
+    if (revision !== scrollRevision || !messagesElement.value) return;
+    if (!restoreScrollAnchor(anchor)) jumpToBottom();
+  });
+}
+
+/** Mounts one more chunk above the window and keeps the visible row in place. */
+function growWindowUpward(): boolean {
+  if (windowGrowthPending) return windowBounds.value.start > 0;
+  const element = messagesElement.value;
+  const next = grownUpwardState(windowEntries(), windowBounds.value);
+  if (!element || !next) return false;
+  windowGrowthPending = true;
+  const anchor = captureScrollAnchor();
+  const previousScrollHeight = element.scrollHeight;
+  const namespace = props.messageNamespace;
+  windowState.value = next;
+  void nextTick(() => {
+    windowGrowthPending = false;
+    const currentElement = messagesElement.value;
+    if (namespace !== props.messageNamespace || !currentElement) return;
+    if (!restoreScrollAnchor(anchor)) {
+      setInstantScrollTop(currentElement, currentElement.scrollTop + currentElement.scrollHeight - previousScrollHeight);
+      updateScrollState();
+      emitScrollPosition();
+    }
+  });
+  return true;
+}
+
+/**
+ * Mounts one more chunk below a detached window when its gap comes near the
+ * view. Rows are added below the reader, so nothing on screen moves.
+ */
+function growWindowDownwardWhenNear(element: HTMLElement): void {
+  const gap = windowGapElement.value;
+  if (!gap || windowGrowthPending) return;
+  if (gap.getBoundingClientRect().top > element.getBoundingClientRect().bottom + 600) return;
+  const next = grownDownwardState(windowEntries(), windowBounds.value);
+  if (next) windowState.value = next;
+}
+
+/**
+ * Mounts a loaded message outside the window. Returns false when the message
+ * is not loaded or already mounted, so callers keep today's fallbacks.
+ */
+function includeMessageInWindow(messageId: string): boolean {
+  const next = windowStateIncluding(windowEntries(), windowBounds.value, entryIndexByMessageId.value, messageId);
+  if (!next) return false;
+  windowGrowthPending = false;
+  windowState.value = next;
+  return true;
+}
+
+// Opening a thread far from the window (search, links) mounts its root.
+watch(() => props.activeThreadParentId, (parentId) => { if (parentId) includeMessageInWindow(parentId); }, { flush: "sync" });
 // One set, edited in place: a new Set per update re-rendered every message.
 const threadIndicatorMemo = createThreadIndicatorMemo();
 // Highlighting re-scans every mounted message, so typing waits for a short
@@ -460,10 +608,25 @@ watch(
     );
     const prependAnchor = isPrepend ? captureScrollAnchor() : null;
     const revision = scrollRevision;
-    if (!isPrepend && oldLastId && newLastId !== oldLastId && !isAcknowledgement) followLatestAfterLayout();
+    // A reader above the bottom keeps the rows they see: the window stops sliding.
+    if (!isScrolledToBottom) freezeWindow();
+    const windowStartBefore = renderedWindowStartId;
+    let followsWindowSlide = false;
+    if (!isPrepend && oldLastId && newLastId !== oldLastId && !isAcknowledgement) {
+      // A follower jumps to the bottom after this render, so the window can drop
+      // the rows far above it.
+      if (isScrolledToBottom && props.active && !shouldRestoreInitialScroll) {
+        resetWindowToLatest();
+        followsWindowSlide = true;
+      }
+      followLatestAfterLayout();
+    }
 
     await nextTick();
     if (revision !== scrollRevision) return;
+    // Rows that left the top of a sliding window move scrollTop, which the
+    // follow check above reads as a reader scroll. The reader was following.
+    if (followsWindowSlide && props.active && renderedWindowStartId !== windowStartBefore) jumpToBottom();
 
     if (!props.active) {
       if (isNewLatestMessage && isScrolledToBottom) {
@@ -606,6 +769,7 @@ watch(
   () => props.messageNamespace,
   (namespace, previousNamespace) => {
     if (namespace === previousNamespace) return;
+    resetWindowToLatest();
     threadActivityNamespace = namespace;
     suppressNextThreadActivityNotice = true;
     threadActivityNotice.value = null;
@@ -708,6 +872,7 @@ watch(
   () => props.roomIdentifier,
   () => {
     scrollRevision++;
+    resetWindowToLatest();
     cancelMessageReveal();
     clearMessageArrivals();
     unreadCount.value = 0;
@@ -887,6 +1052,8 @@ function maybeAutoFillViewport(): void {
     || props.hasFilteredRoomActivity;
   if (!hasLoadedTimelineActivity) return;
   if (element.scrollHeight > element.clientHeight + viewportFillSlack) return;
+  // Loaded rows above the mount window fill the viewport before a network page does.
+  if (growWindowUpward()) { void nextTick(scheduleAutoFillViewport); return; }
 
   autoViewportBackfillCount.value += 1;
   emit("load-older");
@@ -900,6 +1067,14 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   hasAppliedInitialScroll = true;
   shouldRestoreInitialScroll = false;
   cancelMessageReveal();
+  if (windowState.value.kind !== "latest" && !windowMatchesLatest()) {
+    // The mounted rows change in the next render. A smooth scroll would aim at
+    // the old list height, so go there at once and settle again after the render.
+    resetWindowToLatest();
+    behavior = "auto";
+    const revision = scrollRevision;
+    void nextTick(() => { if (revision === scrollRevision && isScrolledToBottom) jumpToBottom(); });
+  }
   if (behavior === "auto") {
     jumpToBottom();
     return;
@@ -947,10 +1122,16 @@ function handleScroll(): void {
   updateScrollState();
   if (isScrolledToBottom) {
     unreadCount.value = 0;
+    trimWindowWhileFollowing();
+  } else {
+    freezeWindow(false);
+    if (!windowReachesLatest.value) growWindowDownwardWhenNear(element);
   }
   emitScrollPosition();
-  if (element.scrollTop < 180 && props.hasOlderMessages && !props.loadingOlderMessages && !props.olderMessagesError) {
-    emit("load-older");
+  if (element.scrollTop < 180) {
+    // Mount loaded rows above the window first; ask for older history only at its top.
+    if (growWindowUpward()) return;
+    if (props.hasOlderMessages && !props.loadingOlderMessages && !props.olderMessagesError) emit("load-older");
   }
 }
 
@@ -991,8 +1172,9 @@ function updateScrollState(): void {
   const element = messagesElement.value;
   if (!element) return;
   const distanceToBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
-  isScrolledToBottom = !revealingMessage && distanceToBottom < 80;
-  isScrolledFarUp.value = distanceToBottom > 900;
+  // A detached window does not hold the newest messages: its end is not "latest".
+  isScrolledToBottom = !revealingMessage && distanceToBottom < 80 && windowReachesLatest.value;
+  isScrolledFarUp.value = distanceToBottom > 900 || !windowReachesLatest.value;
 }
 
 function restoreInitialScrollPosition(): boolean {
@@ -1003,6 +1185,12 @@ function restoreInitialScrollPosition(): boolean {
   // Loading/hidden viewports must not consume the saved position or publish 0.
   if (props.roomLoading || !props.messages.length || !isMeasurableScrollViewport(element)) return true;
   const bookmark = position;
+  if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
+    && includeMessageInWindow(bookmark.anchor.messageId)) {
+    // The saved row is loaded but outside the mount window: mount it, then retry.
+    void nextTick(restoreInitialScrollPosition);
+    return true;
+  }
   if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
     && props.hasOlderMessages && !props.olderMessagesError && restorePagesRequested < 20) {
     if (!props.loadingOlderMessages && !restoreRequestPending) {
@@ -1140,7 +1328,7 @@ function restoreScrollAnchor(anchor: ScrollAnchor | null): boolean {
   if (!anchorElement) return false;
   const viewportTop = element.getBoundingClientRect().top;
   const nextOffsetTop = anchorElement.getBoundingClientRect().top - viewportTop;
-  setInstantScrollTop(element, element.scrollTop + nextOffsetTop - anchor.offsetTop);
+  setInstantScrollTop(element, anchoredScrollTop(element.scrollTop, anchor.offsetTop, nextOffsetTop));
   updateScrollState();
   emitScrollPosition();
   return true;
@@ -1189,7 +1377,15 @@ function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "s
   unreadTimeline.programmaticScroll();
   if (!messageId || !messagesElement.value) return false;
   const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
-  if (!target) return false;
+  if (!target) {
+    // A loaded message outside the mount window: mount it first, then scroll.
+    if (!includeMessageInWindow(messageId)) return false;
+    const namespace = props.messageNamespace, request = ++windowJumpRequest;
+    void nextTick(() => {
+      if (namespace === props.messageNamespace && request === windowJumpRequest) scrollToMessage(messageId, behavior, historyReady);
+    });
+    return true;
+  }
   const group = target.closest('.room-github-updates');
   if (group && !historyReady) {
     const namespace = props.messageNamespace, revision = scrollRevision;
@@ -1234,4 +1430,6 @@ function newestMessage(messages: readonly DesktopRoomMessage[]): DesktopRoomMess
 <style scoped>
 .room-explicit-unread { display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
 .room-explicit-unread::before, .room-explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
+/* Never a scroll anchor: rows inserted above it must not move the reader. */
+.room-message-window-gap { flex: none; overflow-anchor: none; }
 </style>
