@@ -17,6 +17,7 @@ import type {
   DesktopRoomAgentTurnState,
   DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
+import { appSource } from "./app-source";
 
 const rendererRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -325,7 +326,7 @@ describe("durable room delivery UI contracts", () => {
 
   it("carries grouped receipts, disabled retry capability, and reveal events across chat surfaces", async () => {
     const [app, shell, chat, viewport, thread, message, receipts] = await Promise.all([
-      source("src/App.vue"),
+      Promise.resolve(appSource()),
       source("src/components/desktop/content/DesktopRoomShell.vue"),
       source("src/components/desktop/content/RoomChatView.vue"),
       source("src/components/desktop/content/room-chat/RoomMessageViewport.vue"),

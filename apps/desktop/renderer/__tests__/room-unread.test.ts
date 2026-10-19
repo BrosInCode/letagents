@@ -11,6 +11,7 @@ import { createRenderer, h, reactive, ref, ssrContextKey } from "vue";
 import { createRoomUnreadStore } from "../../../../shared/room-unread.mjs";
 import { markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
 import { normalizeRoomIdentifier } from "../src/domain/sidebar-rooms";
+import { appFunction } from "./app-source";
 
 test("per-room storage controls refresh the unread history namespace, including a local fork", async () => {
   async function functionsFrom(path: string, names: string[]): Promise<string> {
@@ -22,7 +23,8 @@ test("per-room storage controls refresh the unread history namespace, including 
       compilerOptions: { target: ts.ScriptTarget.ES2022 },
     }).outputText;
   }
-  const appCode = await functionsFrom("../src/App.vue", ["handleRoomShellRefresh", "roomHistoryMode", "roomUsesLocalHistory", "loadChatStorageSettings"]);
+  const appCode = ts.transpileModule(["handleRoomShellRefresh", "roomHistoryMode", "roomUsesLocalHistory", "loadChatStorageSettings"]
+    .map(appFunction).join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   const shellCode = await functionsFrom("../src/components/desktop/content/DesktopRoomShell.vue", ["setRoomStorageMode", "forkRoomToLocal"]);
   const roomIdentifier = "github.com/acme/repo";
   const chatStorageSettings = ref({ mode: "cloud", roomOverrides: {} as Record<string, string> });
@@ -38,7 +40,7 @@ test("per-room storage controls refresh the unread history namespace, including 
     setRoomMode: async (_room: string, mode: string) => { persistedMode = mode; },
     forkRoomToLocal: async () => { persistedMode = "local"; return { snapshot: snapshot() }; },
   };
-  const app = runInNewContext(appCode + "\n({ handleRoomShellRefresh, roomHistoryMode })", {
+  const appContext: Record<string, unknown> = {
     roomReadKey, chatStorageSettings, sidebarLatestMessages, normalizeRoomIdentifier,
     selectedSnapshot, selectedRootRoomIdentifier, activeEntry, sidebarProjectEntries: ref([]),
     accountRooms: ref([{ roomIdentifier, source: "cloud", focusRooms: [] }]),
@@ -49,7 +51,10 @@ test("per-room storage controls refresh the unread history namespace, including 
       assert.equal(app.roomHistoryMode(roomIdentifier), persistedMode, "discard metadata from the previous history before refreshing");
       sidebarLatestMessages.value = { [roomIdentifier]: { storageMode: persistedMode, latestMessageId: persistedMode === "local" ? "msg_4" : "msg_900" } };
     },
-  });
+  };
+  // Composable code reads names from other composables through the shared `app` context.
+  appContext.app = appContext;
+  const app = runInNewContext(appCode + "\n({ handleRoomShellRefresh, roomHistoryMode })", appContext);
   const props = { room: { identifier: roomIdentifier }, storage: { localRoom: {} as object | null } };
   const setMode = runInNewContext(shellCode + "\nsetRoomStorageMode", {
     props, storageBusy: ref(false), actionPanelOpen: ref(true), window: { confirm: () => true },
@@ -86,10 +91,7 @@ test("per-room storage controls refresh the unread history namespace, including 
 test("App's explicit sidebar read action clears its bookmark even when the old marker is already current", async () => {
   const source = await readFile(new URL("../src/App.vue", import.meta.url), "utf8");
   const { descriptor } = parse(source);
-  const script = ts.createSourceFile("App.ts", descriptor.scriptSetup!.content, ts.ScriptTarget.Latest, true);
-  const handler = script.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === "markRoomEntryRead");
-  assert.ok(handler);
-  const code = ts.transpileModule(handler.getText(script), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const code = ts.transpileModule(appFunction("markRoomEntryRead"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
   function readAction(node: any): string | undefined {
     const event = node.props?.find((prop: any) => prop.type === 7 && prop.name === "on" && prop.arg?.content === "mark-room-read");
     return event?.exp?.content ?? node.children?.map(readAction).find(Boolean);
@@ -111,6 +113,8 @@ test("App's explicit sidebar read action clears its bookmark even when the old m
     rememberRoomMessageIds: () => { writes++; },
     roomUnread: { get: (room: string) => store.get("alice", room), clear: (room: string, revision: string) => store.clear("alice", room, revision) },
   };
+  // Composable code reads names from other composables through the shared `app` context.
+  Object.assign(context, { app: context });
   const automatic = runInNewContext(code + "\nmarkRoomEntryRead", context);
   automatic({ roomIdentifier: "room" });
   assert.ok(store.get("alice", "room"), "selection and automatic read updates preserve the bookmark");
@@ -121,13 +125,13 @@ test("App's explicit sidebar read action clears its bookmark even when the old m
   assert.equal(store.get("bob", "room")?.messageId, "msg_7");
   assert.equal(readRoomMessageIds.value.room, "msg_9");
   assert.equal(writes, 0, "no redundant write to the old marker map");
-  const batchHandler = script.statements.find(statement => ts.isFunctionDeclaration(statement) && statement.name?.text === "handleSidebarBatchAction");
-  assert.ok(batchHandler);
-  const batchCode = ts.transpileModule(batchHandler.getText(script), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  const batch = runInNewContext(code + "\n" + batchCode + "\nhandleSidebarBatchAction", {
+  const batchCode = ts.transpileModule(appFunction("handleSidebarBatchAction"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const batchContext: Record<string, unknown> = {
     ...context, sidebarBatchActionBusy: ref(false), sidebarSelectedEntries: ref([]), currentParentRoom: ref({ id: "room" }),
     resolveSidebarRoomBatchAction: () => ({ targets: [{ roomIdentifier: "other" }] }), pushActionToast() {},
-  });
+  };
+  batchContext.app = batchContext;
+  const batch = runInNewContext(code + "\n" + batchCode + "\nhandleSidebarBatchAction", batchContext);
   await batch("mark-read");
   assert.equal(store.get("alice", "other"), null, "batch Mark as read also clears the explicit bookmark");
   assert.equal(store.get("bob", "room")?.messageId, "msg_7");
