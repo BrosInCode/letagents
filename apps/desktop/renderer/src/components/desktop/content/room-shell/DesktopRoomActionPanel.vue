@@ -118,6 +118,7 @@
           <RoomConversationRouting :room-identifier="room.identifier" @summary="routingSummary = $event" />
           <RoomExpressions :room-identifier="room.identifier" />
           <RoomReplyOrder :room-identifier="room.identifier" @summary="replyOrderSummary = $event" />
+          <RoomHistorySummary :room-identifier="room.identifier" />
         </div>
       </section>
 
@@ -367,6 +368,7 @@ import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
 import RoomExpressions from "./RoomExpressions.vue";
 import RoomReplyOrder from "./RoomReplyOrder.vue";
+import RoomHistorySummary from "./RoomHistorySummary.vue";
 import RoomGitHubEventFilter from "./RoomGitHubEventFilter.vue";
 import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";

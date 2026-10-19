@@ -441,6 +441,8 @@ export interface ProviderRoomTurnRequest {
   activation: Record<string, unknown>;
   actionId: string;
   observedContext?: unknown[];
+  /** The room's history summary, on the first turn of a continuation that has not had it. */
+  historySummary?: import("../../../../../shared/room-history-summary.mjs").RoomHistoryTurnSummary;
   /** The activating message's files, prepared by the daemon for this one turn. Never persisted. */
   attachments?: ProviderRoomTurnAttachment[];
 }

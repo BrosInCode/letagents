@@ -310,6 +310,8 @@ export interface DesktopApi {
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
     getExpressions: (roomIdentifier: string) => Promise<RoomExpressionsSetting>;
     setExpressions: (roomIdentifier: string, enabled: boolean) => Promise<RoomExpressionsSetting>;
+    getHistorySummarySetting: (roomIdentifier: string) => Promise<import("../../../../shared/room-history-summary.mjs").RoomHistorySummarySetting>;
+    setHistorySummarySetting: (roomIdentifier: string, enabled: boolean) => Promise<import("../../../../shared/room-history-summary.mjs").RoomHistorySummarySetting>;
     searchGifs: (roomIdentifier: string, query: string, offset?: number) => Promise<import("../../../../shared/giphy-client.mjs").GiphyResult>;
     resolveGif: (roomIdentifier: string, id: string) => Promise<import("../../../../shared/giphy-client.mjs").GiphyResult>;
     getReplyOrder: (roomIdentifier: string) => Promise<DesktopReplyOrderSettings>;

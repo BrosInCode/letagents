@@ -131,3 +131,39 @@ test("reply-turn yield uses only the authenticated scheduling operation and vali
     assert.equal(calls, before);
   } finally { globalThis.fetch = prior; }
 });
+
+test("the history summary read is optional: none for an old server, off or local room; a failure throws for a later retry", async () => {
+  const prior = globalThis.fetch;
+  const line = { node: "3:0", level: 3, first_message_id: "msg_1", last_message_id: "msg_8", first_at: "2026-10-18T09:00:00.000Z",
+    last_at: "2026-10-19T09:00:00.000Z", messages: 8, text: "Emmy and Ada chose Postgres.", pending: false };
+  let body: unknown = { room_id: "room_1", state: "ready", note: "n", lines: [line], covered_through_message_id: "msg_8" };
+  let status = 200;
+  let calls = 0;
+  globalThis.fetch = (async (url, init) => {
+    calls++;
+    assert.equal(String(url), "https://letagents.test/rooms/room_1/history-summary?max_lines=60");
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer worker-only");
+    return new Response(JSON.stringify(body), { status });
+  }) as typeof fetch;
+  try {
+    assert.deepEqual(await productionSupervisedDeliveryHttp.historySummary!(input), {
+      lines: [{ node: "3:0", first_message_id: "msg_1", last_message_id: "msg_8", last_at: "2026-10-19T09:00:00.000Z",
+        text: "Emmy and Ada chose Postgres.", pending: false }],
+      covered_through_message_id: "msg_8",
+    });
+    for (const none of [{ ...body as object, state: "off", lines: [] }, { ...body as object, state: "unavailable", lines: [] },
+      { ...body as object, lines: [] }, { ...body as object, room_id: "other" }, { ...body as object, lines: [{ ...line, node: "x" }] }]) {
+      body = none;
+      assert.equal(await productionSupervisedDeliveryHttp.historySummary!(input), null);
+    }
+    for (const code of [404, 409]) {
+      status = code;
+      assert.equal(await productionSupervisedDeliveryHttp.historySummary!(input), null, `HTTP ${code} means no summary`);
+    }
+    status = 503;
+    await assert.rejects(productionSupervisedDeliveryHttp.historySummary!(input), /HTTP 503/);
+    const before = calls;
+    assert.equal(await productionSupervisedDeliveryHttp.historySummary!({ ...input, apiUrl: "letagents-local://rooms" }), null);
+    assert.equal(calls, before);
+  } finally { globalThis.fetch = prior; }
+});

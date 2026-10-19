@@ -3,6 +3,7 @@ import { createApiApp } from "./server/app.js";
 import { startRoomEventBridge, stopRoomEventBridge } from "./server/event-bridge.js";
 import { startLivenessSweep, stopLivenessSweep } from "./server/liveness.js";
 import { startJevRoutingWorker } from "./messages/jev-routing-worker.js";
+import { startRoomHistoryWorker } from "./history-summary/worker.js";
 import { startReplyTurnHoldSweep, stopReplyTurnHoldSweep } from "./server/reply-turn-holds.js";
 import { startAttachmentUploadCleanup, stopAttachmentUploadCleanup } from "./server/attachment-upload-cleanup.js";
 import { startLiveActivityCleanup, stopLiveActivityCleanup } from "./server/live-activity-cleanup.js";
@@ -41,6 +42,8 @@ startAttachmentUploadCleanup();
 startLiveActivityCleanup();
 const stopDesktopPushWorker = startDesktopPushWorker();
 const stopJevRoutingWorker = startJevRoutingWorker();
+// Writes room history summaries when the server holds a summarizer key.
+const stopRoomHistoryWorker = startRoomHistoryWorker();
 const stopWakeRuleScheduler = startWakeRuleScheduler({ taskEvents, githubRoomEvents, wakeRuleEvents });
 process.once("exit", closeApiRouteEventBroker);
 
@@ -60,7 +63,7 @@ const stopIntake = () => closeHttpServerIntake(server);
 const shutdown = createGracefulShutdownController({
   stopIntake,
   stopWorkers: async () => {
-    await Promise.all([stopLivenessSweep(), stopReplyTurnHoldSweep(), stopAttachmentUploadCleanup(), stopLiveActivityCleanup(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopWakeRuleScheduler()]);
+    await Promise.all([stopLivenessSweep(), stopReplyTurnHoldSweep(), stopAttachmentUploadCleanup(), stopLiveActivityCleanup(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopRoomHistoryWorker(), stopWakeRuleScheduler()]);
   },
   stopBridge: stopRoomEventBridge,
   closeBroker: async () => {
