@@ -30,38 +30,13 @@ import {
 } from "./supervised-agent-history-retention.js";
 import type { SupervisedInboxState, SupervisedInboxReceiptState, SupervisedRetryDomain, InboxActivation, IngressMessage, ObservedIngressMessage, PollIngestionInput, SuccessfulPollIngestionInput, IngressHealthUpdate, SupervisedInboxItem, InboxHeadSnapshot, SupervisedProviderTurnBinding, SupervisedInboxReceipt, SupervisedInboxEvent, SupervisedInboxReceiptWithTimeline, SupervisedInboxReceiptProjection, SupervisedInboxItemMetadata, SupervisedEffectRecord, StructuredRoomTurnCompletion, AgentInspectorDetail, Row, ProviderContinuationRepair } from "./supervised-agent-inbox-store/types.js";
 export type { SupervisedInboxState, SupervisedInboxReceiptState, SupervisedRetryDomain, InboxActivation, IngressMessage, ObservedIngressMessage, SupervisedInboxItem, SupervisedProviderTurnBinding, SupervisedInboxReceipt, SupervisedInboxEvent, SupervisedInboxReceiptWithTimeline, SupervisedInboxReceiptProjection, SupervisedEffectRecord, StructuredRoomTurnCompletion, AgentInspectorDetail, ProviderContinuationRepair } from "./supervised-agent-inbox-store/types.js";
+import { structuredRoomTurnCompletion, structuredRoomTurnCompletionResult } from "./supervised-agent-inbox-store/turn-completion.js";
+export { structuredRoomTurnCompletion } from "./supervised-agent-inbox-store/turn-completion.js";
 
 export function sameInboxHead(left: InboxHeadSnapshot | null, right: InboxHeadSnapshot | null): boolean {
   return left === null || right === null ? left === right
     : left.inbox_item_id === right.inbox_item_id && left.state === right.state
       && left.provider_turn_id === right.provider_turn_id && left.outcome === right.outcome;
-}
-/** Validate the durable request written by the supervised-only completion tool. */
-export function structuredRoomTurnCompletion(value: unknown): StructuredRoomTurnCompletion | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  if (Object.keys(record).some((key) => key !== "outcome" && key !== "text")) return null;
-  if (record.outcome === "no_reply") {
-    return record.text === undefined || record.text === null || record.text === ""
-      ? { outcome: "no_reply", text: null }
-      : null;
-  }
-  if (record.outcome !== "reply" || typeof record.text !== "string") return null;
-  const text = record.text.trim();
-  if (!text || Buffer.byteLength(text, "utf8") > 32 * 1024) return null;
-  return { outcome: "reply", text };
-}
-
-function structuredRoomTurnCompletionResult(completion: StructuredRoomTurnCompletion): Record<string, unknown> {
-  const payload = {
-    accepted: true,
-    outcome: completion.outcome,
-    instruction: "The daemon recorded this exact turn completion. End the provider turn without sending the activating reply through another tool.",
-  };
-  return {
-    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
-    structuredContent: payload,
-  };
 }
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
 class EffectAuthorityError extends Error {}
