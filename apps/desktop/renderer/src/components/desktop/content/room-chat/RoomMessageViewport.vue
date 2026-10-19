@@ -1,10 +1,10 @@
 <template>
   <div class="room-message-viewport" data-testid="room-chat-viewport">
     <div class="room-message-scroll">
-    <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @wheel.passive="cancelInitialRestore" @touchstart.passive="cancelInitialRestore" @pointerdown="cancelInitialRestore" @keydown="cancelInitialRestore" @scroll="handleScroll" @scrollend="finishMessageReveal">
+    <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @wheel.passive="cancelInitialRestore" @touchstart.passive="cancelInitialRestore" @pointerdown="cancelInitialRestore" @keydown="handleListKeydown" @scroll="handleScroll" @scrollend="finishMessageReveal">
       <p v-if="olderMessagesError" role="status" class="room-load-older-error">{{ olderMessagesError }}</p>
       <button
-        v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages"
+        v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages && windowBounds.start === 0"
         class="room-load-older"
         type="button"
         :disabled="loadingOlderMessages"
@@ -25,10 +25,11 @@
         </div>
 
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
-        <RoomGitHubUpdates v-else :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
+        <RoomGitHubUpdates v-else lazy-history :row-limit="githubGroupRowLimit" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
         <template #default="{ message, history }">
         <div v-if="message.id === unreadTimeline.dividerId.value" class="room-explicit-unread" role="separator">New messages</div>
         <DesktopChatMessage
+          :class="{ 'room-window-pinned-hidden': hiddenPinnedIds.has(message.id) }"
           :message="message"
           :github-history="history"
           :compact-with-previous="entry.type === 'message' && entry.compactWithPrevious"
@@ -261,9 +262,11 @@ import { buildMessageTimelineEntries, type MessageTimelineEntry } from "./timeli
 import {
   anchoredScrollTop,
   firstMessageIdFrom,
+  githubGroupRowLimit,
   grownDownwardState,
   grownUpwardState,
   indexEntriesByMessageId,
+  pinnedOutside,
   resolveWindowBounds,
   windowStateFor,
   windowStateIncluding,
@@ -419,7 +422,7 @@ onMounted(rememberRenderedWindow);
 
 function getAnchorElements(): HTMLElement[] {
   if (!anchorElements) {
-    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>(".room-message-list > [data-message-id], .room-message-list > [data-scroll-anchor-id]") ?? []);
+    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>(".room-message-list > [data-message-id]:not(.room-window-pinned-hidden), .room-message-list > [data-scroll-anchor-id]") ?? []);
     anchorElementsById = new Map(anchorElements.map(element => [(element.dataset.messageId || element.dataset.scrollAnchorId)!, element]));
   }
   return anchorElements;
@@ -446,9 +449,23 @@ const entryIndexByMessageId = computed(() => indexEntriesByMessageId(windowEntri
 const windowBounds = computed(() => resolveWindowBounds(
   windowEntries(), windowState.value, entryIndexByMessageId.value, [props.activeThreadParentId],
 ));
+// The open thread root stays mounted wherever the window is, so its inline
+// thread keeps its state (draft, GIF choice, scroll). Outside the window it is
+// hidden; it is the same keyed row, so it is not remounted when it returns.
+const hiddenPinnedIndexes = computed(() => pinnedOutside(windowBounds.value, entryIndexByMessageId.value, [props.activeThreadParentId])
+  .filter(index => timelineEntries.value[index]?.type === "message"));
+const hiddenPinnedIds = computed(() => new Set(hiddenPinnedIndexes.value.map(index => {
+  const entry = timelineEntries.value[index]!;
+  return entry.type === "message" ? entry.message.id : "";
+})));
 const mountedEntries = computed(() => {
   const { start, end } = windowBounds.value;
-  return start === 0 && end === timelineEntries.value.length ? timelineEntries.value : timelineEntries.value.slice(start, end);
+  const entries = timelineEntries.value;
+  const window = start === 0 && end === entries.length ? entries : entries.slice(start, end);
+  if (!hiddenPinnedIndexes.value.length) return window;
+  const before = hiddenPinnedIndexes.value.filter(index => index < start).map(index => entries[index]!);
+  const after = hiddenPinnedIndexes.value.filter(index => index >= end).map(index => entries[index]!);
+  return [...before, ...window, ...after];
 });
 const windowReachesLatest = computed(() => windowBounds.value.end >= timelineEntries.value.length);
 /** Rough height for the rows below a detached window, so the reader can scroll into them. */
@@ -544,10 +561,43 @@ function growWindowUpward(): boolean {
  */
 function growWindowDownwardWhenNear(element: HTMLElement): void {
   const gap = windowGapElement.value;
-  if (!gap || windowGrowthPending) return;
-  if (gap.getBoundingClientRect().top > element.getBoundingClientRect().bottom + 600) return;
+  // A jump is moving the view to its target; its scroll events are not the reader's.
+  if (!gap || windowGrowthPending || revealingMessage) return;
+  const gapTop = gap.getBoundingClientRect().top;
+  const view = element.getBoundingClientRect();
+  // A jump into the gap (scrollbar drag, End): no rows are near, so go to the
+  // newest messages instead of mounting chunk after chunk.
+  if (gapTop <= view.top || element.scrollHeight - element.scrollTop - element.clientHeight < 80) {
+    scrollToBottom("auto");
+    return;
+  }
+  if (gapTop > view.bottom + 600) return;
   const next = grownDownwardState(windowEntries(), windowBounds.value);
-  if (next) windowState.value = next;
+  if (!next) return;
+  const startBefore = windowBounds.value.start;
+  const anchor = captureScrollAnchor();
+  windowState.value = next;
+  if (windowBounds.value.start === startBefore) return;
+  // Rows left above the reader: put the visible row back in place.
+  windowGrowthPending = true;
+  const namespace = props.messageNamespace;
+  void nextTick(() => {
+    windowGrowthPending = false;
+    if (namespace === props.messageNamespace) restoreScrollAnchor(anchor);
+  });
+}
+
+function handleListKeydown(event: KeyboardEvent): void {
+  cancelInitialRestore();
+  if (event.key === "End" && !windowReachesLatest.value && !isEditableTarget(event.target)) {
+    event.preventDefault();
+    scrollToBottom("auto");
+  }
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  const element = target as HTMLElement | null;
+  return Boolean(element && (element.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName ?? "")));
 }
 
 /**
@@ -927,7 +977,8 @@ function keepLatestInViewOnResize(): void {
   if (!element || element.clientHeight === observedViewportHeight) return;
   // Judge "at the newest message" by the height before this change: a scroll
   // event measured after it can already read the shrunken list as scrolled up.
-  const wasAtLatest = isScrolledToBottom || element.scrollHeight - element.scrollTop - observedViewportHeight < 80;
+  const wasAtLatest = windowReachesLatest.value
+    && (isScrolledToBottom || element.scrollHeight - element.scrollTop - observedViewportHeight < 80);
   observedViewportHeight = element.clientHeight;
   if (props.active && wasAtLatest && !revealingMessage && !shouldRestoreInitialScroll) jumpToBottom();
 }
@@ -1073,7 +1124,15 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
     resetWindowToLatest();
     behavior = "auto";
     const revision = scrollRevision;
-    void nextTick(() => { if (revision === scrollRevision && isScrolledToBottom) jumpToBottom(); });
+    void nextTick(() => {
+      if (revision !== scrollRevision || !isScrolledToBottom) return;
+      jumpToBottom();
+      // The browser's own scroll anchoring can still move the view a little
+      // on the next frame, after the rows changed. Settle once more there.
+      if (typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(() => { if (isScrolledToBottom && windowReachesLatest.value && props.active) jumpToBottom(); });
+      }
+    });
   }
   if (behavior === "auto") {
     jumpToBottom();
@@ -1093,6 +1152,13 @@ function jumpToBottom(): void {
   unreadTimeline.programmaticScroll();
   cancelMessageReveal();
   if (!messagesElement.value) return;
+  if (!windowReachesLatest.value) {
+    // The newest messages are not mounted: mount them, then go there.
+    resetWindowToLatest();
+    const revision = scrollRevision;
+    void nextTick(() => { if (revision === scrollRevision && windowReachesLatest.value) jumpToBottom(); });
+    return;
+  }
   const element = messagesElement.value;
   const previousScrollBehavior = element.style.scrollBehavior;
   element.style.scrollBehavior = "auto";
@@ -1376,8 +1442,16 @@ function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "s
   messageMotion.cancel();
   unreadTimeline.programmaticScroll();
   if (!messageId || !messagesElement.value) return false;
-  const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
+  const found = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
+  const target = hiddenPinnedIds.value.has(messageId) ? null : found;
   if (!target) {
+    // A row in a closed GitHub group is not mounted: the group opens it first.
+    const groupElement = !historyReady ? githubGroupElementFor(messageId) : null;
+    if (groupElement) {
+      const namespace = props.messageNamespace, revision = scrollRevision;
+      groupElement.dispatchEvent(new CustomEvent('reveal-github-message', { detail: { id: messageId, ready: () => { if (namespace === props.messageNamespace && revision === scrollRevision) scrollToMessage(messageId, behavior, true); } } }));
+      return true;
+    }
     // A loaded message outside the mount window: mount it first, then scroll.
     if (!includeMessageInWindow(messageId)) return false;
     const namespace = props.messageNamespace, request = ++windowJumpRequest;
@@ -1402,6 +1476,15 @@ function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "s
   target.classList.add("jump-target");
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
   return true;
+}
+
+/** The mounted GitHub group element that holds `messageId`, if any. */
+function githubGroupElementFor(messageId: string): HTMLElement | null {
+  const index = entryIndexByMessageId.value.get(messageId);
+  if (index === undefined || index < windowBounds.value.start || index >= windowBounds.value.end) return null;
+  const entry = timelineEntries.value[index];
+  if (entry?.type !== "github-group") return null;
+  return messagesElement.value?.querySelector<HTMLElement>(`[data-scroll-anchor-id="${CSS.escape(entry.anchorId)}"]`) ?? null;
 }
 
 function dismissThreadActivityNotice(): void {
@@ -1430,6 +1513,8 @@ function newestMessage(messages: readonly DesktopRoomMessage[]): DesktopRoomMess
 <style scoped>
 .room-explicit-unread { display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
 .room-explicit-unread::before, .room-explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
+/* The open thread root, kept mounted while it is outside the window. */
+.room-window-pinned-hidden { display: none !important; }
 /* Never a scroll anchor: rows inserted above it must not move the reader. */
 .room-message-window-gap { flex: none; overflow-anchor: none; }
 </style>

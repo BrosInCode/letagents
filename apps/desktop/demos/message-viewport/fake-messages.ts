@@ -37,7 +37,8 @@ function seeded(seed: number): () => number {
 }
 
 /** Messages numbered from `startIndex`, oldest first, ending near `endTime`. */
-export function createFakeMessages(count: number, options: { prefix?: string; startIndex?: number; endTime?: number } = {}): DesktopRoomMessage[] {
+export function createFakeMessages(count: number, options: { prefix?: string; startIndex?: number; endTime?: number; kind?: "mixed" | "chat" | "github" } = {}): DesktopRoomMessage[] {
+  const kind = options.kind ?? "mixed";
   const prefix = options.prefix ?? "msg";
   const startIndex = options.startIndex ?? 0;
   const endTime = options.endTime ?? Date.now();
@@ -51,9 +52,11 @@ export function createFakeMessages(count: number, options: { prefix?: string; st
     const timestamp = new Date(endTime - (count - offset) * stepMs).toISOString();
     const roll = random();
     const previous = messages[messages.length - 1];
-    if (roll < 0.08) {
+    if (kind === "github" || (kind === "mixed" && roll < 0.08)) {
       const template = githubLines[Math.floor(random() * githubLines.length)]!;
-      messages.push(base(id, timestamp, "github", "github", template.replaceAll("{n}", String(1600 + (index % 80)))));
+      // A long run touches many pull requests, like a busy CI day.
+      const pull = kind === "github" ? 1000 + index : 1600 + (index % 80);
+      messages.push(base(id, timestamp, "github", "github", template.replaceAll("{n}", String(pull))));
       continue;
     }
     const isAgent = roll < 0.6;

@@ -6,6 +6,7 @@
       <div class="harness-row">
         <button type="button" @click="appendMessage(true)">Add message (own)</button>
         <button type="button" @click="appendMessage(false)">Add message (other)</button>
+        <button type="button" @click="appendMessage(false, 'github')">Add GitHub event</button>
       </div>
       <div class="harness-row">
         <input v-model="jumpId" placeholder="message id, e.g. msg_000010" aria-label="Message id" />
@@ -84,13 +85,15 @@ import { createFakeMessages } from "./fake-messages";
 const params = new URLSearchParams(location.search);
 const count = Math.max(1, Math.min(50_000, Number(params.get("n")) || 2000));
 const olderCount = Math.max(0, Number(params.get("older") ?? 300) || 0);
+// ?github=N ends the room with a run of N GitHub events (one group).
+const githubRun = Math.max(0, Math.min(20_000, Number(params.get("github")) || 0));
 const pageSize = 50;
 
 const roomIdentifier = ref("harness-room-a");
 const mounted = ref(true);
 const mountKey = ref(0);
 const viewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
-const all = createFakeMessages(count + olderCount);
+const all = withGitHubRun(createFakeMessages(count + olderCount), "msg");
 const olderPool = shallowRef<DesktopRoomMessage[]>(all.slice(0, olderCount));
 const messages = shallowRef<DesktopRoomMessage[]>(all.slice(olderCount));
 const loadingOlder = ref(false);
@@ -178,9 +181,18 @@ async function remount(): Promise<Record<string, number | string>> {
   return snapshot({ mountMs: round(scriptAndLayout), mountToPaintMs: round(performance.now() - started) });
 }
 
-async function appendMessage(own: boolean): Promise<Record<string, number | string>> {
+function withGitHubRun(room: DesktopRoomMessage[], prefix: string): DesktopRoomMessage[] {
+  if (!githubRun) return room;
+  const last = Date.parse(room.at(-1)?.timestamp ?? new Date().toISOString());
+  // Seconds apart, so the whole run falls on one day and forms one group.
+  const run = createFakeMessages(githubRun, { prefix: `${prefix}_gh`, kind: "github", endTime: last + githubRun * 2000 })
+    .map((message, index) => ({ ...message, timestamp: new Date(last + (index + 1) * 2000).toISOString() }));
+  return [...room, ...run];
+}
+
+async function appendMessage(own: boolean, kind: "chat" | "github" = "chat"): Promise<Record<string, number | string>> {
   appended += 1;
-  const [message] = createFakeMessages(1, { prefix: own ? "own" : "new", startIndex: 900_000 + appended, endTime: Date.now() + appended * 1000 });
+  const [message] = createFakeMessages(1, { prefix: own ? "own" : "new", startIndex: 900_000 + appended, endTime: Date.now() + appended * 1000, kind });
   const started = performance.now();
   messages.value = [...messages.value, { ...message!, id: `${own ? "own" : "new"}_${appended}` }];
   await nextTick();
@@ -230,7 +242,8 @@ async function switchRoom(): Promise<void> {
   roomIdentifier.value = roomIdentifier.value.endsWith("a") ? "harness-room-b" : "harness-room-a";
   activeThreadParentId.value = null;
   activeSearchIndex.value = -1;
-  const fresh = createFakeMessages(count + olderCount, { prefix: roomIdentifier.value.endsWith("a") ? "msg" : "roomb" });
+  const prefix = roomIdentifier.value.endsWith("a") ? "msg" : "roomb";
+  const fresh = withGitHubRun(createFakeMessages(count + olderCount, { prefix }), prefix);
   olderPool.value = fresh.slice(0, olderCount);
   messages.value = fresh.slice(olderCount);
   await nextTick();

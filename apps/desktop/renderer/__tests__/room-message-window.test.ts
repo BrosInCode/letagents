@@ -8,6 +8,10 @@ import { createRenderer, h, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 import {
   anchoredScrollTop,
+  entryWeight,
+  githubGroupRowLimit,
+  pinnedOutside,
+  startForBudget,
   grownDownwardState,
   grownUpwardState,
   indexEntriesByMessageId,
@@ -120,17 +124,37 @@ describe("message mount window rules", () => {
     const entries = timeline(5000);
     const index = indexEntriesByMessageId(entries);
     let current = bounds(entries, windowStateIncluding(entries, bounds(entries, { kind: "latest" }), index, "m2000")!);
-    const startBefore = current.start;
     let steps = 0;
     while (current.end < entries.length) {
       const next = bounds(entries, grownDownwardState(entries, current)!);
-      assert.equal(next.start, startBefore, "growing downward never moves the top edge");
+      assert.ok(next.start >= current.start, "growing downward never mounts rows above");
       assert.ok(next.end > current.end);
+      assert.ok(next.end - next.start <= messageWindowSize + 3 * messageWindowChunk, `${next.end - next.start} entries after growing down`);
       current = next;
       steps += 1;
     }
     assert.ok(steps > 1);
     assert.equal(grownDownwardState(entries, current), null);
+  });
+
+  it("counts a GitHub group by its rows, up to the group row limit", () => {
+    const group: WindowEntry = { type: "github-group", messages: Array.from({ length: 1000 }, (_, index) => ({ id: `gh${index}` })) };
+    assert.equal(entryWeight(group), githubGroupRowLimit);
+    assert.equal(entryWeight({ type: "github-group", messages: [{ id: "one" }] }), 1);
+    const entries = [...timeline(400), group];
+    const latest = bounds(entries, { kind: "latest" });
+    assert.equal(latest.end, entries.length);
+    assert.ok(latest.end - latest.start <= messageWindowSize - githubGroupRowLimit + 2, `${latest.end - latest.start} entries with the group`);
+    const grown = bounds(entries, grownUpwardState(entries, latest)!);
+    assert.ok(latest.start - grown.start <= messageWindowChunk + 1);
+    assert.equal(startForBudget(entries, entries.length, 1), entries.length - 1);
+  });
+
+  it("reports pinned rows outside the window", () => {
+    const entries = timeline(5000);
+    const index = indexEntriesByMessageId(entries);
+    const latest = bounds(entries, { kind: "latest" });
+    assert.deepEqual(pinnedOutside(latest, index, ["m10", "m4999", null]), [index.get("m10")]);
   });
 
   it("pulls a near pinned thread root inside the window, but not a far one", () => {
@@ -195,6 +219,7 @@ function descendants(node: HostNode): HostNode[] {
 
 function hostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
   let scrollTop = 0;
+  const listeners = new Map<string, Set<(event: Event) => void>>();
   const node: HostNode = {
     kind, type, text, children: [], parent: null, props: {}, style: {},
     isConnected: true, clientHeight: 0,
@@ -223,17 +248,28 @@ function hostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
       return { top, bottom: top + heightOf(node), left: 0, right: 800, width: 800, height: heightOf(node) };
     },
     classList: { add: () => undefined, remove: () => undefined },
-    focus: () => undefined, scrollTo: () => undefined, dispatchEvent: () => true, closest: () => null,
-    scrollIntoView: () => { scrolledIntoView.push(String(node.props["data-message-id"])); },
-    addEventListener: () => undefined, removeEventListener: () => undefined,
+    focus: () => undefined, scrollTo: () => undefined, closest: () => null,
+    dispatchEvent: (event: Event) => { for (const listener of listeners.get(event.type) ?? []) listener(event); return true; },
+    addEventListener: (name: string, listener: (event: Event) => void) => { listeners.set(name, (listeners.get(name) ?? new Set()).add(listener)); },
+    removeEventListener: (name: string, listener: (event: Event) => void) => { listeners.get(name)?.delete(listener); },
+    // Centre the row's top-level ancestor in the list, as block: "center" does.
+    scrollIntoView: () => {
+      scrolledIntoView.push(String(node.props["data-message-id"]));
+      let row: HostNode | null = node;
+      while (row?.parent && !isList(row.parent)) row = row.parent;
+      const list = row?.parent;
+      if (!row || !list) return;
+      const top = (row.getBoundingClientRect as () => DOMRect)().top + (list.scrollTop as number);
+      list.scrollTop = top - (list.clientHeight as number) / 2;
+    },
     querySelectorAll: (selector: string) => {
       if (!selector.includes("data-message-id")) return [];
       return elementChildren(node).filter(child => child.props["data-message-id"] || child.props["data-scroll-anchor-id"]);
     },
     querySelector: (selector: string) => {
-      const match = /\[data-(testid|message-id)="([^"]+)"\]/.exec(selector);
+      const match = /\[data-(testid|message-id|scroll-anchor-id)="([^"]+)"\]/.exec(selector);
       if (!match) return null;
-      const [key, value] = match[1] === "testid" ? ["data-testid", match[2]] : ["data-message-id", match[2]];
+      const key = `data-${match[1]}`, value = match[2];
       return descendants(node).find(child => child.props[key] === value) ?? null;
     },
   };
@@ -284,7 +320,8 @@ async function attachClientRender(component: object, path: string): Promise<void
 
 let vite: ViteDevServer;
 let RoomMessageViewport: object;
-const savedGlobals = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS };
+const savedGlobals = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver, HTMLElement: globalThis.HTMLElement };
+const resizeCallbacks: Array<() => void> = [];
 
 before(async () => {
   Object.assign(globalThis, {
@@ -296,6 +333,8 @@ before(async () => {
     },
     document: { addEventListener() {}, removeEventListener() {}, visibilityState: "visible", hasFocus: () => true },
     CSS: { escape: (value: string) => value },
+    HTMLElement: class {},
+    ResizeObserver: class { constructor(callback: () => void) { resizeCallbacks.push(callback); } observe() {} disconnect() {} },
   });
   vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   RoomMessageViewport = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue")).default;
@@ -307,6 +346,15 @@ before(async () => {
       return h("article", { "data-message-id": ctx.message.id, "data-testid": `room-message-${ctx.message.id}` });
     },
   });
+  // The disclosure keeps a closed panel in the DOM (v-show); this stand-in does
+  // the same, so closed group history that is mounted shows up in the counts.
+  const disclosure = (await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/DisclosurePanel.vue", import.meta.url)))).default;
+  Object.assign(disclosure, {
+    setup: undefined,
+    render(ctx: { open: boolean; $attrs: Record<string, unknown>; $slots: Record<string, (() => unknown) | undefined> }) {
+      return h("div", { ...ctx.$attrs, "data-open": ctx.open }, [ctx.$slots.summary?.() as never, h("div", { hidden: !ctx.open }, ctx.$slots.default?.() as never)]);
+    },
+  });
   const groupedUpdates = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/RoomGitHubUpdates.vue", import.meta.url)));
   await attachClientRender(groupedUpdates.default, "../../../../shared/ui/RoomGitHubUpdates.vue");
   await attachClientRender(RoomMessageViewport, "../src/components/desktop/content/room-chat/RoomMessageViewport.vue");
@@ -316,6 +364,23 @@ after(async () => {
   await vite?.close();
   Object.assign(globalThis, savedGlobals);
 });
+
+function hiddenClass(node: HostNode): boolean {
+  const value = node.props.class;
+  if (!value) return false;
+  if (typeof value === "string") return value.includes("room-window-pinned-hidden");
+  return Boolean((value as Record<string, boolean>)["room-window-pinned-hidden"]);
+}
+
+function githubRun(count: number, after: string) {
+  const start = Date.parse(after);
+  return Array.from({ length: count }, (_, index) => ({
+    id: `gh_${index}`, sender: "github", source: "github", attachments: [], agentPromptKind: null,
+    text: `oak approved PR #${1000 + index} in BrosInCode/letagents https://github.com/BrosInCode/letagents/pull/${1000 + index}`,
+    timestamp: new Date(start + (index + 1) * 1000).toISOString(), actorLabel: null, agentIdentity: null,
+    threadRootId: `gh_${index}`, threadReplyToId: null, thread: null, replyTo: null,
+  }));
+}
 
 function roomMessages(count: number, prefix = "msg") {
   const start = Date.parse("2026-10-01T00:00:00.000Z");
@@ -364,7 +429,10 @@ async function mountViewport(count: number) {
     return row ? { id: row.props["data-message-id"], offset: (row.getBoundingClientRect as () => DOMRect)().top } : null;
   };
   const atBottom = () => (list.scrollHeight as number) - (list.scrollTop as number) - (list.clientHeight as number) < 1;
-  return { props, app, list, calls, mounted, scroll, firstVisible, atBottom, viewport: () => viewport! };
+  const gap = () => descendants(list).some(node => node.props["data-testid"] === "room-message-window-gap");
+  const article = (id: string) => descendants(list).find(node => node.type === "article" && node.props["data-message-id"] === id);
+  const visibleMounted = () => descendants(list).filter(node => node.type === "article" && !hiddenClass(node)).length;
+  return { props, app, list, root, calls, mounted, scroll, firstVisible, atBottom, gap, article, visibleMounted, viewport: () => viewport! };
 }
 
 test("a long room mounts a bounded window of the newest messages, at the bottom", async () => {
@@ -466,12 +534,124 @@ test("search steps across the whole room mount each hit", async () => {
   } finally { view.app.unmount(); }
 });
 
-test("opening a far thread mounts its root, so the inline thread panel renders", async () => {
+test("an open thread root far from the window stays mounted, hidden, as the same row", async () => {
   const view = await mountViewport(2000);
   try {
+    // RoomChatView opens the thread, then scrolls to its root.
     view.props.activeThreadParentId = "msg_42";
     await flush();
-    assert.ok(view.mounted().includes("msg_42"));
+    view.viewport().scrollToMessage("msg_42");
+    await flush();
+    const root = view.article("msg_42");
+    assert.ok(root && !hiddenClass(root), "opening the thread mounts and shows its root");
+    // "Scroll to latest" moves the window to the newest messages.
+    await view.scroll(view.list.scrollTop as number);
+    const pill = descendants(view.root).find(node => node.props["data-testid"] === "desktop-new-messages-pill")!;
+    (pill.props.onClick as () => void)();
+    await flush();
+    assert.ok(view.visibleMounted() <= messageWindowSize + 1, `${view.visibleMounted()} visible rows`);
+    const kept = view.article("msg_42");
+    assert.equal(kept, root, "the root row (and its inline thread) is not remounted");
+    assert.ok(hiddenClass(kept!), "outside the window it is hidden");
+    assert.equal(view.viewport().scrollToMessage("msg_42"), true);
+    await flush();
+    assert.equal(view.article("msg_42"), root);
+    assert.ok(!hiddenClass(root!), "a jump back shows the same row again");
+  } finally { view.app.unmount(); }
+});
+
+test("a 1,000-event GitHub run mounts a bounded number of rows and opens a hidden event on a jump", async () => {
+  const messages = roomMessages(300);
+  const view = await mountViewport(0);
+  try {
+    view.props.messages = [...messages, ...githubRun(1000, messages.at(-1)!.timestamp)];
+    await flush();
+    const rows = descendants(view.list).filter(node => String(node.props.class ?? "").split(/\s+/).includes("github-update-row"));
+    assert.ok(rows.length <= githubGroupRowLimit, `${rows.length} group rows`);
+    assert.ok(view.mounted().length <= messageWindowSize, `${view.mounted().length} message rows: closed history is not mounted`);
+    assert.ok(!view.mounted().includes("gh_10"));
+    assert.equal(view.viewport().scrollToMessage("gh_10"), true, "an event in the group is never sent to history paging");
+    await flush();
+    assert.ok(view.mounted().includes("gh_10"), "the group showed and opened the event's row");
+  } finally { view.app.unmount(); }
+});
+
+test("a jump to the end of a detached window goes to the newest messages", async () => {
+  const view = await mountViewport(2000);
+  try {
+    // An instant jump: a smooth one owns the scroll events until it settles.
+    (view.viewport().scrollToMessage as (id: string, behavior: string) => boolean)("msg_281", "instant");
+    await flush();
+    assert.ok(view.gap());
+    await view.scroll(view.list.scrollHeight as number);
+    assert.ok(!view.gap(), "the window joined the newest messages");
+    assert.ok(view.mounted().length <= messageWindowSize + 1, `${view.mounted().length} rows`);
+    assert.equal(view.mounted().at(-1), "msg_1999");
+    assert.ok(view.atBottom());
+
+    view.viewport().scrollToMessage("msg_281");
+    await flush();
+    assert.ok(view.gap());
+    let prevented = false;
+    (view.list.props.onKeydown as (event: unknown) => void)({ key: "End", target: view.list, preventDefault: () => { prevented = true; } });
+    await flush();
+    assert.ok(prevented, "End is handled by the viewport");
+    assert.ok(!view.gap());
+    assert.ok(view.atBottom());
+  } finally { view.app.unmount(); }
+});
+
+test("scrolling down through a detached window keeps it bounded and the visible row in place", async () => {
+  const view = await mountViewport(3000);
+  try {
+    (view.viewport().scrollToMessage as (id: string, behavior: string) => boolean)("msg_100", "instant");
+    await flush();
+    let maxMounted = 0;
+    for (let step = 0; step < 12 && view.gap(); step += 1) {
+      const gapNode = descendants(view.list).find(node => node.props["data-testid"] === "room-message-window-gap")!;
+      const gapTop = (gapNode.getBoundingClientRect as () => DOMRect)().top + (view.list.scrollTop as number);
+      view.list.scrollTop = gapTop - 900;
+      const before = view.firstVisible();
+      (view.list.props.onScroll as () => void)();
+      await flush();
+      assert.deepEqual(view.firstVisible(), before, `step ${step}: the reader sees the same row`);
+      maxMounted = Math.max(maxMounted, view.mounted().length);
+    }
+    assert.ok(maxMounted <= messageWindowSize + 3 * messageWindowChunk, `${maxMounted} rows at most`);
+    assert.ok(maxMounted > messageWindowTargetAbove + messageWindowTargetBelow + messageWindowChunk, "the window did grow downward");
+  } finally { view.app.unmount(); }
+});
+
+test("a resize at the end of a detached window does not pull the reader to the newest messages", async () => {
+  const view = await mountViewport(2000);
+  try {
+    const resize = resizeCallbacks.at(-1)!;
+    resize(); // The viewport records its 600 px height.
+    (view.viewport().scrollToMessage as (id: string, behavior: string) => boolean)("msg_281", "instant");
+    await flush();
+    view.list.scrollTop = view.list.scrollHeight as number;
+    view.list.clientHeight = 500;
+    resize();
+    await flush();
+    assert.ok(view.gap(), "the window is still detached");
+    view.props.messages = [...(view.props.messages as unknown[]), { ...roomMessages(1, "late")[0], timestamp: "2026-11-01T00:00:00.000Z" }];
+    await flush();
+    assert.ok(view.gap());
+    assert.ok(!view.mounted().includes("late_0"), "the new message is counted, not followed");
+  } finally { view.app.unmount(); }
+});
+
+test("Load earlier messages shows only at the top of the mounted window", async () => {
+  const view = await mountViewport(2000);
+  try {
+    view.props.hasOlderMessages = true;
+    view.props.hasFilteredRoomActivity = true;
+    await flush();
+    const button = () => descendants(view.list).find(node => node.props["data-testid"] === "desktop-load-older-messages");
+    assert.equal(button(), undefined, "loaded rows above the window come first");
+    view.viewport().scrollToMessage("msg_0");
+    await flush();
+    assert.ok(button(), "at the top of loaded history the button returns");
   } finally { view.app.unmount(); }
 });
 
