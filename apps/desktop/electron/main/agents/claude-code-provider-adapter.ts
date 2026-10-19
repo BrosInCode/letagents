@@ -495,6 +495,12 @@ function claudeTerminalDiscriminator(message: ClaudeStreamMessage): string {
   return `${subtype}:${errorState}`;
 }
 
+/** A guest's tools, as Claude itself reports them: only the room's LetAgents tools. */
+export function guestHasOnlyRoomTools(message: ClaudeStreamMessage): boolean {
+  return Array.isArray(message.tools)
+    && (message.tools as unknown[]).every(tool => typeof tool === "string" && tool.startsWith("mcp__letagents__"));
+}
+
 function hasReadyRoomWorkplace(message: ClaudeStreamMessage): boolean {
   if (!Array.isArray(message.mcp_servers) || !Array.isArray(message.tools)) return false;
   const connected = message.mcp_servers.some(row => row && typeof row === "object"
@@ -2148,6 +2154,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       // there would either prompt for everything or decide nothing.
       if (req.permissionProfileId === "auto_review" && observedInit.permissionMode !== "auto") {
         throw new Error("Claude Code did not start in Auto mode. This account or Claude Code version may not support it. Choose another access level, then try again.");
+      }
+      // A guest must have no tool of its own on this Mac: fail closed on anything but LetAgents' tools.
+      if (req.supervisorEntryId?.startsWith("supervised_rental_") && !guestHasOnlyRoomTools(observedInit)) {
+        throw new Error("Claude Code started with tools that can reach this Mac, so the given agent was not started. Update Claude Code, then try again.");
       }
       // A named but failed server is not a usable room connection.
       if (!hasReadyRoomWorkplace(observedInit)) {

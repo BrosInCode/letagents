@@ -63,11 +63,14 @@ export function attestProviderSpawnPolicy(
   } else if (provider === "open-model") {
     requireMatch(policy, "permission", supervisedOpenCodePermissionPolicy(supervisedOpenCodePermissionProfileId(profile)), provider);
   } else if (provider === "claude-code") {
+    // A guest works for someone else: no tool that touches this Mac, only LetAgents'.
+    const guest = request.supervisorEntryId?.startsWith("supervised_rental_") === true;
+    if (guest && profile !== "read_only") throw new Error("claude-code launch refused: a guest agent runs Read-only with no local tools.");
     const authority = profile === "read_only"
       ? {
         permissionMode: "dontAsk",
         dangerouslySkipPermissions: false,
-        tools: ["Read", "Glob", "Grep"],
+        tools: guest ? [] : ["Read", "Glob", "Grep"],
         allowedTools: ["mcp__letagents__*"],
         // The owner's own user settings, and still nothing a project supplies.
         settingSources: homeHarness ? "user" : "",

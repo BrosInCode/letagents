@@ -24,7 +24,8 @@ test("a given agent is always a guest entry, so every rental safeguard applies",
   assert.match(giftEntryId("ask_1"), /^supervised_rental_ask_[0-9a-f]{32}$/);
   assert.equal(giftEntryId("ask_1"), giftEntryId("ask_1"));
   assert.equal(giftPermissionProfile("cursor"), "sandboxed_write");
-  assert.equal(giftPermissionProfile("claude-code"), null);
+  assert.equal(giftPermissionProfile("claude-code"), "read_only");
+  assert.equal(giftPermissionProfile("codex"), null);
   assert.equal(giftPermissionProfile("unknown"), null);
 });
 
@@ -90,6 +91,20 @@ test("the pre-check refuses to give more than is left", async () => {
 
 test("providers without a verified folder lock can't be given", async () => {
   const { coordinator, calls } = fakes();
-  await assert.rejects(coordinator.give({ ...give, providerId: "claude-code" }), /can't be given safely yet/);
+  await assert.rejects(coordinator.give({ ...give, providerId: "codex" }), /can't be given safely yet/);
   assert.deepEqual(calls, []);
+});
+
+test("a guest Claude launches with no built-in tools and refuses to run with any", async () => {
+  const { attestProviderSpawnPolicy } = await import("../main/agents/provider-spawn-configuration.js");
+  const { GUEST_CLAUDE_LAUNCH_POLICY } = await import("../asks/give-coordinator.js");
+  const { guestHasOnlyRoomTools } = await import("../main/agents/claude-code-provider-adapter.js");
+  const request = (launchPolicy: unknown, permissionProfileId = "read_only") => ({ launchPolicy: { ...(launchPolicy as object) }, permissionProfileId,
+    supervisorEntryId: giftEntryId("ask_1"), configurationRevision: 1, deliveryMode: "daemon_inbox" }) as any;
+  assert.deepEqual(attestProviderSpawnPolicy("claude-code", request(GUEST_CLAUDE_LAUNCH_POLICY)).tools, []);
+  assert.throws(() => attestProviderSpawnPolicy("claude-code", request({ ...GUEST_CLAUDE_LAUNCH_POLICY, tools: ["Read", "Glob", "Grep"] })), /tools/);
+  assert.throws(() => attestProviderSpawnPolicy("claude-code", request({ permissionMode: "bypassPermissions" }, "full_access")), /guest agent runs Read-only/);
+  assert.equal(guestHasOnlyRoomTools({ tools: ["mcp__letagents__read_messages", "mcp__letagents__ask_read_file"] } as any), true);
+  assert.equal(guestHasOnlyRoomTools({ tools: ["mcp__letagents__read_messages", "Read"] } as any), false);
+  assert.equal(guestHasOnlyRoomTools({} as any), false);
 });

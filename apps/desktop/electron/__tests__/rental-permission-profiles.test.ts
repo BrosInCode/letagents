@@ -13,7 +13,9 @@ test("only a verified workspace-rooted provider profile is rental-admissible", (
     ["sandboxed_write"],
   );
   assert.deepEqual(listRentalSafePermissionProfiles("codex"), []);
-  assert.deepEqual(listRentalSafePermissionProfiles("claude-code"), []);
+  // Claude is admitted only Read-only, where a guest launch carries no built-in tools (provider-spawn-configuration).
+  assert.deepEqual(listRentalSafePermissionProfiles("claude-code").map((profile) => profile.id), ["read_only"]);
+  assert.equal(isRentalSafePermissionProfile("claude-code", "full_access"), false);
   assert.deepEqual(listRentalSafePermissionProfiles("open-model"), []);
   assert.equal(isRentalSafePermissionProfile("cursor", "sandboxed_write"), true);
   assert.equal(isRentalSafePermissionProfile("cursor", "full_access"), false);

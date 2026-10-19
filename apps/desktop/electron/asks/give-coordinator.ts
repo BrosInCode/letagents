@@ -42,6 +42,12 @@ export function giftCharter(asker: string): string {
   ].join("\n");
 }
 
+/** Claude as a guest: no built-in tools at all, only the room's LetAgents tools. */
+export const GUEST_CLAUDE_LAUNCH_POLICY = Object.freeze({
+  permissionMode: "dontAsk", dangerouslySkipPermissions: false, tools: [] as string[],
+  allowedTools: ["mcp__letagents__*"], settingSources: "",
+});
+
 /** The permission profile a given agent runs with, or null when this provider can't be given safely yet. */
 export function giftPermissionProfile(providerId: string): string | null {
   if (!["codex", "claude-code", "cursor", "open-model"].includes(providerId)) return null;
@@ -145,6 +151,7 @@ export class AskGiveCoordinator {
         creationRequestId: entryId.slice("supervised_".length), roomIdentifier: roomId, displayName,
         providerId: input.providerId as DesktopAgentProviderId, model: input.model, charter: giftCharter(claimed.asker),
         permissionProfileId: profile, repoRootPath: null, agentKey,
+        ...(input.providerId === "claude-code" ? { launchPolicy: GUEST_CLAUDE_LAUNCH_POLICY } : {}),
         preparedGrant: {
           metadata: { grantId, hostId, installationId, allowedRoomIds: [roomId], allowedAgentKeys: [agentKey],
             generation: Number(grant.current_generation ?? grant.generation ?? 1), expiresAt },

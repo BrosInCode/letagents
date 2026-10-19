@@ -14,6 +14,11 @@ const RENTAL_SAFE_PROFILE_IDS: Partial<
   Record<DesktopAgentProviderId, readonly DesktopManagedAgentPermissionProfileId[]>
 > = {
   cursor: ["sandboxed_write"],
+  // A guest Claude runs Read-only with no built-in tools at all: it cannot
+  // read, search or run anything on this Mac, only use LetAgents tools. The
+  // spawn attestation requires the empty tool list and the adapter refuses to
+  // start unless Claude itself reports no tool outside LetAgents'.
+  "claude-code": ["read_only"],
 };
 
 export function listRentalSafePermissionProfiles(
