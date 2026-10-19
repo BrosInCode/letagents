@@ -4,11 +4,13 @@
     class="room-chat-message"
     tabindex="-1"
     :class="{
+      'is-github-history': githubHistory,
       'is-system-message': isSystem,
       'is-github-message': Boolean(githubEvent),
       'has-reply': Boolean(message.replyTo),
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
+      'has-thread': context === 'timeline' && (threadIndicatorVisible || activeThreadRoot),
       'is-compact-continuation': compactWithPrevious,
       'is-ambient-system-message': isAmbientSystem || isWakeNotice,
       'is-wake-notice': isWakeNotice,
@@ -20,22 +22,19 @@
     }"
     :style="{ '--message-accent': senderColor }"
     :data-owner-kind="ownerKind"
+    :data-chat-role="senderRole"
     :data-message-id="message.id"
     :data-thread-message-id="threadMessageId || undefined"
     :data-testid="testId || `room-message-${message.id}`"
-    @contextmenu="openContextMenu"
-    @pointerup="handleSelectionPointerUp"
+    @contextmenu.stop="openContextMenu"
+    @pointerup.stop="handleSelectionPointerUp"
   >
     <WakeGlyph v-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
-    <div
-      v-else
-      class="room-chat-avatar"
-      :style="{ '--avatar-color': senderColor }"
-      aria-hidden="true"
-    />
+    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="avatarUrl" :agent="ownerKind === 'agent'" :provider="ideLabel" :agent-key="message.agentIdentity?.agentKey" />
+    <div v-else class="room-chat-avatar" :style="{ '--avatar-color': senderColor }" aria-hidden="true" />
 
     <div class="room-chat-message-content">
-      <div class="room-message-meta">
+      <div v-if="!githubHistory" class="room-message-meta">
         <div class="room-message-author-block">
           <button
             v-if="ownerKind === 'agent'"
@@ -47,14 +46,11 @@
             {{ displayName }}
           </button>
           <strong v-else>{{ displayName }}</strong>
-          <span v-if="ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
-          <ProviderBadge
-            v-if="ideLabel"
-            :label="ideLabel"
-            :agent-key="message.agentIdentity?.agentKey"
-          />
+          <span v-if="ownerKind === 'agent' && ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
+
         </div>
         <div class="room-message-meta-tail">
+          <div class="room-message-actions">
           <button
             v-if="reactable"
             class="room-message-reply-action room-message-react-action"
@@ -108,6 +104,7 @@
             :disabled="Boolean(pinContext?.state.value.pending)"
             @click="pinContext?.toggle(message.id)"
           ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></button>
+          </div>
           <span v-if="provenanceLabel" class="room-message-provenance" :data-kind="ownerKind">
             {{ provenanceLabel }}
           </span>
@@ -118,12 +115,16 @@
 
       <div v-if="message.outgoing" class="room-message-outgoing" role="status" aria-live="polite">
         <span v-if="message.outgoing.attachmentCount">{{ message.outgoing.attachmentCount }} attachment{{ message.outgoing.attachmentCount === 1 ? "" : "s" }} · </span>
-        <span>{{ message.outgoing.status === "pending" ? "Sending…" : "Delivery not confirmed" }}</span>
+        <span>{{ message.outgoing.status === "pending" ? "Sending…" : message.outgoing.error?.includes('expressions_disabled:') ? "GIF sending is off in this room" : "Delivery not confirmed" }}</span>
         <button v-if="message.outgoing.status === 'uncertain'" type="button" :title="message.outgoing.error || undefined" @click="retryDesktopOutgoingMessage(message.clientMessageId || '')">Retry safely</button>
+        <template v-if="message.gif && message.outgoing.error?.includes('expressions_disabled:')">
+          <button v-if="message.text.trim() || message.outgoing.attachmentCount" type="button" @click="sendDesktopOutgoingWithoutGif(message.clientMessageId || '')">Send without GIF</button>
+          <button v-else type="button" @click="discardRefusedDesktopGif(message.clientMessageId || '')">Remove unsent GIF</button>
+        </template>
       </div>
       <div class="room-message-bubble">
         <button
-          v-if="message.replyTo"
+          v-if="message.replyTo && (context !== 'thread-reply' || message.replyTo.id !== message.threadRootId)"
           class="room-message-reply"
           type="button"
           :aria-label="`Reply preview from ${replyDisplayName}`"
@@ -135,6 +136,8 @@
 
         <DesktopGitHubEventCard
           v-if="githubEvent"
+          :history="githubHistory"
+          :timestamp="message.timestamp"
           room
           :event="githubEvent"
           :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
@@ -143,11 +146,12 @@
         />
 
         <DesktopLongMessageContent
-          v-else
+          v-else-if="(!message.gif || visibleText) && !(message.gif?.text_fallback_only && gifState !== 'unavailable')"
           :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
           :room-identifier="roomIdentifier"
+          :sender="readerSender"
           @message-reference-click="$emit('scroll-to-message', $event)"
           @task-reference-click="$emit('open-task', $event)"
         />
@@ -158,12 +162,50 @@
           :event="linkPreviewPresentation(preview)"
           compact
         />
+        <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @state="gifState = $event" />
         <DesktopMessageAttachments
           v-if="message.attachments.length"
           :message-id="message.id"
           :attachments="message.attachments"
           @open-image="$emit('open-image', $event)"
         />
+      <button
+        v-if="context === 'timeline' && (threadIndicatorVisible || activeThreadRoot)"
+        class="room-thread-marker"
+        :class="{ 'is-active': activeThreadRoot }"
+        type="button"
+        :aria-label="threadMarkerAriaLabel"
+        :aria-expanded="activeThreadRoot"
+        :aria-controls="`room-inline-thread-${message.id}`"
+        @click="$emit('open-thread', message.id)"
+      >
+        <span class="room-thread-marker-main">
+          <MessageSquare :size="13" aria-hidden="true" />
+          <strong>{{ threadMarkerCountLabel }}</strong>
+          <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-count">
+            {{ threadSummary.unreadCount }}
+          </span>
+          <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
+        </span>
+        <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
+          <span
+            v-for="participant in threadSummary.participants"
+            :key="participant.key"
+            class="room-thread-participant-avatar"
+            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.displayName, null) }"
+            :title="participant.displayName"
+          >
+            {{ participantInitials(participant.displayName) }}
+          </span>
+        </span>
+        <span v-if="threadMarkerPreview" class="room-thread-marker-preview">
+          {{ threadMarkerPreview }}
+        </span>
+        <ChevronDown class="room-thread-marker-chevron" :size="14" aria-hidden="true" />
+      </button>
+        <ThreadTransition>
+          <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread" /></div>
+        </ThreadTransition>
       </div>
 
       <MessageReactionBar
@@ -187,6 +229,7 @@
           v-for="receipt in visibleDeliveryReceipts"
           :key="receipt.agentId"
           :data-state="receipt.state"
+          :data-follow-up="receipt.scheduledRetry ? 'scheduled' : receipt.followUpNote?.state"
           :aria-label="receiptLabel(receipt)"
         >
           <span class="room-message-delivery-indicator" aria-hidden="true">
@@ -198,8 +241,37 @@
           </span>
           <strong>{{ receipt.agentName }}</strong>
           <small v-if="receiptStateLabel(receipt)">{{ receiptStateLabel(receipt) }}</small>
+          <template v-if="receipt.scheduledRetry">
+            <small class="room-message-delivery-countdown" aria-hidden="true"><span>{{ scheduledRetryParts(receipt)[0] }}</span> <span>{{ scheduledRetryParts(receipt)[1] }}</span></small>
+            <button
+              type="button"
+              :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId)"
+              :aria-label="`Try again now for ${receipt.agentName}`"
+              title="Asks the agent to start this attempt now instead of waiting."
+              @click="tryRetryNow(receipt)"
+            >{{ retryingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId) ? "Asking…" : "Try now" }}</button>
+            <button
+              type="button"
+              :disabled="!roomDeliverySkipAvailable || skippingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId)"
+              :aria-label="`Stop the automatic attempts for ${receipt.agentName}`"
+              title="No more automatic attempts. Later messages go ahead. The task stays assigned to the agent: send it a message to continue."
+              @click="stopRetrying(receipt)"
+            >{{ skippingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId) ? "Stopping…" : "Stop trying" }}</button>
+            <small class="room-message-delivery-outcome">{{ scheduledRetryOutcome(receipt.scheduledRetry) }}</small>
+          </template>
+          <template v-else-if="receipt.followUpNote">
+            <small>{{ followUpNoteLabel(receipt.followUpNote) }}</small>
+            <button
+              v-if="receipt.followUpNote.canRetry"
+              type="button"
+              :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId, receipt.followUpNote.sourceMessageId)"
+              :aria-label="deliveryRecoveryAvailable ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
+              title="Retry delivery"
+              @click="retryFollowUp(receipt)"
+            >{{ retryingReceipt(receipt.agentId, receipt.followUpNote.sourceMessageId) ? "Retrying…" : deliveryRecoveryAvailable ? "Retry" : "Retry unavailable" }}</button>
+          </template>
           <button
-            v-if="receipt.state === 'queued_behind_blocked' && receipt.blockedByMessageId"
+            v-if="(receipt.state === 'queued_behind_blocked' || receipt.state === 'queued_behind_retry') && receipt.blockedByMessageId"
             type="button"
             class="room-message-delivery-link"
             @click="$emit('scroll-to-message', receipt.blockedByMessageId)"
@@ -241,37 +313,7 @@
         </li>
       </ul>
 
-      <button
-        v-if="context === 'timeline' && threadIndicatorVisible"
-        class="room-thread-marker"
-        :class="{ 'is-active': activeThreadRoot }"
-        type="button"
-        :aria-label="threadMarkerAriaLabel"
-        @click="$emit('open-thread', message.id)"
-      >
-        <span class="room-thread-marker-main">
-          <MessageSquare :size="13" aria-hidden="true" />
-          <strong>{{ threadMarkerCountLabel }}</strong>
-          <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-count">
-            {{ threadSummary.unreadCount }}
-          </span>
-          <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
-        </span>
-        <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
-          <span
-            v-for="participant in threadSummary.participants"
-            :key="participant.key"
-            class="room-thread-participant-avatar"
-            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.displayName, null) }"
-            :title="participant.displayName"
-          >
-            {{ participantInitials(participant.displayName) }}
-          </span>
-        </span>
-        <span v-if="threadMarkerPreview" class="room-thread-marker-preview">
-          {{ threadMarkerPreview }}
-        </span>
-      </button>
+
     </div>
 
     <Teleport to="body">
@@ -353,17 +395,24 @@
 </template>
 
 <script setup lang="ts">
+import RoomGif from "./room-chat/RoomGif.vue";
 import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
 import MessageReminderMenu from "./MessageReminderMenu.vue";
 import { reminderAccount } from "../../../composables/useMessageReminders";
-import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
+import { discardRefusedDesktopGif, sendDesktopOutgoingWithoutGif, retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
 import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
-import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
+import { Check, ChevronDown, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
 import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import { useSecondClock } from "../../../composables/useSecondClock";
+import { scheduledRetryClockLabel, scheduledRetryLabelParts, scheduledRetryOutcome, type AgentScheduledRetry } from "../../../domain/scheduled-retry";
+import type { RoomMessageFollowUpNote } from "../../../domain/room-message-receipts";
+
+/** What this message needs of an automatic attempt: its time, its attempt, what it follows, and the id its two controls name. */
+type AgentScheduledRetryView = Pick<AgentScheduledRetry, "atMs" | "attempt" | "attempts" | "kind" | "sourceMessageId">;
 import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
 import {
@@ -373,7 +422,9 @@ import {
 } from "../../../domain/room-urls";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
-import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
+import ChatAvatar from "../../../../../../../shared/ui/ChatAvatar.vue";
+import { chatSenderRole } from "../../../../../../../shared/chat-appearance";
+import "../../../../../../../shared/ui/chat-palette.css";
 import {
   getSenderColor,
   parseSenderIdentity,
@@ -399,15 +450,17 @@ import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 import MessageReactionBar from "../../../../../../../shared/ui/MessageReactionBar.vue";
 import MessageReactionPicker, { type MessageReactionPickerAnchor } from "../../../../../../../shared/ui/MessageReactionPicker.vue";
+import ThreadTransition from "../../../../../../../shared/ui/ThreadTransition.vue";
 import WakeGlyph from "../../../../../../../shared/ui/WakeGlyph.vue";
 import { isPinMessageId } from "../../../../../../../shared/message-pins.mjs";
 import { injectRoomMessageLinkPreviews } from "../../../composables/useRoomMessageLinkPreviews";
 import { excludeGitHubEventLink, linkPreviewPresentation } from "../../../../../../../shared/message-link-previews.mjs";
 import { injectRoomMessagePins } from "../../../composables/useRoomMessagePins";
-import { injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
+import { useMessageViewer, injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
 
 const props = withDefaults(defineProps<{
+  githubHistory?: boolean;
   message: DesktopRoomMessage;
   compactWithPrevious?: boolean;
   threadSummary: ThreadIndicatorSummary;
@@ -420,7 +473,11 @@ const props = withDefaults(defineProps<{
   context?: "timeline" | "thread-root" | "thread-reply";
   threadMessageId?: string;
   testId?: string;
-  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null; retry?: DesktopRoomAgentDeliveryAttention["retry"] | null }>;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null; retry?: DesktopRoomAgentDeliveryAttention["retry"] | null;
+    /** The agent's automatic attempt for the work this message began, while it waits for its time. */
+    scheduledRetry?: AgentScheduledRetryView | null;
+    /** The follow-up of the work this message began, when it waits for its owner or ended with nothing started. */
+    followUpNote?: RoomMessageFollowUpNote | null }>;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;
@@ -437,16 +494,17 @@ const props = withDefaults(defineProps<{
   roomDeliverySkipAvailable: false,
 });
 
-function retryingReceipt(agentId: string): boolean {
-  return props.deliveryRetryKeys?.has(`${agentId}:${props.message.id}`) === true;
+/** A request for this agent that is on its way. A follow-up has an id of its own, which is not this message's. */
+function retryingReceipt(agentId: string, sourceMessageId = props.message.id): boolean {
+  return props.deliveryRetryKeys?.has(`${agentId}:${sourceMessageId}`) === true;
 }
 
 function restoringReceipt(agentId: string): boolean {
   return props.continuationRepairKeys?.has(`${agentId}:${props.message.id}`) === true;
 }
 
-function skippingReceipt(agentId: string): boolean {
-  return props.roomDeliverySkipKeys?.has(`${agentId}:${props.message.id}`) === true;
+function skippingReceipt(agentId: string, sourceMessageId = props.message.id): boolean {
+  return props.roomDeliverySkipKeys?.has(`${agentId}:${sourceMessageId}`) === true;
 }
 
 const emit = defineEmits<{
@@ -465,6 +523,37 @@ const emit = defineEmits<{
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
 }>();
 
+/** Try now: ask the agent to start its automatic attempt at once. The request names the attempt, which is not this message. */
+function tryRetryNow(receipt: { agentId: string; scheduledRetry?: AgentScheduledRetryView | null }): void {
+  const retryId = receipt.scheduledRetry?.sourceMessageId;
+  if (retryId && props.deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId, retryId)) emit("retry-delivery", receipt.agentId, retryId);
+}
+
+/** Stop trying: end the agent's automatic attempt before it starts. */
+function stopRetrying(receipt: { agentId: string; scheduledRetry?: AgentScheduledRetryView | null }): void {
+  const retryId = receipt.scheduledRetry?.sourceMessageId;
+  if (retryId && props.roomDeliverySkipAvailable && !skippingReceipt(receipt.agentId, retryId)) emit("skip-delivery", receipt.agentId, retryId);
+}
+
+/** Retry for a follow-up that waits for its owner: the request names the follow-up, which is not this message. */
+function retryFollowUp(receipt: { agentId: string; followUpNote?: RoomMessageFollowUpNote | null }): void {
+  const note = receipt.followUpNote;
+  if (note?.canRetry && props.deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId, note.sourceMessageId)) emit("retry-delivery", receipt.agentId, note.sourceMessageId);
+}
+
+/**
+ * The countdown as this message shows it: the saved time minus the clock, so it is right however long the app slept.
+ * It has two parts, which the receipt may wrap between: the wait, and the attempt.
+ */
+function scheduledRetryParts(receipt: { scheduledRetry?: AgentScheduledRetryView | null }): [string, string] {
+  return receipt.scheduledRetry ? scheduledRetryLabelParts(receipt.scheduledRetry, retryClock.value) : ["", ""];
+}
+
+/** Why the follow-up of this message's work waits for its owner, or why it ended with nothing started. */
+function followUpNoteLabel(note: Pick<RoomMessageFollowUpNote, "state" | "text">): string {
+  return receiptErrorLabel(note.text) || (note.state === "ended" ? "The agent did not try again." : "The agent stopped and now waits for you.");
+}
+
 const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((receipt) => [
   "retryable",
   "result_recovery",
@@ -475,10 +564,13 @@ const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((re
   "cancelled_by_user",
   "restoring_conversation",
   "queued_behind_blocked",
+  "queued_behind_retry",
 ].includes(receipt.state)));
+// Counts down to the saved time of an automatic attempt, once a second while one shows on this message.
+const retryClock = useSecondClock(() => Boolean(props.deliveryReceipts?.some((receipt) => receipt.scheduledRetry)));
 
 function receiptIsAnimated(state: string): boolean {
-  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery", "restoring_conversation"].includes(state);
+  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery", "restoring_conversation", "queued_behind_retry"].includes(state);
 }
 
 function receiptNeedsAttention(state: string): boolean {
@@ -499,6 +591,7 @@ function receiptStateLabel(receipt: { state: string; terminalReason: string | nu
   if (state === "restoring_conversation") return "Restoring conversation";
   if (state === "blocked") return receiptErrorLabel(receipt.error) || "Needs attention";
   if (state === "queued_behind_blocked") return "Queued behind an issue";
+  if (state === "queued_behind_retry") return "Queued until the agent has tried again";
   if (state === "acknowledged_no_reply") return "Read · no reply";
   if (state === "acknowledged_failed") return receiptErrorLabel(receipt.error) || "Work did not finish";
   if (state === "cancelled_by_room_move") return "Moved rooms";
@@ -506,8 +599,17 @@ function receiptStateLabel(receipt: { state: string; terminalReason: string | nu
   return "";
 }
 
-function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null }): string {
+function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null;
+  scheduledRetry?: AgentScheduledRetryView | null; followUpNote?: RoomMessageFollowUpNote | null }): string {
   if (receipt.terminalReason === "upgrade_authority_unavailable") return `A safety upgrade retired this legacy turn for ${receipt.agentName}; its exact authority could not be reconstructed`;
+  if (receipt.scheduledRetry || receipt.followUpNote) {
+    // Read aloud with a clock time: the list is a live region, and a count that changes each second would be read each second.
+    const failed = (receiptErrorLabel(receipt.error) || "Work did not finish").replace(/[.\s]+$/, "");
+    return `${receipt.agentName}: ${failed}. ${receipt.scheduledRetry
+      ? `${scheduledRetryClockLabel(receipt.scheduledRetry, retryClock.value)}. ${scheduledRetryOutcome(receipt.scheduledRetry)}`
+      : followUpNoteLabel(receipt.followUpNote!)}`;
+  }
+  if (receipt.state === "queued_behind_retry") return `Waiting — ${receipt.agentName} will try earlier work again first`;
   if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
   if (receipt.state === "publishing") return `${receipt.agentName} is sending a reply`;
   if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;
@@ -524,6 +626,7 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   return `Waiting for ${receipt.agentName}`;
 }
 
+const gifState = ref<'loading' | 'ready' | 'unavailable'>('loading');
 const remindable = computed(() => Boolean(reminderAccount.value && props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier) && isValidMessageId(props.message.id) && !props.message.outgoing));
 const { pushActionToast } = useDesktopActionToasts();
 function reminderScheduled(dueAt: string) {
@@ -543,7 +646,7 @@ const selectionPopoverPosition = ref({ x: 0, y: 0 });
 const selectedQuoteText = ref("");
 let selectionOutsideListenerActive = false;
 const identity = computed(() => parseSenderIdentity(props.message));
-const displayName = computed(() => props.message.agentIdentity?.displayName || identity.value.displayName);
+const displayName = computed(() => props.message.source === "browser" ? props.message.sender : props.message.agentIdentity?.displayName || identity.value.displayName);
 const ownerAttribution = computed(() => resolveOwnerAttribution({
   ownerAttribution: props.message.agentIdentity?.ownerAttribution,
   ownerLabel: props.message.agentIdentity?.ownerLabel,
@@ -551,19 +654,33 @@ const ownerAttribution = computed(() => resolveOwnerAttribution({
   sender: props.message.sender,
 }));
 const ideLabel = computed(() => props.providerLabel || props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
-const isSystem = computed(() => ["system", "letagents"].includes(props.message.sender.toLowerCase()));
+const isSystem = computed(() => props.message.source !== "browser" && ["system", "letagents"].includes(props.message.sender.toLowerCase()));
 /** An agent's wake rule fired: a quiet line, not a conversation. */
 const isWakeNotice = computed(() => props.message.source === WAKE_NOTICE_SOURCE);
 const isAmbientSystem = computed(() =>
-  isAmbientSystemMessage(props.message.sender, props.message.text || "")
+  props.message.source !== "browser" && isAmbientSystemMessage(props.message.sender, props.message.text || "")
 );
-const githubEvent = computed(() => parseGitHubEvent(props.message));
+const githubEvent = computed(() => props.message.source === "browser" ? null : parseGitHubEvent(props.message));
+const viewer = useMessageViewer();
+const senderRole = computed(() => chatSenderRole({ human: ownerKind.value === 'human', agent: ownerKind.value === 'agent',
+  viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey, outgoing: Boolean(props.message.outgoing) }));
+const avatarUrl = computed(() => props.message.senderProfile?.avatarUrl || (props.message.outgoing ? viewer.value?.avatar_url : null));
+const readerSender = computed(() => ({
+  name: displayName.value,
+  context: senderRole.value === 'own-agent' ? 'Your agent' : senderRole.value === 'self' ? 'You'
+    : ownerKind.value === 'agent' ? ownerAttribution.value || 'Agent' : ownerKind.value === 'human' ? 'Human' : 'Room',
+  timestamp: props.message.timestamp,
+  avatarUrl: avatarUrl.value,
+  agent: ownerKind.value === 'agent',
+  provider: ideLabel.value,
+  agentKey: props.message.agentIdentity?.agentKey,
+}));
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source));
 const ownerKind = computed(() => {
   if (isSystem.value) return "system";
   if (props.message.source === "github") return "github";
-  if (props.message.source === "agent" || ownerAttribution.value || ideLabel.value) return "agent";
   if (props.message.source === "browser") return "human";
+  if (props.message.source === "agent" || ownerAttribution.value || ideLabel.value) return "agent";
   return "room";
 });
 const provenanceLabel = computed(() =>
@@ -620,7 +737,7 @@ const threadMarkerPreview = computed(() => {
 });
 const threadMarkerAriaLabel = computed(() => {
   const unread = props.threadSummary.unreadCount > 0 ? `, ${props.threadSummary.unreadCount} unread` : "";
-  return `${threadMarkerCountLabel.value}${unread}. Open thread.`;
+  return `${threadMarkerCountLabel.value}${unread}. ${props.activeThreadRoot ? "Collapse replies" : "Open thread"}.`;
 });
 const agentModalTarget = computed<AgentModalTarget>(() => ({
   messageId: props.message.id,
@@ -867,11 +984,11 @@ function messageCopyText(): string {
   const text = visibleText.value.trim();
   if (text) return text;
   if (props.message.attachments.length === 1) {
-    return props.message.attachments[0]?.fileName || props.message.attachments[0]?.name || "1 attachment";
+    return props.message.attachments[0]?.fileName || "1 attachment";
   }
   if (props.message.attachments.length > 1) {
     return props.message.attachments
-      .map((attachment) => attachment.fileName || attachment.name || "attachment")
+      .map((attachment) => attachment.fileName)
       .join("\n");
   }
   return "";

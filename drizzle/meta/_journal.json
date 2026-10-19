@@ -785,6 +785,27 @@
       "when": 1790900300000,
       "tag": "0111_message_reminders",
       "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1790900400000,
+      "tag": "0112_sequential_reply_turns",
+      "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1791830000000,
+      "tag": "0113_room_expressions",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1792240000000,
+      "tag": "0114_message_attachment_upload_owner",
+      "breakpoints": true
     }
   ]
 }

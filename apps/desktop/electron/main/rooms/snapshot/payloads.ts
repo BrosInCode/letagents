@@ -156,6 +156,7 @@ export interface ActivityEntryPayload {
     display_name: string;
     kind: "human" | "agent";
     actor_label?: string | null;
+    agent_key?: string | null;
     owner_label?: string | null;
     ide_label?: string | null;
     repo_branch?: string | null;

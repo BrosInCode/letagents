@@ -4,11 +4,10 @@ import { basename, dirname, join, resolve } from "node:path";
 
 import { getMainWorktreeRoot, runGit } from "../git-exec.js";
 
-// Behavioral mirror of `src/orchestrator/worktrees.ts`. The desktop app and the
-// orchestrator are compiled as separate packages with disjoint `rootDir`s, so
-// the canonical module cannot be imported here without breaking both builds.
-// Keep the prune-before-add, reuse-existing-checkout, sibling-naming,
-// collision-fallback and created-ownership behavior in sync with that module.
+// Worktree provisioning for desktop rooms: prune-before-add, reuse an existing
+// checkout, sibling naming, collision fallback and created-ownership tracking.
+// (Formerly mirrored the standalone orchestrator's worktrees module, which was
+// removed as dead code.)
 
 function sanitizeBranchName(branch: string): string {
   return branch.replace(/[^a-zA-Z0-9._-]+/g, "-");

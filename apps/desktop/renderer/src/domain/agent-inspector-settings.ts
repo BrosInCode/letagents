@@ -6,7 +6,7 @@ import type {
 
 export type AgentInspectorConfigurationDraft = Pick<
   DesktopSupervisorAgentConfiguration,
-  "model" | "reasoningEffort" | "charter" | "permissionProfileId"
+  "model" | "reasoningEffort" | "charter" | "permissionProfileId" | "imageInput"
 >;
 
 export type AgentInspectorConfigurationResource = {
@@ -130,8 +130,48 @@ export function configurationDraft(configuration: DesktopSupervisorAgentConfigur
     reasoningEffort: configuration.reasoningEffort,
     charter: configuration.charter,
     permissionProfileId: configuration.permissionProfileId,
+    ...(configuration.imageInput === undefined ? {} : { imageInput: configuration.imageInput }),
   };
 }
+
+/**
+ * A short label for lists and headers: the owner saved another access level
+ * that the running agent does not have yet. The title says when it will: an
+ * agent that gets its messages from LetAgents switches when its turn ends.
+ */
+export function permissionPendingBadge(deliveryMode?: string): { label: string; title: string } {
+  return {
+    label: "Settings pending",
+    title: deliveryMode === "daemon_inbox"
+      ? "You changed this agent's access level. It applies when the current turn ends, or when the agent restarts."
+      : "You changed this agent's access level. It applies the next time the agent starts.",
+  };
+}
+
+/**
+ * What the Permissions section says about when a choice reaches the agent. An
+ * agent that gets its messages from LetAgents switches as soon as it is idle,
+ * and a turn that is running is not stopped. Any other agent switches when it
+ * starts again.
+ */
+export function permissionTimingNote(deliveryMode: string | undefined, pending = false): string {
+  const live = deliveryMode === "daemon_inbox";
+  if (pending) {
+    return live
+      ? "Your new access level is saved. The agent switches to it when its current turn ends, or when it restarts."
+      : "Your new access level is saved. The agent gets it the next time it starts.";
+  }
+  return live
+    ? "Choose what the agent can access. A new level applies as soon as the agent is idle. A turn that is running is not stopped."
+    : "Choose what the agent can access the next time it starts.";
+}
+
+/**
+ * Only an Open Model agent asks: its model is whatever the owner set, and a
+ * model that cannot read images gets an error text in each image's place.
+ */
+export const IMAGE_INPUT_TITLE = "This model can read images";
+export const IMAGE_INPUT_DESCRIPTION = "When this is on, the agent gets the images that people attach to the message that wakes it. Turn it on only if your model accepts image input. It applies the next time the agent starts.";
 
 export function configurationHasRuntimeLag(configuration: DesktopSupervisorAgentConfiguration | null): boolean {
   return Boolean(configuration && configuration.runtimeConfigurationRevision < configuration.configRevision);

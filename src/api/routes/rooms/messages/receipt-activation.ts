@@ -5,8 +5,10 @@ import { message_agent_receipts, messages, room_agent_sessions } from "../../../
 import {
   attachAgentMessageActivationsFromReceipts,
   type AgentMessageActivation,
+  type AgentMessageActivationReceipt,
   type ActivationIdentity,
 } from "../../../../shared/activation-routing.js";
+import { loadReplyTurnPriorSpeakers, priorSpeakersBefore } from "../../../db/messages/reply-turns.js";
 import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
 import {
   resolveGlobalLegacyTargets,
@@ -54,12 +56,22 @@ export function attachAccountRoutingAuthorityActivation<T extends MessageWithId>
   const messageNumber = typeof message.id === "string"
     ? parseScopedId(message.id, "msg")
     : null;
-  const receipts = new Map<number, { activation_reason: string }>();
+  const receipts = new Map<number, AgentMessageActivationReceipt>();
   if (messageNumber && target) {
     receipts.set(messageNumber, {
       activation_reason: "activation_reason" in target
         ? target.activation_reason || "explicit_mention"
         : "explicit_mention",
+      // The batched envelope already carries this agent's reply turn, so the
+      // live path and the durable read path give the same activation.
+      ...("turn_position" in target && target.turn_position
+        ? {
+            turn_position: target.turn_position,
+            turn_count: target.turn_count ?? null,
+            prior_speakers: target.prior_speakers ?? [],
+            hold_release_reason: target.hold_release_reason ?? null,
+          }
+        : {}),
     });
   }
   const snapshots = routing.authority === "receipts" && messageNumber
@@ -112,7 +124,7 @@ export async function attachReceiptAuthorityActivations<T extends MessageWithId>
       .filter((value): value is number => value !== null),
   )];
 
-  const receiptsMap = new Map<number, { activation_reason: string }>();
+  const receiptsMap = new Map<number, AgentMessageActivationReceipt>();
   const snapshotNumbers = new Set<number>();
   if (numbers.length > 0) {
     // Receipts are seeded against one exact send-time session. A successor
@@ -126,6 +138,14 @@ export async function attachReceiptAuthorityActivations<T extends MessageWithId>
         message_number: message_agent_receipts.message_number,
         activation_reason: message_agent_receipts.activation_reason,
         agent_session_id: message_agent_receipts.agent_session_id,
+        turn_position: message_agent_receipts.turn_position,
+        turn_count: message_agent_receipts.turn_count,
+        // A hold past its deadline is released by the frontier even before a
+        // sweep records it, so it reads as a deadline release.
+        hold_release_reason: sql<string | null>`CASE
+          WHEN ${message_agent_receipts.hold_released_at} IS NULL
+           AND ${message_agent_receipts.hold_release_after} <= now() THEN 'deadline'
+          ELSE ${message_agent_receipts.hold_release_reason} END`,
       })
       .from(message_agent_receipts)
       .where(and(
@@ -188,7 +208,27 @@ export async function attachReceiptAuthorityActivations<T extends MessageWithId>
       const sameOwner = Boolean(currentOwnerAccountId)
         && capturedSession?.owner_account_id === currentOwnerAccountId;
       if (isCapturedSession || (capturedSessionEnded && isUniqueLiveSuccessor && sameOwner)) {
-        receiptsMap.set(row.message_number, { activation_reason: row.activation_reason });
+        receiptsMap.set(row.message_number, {
+          activation_reason: row.activation_reason,
+          turn_position: row.turn_position,
+          turn_count: row.turn_count,
+          hold_release_reason: row.hold_release_reason,
+        });
+      }
+    }
+    // A later reply turn names the agents that already answered. One query
+    // for the page, only when it holds such a turn.
+    const laterTurnNumbers = [...receiptsMap]
+      .filter(([, receipt]) => (receipt.turn_position ?? 0) >= 2)
+      .map(([number]) => number);
+    if (laterTurnNumbers.length > 0) {
+      const replied = await loadReplyTurnPriorSpeakers(roomId, laterTurnNumbers);
+      for (const number of laterTurnNumbers) {
+        const receipt = receiptsMap.get(number)!;
+        receiptsMap.set(number, {
+          ...receipt,
+          prior_speakers: priorSpeakersBefore(replied.get(number), receipt.turn_position ?? null),
+        });
       }
     }
 

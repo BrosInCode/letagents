@@ -355,6 +355,17 @@ test("observedState failed is a failure even with condition none", () => {
   assert.equal(stateOf(progress, progress.currentPhaseId), "failed");
 });
 
+test("a paused entry is not a failed launch and has no cleanup headline", () => {
+  const progress = supervisedLaunchProgress(entry({ desiredState: "paused", observedState: "starting" }));
+  assert.equal(progress.failed, false);
+  assert.equal(progress.stopped, false);
+  assert.equal(progress.stopFailed, false);
+  assert.equal(progress.ready, false);
+  assert.equal(progress.failureDetail, null);
+  assert.equal(progress.headline, "Starting Codex agent");
+  assert.doesNotMatch(progress.headline, /cleanup/i);
+});
+
 test("stop intent stays nonterminal until the daemon observes the provider stopped", () => {
   const progress = supervisedLaunchProgress(entry({
     desiredState: "stopped",
@@ -464,4 +475,21 @@ test("native compaction is visible during startup without completing any readine
   for (const override of [{ desiredState: "paused" }, { desiredState: "stopped" }, { condition: "coordination_blocked", lastError: "Failed" }, { observedState: "failed" }, { provider: "codex" }] as Partial<DesktopSupervisorManifestEntry>[]) {
     assert.notEqual(supervisedLaunchProgress({ ...starting, ...override }).headline, "Compacting conversation");
   }
+});
+
+test("a Claude launch refused by the usage limit says so instead of a generic start failure", () => {
+  const limited = entry({
+    provider: "claude",
+    observedState: "failed",
+    condition: "coordination_blocked",
+    workspacePath: "/tmp/claude-agent",
+    lastError: "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (failed_response). "
+      + "Startup observations: assistant_error=rate_limit; result=success; init_ms=512.",
+  });
+  const progress = supervisedLaunchProgress(limited);
+  assert.equal(progress.failed, true);
+  assert.equal(progress.failureDetail, "Claude's usage limit is reached. LetAgents checks again by itself and starts the agent after the limit resets.");
+  assert.equal(supervisedLaunchProgress({ ...limited, lastError: "convergence scheduler failure: spawn failed" }).failureDetail,
+    "LetAgents couldn't start Claude Code in the private project area. Try this launch again or cancel it and start a new agent.",
+    "another start failure keeps its own wording");
 });

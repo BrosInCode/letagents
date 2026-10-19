@@ -1,3 +1,4 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../../../shared/room-expressions.mjs";
 import type {
   DesktopLocalChatSyncResult,
   DesktopMessageInfo,
@@ -23,6 +24,7 @@ import {
   getLocalChatMessageByClientId,
   claimUnsyncedLocalChatMessages,
   getLatestLocalChatMessages,
+  getLocalChatMessages,
   getLocalChatMessagesBefore,
   getLocalChatMessagesAround,
   getLocalMessageThread,
@@ -63,6 +65,10 @@ import {
   getStoredAgentSession,
   type StoredAgentSessionState,
 } from "../agents/state.js";
+import { activeGitHubRoomIdentifier, resolveRoomIdentifierFromPath } from "../../repo-status.js";
+import { canonicalProjectRoomIdentifier, findProjectBinding } from "../../project-bindings.js";
+import { bindProjectRoot, listProjectBindings } from "../project-bindings-store.js";
+import { getJoinedRoomInfo, mapDesktopRoomInfoPayload, roomInfoCacheKey } from "./room-info.js";
 
 export { mapCloudRoomMessagePayload, mapRoomMessagePayload, type RoomMessagePayload };
 
@@ -85,6 +91,7 @@ export async function sendDesktopRoomMessage(
   threadRootId?: string | null,
   clientMessageId?: string | null,
   messageNamespace?: string | null,
+  gif?: RoomGif | null,
 ): Promise<DesktopSendRoomMessageResult> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedText = text.trim();
@@ -95,7 +102,7 @@ export async function sendDesktopRoomMessage(
   if (!trimmedRoomIdentifier) {
     throw new Error("Choose a room before sending a message.");
   }
-  if (!trimmedText && attachments.length === 0) {
+  if (!trimmedText && !gif && attachments.length === 0) {
     throw new Error("Write a message before sending.");
   }
 
@@ -107,6 +114,7 @@ export async function sendDesktopRoomMessage(
     throw new Error("This message belongs to a different room storage mode. Switch back to its original mode before retrying.");
   }
   if (storage.effectiveMode === "local") {
+    if (gif) throw new Error("GIFs require a cloud room.");
     const localRoomIdentifier = localRoomIdentifierForStorage(
       storage,
       trimmedRoomIdentifier,
@@ -131,6 +139,7 @@ export async function sendDesktopRoomMessage(
       reply_to: replyTo || null,
       thread_root_id: threadRootId || null,
       source: "browser",
+      sender_profile: storedAuth.account?.login ? { login: storedAuth.account.login, avatar_url: storedAuth.account.avatarUrl || null } : null,
       attachments: localAttachments,
       readerKey,
       idempotency_key: clientId,
@@ -153,6 +162,7 @@ export async function sendDesktopRoomMessage(
       body: JSON.stringify({
         sender,
         text: trimmedText,
+        ...(gif ? { gif } : {}),
         reply_to: replyTo || null,
         thread_root_id: threadRootId || null,
         attachments,
@@ -401,6 +411,28 @@ export async function markDesktopRoomThreadRead(
   return { thread: mapped };
 }
 
+/** Forward pagination for unread counting, including threaded replies. */
+export async function getDesktopRoomMessagesAfter(
+  roomIdentifier: string,
+  afterMessageId: string | null,
+): Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }> {
+  if (!roomIdentifier.trim() || (afterMessageId && !parsePositivePgIntegerScopedId(afterMessageId, "msg"))) {
+    throw new Error("Invalid unread message cursor.");
+  }
+  if (isDesktopSmokeCheck()) return { messages: [], hasMore: false };
+  const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
+  const page = storage.effectiveMode === "local"
+    ? await getLocalChatMessages(localRoomIdentifierForStorage(storage, roomIdentifier), {
+        after: afterMessageId || undefined,
+        limit: 100,
+        readerKey: await resolveLocalThreadReaderKey(),
+      })
+    : await apiFetch<{ messages: RoomMessagePayload[]; has_more: boolean }>(
+        `/rooms/${encodeURIComponent(cloudRoomIdentifierForStorage(storage, roomIdentifier))}/messages?limit=100${afterMessageId ? `&after=${encodeURIComponent(afterMessageId)}` : ""}`,
+      );
+  return { messages: page.messages.map(mapRoomMessagePayload), hasMore: page.has_more };
+}
+
 export async function getDesktopRoomMessagesBefore(
   roomIdentifier: string,
   beforeMessageId: string,
@@ -544,6 +576,7 @@ export async function getDesktopRoomLatestMessages(
         const latest = page.messages?.at(-1) || null;
         return {
           roomIdentifier,
+          storageMode: storage.effectiveMode,
           latestMessageId: latest?.id || null,
           latestMessageAt: latest?.timestamp || null,
         };
@@ -842,6 +875,48 @@ async function ensureLocalRoomPublishTarget(
   }
   if (!localRoom) {
     throw new Error("Only local rooms can be published.");
+  }
+  if (localRoom.gitRoom?.accessMode === "local" || /^local-[a-z0-9-]+-[a-f0-9]{10}$/.test(localRoom.roomIdentifier)) {
+    // Adding origin or reconnecting a folder never uploads local history. Only
+    // this explicit Publish action may attach its existing SQLite history to
+    // the authenticated provider room.
+    const context = { roomIdentifier: localRoom.roomIdentifier, gitRoom: localRoom.gitRoom };
+    const binding = findProjectBinding(await listProjectBindings(), context);
+    if (!binding) throw new Error("Connect this room to its project folder before publishing.");
+    const resolved = await resolveRoomIdentifierFromPath(binding.rootPath, { ignoreConfiguredRoom: true });
+    const repositoryRoom = canonicalProjectRoomIdentifier(resolved.roomIdentifier);
+    if (resolved.source !== "git_remote" || !/^github\.com\/[^/]+\/[^/]+$/.test(repositoryRoom || "")) {
+      throw new Error("Add this project's GitHub origin remote, then publish again. Your history is still local.");
+    }
+    const repository = mapDesktopRoomInfoPayload(repositoryRoom!, await getJoinedRoomInfo(repositoryRoom!));
+    if (!repository.authenticated || repository.gitRoom?.host !== "github.com" || !repository.gitRoom.repository.id
+      || roomInfoCacheKey(repository.identifier) !== roomInfoCacheKey(repositoryRoom)) {
+      throw new Error("Sign in with access to this project's GitHub room before publishing.");
+    }
+    // A first push may not have created origin/HEAD. Use GitHub's default
+    // branch, and the original room's ref rather than today's checkout.
+    const defaultBranch = repository.gitRoom.ref.defaultBranch || repository.gitRoom.ref.name;
+    if (localRoom.gitRoom?.ref.name && !defaultBranch) throw new Error("The repository's default branch could not be confirmed. Your history is still local.");
+    const target = activeGitHubRoomIdentifier({
+      repoRoom: repositoryRoom,
+      currentBranch: localRoom.gitRoom?.ref.name ?? null,
+      defaultBranch,
+    })!;
+    const hosted = target === repositoryRoom ? repository : mapDesktopRoomInfoPayload(target, await getJoinedRoomInfo(target));
+    if (!hosted.authenticated || hosted.gitRoom?.host !== "github.com" || hosted.gitRoom.repository.id !== repository.gitRoom.repository.id
+      || roomInfoCacheKey(hosted.identifier) !== roomInfoCacheKey(target)) {
+      throw new Error("Sign in with access to this project's GitHub room before publishing.");
+    }
+    // Do not attach history if the folder or its origin changed during join.
+    const currentBinding = findProjectBinding(await listProjectBindings(), context);
+    const current = currentBinding && await resolveRoomIdentifierFromPath(currentBinding.rootPath, { ignoreConfiguredRoom: true });
+    if (!currentBinding || currentBinding.id !== binding.id || currentBinding.rootPath !== binding.rootPath
+      || current?.source !== "git_remote" || canonicalProjectRoomIdentifier(current.roomIdentifier) !== repositoryRoom) {
+      throw new Error("The project changed while publishing. Reconnect the project and try again.");
+    }
+    await bindProjectRoot({ context: { roomIdentifier: hosted.identifier, gitRoom: hosted.gitRoom }, rootPath: currentBinding.rootPath, source: "git_remote" });
+    await linkLocalRoomToCloud({ roomIdentifier, cloudRoomIdentifier: hosted.identifier, gitRoom: hosted.gitRoom });
+    return hosted.identifier;
   }
   assertLocalRoomPublishable(localRoom);
 

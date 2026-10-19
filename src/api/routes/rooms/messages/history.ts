@@ -22,7 +22,7 @@ import {
 import {
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
-import { resolveMessageActivationIdentity } from "./activation-identity.js";
+import { replyTurnHoldAgentKey, resolveMessageActivationIdentity } from "./activation-identity.js";
 import { isAppSession } from "../../../request/app-session.js";
 import { attachReceiptAuthorityActivations } from "./receipt-activation.js";
 import { resolveParticipantRoom } from "./helpers.js";
@@ -77,17 +77,37 @@ export function registerMessageHistoryRoutes(
       const accountId = req.sessionAccount?.account_id ?? null;
       const accountAgentRouting = isAppSession(req);
       const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
+      if (req.query.context_only === "true") {
+        // Observation is not delivery. A later held turn must not hide a
+        // public human correction from the turn this worker is answering now.
+        // Keep prompt-only messages and activation/cursor authority out of
+        // this read; ordinary history, poll and SSE keep their frontiers.
+        if (!activationIdentity || before !== "latest" || after) {
+          res.status(400).json({ error: "Context reads require a worker and before=latest." });
+          return;
+        }
+        const context = await getLatestMessages(project.id, {
+          limit: Math.min(limit ?? 30, 30), include_prompt_only: false,
+          account_id: accountId, account_agent_routing: false,
+        });
+        res.json({ room_id: project.id, context_only: true, messages: context.messages });
+        return;
+      }
+      const workerFrontier = {
+        wait_for_routing: activationIdentity?.session_kind === "worker",
+        hold_agent_key: replyTurnHoldAgentKey(activationIdentity),
+      };
       const result = before === "latest"
-        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, wait_for_routing: activationIdentity?.session_kind === "worker" })
+        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, ...workerFrontier })
         : before
-          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, wait_for_routing: activationIdentity?.session_kind === "worker" })
+          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, ...workerFrontier })
           : await getMessages(project.id, {
             limit,
             after,
             include_prompt_only: includePromptOnly,
             account_id: accountId,
             account_agent_routing: accountAgentRouting,
-            wait_for_routing: activationIdentity?.session_kind === "worker",
+            ...workerFrontier,
           });
 
       res.json({
@@ -383,6 +403,7 @@ export function registerMessageHistoryRoutes(
         includePromptOnly,
         load: deps.getMessagesAfter ?? getMessagesAfter,
         waitForRouting: liveController.activationIdentity?.session_kind === "worker",
+        holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
       });
       if (next.messages.length > 0) {
         await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
@@ -448,6 +469,7 @@ export function registerMessageHistoryRoutes(
         account_id: accountId,
         account_agent_routing: accountAgentRouting,
         wait_for_routing: liveController.activationIdentity?.session_kind === "worker",
+        hold_agent_key: replyTurnHoldAgentKey(liveController.activationIdentity),
       });
       const page = existing.messages;
       if (!settled && page.length > 0) {

@@ -1,6 +1,6 @@
 {
   "name": "letagents",
-  "version": "0.12.35",
+  "version": "0.12.39",
   "description": "Let Agents Chat \u2014 MCP server for AI agent communication",
   "type": "module",
   "main": "dist/mcp/server.js",
@@ -22,7 +22,6 @@
     "build:all": "npm run build && npm run build:web",
     "test:mcp": "node --import tsx --test src/mcp/__tests__/*.test.ts",
     "test:package-runtime": "node --test scripts/package-runtime.test.mjs",
-    "test:orchestrator": "node --import tsx --test src/orchestrator/__tests__/*.test.ts",
     "test:web": "node --import tsx --test src/web/tests/*.test.ts src/web/src/composables/*.test.ts",
     "test:dependency-age": "node --test scripts/verify-dependency-age.test.mjs",
     "test:docker-context": "node --test scripts/verify-docker-context.test.mjs",
@@ -50,7 +49,7 @@
   },
   "license": "BUSL-1.1",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.27.1",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "drizzle-orm": "0.45.2",
     "express": "5.2.1",
     "pg": "8.20.0",
@@ -71,6 +70,8 @@
     },
     "fast-uri": "3.1.8",
     "hono": "4.13.8",
-    "ip-address": "10.7.2"
+    "ip-address": "10.7.2",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "proxy-addr": "2.0.8"
   }
 }

@@ -123,7 +123,7 @@ test("interactive desktop sessions retain rental tools", () => {
 
 test("custodial polling advertises the restricted real tool surface with delivery enabled", () => {
   const names = discovered("supervised_mcp_polling", "codex");
-  assert.deepEqual([...names].sort(), [...discovered("supervised_room_turn", "codex")].filter(name => name !== "set_reply_thread").concat("wait_for_messages").sort());
+  assert.deepEqual([...names].sort(), [...discovered("supervised_room_turn", "codex")].filter(name => !["set_reply_thread", "set_reply_gif", "set_reply_attachments"].includes(name)).concat("wait_for_messages").sort());
   assert.deepEqual(letAgentsRuntimeContract().profiles.supervised_mcp_polling, {
     contract: "custodial_polling_v1", tools: [...names].sort(),
   });
@@ -157,10 +157,10 @@ test("every cloud profile can wait with a wake rule; listing is a read and chang
 });
 
 test("local native discovery and runtime contract agree and expose an executable closeout path", async () => {
-  for (const provider of ["cursor", "codex", "claude-code"]) {
+  for (const executionOwner of ["provider", "daemon"] as const) for (const provider of ["cursor", "codex", "claude-code"]) {
     const server = new McpServer({ name: "local-tool-contract", version: "1" });
     const client = new Client({ name: "local-tool-reader", version: "1" });
-    registerTools(server, "supervised_room_turn", provider, { apiUrl: LOCAL_ROOM_API_ORIGIN });
+    registerTools(server, "supervised_room_turn", provider, { apiUrl: LOCAL_ROOM_API_ORIGIN, executionOwner });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     try {
       await server.connect(serverTransport); await client.connect(clientTransport);
@@ -170,12 +170,14 @@ test("local native discovery and runtime contract agree and expose an executable
       for (const name of ["get_board", "read_messages", "claim_task", "complete_task", "update_task", "send_thread_message", "set_reply_thread", "publish_room_artifact"]) {
         assert.ok(tools.some(tool => tool.name === name), `${provider} keeps ${name}`);
       }
-      for (const name of ["join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "get_room_guidelines", "submit_review_verdict", "add_wake_rule", "list_wake_rules", "cancel_wake_rule"]) {
+      for (const name of ["set_reply_gif", "set_reply_attachments", "search_gifs", "react_to_message", "join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "get_room_guidelines", "submit_review_verdict", "add_wake_rule", "list_wake_rules", "cancel_wake_rule"]) {
         assert.ok(!tools.some(tool => tool.name === name), `${provider} cannot discover unsupported ${name}`);
       }
       assert.match(tools.find(tool => tool.name === "update_task")!.description!, /merged work with status 'done'; no close intent or replacement work lease/);
-      assert.equal(tools.find(tool => tool.name === "get_board")?.annotations?.readOnlyHint, true);
-      assert.equal(tools.find(tool => tool.name === "update_task")?.annotations?.readOnlyHint, false);
+      if (executionOwner === "provider") {
+        assert.equal(tools.find(tool => tool.name === "get_board")?.annotations?.readOnlyHint, true);
+        assert.equal(tools.find(tool => tool.name === "update_task")?.annotations?.readOnlyHint, false);
+      }
     } finally { await client.close(); await server.close(); }
   }
   const hosted = letAgentsRuntimeContract("https://letagents.chat");
@@ -210,6 +212,8 @@ test("thread routing is a strict bounded-only control, truthfully classified as 
   try {
     await server.connect(serverTransport); await client.connect(clientTransport);
     const tool = (await client.listTools()).tools.find(tool => tool.name === "set_reply_thread")!;
+    assert.match(tool.description || "", /ordinary top-level questions in the main room by default/);
+    assert.match(tool.description || "", /existing thread replies stay threaded automatically/);
     assert.equal(tool.annotations?.readOnlyHint, false);
     assert.deepEqual(tool.inputSchema.properties, {});
     assert.equal(tool.inputSchema.additionalProperties, false);
@@ -217,6 +221,29 @@ test("thread routing is a strict bounded-only control, truthfully classified as 
       const result = await client.callTool({ name: "set_reply_thread", arguments: args });
       assert.equal(result.isError, true);
       assert.match(JSON.stringify(result.content), /[Uu]nrecognized|[Uu]nexpected/);
+    }
+  } finally { await client.close(); await server.close(); }
+});
+
+test("reply attachments are a strict bounded-only control for supervised room turns, classified as a mutation", async () => {
+  for (const profile of ["autonomous_mcp_worker", "interactive_desktop", "supervised_mcp_polling"] as const) {
+    assert.equal(discovered(profile).has("set_reply_attachments"), false, profile);
+  }
+  assert.equal(supervisedToolIsMutation("set_reply_attachments"), true);
+  const server = new McpServer({ name: "attachment-control", version: "1" });
+  const client = new Client({ name: "attachment-control-test", version: "1" });
+  registerTools(server, "supervised_room_turn", "claude-code");
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    const tool = (await client.listTools()).tools.find(tool => tool.name === "set_reply_attachments")!;
+    assert.match(tool.description || "", /records an intent only, sends nothing/);
+    assert.match(tool.description || "", /credentials/);
+    assert.equal(tool.annotations?.readOnlyHint, false);
+    assert.equal(tool.inputSchema.additionalProperties, false);
+    for (const args of [{ files: [] }, { files: ["a", "b", "c", "d", "e"] }, { files: ["a.png"], room_id: "other" }, { paths: ["a.png"] }]) {
+      const result = await client.callTool({ name: "set_reply_attachments", arguments: args });
+      assert.equal(result.isError, true, JSON.stringify(args));
     }
   } finally { await client.close(); await server.close(); }
 });

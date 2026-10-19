@@ -115,6 +115,7 @@ export interface DesktopActivityEntry {
   participantDisplayName: string;
   participantKind: "human" | "agent";
   participantActorLabel: string | null;
+  participantAgentKey?: string | null;
   participantOwnerLabel: string | null;
   participantIdeLabel: string | null;
   repoBranch: string | null;

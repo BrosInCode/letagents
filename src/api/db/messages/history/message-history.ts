@@ -1,8 +1,8 @@
-import { settledRoutingCondition } from "../routing-frontier.js";
+import { replyTurnHoldCondition, settledRoutingCondition } from "../routing-frontier.js";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../../client.js";
-import { message_attachments, messages } from "../../schema.js";
+import { accounts, message_attachments, messages } from "../../schema.js";
 import {
   toMessageAttachment,
   toMessageReplyReference,
@@ -45,6 +45,8 @@ type MessageHistoryOptions = {
   account_id?: string | null;
   account_agent_routing?: boolean;
   wait_for_routing?: boolean;
+  /** A worker's durable agent key: hide its held reply turns and everything after. */
+  hold_agent_key?: string | null;
 };
 
 export async function getMessages(
@@ -53,7 +55,11 @@ export async function getMessages(
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
   const afterNumber = options?.after ? parseScopedId(options.after, "msg") : null;
-  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
+  const visibilityCondition = and(
+    visibleMessageCondition(options?.include_prompt_only),
+    settledRoutingCondition(options?.wait_for_routing),
+    replyTurnHoldCondition(roomId, options?.hold_agent_key),
+  );
 
   const rows = await db
     .select(messageRowSelection)
@@ -84,7 +90,11 @@ export async function getLatestMessages(
   options?: Omit<MessageHistoryOptions, "after">,
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
-  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
+  const visibilityCondition = and(
+    visibleMessageCondition(options?.include_prompt_only),
+    settledRoutingCondition(options?.wait_for_routing),
+    replyTurnHoldCondition(roomId, options?.hold_agent_key),
+  );
 
   const rows = await db
     .select(messageRowSelection)
@@ -117,7 +127,11 @@ export async function getMessagesBefore(
   }
 
   const limit = clampLimit(options?.limit);
-  const visibilityCondition = and(visibleMessageCondition(options?.include_prompt_only), settledRoutingCondition(options?.wait_for_routing));
+  const visibilityCondition = and(
+    visibleMessageCondition(options?.include_prompt_only),
+    settledRoutingCondition(options?.wait_for_routing),
+    replyTurnHoldCondition(roomId, options?.hold_agent_key),
+  );
 
   const rows = await db
     .select(messageRowSelection)
@@ -245,6 +259,11 @@ export async function hydrateMessageReplies(
     }
   }
 
+  const publisherIds = [...new Set(bounded.filter((row) => row.source === "browser" && !row.publisher_agent_key)
+    .map((row) => row.publisher_account_id).filter((id): id is string => Boolean(id)))];
+  const profiles = publisherIds.length ? await executor.select({ id: accounts.id, login: accounts.login, avatar_url: accounts.avatar_url })
+    .from(accounts).where(inArray(accounts.id, publisherIds)) : [];
+  const profileById = new Map(profiles.map(({ id, login, avatar_url }) => [id, { login, avatar_url }]));
   const accountRouting = await accountRoutingPromise;
   return bounded.map((row) => {
     const threadRootNumber = row.thread_root_number ?? row.number;
@@ -256,6 +275,9 @@ export async function hydrateMessageReplies(
       threadSummary && (threadSummary.reply_count > 0 || row.thread_root_number) ? threadSummary : null,
       reactionMap.get(row.number) ?? [],
     );
+    if (row.source === "browser" && !row.publisher_agent_key) {
+      message.sender_profile = profileById.get(row.publisher_account_id ?? "") ?? null;
+    }
     return options?.accountId && options.accountAgentRouting
       ? { ...message, account_agent_routing: accountRouting.get(row.number) ?? null }
       : message;

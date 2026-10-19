@@ -9,6 +9,7 @@ import { announceProcessExit } from "./server/runtime/process-connection.js";
 import { executionProfile } from "./server/runtime/execution-profile.js";
 import { setMcpClientNameSource } from "./server/runtime/identity/config.js";
 import { WORKSPACE_CAPTURE_INSTRUCTIONS } from "./server/tools/workspace.js";
+import { ROOM_EXPRESSION_GUIDANCE } from "../../shared/room-expressions.mjs";
 import {
   LETAGENTS_RUNTIME_CONTRACT_ARG,
   letAgentsRuntimeContract,
@@ -27,7 +28,8 @@ async function main() {
   const server = new McpServer({
     name: "letagents",
     version: "0.2.0",
-  }, { instructions: profile === "autonomous_mcp_worker" || profile === "interactive_desktop" ? WORKSPACE_CAPTURE_INSTRUCTIONS : undefined });
+  }, { instructions: profile === "autonomous_mcp_worker" || profile === "interactive_desktop"
+    ? `${WORKSPACE_CAPTURE_INSTRUCTIONS}\n\n${ROOM_EXPRESSION_GUIDANCE}` : undefined });
   attachMcpServer(server);
   registerRoomResources(server);
   registerTools(server, profile, supervisedProvider);

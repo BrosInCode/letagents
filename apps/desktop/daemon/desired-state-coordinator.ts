@@ -1,9 +1,7 @@
 import type { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
-import type { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
-import type { ManifestAdministrationCoordinator } from "./manifest-administration-coordinator.js";
 import type { ManifestStore } from "./manifest-store.js";
 import type { SupervisedAgentDelivery } from "./supervised-agent-delivery.js";
-import type { DaemonManifestEntry, DesiredState, LegacyLaneOwner } from "./types.js";
+import type { DaemonManifestEntry, DesiredState } from "./types.js";
 
 type DesiredStateAuthority = {
   currentManifestGeneration: () => number;
@@ -16,8 +14,6 @@ type DesiredStateAuthority = {
 export type DesiredStateCoordinatorOptions = {
   store: ManifestStore;
   entryConcurrency: EntryConcurrencyGate;
-  legacyLanes: LegacyLaneCoordinator;
-  manifestAdministration: ManifestAdministrationCoordinator;
   delivery: SupervisedAgentDelivery | null;
   authority: DesiredStateAuthority;
   waitForActiveRoomMove: (entryId: string) => Promise<void>;
@@ -26,12 +22,10 @@ export type DesiredStateCoordinatorOptions = {
   requestConvergence: (entryId: string) => void;
 };
 
-/** Owns Pause, Resume, and Stop desired-state mutations and their lane fences. */
+/** Owns Pause, Resume, and Stop desired-state mutations. */
 export class DesiredStateCoordinator {
   private readonly store: ManifestStore;
   private readonly entryConcurrency: EntryConcurrencyGate;
-  private readonly legacyLanes: LegacyLaneCoordinator;
-  private readonly manifestAdministration: ManifestAdministrationCoordinator;
   private readonly delivery: SupervisedAgentDelivery | null;
   private readonly authority: DesiredStateAuthority;
   private readonly waitForActiveRoomMove: DesiredStateCoordinatorOptions["waitForActiveRoomMove"];
@@ -42,8 +36,6 @@ export class DesiredStateCoordinator {
   constructor(options: DesiredStateCoordinatorOptions) {
     this.store = options.store;
     this.entryConcurrency = options.entryConcurrency;
-    this.legacyLanes = options.legacyLanes;
-    this.manifestAdministration = options.manifestAdministration;
     this.delivery = options.delivery;
     this.authority = options.authority;
     this.waitForActiveRoomMove = options.waitForActiveRoomMove;
@@ -83,15 +75,12 @@ export class DesiredStateCoordinator {
       updated = await this.authority.serializeManifest(async () => {
         await this.authority.assertCurrent();
         const manifest = await this.store.load();
-        const legacyOwners = this.legacyLanes.liveOwners(manifest.legacy_lane_owners ?? []);
         const entry = manifest.entries.find((candidate) => candidate.id === id);
         if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-        this.assertLaneAvailable(manifest.entries, legacyOwners, entry, desiredState);
         const nextEntry = { ...entry, desired_state: desiredState };
         const next = await this.store.write(
           this.authority.currentManifestGeneration(),
           manifest.entries.map((candidate) => candidate.id === id ? nextEntry : candidate),
-          legacyOwners,
           (commit) => this.authority.fenceCommit(commit),
           desiredState === "running" ? undefined : {
             agentId: id,
@@ -149,16 +138,13 @@ export class DesiredStateCoordinator {
       result = await this.authority.serializeManifest(async () => {
         await this.authority.assertCurrent();
         const manifest = await this.store.load();
-        const legacyOwners = this.legacyLanes.liveOwners(manifest.legacy_lane_owners ?? []);
         const entry = manifest.entries.find((candidate) => candidate.id === id);
         if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
         if (entry.desired_state !== expectedDesiredState) return { applied: false, entry };
-        this.assertLaneAvailable(manifest.entries, legacyOwners, entry, desiredState);
         const nextEntry = { ...entry, desired_state: desiredState };
         const next = await this.store.write(
           this.authority.currentManifestGeneration(),
           manifest.entries.map((candidate) => candidate.id === id ? nextEntry : candidate),
-          legacyOwners,
           (commit) => this.authority.fenceCommit(commit),
           desiredState === "running" ? undefined : {
             agentId: id,
@@ -177,24 +163,6 @@ export class DesiredStateCoordinator {
     // the CAS lost. Reconcile both the changed and unchanged durable state.
     this.requestConvergence(id);
     return result;
-  }
-
-  private assertLaneAvailable(
-    entries: readonly DaemonManifestEntry[],
-    legacyOwners: readonly LegacyLaneOwner[],
-    entry: DaemonManifestEntry,
-    desiredState: DesiredState,
-  ): void {
-    if (desiredState === "stopped") return;
-    const supervisedOwner = this.manifestAdministration.competingSupervisedLaneOwner(entries, entry);
-    if (supervisedOwner) {
-      throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
-    }
-    const legacyOwner = legacyOwners.find((candidate) =>
-      candidate.room_id === entry.room_id && candidate.provider === entry.provider);
-    if (legacyOwner && desiredState === "running") {
-      throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
-    }
   }
 }
 

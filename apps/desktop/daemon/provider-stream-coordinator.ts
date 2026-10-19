@@ -1,5 +1,6 @@
 import { ProviderLiveDisplay } from "./provider-live-display.js";
 import { publishWorkerNativeActivity } from "./cloud-http.js";
+import { liveActivitySummaryForEvent, type LiveActivitySummaryStatus } from "./live-activity-summary-relay.js";
 import { sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import type {
@@ -41,6 +42,7 @@ import {
   type LifecycleProjectionProvider,
 } from "./lifecycle-projection-ledger.js";
 import type { LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+import { turnStartLatency } from "./turn-start-latency.js";
 
 /** Immutable identity for one exact durable provider installation. */
 export type ProviderInstallationToken = Readonly<{
@@ -226,6 +228,7 @@ export type ProviderStreamCoordinatorOptions = {
     entryId: string,
     event: DaemonActivityEvent,
     activityOnly: boolean,
+    position?: "exact" | "after_latest",
   ): Promise<void>;
   publishNativeActivity(
     entryId: string,
@@ -233,6 +236,8 @@ export type ProviderStreamCoordinatorOptions = {
     status: "working" | "idle",
     observedAt?: string,
   ): Promise<unknown>;
+  /** The line the owner sees in the live strip, for every room member; null when the turn ends. */
+  observeActivitySummary?(entryId: string, summary: string | null, status: LiveActivitySummaryStatus): void;
   handleTerminal(
     installation: ProviderInstallationToken,
     bindingIdentity: LiveBindingIdentity | undefined,
@@ -1263,6 +1268,34 @@ export class ProviderStreamCoordinator {
     return this.handleInstalled(installation, event);
   }
 
+  /**
+   * The status an early activity-line publication may report, or null when
+   * the heartbeat would not announce liveness now. Same conditions as the
+   * heartbeat: the exact current runtime and binding generation, an entry that
+   * is working or idle (never recovering), and no pending host-grant renewal
+   * or bearer rotation. A refused line stays pending for the next heartbeat.
+   */
+  private async activitySummaryPublicationStatus(
+    installation: ProviderInstallationToken,
+  ): Promise<"working" | "idle" | null> {
+    const { entryId, handle } = installation;
+    const entry = await this.options.manifest.getEntry(entryId);
+    if (!entry || !this.entryMatchesInstallation(entry, installation)
+      || !this.isCurrentInstallation(installation)) return null;
+    if (this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId
+      !== entry.provider_ref?.execution_generation_id) return null;
+    if (entry.observed_state !== "working" && entry.observed_state !== "idle") return null;
+    const state = handle.observedState;
+    if (state !== "working" && state !== "idle") return null;
+    if (await this.options.heartbeat.requiresHostGrant(entry)) {
+      const hostGrant = this.options.heartbeat.currentHostGrant(entry);
+      if (hostGrant && this.options.heartbeat.hostGrantNeedsRenewal(hostGrant)) return null;
+      const binding = hostGrant ? await this.options.bindings.get(entryId) : null;
+      if (hostGrant && binding && await this.options.heartbeat.hostWorkerBearerNeedsRotation(entry, binding)) return null;
+    }
+    return this.isCurrentInstallation(installation) ? state : null;
+  }
+
   private async handleInstalled(
     sourceInstallation: ProviderInstallationToken,
     event: ProviderActionStreamEvent,
@@ -1344,13 +1377,23 @@ export class ProviderStreamCoordinator {
       }
       for (const projected of display.project(sanitizedEvent, event.nativeLifecyclePhase)) {
         this.options.streams.push(entryId, projected);
+        turnStartLatency.observeOutput(entryId, projected.method, event.observedAt);
       }
       await this.options.serializeEntry(entryId, async () => {
         if (!this.isCurrentInstallation(installation)) return;
+        // Its position was read before this write was serialized; a notice may have taken it since.
         await this.options.appendNativeActivity(entryId, sanitizedEvent,
-          daemonInbox && this.typedDaemonInboxInstallations.has(installation));
+          daemonInbox && this.typedDaemonInboxInstallations.has(installation), "after_latest");
       });
       if (!this.isCurrentInstallation(installation)) return;
+    }
+    // The same line the owner's live strip shows, for the other room members.
+    // A turn that ends or waits for room messages has no line.
+    const activityLine = observedLifecycle === "terminal" || lifecycle === "failed" || quietlyPolling
+      ? null
+      : isHumanRoomActivityEvent(event) ? liveActivitySummaryForEvent(sanitizedEvent) : undefined;
+    if (activityLine !== undefined) {
+      this.options.observeActivitySummary?.(entryId, activityLine, () => this.activitySummaryPublicationStatus(installation));
     }
     const waitEvidence = (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
       && !custodialPolling

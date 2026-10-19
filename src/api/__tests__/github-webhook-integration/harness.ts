@@ -117,9 +117,38 @@ export async function createInReviewTaskWithLease(
   return task;
 }
 
+/**
+ * A local stand-in for the GitHub REST API. The access check reads repository
+ * visibility from GITHUB_API_BASE_URL, so the scenarios never depend on the
+ * live api.github.com answer. Only the test repository is known; any other
+ * repository gets 404, as GitHub answers for an unknown repository.
+ */
+async function startGitHubApiStub(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  const repoPath = `/repos/${repoRoomName.replace(/^github\.com\//, "")}`;
+  const server = createServer((req, res) => {
+    const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname.toLowerCase();
+    const known = req.method === "GET" && pathname === repoPath;
+    res.writeHead(known ? 200 : 404, { "content-type": "application/json" });
+    res.end(JSON.stringify(known ? { private: false, full_name: repoRoomName } : { message: "Not Found" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("failed to bind GitHub API stub");
+  }
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections();
+    }),
+  };
+}
+
 export function webhookIntegrationTest(
   name: string,
-  fn: (context: WebhookIntegrationContext) => Promise<void>
+  fn: (context: WebhookIntegrationContext) => Promise<void>,
+  options: { serverEnv?: Record<string, string> } = {}
 ): void {
   test(
     name,
@@ -130,9 +159,14 @@ export function webhookIntegrationTest(
     async (t) => {
       await resetDatabase();
 
-      const { child, port } = await startServer();
+      const githubApi = await startGitHubApiStub();
+      const { child, port } = await startServer({
+        GITHUB_API_BASE_URL: githubApi.baseUrl,
+        ...options.serverEnv,
+      });
       t.after(async () => {
         await stopServer(child);
+        await githubApi.close();
       });
 
       await fn({
@@ -260,7 +294,9 @@ async function waitForServer(
   );
 }
 
-export async function startServer(): Promise<{ child: ChildProcess; port: number }> {
+export async function startServer(
+  serverEnv: Record<string, string> = {}
+): Promise<{ child: ChildProcess; port: number }> {
   if (!testDatabaseUrl) {
     throw new Error("DB-backed webhook integration tests require TEST_DB_URL");
   }
@@ -276,6 +312,7 @@ export async function startServer(): Promise<{ child: ChildProcess; port: number
       cwd: process.cwd(),
       env: {
         ...process.env,
+        ...serverEnv,
         DB_URL: testDatabaseUrl,
         HOST: "127.0.0.1",
         PORT: String(port),
@@ -343,6 +380,8 @@ export async function postGitHubWebhook(input: {
   deliveryId: string;
   eventName: string;
   payload: Record<string, unknown>;
+  /** The HTTP status the route answers with. */
+  expectedStatus?: number;
 }): Promise<{ ok: boolean; status?: string; duplicate?: boolean }> {
   const rawBody = JSON.stringify(input.payload);
   const response = await fetch(`http://127.0.0.1:${input.port}/webhooks/github`, {
@@ -357,7 +396,7 @@ export async function postGitHubWebhook(input: {
   });
 
   const body = await response.json();
-  assert.equal(response.status, 202);
+  assert.equal(response.status, input.expectedStatus ?? 202);
   return body;
 }
 

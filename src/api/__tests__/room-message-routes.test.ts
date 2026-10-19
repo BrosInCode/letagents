@@ -887,6 +887,7 @@ test("desktop app-session human messages can post as browser activity", async ()
       reply_to: null,
       thread_root_id: null,
       attachments: [],
+      attachment_uploader: { account_id: "acct_1", agent_session_id: null },
       account_id: "acct_1",
       account_agent_routing: true,
     },
@@ -967,6 +968,7 @@ test("desktop app-session messages ignore agent-shaped display labels", async ()
       reply_to: null,
       thread_root_id: null,
       attachments: [],
+      attachment_uploader: { account_id: "acct_1", agent_session_id: null },
       account_id: "acct_1",
       account_agent_routing: true,
     },
@@ -1047,6 +1049,7 @@ test("desktop local sync forwards client message idempotency key", async () => {
       reply_to: null,
       thread_root_id: null,
       attachments: [],
+      attachment_uploader: { account_id: "acct_1", agent_session_id: null },
       client_message_id: "local-chat:room_1:1",
       account_id: "acct_1",
       account_agent_routing: true,
@@ -2348,7 +2351,11 @@ test('typing reaches only opted-in other people; agent SSE/poll stay parked and 
 
 for (const failure of ['denied', 'throws'] as const) {
   test(`typing authorization ${failure} drops only the hint; message delivery owns stream closure`, async (context) => {
-    context.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    // Stub only Date.now: the first `mock.timers.enable()` in a process makes Node queue an
+    // ExperimentalWarning, which prints through console.error. If that tick runs after the
+    // console.error mock below, the warning is counted as a log of this test.
+    let now = Date.now();
+    context.mock.method(Date, 'now', () => now);
     const { roomTyping } = await import('../server/room-typing.js');
     const handlers = new Map<string, Function>();
     const app = Object.fromEntries(['get', 'post', 'put', 'delete'].map(method => [method,
@@ -2378,7 +2385,7 @@ for (const failure of ['denied', 'throws'] as const) {
       await handlers.get('get:/^\\/rooms\\/(.+)\\/messages\\/stream$/')!(req, res);
       res.writes.length = 0;
       failing = true;
-      context.mock.timers.tick(60001);
+      now += 60001;
       roomTyping.report(room, 'ada', 'Ada', { client_id: 'composer_auth_test', sequence: 1, typing: true, ttl_ms: 5000 });
       await flushAsyncEvents();
       assert.equal(res.writes.length, 0, 'denied/failed hint is dropped');

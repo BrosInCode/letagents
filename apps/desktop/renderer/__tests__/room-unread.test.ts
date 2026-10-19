@@ -9,7 +9,79 @@ import ts from "typescript";
 import { createServer } from "vite";
 import { createRenderer, h, reactive, ref, ssrContextKey } from "vue";
 import { createRoomUnreadStore } from "../../../../shared/room-unread.mjs";
-import { markRoomRead } from "../src/domain/desktop-room-read-state";
+import { markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
+import { normalizeRoomIdentifier } from "../src/domain/sidebar-rooms";
+
+test("per-room storage controls refresh the unread history namespace, including a local fork", async () => {
+  async function functionsFrom(path: string, names: string[]): Promise<string> {
+    const { descriptor } = parse(await readFile(new URL(path, import.meta.url), "utf8"));
+    const script = ts.createSourceFile("component.ts", descriptor.scriptSetup!.content, ts.ScriptTarget.Latest, true);
+    return ts.transpileModule(script.statements.filter(statement =>
+      ts.isFunctionDeclaration(statement) && names.includes(statement.name?.text || ""),
+    ).map(statement => statement.getText(script)).join("\n"), {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+  }
+  const appCode = await functionsFrom("../src/App.vue", ["handleRoomShellRefresh", "roomHistoryMode", "roomUsesLocalHistory", "loadChatStorageSettings"]);
+  const shellCode = await functionsFrom("../src/components/desktop/content/DesktopRoomShell.vue", ["setRoomStorageMode", "forkRoomToLocal"]);
+  const roomIdentifier = "github.com/acme/repo";
+  const chatStorageSettings = ref({ mode: "cloud", roomOverrides: {} as Record<string, string> });
+  const sidebarLatestMessages = ref<Record<string, any>>({ [roomIdentifier]: { storageMode: "cloud", latestMessageId: "msg_900" } });
+  let persistedMode = "cloud", settingsReads = 0, refreshes = 0, appliedSnapshots = 0;
+  let pendingRefresh: Promise<void> | undefined;
+  const snapshot = () => ({ roomIdentifier, storage: { effectiveMode: persistedMode } });
+  const selectedSnapshot = ref(snapshot());
+  const selectedRootRoomIdentifier = ref(roomIdentifier);
+  const activeEntry = ref({ id: roomIdentifier });
+  const bridge = {
+    getSettings: async () => { settingsReads++; return { mode: "cloud", roomOverrides: { [roomIdentifier]: persistedMode } }; },
+    setRoomMode: async (_room: string, mode: string) => { persistedMode = mode; },
+    forkRoomToLocal: async () => { persistedMode = "local"; return { snapshot: snapshot() }; },
+  };
+  const app = runInNewContext(appCode + "\n({ handleRoomShellRefresh, roomHistoryMode })", {
+    roomReadKey, chatStorageSettings, sidebarLatestMessages, normalizeRoomIdentifier,
+    selectedSnapshot, selectedRootRoomIdentifier, activeEntry, sidebarProjectEntries: ref([]),
+    accountRooms: ref([{ roomIdentifier, source: "cloud", focusRooms: [] }]),
+    sessionGeneration: ref(1), getChatStorageBridge: () => bridge,
+    chatStorageFeedback: ref(null), handleRefreshRoom() { appliedSnapshots++; }, syncSelectedRoomStream() {},
+    refreshSidebarLatestMessages: async () => {
+      refreshes++;
+      assert.equal(app.roomHistoryMode(roomIdentifier), persistedMode, "discard metadata from the previous history before refreshing");
+      sidebarLatestMessages.value = { [roomIdentifier]: { storageMode: persistedMode, latestMessageId: persistedMode === "local" ? "msg_4" : "msg_900" } };
+    },
+  });
+  const props = { room: { identifier: roomIdentifier }, storage: { localRoom: {} as object | null } };
+  const setMode = runInNewContext(shellCode + "\nsetRoomStorageMode", {
+    props, storageBusy: ref(false), actionPanelOpen: ref(true), window: { confirm: () => true },
+    desktopIpc: { chatStorage: bridge, room: { getSnapshot: async () => snapshot(), stopStream: async () => {} } },
+    emit: (event: string, value: unknown) => { assert.equal(event, "refresh-room"); pendingRefresh = app.handleRoomShellRefresh(value); },
+  });
+  for (const mode of ["local", "cloud", "local"]) {
+    if (refreshes === 2) props.storage.localRoom = null;
+    await setMode(mode);
+    await pendingRefresh;
+    assert.equal(app.roomHistoryMode(roomIdentifier), mode);
+    assert.equal(roomReadMarkerKey(roomIdentifier, app.roomHistoryMode(roomIdentifier)), mode === "local" ? `${roomIdentifier}::local-history` : roomIdentifier);
+  }
+  assert.equal(settingsReads, 3);
+  assert.equal(refreshes, 3);
+  assert.equal(appliedSnapshots, 3);
+
+  // A delayed storage refresh must not apply the previous room after navigation.
+  let resumeSettings!: () => void;
+  const pendingSettings = new Promise<void>((resolve) => { resumeSettings = resolve; });
+  bridge.getSettings = async () => { await pendingSettings; return { mode: "cloud", roomOverrides: { [roomIdentifier]: persistedMode } }; };
+  persistedMode = "cloud";
+  const lateRefresh = app.handleRoomShellRefresh(snapshot());
+  selectedSnapshot.value = { ...snapshot(), roomIdentifier: "other-room" };
+  selectedRootRoomIdentifier.value = "other-room";
+  activeEntry.value = { id: "other-room" };
+  resumeSettings();
+  await lateRefresh;
+  assert.equal(appliedSnapshots, 3);
+  assert.equal(refreshes, 3);
+  assert.equal(selectedSnapshot.value.roomIdentifier, "other-room");
+});
 
 test("App's explicit sidebar read action clears its bookmark even when the old marker is already current", async () => {
   const source = await readFile(new URL("../src/App.vue", import.meta.url), "utf8");
@@ -34,7 +106,7 @@ test("App's explicit sidebar read action clears its bookmark even when the old m
   const readRoomMessageIds = ref({ room: "msg_9" });
   let writes = 0;
   const context = {
-    readRoomMessageIds, markRoomRead,
+    readRoomMessageIds, markRoomRead, roomReadMarkerKey, roomHistoryMode: () => "cloud",
     latestMessageIdForEntry: () => "msg_9",
     rememberRoomMessageIds: () => { writes++; },
     roomUnread: { get: (room: string) => store.get("alice", room), clear: (room: string, revision: string) => store.clear("alice", room, revision) },

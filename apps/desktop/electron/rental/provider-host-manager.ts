@@ -186,7 +186,6 @@ export class RentalProviderHostManager {
       // Preflight uses this only as an existence signal; it never becomes
       // the rental cwd. Launches remain in their daemon-owned workspace.
       repoRootPath: process.cwd(),
-      launchMode: "supervised",
     }).catch(() => null);
     this.preflightCache.set(providerId, { checkedAt: Date.now(), result });
     return result;

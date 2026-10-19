@@ -103,7 +103,7 @@
             />
             <path
               v-else-if="tab.id === 'activity'"
-              d="M2.5 8h2.25l1.5-3.5 3 7 1.25-3.5h3"
+              d="M10 13v-1.5A2.5 2.5 0 0 0 7.5 9h-3A2.5 2.5 0 0 0 2 11.5V13M8 4.5a2 2 0 1 1-4 0 2 2 0 0 1 4 0Zm3-2a2 2 0 0 1 0 4M14 13v-1.5A2.5 2.5 0 0 0 12 9"
               stroke="currentColor"
               stroke-width="1.4"
               stroke-linecap="round"

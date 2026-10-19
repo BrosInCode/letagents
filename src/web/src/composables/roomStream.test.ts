@@ -264,14 +264,16 @@ test('wake-rule pointers re-read the room\'s rules, wait behind a gap snapshot, 
   }
 })
 
-test('room stream forwards typed GitHub event invalidations', () => {
+test('room stream forwards full GitHub updates without refetch and still accepts legacy invalidations', () => {
+  const githubPayloads: unknown[] = []
   const githubEventRooms: Array<string | null | undefined> = []
   const stream = createRoomStream({
     setConnectionState: () => {},
     setStreaming: () => {},
     appendMessage: () => true,
     onGitHubMessage: () => {},
-    onGitHubEvent: (roomIdentifier) => {
+    onGitHubEvent: (roomIdentifier, event) => {
+      githubPayloads.push(event)
       githubEventRooms.push(roomIdentifier)
     },
     onTaskLifecycleMessage: () => {},
@@ -299,7 +301,10 @@ test('room stream forwards typed GitHub event invalidations', () => {
     event_type: 'pull_request',
   })
 
-  assert.deepEqual(githubEventRooms, ['focus_27'])
+  const payload = {room_id:'focus_27',id:'job-update',event_type:'workflow_job',action:'in_progress',created_at:'2026-10-11T10:00:00Z',metadata:{run_id:'90',job_id:'19'}}
+  source.dispatch('github_event', payload)
+  assert.deepEqual(githubEventRooms, ['focus_27', 'focus_27'])
+  assert.deepEqual(githubPayloads, [undefined, payload])
   stream.stop()
   assert.equal(source.closed, true)
 })

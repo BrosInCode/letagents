@@ -1,4 +1,7 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../../shared/room-expressions.mjs";
 export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
+/** "Answer in turns": enabled is the room's sequential reply order; off (parallel) by default. */
+export interface DesktopReplyOrderSettings { enabled: boolean; can_manage: boolean; }
 /** Reactions of the messages in a requested range, in the shape the shared reaction store reads. */
 export interface DesktopMessageReactionsRange {
   /** Only reacted messages appear. */
@@ -50,15 +53,6 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
-  DesktopManagedAgentChangeSummary,
-  DesktopManagedAgentInspectResult,
-  DesktopManagedAgentPermissionDecisionInput,
-  DesktopManagedAgentPermissionDecisionResult,
-  DesktopManagedAgentRetryInput,
-  DesktopManagedAgentSession,
-  DesktopManagedAgentStartInput,
-  DesktopManagedAgentStartResult,
-  DesktopManagedAgentStopInput,
   DesktopSupervisorAttemptDetail,
   DesktopSupervisorAgentConfiguration,
   DesktopSupervisorAgentConfigurationApplyInput,
@@ -153,6 +147,8 @@ export interface DesktopApi {
   };
   notifications: {
     getStatus: () => Promise<DesktopNotificationStatus>;
+    setBadgeCount?: (count: number) => Promise<void>;
+    onReceived?: (callback: (target: DesktopNotificationTarget) => void) => () => void;
     setEnabled: (enabled: boolean) => Promise<DesktopNotificationStatus>;
     takePendingActivation: () => Promise<DesktopNotificationTarget | null>;
     onActivated: (callback: (target: DesktopNotificationTarget) => void) => () => void;
@@ -223,6 +219,7 @@ export interface DesktopApi {
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessage: (roomIdentifier: string, messageId: string) => Promise<DesktopRoomMessage | null>;
     getMessageInfo: (roomIdentifier: string, messageId: string) => Promise<DesktopMessageInfo | null>;
+    getMessagesAfter?: (roomIdentifier: string, afterMessageId: string | null) => Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;
     getThread: (roomIdentifier: string, threadRootId: string, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadPage>;
@@ -248,7 +245,8 @@ export interface DesktopApi {
       attachments?: Array<{ upload_id: string }>,
       threadRootId?: string | null,
       clientMessageId?: string | null,
-      messageNamespace?: string | null
+      messageNamespace?: string | null,
+      gif?: RoomGif | null
     ) => Promise<DesktopSendRoomMessageResult>;
     addTask: (roomIdentifier: string, input: DesktopTaskCreateInput) => Promise<DesktopTaskMutationResult>;
     updateTask: (
@@ -310,6 +308,12 @@ export interface DesktopApi {
     stopAccountActivity?: () => Promise<void>;
     onAccountActivity?: (callback: (state: DesktopAccountActivityState) => void) => () => void;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
+    getExpressions: (roomIdentifier: string) => Promise<RoomExpressionsSetting>;
+    setExpressions: (roomIdentifier: string, enabled: boolean) => Promise<RoomExpressionsSetting>;
+    searchGifs: (roomIdentifier: string, query: string, offset?: number) => Promise<import("../../../../shared/giphy-client.mjs").GiphyResult>;
+    resolveGif: (roomIdentifier: string, id: string) => Promise<import("../../../../shared/giphy-client.mjs").GiphyResult>;
+    getReplyOrder: (roomIdentifier: string) => Promise<DesktopReplyOrderSettings>;
+    setReplyOrder: (roomIdentifier: string, enabled: boolean) => Promise<DesktopReplyOrderSettings>;
     /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */
     getMessageLinkPreviews?: (roomIdentifier: string, references: import("../../../../shared/message-link-previews.mjs").LinkPreviewReference[]) => Promise<import("../../../../shared/message-link-previews.mjs").MessageLinkPreviewsResponse>;
     getMessagePins?: (roomIdentifier: string) => Promise<import("../../../../shared/message-pins.mjs").MessagePinsResponse>;
@@ -401,6 +405,8 @@ export interface DesktopApi {
     /** `newProjectRoom` is the creation flow: it refuses the home folder and the disk root. */
     openRoom: (rootPath: string, options?: { newProjectRoom?: boolean }) => Promise<DesktopRepoRoomSelection>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
+    pickProjectParent: () => Promise<string | null>;
+    createProject: (parentPath: string, name: string) => Promise<DesktopRepoRoomSelection>;
     listProjectBindings: () => Promise<DesktopProjectBinding[]>;
     migrateProjectBindings: (
       candidates: DesktopLegacyProjectBindingCandidate[],
@@ -412,22 +418,6 @@ export interface DesktopApi {
   };
   workers: {
     list: () => Promise<WorkerSnapshot[]>;
-    listManagedAgentSessions: (roomIdentifier?: string | null) => Promise<DesktopManagedAgentSession[]>;
-    onManagedAgentSessionUpdate: (callback: (session: DesktopManagedAgentSession) => void) => () => void;
-    startManagedAgent: (input: DesktopManagedAgentStartInput) => Promise<DesktopManagedAgentStartResult>;
-    stopManagedAgent: (input?: DesktopManagedAgentStopInput) => Promise<DesktopManagedAgentSession | null>;
-    retryManagedAgent: (input: DesktopManagedAgentRetryInput) => Promise<DesktopManagedAgentSession | null>;
-    inspectManagedAgent: (
-      sessionId?: string | null,
-      roomIdentifier?: string | null
-    ) => Promise<DesktopManagedAgentInspectResult | null>;
-    getManagedAgentChangeSummary: (
-      sessionId?: string | null,
-      roomIdentifier?: string | null
-    ) => Promise<DesktopManagedAgentChangeSummary | null>;
-    resolveManagedAgentPermission: (
-      input: DesktopManagedAgentPermissionDecisionInput
-    ) => Promise<DesktopManagedAgentPermissionDecisionResult>;
     listAgentProviders: () => Promise<DesktopAgentProvider[]>;
     listAgentProviderModels: (
       providerId: DesktopAgentProviderId,
@@ -448,9 +438,9 @@ export interface DesktopApi {
     listHostApprovals?: (roomIdentifier: string) => Promise<import("../../shared/host-approvals.js").DesktopHostApprovalSnapshot>;
     decideHostApproval?: (input: { id: string; decision: import("../../shared/host-approvals.js").HostApprovalSelection }) => Promise<import("../../shared/host-approvals.js").HostApprovalStatus>;
     getStatus: () => Promise<DesktopSupervisorDaemonStatus>;
+    getServiceSnapshot?: () => Promise<import("./agents.js").DesktopSupervisorServiceSnapshot>;
     listAgents: (roomIdentifier?: string | null) => Promise<DesktopSupervisorManifestEntry[]>;
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
-    resumeOwnershipTransfer: (id: string) => Promise<DesktopSupervisorManifestEntry>;
     setDesiredState: (id: string, desiredState: DesktopSupervisorDesiredState) => Promise<DesktopSupervisorManifestEntry>;
     reconnectAgent: (input: import("./agents.js").DesktopSupervisorReconnectInput) => Promise<DesktopSupervisorManifestEntry>;
     recoverAgentRuntime: (input: import("./agents.js").DesktopSupervisorRuntimeRecoveryInput) => Promise<DesktopSupervisorManifestEntry>;

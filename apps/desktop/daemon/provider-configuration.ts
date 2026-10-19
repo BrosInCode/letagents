@@ -60,6 +60,16 @@ const HOME_HARNESS_CHANGE_KEY = /^letagentsOwnerIsolationChangedAt([1-9][0-9]{0,
 export function homeHarnessChangeKey(revision: number): string {
   return `letagentsOwnerIsolationChangedAt${revision}`;
 }
+/**
+ * The revision at which the owner last changed the agent's access level (its
+ * permission mode), in the key's name. A process that started before it still
+ * runs with the older level. Only the latest change is kept: it is the only
+ * one that decides, and two changes that cancel out cost one harmless restart.
+ */
+const PERMISSION_CHANGE_KEY = /^letagentsPermissionChangedAt([1-9][0-9]{0,14})$/;
+export function permissionChangeKey(revision: number): string {
+  return `letagentsPermissionChangedAt${revision}`;
+}
 const homeHarnessProviders = new Set(["codex", "claude-code", "claude"]);
 const MAX_HOME_HARNESS_CHANGES = 32;
 
@@ -133,6 +143,27 @@ export function homeHarnessDiffersFromSaved(policy: unknown, runtimeRevision: nu
   return storedHomeHarnessChanges(policy).filter((revision) => revision > started).length % 2 === 1;
 }
 
+/** The revision of the latest change to the access level, from the policy as it is stored. Undefined when there was none. */
+export function latestPermissionChange(policy: unknown): number | undefined {
+  if (!isPlainPolicy(policy)) return undefined;
+  let latest: number | undefined;
+  for (const key of Object.getOwnPropertyNames(policy)) {
+    const revision = PERMISSION_CHANGE_KEY.exec(key)?.[1];
+    if (revision !== undefined && policy[key] === false && (latest === undefined || Number(revision) > latest)) latest = Number(revision);
+  }
+  return latest;
+}
+
+/**
+ * Whether the owner changed the access level after a process that started at
+ * `runtimeRevision` began, so that it still runs with the older one. A process
+ * whose revision is not known is counted as older than every change.
+ */
+export function permissionChangedSince(policy: unknown, runtimeRevision: number | undefined): boolean {
+  const changed = latestPermissionChange(policy);
+  return changed !== undefined && changed > (Number.isSafeInteger(runtimeRevision) ? runtimeRevision as number : 0);
+}
+
 /**
  * What to show for an agent. `runtimeRevision` is the configuration revision
  * its running process started with, undefined when that is not known, and
@@ -158,12 +189,21 @@ export function homeHarnessState(
  * setup has no such record, and neither has one that may not have it. A
  * record that cannot be read says no, exactly as it does for a launch: a
  * launch from such a record starts the agent without the owner's setup.
+ *
+ * `appliedRevision` is the configuration revision the process started with,
+ * as the daemon's store records it. An entry read from the manifest carries
+ * no revision, so a caller reads it from the store and passes it here. With
+ * none to give, the question has no answer and this refuses, rather than
+ * counting the process as older than every change.
  */
 export function startedWithHomeHarness(entry: {
-  id: string; provider: string; delivery_mode?: string; provider_launch_policy?: unknown; runtime_configuration_revision?: number;
-}): boolean {
+  id: string; provider: string; delivery_mode?: string; provider_launch_policy?: unknown;
+}, appliedRevision: number | undefined): boolean {
+  if (!Number.isSafeInteger(appliedRevision) || appliedRevision! < 1) {
+    throw new Error("LetAgents cannot tell which settings this agent's process started with.");
+  }
   const state = homeHarnessState({ id: entry.id, provider: entry.provider, deliveryMode: entry.delivery_mode },
-    entry.provider_launch_policy, entry.runtime_configuration_revision);
+    entry.provider_launch_policy, appliedRevision!);
   return state === "on" || state === "until_restart";
 }
 
@@ -174,9 +214,13 @@ export function startedWithHomeHarness(entry: {
  * process was started: that is said as "unknown", which changes one thing
  * only, that the process is not asked what would make it load a project's
  * config again. Such an agent is otherwise treated as without the setup.
+ * `appliedRevision` is the one `startedWithHomeHarness` asks for.
  */
-export function ownerSetupRef(entry: Parameters<typeof startedWithHomeHarness>[0]): { ownerSetup?: true | "unknown" } {
-  if (startedWithHomeHarness(entry)) return { ownerSetup: true };
+export function ownerSetupRef(
+  entry: Parameters<typeof startedWithHomeHarness>[0],
+  appliedRevision: number | undefined,
+): { ownerSetup?: true | "unknown" } {
+  if (startedWithHomeHarness(entry, appliedRevision)) return { ownerSetup: true };
   const policy = entry.provider_launch_policy;
   return policy !== undefined && policy !== null && !isPlainPolicy(policy) ? { ownerSetup: "unknown" } : {};
 }
@@ -192,18 +236,24 @@ export function ownerSetupRef(entry: Parameters<typeof startedWithHomeHarness>[0
  * it paused with no such record (nothing the provider could attach to), so
  * for a paused agent the caller asks whether the end is recorded and passes
  * an entry without the reference only then.
+ *
+ * `lastStartedAtRevision` is the revision the agent last started at, as the
+ * daemon's store records it: an entry read from the manifest carries none.
+ * Undefined when the store could not say, and then a process is counted as
+ * older than every change.
  */
 export function homeHarnessRosterState(
   entry: {
-    id: string; provider: string; delivery_mode?: string; provider_launch_policy?: unknown; runtime_configuration_revision?: number;
+    id: string; provider: string; delivery_mode?: string; provider_launch_policy?: unknown;
     provider_ref?: unknown; observed_state: string;
   },
+  lastStartedAtRevision: number | undefined,
   held: { startedAtRevision: number | undefined } | null,
 ): HomeHarnessState | null {
   const mayStillRun = Boolean(entry.provider_ref) && !["absent", "stopped", "failed"].includes(entry.observed_state);
   return homeHarnessState({ id: entry.id, provider: entry.provider, deliveryMode: entry.delivery_mode }, entry.provider_launch_policy,
-    held ? held.startedAtRevision ?? entry.runtime_configuration_revision
-      : mayStillRun ? entry.runtime_configuration_revision : null);
+    held ? held.startedAtRevision ?? lastStartedAtRevision
+      : mayStillRun ? lastStartedAtRevision : null);
 }
 
 /** The policy as a provider may see it: without LetAgents' own keys, however they got there. */
@@ -221,10 +271,12 @@ export function withoutHomeHarness<T>(policy: T): T {
  * The policy to store: the native options, the key only while it is on, and
  * the changes a running process may still predate. `changedAt` records a new
  * change; the ones the running process already started after are dropped then.
+ * `permissionChangedAt` records a new change to the access level. A change
+ * that the policy already records is kept as it is.
  */
 export function storedLaunchPolicy(
   snapshot: Pick<ProviderConfigurationSnapshot, "launchPolicy" | "homeHarness">,
-  previous?: { policy: unknown; runtimeRevision?: number; changedAt?: number },
+  previous?: { policy: unknown; runtimeRevision?: number; changedAt?: number; permissionChangedAt?: number },
 ): Record<string, unknown> {
   const native = withoutHomeHarness(snapshot.launchPolicy);
   const earlier = storedHomeHarnessChanges(previous?.policy);
@@ -233,10 +285,13 @@ export function storedLaunchPolicy(
     : [...earlier.filter((revision) => revision > (previous.runtimeRevision ?? 0)), previous.changedAt];
   // Two changes cancel for any process older than both, so the oldest go in pairs.
   while (changes.length > MAX_HOME_HARNESS_CHANGES) changes.splice(0, 2);
+  // An access level changed earlier and not yet started is kept, unless this save changes it again.
+  const permissionChangedAt = previous?.permissionChangedAt ?? latestPermissionChange(previous?.policy);
   return {
     ...native,
     ...(snapshot.homeHarness === true ? HOME_HARNESS_ON : {}),
     ...Object.fromEntries(changes.map((revision) => [homeHarnessChangeKey(revision), false])),
+    ...(permissionChangedAt === undefined ? {} : { [permissionChangeKey(permissionChangedAt)]: false }),
   };
 }
 
@@ -248,8 +303,9 @@ export function storedLaunchPolicy(
  * policy with no such record is returned as it is.
  */
 export function launchPolicyForToolRules<T>(policy: T): T {
-  if (!isPlainPolicy(policy) || !Object.getOwnPropertyNames(policy).some((key) => HOME_HARNESS_CHANGE_KEY.test(key))) return policy;
-  return Object.fromEntries(Object.entries(policy).filter(([key]) => !HOME_HARNESS_CHANGE_KEY.test(key))) as T;
+  const isChange = (key: string) => HOME_HARNESS_CHANGE_KEY.test(key) || PERMISSION_CHANGE_KEY.test(key);
+  if (!isPlainPolicy(policy) || !Object.getOwnPropertyNames(policy).some(isChange)) return policy;
+  return Object.fromEntries(Object.entries(policy).filter(([key]) => !isChange(key))) as T;
 }
 
 /** The stored policy a launch or a save may use for this agent: only an agent that may have the owner's setup carries it. */
@@ -259,21 +315,6 @@ export function entryLaunchPolicy(agent: HomeHarnessAgent, policy: unknown): unk
 
 const efforts = new Set<Exclude<ProviderReasoningEffort, null>>(["low", "medium", "high", "xhigh", "max"]);
 const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reasoningEffort", "sandbox"]);
-
-/**
- * Admission may share a room/provider lane only when every durable entry owns
- * an independently addressable native runtime. Codex uses separate app-server
- * threads; Claude launches an isolated CLI/session per entry; Cursor uses a
- * stable private profile and continuation per entry; Open Model launches one
- * isolated OpenCode server per entry.
- */
-export function providerSupportsConcurrentSupervisedAgents(provider: string): boolean {
-  return provider === "codex"
-    || provider === "claude-code"
-    || provider === "claude"
-    || provider === "cursor"
-    || provider === "open-model";
-}
 
 /**
  * The immutable provider is the authority for editable Inspector settings.
@@ -302,7 +343,7 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
 
   if (provider === "codex") {
     for (const key of reservedCodexPolicy) if (Object.hasOwn(policy, key)) throw new Error(`Codex launch policy cannot override '${key}'.`);
-    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write", "auto_review"]);
+    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write", "auto_review", "read_only"]);
     const authority = profile === "auto_review"
       ? {
         approvalPolicy: "on-request",
@@ -313,6 +354,13 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
       : profile === "ask_before_write"
       ? {
         approvalPolicy: "on-request",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }
+      : profile === "read_only"
+      ? {
+        // The sandbox of Ask before writes with nobody to ask: Codex refuses
+        // what needs more access instead of waiting for an approval.
+        approvalPolicy: "never",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
       }
       : {

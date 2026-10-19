@@ -321,3 +321,18 @@ test("detail refresh retains exact last-check evidence and drops mismatched heal
   assert.equal(resource.detail.runtime_control, null);
   assert.equal(resource.detail.source_message.id, "source", "exact retained history survives the health failure");
 });
+
+test("usage readings remain bound to their exact conversation and daemon generation", async () => {
+  const entry = { id: "entry", roomId: "room", executionGenerationId: "execution", providerContinuationId: "thread", runtimeGenerationId: "birth" } as any;
+  const usage = { providerContinuationId: "thread", executionGenerationId: "execution", daemonGeneration: 4,
+    account: { state: "available", windows: [] }, context: { usedTokens: 31000, capacityTokens: 200000, observedAt: "2026-10-10T20:00:00.000Z" }, compaction: null };
+  const detail = { entry_id: "entry", room_id: "room", requested_source_message_id: null, source_message: null, availability: "not_loaded", usage } as any;
+  for (const changed of [entry, { ...entry, providerContinuationId: "replacement" }, { ...entry, executionGenerationId: "next" }]) {
+    let resource: any = { status: "idle", detail: null, error: null, sourceMessageId: null };
+    await readAgentInspectorWorkDetail({ entry: changed, source: null, generation: 4, previous: resource,
+      read: async () => detail, isCurrent: () => true, write: next => { resource = next; } });
+    assert.equal(resource.detail.usage, changed === entry ? usage : null);
+  }
+  const resource = { status: "ready", detail, error: null, sourceMessageId: null } as any;
+  assert.equal(invalidateAgentInspectorRuntimeControl(resource, { entries: [entry], daemonGeneration: 5 } as any, "entry", "room").detail?.usage, null);
+});

@@ -75,7 +75,7 @@ export async function runGitStdout(
 
 /**
  * Resolve the main worktree root for a checkout. Preserves the hardened
- * try/catch used by rooms/worktrees.ts (orchestrator mirror).
+ * try/catch used by rooms/worktrees.ts.
  */
 export async function getMainWorktreeRoot(repoRoot: string): Promise<string> {
   try {

@@ -94,15 +94,18 @@ export function useRoomWorkHandoff<T>(options: {
 /** Lists own scrolling/history; an own send requests latest before measuring its landing. */
 export function useRoomMessageMotion(options: {
   element: Ref<HTMLElement | null>;
+  /** Work rows pinned outside the scrolling list. A reply still grows from its row there. */
+  work?: Ref<HTMLElement | null>;
   messages: () => MotionMessage[];
   scope: () => string | null | undefined;
   ready: () => boolean;
   following: () => boolean;
   scrollToLatest: () => void;
   onInterrupt?: () => void;
+  onOwnSend?: () => void;
 }) {
   const send = injectRoomMessageMotion();
-  const animator = createRoomMessageAnimator(() => options.element.value);
+  const animator = createRoomMessageAnimator(() => options.element.value, () => options.work?.value ?? null);
   let previous = options.messages().map(message => message.stableId);
   let revision = 0;
   let media: MediaQueryList | null = null;
@@ -125,6 +128,7 @@ export function useRoomMessageMotion(options: {
       if (source) sends.set(message.id, source);
     }
     if (!appended.length && !sends.size) return;
+    if (sends.size) options.onOwnSend?.();
     const element = options.element.value;
     const following = options.following();
     // Capture the current presentation before cancelling a previous flight, so
@@ -142,7 +146,7 @@ export function useRoomMessageMotion(options: {
     if (!element || !options.ready() || (!following && !sends.size)) return;
     const sources = new Map<string, WorkGeometry>();
     const used = new Set<HTMLElement>();
-    const workRows = [...element.querySelectorAll<HTMLElement>('[data-motion-work]')];
+    const workRows = [...(options.work?.value ?? element).querySelectorAll<HTMLElement>('[data-motion-work]')];
     for (const message of appended) {
       const matches = workRows.filter(work => !used.has(work) && sameMotionAgent(message, { session: work.dataset.motionSession, key: work.dataset.motionAgent })
         && (!work.dataset.motionAfter || (messages.findIndex(item => item.id === work.dataset.motionAfter) >= 0 && messages.findIndex(item => item.id === work.dataset.motionAfter) < messages.indexOf(message))));

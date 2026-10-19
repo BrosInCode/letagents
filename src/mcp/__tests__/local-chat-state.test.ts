@@ -1787,7 +1787,7 @@ test("local routing schema startup is history-independent and bounded backfill r
   database.close();
 });
 
-test("local routing schema upgrade is race-idempotent across processes", async () => {
+test("local routing schema upgrade is race-idempotent across processes", { timeout: 20_000 }, async (t) => {
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => ReturnType<typeof openSqliteDb> & { close(): void };
   };
@@ -1821,23 +1821,36 @@ test("local routing schema upgrade is race-idempotent across processes", async (
     const db = new DatabaseSync(workerData.databasePath);
     parentPort.postMessage("ready");
     Atomics.wait(new Int32Array(workerData.start), 0, 0);
-    await projection.ensureLocalThreadRoutingProjectionSchemaAsync(db);
-    db.close();
+    try {
+      // Test concurrent cutover correctness independently of CI scheduling load.
+      // The mock-clock test separately verifies the production retry deadline.
+      await projection.ensureLocalThreadRoutingProjectionSchemaAsync(db, { maxWaitMs: 10_000 });
+    } finally { db.close(); }
   `, {
     eval: true,
     type: "module",
     workerData: { databasePath, moduleUrl, start },
   }));
-  await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
-    worker.once("message", () => resolve());
-    worker.once("error", reject);
-  })));
-  Atomics.store(gate, 0, 1);
-  Atomics.notify(gate, 0, workerCount);
-  await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
-    worker.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`upgrade worker exited ${code}`)));
-    worker.once("error", reject);
-  })));
+  t.after(async () => { await Promise.all(workers.map((worker) => worker.terminate())); });
+  try {
+    // Register completion handlers before releasing the start gate so even a
+    // fast failure is observed, and drain every worker before fixture cleanup.
+    const completions = workers.map((worker) => new Promise<void>((resolve, reject) => {
+      worker.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`upgrade worker exited ${code}`)));
+      worker.once("error", reject);
+    }));
+    const completed = Promise.all(completions);
+    void completed.catch(() => {});
+    await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
+      worker.once("message", () => resolve());
+      worker.once("error", reject);
+    })));
+    Atomics.store(gate, 0, 1);
+    Atomics.notify(gate, 0, workerCount);
+    await completed;
+  } finally {
+    await Promise.all(workers.map((worker) => worker.terminate()));
+  }
 
   const verified = new DatabaseSync(databasePath);
   const columns = new Set(verified.prepare("PRAGMA table_info(local_chat_thread_routing_aliases_v2)")

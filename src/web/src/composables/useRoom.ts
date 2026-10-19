@@ -1,3 +1,4 @@
+import { mergeActivityEvents } from '../../../../shared/ui/activity/model'
 import { readonly } from 'vue'
 import {
   discardAttachmentUpload,
@@ -36,6 +37,7 @@ import {
   githubEventsSupported,
   isConnected,
   isLoadingOlderMessages,
+  olderMessagesError,
   isStreaming,
   joinError,
   lastSendError,
@@ -111,6 +113,7 @@ const {
   refreshRoomBoard,
   refreshRoomFocusRooms,
   refreshRoomGitHubEvents,
+  loadOlderGitHubEvents,
   refreshRoomMessages,
   refreshTaskGithubStatus,
   refreshTasksAndPresence,
@@ -123,8 +126,8 @@ const {
   refreshPresence,
 })
 
-function scheduleGitHubRoomUpdates(roomIdentifier?: string | null) {
-  if (room.value && githubEventsSupported.value) {
+function scheduleGitHubRoomUpdates(roomIdentifier?: string | null, repairEvents = true) {
+  if (repairEvents && room.value && githubEventsSupported.value) {
     scheduleGitHubEventsRefresh(
       getGitHubEventsIdentifier(room.value),
       githubEventsSupported.value,
@@ -152,8 +155,15 @@ const roomStream = createRoomStream({
   onGitHubMessage: () => {
     scheduleGitHubRoomUpdates()
   },
-  onGitHubEvent: (roomIdentifier) => {
-    scheduleGitHubRoomUpdates(roomIdentifier)
+  onGitHubEvent: (roomIdentifier, event) => {
+    if (!room.value || (roomIdentifier && roomIdentifier !== room.value.identifier && roomIdentifier !== room.value.projectId)) return
+    if (event) {
+      githubEvents.value = mergeActivityEvents(githubEvents.value, [event])
+      githubEventsAvailable.value = true
+      if (['workflow_run', 'workflow_job', 'pull_request_review_comment', 'pull_request_review_thread'].includes(event.event_type)) return
+    }
+    // Event bodies arrive over the room stream; only legacy invalidations need a fetch.
+    scheduleGitHubRoomUpdates(roomIdentifier, !event)
   },
   onTaskLifecycleMessage: () => {
     if (!room.value) return
@@ -266,6 +276,7 @@ export function useRoom() {
     messagesHasOlder: readonly(messagesHasOlder),
     messagesLoaded: readonly(messagesLoaded),
     isLoadingOlderMessages: readonly(isLoadingOlderMessages),
+    olderMessagesError: readonly(olderMessagesError),
     tasks: readonly(tasks),
     focusRooms: readonly(focusRooms),
     presence: readonly(presence),
@@ -322,6 +333,7 @@ export function useRoom() {
     refreshRoomFocusRooms,
     refreshTaskGithubStatus,
     refreshRoomGitHubEvents,
+    loadOlderGitHubEvents,
     renameRoom,
     loadOlderMessages,
     restoreSession,

@@ -149,7 +149,7 @@
               <strong>{{ sidebarRoomTitle(result.entry) }}</strong>
               <small>{{ result.context }}</small>
             </span>
-            <span v-if="result.entry.hasUnread" class="room-unread-dot" aria-label="Unread messages"></span>
+            <RoomUnreadBadge :count="result.entry.unreadCount || 0" :marked-unread="result.entry.hasUnread" />
           </button>
         </div>
         <p v-else-if="searchQuery.trim()" class="sidebar-search-empty">
@@ -294,12 +294,7 @@
                     <span class="pinned-title">{{ project.roomName }}</span>
                     <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
                     <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
-                    <span
-                      v-if="project.parent.hasUnread"
-                      class="room-unread-dot"
-                      aria-label="Unread messages"
-                      title="Unread messages"
-                    ></span>
+                    <RoomUnreadBadge :count="project.parent.unreadCount || 0" :marked-unread="project.parent.hasUnread" />
                   </span>
                 </span>
               </button>
@@ -444,12 +439,7 @@
                       <span class="project-name">{{ project.roomName }}</span>
                       <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
                       <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
-                      <span
-                        v-if="project.parent.hasUnread"
-                        class="room-unread-dot"
-                        aria-label="Unread messages"
-                        title="Unread messages"
-                      ></span>
+                      <RoomUnreadBadge :count="project.parent.unreadCount || 0" :marked-unread="project.parent.hasUnread" />
                     </span>
                   </span>
                 </span>
@@ -639,6 +629,7 @@
 </template>
 
 <script setup lang="ts">
+import RoomUnreadBadge from "./RoomUnreadBadge.vue";
 import {
   Archive,
   ArrowLeftRight,
@@ -722,6 +713,7 @@ const props = defineProps<{
   activeEntry: SidebarEntry;
   primaryRoom: RoomEntry;
   projectEntries: ProjectGroup[];
+  revealRequest?: { entryId: string; sequence: number } | null;
   settingsEntry: SystemEntry;
   pinnedCollapsed: boolean;
   roomsCollapsed: boolean;
@@ -1614,6 +1606,25 @@ function revealSearchResult(entry: RoomEntry): void {
   if (!project.parent.pinned && props.roomsCollapsed) emit("toggle-rooms-collapsed");
   if (projectIsCollapsed(project.id)) emit("toggle-project", project.id);
 }
+
+// Only explicit New room navigation requests a reveal. Routine selection and
+// background room refreshes must not move the sidebar's reading position.
+watch(() => props.revealRequest, async (request, _previous, onCleanup) => {
+  if (!request) return;
+  let cancelled = false;
+  onCleanup(() => { cancelled = true; });
+  const entry = props.projectEntries.flatMap((project) => [project.parent, ...projectChildRooms(project)])
+    .find((candidate) => candidate.id === request.entryId);
+  if (!entry) return;
+  searchQuery.value = "";
+  searchOpen.value = false;
+  revealSearchResult(entry);
+  await nextTick();
+  if (cancelled || props.activeEntry.id !== request.entryId) return;
+  const row = Array.from(sidebarElement.value?.querySelectorAll<HTMLElement>("[data-sidebar-entry-id]") || [])
+    .find((element) => element.dataset.sidebarEntryId === request.entryId);
+  row?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+}, { flush: "post" });
 
 function searchResultId(entryId: string): string {
   return `sidebar-room-search-result-${encodeURIComponent(entryId)}`;

@@ -45,7 +45,7 @@ export function prepareSupervisorState(
   child: ChildProcess,
   createKey: () => { key: Buffer; sealedKey: string } = createStateRecoveryKey,
   callerWaitMs = 30_000,
-  getHostApprovalPublicKey: () => Promise<string> = async () => (await loadHostApprovalSigner()).publicKey,
+  getHostApprovalPublicKey: () => Promise<string | null> = async () => (await loadHostApprovalSigner()).publicKey,
 ): Promise<void> {
   // Injected legacy test/process ports without IPC do not own secure bootstrap.
   if (typeof child.send !== "function") return Promise.resolve();

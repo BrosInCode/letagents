@@ -27,7 +27,7 @@ export { createProject, createProjectWithName, getOrCreateProjectByName, getOrCr
 export { getProjectById, rotateProjectCode, updateProjectDisplayName, createRoomAlias } from "./db/rooms.js";
 export { getFocusRoomsForParent, getActiveFocusRoomForTask, getFocusRoomByKey, activateFocusRoom, archiveFocusRoom, claimGitRefFocusRoomLifecycleEvent, concludeFocusRoom, updateFocusRoomSettings, createFocusRoomFromIntent, createFocusRoomForTask } from "./db/focus-rooms.js";
 export { getGitHubRepositoryLinkById, upsertGitHubRepositoryLink, migrateGitHubRepositoryCanonicalRoom, upsertGitHubAppInstallation, markGitHubAppInstallationUninstalled, setGitHubAppInstallationSuspended, upsertGitHubAppRepository, markGitHubAppRepositoryRemoved } from "./db/github/index.js";
-export { getGitHubAppRepositoryByFullName, getGitHubAppRepositoryByRoomId, getGitHubAppInstallationById, recordGitHubWebhookDelivery, markGitHubWebhookDeliveryProcessed, insertGitHubRoomEvent, updateGitHubRoomEventLinkedTaskId, getGitHubRoomEvents, hasGitHubRoomActivationEventAfter } from "./db/github/index.js";
+export { getGitHubAppRepositoryByFullName, getGitHubAppRepositoryByRoomId, getGitHubAppInstallationById, recordGitHubWebhookDelivery, markGitHubWebhookDeliveryProcessed, insertGitHubRoomEvent, updateGitHubRoomEventLinkedTaskId, claimGitHubRoomEventForTask, releaseGitHubRoomEventFromTask, getLatestPullRequestRoomEvent, getGitHubRoomEvents, hasGitHubRoomActivationEventAfter } from "./db/github/index.js";
 export { getTasksGitHubArtifactStatus } from "./db/github/index.js";
 export { buildManualGitHubRepoRoomBindingInput, ensureGitHubRepoRoomBinding, getGitRoomBindingForRoom, getGitRoomBindingsForRooms, normalizeGitRoomVisibility, upsertGitRoomBinding } from "./db/git-room-bindings.js";
 export { buildRoomSharedArtifactIdentityKey, getRoomSharedArtifactByIdentityKey, getRoomSharedArtifacts, linkRoomSharedArtifactToTask, preserveManualRoomSharedArtifactInput, publishWorkerArtifactFenced, syncRoomSharedArtifactsForTask, upsertRoomSharedArtifact } from "./db/room-shared-artifacts.js";
@@ -35,7 +35,7 @@ export { addMessage, addMessageWithCreateStatus, getMessageStreamCheckpoint, get
 export type { AddMessageOptions, MessageCreateTransaction } from "./db/messages.js";
 export type { MessageThreadInboxFilter, MessageThreadInboxItem, MessageThreadInboxPage } from "./db/messages.js";
 export type { MessageThreadReadOverlay, MessageThreadReadTarget } from "./db/messages.js";
-export { getMessageAttachmentUpload, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";
+export { getMessageAttachmentUpload, deleteExpiredPendingMessageAttachmentUpload, listExpiredPendingMessageAttachmentUploads, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";
 export { upsertRoomAgentPresence, upsertRoomAgentLivenessObservation, heartbeatNativeHarnessTaskLeases, recordNativeHarnessActivity, markRoomAgentDeliveryConnected, markRoomAgentDeliveryHeartbeat, upsertDesktopRoomAgentDeliveryHeartbeat, upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat, pauseDesktopRoomAgentDelivery, isStaleDesktopRoomAgentDeliverySignalError, markRoomAgentDeliveryDisconnected, forceDisconnectRoomAgentDeliverySession, getRoomAgentDeliverySessions, getReachableWorkerDeliverySessionForAgentSession, pruneStaleRoomAgentDeliveryInstances } from "./db/presence.js";
 export { setRoomLiveAgentSuppressed, getRoomAgentPresence, getRoomAgentPresenceSnapshot } from "./db/presence.js";
 export { getLivenessAnnouncementCandidate } from "./db/presence.js";

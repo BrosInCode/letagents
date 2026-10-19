@@ -141,6 +141,23 @@
   background: var(--sidebar-selection);
 }
 
+.room-unread-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--sidebar-selection);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
 /* Child rooms hang from a hairline under their parent's icon. */
 .project-room-list {
   position: relative;
@@ -174,8 +191,9 @@
   transform: translateY(-50%) scale(1.03);
 }
 
+/* Rows stay draggable for reordering, but hovering one is a click target first: the grab hand shows only while a drag is in progress. */
 :is(.pinned-room, .project-row, .room-row)[draggable="true"] {
-  cursor: grab;
+  cursor: pointer;
 }
 
 :is(.pinned-room, .project-row, .room-row)[data-dragging="true"],
@@ -332,8 +350,7 @@
   color: var(--text);
 }
 
-.room-child-meta,
-.room-suggested-action {
+.room-child-meta {
   min-width: 0;
   overflow: hidden;
   font-size: 0.68rem;
@@ -345,21 +362,6 @@
 
 .room-child-meta {
   color: var(--text-tertiary);
-}
-
-.room-suggested-action {
-  color: color-mix(in srgb, var(--accent, #7dd3fc) 78%, var(--text-secondary));
-}
-
-.room-workspace-pill {
-  flex: 0 0 auto;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--sidebar-selection) 14%, transparent);
-  color: color-mix(in srgb, var(--sidebar-selection) 72%, white);
-  font-size: 0.57rem;
-  font-weight: 760;
-  line-height: 1.45;
 }
 
 .room-empty {

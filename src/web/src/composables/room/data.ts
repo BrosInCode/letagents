@@ -189,14 +189,14 @@ export async function fetchFocusRooms(
   }
 }
 
-export async function fetchGitHubEvents(roomIdentifier: string): Promise<{
+export async function fetchGitHubEvents(roomIdentifier: string, after?: string): Promise<{
   events: RoomGitHubEvent[]
   available: boolean
   hasMore: boolean
   error: RoomGitHubEventsError | null
 }> {
   try {
-    const data = await apiFetch(`${roomPath(roomIdentifier)}/events?limit=100`)
+    const data = await apiFetch(`${roomPath(roomIdentifier)}/events?limit=100${after ? `&after=${encodeURIComponent(after)}` : ''}`)
     return toAvailableGitHubEventsResult<RoomGitHubEvent>(data)
   } catch (error) {
     return mapGitHubEventsFetchError<RoomGitHubEvent>(

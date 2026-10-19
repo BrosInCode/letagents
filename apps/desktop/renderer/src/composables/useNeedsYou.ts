@@ -26,15 +26,7 @@ export function useNeedsYou() {
     loading.value = true;
     try {
       if (!desktopIpc.room?.getNeedsYou) throw new Error(desktopBridgeUpgradeMessage());
-      const [result, sessions] = await Promise.all([
-        desktopIpc.room.getNeedsYou(includeUpdates),
-        includeUpdates
-          ? (desktopIpc.workers?.listManagedAgentSessions?.() ?? Promise.reject(new Error('Agent sessions unavailable')))
-            .then(managedSessions => ({ managedSessions, managedSessionsUnavailable: false }))
-            .catch(() => ({ managedSessions: [], managedSessionsUnavailable: true }))
-          : Promise.resolve({}),
-      ]);
-      Object.assign(result, sessions);
+      const result = await desktopIpc.room.getNeedsYou(includeUpdates);
       if (current === generation) {
         for (const room of result.rooms) {
           const newer = (roomReadAt.get(room.roomIdentifier) ?? 0) > startedAt

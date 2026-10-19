@@ -35,7 +35,7 @@ export const settingsSubsections: Partial<Record<SettingsPaneId, SettingsNavItem
     { id: "system:setup", title: "Connect an app", description: "Set up LetAgents in an existing agent app", icon: Wrench },
   ],
   "system:diagnostics": [
-    { id: "system:diagnostics", title: "Health", description: "Check local state and recovery actions", icon: Activity },
+    { id: "system:diagnostics", title: "Health", description: "See the background service and agents across all rooms", icon: Activity },
     { id: "system:runtime", title: "Technical details", description: "Application, repository, and runtime information", icon: GitBranch },
     { id: "system:supervisor", title: "Cloud access", description: "Advanced cloud authorization and credential recovery", icon: KeyRound },
   ],

@@ -1,11 +1,14 @@
+import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import { JEV_MAX_CANDIDATE_AGENTS } from "../../messages/jev-conversation-routing.js";
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 
 import {
   assertAttachmentTotalByteSize,
+  type MessageAttachmentUploader,
   type NormalizedMessageAttachmentReference,
 } from "../../messages/attachments.js";
+import { messageAttachmentUploadUsableBy } from "./attachments.js";
 import {
   isPromptOnlyAgentMessage,
   normalizeAgentPromptKind,
@@ -31,9 +34,9 @@ import {
 import { WAKE_NOTICE_SOURCE } from "../../../../shared/wake-rules.mjs";
 import { RequestValidationError } from "../../validation-error.js";
 import { chooseAnsweringSession, chooseSessionForReply } from "../../rooms/answering-session.js";
-import { getSessionConnections } from "./session-connections.js";
+import { getReplyTurnReadySessions, getSessionConnections } from "./session-connections.js";
 import { db } from "../client.js";
-import { rooms, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
+import { rooms, room_settings, jev_routing_jobs, message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
@@ -52,6 +55,7 @@ import {
   createAccountRoutingTargetBudget,
   getBoundedActiveWorkLeaseOwners,
   getRecentHumanConversationRecipient,
+  getHumanThreadRootRecipientOwners,
   getMessageAccountAgentRouting,
   MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES,
   MAX_ACCOUNT_ROUTING_TARGETS,
@@ -67,6 +71,15 @@ import {
   type ThreadRoutingProjection,
 } from "./thread-routing-membership.js";
 import { enqueueDesktopPushNotifications } from "../../notifications/enqueue.js";
+import {
+  finishReplyTurnsTx,
+  planReplyTurns,
+  queueReplyTurnWakes,
+  releaseAgentReplyTurnHoldsTx,
+  sequentialReplyReason,
+  type ReleasedReplyTurn,
+  type ReplyTurnFields,
+} from "./reply-turns.js";
 
 const MESSAGE_RECEIPT_INSERT_BATCH_SIZE = 500;
 const MAX_ACTIVE_ROUTING_SESSIONS = 50_000;
@@ -81,7 +94,7 @@ export function chunkMessageReceiptRows<T>(rows: readonly T[]): T[][] {
 
 async function insertMessageReceiptRows(
   tx: MessageCreateTransaction,
-  rows: readonly {
+  rows: readonly ({
     id: string;
     message_room_id: string;
     message_number: number;
@@ -93,7 +106,7 @@ async function insertMessageReceiptRows(
     receipt_state: string;
     created_at: string;
     updated_at: string;
-  }[],
+  } & Partial<ReplyTurnFields>)[],
 ): Promise<void> {
   for (const batch of chunkMessageReceiptRows(rows)) {
     // One JSON bind per bounded batch avoids Drizzle/Postgres parameter growth
@@ -102,16 +115,21 @@ async function insertMessageReceiptRows(
       INSERT INTO ${message_agent_receipts} (
         id, message_room_id, message_number, room_id, agent_session_id,
         agent_key, actor_label, activation_reason, receipt_state,
+        turn_position, turn_count, hold_release_after, hold_released_at,
         created_at, updated_at
       )
       SELECT input.id, input.message_room_id, input.message_number,
              input.room_id, input.agent_session_id, input.agent_key,
              input.actor_label, input.activation_reason, input.receipt_state,
+             input.turn_position, input.turn_count,
+             input.hold_release_after::timestamptz, input.hold_released_at::timestamptz,
              input.created_at::timestamptz, input.updated_at::timestamptz
         FROM jsonb_to_recordset(${JSON.stringify(batch)}::jsonb) AS input(
           id text, message_room_id text, message_number integer, room_id text,
           agent_session_id text, agent_key text, actor_label text,
           activation_reason text, receipt_state text,
+          turn_position integer, turn_count integer,
+          hold_release_after text, hold_released_at text,
           created_at text, updated_at text
         )
       ON CONFLICT DO NOTHING
@@ -135,11 +153,24 @@ export interface AddMessageOptions {
   reply_to_message_id?: string | null;
   thread_root_message_id?: string | null;
   attachments?: NormalizedMessageAttachmentReference[];
+  /** The request credential; only its own (or unowned legacy) uploads attach. */
+  attachment_uploader?: MessageAttachmentUploader | null;
+  gif?: RoomGif | null;
   client_message_id?: string | null;
   publisher_agent_key?: string | null;
   publisher_agent_session_id?: string | null;
   account_id?: string | null;
   account_agent_routing?: boolean;
+  /**
+   * Accounts to notify by desktop push even when they have no recents row for
+   * the room (for example a GitHub review request). Resolved and access-checked by the caller.
+   */
+  notify_account_ids?: readonly string[];
+  /**
+   * Accounts that get a recents row for the room in the message transaction.
+   * Only accounts whose room access was allowed belong here.
+   */
+  recents_account_ids?: readonly string[];
   /**
    * Runs inside the message-insert transaction after the row is created, so
    * callers can persist state that must be atomic with message creation
@@ -193,6 +224,9 @@ async function assertDesktopReplayMatches(
     || existing.publisher_agent_key !== (options?.publisher_agent_key?.trim() || null)
     || existing.publisher_agent_session_id !== (options?.publisher_agent_session_id?.trim() || null)
     || existing.source !== (options?.source || null) || existing.sender !== sender || existing.text !== text
+    || (existing.gif?.id ?? null) !== (options?.gif?.id ?? null)
+    || (existing.gif?.title ?? null) !== (options?.gif?.title ?? null)
+    || Boolean(existing.gif?.text_fallback_only) !== Boolean(options?.gif?.text_fallback_only)
     || existing.reply_to_number !== replyNumber
     || (existing.thread_root_number ?? existing.number) !== (rootNumber ?? existing.number)
     || existing.agent_prompt_kind !== (options?.agent_prompt_kind || null)) {
@@ -220,6 +254,7 @@ export async function addMessageWithCreateStatus(
   const attachmentRefs = options?.attachments ?? [];
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   const repliedReceiptTargets = new Set<number>();
+  const releasedReplyTurns: ReleasedReplyTurn[] = [];
   // Conversation routing (Jev) never runs inside the send: the plan is
   // captured in the transaction and executed after commit, so the human's
   // send returns as fast as the deterministic ladder alone.
@@ -237,6 +272,12 @@ export async function addMessageWithCreateStatus(
         ? parseScopedId(options.thread_root_message_id, "msg")
         : null;
 
+    // Lock before looking up a replay: a previous attempt may commit while a
+    // concurrent Off update is ahead of us. Its saved message must still win.
+    const expressionSetting = options?.gif
+      ? (await tx.select({ enabled: room_settings.expressions_enabled }).from(room_settings)
+        .where(eq(room_settings.room_id, roomId)).for("share"))[0]
+      : null;
     if (clientMessageId) {
       const [existingMessage] = await tx
         .select(messageRowSelection)
@@ -255,6 +296,9 @@ export async function addMessageWithCreateStatus(
       }
     }
 
+    if (options?.gif) {
+      if (!expressionSetting?.enabled) throw new RequestValidationError("expressions_disabled: GIF sending is disabled in this room. Send text instead.");
+    }
     if (options?.reply_to_message_id && !replyToNumber) {
       throw new RequestValidationError("reply_to must be a valid message id");
     }
@@ -310,6 +354,7 @@ export async function addMessageWithCreateStatus(
       thread_root_number: threadRootNumber,
       sender,
       text,
+      gif: options?.gif ?? null,
       display_text: retainsDisplayText(options?.source) ? options?.display_text?.trim() || null : null,
       agent_prompt_kind: promptKind,
       source: options?.source ?? null,
@@ -365,6 +410,7 @@ export async function addMessageWithCreateStatus(
             inArray(message_attachment_uploads.upload_id, uploadIds),
             eq(message_attachment_uploads.status, "pending"),
             sql`${message_attachment_uploads.expires_at} > ${createdMessage.timestamp}`,
+            messageAttachmentUploadUsableBy(options?.attachment_uploader),
           ),
         )
         .returning(messageAttachmentUploadSelection);
@@ -413,7 +459,10 @@ export async function addMessageWithCreateStatus(
     let notificationEnqueueDurationMs = 0;
     if (!createdMessageIsPromptOnly && !addressedTo) {
       const notificationEnqueueStartedAtMs = Date.now();
-      await enqueueDesktopPushNotifications(tx, createdMessage);
+      await enqueueDesktopPushNotifications(tx, createdMessage, {
+        notify_account_ids: options?.notify_account_ids,
+        recents_account_ids: options?.recents_account_ids,
+      });
       notificationEnqueueDurationMs = Date.now() - notificationEnqueueStartedAtMs;
     }
 
@@ -437,6 +486,8 @@ export async function addMessageWithCreateStatus(
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;
       publisher_account_id?: string | null;
+      visibility?: string | null;
+      rental_session_id?: string | null;
     } | null = null;
     if (replyToNumber) {
       const [foundReply] = await tx
@@ -447,6 +498,8 @@ export async function addMessageWithCreateStatus(
           publisher_agent_key: messages.publisher_agent_key,
           publisher_agent_session_id: messages.publisher_agent_session_id,
           publisher_account_id: messages.publisher_account_id,
+          visibility: messages.visibility,
+          rental_session_id: messages.rental_session_id,
         })
         .from(messages)
         .where(and(eq(messages.room_id, roomId), eq(messages.number, replyToNumber)))
@@ -458,6 +511,8 @@ export async function addMessageWithCreateStatus(
         publisher_agent_key: foundReply.publisher_agent_key,
         publisher_agent_session_id: foundReply.publisher_agent_session_id,
         publisher_account_id: foundReply.publisher_account_id,
+        visibility: foundReply.visibility,
+        rental_session_id: foundReply.rental_session_id,
       };
     }
 
@@ -718,6 +773,24 @@ export async function addMessageWithCreateStatus(
         }
       }
 
+      // Top-level answers do not make an agent a thread participant. Let a
+      // human's first unaddressed thread follow-up reach the root's captured
+      // audience without making every subsequent peer reply a broadcast.
+      if (createdMessage.source === "browser" && createdMessage.publisher_account_id
+        && !createdMessage.publisher_agent_key && !createdMessageIsPromptOnly
+        && createdMessage.thread_root_number !== null && threadMembership.size === 0
+        && !globalAddresses.broadcast && !globalAddresses.hasMention
+        && !replyToMessage?.publisher_agent_key && replyToMessage?.source !== "agent"
+        && replyToMessage?.visibility == null && replyToMessage?.rental_session_id == null
+        && !(taskOwnerFollowUp && leases.length > 0)) {
+        const rootRecipients = await getHumanThreadRootRecipientOwners(
+          tx, roomId, routingThreadRootNumber, createdMessage.number, ownedSessionGroups.map(([key]) => key),
+        );
+        for (const [key, capturedOwner] of rootRecipients) {
+          if (ownerScopeByAgentKey.get(key) === capturedOwner) threadMembership.add(key);
+        }
+      }
+
       const recentRecipient = humanConversationEligible && sessionsByAgentKey.size > 2
         ? await getRecentHumanConversationRecipient(tx, roomId, {
             number: createdMessage.number, timestamp: createdMessage.timestamp,
@@ -775,6 +848,7 @@ export async function addMessageWithCreateStatus(
         agent_session_id: string; agent_key: string; actor_label: string;
         activation_reason: string; receipt_state: string; created_at: string; updated_at: string;
       }>();
+      const taskOwnerThreadRecipients = new Set<string>();
 
       for (const [agentKey, group] of ownedSessionGroups) {
         if (
@@ -848,6 +922,21 @@ export async function addMessageWithCreateStatus(
         }
 
         if (selectedActivation) {
+          // Thread membership wins the receipt reason above, but a genuine
+          // task follow-up must still reach its existing lease owner promptly.
+          // Reuse the task routing check: expired or ambiguous owners do not
+          // gain priority merely because the text says "continue".
+          if (createdMessage.source === "agent"
+            && selectedActivation.activation.reason === "thread_participant"
+            && taskOwnerFollowUp
+            && group.identities.some(identity => {
+              const ownerActivation = decideAgentMessageActivation(messageForRouting, identity, {
+                activeTaskLeases: leases, threadParticipantRootIds: new Set<string>(),
+              });
+              return ownerActivation.reason === "task_owner" && ownerActivation.decision === "activate";
+            })) {
+            taskOwnerThreadRecipients.add(agentKey);
+          }
           const receiptSession = selectedActivation.activation.reason === "task_owner"
             ? selectedActivation.session
             : selectedActivation.activation.reason === "reply_target"
@@ -874,7 +963,52 @@ export async function addMessageWithCreateStatus(
         }
       }
 
-      const receiptRowsToInsert = [...receiptsByAgentKey.values()];
+      const routedReceipts = [...receiptsByAgentKey.values()];
+      // An unaddressed human question to a thread is still a shared conversation.
+      // Keep mentions, quoted agents, task follow-ups and all peer messages in
+      // their existing lanes; only this verified human shape can sequence
+      // thread_participant receipts. No recipient selection changes here.
+      const sharedHumanThreadCandidate = routedReceipts.length >= 2
+        && createdMessage.source === "browser" && !createdMessageIsPromptOnly
+        && Boolean(createdMessage.publisher_account_id) && !createdMessage.publisher_agent_key
+        && createdMessage.thread_root_number !== null && !taskOwnerFollowUp
+        && !globalAddresses.broadcast && !globalAddresses.hasMention
+        && (replyToMessage === null || (replyToMessage.source === "browser"
+          && Boolean(replyToMessage.publisher_account_id) && !replyToMessage.publisher_agent_key
+          && replyToMessage.visibility === null && replyToMessage.rental_session_id === null));
+      // The transaction hook may restrict the persisted message. MessageRow
+      // deliberately omits these fields, so inspect the row after that hook
+      // rather than treating absent projection fields as public visibility.
+      const [visibleHumanRequest] = createdMessage.source === "browser"
+        ? await tx.select({ text: messages.text, promptKind: messages.agent_prompt_kind, account: messages.publisher_account_id }).from(messages).where(and(
+          eq(messages.room_id, roomId), eq(messages.number, createdMessage.number),
+          eq(messages.source, "browser"),
+          sql`${messages.publisher_account_id} IS NOT NULL`,
+          sql`${messages.publisher_agent_key} IS NULL`, sql`${messages.publisher_agent_session_id} IS NULL`,
+          sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`,
+        )).limit(1) : [];
+      const freshHumanRequest = Boolean(visibleHumanRequest?.account?.trim()
+        && !isPromptOnlyAgentMessage(visibleHumanRequest.text, visibleHumanRequest.promptKind));
+      const sharedHumanThread = sharedHumanThreadCandidate && freshHumanRequest;
+      // Several agents woken by one broadcast or small-room message answer
+      // one after another only in a room whose admin turned sequential replies
+      // on (NULL is parallel). The setting is read only when the receipts
+      // could be sequenced at all.
+      const sequenceCandidate = routedReceipts.length >= 2
+        && routedReceipts.every((receipt) => sequentialReplyReason(receipt.activation_reason, sharedHumanThread));
+      const [replyOrder] = sequenceCandidate
+        ? await tx.select({ order: room_settings.agent_reply_order })
+          .from(room_settings).where(eq(room_settings.room_id, roomId)).for("share")
+        : [];
+      const receiptRowsToInsert = planReplyTurns(routedReceipts, {
+        messageNumber: createdMessage.number,
+        timestamp: createdMessage.timestamp,
+        sequential: sequenceCandidate && replyOrder?.order === "sequential",
+        sharedHumanThread,
+        readySessionIds: replyOrder?.order === "sequential"
+          ? await getReplyTurnReadySessions(tx, roomId, routedReceipts.map(receipt => receipt.agent_session_id))
+          : undefined,
+      });
       if (receiptRowsToInsert.length > MAX_ACCOUNT_ROUTING_TARGETS) {
         throw new RequestValidationError("Message fanout exceeds the bounded desktop routing contract.");
       }
@@ -907,10 +1041,36 @@ export async function addMessageWithCreateStatus(
           .find((session) => session.session_id === receipt.agent_session_id)!.owner_account_id,
       }));
       await insertMessageReceiptRows(tx, receiptRowsToInsert);
+      // A newer human correction must get past older holds, while retaining
+      // its own reply order. The bound is essential: releasing all holds after
+      // insertion would also release the sequence just created above.
+      if (freshHumanRequest) releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
+        tx, roomId, receiptRowsToInsert.filter(receipt => receipt.turn_position !== null)
+          .map(receipt => receipt.agent_key), createdMessage.number,
+      ));
+      // A direct activation (mention, reply target, human thread, task owner)
+      // must not stay behind an earlier held turn: the frontier would hide it
+      // too. Automatic participation in a peer's thread reply is different:
+      // keep that receipt, but do not let it release unrelated queued turns.
+      // Public human sequences released only older holds above. Their new
+      // sequence stays intact; peer/system sequences gain no such bypass.
+      releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
+        tx,
+        roomId,
+        receiptRowsToInsert.filter((receipt) => receipt.turn_position === null
+          && (!(createdMessage.source === "agent" && receipt.activation_reason === "thread_participant")
+            || taskOwnerThreadRecipients.has(receipt.agent_key)))
+          .map((receipt) => receipt.agent_key),
+      ));
     }
 
     if (addressedTo) {
       const addressed = await routeAddressedMessage(tx, roomId, createdMessage, addressedTo);
+      releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
+        tx,
+        roomId,
+        addressed.map((target) => target.agent_key),
+      ));
       receiptCount = addressed.length;
       recipientAgentKeys = addressed.map((target) => target.agent_key);
       recipientAgentTargets = addressed;
@@ -943,7 +1103,11 @@ export async function addMessageWithCreateStatus(
       if (supervisedTarget) replyTargetNumbers.add(supervisedTarget);
       for (const targetNumber of replyTargetNumbers) {
         const unresolved = await tx
-          .select({ id: message_agent_receipts.id, receipt_state: message_agent_receipts.receipt_state })
+          .select({
+            id: message_agent_receipts.id,
+            receipt_state: message_agent_receipts.receipt_state,
+            turn_position: message_agent_receipts.turn_position,
+          })
           .from(message_agent_receipts)
           .where(and(
             eq(message_agent_receipts.message_room_id, roomId),
@@ -982,6 +1146,14 @@ export async function addMessageWithCreateStatus(
             timestamp: createdMessage.timestamp,
           });
           repliedReceiptTargets.add(targetNumber);
+          // This agent's turn is done: the next ready position may now see
+          // the message, with this reply already in its context.
+          if (receipt.turn_position !== null) {
+            releasedReplyTurns.push(...await finishReplyTurnsTx(tx, roomId, [{
+              message_number: targetNumber,
+              agent_key: publisherAgentKey,
+            }]));
+          }
         }
       }
     }
@@ -994,6 +1166,8 @@ export async function addMessageWithCreateStatus(
       mentionNotices,
     }, options, tx);
   });
+  // Only after commit, and only the released agents' workers.
+  queueReplyTurnWakes(releasedReplyTurns);
   if (repliedReceiptTargets.size > 0) {
     // Dynamic import avoids a module cycle; room-level so the shared stream
     // never enumerates ids that may be concealed from some participants.

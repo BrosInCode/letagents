@@ -1,8 +1,11 @@
 import { isLocalRoomApi, LOCAL_ROOM_API_ORIGIN } from "../../../../../shared/room-api-origin.mjs";
+import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../../../shared/codex-read-only-room-tools.mjs";
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../shared/codex-thread-history.mjs";
 import { LETAGENTS_MCP_SERVER_NAME } from "../../../../../shared/codex-owner-isolation.mjs";
-import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS, RoomTurnContextCache } from "./desktop-event-prompt-format.js";
 import { createHash } from "node:crypto";
+import { ProviderUsageTracker, readCodexUsageTail } from "./provider-usage.js";
+import type { ProviderUsage } from "../../../shared/provider-usage.js";
 import { execFile } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
@@ -18,6 +21,11 @@ import {
   type CodexAppServerLaunch,
 } from "./codex-app-server.js";
 import {
+  CODEX_BUILT_IN_READ_ONLY_PROFILE, codexReadOnlyProfileId, sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal,
+} from "./codex-agent-home.js";
+import {
+  STARTS_AGAIN_BY_ITSELF,
+  assertLiveCodexIsolationUnchanged,
   assertLiveCodexProjectUnchanged,
   codexProcessKeepsOwnerSetup,
   readCodexCommandLine,
@@ -37,7 +45,7 @@ import {
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { LETAGENTS_MCP_RUNTIME_TREE_SHA256, resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
-import { attestProviderSpawnPolicy, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "./provider-spawn-configuration.js";
+import { attestProviderSpawnPolicy, launchNoticeSaidOnce, ownerSetupUnusedOptionsNotice, ownerSetupUnusedOptionsSaidOnce, spawnUsesHomeHarness } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
 import {
   ProviderExecutionObserver,
@@ -78,6 +86,7 @@ import {
   type ProviderTurnControlOptions,
   ProviderTurnControlError,
   type ProviderRoomTurnRequest,
+  type RoomTurnImageDelivery,
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnResult,
   type ProviderRoomTurnOptions,
@@ -102,7 +111,26 @@ import {
   terminateFreshLaunch,
 } from "./provider-evidence.js";
 
-type CodexThreadResult = { thread?: { id?: string }; approvalsReviewer?: unknown; cwd?: unknown };
+type CodexThreadResult = {
+  thread?: { id?: string }; approvalsReviewer?: unknown; approvalPolicy?: unknown; sandbox?: unknown; activePermissionProfile?: unknown; cwd?: unknown; reasoningEffort?: unknown;
+};
+
+/** How long a start waits for Codex to list its models before it leaves the reasoning effort out. */
+const CODEX_MODEL_LIST_TIMEOUT_MS = 5_000;
+/** The line about an agent's reasoning effort is said when it changes, not at every start. A repair whose line was recorded keeps it here too. */
+const codexEffortNoticeSaidOnce = launchNoticeSaidOnce();
+/** The line about files Codex wrote in the agents' home: said when what it names changes. */
+const codexAgentHomeNoticeSaidOnce = launchNoticeSaidOnce();
+
+/** Whether a policy has a sandbox: every one but an exact Full access. The owner's saved command rules would open it. */
+function codexPolicyIsSandboxed(policy: Readonly<Record<string, unknown>>): boolean {
+  const sandbox = recordValue(policy.sandboxPolicy);
+  return !(sandbox?.type === "dangerFullAccess" && Object.keys(sandbox).length === 1);
+}
+/** A value as a notice shows it: printable, short, and in quotes. */
+function shownInNotice(text: string): string {
+  return JSON.stringify(text.replace(/[^\x20-\x7e]/g, "?").slice(0, 48));
+}
 
 /**
  * The reviewer Codex reports must be the one this launch named. The owner's
@@ -118,6 +146,273 @@ function assertCodexReviewerApplied(policy: Record<string, unknown>, result: Cod
   if (result.approvalsReviewer !== undefined && result.approvalsReviewer !== null && result.approvalsReviewer !== "user") {
     throw new Error("Codex would review approvals itself instead of asking you. Choose Auto to allow that, or remove the reviewer from your Codex settings.");
   }
+}
+
+/**
+ * A thread's reasoning effort, as the parameter Codex takes it in.
+ *
+ * Codex takes the effort as the config override `model_reasoning_effort`, on
+ * thread/start and on thread/resume. It has no `reasoningEffort` parameter:
+ * it ignores one, and the thread runs with the effort of its owner's settings.
+ *
+ * Codex accepts any effort for a thread and reports it back. It is the model
+ * that refuses an effort it does not advertise, and then every turn of the
+ * thread fails. So the effort is sent only when Codex lists it for the
+ * thread's model. An agent with no model of its own runs its owner's Codex
+ * model, or the model its thread already has, and neither is known here: its
+ * effort must be one that every listed model takes. An effort that is not
+ * sent leaves the thread with the effort Codex gives it, and the owner is told.
+ *
+ * Only the first page of the list is read, with a time limit. A list that
+ * has more pages is not complete, and a model that is not on the first page
+ * is not found: both leave the effort out, as an answer that does not come does.
+ */
+async function codexThreadEffort(
+  client: CodexAdapterRpc,
+  policy: Record<string, unknown>,
+  model: string | null | undefined,
+  effort: string | null | undefined,
+): Promise<{ params: { config?: Record<string, unknown> }; sent: string | null; notice: string | null }> {
+  if (!effort) return { params: {}, sent: null, notice: null };
+  const named = model?.trim() || null;
+  let listed: Array<Record<string, unknown>> = [];
+  let answered = false;
+  let complete = false;
+  try {
+    const page = recordValue(await client.request<unknown>("model/list", { includeHidden: true }, { timeoutMs: CODEX_MODEL_LIST_TIMEOUT_MS }));
+    listed = (Array.isArray(page?.data) ? page.data : []).map(recordValue).filter((entry): entry is Record<string, unknown> => entry !== null);
+    answered = true;
+    complete = (page?.nextCursor ?? null) === null;
+  } catch {
+    // No answer: the effort cannot be checked, and it is not sent.
+  }
+  // A thread is started with a model's `model`. An entry's `id` names the entry, not the model.
+  const models = named ? listed.filter((entry) => entry.model === named) : complete ? listed : [];
+  const takes = (entry: Record<string, unknown>) => Array.isArray(entry.supportedReasoningEfforts)
+    && entry.supportedReasoningEfforts.some((option) => recordValue(option)?.reasoningEffort === effort);
+  if (models.length && models.every(takes)) {
+    return { params: { config: { ...recordValue(policy.config), model_reasoning_effort: effort } }, sent: effort, notice: null };
+  }
+  const unchecked = !answered ? "Codex did not say which efforts its models take"
+    : !complete ? "Codex did not list all its models"
+    : named ? `Codex does not list the model ${shownInNotice(named)}` : "Codex listed no models";
+  const reason = !models.length ? `${unchecked}, so the effort could not be checked`
+    : named ? `the model ${shownInNotice(named)} does not take it`
+    : "not every Codex model takes it and this agent has no model of its own";
+  return {
+    params: {},
+    sent: null,
+    notice: `This agent's reasoning effort ${shownInNotice(effort)} was not given to Codex, because ${reason}. The agent runs with the effort Codex gives it.`
+      + (models.length ? ` Choose ${named ? "another effort" : "a model or another effort"} in the agent's settings.` : ""),
+  };
+}
+
+/**
+ * The effort Codex reports for a thread, against the effort it was sent.
+ * Codex once ignored the effort and said nothing, and it keeps the effort of
+ * a thread that is already loaded. Neither stops the agent: the owner is told
+ * both values.
+ *
+ * Codex 0.153 reports the effort of a thread it was sent one for, and writes
+ * a value it does not have as null. So a null in that place is Codex saying
+ * that the thread has no effort, and the owner is told that too. A reply with
+ * no such field is an app-server that does not report the effort: it says
+ * nothing either way.
+ */
+function codexEffortMismatchNotice(sent: string | null, result: CodexThreadResult): string | null {
+  const reported = result.reasoningEffort;
+  if (sent === null) return null;
+  if (reported === null) {
+    return `This agent's reasoning effort ${shownInNotice(sent)} was given to Codex, but Codex reports no effort for the conversation. `
+      + "The agent runs with the effort Codex gives it.";
+  }
+  if (typeof reported !== "string" || !reported || reported === sent) return null;
+  return `This agent's reasoning effort ${shownInNotice(sent)} was given to Codex, but Codex reports ${shownInNotice(reported)} for the conversation. `
+    + "The agent runs with the effort Codex reports.";
+}
+
+/** Whether a thread's policy is Read-only's: the one access level that names `never` together with the read-only sandbox. */
+function codexThreadIsReadOnly(policy: Record<string, unknown>): boolean {
+  return policy.approvalPolicy === "never" && policy.sandbox === "read-only";
+}
+
+/** A part of a reported sandbox that grants nothing: off, absent, or an empty list. */
+function grantsNothing(value: unknown): boolean {
+  return value === false || value === null || value === undefined || value === 0 || value === ""
+    || (Array.isArray(value) && value.length === 0)
+    || (recordValue(value) !== null && Object.keys(value as object).length === 0);
+}
+
+/**
+ * Whether a reported read-only sandbox has a part that could let the thread
+ * write or reach the network. A newer Codex may add parts this build does not
+ * know, and a part cannot be judged by a meaning it does not have yet. So it
+ * is judged by its name and its value: a part whose name speaks of writing,
+ * of the network, or of an exception to the sandbox widens it when its value
+ * is anything but off, absent or empty. Every other unknown part is left
+ * alone, which is what keeps a newer Codex from locking Read-only out.
+ */
+function codexReadOnlySandboxWidened(sandbox: unknown, depth = 0): boolean {
+  if (depth > 6) return true;
+  if (Array.isArray(sandbox)) return sandbox.some((item) => codexReadOnlySandboxWidened(item, depth + 1));
+  const record = recordValue(sandbox);
+  if (!record) return false;
+  return Object.entries(record).some(([name, value]) =>
+    (/writ|network|domain|host|socket|proxy|internet|exclu|exempt|escalat|unsandbox|bypass|danger|unrestrict/i.test(name) && !grantsNothing(value))
+    || codexReadOnlySandboxWidened(value, depth + 1));
+}
+
+/**
+ * Said when a reply has the read-only sandbox and does not name the permission profile. LetAgents cannot tell an
+ * older Codex, which does not report a profile, from a newer one that reports it another way. So the line claims
+ * neither, and names what helps in each case.
+ */
+const SIGN_IN_PROTECTION_NOT_CONFIRMED = "This version of Codex did not confirm that it keeps your Codex sign-in file from this agent's commands, so the agent was not started. "
+  + "If Codex is not up to date, update it. If it is, update LetAgents, or choose another access level: at every other level the agent's commands can read that file.";
+
+/**
+ * A thread asked for Read-only must report it: the read-only sandbox with no
+ * network, nobody to ask, and the permission profile of this work attempt.
+ * The owner's own Codex settings or an older app-server could leave the
+ * thread another sandbox or approval policy, and the reply to thread/start
+ * and thread/resume is the only word on what the thread got. The reply is
+ * held to the four things the level promises: the sandbox is the read-only
+ * one, its network access is off, the approval policy is `never`, and the
+ * profile is the one that keeps the owner's sign-in file from a command. A
+ * missing one starts no turn, and so does a part that widens the sandbox (see
+ * above). No other access level is checked here.
+ *
+ * `profile` is the permission profile the runtime names in its requests: the
+ * one of a Read-only agent's work attempt. It is null for a launch that names
+ * no access level and has this policy all the same. The product's launch
+ * refuses to start Codex for such a caller (see `readOnlySandbox`), so only a
+ * test's stand-in for the launch gets this far. It names the sandbox as
+ * before, and its reply is held to the sandbox and the approval policy alone.
+ *
+ * What a reply cannot show is that the `deny` is in force: Codex 0.153.4
+ * reports the same after it has dropped one. So this is one of two checks.
+ * The other is made at the launch, with a made-up file, and every request of
+ * a Read-only runtime names the profile, so that Codex is never left to keep
+ * or drop it by itself.
+ */
+function assertCodexReadOnlyApplied(policy: Record<string, unknown>, result: CodexThreadResult, profile: string | null): void {
+  if (!codexThreadIsReadOnly(policy) || codexReplyIsReadOnly(result, profile)) return;
+  if (codexReplyHasReadOnlySandbox(result)) throw new Error(SIGN_IN_PROTECTION_NOT_CONFIRMED);
+  throw new Error("Codex did not confirm Read-only access for this agent, so the agent was not started. Update Codex, or choose another access level.");
+}
+
+/** What a conversation's reply says of its approval policy, its sandbox and its permission profile. */
+type CodexReportedAccess = Pick<CodexThreadResult, "approvalPolicy" | "sandbox" | "activePermissionProfile">;
+
+/** Whether a reply reports the sandbox and the approval policy Read-only promises, and no part that widens the sandbox. */
+function codexReplyHasReadOnlySandbox(result: CodexReportedAccess): boolean {
+  const sandbox = recordValue(result.sandbox);
+  return result.approvalPolicy === "never" && sandbox?.type === "readOnly" && sandbox.networkAccess === false
+    && !codexReadOnlySandboxWidened(sandbox);
+}
+
+/** Whether a reply names this permission profile, as one that extends Codex's own read-only profile. */
+function codexReplyNamesProfile(result: CodexReportedAccess, profile: string): boolean {
+  const active = recordValue(result.activePermissionProfile);
+  return active?.id === profile && active.extends === CODEX_BUILT_IN_READ_ONLY_PROFILE;
+}
+
+/** Whether a reply reports everything Read-only promises: the sandbox, the approval policy, and the permission profile of a runtime that names one. */
+function codexReplyIsReadOnly(result: CodexReportedAccess, profile: string | null): boolean {
+  return codexReplyHasReadOnlySandbox(result) && (profile === null || codexReplyNamesProfile(result, profile));
+}
+
+/**
+ * The permission profile a runtime with this policy names when it was found
+ * running: the one of its work attempt for the Read-only policy, and none
+ * otherwise. A process found running names no access level, so its policy
+ * says it. A launch goes by the level's own name.
+ */
+function codexFoundProfile(turnPolicy: Readonly<Record<string, unknown>> | null, workAttemptId: string): string | null {
+  return codexTurnPolicyIsReadOnly(turnPolicy) ? codexReadOnlyProfileId(workAttemptId) : null;
+}
+
+/** Whether a runtime's own policy is Read-only's. A process found running names no access level, so its policy says it. */
+function codexTurnPolicyIsReadOnly(turnPolicy: Readonly<Record<string, unknown>> | null): boolean {
+  return turnPolicy !== null && codexThreadIsReadOnly(normalizeLaunchPolicy(turnPolicy));
+}
+
+/**
+ * What a conversation is started or loaded with. A Read-only runtime names
+ * its permission profile in place of the read-only sandbox: Codex takes one
+ * or the other, never both, and only the profile keeps the owner's sign-in
+ * file from a command. A runtime that names no profile is as it was.
+ */
+function codexThreadAccess(policy: Record<string, unknown>, profile: string | null): Record<string, unknown> {
+  if (profile === null) return policy;
+  // The profile stands in for the read-only sandbox and for no other.
+  if (!codexThreadIsReadOnly(policy)) throw new Error("A Codex permission profile was named for a conversation whose policy is not Read-only's.");
+  const { sandbox: _namedSandbox, ...named } = policy;
+  return { ...named, permissions: profile };
+}
+
+/**
+ * What a turn is started with: the same, for a turn's policy. A turn that
+ * named the sandbox instead would take the profile's name off the
+ * conversation, and Codex would be left to keep its `deny` or to drop it.
+ */
+function codexTurnAccess(turnPolicy: Readonly<Record<string, unknown>>, profile: string | null): Readonly<Record<string, unknown>> {
+  if (profile === null) return turnPolicy;
+  if (!codexTurnPolicyIsReadOnly(turnPolicy)) throw new Error("A Codex permission profile was named for a turn whose policy is not Read-only's.");
+  const { sandboxPolicy: _namedSandbox, ...named } = turnPolicy;
+  return Object.freeze({ ...named, permissions: profile });
+}
+
+/**
+ * For a Read-only runtime found running: what its loaded conversation reports
+ * when that is not Read-only, as a line for its owner. Null when it reports
+ * Read-only, and for every other access level. Only the names Codex gives its
+ * policy and its sandbox are repeated, short and in quotes. A conversation
+ * that has the sandbox and not the profile is said so: a process that was
+ * started before Read-only agents were given a profile is found this way.
+ */
+function codexFoundNotReadOnly(turnPolicy: Readonly<Record<string, unknown>> | null, result: CodexReportedAccess, profile: string | null): string | null {
+  if (!codexTurnPolicyIsReadOnly(turnPolicy) || codexReplyIsReadOnly(result, profile)) return null;
+  if (codexReplyHasReadOnlySandbox(result)) {
+    const reported = recordValue(result.activePermissionProfile) ? "another permission profile than the one LetAgents gave it" : "no permission profile";
+    return `Codex reported ${reported} for this agent's conversation, so nothing says that your Codex sign-in file is kept from its commands. `
+      + "That is not Read-only access";
+  }
+  const named = (value: unknown) => typeof value === "string" && value ? shownInNotice(value)
+    : value === undefined || value === null ? "none" : "one this build does not know";
+  const sandbox = recordValue(result.sandbox);
+  const more = sandbox?.networkAccess === true ? " with network access"
+    : sandbox?.type !== "readOnly" ? ""
+    : sandbox.networkAccess !== false ? " with no word on its network access"
+    : codexReadOnlySandboxWidened(sandbox) ? " with a part that widens it" : "";
+  return `Codex reported approval policy ${named(result.approvalPolicy)} and sandbox ${named(sandbox?.type)}${more} for this agent's conversation. `
+    + "That is not Read-only access";
+}
+
+/**
+ * Web search is off for a Read-only agent. Codex runs a search on its model
+ * provider's side, outside the sandbox, and asks nobody: with web search on,
+ * a query or a page address can carry what the agent read. The owner's linked
+ * config decides it otherwise, and can say "live".
+ *
+ * It is said in two places, for a launch that names the Read-only level.
+ * Codex 0.153.4 was seen to take a conversation's own config over the
+ * launch's, so the launch override alone can be undone by a `config` in a
+ * stored policy. A Read-only conversation is therefore given its own config
+ * whole: this setting, the reasoning effort when one is sent, and nothing a
+ * stored policy holds. The installed-Codex tests show both, with a stand-in
+ * model.
+ */
+export const CODEX_READ_ONLY_CONFIG_OVERRIDES: readonly string[] = Object.freeze(['web_search="disabled"']);
+const CODEX_READ_ONLY_THREAD_CONFIG: Readonly<Record<string, unknown>> = Object.freeze({ web_search: "disabled" });
+
+/** The `config` a conversation is started or resumed with: the reasoning effort's, and for a Read-only runtime its own. */
+function codexThreadConfig(
+  readOnlyLevel: boolean,
+  effort: { params: { config?: Record<string, unknown> }; sent: string | null },
+): { config?: Record<string, unknown> } {
+  if (!readOnlyLevel) return effort.params;
+  return { config: { ...(effort.sent === null ? {} : { model_reasoning_effort: effort.sent }), ...CODEX_READ_ONLY_THREAD_CONFIG } };
 }
 
 /**
@@ -175,6 +470,8 @@ export interface CodexAdapterRpc {
   close(): void;
   onDisconnect(listener: () => void): () => void;
   currentConnectionId(): string | null;
+  /** The Codex home the app-server said it runs with. Null when it did not say. */
+  reportedCodexHome?(): string | null;
   listPendingRequests(): readonly RpcServerRequest[];
   /** Told of each server request as it arrives, before any observer of the pending set. */
   onRequest?(listener: (request: RpcServerRequest) => void): () => void;
@@ -204,7 +501,13 @@ export interface CodexProviderAdapterDependencies {
   launchServer(
     serverUrl: string,
     codexBin: string,
-    options: { trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean },
+    options: {
+      trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean; sandboxed?: boolean; writableSandbox?: boolean;
+      /** A Read-only launch: the name of the permission profile the launch must define, with the sign-in file denied. */
+      hideSignInProfile?: string;
+      /** The policy is the Read-only level's own. The launch starts nothing for it without that profile. */
+      readOnlySandbox?: boolean;
+    },
   ): CodexAppServerLaunch | Promise<CodexAppServerLaunch>;
   waitForServer(serverUrl: string, launch: CodexAppServerLaunch): Promise<boolean>;
   createRpcClient(
@@ -225,6 +528,26 @@ export interface CodexProviderAdapterDependencies {
    * project configuration it was not started with turned off.
    */
   assertLiveProjectUnchanged(codexBin: string, live: CodexLiveProcess): Promise<void>;
+  /**
+   * Why a running app-server at a sandboxed access level may not start or
+   * load a conversation: a command rule it would read with its home, in its
+   * project or from the machine. Null when it may.
+   */
+  sandboxedLoadRefusal(
+    codexBin: string,
+    live: { cwd: string; codexHome: string | null; writableSandbox: boolean },
+    /** Given the folders the Codex config lets a command write, as they are named now: asked again before each turn. */
+    keepWritableFoldersCheck?: (check: () => string | null) => void,
+  ): Promise<string | null>;
+  /**
+   * Throws when a running app-server that was started without its owner's
+   * setup would now start an MCP server, or load a skill, that it was not
+   * started with turned off, or when the project changes the room's own
+   * server. `codexHome` is the home the process runs with, and
+   * `launchOverrides` are its launch's own overrides: null for a process that
+   * was found running, whose launch is not known.
+   */
+  assertLiveIsolationUnchanged(codexBin: string, live: CodexLiveProcess & { codexHome: string | null; launchOverrides: readonly string[] | null }): Promise<void>;
   writeSupervisorBridgeContext(
     cwd: string,
     context: {
@@ -354,16 +677,49 @@ export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
 }
 
 function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unknown> {
+  const startedAt = Date.now();
   return new Promise((resolve, reject) => {
+    let deadlineExpired = false;
+    let killedAtDeadline = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     const child = execFile(process.execPath, [entryPath, "--letagents-runtime-contract"], {
-      encoding: "utf8", timeout: 8_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
+      encoding: "utf8", killSignal: "SIGKILL", maxBuffer: 64 * 1024,
       // The read-only contract probe needs neither user auth nor daemon authority.
       env: { ELECTRON_RUN_AS_NODE: "1", ...(isLocalRoomApi(apiUrl) ? { LETAGENTS_API_URL: LOCAL_ROOM_API_ORIGIN } : {}) },
     }, (error, stdout) => {
-      if (error) return reject(new Error("The verified LetAgents MCP runtime contract could not be read."));
+      if (deadline) clearTimeout(deadline);
+      if (error) {
+        // Never expose stderr, paths, environment or the child-process Error message.
+        const code = typeof error.code === "number" ? error.code : "unavailable";
+        const signal = error.signal === "SIGKILL" ? "SIGKILL" : error.signal ? "other" : "none";
+        const failure = new Error(`The verified LetAgents MCP runtime contract could not be read. Exit: ${code}; signal: ${signal}; killed: ${Boolean(error.killed)}; elapsed: ${Date.now() - startedAt}ms; output: ${Buffer.byteLength(stdout)} bytes.`);
+        // Retain the successful deadline-kill gate. A delayed exit notification
+        // cannot prove which SIGKILL caused termination; retries still require
+        // a fresh valid contract. Other observed failures remain fail-closed.
+        if (killedAtDeadline && error.signal === "SIGKILL" && error.code == null) {
+          Object.assign(failure, { transientProviderStart: true });
+        }
+        return reject(failure);
+      }
+      if (deadlineExpired) {
+        // Timeout cleanup can discard unread stdout from a child that already
+        // exited successfully while this process's event loop was delayed.
+        return reject(Object.assign(new Error(`The verified LetAgents MCP runtime contract exceeded its eight-second deadline. Elapsed: ${Date.now() - startedAt}ms.`), { transientProviderStart: true }));
+      }
       try { resolve(JSON.parse(stdout)); }
       catch { reject(new Error("The verified LetAgents MCP runtime contract is malformed.")); }
     });
+    deadline = setTimeout(() => {
+      // Record the deadline before destroying pipes, even if the child has
+      // already exited. Preserve an already observed unsuccessful exit.
+      deadlineExpired = child.signalCode === null && (child.exitCode === null || child.exitCode === 0);
+      // Match execFile's timeout cleanup: a descendant must not keep the
+      // callback waiting by retaining the probe's output pipes.
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      if (child.exitCode === null && child.signalCode === null) killedAtDeadline = child.kill("SIGKILL");
+    }, 8_000);
+    deadline.unref();
     child.stdin?.end();
   });
 }
@@ -404,33 +760,60 @@ const boundedMcpEnvironment = {
   LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
 };
 
+/**
+ * Version 2: a sandboxed agent runs with a Codex home that has no saved
+ * command rules. Version 3: a Read-only agent's conversations name a
+ * permission profile that keeps the owner's sign-in file from its commands.
+ * A process started under an earlier version is replaced when it is idle, so
+ * this number never goes back.
+ */
+export const CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION = 3;
+
+// The room tools a Read-only agent may use: Codex is told to run these without
+// asking and to refuse every other one. Codex 0.153.4 was seen to refuse a
+// tool that needs an approval when nobody can be asked ("MCP tool call
+// requires approval, but approval policy is never") and to run one approved in
+// advance. The background service keeps the same list for itself.
+export { CODEX_READ_ONLY_ROOM_TOOLS };
+
 function boundedLaunchContract(apiUrl: string, tools: string[]): string {
   // Reuse the generated override: approval modes, filters, credentials and
   // command semantics must change the identity too. Birth/workspace coordinates
   // are independently fenced; replace only those variable launch values.
+  // The access level is not part of this identity: the daemon compares one
+  // contract for every agent of a room server, and a change of access level
+  // already replaces the runtime through its configuration revision.
   const override = custodialMcpOverride("<sealed-entry>", "<workspace>", {
     ...boundedMcpEnvironment, LETAGENTS_API_URL: apiUrl,
   }, [...tools].sort());
   return createHash("sha256").update(JSON.stringify({
-    version: 1, provider: "codex", runtimeTree: LETAGENTS_MCP_RUNTIME_TREE_SHA256, override,
+    version: CODEX_BOUNDED_LAUNCH_CONTRACT_VERSION, provider: "codex", runtimeTree: LETAGENTS_MCP_RUNTIME_TREE_SHA256, override,
   })).digest("hex");
 }
 
-function custodialMcpOverride(entryPath: string, cwd: string, environment: Record<string, string>, tools: string[]): string {
+function custodialMcpOverride(
+  entryPath: string, cwd: string, environment: Record<string, string>, tools: string[],
+  /** The launch is a Read-only agent's: its room tools are the named ones and no others. */
+  readOnlyRoomTools = false,
+): string {
   const env = Object.entries({ ...environment, ELECTRON_RUN_AS_NODE: "1" })
     .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`).join(", ");
   // Native config deep-merges even a parent-table CLI override. Pin each
   // advertised tool so inherited prompt/approve rules cannot alter this policy.
   const toolApprovalModes = tools.map((name) => {
-    // This verified bounded capability only records final-answer routing. It
-    // cannot choose a recipient or send text. Actual message tools remain writes.
-    const mode = environment.LETAGENTS_EXECUTION_PROFILE === "supervised_room_turn"
-      && name === "set_reply_thread" ? "approve" : "writes";
+    const mode = readOnlyRoomTools
+      // "prompt" needs an approval every time, and Codex refuses that when
+      // nobody can be asked. "writes" would not do: under it Codex runs any
+      // tool the room server marks as a read, named above or not.
+      ? CODEX_READ_ONLY_ROOM_TOOLS.has(name) ? "approve" : "prompt"
+      // This verified bounded capability only records final-answer routing. It
+      // cannot choose a recipient or send text. Actual message tools remain writes.
+      : environment.LETAGENTS_EXECUTION_PROFILE === "supervised_room_turn" && name === "set_reply_thread" ? "approve" : "writes";
     return `${JSON.stringify(name)} = { approval_mode = ${JSON.stringify(mode)} }`;
   }).join(", ");
   // Codex merges installed config beneath CLI overrides. Pin every authority
   // coordinate and clear inherited credential names/tool filters explicitly.
-  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [], default_tools_approval_mode = "writes", tools = { ${toolApprovalModes} } }`;
+  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [], default_tools_approval_mode = ${JSON.stringify(readOnlyRoomTools ? "prompt" : "writes")}, tools = { ${toolApprovalModes} } }`;
 }
 
 function isCodexExecutionMethod(method: string): boolean {
@@ -686,16 +1069,26 @@ function exactPermissionItemKey(threadId: string, turnId: string, itemId: string
   return JSON.stringify([threadId, turnId, itemId]);
 }
 
-function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
+/**
+ * Codex's own process reads a local image, outside the agent's sandbox, and
+ * resizes it before it enters the thread history. The daemon staged the file
+ * and keeps it until this turn has ended. Each image follows a short label.
+ */
+function roomTurnImageInput(request: ProviderRoomTurnRequest): Array<Record<string, unknown>> {
+  return includedRoomTurnImages(request.attachments).flatMap(image => image.path ? [
+    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}`, text_elements: [] },
+    { type: "localImage", path: image.path },
+  ] : []);
+}
+
+function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest, context = formatRoomTurnContext(request)): string {
   return [
     ...MANAGED_ROOM_WORK_INSTRUCTIONS,
     "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",
     "If no response should be published, return exactly LETAGENTS_NO_ROOM_REPLY with no other text.",
     `Inbox item: ${request.inboxItemId}`,
-    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
-    `Source message: ${JSON.stringify(request.sourceMessage)}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    ...context,
   ].join("\n");
 }
 
@@ -816,6 +1209,12 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   // The owner's own config is found as the launch found it: through the launch's environment.
   assertLiveProjectUnchanged: (codexBin, live) =>
     assertLiveCodexProjectUnchanged(codexBin, live, codexAppServerEnvironment({ homeHarness: true }).env),
+  sandboxedLoadRefusal: (codexBin, live, keepWritableFoldersCheck) =>
+    sandboxedCodexLoadRefusal(codexBin, { ...live, env: codexAppServerEnvironment().env, keepWritableFoldersCheck }),
+  // Asked as the process reads its settings: with the home it runs with.
+  assertLiveIsolationUnchanged: (codexBin, live) => assertLiveCodexIsolationUnchanged(codexBin, live, {
+    ...codexAppServerEnvironment().env, ...(live.codexHome ? { CODEX_HOME: live.codexHome } : {}),
+  }),
   writeSupervisorBridgeContext: writeCodexSupervisorBridgeContext,
   now: () => new Date().toISOString(),
   sleep: delay,
@@ -826,13 +1225,52 @@ function isCodexRuntimeUnavailable(state: ProviderObservedState): boolean {
 }
 
 class CodexProviderHandle implements ProviderHandle {
+  readonly usage: ProviderUsageTracker;
+  usageRead: Promise<void> | null = null;
+  usageReadAt = 0;
+  usageConnection = "";
   subscriptionAfterMaterialization = false;
   /** Told what was turned down for the owner, so it can be shown in the agent's activity. */
   ownerRequestDeclined: ((summary: string) => void) | null = null;
   /** The process was started with its owner's own Codex setup, so it must never reload a project's config unchecked. */
   ownerSetup = false;
+  /**
+   * This runtime is a Read-only agent's: every conversation it starts or loads
+   * again is given the Read-only config, and names the Read-only permission
+   * profile in place of a sandbox. From its launch, the level by name.
+   * For a process found running, whose level is not named, its policy says it:
+   * when it is found with its policy, and when the policy is bound later.
+   */
+  readOnlyLevel = false;
+  /**
+   * What the loaded conversation of a process found running reported, kept
+   * only while the runtime has no policy to hold it to. The daemon can find a
+   * process before it supplies the policy.
+   */
+  reportedWhenFound: CodexReportedAccess | null = null;
+  /** Set when that report was not Read-only for a Read-only runtime: the stop that followed, and what was reported. */
+  foundNotReadOnly: { reported: string; stopped: Promise<ProviderAttachTerminal> | null } | null = null;
+  /**
+   * The Codex home the app-server said it runs with: null when it did not
+   * say. Undefined only for a client that cannot be asked, which is never the
+   * real one.
+   */
+  codexHome: string | null | undefined = undefined;
+  /** The folder this agent works in: from its launch, from a repair, or as the conversation of a process found running says. Null when none said. */
+  cwd: string | null = null;
+  /** The overrides this adapter's own launch gave Codex, the room's server among them. Null for a process that was found running. */
+  launchOverrides: readonly string[] | null = null;
+  /**
+   * Why a folder the Codex config lets a sandboxed command write may not be
+   * written now, as the folders were named at the launch or the last load.
+   * Null for a sandbox that writes nowhere, and for a process that was found
+   * running, until its next load names them.
+   */
+  writableFoldersCheck: (() => string | null) | null = null;
   /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
   launchNotices: readonly string[] = [];
+  /** What this runtime's launch, or its last repair that the daemon recorded, found about its reasoning effort. A repair does not say it again. */
+  effortNotice: string | null = null;
   custodyLaunchAgentSessionId?: string;
   managedLaunchContract?: string;
   readonly execution: ProviderExecutionObserver;
@@ -867,6 +1305,7 @@ class CodexProviderHandle implements ProviderHandle {
   /** The one pending read after the thread reported `systemError`. */
   systemErrorReconciliation: Promise<void> | null = null;
   readonly roomTurnResults = new CodexTurnResultAccumulator();
+  readonly roomContext = new RoomTurnContextCache();
   providerContinuationId: string;
 
   constructor(
@@ -881,8 +1320,10 @@ class CodexProviderHandle implements ProviderHandle {
     private turnPolicy: Readonly<Record<string, unknown>> | null,
   ) {
     this.providerContinuationId = providerContinuationId;
+    this.usage = new ProviderUsageTracker(providerContinuationId);
     this.execution = new ProviderExecutionObserver(now);
     client.onDisconnect(() => {
+      this.roomContext.reset();
       this.permissionFileChangeProposals.clear();
       if (this.nativeRuntimeUnavailable) return;
       this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
@@ -896,9 +1337,51 @@ class CodexProviderHandle implements ProviderHandle {
     });
   }
 
+  /** The access every turn of this runtime is started with, once nothing stands against a turn. */
   requireTurnPolicy(): Readonly<Record<string, unknown>> {
     if (!this.turnPolicy) throw new Error("Codex cannot start a turn without its exact applied permission policy; restart the agent to apply its configuration.");
-    return this.turnPolicy;
+    // Its process is being stopped. Should the stop fail, it still takes no turn.
+    if (this.foundNotReadOnly) throw new Error(`${this.foundNotReadOnly.reported}. Restart the agent.`);
+    if (this.sandboxed()) {
+      // A process that was started before agents had a home of their own, or that
+      // a daemon found running, is never kept as it is: it takes no turn at a
+      // sandboxed level while its home holds a saved rule, and its owner is told.
+      // Nor does it take one in a project that has rule folders of its own, trusted
+      // or not. Codex 0.153.4 reads rules when it starts or loads a conversation and
+      // not at each turn, so a folder that appears between two turns does not reach a
+      // running conversation; it is looked for here all the same, because only names
+      // are read and the next load would take it.
+      const refusal = (this.codexHome !== undefined ? sandboxedCodexHomeRefusal(this.codexHome) : null)
+        // A stand-in client, which cannot be asked its home, is not asked for a folder it never said either.
+        ?? (this.cwd !== null || this.codexHome !== undefined ? sandboxedCodexProjectRefusal(this.cwd) : null)
+        // A folder the Codex config lets a command write, that has become a way into a home since it was last looked at.
+        ?? this.writableFoldersRefusal();
+      if (refusal) throw new Error(refusal);
+    }
+    // What the turn is started with: for a Read-only runtime its permission profile, never a sandbox by name.
+    return codexTurnAccess(this.turnPolicy, this.readOnlyProfile());
+  }
+
+  /**
+   * The permission profile this runtime names in every request and holds every reply to: the one of
+   * its work attempt when it is a Read-only agent's (see `readOnlyLevel`), and none otherwise.
+   */
+  readOnlyProfile(): string | null {
+    return this.readOnlyLevel ? codexReadOnlyProfileId(this.workAttemptId) : null;
+  }
+
+  private writableFoldersRefusal(): string | null {
+    try {
+      return this.writableFoldersCheck?.() ?? null;
+    } catch (error) {
+      // A folder that cannot be looked at is not taken as safe.
+      return `LetAgents could not look at the folders your Codex config lets a sandboxed command write (${errorMessage(error).split("\n")[0]}), so it gives this agent no work. Pause the agent and resume it.`;
+    }
+  }
+
+  /** Whether this runtime's access level has a sandbox. False while its policy is not known: it takes no turn then. */
+  sandboxed(): boolean {
+    return this.turnPolicy !== null && codexPolicyIsSandboxed(this.turnPolicy);
   }
 
   /** The policy this runtime was launched under, when it is known. */
@@ -906,10 +1389,21 @@ class CodexProviderHandle implements ProviderHandle {
     return this.turnPolicy;
   }
 
-  bindTurnPolicy(policy: unknown): void {
+  /**
+   * Returns what the loaded conversation reported when this runtime was found,
+   * once, when this call is the one that gives the runtime its policy: nothing
+   * has held that report to the policy yet.
+   */
+  bindTurnPolicy(policy: unknown): CodexReportedAccess | null {
     // Observation-only recovery may attach before the daemon supplies the
     // applied configuration. Bind once; later settings cannot change this birth.
-    if (this.turnPolicy === null && policy !== undefined) this.turnPolicy = codexTurnPolicy(policy);
+    if (this.turnPolicy !== null || policy === undefined) return null;
+    this.turnPolicy = codexTurnPolicy(policy);
+    // As an attach with the policy does it: see `readOnlyLevel`.
+    this.readOnlyLevel = codexTurnPolicyIsReadOnly(this.turnPolicy);
+    const reported = this.reportedWhenFound;
+    this.reportedWhenFound = null;
+    return reported;
   }
 
   replaceContinuation(providerContinuationId: string): void {
@@ -921,6 +1415,7 @@ class CodexProviderHandle implements ProviderHandle {
     }
     this.terminalTurns.clear();
     this.roomTurnResults.clearAll();
+    this.roomContext.reset();
     this.providerContinuationId = providerContinuationId;
     this.invalidatePermissions();
   }
@@ -949,6 +1444,46 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly deps: CodexProviderAdapterDependencies;
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
+  async readUsage(providerHandle: ProviderHandle): Promise<ProviderUsage | null> {
+    const handle = this.requireHandle(providerHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = handle.client.currentConnectionId();
+    if (this.handles.get(handle.workAttemptId) !== handle || !connection) return null;
+    handle.usage.snapshot(continuation);
+    const current = () => this.handles.get(handle.workAttemptId) === handle
+      && handle.providerContinuationId === continuation && handle.client.currentConnectionId() === connection;
+    const now = Date.parse(this.deps.now());
+    const key = `${connection}:${continuation}`;
+    if (handle.usageConnection !== key) {
+      handle.usageReadAt = 0; handle.usageRead = null;
+      if (handle.usageConnection) handle.usage.accountFailed();
+      handle.usageConnection = key;
+    }
+    if (!handle.usageRead && (!handle.usageReadAt || now - handle.usageReadAt >= 30_000)) {
+      handle.usageReadAt = now;
+      const accountRevision = handle.usage.accountRevision;
+      const reading = (async () => {
+        await Promise.all([
+          handle.client.request("account/rateLimits/read", undefined, { timeoutMs: 2_000 }).then(payload => {
+            if (current()) handle.usage.account(payload, this.deps.now(), accountRevision);
+          }, () => { if (current()) handle.usage.accountFailed(accountRevision); }),
+          (async () => {
+            if (handle.usage.snapshot(continuation).context) return;
+            try {
+              const read = await handle.client.request<{ thread?: { id?: string; path?: unknown } }>("thread/read", { threadId: continuation, includeTurns: false }, { timeoutMs: 2_000 });
+              if (!current() || read.thread?.id !== continuation) return;
+              const context = await readCodexUsageTail(read.thread.path);
+              if (current()) handle.usage.seedContext(context);
+            } catch { /* A not-yet-materialized thread has no previous sample. */ }
+          })(),
+        ]);
+      })().finally(() => { if (handle.usageRead === reading) handle.usageRead = null; });
+      handle.usageRead = reading;
+    }
+    await handle.usageRead;
+    return current() ? handle.usage.snapshot(continuation) : null;
+  }
+
   private readonly handles = new Map<string, CodexProviderHandle>();
   private readonly pollingLaunches = new WeakMap<CodexProviderHandle, { roomId: string; cwd: string; configurationRevision: number | undefined; agentSessionId: string }>();
   private readonly pollingDispatches = new WeakSet<CodexProviderHandle>();
@@ -1017,8 +1552,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     ) {
       if (handle) return null;
     } else {
-      handle.bindTurnPolicy(ref.launchPolicy);
-      return handle;
+      return this.bindFoundPolicy(handle, ref.launchPolicy);
     }
     const connection = ref.providerConnection;
     if (!connection || connection.kind !== "codex_app_server") {
@@ -1032,8 +1566,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)
       ) return null;
       const attached = await pending.promise;
-      if (attached instanceof CodexProviderHandle) attached.bindTurnPolicy(ref.launchPolicy);
-      return attached;
+      return attached instanceof CodexProviderHandle ? this.bindFoundPolicy(attached, ref.launchPolicy) : attached;
     }
     const attaching = this.attachRunning(ref, connection).finally(() => {
       if (this.pendingAttaches.get(ref.workAttemptId)?.promise === attaching) {
@@ -1422,7 +1955,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // A cached handle state or an active thread with no visible turn cannot
       // certify idle. Even a valid empty list requires the thread itself to
       // be between turns.
-      if (!isCodexThreadBetweenTurns(extractThreadStatus(read.thread))) return { state: "unknown" };
+      const status = extractThreadStatus(read.thread);
+      if (status === "notLoaded") {
+        // A handoff may find the saved thread unloaded. Do not cold-resume it
+        // with process defaults just to stop the old runtime. Prove the exact
+        // app-server has no loaded threads, in addition to terminal history.
+        const loaded = recordValue(await handle.client.request<unknown>(
+          "thread/loaded/list", { limit: 1 }, { timeoutMs: 2_000 },
+        ));
+        if (!current() || !Array.isArray(loaded?.data) || loaded.data.length !== 0
+          || loaded.nextCursor !== null) return { state: "unknown" };
+      } else if (!isCodexThreadBetweenTurns(status)) return { state: "unknown" };
       return { state: "idle", providerContinuationId: continuation, nativeProcessIdentity: identity, latestProviderTurnId: latest };
     } catch {
       // Timeouts and unavailable snapshots are uncertainty, not runtime failure.
@@ -1576,6 +2119,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return { outcome: "interrupt_dispatched", targetTurnId: turnId };
   }
 
+  /**
+   * Codex's own process reads a local image and resizes it before it enters
+   * the thread history; a data URL would stay there at full size.
+   */
+  roomTurnImageDelivery(): RoomTurnImageDelivery {
+    return "file";
+  }
+
   /** Execute one durable inbox item on this exact app-server/thread only. */
   async runRoomTurn(
     providerHandle: ProviderHandle,
@@ -1602,15 +2153,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
     await options.beforeNativeDispatch?.();
     assertRuntimeAvailable();
     handle.roomTurnResults.beginTurnStart(handle.providerContinuationId);
+    const context = handle.roomContext.prepare(request, continuation);
     let started: TurnStartResult;
     try {
       started = await handle.client.request<TurnStartResult>("turn/start", {
         ...turnPolicy,
         threadId: handle.providerContinuationId,
-        input: [{ type: "text", text: boundedRoomTurnPrompt(request), text_elements: [] }],
+        input: [{ type: "text", text: boundedRoomTurnPrompt(request, context.lines), text_elements: [] }, ...roomTurnImageInput(request)],
       });
     } catch (error) {
       handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
+      handle.roomContext.reset();
       if (isMissingContinuation(error, handle.providerContinuationId)) {
         throw new ProviderContinuationMissingError(handle.providerContinuationId);
       }
@@ -1619,6 +2172,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const turnId = started.turn?.id?.trim();
     if (!turnId) {
       handle.roomTurnResults.abandonTurnStart(handle.providerContinuationId);
+      handle.roomContext.reset();
       throw new Error("Codex did not acknowledge the bounded room turn.");
     }
     handle.roomTurnResults.bindTurnStart(handle.providerContinuationId, turnId);
@@ -1630,11 +2184,22 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // not retain that completed turn for a later unrelated invocation.
       handle.terminalTurns.delete(exactTurnKey(handle.providerContinuationId, turnId));
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
+      handle.roomContext.reset();
       throw error;
     }
     handle.setLiveState("working");
-    const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
-    return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
+    try {
+      const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
+      const result = await this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
+      if ((result.outcome === "reply" || result.outcome === "no_reply")
+        && handle.providerContinuationId === continuation && handle.client.currentConnectionId() === rpcConnection
+        && sameProviderConnectionIdentity(handle.providerConnection, connection) && !options.detachSignal?.aborted) context.commit();
+      else handle.roomContext.reset();
+      return result;
+    } catch (error) {
+      handle.roomContext.reset();
+      throw error;
+    }
   }
 
   /** Reattach only the durable exact turn; never issue a second turn/start. */
@@ -1644,6 +2209,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     options: Pick<ProviderRoomTurnOptions, "detachSignal" | "checkpointTerminalResult"> = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
+    handle.roomContext.reset();
     const turnId = request.providerTurnId.trim();
     if (!turnId) throw new CodexRoomTurnRecoveryError("Codex room-turn recovery requires an exact persisted turn id.");
     handle.roomTurnResults.track(handle.providerContinuationId, turnId);
@@ -1719,6 +2285,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (handle.turnWaiters.size) throw new Error("Codex continuation repair is unsafe while a provider turn is active.");
     // Loading or starting a thread makes Codex read the project's config again.
     if (handle.ownerSetup) await this.stopBeforeProjectReload(handle, request.cwd);
+    // It reads its command rules again too: what the project or the machine gained since the launch would apply.
+    handle.cwd = request.cwd;
+    await this.stopBeforeRuleLoad(handle, request.launchPolicy, request.cwd);
 
     const assertAttached = () => {
       if (options.detachSignal?.aborted) {
@@ -1742,6 +2311,31 @@ export class CodexProviderAdapter implements ProviderAdapter {
       ...(handle.ownerSetup ? Object.fromEntries(CODEX_ACCESS_LEVEL_OPTIONS.filter((key) => Object.hasOwn(stored, key)).map((key) => [key, stored[key]])) : stored),
       ...(handle.appliedTurnPolicy() ?? {}),
     });
+    const effort = await codexThreadEffort(handle.client, policy, request.model, request.reasoningEffort);
+    // The daemon reads launch notices when a launch returns, and it drops a line that a repair
+    // streams when the repair replaces the conversation. So a repair returns its line, and the
+    // daemon records it when the repair is done.
+    // The line is that of the conversation the repair ends on, read as a launch reads it.
+    let effortNotice = effort.notice;
+    const readEffort = (thread: CodexThreadResult) => {
+      effortNotice = effort.notice ?? codexEffortMismatchNotice(effort.sent, thread);
+    };
+    // The line is returned when it is not what the agent was last told and not what this runtime
+    // last found. It counts as said when the daemon has recorded it, and not before: a repair that
+    // fails, and a line that the daemon could not record, leave it to be said by the retry or by
+    // the next launch. It is then kept where a launch looks, so that launch does not say it again.
+    const said = (): Pick<ProviderContinuationRepairResult, "notices" | "noticesRecorded"> => {
+      const line = effortNotice;
+      const agent = request.supervisorEntryId;
+      const unsaid = line !== null && line !== handle.effortNotice && !codexEffortNoticeSaidOnce.isLastTold(agent, line);
+      return {
+        ...(unsaid ? { notices: [line] } : {}),
+        noticesRecorded: () => {
+          handle.effortNotice = line;
+          codexEffortNoticeSaidOnce.told(agent, line);
+        },
+      };
+    };
     const probeDelays = [0, 1_000, 2_000, 4_000];
     const probe = async (threadId: string): Promise<boolean> => {
       for (const waitMs of probeDelays) {
@@ -1755,12 +2349,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
           const resumed = await handle.client.request<CodexThreadResult>("thread/resume", {
             threadId,
             cwd: request.cwd,
-            ...policy,
+            ...codexThreadAccess(policy, handle.readOnlyProfile()),
             ...(request.model ? { model: request.model } : {}),
-            ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
+            ...codexThreadConfig(handle.readOnlyLevel, effort),
           });
           assertAttached();
           assertCodexReviewerApplied(policy, resumed);
+          assertCodexReadOnlyApplied(policy, resumed, handle.readOnlyProfile());
+          readEffort(resumed);
           if (resumed.thread?.id === threadId) return true;
           throw new Error("Codex continuation repair resolved a different thread.");
         } catch (error) {
@@ -1790,6 +2386,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         outcome: "replaced",
         previousProviderContinuationId: expected,
         replacementProviderContinuationId: checkpointedReplacement,
+        ...said(),
       };
     }
 
@@ -1799,18 +2396,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
         outcome: "rematerialized",
         previousProviderContinuationId: expected,
         replacementProviderContinuationId: expected,
+        ...said(),
       };
     }
 
     assertAttached();
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
-      ...policy,
+      ...codexThreadAccess(policy, handle.readOnlyProfile()),
       historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
-      ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
+      ...codexThreadConfig(handle.readOnlyLevel, effort),
     });
     assertCodexReviewerApplied(policy, started);
+    assertCodexReadOnlyApplied(policy, started, handle.readOnlyProfile());
     assertCodexThreadDirectory(request.cwd, started);
+    readEffort(started);
     const replacement = started.thread?.id?.trim();
     if (!replacement || replacement === expected) {
       throw new Error("Codex continuation repair did not return a distinct replacement thread.");
@@ -1825,6 +2425,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       outcome: "replaced",
       previousProviderContinuationId: expected,
       replacementProviderContinuationId: replacement,
+      ...said(),
     };
   }
 
@@ -2046,6 +2647,17 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const attestedPolicy = attestProviderSpawnPolicy("codex", req);
     const policy = normalizeLaunchPolicy(attestedPolicy);
     const turnPolicy = codexTurnPolicy(attestedPolicy);
+    // Read-only limits the room tools to a named list, and the background service holds that list
+    // only for an agent it delivers room messages to. An agent that collects its own messages calls
+    // the room server itself, so only Codex would hold the list there. No agent ran that way before:
+    // Read-only for Codex came with the list. So every launch of another kind is refused, and a
+    // launch that does not say its kind is taken as one, as the rest of this start takes it.
+    if (req.permissionProfileId?.trim() === "read_only" && req.deliveryMode !== "daemon_inbox") {
+      throw new Error(
+        "Read-only access is for a Codex agent that LetAgents delivers room messages to. This agent collects its own room messages, "
+        + "so LetAgents cannot hold it to the room tools that Read-only allows, and did not start it. Choose another access level for this agent.",
+      );
+    }
     const supervisorCoordinates = [
       req.supervisorEntryId,
       req.supervisorSocketPath,
@@ -2131,19 +2743,41 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (homeHarness && !custodialRuntime) {
       throw new Error("Codex can use its owner's own setup only as a daemon-supervised room agent.");
     }
+    // The access level itself decides what follows, not the shape of a policy:
+    // the attestation above has tied the level to its policy.
+    const readOnlyLevel = req.permissionProfileId?.trim() === "read_only";
+    // A Read-only agent's conversations name this permission profile in place of a sandbox. The launch defines it.
+    const readOnlyProfile = readOnlyLevel ? codexReadOnlyProfileId(req.workAttemptId) : null;
+    // Room tools are approved in advance only for an agent the daemon delivers
+    // room messages to. Such an agent's room tools run in the daemon, on its
+    // own room and workspace. An agent that collects its own messages runs them
+    // in the room server with the caller's `cwd`, so none of its tools is.
+    const readOnlyRoomTools = boundedMcp && readOnlyLevel;
     const serverUrl = await this.deps.resolveServerUrl();
-    const launch = await this.deps.launchServer(serverUrl, this.codexBin, {
-      trustedProjectPath: req.cwd,
-      configOverrides: custodialRuntime
+    // The launch's own overrides, the room's server among them. Kept with the handle: a later check lists Codex's servers as this launch does.
+    const launchOverrides = [
+      ...(custodialRuntime
         ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, {
             ...supervisorEnvironment!,
             ...(boundedMcp ? { LETAGENTS_API_URL: req.supervisorWorkerSession?.apiUrl || desktopApiUrl,
               LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "" } : {}),
-          }, custodialTools)]
-        : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
+          }, custodialTools, readOnlyRoomTools)]
+        : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides]),
+      // Read-only only: no other access level's launch changes.
+      ...(readOnlyLevel ? CODEX_READ_ONLY_CONFIG_OVERRIDES : []),
+    ];
+    const launch = await this.deps.launchServer(serverUrl, this.codexBin, {
+      trustedProjectPath: req.cwd,
+      configOverrides: launchOverrides,
       ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
       // The owner's own Codex setup stays on for this agent's app-server.
       ...(homeHarness ? { homeHarness: true } : {}),
+      ...(codexPolicyIsSandboxed(turnPolicy) ? { sandboxed: true, ...(policy.sandbox === "workspace-write" ? { writableSandbox: true } : {}) } : {}),
+      // A Read-only conversation names this profile, so the launch must define it: with the owner's sign-in file denied to every command.
+      ...(readOnlyProfile ? { hideSignInProfile: readOnlyProfile } : {}),
+      // The launch is told the policy too, whatever level was named. With this policy and no profile it starts nothing:
+      // a caller that left the level's name out would otherwise get Codex's read-only sandbox alone.
+      ...(codexThreadIsReadOnly(policy) ? { readOnlySandbox: true } : {}),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {
@@ -2182,23 +2816,46 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
     try {
       await client.connect();
+      const reportedHome = client.reportedCodexHome?.();
+      // At a sandboxed level a Codex that does not say which home it runs with is not used. Codex
+      // 0.153.4 always says. A client that cannot be asked at all is a stand-in, never the real one.
+      if (codexPolicyIsSandboxed(turnPolicy) && (reportedHome === null || (launch.codexHome && reportedHome === undefined))) {
+        throw new Error(
+          "Codex did not say which home folder it runs with, so LetAgents cannot tell that your saved command rules stay away from this agent, and stopped it. "
+          + "Update Codex, then start the agent again.",
+        );
+      }
+      // A Codex that says it runs with another home than the one it was given has the owner's rules.
+      if (launch.codexHome && !sameDirectory(reportedHome!, launch.codexHome)) {
+        throw new Error(
+          "Codex did not start with the home folder LetAgents gave it for this access level, so LetAgents stopped it. "
+          + "Check that nothing sets CODEX_HOME for the codex command (a wrapper script or a shell alias), update Codex, then start the agent again.",
+        );
+      }
       await requireLetAgentsWorkplace(client);
       if (resumeRef && !this.resumeSupported) {
         throw new Error(
           "Codex app-server does not support thread/resume; bounded recovery must start a fresh generation.",
         );
       }
+      const effort = await codexThreadEffort(client, policy, req.model, req.reasoningEffort);
       let threadResult: CodexThreadResult;
       if (resumeRef) {
         try {
           threadResult = await client.request<CodexThreadResult>("thread/resume", {
             threadId: resumeRef.providerContinuationId,
             cwd: req.cwd,
-            ...policy,
+            ...codexThreadAccess(policy, readOnlyProfile),
             ...(req.model ? { model: req.model } : {}),
-            ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
+            ...codexThreadConfig(readOnlyLevel, effort),
           });
         } catch (error) {
+          if (errorMessage(error) === `thread ${resumeRef.providerContinuationId} already has an active writer`) {
+            throw new Error(
+              "This agent's saved Codex conversation is being used by another running Codex session. "
+              + "Resume this agent after that session has stopped using the conversation. LetAgents will not interrupt it.",
+            );
+          }
           if (!isMethodNotFound(error)) throw error;
           this.resumeSupported = false;
           throw new Error(
@@ -2207,14 +2864,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
         }
       } else {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
-          ...policy,
+          ...codexThreadAccess(policy, readOnlyProfile),
           historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
-          ...(req.reasoningEffort ? { reasoningEffort: req.reasoningEffort } : {}),
+          ...codexThreadConfig(readOnlyLevel, effort),
         });
         assertCodexThreadDirectory(req.cwd, threadResult);
       }
       assertCodexReviewerApplied(policy, threadResult);
+      assertCodexReadOnlyApplied(policy, threadResult, readOnlyProfile);
       const threadId = threadResult.thread?.id;
       if (!threadId) {
         throw new Error("Codex app-server did not return a thread id.");
@@ -2236,11 +2894,22 @@ export class CodexProviderAdapter implements ProviderAdapter {
       );
       handle.managedLaunchContract = managedLaunchContract;
       handle.ownerSetup = homeHarness;
+      handle.readOnlyLevel = readOnlyLevel;
+      handle.codexHome = reportedHome;
+      handle.cwd = req.cwd;
+      handle.launchOverrides = launchOverrides;
+      handle.writableFoldersCheck = launch.writableFoldersCheck ?? null;
       // A start with the owner's setup asks Codex nothing more that can fail it, so a line given here reaches the owner.
       const unused = homeHarness
         ? ownerSetupUnusedOptionsSaidOnce.whenChanged(req.supervisorEntryId, ownerSetupUnusedOptionsNotice("Codex", req.launchPolicy, attestedPolicy))
         : null;
-      if (unused) handle.launchNotices = [unused];
+      // The effort is either not sent, or sent and reported back. A line about it is said when it changes.
+      handle.effortNotice = effort.notice ?? codexEffortMismatchNotice(effort.sent, threadResult);
+      handle.launchNotices = [
+        unused,
+        codexEffortNoticeSaidOnce.whenChanged(req.supervisorEntryId, handle.effortNotice),
+        codexAgentHomeNoticeSaidOnce.whenChanged(req.supervisorEntryId, launch.notices?.join(" ") || null),
+      ].filter((notice): notice is string => notice !== null);
       this.reportDeclinedOwnerRequests(handle);
       handle.setLiveState("idle");
       this.emitNativeExecution(handle, {
@@ -2280,7 +2949,6 @@ export class CodexProviderAdapter implements ProviderAdapter {
         roomIdentifier: req.roomId,
         joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
         cwd: req.cwd,
-        deliveryMode: req.deliveryMode ?? "mcp_polling",
         stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
         token: makeCodexStopToken(),
         suggestedDisplayName: req.agentDisplayName.trim(),
@@ -2303,7 +2971,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
       void this.emitTranscriptTail(handle);
       return handle;
     } catch (error) {
-      if (handle) handle.protocolError = true;
+      if (handle) {
+        handle.protocolError = true;
+        // The lines about the effort and the agents' home did not reach the owner, so the next start says them.
+        codexEffortNoticeSaidOnce.forget(req.supervisorEntryId, handle.launchNotices);
+        codexAgentHomeNoticeSaidOnce.forget(req.supervisorEntryId, handle.launchNotices);
+      }
       client.close();
       if (launch.pid !== null) this.deps.signalProcess(launch.pid, "SIGTERM");
       throw error;
@@ -2345,6 +3018,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const ownerSetup = ref.ownerSetup === true;
     let handle: CodexProviderHandle | null = null;
     let exactEndpointVerified = false;
+    let reportedWhenFound: CodexReportedAccess | null = null;
+    let notReadOnly: string | null = null;
     const pendingNotifications: RpcNotification[] = [];
     const client = this.deps.createRpcClient(connection.url, (notification) => {
       if (!handle) pendingNotifications.push(notification);
@@ -2405,21 +3080,30 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (!continuationMissing && !exactEmptyFallback && loadedThread) {
         // thread/read verifies identity but does not subscribe this connection
         // to turn items or approval requests. Resume the exact existing thread
-        // without configuration overrides or starting/replaying a turn.
+        // without configuration overrides or starting/replaying a turn. It names
+        // no access either, a Read-only runtime's profile included: the reply is
+        // then what the conversation has, not what this request asked for.
         const subscribed = await client.request<CodexThreadResult>("thread/resume", {
           threadId: ref.providerContinuationId,
         });
         if (subscribed.thread?.id !== ref.providerContinuationId) {
           throw new Error("Codex subscription resolved a different durable continuation thread.");
         }
+        // The reply names the policy the loaded conversation has. For Read-only it is held to the same check as at a
+        // start. Without a policy there is nothing to hold it to yet: it is kept for the call that binds one.
+        notReadOnly = codexFoundNotReadOnly(turnPolicy, subscribed, codexFoundProfile(turnPolicy, ref.workAttemptId));
+        if (!turnPolicy) reportedWhenFound = { approvalPolicy: subscribed.approvalPolicy, sandbox: subscribed.sandbox, activePermissionProfile: subscribed.activePermissionProfile };
         // A turn can finish between the first read and subscription without
         // sending this connection a notification. Reconstruct from a fresh
         // snapshot after subscribing so that gap cannot retain a stale turn.
-        read = await client.request<ThreadReadResult>("thread/read", {
-          threadId: ref.providerContinuationId, includeTurns: true,
-        });
-        if (read.thread?.id !== ref.providerContinuationId) {
-          throw new Error("Codex subscription snapshot resolved a different durable continuation thread.");
+        // A runtime that is about to be stopped is asked nothing more.
+        if (!notReadOnly) {
+          read = await client.request<ThreadReadResult>("thread/read", {
+            threadId: ref.providerContinuationId, includeTurns: true,
+          });
+          if (read.thread?.id !== ref.providerContinuationId) {
+            throw new Error("Codex subscription snapshot resolved a different durable continuation thread.");
+          }
         }
       }
       const observedExit = this.deps.observeProcessExit(
@@ -2434,7 +3118,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         this.deps,
       );
       const launch: CodexAppServerLaunch = { pid: connection.pid, exited: exitEvidence };
-      handle = new CodexProviderHandle(
+      const found = new CodexProviderHandle(
         ref.workAttemptId,
         connection.pid,
         ref.providerContinuationId,
@@ -2445,12 +3129,22 @@ export class CodexProviderAdapter implements ProviderAdapter {
         this.deps.now,
         turnPolicy,
       );
+      this.exitPromises.set(found, launch.exited.then((exit) => this.observeExit(found, exit)));
+      // A runtime that failed the Read-only check is stopped, not attached. It is never kept here
+      // or handed to the daemon, and what it still sends on this connection is dropped.
+      if (notReadOnly) return await this.stopFoundNotReadOnly(notReadOnly, () => this.stop(found));
+      handle = found;
       handle.ownerSetup = ownerSetup;
+      handle.readOnlyLevel = codexTurnPolicyIsReadOnly(turnPolicy);
+      handle.reportedWhenFound = reportedWhenFound;
+      // A process found running is held to the same rule as a new one: see requireTurnPolicy.
+      handle.codexHome = client.reportedCodexHome?.();
+      const conversationFolder = recordValue(read.thread)?.cwd;
+      handle.cwd = typeof conversationFolder === "string" && conversationFolder.trim() ? conversationFolder : null;
       this.reportDeclinedOwnerRequests(handle);
       handle.setLiveState(continuationMissing ? "idle" : "working");
       handle.subscriptionAfterMaterialization = exactEmptyFallback;
       this.handles.set(ref.workAttemptId, handle);
-      this.exitPromises.set(handle, launch.exited.then((exit) => this.observeExit(handle!, exit)));
       const queuedTurnLifecycle = pendingNotifications.some(notification =>
         this.queuedTurnLifecycleIsAmbiguous(handle!, notification));
       this.reconstructAttachedExecution(
@@ -2678,8 +3372,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
     notification: RpcNotification,
     correlateLifecycle = true,
   ): void {
+    handle.usage.snapshot(handle.providerContinuationId);
+    handle.usage.codex(notification.method, notification.params, this.deps.now());
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
+    if (exactThreadId === handle.providerContinuationId && (
+      notification.method === "thread/compacted"
+      || (["item/started", "item/completed"].includes(notification.method)
+        && recordValue(recordValue(notification.params)?.item)?.type === "contextCompaction")
+    )) handle.roomContext.reset();
     const terminalMatch = /^turn\/(completed|interrupted|failed|cancelled|stopped)$/i.exec(notification.method);
     this.observePermissionFileChangeProposal(handle, notification);
     const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);
@@ -2693,6 +3394,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
         ? nativeStatus.toLowerCase()
         : terminalMatch[1]!.toLowerCase();
       this.noteExactTurnTerminal(handle, exactTurnKey(exactThreadId, exactTurnId), terminalStatus);
+    }
+    if (notification.method === "thread/settings/updated" && exactThreadId === handle.providerContinuationId) {
+      this.holdSettingsToReadOnly(handle, notification.params);
     }
     const threadStatus = recordValue(recordValue(notification.params)?.status)?.type
       ?? recordValue(notification.params)?.status;
@@ -2961,6 +3665,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const subscribed = await handle.client.request<CodexThreadResult>("thread/resume", { threadId });
     if (subscribed.thread?.id !== threadId) throw new Error("Codex subscription resolved a different materialized thread.");
     handle.subscriptionAfterMaterialization = false;
+    // A runtime that was found with no loaded conversation had no reply to hold to its level then.
+    // This reply is the first word on what the conversation got, so it is held to Read-only as every other is.
+    const notReadOnly = codexFoundNotReadOnly(handle.appliedTurnPolicy(), subscribed, handle.readOnlyProfile());
+    if (notReadOnly) {
+      handle.foundNotReadOnly ??= { reported: notReadOnly, stopped: null };
+      // Its turn must not go on with what the level does not allow. The stop is not waited for here; the daemon sees the process end.
+      this.stopNotReadOnly(handle)?.catch(() => undefined);
+      throw new Error(`${notReadOnly}, so LetAgents stopped the agent. ${STARTS_AGAIN_BY_ITSELF}`);
+    }
     return true;
   }
 
@@ -3148,6 +3861,82 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   /**
+   * Gives a runtime that was found before the daemon supplied its policy that
+   * policy. What its conversation reported then is held to the policy now, as
+   * an attach with the policy holds it. Every later caller gets the same answer.
+   */
+  private bindFoundPolicy(handle: CodexProviderHandle, policy: unknown): CodexProviderHandle | Promise<ProviderAttachTerminal> {
+    const reported = handle.bindTurnPolicy(policy);
+    const notReadOnly = reported && codexFoundNotReadOnly(handle.appliedTurnPolicy(), reported, handle.readOnlyProfile());
+    if (notReadOnly) handle.foundNotReadOnly = { reported: notReadOnly, stopped: null };
+    return this.stopNotReadOnly(handle) ?? handle;
+  }
+
+  /**
+   * Codex says so when the settings of a conversation change. For a Read-only
+   * runtime the new settings are held to the level as a reply is: a sandbox,
+   * an approval policy or a permission profile other than Read-only's stops
+   * the runtime, its owner is told, and the daemon starts the agent again.
+   * Nothing LetAgents sends changes them, so a change is Codex's own or some
+   * other client's. A notice that holds no settings says nothing either way.
+   *
+   * This catches a profile that Codex stops reporting. It does not show that
+   * the `deny` is in force while the profile is reported: see
+   * assertCodexReadOnlyApplied.
+   */
+  private holdSettingsToReadOnly(handle: CodexProviderHandle, params: unknown): void {
+    const settings = recordValue(recordValue(params)?.threadSettings);
+    if (!settings || handle.foundNotReadOnly) return;
+    const notReadOnly = codexFoundNotReadOnly(handle.appliedTurnPolicy(), {
+      approvalPolicy: settings.approvalPolicy, sandbox: settings.sandboxPolicy, activePermissionProfile: settings.activePermissionProfile,
+    }, handle.readOnlyProfile());
+    if (!notReadOnly) return;
+    handle.foundNotReadOnly = { reported: notReadOnly, stopped: null };
+    // The daemon keeps an agent's activity from its stream, so this is said there before the process goes.
+    this.publishStream(handle, "readOnly/stopped", {}, "provider_event", `Stopped this agent. ${notReadOnly}. ${STARTS_AGAIN_BY_ITSELF}`);
+    // The stop is not waited for here; the daemon sees the process end. One that fails is tried again at the next attach.
+    this.stopNotReadOnly(handle)?.catch(() => undefined);
+  }
+
+  /**
+   * The stop of a runtime that was found not to be Read-only. One stop serves
+   * every caller while it runs and once it has ended the process. A stop that
+   * failed is not kept: the runtime takes no turn meanwhile, and the next
+   * attach, or the next call here, tries again, so its process does not stay
+   * until the owner restarts the agent.
+   */
+  private stopNotReadOnly(handle: CodexProviderHandle): Promise<ProviderAttachTerminal> | null {
+    const found = handle.foundNotReadOnly;
+    if (!found) return null;
+    if (!found.stopped) {
+      const stopping = this.stopFoundNotReadOnly(found.reported, () => this.stop(handle));
+      found.stopped = stopping;
+      stopping.catch(() => { if (found.stopped === stopping) found.stopped = null; });
+    }
+    return found.stopped;
+  }
+
+  /**
+   * A Read-only runtime found running whose conversation reports another
+   * policy is not kept: a turn it is in would go on with what the level does
+   * not allow. Its process is stopped, and the answer is the proof that it is
+   * gone, with a line for its owner. The daemon then closes this runtime and
+   * starts the agent again by its normal path. When the process cannot be
+   * proved gone, the attach fails: a second writer must not start.
+   */
+  private async stopFoundNotReadOnly(reported: string, stop: () => Promise<ProviderTerminalPayload>): Promise<ProviderAttachTerminal> {
+    let terminal: ProviderTerminalPayload;
+    try {
+      terminal = await stop();
+      // A stop that ends on a lost connection is not proof that the process is gone.
+      if (!terminal.nativeRuntimeDeath) throw new Error("its process could not be proved gone");
+    } catch (error) {
+      throw new Error(`${reported}, and LetAgents could not stop the agent: ${errorMessage(error)}`);
+    }
+    return { state: "terminal", terminal, notices: [`${reported}, so LetAgents stopped the agent. ${STARTS_AGAIN_BY_ITSELF}`] };
+  }
+
+  /**
    * For a process that has its owner's setup: check the project still adds
    * nothing the process was not started with turned off, and stop the process
    * and refuse when it does, or when that cannot be checked. The caller then
@@ -3163,17 +3952,59 @@ export class CodexProviderAdapter implements ProviderAdapter {
     throw new Error(reason);
   }
 
+  /**
+   * For a process at a sandboxed access level: stop it and refuse when a
+   * conversation it started or loaded now would read a command rule, or when
+   * that cannot be checked. As above, the agent is idle and its owner is told.
+   */
+  private async stopBeforeRuleLoad(handle: CodexProviderHandle, storedPolicy: unknown, cwd: string): Promise<void> {
+    const policy = handle.appliedTurnPolicy() ?? recordValue(storedPolicy);
+    if (!policy || !codexPolicyIsSandboxed(policy)) return;
+    // The project's own rule folders are looked in by name, for every client. The rest is asked of
+    // Codex with the home the process runs with, which a stand-in client cannot say.
+    const reason = sandboxedCodexProjectRefusal(cwd) ?? (handle.codexHome === undefined ? null
+      : await this.deps.sandboxedLoadRefusal(this.codexBin, { cwd, codexHome: handle.codexHome, writableSandbox: recordValue(policy.sandboxPolicy)?.type === "workspaceWrite" },
+        (check) => { handle.writableFoldersCheck = check; })
+        .catch((error: unknown) => `LetAgents could not check which command rules Codex would read (${errorMessage(error).split("\n")[0]}), `
+          + `so it stopped the agent before Codex could load them. ${STARTS_AGAIN_BY_ITSELF}`))
+      // A process with its owner's setup was checked against its project just before this.
+      ?? (handle.codexHome === undefined || handle.ownerSetup ? null : await this.isolationChanged(handle, cwd));
+    if (!reason) return;
+    this.publishStream(handle, "sandboxRules/stopped", {}, "provider_event", `Stopped this agent. ${reason}`);
+    await this.stop(handle).catch(() => undefined);
+    throw new Error(reason);
+  }
+
+  /**
+   * Why a process without its owner's setup may not start or load a
+   * conversation now: an MCP server or a skill it was not started with turned
+   * off, or a project that changes the room's own server. Null when it may.
+   */
+  private async isolationChanged(handle: CodexProviderHandle, cwd: string): Promise<string | null> {
+    const commandLine = handle.pid === null ? null : await this.deps.readCommandLine(handle.pid);
+    if (!commandLine) {
+      return "LetAgents could not read how this agent's Codex was started, so it stopped the agent "
+        + `before Codex could load a project's MCP servers. ${STARTS_AGAIN_BY_ITSELF}`;
+    }
+    try {
+      await this.deps.assertLiveIsolationUnchanged(this.codexBin, { commandLine, cwd, codexHome: handle.codexHome ?? null, launchOverrides: handle.launchOverrides });
+      return null;
+    } catch (error) {
+      return errorMessage(error);
+    }
+  }
+
   /** Why a process with its owner's setup may not load the project's config again. Null when it may. */
   private async projectReloadRefusal(handle: CodexProviderHandle, cwd: string): Promise<string | null> {
     const commandLine = handle.pid === null ? null : await this.deps.readCommandLine(handle.pid);
     if (!commandLine) {
       return "LetAgents could not read how this agent's Codex was started, so it stopped the agent "
-        + "before Codex could load the project's configuration with your own setup. It starts again by itself.";
+        + `before Codex could load the project's configuration with your own setup. ${STARTS_AGAIN_BY_ITSELF}`;
     }
     // LetAgents started this process with the owner's setup. A command line that says otherwise is not believed.
     if (!codexProcessKeepsOwnerSetup(commandLine)) {
       return "This agent's Codex is not running the way LetAgents started it, so LetAgents stopped the agent "
-        + "before Codex could load the project's configuration with your own setup. It starts again by itself.";
+        + `before Codex could load the project's configuration with your own setup. ${STARTS_AGAIN_BY_ITSELF}`;
     }
     try {
       await this.deps.assertLiveProjectUnchanged(this.codexBin, { commandLine, cwd });

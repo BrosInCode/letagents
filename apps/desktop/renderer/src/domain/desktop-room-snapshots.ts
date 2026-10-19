@@ -69,14 +69,21 @@ export function removeSnapshotReasoningSession(
   };
 }
 
+let liveMessageArrival = 0;
+
 export function appendSnapshotMessage(
   snapshot: DesktopRoomSnapshot | null,
-  message: DesktopRoomMessage
+  message: DesktopRoomMessage,
+  admitParticipation = false,
 ): DesktopRoomSnapshot | null {
   if (!snapshot) return snapshot;
+  // Only this live-event / successful-send path marks new participation.
+  // Snapshot reconciliation and historical batch merges deliberately do not.
+  const live = admitParticipation && !message.outgoing && !snapshot.messages.some(existing => existing.id === message.id)
+    ? { ...message, liveArrival: ++liveMessageArrival } : message;
   return {
     ...snapshot,
-    messages: appendDesktopRoomMessage(snapshot.messages || [], message),
+    messages: appendDesktopRoomMessage(snapshot.messages || [], live),
   };
 }
 
@@ -294,7 +301,8 @@ export function mergeDesktopRoomMessages(
   for (const message of current) byId.set(message.id, message);
   for (const message of incoming) {
     if (!isPromptOnlyDesktopMessage(message)) {
-      byId.set(message.id, message);
+      const arrival = byId.get(message.id)?.liveArrival;
+      byId.set(message.id, arrival === undefined ? message : { ...message, liveArrival: arrival });
     }
   }
   return [...byId.values()].sort(compareDesktopRoomMessages);
@@ -350,8 +358,8 @@ export function messageReferencesMissingThreadContext(
 }
 
 function compareDesktopGitHubEvents(left: DesktopGitHubRoomEvent, right: DesktopGitHubRoomEvent): number {
-  const leftTime = Date.parse(left.createdAt || "");
-  const rightTime = Date.parse(right.createdAt || "");
+  const leftTime = Date.parse(left.eventOrderAt || left.createdAt || "");
+  const rightTime = Date.parse(right.eventOrderAt || right.createdAt || "");
   if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
     return rightTime - leftTime;
   }

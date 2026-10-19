@@ -20,8 +20,9 @@ import type {
   ProviderActionStreamEvent,
   ProviderActionTerminal,
   ProviderTurnControlResult,
+  RoomTurnImageDelivery,
 } from "./provider-action-port.js";
-import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
@@ -39,6 +40,7 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
+  readUsage?(handle: NativeHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   runtimeCustody?(workAttemptId: string, handle?: NativeHandle): "absent" | "owned" | "unknown";
   observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; connectionId?: string; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | Extract<ClaudePermissionObservation, { type: "request_closed" }> | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
@@ -62,12 +64,15 @@ export type NativeProviderAdapter = {
   inspectTurnBoundary?(handle: NativeHandle): Promise<NativeTurnBoundary>;
   controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointPreparedTurn?: (state: { providerTurnId: string; providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
+  roomTurnImageDelivery?(handle: NativeHandle): RoomTurnImageDelivery;
   recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void> }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: NativeHandle, request: ProviderContinuationRepairRequest, options: { checkpointReplacement: (providerContinuationId: string) => Promise<void>; detachSignal?: AbortSignal }): Promise<{
     handle: NativeHandle;
     outcome: "rematerialized" | "replaced";
     previousProviderContinuationId: string;
     replacementProviderContinuationId: string;
+    notices?: readonly string[];
+    noticesRecorded?: () => void;
   }>;
   stopRef?(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number }): Promise<ProviderActionTerminal>;
   describeManagedLaunchContract?(input: { apiUrl: string; devMcpServerEntryPath?: string }): Promise<string | null>;
@@ -181,10 +186,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       // omitted a provider connection it did not know how to serialize; the
       // remembered native handle is the authority needed to repair that
       // manifest, never permission to launch a replacement.
-      if (provider === "codex" && ref.launchPolicy !== undefined
-        && await (await this.adapter(provider)).attach({
+      if (provider === "codex" && ref.launchPolicy !== undefined) {
+        const bound = await (await this.adapter(provider)).attach({
           ...ref, providerConnection: ref.providerConnection ?? handle.providerConnection,
-        }) !== handle) return null;
+        });
+        // The adapter can stop a runtime that fails a check against the policy it is given
+        // here. Its proof that the process is gone is then the answer, as at a first attach.
+        if (bound !== handle) return bound && isAttachTerminal(bound) ? bound : null;
+      }
       return publicHandle(handle);
     }
     const adapter = await this.adapter(provider);
@@ -437,6 +446,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return adapter.runRoomTurn(remembered.handle, request, options);
   }
 
+  /** Asked for one turn only; an unknown or replaced handle takes no images. */
+  async roomTurnImageDelivery(handle: ProviderActionHandle): Promise<RoomTurnImageDelivery> {
+    let remembered: ReturnType<ProviderActionPortRouter["required"]>;
+    try { remembered = this.required(handle); } catch { return null; }
+    const adapter = await this.adapter(remembered.provider);
+    return adapter.roomTurnImageDelivery?.(remembered.handle) ?? null;
+  }
+
   async recoverRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; settleLifecycleBeforeIdle?: () => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void> }): Promise<ProviderRoomTurnResult> {
     const remembered = this.required(handle);
     const adapter = await this.adapter(remembered.provider);
@@ -560,6 +577,25 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const adapter = await this.adapter(remembered.provider);
     if (!adapter.onExecution) throw new Error(`Provider '${remembered.provider}' does not expose native execution observations.`);
     return adapter.onExecution(remembered.handle, listener);
+  }
+
+  async readUsage(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null> {
+    const remembered = this.required(handle);
+    const continuation = handle.providerContinuationId;
+    const connection = structuredClone(handle.providerConnection);
+    // Cursor keeps its session between turns without a live process. Reading
+    // that exact idle lane needs stable state, not evidence of process life.
+    // Other providers and running Cursor turns still require a process birth.
+    const sameConnection = remembered.provider === "cursor" && connection?.kind === "cursor_cli"
+      && connection.pid === null && connection.processIdentity == null
+      ? sameProviderActionConnectionSnapshot : sameProviderActionConnectionIdentity;
+    if (!sameConnection(remembered.handle.providerConnection, connection)
+      || this.exits.get(remembered.handle)?.exited) return null;
+    const usage = await remembered.adapter.readUsage?.(remembered.handle) ?? null;
+    const current = this.handles.get(handle.workAttemptId);
+    return current === remembered && current.handle?.providerContinuationId === continuation
+      && sameConnection(current.handle.providerConnection, connection)
+      && !this.exits.get(remembered.handle)?.exited && usage?.providerContinuationId === continuation ? usage : null;
   }
 
   async probeControl(handle: ProviderActionHandle): Promise<ControlProbeResult> {

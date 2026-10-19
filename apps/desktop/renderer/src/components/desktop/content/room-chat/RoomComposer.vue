@@ -1,8 +1,8 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
-    <button v-if="attentionApprovalCount" type="button" class="desktop-host-approval-history"
+    <button v-if="historyApprovalCount" type="button" class="desktop-host-approval-history"
       :aria-expanded="showApprovalHistory" @click="showApprovalHistory = !showApprovalHistory">
-      {{ `${showApprovalHistory ? 'Hide' : 'Show'} ${attentionApprovalCount} ${attentionApprovalCount === 1 ? 'approval' : 'approvals'} needing attention` }}
+      {{ hostApprovalHistoryLabel(historyApprovalCount, showApprovalHistory) }}
     </button>
     <RoomPresenceChips :chips="presenceChips ?? []" />
     <RoomComposerEventChips
@@ -54,7 +54,7 @@
             <ChevronRight :size="14" aria-hidden="true" />
           </button>
         </template>
-        <button type="button" class="desktop-host-approval-dismiss" :disabled="approvalSettling"
+        <button type="button" class="desktop-host-approval-dismiss" :disabled="!decisionsArmed"
           :aria-label="`Dismiss approval from ${currentHostApproval.presentation.displayName}`"
           @click="dismissHostApproval(currentHostApproval.id)">
           <X :size="15" aria-hidden="true" />
@@ -80,7 +80,7 @@
         </details>
         <!-- One action group per state, each in this chain, then Always allow.
           Every action here, destructive ones included, is disabled by
-          hostApprovalDecisionsDisabled so it waits out the settle hold. The
+          hostApprovalDecisionsDisabled so it waits out the arming hold. The
           row runs right to left: the chain's group sits at the right edge, and
           Always allow takes its own line above when it would not fit beside it. -->
         <div class="desktop-host-approval-decisions">
@@ -114,58 +114,6 @@
     <p v-if="hostApprovalError" class="desktop-composer-permission-error" role="status">
       {{ hostApprovalError }} <button type="button" :disabled="hostApprovalLoading" @click="refreshRoomHostApprovals">Refresh approvals</button>
     </p>
-    <div
-      v-if="primaryPermissionApproval"
-      class="desktop-composer-permission-tray"
-      data-testid="desktop-composer-permission-tray"
-      aria-live="polite"
-    >
-      <div class="desktop-composer-permission-main">
-        <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
-        <div class="desktop-composer-permission-copy">
-          <strong>{{ primaryPermissionApproval.displayName }} needs approval</strong>
-          <span>
-            {{ primaryPermissionApproval.title }}
-            <template v-if="permissionOverflowCount > 0">
-              / {{ permissionOverflowCount }} more waiting
-            </template>
-          </span>
-        </div>
-      </div>
-      <p>
-        <span>{{ primaryPermissionApproval.providerLabel }}</span>
-        <span>{{ primaryPermissionApproval.toolName }}</span>
-        <span v-if="primaryPermissionApproval.targetLabel">{{ primaryPermissionApproval.targetLabel }}</span>
-      </p>
-      <div class="desktop-composer-permission-actions">
-        <button
-          type="button"
-          class="desktop-composer-permission-detail"
-          @click="$emit('open-permission-detail', primaryPermissionApproval)"
-        >
-          Details
-        </button>
-        <button
-          type="button"
-          class="desktop-composer-permission-deny"
-          :disabled="Boolean(resolvingPermissionIds[primaryPermissionApproval.id])"
-          @click="$emit('resolve-permission', primaryPermissionApproval, 'deny')"
-        >
-          {{ resolvingPermissionIds[primaryPermissionApproval.id] === 'deny' ? "Denying..." : "Deny" }}
-        </button>
-        <button
-          type="button"
-          class="desktop-composer-permission-allow"
-          :disabled="Boolean(resolvingPermissionIds[primaryPermissionApproval.id])"
-          @click="$emit('resolve-permission', primaryPermissionApproval, 'allow')"
-        >
-          {{ resolvingPermissionIds[primaryPermissionApproval.id] === 'allow' ? "Allowing..." : "Allow" }}
-        </button>
-      </div>
-    </div>
-    <div v-if="permissionError" class="desktop-composer-permission-error" role="alert">
-      {{ permissionError }}
-    </div>
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
         <strong>{{ replyHeading }}</strong>
@@ -174,7 +122,6 @@
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
     <div class="desktop-composer-input-row">
-      <TypingIndicator :label="typing.label.value" />
       <button
         class="desktop-composer-add-agent"
         type="button"
@@ -202,32 +149,36 @@
         @input="handleDraftInput"
         @keydown="handleComposerKey"
       />
-      <button
-        class="desktop-composer-attach"
-        type="button"
-        :disabled="roomLoading || sending || !roomIdentifier || attaching"
-        :title="attaching ? 'Attaching' : 'Attach files'"
-        :aria-label="attaching ? 'Attaching files' : 'Attach files'"
-        data-testid="desktop-composer-attach"
-        @click="$emit('pick-attachments')"
-      >
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.8-8.8a4 4 0 1 1 5.7 5.7l-8.9 8.9a2 2 0 0 1-2.8-2.8l8.1-8.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
-      </button>
-      <button
-        class="desktop-composer-send"
-        type="submit"
-        :aria-label="sending ? 'Sending message' : 'Send message'"
-        :title="sending ? 'Sending message' : 'Send message'"
-        :disabled="roomLoading || sending || slash.busy.value || !canSend"
-        data-testid="desktop-composer-send"
-      >
-        <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
-        <ArrowUp v-else :size="17" aria-hidden="true" />
-      </button>
+      <div class="desktop-composer-actions" data-testid="desktop-composer-actions">
+        <button
+          class="desktop-composer-attach"
+          type="button"
+          :disabled="roomLoading || sending || !roomIdentifier || attaching"
+          :title="attaching ? 'Attaching' : 'Attach files'"
+          :aria-label="attaching ? 'Attaching files' : 'Attach files'"
+          data-testid="desktop-composer-attach"
+          @click="$emit('pick-attachments')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.8-8.8a4 4 0 1 1 5.7 5.7l-8.9 8.9a2 2 0 0 1-2.8-2.8l8.1-8.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
+        </button>
+        <RoomGifPicker :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending" @select="selectedGif = $event" />
+        <button
+          class="desktop-composer-send"
+          type="submit"
+          :aria-label="sending ? 'Sending message' : 'Send message'"
+          :title="sending ? 'Sending message' : 'Send message'"
+          :disabled="roomLoading || sending || slash.busy.value || !canSend"
+          data-testid="desktop-composer-send"
+        >
+          <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
+          <ArrowUp v-else :size="17" aria-hidden="true" />
+        </button>
+      </div>
     </div>
+    <div v-if="selectedGif" class="desktop-composer-gif-draft">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
     <DesktopAttachmentDrafts
       :attachments="attachmentDrafts"
       :pending-attachments="pendingAttachmentDrafts"
@@ -269,28 +220,28 @@
 </template>
 
 <script setup lang="ts">
+import type { RoomGif } from "../../../../../../../../shared/room-expressions.mjs";
+
 import { injectRoomMessageMotion } from "../../../../../../../../shared/ui/useRoomMessageMotion";
-import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
 import { useComposerSlashCommands } from "../../../../../../../../shared/ui/useComposerSlashCommands";
 import { roomSearchCommandKey } from "../room-shell/useDesktopRoomSearch";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 import { useRoomTyping } from "../../../../composables/useRoomTyping";
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, Plus, X } from "@lucide/vue";
 import type {
-  DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
-import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
-import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_SETTLE_MS, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalFields, hostApprovalHeading, hostApprovalSummary } from "./host-approval-presentation";
+import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_ARM_MS, hostApprovalActionKey, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalDecisionsArmed, hostApprovalFields, hostApprovalHeading, hostApprovalHistoryCount, hostApprovalHistoryLabel, hostApprovalSummary, hostApprovalTrayOrder } from "./host-approval-presentation";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "./host-approval-dismissals";
 import { decideHostApproval, hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./host-approvals";
 import { roomMentionCandidates } from "../../../../domain/participants";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
+import RoomGifPicker from "./RoomGifPicker.vue";
 import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
 import RoomPresenceChips from "./RoomPresenceChips.vue";
 import type { PresenceChip } from "../../../../domain/presence-chips";
@@ -322,28 +273,23 @@ const props = defineProps<{
   participants: DesktopParticipantSummary[];
   presenceChips?: PresenceChip[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
-  permissionApprovals: ManagedAgentPermissionApproval[];
-  permissionError: string | null;
   replyTo: RoomComposerReplyTarget | null;
-  resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
   roomIdentifier: string | null;
   roomLoading: boolean;
   sendError: string | null;
   sending: boolean;
   correctableAgents?: readonly AgentCorrectionTarget[];
+  // False while the chat tab is hidden; the composer holds its cards again when it turns true.
+  active?: boolean;
 }>();
 
+const selectedGif = ref<RoomGif | null>(null);
 const emit = defineEmits<{
   "clear-reply": [];
   "pick-attachments": [];
   "open-add-agent": [];
-  "open-permission-detail": [approval: ManagedAgentPermissionApproval];
   "remove-attachment": [uploadId: string];
-  "resolve-permission": [
-    approval: ManagedAgentPermissionApproval,
-    behavior: DesktopManagedAgentPermissionDecisionBehavior,
-  ];
-  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
+  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "open-event-preview": [event: ComposerEventPreview];
   "dismiss-event-preview": [messageId: string];
   "stop-agent-turn": [agentId: string, approvalId: string];
@@ -381,20 +327,24 @@ const unresolvedHostApprovals = computed(() => hostApprovals.value.filter(approv
     || approval.status === "unavailable" || approval.status === "uncertain")
   && !dismissedHostApprovalIds.value.has(approval.id)
   && !(approval.dismissKey && rememberedHostApprovalDismissals.value.has(approval.dismissKey))));
-const attentionApprovalCount = computed(() => unresolvedHostApprovals.value.filter(approval =>
-  approval.status === "uncertain" || approval.status === "unavailable").length);
 function approvalBlocksTurn(approval: DesktopHostApproval): boolean {
   return hostApprovalBlocksTurn(approval, approvalRoom.value.firstSeenAt[hostApprovalIdentity(approval)], approvalNowMs.value);
 }
 // A request its agent is still waiting on stays in view, even when it cannot be decided here.
+// Pending requests are always in view; the history toggle adds the rest.
+function shownWithoutHistory(approval: DesktopHostApproval): boolean {
+  return approval.status === "pending" || approval.status === "decision_recorded" || approvalBlocksTurn(approval);
+}
 const visibleHostApprovals = computed(() => unresolvedHostApprovals.value.filter(approval =>
-  showApprovalHistory.value || approval.status === "pending" || approval.status === "decision_recorded"
-  || approvalBlocksTurn(approval)));
+  showApprovalHistory.value || shownWithoutHistory(approval)));
+// The history line counts only what its toggle adds to the stack, so it never names a request already in view.
+const historyApprovalCount = computed(() => hostApprovalHistoryCount(
+  unresolvedHostApprovals.value.filter(approval => !shownWithoutHistory(approval))));
 
 // An undecidable record stays dismissed across restarts until its status
 // changes. A live request is dismissed only for this session.
 function dismissHostApproval(id: string): void {
-  if (approvalSettling.value) return;
+  if (!decisionsArmed.value) return;
   const dismissKey = hostApprovals.value.find(approval => approval.id === id)?.dismissKey;
   if (dismissKey) {
     rememberedHostApprovalDismissals.value = rememberHostApprovalDismissal(rememberedHostApprovalDismissals.value, dismissKey);
@@ -410,10 +360,15 @@ function refreshRoomHostApprovals(): Promise<void> {
 // The tray shows one request. Requests keep the order this composer first
 // listed them, and a new one joins the end, so an arrival never replaces or
 // moves the request being decided. A re-presented request keeps its place.
+// Requests that can still be answered lead; unavailable ones follow.
 const trayOrder = ref<string[]>([]);
 const currentApprovalKey = ref<string | null>(null);
-const approvalSettling = ref(false);
-let approvalSettleTimer: ReturnType<typeof setTimeout> | null = null;
+// When the visible card appeared, and the clock its decisions arm on. The clock
+// moves to the arm time itself, so a timer that fires a millisecond early still arms.
+const cardShownAtMs = ref(0);
+const decisionClockMs = ref(0);
+let decisionTimer: ReturnType<typeof setTimeout> | null = null;
+const decisionsArmed = computed(() => hostApprovalDecisionsArmed(cardShownAtMs.value, decisionClockMs.value));
 const trayApprovals = computed(() => {
   const byKey = new Map<string, DesktopHostApproval>();
   for (const approval of visibleHostApprovals.value) {
@@ -425,22 +380,23 @@ const trayApprovals = computed(() => {
 const currentHostApproval = computed(() => trayApprovals.value.find(approval =>
   hostApprovalIdentity(approval) === currentApprovalKey.value) ?? trayApprovals.value[0] ?? null);
 const currentApprovalIndex = computed(() => currentHostApproval.value ? trayApprovals.value.indexOf(currentHostApproval.value) : -1);
-const hostApprovalDecisionsDisabled = computed(() => hostApprovalBusy.value !== null || hostApprovalError.value !== null || approvalSettling.value);
+const hostApprovalDecisionsDisabled = computed(() => hostApprovalBusy.value !== null || hostApprovalError.value !== null || !decisionsArmed.value);
 
 watch(visibleHostApprovals, (approvals) => {
   const keys = [...new Set(approvals.map(hostApprovalIdentity))];
   const previous = trayOrder.value;
-  const order = [...previous.filter(key => keys.includes(key)), ...keys.filter(key => !previous.includes(key))];
+  const listed = [...previous.filter(key => keys.includes(key)), ...keys.filter(key => !previous.includes(key))];
+  // The stored order is the order shown, so "takes its place" below follows the stack.
+  const order = hostApprovalTrayOrder(listed.map(key => approvals.find(approval => hostApprovalIdentity(approval) === key)!))
+    .map(hostApprovalIdentity);
   const current = currentApprovalKey.value;
   if (!current || !order.includes(current)) {
     // The request on screen was decided, withdrawn or hidden, or the tray just
     // appeared: show the one that takes its place, under a pointer aimed at
-    // the old one, and hold its actions until it settles.
+    // the old one. The watch below holds its decisions until they arm.
     const index = current ? previous.indexOf(current) : -1;
     const position = index < 0 ? 0 : previous.slice(0, index).filter(key => order.includes(key)).length;
-    const next = order[position] ?? order[position - 1] ?? null;
-    if (next) settleApprovalTray();
-    currentApprovalKey.value = next;
+    currentApprovalKey.value = order[position] ?? order[position - 1] ?? null;
   }
   trayOrder.value = order;
 }, { immediate: true });
@@ -450,20 +406,62 @@ function showApprovalAt(index: number): void {
   if (approval) currentApprovalKey.value = hostApprovalIdentity(approval);
 }
 
-function settleApprovalTray(): void {
-  approvalSettling.value = true;
-  if (approvalSettleTimer) clearTimeout(approvalSettleTimer);
-  approvalSettleTimer = setTimeout(() => { approvalSettling.value = false; approvalSettleTimer = null; }, HOST_APPROVAL_SETTLE_MS);
+/** Start the hold for the card now on screen. Its decisions arm when the hold ends. */
+function holdCardDecisions(): void {
+  const shownAtMs = Date.now();
+  cardShownAtMs.value = shownAtMs;
+  decisionClockMs.value = shownAtMs;
+  if (decisionTimer) clearTimeout(decisionTimer);
+  decisionTimer = setTimeout(() => {
+    decisionTimer = null;
+    decisionClockMs.value = shownAtMs + HOST_APPROVAL_ARM_MS;
+  }, HOST_APPROVAL_ARM_MS);
 }
+
+// Every request that becomes the visible card holds first: when it mounts, and
+// when Previous, Next, a decision or a withdrawal shows a different request.
+// The same card holds again when a decision button appears on it, such as Stop turn.
+const currentCardHoldKey = computed(() => currentHostApproval.value
+  ? `${hostApprovalIdentity(currentHostApproval.value)}\n${hostApprovalActionKey(currentHostApproval.value, approvalBlocksTurn(currentHostApproval.value))}`
+  : null);
+watch(currentCardHoldKey, (key) => {
+  if (key) holdCardDecisions();
+}, { immediate: true });
+
+// The owner sees the composer again when the window comes back to the front,
+// when the room is shown again through KeepAlive, or when the chat tab is shown.
+// A card that was on screen then holds again, so it is armed only from that moment.
+function holdCardIfShown(): void {
+  if (currentHostApproval.value) holdCardDecisions();
+}
+function onWindowVisibilityChange(): void {
+  if (document.visibilityState === "visible") holdCardIfShown();
+}
+// A host without a document (a unit harness) has no visibility to watch.
+function setVisibilityListener(listening: boolean): void {
+  if (typeof document === "undefined") return;
+  if (listening) document.addEventListener("visibilitychange", onWindowVisibilityChange);
+  else document.removeEventListener("visibilitychange", onWindowVisibilityChange);
+}
+watch(() => props.active, (active) => {
+  if (active) holdCardIfShown();
+});
+onActivated(() => {
+  holdCardIfShown();
+  setVisibilityListener(true);
+});
+onDeactivated(() => {
+  setVisibilityListener(false);
+});
 
 /** The room checks the request again before it stops anything. */
 function stopAgentTurnFor(approval: DesktopHostApproval): void {
-  if (approvalSettling.value) return;
+  if (!decisionsArmed.value) return;
   emit("stop-agent-turn", approval.presentation.agentId, approval.id);
 }
 
 function decideRoomHostApproval(approval: DesktopHostApproval, decision: HostApprovalSelection): Promise<void> {
-  if (!props.roomIdentifier || approvalSettling.value) return Promise.resolve();
+  if (!props.roomIdentifier || !decisionsArmed.value) return Promise.resolve();
   return decideHostApproval(props.roomIdentifier, approval.id, decision);
 }
 
@@ -473,17 +471,15 @@ watch(hostApprovals, (approvals) => {
 });
 
 const canSend = computed(() =>
-  Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || props.attachmentDrafts.length > 0))
+  Boolean(!props.roomLoading && props.roomIdentifier && (draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0))
 );
 // A correction is plain text for one agent's private session, so a reply,
 // a quote or attachments keep the message a room message.
 const correctionOffer = computed(() =>
-  props.correctableAgents?.length && !props.replyTo
+  props.correctableAgents?.length && !props.replyTo && !selectedGif.value
     && props.attachmentDrafts.length === 0 && props.pendingAttachmentDrafts.length === 0
     ? mentionedCorrectionTarget(draft.value, props.correctableAgents)
     : null);
-const primaryPermissionApproval = computed(() => props.permissionApprovals[0] ?? null);
-const permissionOverflowCount = computed(() => Math.max(0, props.permissionApprovals.length - 1));
 const composerInputLabel = computed(() => {
   if (props.roomLoading) return "Room messages are loading";
   return props.roomIdentifier ? "Message room" : "Choose a room before writing";
@@ -510,7 +506,7 @@ const slash = useComposerSlashCommands({
   text: draft,
   platform: "desktop",
   scope: () => props.messageNamespace || props.roomIdentifier,
-  hasAttachments: () => props.attaching || props.attachmentDrafts.length > 0 || props.pendingAttachmentDrafts.length > 0,
+  hasAttachments: () => Boolean(selectedGif.value) || props.attaching || props.attachmentDrafts.length > 0 || props.pendingAttachmentDrafts.length > 0,
   isReply: () => Boolean(props.replyTo),
   focus: () => { void nextTick(() => textareaElement.value?.focus()); },
   onError: () => pushActionToast("Command could not be completed. Your draft is still here.", "error"),
@@ -571,13 +567,16 @@ watch(
 
 onMounted(() => {
   void refreshRoomHostApprovals();
+  // The listener comes before the interval: if this hook throws, no interval is left running.
+  setVisibilityListener(true);
   approvalTimer = setInterval(() => { approvalNowMs.value = Date.now(); void refreshRoomHostApprovals(); }, 3_000);
   void nextTick(syncTextareaHeight);
 });
 
 onBeforeUnmount(() => {
   if (approvalTimer) clearInterval(approvalTimer);
-  if (approvalSettleTimer) clearTimeout(approvalSettleTimer);
+  if (decisionTimer) clearTimeout(decisionTimer);
+  setVisibilityListener(false);
 });
 
 async function submitMessage(): Promise<void> {
@@ -586,10 +585,12 @@ async function submitMessage(): Promise<void> {
 }
 
 const messageMotion = injectRoomMessageMotion();
+watch(() => props.messageNamespace || props.roomIdentifier, () => { selectedGif.value = null; });
 
 function sendRoomMessage(): void {
   const text = draft.value.trim();
-  if ((!text && props.attachmentDrafts.length === 0) || props.sending) return;
+  if ((!text && !selectedGif.value && props.attachmentDrafts.length === 0) || props.sending) return;
+  const submittedGif = selectedGif.value;
   const replyTarget = props.replyTo;
   const messageText = replyTarget?.isSelection
     ? applySelectedTextQuoteToDraft(text, replyTarget.text, replyTarget.sourceMessageId)
@@ -606,8 +607,10 @@ function sendRoomMessage(): void {
       if (!sent) return;
       typing.stop();
       clearSubmittedText();
+      if (selectedGif.value === submittedGif) selectedGif.value = null;
       void nextTick(() => textareaElement.value?.focus());
     },
+    submittedGif,
   );
 }
 

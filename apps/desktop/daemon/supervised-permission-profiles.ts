@@ -44,9 +44,11 @@ const codexProfiles: readonly SupervisedPermissionProfile[] = [
   },
   {
     id: "read_only", label: "Read-only",
-    description: "Read-only access is unavailable for Codex here.",
-    status: "gated", risk: "low",
-    detail: "Choose another available access level.", isDefault: false,
+    description: "Can read files on this Mac, also outside your project, and read and post in the room.",
+    // Not "low": the Codex sandbox denies no read, so the agent can read every file this account can, and it can post in the room.
+    // The one file kept from its commands is the owner's Codex sign-in file, which its permission profile denies.
+    status: "available", risk: "medium",
+    detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.", isDefault: false,
   },
 ];
 
@@ -173,6 +175,10 @@ const OWNER_SETUP_DESCRIPTIONS: Readonly<Record<string, Readonly<Record<string, 
     },
   },
   codex: {
+    read_only: {
+      // Only what was seen: how Codex treats an MCP server of the owner's at this level. Hooks and plugins were not tried.
+      detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews. These limits cover Codex's own commands and the room's tools only. Your own MCP tools can run without asking when your own Codex settings already approve them or their own server labels them read-only, which nothing checks. This level puts no limit of its own on your hooks and plugins.",
+    },
     ask_before_write: {
       detail: "Starts with read-only file access and no network access. Requests approval when it needs more access. Your own MCP tools, hooks and plugins are not held to these limits: they run as you, and some run without asking.",
     },
@@ -193,6 +199,28 @@ export function describeProfilesWithOwnerSetup(providerId: string, profiles: unk
     // Only an access level the agent can actually use is redescribed.
     return described && (profile as { status?: unknown }).status === "available" ? { ...profile, ...described } : profile;
   });
+}
+
+/**
+ * Why a Codex agent that collects its own room messages cannot have Read-only.
+ * Read-only limits the room tools to a named list, and the background service
+ * holds that list only for an agent it delivers room messages to. Said where
+ * the level is offered and where it is saved, so the owner learns it there
+ * and not only when the agent does not start.
+ */
+export const CODEX_READ_ONLY_NEEDS_DELIVERY = "Read-only access is for a Codex agent that LetAgents delivers room messages to. "
+  + "This agent collects its own room messages, so LetAgents cannot hold it to the room tools that Read-only allows. Choose another access level for this agent.";
+
+/** Whether Read-only cannot be used by this agent: a Codex agent the background service does not deliver room messages to. */
+export function codexReadOnlyNeedsDelivery(providerId: string, deliveryMode: string | null | undefined): boolean {
+  return providerId.trim().toLowerCase() === "codex" && deliveryMode !== "daemon_inbox";
+}
+
+/** A provider's access levels as one agent can use them: Read-only is shown as unavailable, with the reason, to an agent that cannot have it. */
+export function describeProfilesForAgent(providerId: string, deliveryMode: string | null | undefined, profiles: unknown): unknown {
+  if (!codexReadOnlyNeedsDelivery(providerId, deliveryMode) || !Array.isArray(profiles)) return profiles;
+  return profiles.map((profile) => (profile && typeof profile === "object" && (profile as { id?: unknown }).id === "read_only"
+    ? { ...profile, status: "gated", detail: CODEX_READ_ONLY_NEEDS_DELIVERY } : profile));
 }
 
 export function assertSupervisedPermissionProfileAvailable(providerId: string, requestedId: string | null): string {

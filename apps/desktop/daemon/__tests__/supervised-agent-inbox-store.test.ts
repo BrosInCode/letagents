@@ -1315,6 +1315,7 @@ test("current v13 repairs an intermediate inbox missing the failure-code constra
     // but omitted the failure-code CHECK from the persisted table definition.
     const partial = new DatabaseSync(env.database);
     const schemaVersion = (partial.prepare("PRAGMA schema_version").get() as { schema_version: number }).schema_version;
+    partial.enableDefensive?.(false); // Only this disposable historical-schema fixture.
     partial.exec("PRAGMA writable_schema=ON");
     partial.prepare(`
       UPDATE sqlite_master
@@ -1326,6 +1327,7 @@ test("current v13 repairs an intermediate inbox missing the failure-code constra
       WHERE type='table' AND name='supervised_agent_inbox'
     `).run();
     partial.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+    partial.enableDefensive?.(true);
     partial.close();
 
     const repaired = new SupervisedAgentInboxStore(env.database);
@@ -1374,6 +1376,7 @@ test("current v13 rejects unsupported failure codes even when the repair journal
 
     const malformed = new DatabaseSync(env.database);
     const schemaVersion = (malformed.prepare("PRAGMA schema_version").get() as { schema_version: number }).schema_version;
+    malformed.enableDefensive?.(false); // Construct the rejected legacy table in the test fixture only.
     malformed.exec(`
       PRAGMA foreign_keys=OFF;
       DROP TABLE provider_continuation_repairs;
@@ -1389,6 +1392,7 @@ test("current v13 rejects unsupported failure codes even when the repair journal
       WHERE type='table' AND name='supervised_agent_inbox'
     `).run();
     malformed.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};`);
+    malformed.enableDefensive?.(true);
     malformed.close();
 
     const unsupported = new DatabaseSync(env.database);
@@ -1702,6 +1706,44 @@ test("a started message can be skipped once its turn is finished or belongs to a
     corrupt.close();
     await assert.rejects(store.skipBlocked(later!.inbox_item_id), /Only the current FIFO head/);
     assert.equal((await store.get(head!.inbox_item_id))?.state, "blocked");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("Skip on a follow-up says that it was skipped only when no turn started for it; a follow-up that started keeps the text of a started turn", async () => {
+  const SKIPPED = "You skipped the next attempt, and the task and its work lease are left as they are.";
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    const ingest = (agent: string, id: string) => store.ingestPoll({ agent_id: agent, room_id: "room", last_observed_message_id: "9",
+      messages: [{ source_message_id: id, source_message: {}, activation: {} }] });
+    // A follow-up that was blocked and never started, and a room message that was blocked and never started.
+    const [unstarted] = await ingest("unstarted", "task-continuation:parent");
+    await store.transition(unstarted!.inbox_item_id, "blocked", { last_error: "The model provider needs authentication or account access." });
+    assert.equal((await store.skipBlocked(unstarted!.inbox_item_id)).last_error, SKIPPED);
+    const [message] = await ingest("message", "msg_1");
+    await store.transition(message!.inbox_item_id, "blocked", { last_error: "safe pre-turn failure" });
+    assert.equal((await store.skipBlocked(message!.inbox_item_id)).last_error, null, "a room message that never started has no text, as before");
+
+    // A follow-up whose turn finished, and whose answer is dropped by Skip. It runs as an ordinary item, and has the id of a follow-up
+    // by the time that it is skipped: a follow-up cannot be claimed without the record of the failure that it follows.
+    await ingest("started", "1");
+    await seedActiveAgent(env, { agentId: "started", roomId: "room", workAttemptId: TEST_PROVIDER_TURN_AUTHORITY.work_attempt_id,
+      executionGenerationId: "generation-2", providerContinuationId: TEST_PROVIDER_TURN_AUTHORITY.provider_continuation_id });
+    const item = (await store.claimHead("started"))!;
+    await store.checkpointTurnStarted(item.inbox_item_id, "turn-started", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: "started",
+      execution_generation_id: TEST_PROVIDER_TURN_AUTHORITY.origin_execution_generation_id, provider_turn_id: "turn-started",
+      outcome: "unreadable", text: null, evidence: "none", terminal_evidence: {} });
+    await store.transition(item.inbox_item_id, "awaiting_result");
+    await store.transition(item.inbox_item_id, "result_recovery");
+    await store.transition(item.inbox_item_id, "blocked", { last_error: "The same turn was re-read and was not rerun." });
+    const raw = new DatabaseSync(env.database);
+    raw.prepare("UPDATE supervised_agent_inbox SET source_message_id='task-continuation:parent' WHERE inbox_item_id=?").run(item.inbox_item_id);
+    raw.close();
+    const skipped = await store.skipBlocked(item.inbox_item_id);
+    assert.equal(skipped.source_message_id, "task-continuation:parent");
+    assert.match(skipped.last_error ?? "", /not rerun and its answer was dropped/);
+    assert.notEqual(skipped.last_error, SKIPPED, "a turn started, so \"the agent did not try again\" would be untrue");
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -4002,6 +4044,73 @@ test("formal bind and desktop credential installation serialize to the latest ex
     assert.equal(await store.credentialFor(successor), "bound-successor");
     await store.close();
   } finally { await env.cleanup(); }
+});
+
+test("GIF intent survives restart, can be replaced or cleared, and never completes a turn", async () => {
+  const env = await fixture();
+  let store = new SupervisedAgentInboxStore(env.database);
+  const authority = { agent_id: "gif-agent", room_id: "room", execution_generation_id: "generation",
+    provider_turn_id: "native-turn", work_attempt_id: "attempt", current_execution_generation_id: "generation",
+    provider_continuation_id: "continuation" };
+  try {
+    const [item] = await store.ingestPoll({ agent_id: authority.agent_id, room_id: "room", last_observed_message_id: "msg_1",
+      messages: [{ source_message_id: "msg_1", source_message: { id: "msg_1", text: "Good work" }, activation: {} }] });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, authority.provider_turn_id, TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, { agentId: authority.agent_id, roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation" });
+    const gif = { provider: "giphy", id: "abc123", title: "Nice work", text_fallback_only: true };
+    const request = { ...authority, mcp_request_id: "gif", tool_name: "set_reply_gif", request: { gif }, mutation: true };
+    await assert.rejects(store.prepareEffect(request, async () => { throw new Error("authority lost"); }), /authority lost/);
+    assert.equal(await store.replyGif(item!.inbox_item_id), null);
+    const first = await store.prepareEffect(request);
+    assert.equal(first.effect.state, "completed");
+    assert.deepEqual(await store.replyGif(item!.inbox_item_id), gif);
+    assert.equal((await store.get(item!.inbox_item_id))!.state, "dispatching");
+    await store.close(); store = new SupervisedAgentInboxStore(env.database);
+    assert.deepEqual(await store.prepareEffect(request), { created: false, effect: first.effect });
+    assert.deepEqual(await store.replyGif(item!.inbox_item_id), gif);
+    await store.prepareEffect({ ...request, mcp_request_id: "clear", request: { gif: null } });
+    assert.equal(await store.replyGif(item!.inbox_item_id), null);
+    await assert.rejects(store.prepareEffect({ ...request, mcp_request_id: "other-room", request: { gif, room_id: "different" } }), /Invalid GIF/);
+    await store.prepareEffect({ ...authority, mcp_request_id: "finish", tool_name: "complete_room_turn", request: { outcome: "no_reply" } });
+    await assert.rejects(store.prepareEffect({ ...request, mcp_request_id: "too-late" }), /already complete/);
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("reply attachment intent survives restart, can be replaced or cleared, journals no path, and never completes a turn", async () => {
+  const env = await fixture();
+  let store = new SupervisedAgentInboxStore(env.database);
+  const authority = { agent_id: "files-agent", room_id: "room", execution_generation_id: "generation",
+    provider_turn_id: "native-turn", work_attempt_id: "attempt", current_execution_generation_id: "generation",
+    provider_continuation_id: "continuation" };
+  const file = (name: string) => ({ spool_id: "c".repeat(32), name, mime_type: "image/png", size_bytes: 9, sha256: "d".repeat(64) });
+  try {
+    const [item] = await store.ingestPoll({ agent_id: authority.agent_id, room_id: "room", last_observed_message_id: "msg_1",
+      messages: [{ source_message_id: "msg_1", source_message: { id: "msg_1", text: "Show me" }, activation: {} }] });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, authority.provider_turn_id, TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, { agentId: authority.agent_id, roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation" });
+    const request = { ...authority, mcp_request_id: "files", tool_name: "set_reply_attachments", request: { files: [file("before.png")] }, mutation: true };
+    assert.deepEqual(await store.replyAttachments(item!.inbox_item_id), []);
+    const first = await store.prepareEffect(request);
+    assert.equal(first.effect.state, "completed");
+    assert.match(JSON.stringify(first.effect.result), /REPLY_ATTACHMENTS_RECORDED/);
+    assert.deepEqual(await store.replyAttachments(item!.inbox_item_id), [file("before.png")]);
+    assert.equal((await store.get(item!.inbox_item_id))!.state, "dispatching");
+    await store.close(); store = new SupervisedAgentInboxStore(env.database);
+    assert.deepEqual(await store.prepareEffect(request), { created: false, effect: first.effect });
+    await store.prepareEffect({ ...request, mcp_request_id: "replace", request: { files: [file("after.png")] } });
+    assert.deepEqual(await store.replyAttachments(item!.inbox_item_id), [file("after.png")]);
+    await store.prepareEffect({ ...request, mcp_request_id: "clear", request: { files: null } });
+    assert.deepEqual(await store.replyAttachments(item!.inbox_item_id), []);
+    for (const invalid of [{ files: ["/Users/owner/.ssh/id_ed25519"] }, { files: [{ ...file("a.png"), path: "/workspace/a.png" }] }, { files: [file("a/b.png")] }]) {
+      await assert.rejects(store.prepareEffect({ ...request, mcp_request_id: `invalid-${JSON.stringify(invalid).length}`, request: invalid }), /Invalid reply attachments/);
+    }
+    await store.prepareEffect({ ...authority, mcp_request_id: "finish", tool_name: "complete_room_turn", request: { outcome: "no_reply" } });
+    await assert.rejects(store.prepareEffect({ ...request, mcp_request_id: "too-late" }), /already complete/);
+  } finally { await store.close(); await env.cleanup(); }
 });
 
 test("reply-thread intent commits atomically, deduplicates exact requests and permits later work", async () => {

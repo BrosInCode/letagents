@@ -3,6 +3,7 @@ import type {
 } from "../../../electron/ipc-types";
 import { agentCompactionProgress } from "./managed-agents";
 import { ownerSetupRefusalReason } from "./agent-home-harness";
+import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { safeUserVisibleErrorDetail } from "./user-visible-error";
 
@@ -61,8 +62,6 @@ export interface SupervisedLaunchProgress {
   stopping: boolean;
   /** Stop intent converged to an actionable failure instead of remaining in flight. */
   stopFailed: boolean;
-  /** The durable claim exists, but ownership transfer never activated it. */
-  ownershipPaused: boolean;
   /** The launch was retired (desired_state=stopped) before/after readiness. */
   stopped: boolean;
   /** Real registered agent name once ready; null while still launching. */
@@ -187,7 +186,6 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
   const missingRuntimeDetail = missingProviderRuntimeDetail(entry, providerLabel);
   const agentDisplayName = supervisedAgentDisplayLabel(entry.displayName, entry.id);
   const reached = reachedIndex(entry);
-  const ownershipPaused = entry.desiredState === "paused";
   const stopFailed = entry.desiredState === "stopped"
     && (entry.observedState === "failed" || isBlockingCondition(entry));
   const stopping = entry.desiredState === "stopped"
@@ -205,7 +203,7 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     && !stopped
     && entry.condition === "coordination_blocked"
     && !isExpectedCoordinationWait(entry.lastError);
-  const failed = ownershipPaused || stopFailed || (!ready
+  const failed = stopFailed || (!ready
     && !stopping
     && !stopped
     && (entry.observedState === "failed" || isBlockingCondition(entry)));
@@ -230,10 +228,10 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
   const currentPhaseId = phases[Math.min(activeIndex, phases.length - 1)]!.id;
 
   const failureDetail = failed
-    ? (ownershipPaused
-        ? safeUserVisibleErrorDetail(entry.lastError, `The ${providerLabel} launch was saved, but ownership transfer did not finish. Cancel it before starting a replacement.`)
-        : stopFailed
+    ? (stopFailed
         ? safeUserVisibleErrorDetail(entry.lastError, `The supervisor couldn't stop the ${providerLabel} agent. Check its status and try again.`)
+        : claudeUsageLimitReached(entry.lastError)
+        ? CLAUDE_USAGE_LIMIT_REASON
         : entry.condition === "coordination_blocked" && hasProviderExecution
         ? `LetAgents can't currently reconnect to the previous ${providerLabel} process. It may still reconnect; you can wait or cancel this launch and start a new agent.`
         : entry.condition === "coordination_blocked"
@@ -247,8 +245,6 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
   let headline: string;
   if (ready) {
     headline = `${agentDisplayName} is ready`;
-  } else if (ownershipPaused) {
-    headline = `${providerLabel} launch needs cleanup`;
   } else if (stopFailed) {
     headline = `Couldn't stop the ${providerLabel} agent`;
   } else if (stopping) {
@@ -274,7 +270,6 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
     recoverableBlocked,
     stopping,
     stopFailed,
-    ownershipPaused,
     stopped,
     agentName: ready ? agentDisplayName : null,
     providerLabel,

@@ -1,6 +1,7 @@
-import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { cursorRoomTurnImageFolders, cursorRoomTurnImageLines, withReadOnlyImageFolders } from "./cursor-room-turn-images.js";
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants as fsConstants, fstatSync, fsyncSync, mkdtempSync, openSync, readSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fsyncSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
@@ -53,7 +54,11 @@ import {
   CURSOR_SESSION_ID_PATTERN,
 } from "./cursor-provider-constants.js";
 import { createCursorRuntimeCustodyReader, safeCursorTerminalErrorDetail } from "./cursor-provider-evidence.js";
-import { checkpointCursorTurnBeforeLaneRetires, cursorAttemptEndingResult, CursorRoomTurnTerminalError } from "./cursor-turn-settlement.js";
+import {
+  checkpointCursorTurnBeforeLaneRetires, cursorAttemptEndingResult, CursorRoomTurnTerminalError,
+  CursorTerminalAuthorityUnprovenError, cursorTerminalAuthorityProof, cursorAuthorityMessage,
+  CursorRoomTurnRecoveryError, readBoundedCursorTurnFile,
+} from "./cursor-turn-settlement.js";
 import { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 import {
@@ -116,6 +121,8 @@ import { resolveLetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { buildCursorChildEnv, cursorDaemonChildEnv } from "./cursor-runner.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { cursorPermissionProfileInstructionLines } from "./cursor-permission-profile.js";
+import { createCursorUsageReader, readCursorAccountUsage, readCursorContext, readCursorUsageOwner } from "./cursor-usage.js";
+import type { ProviderUsage } from "../../../shared/provider-usage.js";
 import {
   createSupervisedWorkspaceGeneration,
   openSupervisedWorkspaceGeneration,
@@ -192,6 +199,9 @@ export interface CursorProviderAdapterDependencies {
   createWorkspaceGeneration: typeof createSupervisedWorkspaceGeneration;
   recoverWorkspaceGeneration: typeof recoverSupervisedWorkspaceGeneration;
   removeWorkspaceGenerationReceipt: typeof removeSupervisedWorkspaceGenerationReceipt;
+  readUsageAccount: typeof readCursorAccountUsage;
+  readUsageContext: typeof readCursorContext;
+  readUsageOwner: typeof readCursorUsageOwner;
   now(): string;
 }
 
@@ -243,8 +253,8 @@ const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
   },
   deliveryModes: ["mcp_polling", "daemon_inbox"],
   // `--resume <session_id>` is the documented continuation across per-turn
-  // children (the legacy engine already relies on it); the adapter asserts the
-  // session identity echo per turn. Subject to TrailDelta's task_38 spike cell.
+  // children; the adapter asserts the session identity echo per turn. Subject
+  // to TrailDelta's task_38 spike cell.
   resume: true,
   // cursor-agent takes its prompt as a positional argument and ignores stdin —
   // there is NO channel into a RUNNING turn. poke() delivers at the next turn
@@ -289,9 +299,8 @@ export function boundedCursorRoomTurnPrompt(
     "After complete_room_turn succeeds, end this provider turn without revising or repeating the proposal.",
     `Turn id: ${turnId}`,
     `Inbox item: ${request.inboxItemId}`,
-    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
-    `Source message: ${JSON.stringify(request.sourceMessage)}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    ...formatRoomTurnContext(request),
+    ...cursorRoomTurnImageLines(request),
   ].join("\n");
 }
 
@@ -428,6 +437,9 @@ const DEFAULT_DEPENDENCIES: CursorProviderAdapterDependencies = {
   createWorkspaceGeneration: createSupervisedWorkspaceGeneration,
   recoverWorkspaceGeneration: recoverSupervisedWorkspaceGeneration,
   removeWorkspaceGenerationReceipt: removeSupervisedWorkspaceGenerationReceipt,
+  readUsageAccount: readCursorAccountUsage,
+  readUsageContext: readCursorContext,
+  readUsageOwner: readCursorUsageOwner,
   now: () => new Date().toISOString(),
 };
 
@@ -479,6 +491,10 @@ type CursorTurnTerminal = {
   /** Trusted wrapper link to the exact private filesystem authority journal. */
   workspaceGenerationManifestPath?: string;
   workspaceGenerationSettlement?: CursorGenerationSettlement;
+  /** The turn finished, but its wrapper could not prove its remote authority ended. */
+  authorityUnproven?: true;
+  /** Its private generation stays unreconciled, so the turn's file changes are not kept. */
+  fileChangesLost?: true;
 };
 
 type CursorGenerationSettlement = {
@@ -486,10 +502,6 @@ type CursorGenerationSettlement = {
   phase: "aborted" | "cleaned";
   provider_continuation_id: string;
 };
-
-class CursorRoomTurnRecoveryError extends Error {
-  readonly roomTurnRecoveryOutcome = "ambiguous" as const;
-}
 
 class CursorRoomTurnNotDispatchedError extends Error {
   readonly roomTurnRecoveryOutcome = "not_dispatched" as const;
@@ -506,39 +518,6 @@ class CursorRoomTurnObservationDetachedError extends Error {}
 
 class CursorRecordedTurnInProgressError extends Error {
   readonly providerAttachOutcome = "in_progress" as const;
-}
-
-/** Read one exact inode with O_NOFOLLOW and a preallocated size bound. */
-function readBoundedCursorTurnFile(path: string, maxBytes: number, label: string): string | null {
-  let fd: number;
-  try {
-    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new CursorRoomTurnRecoveryError(`${label} could not be opened safely.`);
-  }
-  try {
-    const before = fstatSync(fd);
-    if (!before.isFile() || before.size > maxBytes) {
-      throw new CursorRoomTurnRecoveryError(`${label} is not a bounded regular file.`);
-    }
-    const bytes = Buffer.alloc(before.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const read = readSync(fd, bytes, offset, bytes.length - offset, offset);
-      if (read === 0) break;
-      offset += read;
-    }
-    const after = fstatSync(fd);
-    if (offset !== before.size || after.size !== before.size
-      || after.dev !== before.dev || after.ino !== before.ino
-      || after.mtimeMs !== before.mtimeMs) {
-      throw new CursorRoomTurnRecoveryError(`${label} changed while it was being read.`);
-    }
-    return bytes.toString("utf8");
-  } finally {
-    closeSync(fd);
-  }
 }
 
 // The empirically proven usage-limit signature (task_38 spike, msg_1708):
@@ -617,6 +596,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private readonly stopGraceMs: number;
   private readonly supervisedProfileFactory: NonNullable<CursorProviderAdapterOptions["supervisedProfileFactory"]>;
   private readonly handles = new Map<string, CursorProviderHandle>();
+  private readonly readCursorUsage: ReturnType<typeof createCursorUsageReader>;
   private readonly processCustody: ProviderProcessCustody;
   readonly runtimeCustody: ReturnType<typeof createCursorRuntimeCustodyReader>;
 
@@ -650,10 +630,17 @@ export class CursorProviderAdapter implements ProviderAdapter {
           devEntryPath: input.devMcpServerEntryPath,
         }),
       }));
+    this.readCursorUsage = createCursorUsageReader(
+      this.cursorBin, this.deps, (id) => this.handles.get(id), this.supervisedProfileFactory,
+    );
   }
 
   capabilities(): ProviderAdapterCapabilities {
     return { ...BASE_CURSOR_CAPABILITIES };
+  }
+
+  async readUsage(providerHandle: ProviderHandle): Promise<ProviderUsage | null> {
+    return this.readCursorUsage(this.requireHandle(providerHandle));
   }
 
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
@@ -872,6 +859,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
     };
   }
 
+  /** The daemon stages a file that this turn's sandbox may read; see cursor-room-turn-images.ts. */
+  roomTurnImageDelivery(): "file" { return "file"; }
+
   async runRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRequest,
@@ -925,6 +915,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           turnAbortController.signal,
           markDurableTurnStarted,
           options.settleLifecycleBeforeIdle,
+          cursorRoomTurnImageFolders(request),
         );
       } catch (error) {
         if (!(error instanceof CursorPostDispatchCheckpointError)) throw error;
@@ -972,11 +963,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
       });
       if (attemptTerminal) terminal = { ...terminal, attemptTerminal };
       const acceptedResult = disposition?.acceptedResult ?? result;
-      const cleanupRecoveryEvidence = options.checkpointTerminalResult
+      // An unproven ending keeps its live generation receipt and journal: only
+      // a successor holding trusted containment proof may reconcile them.
+      const cleanupRecoveryEvidence = !terminal.authorityUnproven && (options.checkpointTerminalResult
         ? disposition === undefined
           ? result.outcome !== "unreadable"
           : disposition.cleanupRecoveryEvidence
-        : false;
+        : false);
       if (cleanupRecoveryEvidence) {
         if (turn.workspaceGenerationManifestPath) {
           await this.deps.removeWorkspaceGenerationReceipt(turn.workspaceGenerationManifestPath,
@@ -1217,13 +1210,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
     let terminalError: string | undefined;
     let publicationContract: CursorTurnTerminal["publicationContract"] = "structured_room_turn_v1";
     let legacyUnversionedTerminal = false;
+    let authorityProof: ReturnType<typeof cursorTerminalAuthorityProof> = "missing";
+    let authorityMessage = "";
     try {
       const raw = JSON.parse(terminalJson) as Record<string, unknown>;
-      const currentRemoteAuthorityEvidence = raw.native_process_group_reaped === true
-        && raw.reap_scope === "native_process_group"
-        && raw.remote_authority_revoked === true;
-      if (!currentRemoteAuthorityEvidence) {
-        throw new CursorRoomTurnRecoveryError("Cursor terminal evidence does not prove native process-group retirement and remote-authority revocation.");
+      authorityProof = cursorTerminalAuthorityProof(raw);
+      authorityMessage = cursorAuthorityMessage(raw);
+      // Only a finished turn (type exit) can carry unproven authority forward;
+      // a not-started or errored wrapper with live authority stays untrusted.
+      if (authorityProof === "missing" || (authorityProof === "unproven" && raw.type !== "exit")) {
+        throw new CursorRoomTurnRecoveryError(authorityMessage);
       }
       if (raw.workspace_generation_manifest_path !== undefined && raw.workspace_generation_manifest_path !== null) {
         if (typeof raw.workspace_generation_manifest_path !== "string" || !isAbsolute(raw.workspace_generation_manifest_path)
@@ -1300,7 +1296,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
       && initSessionId !== handle.providerContinuationId) {
       throw new CursorRoomTurnRecoveryError("Cursor terminal snapshot belongs to a different provider continuation.");
     }
-    if (pendingContinuation) handle.providerContinuationId = initSessionId;
+    // An unproven terminal never adopts state; the live init already did.
+    if (pendingContinuation && authorityProof === "proven") handle.providerContinuationId = initSessionId;
     const resultSessionId = resultMessage ? sessionIdOf(resultMessage) : null;
     if (resultMessage && publicationContract === "structured_room_turn_v1" && !resultSessionId) {
       throw new CursorRoomTurnRecoveryError("Cursor terminal result has no exact provider session identity.");
@@ -1327,7 +1324,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         ? resultMessage.request_id.trim()
         : null;
     }
-    return sawResult
+    const terminal: CursorTurnTerminal = sawResult
       ? {
         state: "result",
         exit,
@@ -1355,6 +1352,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
         ...(workspaceGenerationManifestPath ? { workspaceGenerationManifestPath } : {}),
         ...(workspaceGenerationSettlement ? { workspaceGenerationSettlement } : {}),
       };
+    // Every other check passed; only the revocation proof is absent.
+    if (authorityProof === "unproven") {
+      throw sawResult
+        ? new CursorTerminalAuthorityUnprovenError(authorityMessage, terminal)
+        : new CursorRoomTurnRecoveryError(authorityMessage);
+    }
+    return terminal;
   }
 
   /**
@@ -1605,7 +1609,6 @@ export class CursorProviderAdapter implements ProviderAdapter {
       roomIdentifier: req.roomId,
       joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
       cwd: req.cwd,
-      deliveryMode: "mcp_polling",
       stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
       token: makeCodexStopToken(),
       suggestedDisplayName: req.agentDisplayName.trim(),
@@ -1645,6 +1648,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     launchSignal?: AbortSignal,
     markDurableTurnStarted?: ProviderRoomTurnOptions["markDurableTurnStarted"],
     settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"],
+    readOnlyImageFolders: readonly string[] = [], // Daemon-staged images: this launch may read, never write or run.
   ): Promise<LiveTurn> {
     return this.processCustody.acquire(handle.workAttemptId, async () => {
       throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
@@ -1887,7 +1891,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           deniedWriteRegexes = profile.nativeDeniedWriteRegexes;
           deniedWritePaths = profile.nativeDeniedWritePaths;
           deniedWriteStructuralPaths = profile.nativeDeniedWriteStructuralPaths;
-          deniedWriteSubpaths = profile.nativeDeniedWriteSubpaths;
+          deniedWriteSubpaths = withReadOnlyImageFolders(profile.nativeDeniedWriteSubpaths, readOnlyImageFolders);
           deniedExecSubpaths = profile.nativeDeniedExecSubpaths;
           allowedWriteSubpaths = profile.nativeAllowedWriteSubpaths?.length
             ? [...new Set([
@@ -1903,11 +1907,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
                 ...cursorSandboxPathVariants(entry.sourcePath),
                 ...(entry.generationPath ? cursorSandboxPathVariants(entry.generationPath) : []),
               ]) ?? []),
+              ...readOnlyImageFolders.flatMap(cursorSandboxPathVariants),
             ])]
             : undefined;
           deniedExecSubpaths = [...new Set([
             ...(deniedExecSubpaths ?? []),
             ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
+            ...readOnlyImageFolders.flatMap(cursorSandboxPathVariants),
           ])];
           mcpRuntimeEntryPath = profile.mcpRuntimeEntryPath;
           if (!profile.mcpRuntimeEnv) {
@@ -2558,10 +2564,15 @@ export class CursorProviderAdapter implements ProviderAdapter {
     // map would strand Inspector cards in `running` indefinitely.
     this.interruptLiveDisplayTools(handle, turn);
     let trustedDurableTerminal: CursorTurnTerminal | undefined;
+    let authorityUnproven: { authorityUnproven: true; fileChangesLost?: true } | undefined;
     if (turn.child.requiresDurableTerminalEvidence) {
       try {
         trustedDurableTerminal = this.readTrustedDurableTurnTerminal(handle, turn);
       } catch (error) {
+        // An unrelated stream violation outranks a merely unproven shutdown.
+        if (error instanceof CursorTerminalAuthorityUnprovenError && !handle.protocolError) {
+          authorityUnproven = { authorityUnproven: true, ...(turn.workspaceGeneration ? { fileChangesLost: true as const } : {}) };
+        }
         handle.protocolError = true;
         this.publishStream(handle, "turn/terminal_invalid", {
           reason: error instanceof Error ? error.message : String(error),
@@ -2587,6 +2598,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         providerRequestId: turn.providerRequestId,
         attemptTerminal,
         publicationContract: "structured_room_turn_v1",
+        ...authorityUnproven,
         ...(exactTerminalError
           ? {
             terminalError: `${exactTerminalError} Its private workspace generation was retained for safe recovery because durable containment proof was unavailable.`,
@@ -2653,6 +2665,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         providerRequestId: turn.providerRequestId,
         attemptTerminal,
         publicationContract: "structured_room_turn_v1",
+        ...authorityUnproven,
         ...(exactTerminalError ? { terminalError: exactTerminalError } : {}),
       });
     }
@@ -2687,7 +2700,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (!turn.roomTurnId) {
       throw new CursorRoomTurnRecoveryError("The supervised result had no exact durable turn identity.");
     }
-    const durable = this.readDurableTurnTerminal(handle, turn.roomTurnId);
+    let durable: CursorTurnTerminal | null;
+    let unproven: CursorTerminalAuthorityUnprovenError<CursorTurnTerminal> | null = null;
+    try {
+      durable = this.readDurableTurnTerminal(handle, turn.roomTurnId);
+    } catch (error) {
+      // Cross-check an otherwise sound terminal before reporting it unproven.
+      if (!(error instanceof CursorTerminalAuthorityUnprovenError)) throw error;
+      unproven = error as CursorTerminalAuthorityUnprovenError<CursorTurnTerminal>;
+      durable = unproven.terminal;
+    }
     if (!durable) {
       throw new CursorRoomTurnRecoveryError("The supervised wrapper published no trusted terminal evidence.");
     }
@@ -2710,6 +2732,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           : "The live result did not match the exact durable terminal snapshot.",
       );
     }
+    if (unproven) throw unproven;
     return durable;
   }
 
@@ -3157,7 +3180,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
     if (terminal.state === "attempt_terminal") {
       return cursorAttemptEndingResult({ turnId, providerContinuationId, protocolError,
-        cause: terminal.attemptTerminal?.terminalCause, terminalError: terminal.terminalError });
+        cause: terminal.attemptTerminal?.terminalCause, terminalError: terminal.terminalError,
+        authorityUnproven: terminal.authorityUnproven, fileChangesLost: terminal.fileChangesLost === true });
     }
     if (terminal.isError) {
       if (!terminal.nativeFailure) throw new CursorRoomTurnTerminalError("Cursor returned an unproven error result for the bounded room turn.");

@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../../../../../../shared/room-expressions.mjs";
 import { computed, provide, ref, watch, type Ref } from "vue";
 import type {
   DesktopRoomInfo,
@@ -10,7 +11,6 @@ import {
 } from "./messages";
 import {
   isGitHubRoomMessage,
-  isLowSignalGitHubCheckMessage,
 } from "../desktop-chat-message/github-event";
 import { roomTimelineMessages } from "../room-chat/thread-utils";
 import { desktopIpc } from "../../../../ipc/index.js";
@@ -52,8 +52,7 @@ export function useDesktopRoomMessages(options: {
   const visibleMessages = computed(() => {
     return mergeRoomMessages(loadedServerMessages.value, localMessages.value)
       .filter((message) =>
-        !isLowSignalGitHubCheckMessage(message)
-        && (options.githubEventsVisible.value || !isGitHubRoomMessage(message))
+        options.githubEventsVisible.value || !isGitHubRoomMessage(message)
       );
   });
   const hasFilteredRoomActivity = computed(() => {
@@ -61,7 +60,6 @@ export function useDesktopRoomMessages(options: {
     return [...olderMessages.value, ...options.messages.value, ...localMessages.value]
       .some((message) =>
         isUserFacingFilteredMessage(message)
-        || isLowSignalGitHubCheckMessage(message)
         || (!options.githubEventsVisible.value && isGitHubRoomMessage(message))
       );
   });
@@ -119,10 +117,11 @@ export function useDesktopRoomMessages(options: {
     attachments: Array<{ upload_id: string }> = [],
     threadRootId: string | null = null,
     complete: (sent: boolean) => void = () => undefined,
+    gif?: RoomGif | null,
   ): Promise<void> {
     const trimmedText = text.trim();
     const roomIdentifier = options.room.value.identifier;
-    if ((!trimmedText && attachments.length === 0) || !roomIdentifier
+    if ((!trimmedText && !gif && attachments.length === 0) || !roomIdentifier
       || replyTo?.startsWith("pending:") || threadRootId?.startsWith("pending:")) {
       complete(false);
       return;
@@ -131,7 +130,7 @@ export function useDesktopRoomMessages(options: {
     const messageNamespace = options.messageNamespace?.value ?? null;
     const reply = visibleMessages.value.find(message => message.id === replyTo);
     const clientMessageId = enqueueDesktopMessage({
-      roomIdentifier, messageNamespace, text: trimmedText, replyTo, threadRootId, attachments,
+      roomIdentifier, messageNamespace, text: trimmedText, replyTo, threadRootId, attachments, gif,
       replyPreview: reply ? {
         id: reply.id, sender: reply.sender, text: reply.text, source: reply.source,
         timestamp: reply.timestamp, agentIdentity: reply.agentIdentity,

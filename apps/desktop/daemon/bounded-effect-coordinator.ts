@@ -1,4 +1,8 @@
+import { validReplyGifIntent } from "../../../shared/room-expressions.mjs";
+import { validReplyAttachmentsRequest } from "../../../shared/message-attachments.mjs";
+import { CODEX_READ_ONLY_ROOM_TOOLS } from "../../../shared/codex-read-only-room-tools.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
+import type { ReplyAttachmentSnapshotInput } from "./reply-attachment-spool.js";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import type {
   SupervisedEffectRecord,
@@ -37,7 +41,7 @@ export type CompleteBoundedEffectInput = BoundedEffectCoordinates & {
 };
 
 export type BoundedEffectContext = {
-  entry: Pick<DaemonManifestEntry, "id" | "room_id" | "provider" | "workspace_path">;
+  entry: Pick<DaemonManifestEntry, "id" | "room_id" | "provider" | "workspace_path" | "permission_profile_id">;
   agent: Pick<SupervisedIngressAgent,
     "agentSessionId" | "bearer" | "apiUrl" | "workAttemptId" |
     "executionGenerationId" | "providerContinuationId"
@@ -145,7 +149,42 @@ export type BoundedEffectCoordinatorOptions = {
   policy: {
     structuredRoomTurnCompletion(value: unknown): unknown | null;
   };
+  /** Copies the files an agent attaches to its final reply; absent in daemons without a spool. */
+  replyAttachments?: {
+    snapshot(input: ReplyAttachmentSnapshotInput): Promise<{ files: Array<{ spool_id: string }> | null }>;
+    /** Drop the copies a newly journaled choice replaced. */
+    keepOnly(inboxItemId: string, spoolIds: readonly string[]): Promise<void>;
+  };
 };
+
+/** Whether an agent is a Codex agent whose saved access level is Read-only. */
+export function codexAgentIsReadOnly(entry: Pick<DaemonManifestEntry, "provider" | "permission_profile_id">): boolean {
+  return entry.provider.trim().toLowerCase() === "codex" && entry.permission_profile_id?.trim() === "read_only";
+}
+
+/**
+ * Why a room tool is refused for a Codex agent whose access level is
+ * Read-only. Null for a tool it may use, and for every other agent.
+ *
+ * The owner's card for the level says what the agent can do in the room: read
+ * it and post in it. Codex is told the same list, but that part is a setting
+ * of Codex, and what Codex does with it can change. Every room tool call of
+ * such an agent passes here, so the limit is kept here whatever Codex asked
+ * for. The level is the one the owner saved: it is the one their card shows,
+ * and it holds from the moment it is saved, also for a process that still
+ * runs with an earlier level. A tool is allowed only by its exact name, so a
+ * tool the room server gains later is refused until it is named.
+ */
+export function readOnlyRoomToolRefusal(
+  entry: Pick<DaemonManifestEntry, "provider" | "permission_profile_id">,
+  toolName: string,
+): string | null {
+  if (!codexAgentIsReadOnly(entry)) return null;
+  if (CODEX_READ_ONLY_ROOM_TOOLS.has(toolName)) return null;
+  const shown = JSON.stringify(toolName.replace(/[^\x20-\x7e]/g, "?").slice(0, 64));
+  return `Read-only access does not allow the room tool ${shown}. This agent can read the room and post in it. `
+    + "It cannot change the task board, join rooms or submit reviews. Its owner can choose another access level.";
+}
 
 /** Narrow shutdown/handoff surface consumed by the daemon lifecycle owner. */
 export type BoundedEffectHandoffPort = {
@@ -232,6 +271,21 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
 
     // Re-resolve exact authority after journal preparation and before any I/O.
     const context = await this.options.context.exactActive(input);
+    // The entry was loaded again: its owner may have saved Read-only since this call was prepared.
+    // The level holds from the moment it is saved, so the tool is not run, and its effect is closed as failed.
+    const refusedNow = readOnlyRoomToolRefusal(context.entry, input.toolName);
+    if (refusedNow) {
+      try {
+        await this.reserveJournal(() => this.options.executionCompletion.complete({
+          ...input,
+          effectId: prepared.effect_id as string,
+          error: refusedNow,
+        }, true));
+      } catch {
+        // The refusal stands. An effect that could not be closed is never run again by the same request id.
+      }
+      throw new Error(refusedNow);
+    }
     const authorization = this.options.authorizations.get(context.entry.id);
     const session = authorization?.agentSession;
     if (!authorization || !session
@@ -289,6 +343,9 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       throw new Error("A supervised effect requires MCP request and tool identities.");
     }
     const context = await this.options.context.exactActive(input);
+    // Before anything is journaled or run: a refused call leaves no effect behind.
+    const refusal = readOnlyRoomToolRefusal(context.entry, input.toolName);
+    if (refusal) throw new Error(refusal);
     const withExactRoom = (result: Record<string, unknown>): Record<string, unknown> => ({
       ...result,
       room_id: context.entry.room_id,
@@ -299,6 +356,26 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
     if (input.toolName === "set_reply_thread"
       && (!input.input || typeof input.input !== "object" || Array.isArray(input.input) || Object.keys(input.input).length !== 0)) {
       throw new Error("set_reply_thread takes an empty object; the active turn determines its thread.");
+    }
+    if (input.toolName === "set_reply_gif" && !validReplyGifIntent(input.input)) throw new Error("Invalid GIF reply intent.");
+    let request = input.input;
+    if (input.toolName === "set_reply_attachments") {
+      if (isLocalRoomApi(context.agent.apiUrl)) throw new Error("Reply attachments need a cloud room.");
+      if (!validReplyAttachmentsRequest(input.input)) {
+        throw new Error("set_reply_attachments takes { files: [1 to 4 workspace paths] }, or { files: null } to clear them.");
+      }
+      if (input.input.files) {
+        if (!this.options.replyAttachments) throw new Error("This LetAgents daemon cannot attach files yet.");
+        // Copy the files now: the journal keeps the copies' identities, never the agent's paths.
+        request = await this.options.replyAttachments.snapshot({
+          workspacePath: context.entry.workspace_path,
+          inboxItemId: context.inbox.inbox_item_id,
+          agentId: input.entryId,
+          providerTurnId: context.inbox.provider_turn_id!,
+          mcpRequestId: input.mcpRequestId,
+          files: input.input.files,
+        });
+      }
     }
     if (input.toolName === "complete_room_turn") {
       if (context.entry.provider !== "cursor") {
@@ -354,10 +431,14 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
       provider_turn_id: context.inbox.provider_turn_id!,
       mcp_request_id: input.mcpRequestId,
       tool_name: input.toolName,
-      request: input.input,
+      request,
       mutation: input.mutation,
     }, (commit) => this.options.authority.fenceCommit(commit));
     if (prepared.effect.state === "completed") {
+      if (input.toolName === "set_reply_attachments" && prepared.created) {
+        const kept = (request as { files?: Array<{ spool_id: string }> | null }).files ?? [];
+        await this.options.replyAttachments?.keepOnly(context.inbox.inbox_item_id, kept.map((file) => file.spool_id)).catch(() => undefined);
+      }
       return withExactRoom({ state: "completed", result: prepared.effect.result });
     }
     if (!prepared.created) {
@@ -376,13 +457,14 @@ export class BoundedEffectCoordinator implements BoundedEffectHandoffPort {
         throw new Error("The prior supervised effect is still executing; refusing a duplicate side effect.");
       }
     }
-    const targetMessage = typeof args.thread_parent_id === "string"
-      ? args.thread_parent_id
-      : typeof args.reply_to === "string"
-        ? args.reply_to
-        : null;
+    const threadParentId = typeof args.thread_parent_id === "string" ? args.thread_parent_id.trim() : "";
+    const replyTo = typeof args.reply_to === "string" ? args.reply_to.trim() : "";
+    const targetMessage = threadParentId || replyTo || null;
+    // An untargeted post during a bounded turn is also the activating answer.
+    // Otherwise it can send once here and again as a final "answered in the room" recap.
+    // Separate tool messages must explicitly target another message or thread.
     if ((input.toolName === "send_message" || input.toolName === "send_thread_message")
-      && targetMessage === context.active.sourceMessageId) {
+      && (targetMessage === null || targetMessage === context.active.sourceMessageId)) {
       return withExactRoom({
         state: "prepared",
         effect_id: prepared.effect.effect_id,

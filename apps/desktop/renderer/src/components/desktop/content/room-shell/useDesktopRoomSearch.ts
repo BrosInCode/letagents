@@ -25,7 +25,7 @@ export function useDesktopRoomSearch(
         roomMessageVisibleText(message, agentNames()),
         message.replyTo?.displayText || message.replyTo?.text || "",
         message.replyTo ? roomMessageVisibleText(message.replyTo, agentNames()) : "",
-        ...message.attachments.map((attachment) => attachment.fileName || attachment.name || ""),
+        ...message.attachments.map((attachment) => attachment.fileName),
       ].join("\n").toLowerCase();
       return haystack.includes(query);
     });

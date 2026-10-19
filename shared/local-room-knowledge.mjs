@@ -7,7 +7,8 @@ export function initializeRoomKnowledge(db) {
     CREATE TABLE IF NOT EXISTS local_room_knowledge_revisions (
     room_id TEXT NOT NULL, id TEXT NOT NULL, version INTEGER NOT NULL, value TEXT NOT NULL,
     PRIMARY KEY(room_id, id, version));
-    CREATE TABLE IF NOT EXISTS local_room_knowledge_outbox (room_id TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(room_id, id));`);
+    CREATE TABLE IF NOT EXISTS local_room_knowledge_outbox (room_id TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(room_id, id));
+    CREATE TABLE IF NOT EXISTS local_room_knowledge_request_outbox (room_id TEXT NOT NULL, id TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(room_id, id));`);
 }
 export function listLocalKnowledge(db, roomId, type) {
   initializeRoomKnowledge(db);
@@ -41,6 +42,8 @@ export function saveLocalKnowledge(db, record, expectedVersion) {
     db.prepare('INSERT INTO local_room_knowledge VALUES (?, ?, ?, ?, ?) ON CONFLICT(room_id, id) DO UPDATE SET version = excluded.version, value = excluded.value').run(record.room_id, record.id, record.type, record.version, JSON.stringify(record));
     db.prepare('INSERT INTO local_room_knowledge_revisions VALUES (?, ?, ?, ?)').run(record.room_id, record.id, record.version, JSON.stringify(record));
     if (record.type === 'attention' && record.response) db.prepare('INSERT OR IGNORE INTO local_room_knowledge_outbox VALUES (?, ?, ?)').run(record.room_id, record.id, JSON.stringify(record));
+    // An agent's new request is shown in the room chat once, by the desktop.
+    if (record.type === 'attention' && expectedVersion === undefined && record.author.kind === 'agent') db.prepare('INSERT OR IGNORE INTO local_room_knowledge_request_outbox VALUES (?, ?, ?)').run(record.room_id, record.id, JSON.stringify(record));
     db.exec('COMMIT');
     return record;
   } catch (error) { db.exec('ROLLBACK'); throw error; }

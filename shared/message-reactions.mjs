@@ -89,16 +89,16 @@ export function viewerReactedWith(reaction, viewerLogin) {
   return Boolean(reaction?.reactors?.some((reactor) => sameLogin(reactor.login, viewerLogin)));
 }
 
-/** "You, Ada and 3 others reacted with 👍" — the tooltip and the accessible name. */
-export function describeMessageReaction(reaction, viewerLogin) {
+/** Name every supplied human and agent; count only reactors the server has not listed. */
+export function describeMessageReaction(reaction, viewerLogin, viewerHasReacted = false) {
   const reactors = Array.isArray(reaction?.reactors) ? reaction.reactors : [];
-  const viewerReacted = viewerReactedWith(reaction, viewerLogin);
+  const viewerReacted = viewerHasReacted || viewerReactedWith(reaction, viewerLogin);
   const names = [
     ...(viewerReacted ? ["You"] : []),
     ...reactors.filter((reactor) => !sameLogin(reactor.login, viewerLogin)).map((reactor) => reactor.name),
   ];
   const count = Math.max(Number(reaction?.count) || 0, names.length);
-  const shown = names.slice(0, 3);
+  const shown = [...names];
   const others = count - shown.length;
   if (others > 0) shown.push(others === 1 ? "1 other" : `${others} others`);
   const who = shown.length <= 1

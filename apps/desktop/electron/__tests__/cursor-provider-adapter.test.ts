@@ -1,3 +1,4 @@
+import "./isolated-home.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -11,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import {
+  boundedCursorRoomTurnPrompt,
   CURSOR_NO_ROOM_REPLY_SENTINEL,
   CursorProviderAdapter,
   cursorCliEnv,
@@ -20,6 +22,7 @@ import {
   type CursorCliChild,
   type CursorProviderAdapterDependencies,
 } from "../main/agents/cursor-provider-adapter.js";
+import { boundedClaudeRoomTurnPrompt } from "../main/agents/claude-code-provider-adapter.js";
 import type {
   ProviderHandle,
   ProviderRoomTurnOptions,
@@ -39,6 +42,7 @@ import {
 import { prepareCursorResumeOwnershipLock } from "../main/agents/cursor-sandbox-policy.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import { removeSupervisedWorkspaceGenerationReceipt } from "../main/agents/supervised-workspace-generation.js";
+import { cursorAuthorityUnprovenDetail } from "../main/agents/cursor-turn-settlement.js";
 const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -441,6 +445,9 @@ function createHarness(options: HarnessOptions = {}) {
   let mintedSessions = 0;
 
   const dependencies: CursorProviderAdapterDependencies = {
+    readUsageOwner: () => null,
+    readUsageContext: () => null,
+    readUsageAccount: async () => ({ state: "unavailable", windows: [] }),
     relocateConversationNamespace() {},
     async openWorkspaceGeneration(path) {
       const generation = generations.get(path);
@@ -736,6 +743,15 @@ test("Cursor resume ownership rejects occupied or unsafe structures without chan
     assert.throws(() => prepareCursorResumeOwnershipLock(id, root), /not private/);
     assert.equal(existsSync(join(root, "elsewhere")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("supervised Cursor room turns say there is no network and git fails from the sandbox only for sandboxed writes", () => {
+  const limit = /In this mode there is no network\. git and gh usually fail inside the workspace/;
+  const sandboxed = boundedCursorRoomTurnPrompt(roomTurnRequest(), "turn_cursor_1", "sandboxed_write");
+  assert.match(sandboxed, limit);
+  assert.match(sandboxed, /This is caused by the sandbox, so do not report it as a problem with the owner's Mac\./);
+  assert.doesNotMatch(boundedCursorRoomTurnPrompt(roomTurnRequest(), "turn_cursor_2", "full_access"), limit);
+  assert.doesNotMatch(boundedClaudeRoomTurnPrompt(roomTurnRequest()), limit);
 });
 
 test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags", () => {
@@ -1549,7 +1565,8 @@ test("MCP retirement preserves the grace window after its leader exits before a 
   skip: process.platform === "win32",
 }, () => verifyMcpConnectorRetirement(false, true));
 
-async function verifyMcpRuntimeSignalFence(probeMode: "recycled" | "absent" | "ambiguous_identity" | "ambiguous_kill_identity" | "ambiguous_group"): Promise<void> {
+async function verifyMcpRuntimeSignalFence(probeMode: "recycled" | "absent" | "ambiguous_identity" | "ambiguous_kill_identity" | "ambiguous_group"
+  | "group_timeout_then_empty" | "group_timeout_always" | "group_alive"): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-runtime-recycled-group-"));
   const statePath = join(root, "turn.jsonl");
   const cursorBin = join(root, "fake-cursor-agent");
@@ -1561,6 +1578,7 @@ async function verifyMcpRuntimeSignalFence(probeMode: "recycled" | "absent" | "a
   const groupSignalPath = join(root, "group-signal.log");
   const ambiguousProbePath = join(root, "ambiguous-probe.log");
   const laterProbePath = join(root, "later-probe.log");
+  const groupTimeoutsPath = join(root, "group-probe-timeouts.log");
   const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
   const connectorSocketPath = join(connectorRoot, "stdio.sock");
   const runtimeDataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
@@ -1605,9 +1623,11 @@ const originalKill = process.kill.bind(process);
 fs.appendFileSync(${JSON.stringify(preloadLoadedPath)}, String(process.pid) + "\\n");
 let exactIdentityReads = 0;
 let capturedIdentity;
-let ambiguousGroupProbe = false;
+let ambiguousGroupProbes = 0;
+let groupProbeCalls = 0;
 const probeMode = ${JSON.stringify(probeMode)};
-const retryIdentity = probeMode === "ambiguous_identity" || probeMode === "ambiguous_kill_identity";
+const groupMode = probeMode.startsWith("group_");
+const retryIdentity = probeMode === "ambiguous_identity" || probeMode === "ambiguous_kill_identity" || groupMode;
 function ambiguousProbe() {
   fs.writeFileSync(${JSON.stringify(ambiguousProbePath)}, fs.existsSync(${JSON.stringify(groupSignalPath)})
     ? fs.readFileSync(${JSON.stringify(groupSignalPath)}, "utf8") : "");
@@ -1650,9 +1670,22 @@ childProcess.spawnSync = function(command, args, options) {
   if (command === "/bin/ps" && Array.isArray(args)
     && args[0] === "-axo" && args[1] === "pid=,pgid=") {
     const pid = runtimePid();
+    if (pid && groupMode) {
+      // Record the bound each attempt of the wrapper's group probe was given.
+      fs.appendFileSync(${JSON.stringify(groupTimeoutsPath)}, String(options && options.timeout) + "\\n");
+      groupProbeCalls += 1;
+      if (probeMode === "group_timeout_always" || (probeMode === "group_timeout_then_empty" && groupProbeCalls === 1)) {
+        return ambiguousProbe();
+      }
+      const observed = originalSpawnSync.call(this, command, args, options);
+      if (probeMode === "group_timeout_then_empty") return observed;
+      const stdout = String(observed.stdout || "") + String(pid + 100000) + " " + String(pid) + "\\n";
+      return { pid: 0, output: [null, stdout, observed.stderr || ""], stdout, stderr: observed.stderr || "", status: observed.status, signal: observed.signal };
+    }
     if (pid && !retryIdentity) {
-      if (probeMode === "ambiguous_group" && !ambiguousGroupProbe) {
-        ambiguousGroupProbe = true;
+      // A timeout that outlasts the wrapper's whole retry budget loses group continuity.
+      if (probeMode === "ambiguous_group" && ambiguousGroupProbes < 3) {
+        ambiguousGroupProbes += 1;
         return ambiguousProbe();
       }
       fs.appendFileSync(${JSON.stringify(laterProbePath)}, "group\\n");
@@ -1729,7 +1762,21 @@ attestFixtureMcp().then(() => setInterval(() => {}, 1000)).catch((error) => {
     assert.equal(existsSync(initialIdentityPath), true, "spawn records the original runtime leader's exact birth and ancestry");
     assert.equal(terminal.type, "not_started", "the invalid contract exercises cleanup before and after startup settles");
     const signals = existsSync(groupSignalPath) ? readFileSync(groupSignalPath, "utf8").trim().split("\n") : [];
-    if (probeMode === "recycled" || probeMode === "absent") {
+    if (probeMode.startsWith("group_")) {
+      const bounds = readFileSync(groupTimeoutsPath, "utf8").trim().split("\n");
+      if (probeMode === "group_timeout_then_empty") {
+        assert.deepEqual(bounds.slice(0, 2), ["250", "1000"], "a timed-out probe is retried at once with a longer bound");
+        assert.deepEqual(terminal.remote_authority_failed_checks, [], "a retried probe that answers proves the group closed");
+      } else if (probeMode === "group_timeout_always") {
+        assert.ok(bounds.length >= 3 && bounds.length % 3 === 0
+          && bounds.every((bound, index) => bound === (index % 3 === 0 ? "250" : "1000")),
+        `every probe is tried three times, then reported unknown: ${bounds.join(",")}`);
+        assert.deepEqual(terminal.remote_authority_failed_checks, ["mcp_runtime_group"]);
+      } else {
+        assert.ok(bounds.length >= 1 && bounds.every((bound) => bound === "250"), "a definite answer is never retried");
+        assert.deepEqual(terminal.remote_authority_failed_checks, ["mcp_runtime_group"]);
+      }
+    } else if (probeMode === "recycled" || probeMode === "absent") {
       assert.equal(existsSync(identityProbePath), true, "retirement observes that the original group leader birth changed");
       assert.equal(existsSync(groupSignalPath), false, "the recycled numeric PGID receives neither TERM nor KILL");
       assert.equal(existsSync(laterProbePath), true, "cleanup continues probing group absence without restoring signal authority");
@@ -1746,7 +1793,7 @@ attestFixtureMcp().then(() => setInterval(() => {}, 1000)).catch((error) => {
       }
     }
     assert.equal(terminal.remote_authority_revoked,
-      probeMode === "ambiguous_identity" || probeMode === "ambiguous_kill_identity",
+      probeMode === "ambiguous_identity" || probeMode === "ambiguous_kill_identity" || probeMode === "group_timeout_then_empty",
       "only successful retirement of a freshly verified runtime proves revoked authority");
   } finally {
     if (child?.pid) {
@@ -1768,7 +1815,15 @@ test("MCP cleanup retries distinguish unavailable identity from lost process-gro
   await t.test("TERM identity timeout then success", () => verifyMcpRuntimeSignalFence("ambiguous_identity"));
   await t.test("KILL identity timeout then success", () => verifyMcpRuntimeSignalFence("ambiguous_kill_identity"));
   await t.test("confirmed absence permanently revokes signals", () => verifyMcpRuntimeSignalFence("absent"));
-  await t.test("group probe ambiguity", () => verifyMcpRuntimeSignalFence("ambiguous_group"));
+  await t.test("group probe ambiguity that outlasts every retry", () => verifyMcpRuntimeSignalFence("ambiguous_group"));
+});
+
+test("the wrapper retries a timed-out process-group probe with a longer bound and never reports closed without an answer", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  await t.test("a timeout then an answer proves the group closed", () => verifyMcpRuntimeSignalFence("group_timeout_then_empty"));
+  await t.test("a timeout on every try leaves the group unproven", () => verifyMcpRuntimeSignalFence("group_timeout_always"));
+  await t.test("a definite still-alive answer is final and is not retried", () => verifyMcpRuntimeSignalFence("group_alive"));
 });
 
 test("the exact live Cursor connector rejects a swapped runtime with a missing or malformed completion contract", async () => {
@@ -3304,6 +3359,48 @@ test("a successor recovers the exact Cursor reply from the private wrapper journ
   }
 });
 
+for (const startingContinuation of ["sess-cursor-1", "cursor-pending:unproven-restart"]) {
+test(`a successor still refuses a wrapper journal whose remote authority was never proven revoked (${startingContinuation.startsWith("cursor-pending") ? "pending" : "established"} conversation)`, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-recovery-unproven-"));
+  try {
+    const configDir = join(root, "config");
+    mkdirSync(configDir, { recursive: true });
+    const turnId = "cursor:unproven-restart-turn";
+    const statePath = join(configDir, `letagents-cursor-turn-${createHash("sha256").update(turnId).digest("hex")}.jsonl`);
+    writeFileSync(statePath, "");
+    const harness = createHarness();
+    const generation = await harness.dependencies.createWorkspaceGeneration({ realWorkspace: root, turnIdentity: turnId });
+    harness.workspaceGenerationEvents.length = 0;
+    writeFileSync(`${statePath}.terminal.json`, JSON.stringify(unprovenAuthorityTerminal(
+      { workspaceGenerationManifestPath: generation.manifestPath },
+      { remote_authority_failed_checks: ["proxy_sockets", "runtime_data", "proxy_sockets"] }, "reply that must not be published",
+    )));
+    const adapter = new CursorProviderAdapter({
+      dependencies: harness.dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir, dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home"), NPM_CONFIG_CACHE: join(root, "npm-cache") },
+      }),
+    });
+    const request = daemonSpawnRequest({ cwd: root });
+    const handle = await adapter.resume({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: startingContinuation,
+      providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    }, request);
+    await assert.rejects(
+      adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-unproven-restart", providerTurnId: turnId }),
+      (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "ambiguous"
+        && /remote-authority revocation\. Wrapper checks that failed: proxy_sockets, runtime_data\.$/.test((error as Error).message),
+    );
+    assert.deepEqual(harness.workspaceGenerationEvents, [], "recovery never reconciles a generation without containment proof");
+    assert.equal(handle.providerContinuationId, startingContinuation, "an unproven terminal never rewrites the lane's conversation");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+}
+
 test("Cursor recommits a visible settlement before cleanup after a failed directory sync", async (t) => {
   for (const phase of ["cleaned", "aborted", "before-loan", "fresh-aborted"] as const) {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "letagents-cursor-settlement-sync-")));
@@ -4215,6 +4312,188 @@ test("a writable generation reconciles only after its exact durable containment 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/**
+ * Run one writable supervised turn whose live stream reports a successful
+ * result, then let the wrapper publish `terminalFor(launch)` as its durable
+ * terminal. The checkpoint callback answers as the daemon does for a settled
+ * Cursor ending: cleanup of recovery evidence is allowed.
+ */
+async function runTurnWithWrapperTerminal(
+  inboxItemId: string,
+  terminalFor: (launch: { statePath?: string; workspaceGenerationManifestPath?: string }) => Record<string, unknown>,
+  liveResult: string | null = "reply that must not be published",
+  permissionProfileId: "read_only" | "sandboxed_write" = "sandboxed_write",
+) {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-unproven-authority-"));
+  const harness = createHarness({ ownsDescendantReaping: true });
+  try {
+    const dependencies: CursorProviderAdapterDependencies = {
+      ...harness.dependencies,
+      prepareTurnState(path) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      },
+      launchTurn(input) {
+        const child = harness.dependencies.launchTurn(input);
+        Object.defineProperty(child, "requiresDurableTerminalEvidence", { value: true });
+        return child;
+      },
+    };
+    const streamEvents: ProviderStreamEvent[] = [];
+    const adapter = new CursorProviderAdapter({
+      dependencies,
+      streamSink: (event) => streamEvents.push(event),
+      supervisedProfileFactory: (input) => {
+        const profileRoot = input.profileRoot ?? root;
+        const homeDir = join(profileRoot, "home");
+        const configDir = join(profileRoot, "config");
+        mkdirSync(homeDir, { recursive: true });
+        mkdirSync(configDir, { recursive: true });
+        return {
+          homeDir,
+          configDir,
+          dataDir: join(profileRoot, "data"),
+          cacheDir: join(profileRoot, "cache"),
+          env: { HOME: homeDir, NPM_CONFIG_CACHE: join(profileRoot, "npm-cache") },
+          ...(input.inspectionOnly ? {} : wrapperHostedMcpFixture(profileRoot)),
+        };
+      },
+    });
+    const handle = await spawnDaemonLane(adapter, harness, daemonSpawnRequest({
+      cwd: root,
+      permissionProfileId,
+      launchPolicy: permissionProfileId === "read_only" ? { mode: "ask", force: false } : { force: true, sandbox: "enabled" },
+    }));
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, (terminal) => terminals.push(terminal));
+    const checkpointed: ProviderRoomTurnResult[] = [];
+    const pending = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId }), {
+      checkpointTerminalResult: async (result) => {
+        checkpointed.push(result);
+        return { acceptedResult: result, cleanupRecoveryEvidence: true };
+      },
+    });
+    for (let index = 0; index < 100 && harness.children.length === 0; index += 1) await flush();
+    const child = harness.children[0]!;
+    for (let index = 0; index < 100 && !child.isReleased; index += 1) await flush();
+    if (liveResult !== null) {
+      child.emit({
+        type: "result", subtype: "success", is_error: false,
+        result: liveResult, session_id: "sess-cursor-1",
+      });
+    }
+    const launch = harness.launches[0]!;
+    writeFileSync(`${launch.statePath}.terminal.json`, JSON.stringify(terminalFor(launch)));
+    child.resolveExit({ type: "exit", code: 1, signal: null });
+    const outcome = await withLoopAlive(pending).then(
+      (value) => ({ value, error: undefined }),
+      (error: unknown) => ({ value: undefined, error }),
+    );
+    return { ...outcome, harness, handle, terminals, checkpointed, streamEvents, terminalEvidenceKept: existsSync(`${launch.statePath}.terminal.json`) };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** A wrapper terminal that is sound in every way except the remote-authority proof. */
+function unprovenAuthorityTerminal(
+  launch: { workspaceGenerationManifestPath?: string },
+  over: Record<string, unknown> = {},
+  resultText = "reply that must not be published",
+): Record<string, unknown> {
+  return {
+    type: "exit",
+    code: 0,
+    signal: null,
+    native_process_group_reaped: true,
+    reap_scope: "native_process_group",
+    remote_authority_revoked: false,
+    turn_contract_version: 1,
+    session_contract_valid: true,
+    stream_contract_complete: true,
+    workspace_generation_manifest_path: launch.workspaceGenerationManifestPath,
+    init: { type: "system", subtype: "init", session_id: "sess-cursor-1" },
+    result: {
+      type: "result", subtype: "success", is_error: false,
+      result: resultText, session_id: "sess-cursor-1", request_id: null,
+    },
+    ...over,
+  };
+}
+
+test("a finished turn whose wrapper could not prove its remote authority ended settles as lost instead of blocking the lane", async () => {
+  const run = await runTurnWithWrapperTerminal("unproven-authority-finished",
+    (launch) => unprovenAuthorityTerminal(launch, { remote_authority_failed_checks: ["mcp_runtime_group", "not-a-known-check"] }));
+
+  assert.equal(run.error, undefined, "the turn settles; it does not throw and block the FIFO head");
+  assert.deepEqual(run.value, {
+    turnId: run.value!.turnId,
+    providerContinuationId: "sess-cursor-1",
+    outcome: "interrupted",
+    text: null,
+    evidence: "stream",
+    authorityUnproven: true,
+    error: "Cursor finished this turn, but LetAgents could not confirm that the turn's helper processes had stopped. "
+      + "The turn's reply was not posted and its file changes were not kept.",
+  });
+  assert.equal(run.value!.outcome === "interrupted" && run.value!.error, cursorAuthorityUnprovenDetail(true));
+  const invalid = run.streamEvents.find((event) => event.method === "turn/terminal_invalid");
+  assert.match(String((invalid?.payload as { reason?: unknown } | undefined)?.reason),
+    /Wrapper checks that failed: mcp_runtime_group\.$/, "the technical observation names the failed clean-up check, and only known names");
+  assert.deepEqual(run.checkpointed, [run.value], "the daemon is asked to settle exactly this ending");
+  assert.equal(run.terminals.length, 1, "the lane still retires once");
+  assert.equal(run.terminals[0]!.terminalCause, "protocol_error");
+  assert.equal(run.handle.observedState(), "failed");
+  assert.deepEqual(
+    run.harness.workspaceGenerationEvents.map((event) => event.kind),
+    ["create"],
+    "unproven authority never reconciles the writable generation or removes its receipt",
+  );
+  assert.equal(run.terminalEvidenceKept, true, "the untrusted terminal stays as evidence for a trusted successor");
+});
+
+test("a finished read-only turn with unproven remote authority settles as lost the same way", async () => {
+  const run = await runTurnWithWrapperTerminal("unproven-authority-read-only", (launch) => unprovenAuthorityTerminal(launch),
+    "reply that must not be published", "read_only");
+
+  assert.equal(run.error, undefined);
+  assert.equal(run.value?.outcome, "interrupted");
+  assert.equal((run.value as { authorityUnproven?: true } | undefined)?.authorityUnproven, true);
+  assert.equal((run.value as { error?: string } | undefined)?.error,
+    "Cursor finished this turn, but LetAgents could not confirm that the turn's helper processes had stopped. The turn's reply was not posted.",
+    "a read-only turn made no file changes, so none are reported lost");
+  assert.equal(run.terminals[0]!.terminalCause, "protocol_error");
+  assert.deepEqual(run.harness.workspaceGenerationEvents, [], "a read-only turn owns no private generation");
+});
+
+for (const [name, terminalFor, liveResult] of [
+  ["a wrapper that errored", (launch: { workspaceGenerationManifestPath?: string }) =>
+    unprovenAuthorityTerminal(launch, { type: "error", error: "Cursor's live MCP connector ended before the turn became terminal." }), "live"],
+  ["a terminal for another workspace generation", (launch: { workspaceGenerationManifestPath?: string }) =>
+    unprovenAuthorityTerminal(launch, { workspace_generation_manifest_path: `${launch.workspaceGenerationManifestPath}.other` }), "live"],
+  ["a result that differs from the live result", (launch: { workspaceGenerationManifestPath?: string }) =>
+    unprovenAuthorityTerminal(launch, {}, "a different final answer"), "live"],
+  ["a turn that never produced a result", (launch: { workspaceGenerationManifestPath?: string }) =>
+    unprovenAuthorityTerminal(launch, { result: null }), null],
+  ["a wrapper that gave no revocation answer at all", (launch: { workspaceGenerationManifestPath?: string }) => {
+    const terminal = unprovenAuthorityTerminal(launch);
+    delete terminal.remote_authority_revoked;
+    return terminal;
+  }, "live"],
+  ["an incomplete stream contract", (launch: { workspaceGenerationManifestPath?: string }) =>
+    unprovenAuthorityTerminal(launch, { stream_contract_complete: false }), "live"],
+] as const) {
+  test(`unproven authority is trusted only for a sound finished turn, not for ${name}`, async () => {
+    const run = await runTurnWithWrapperTerminal(`unproven-authority-${name.replace(/\W+/g, "-")}`, terminalFor, liveResult);
+
+    assert.match(String((run.error as Error | undefined)?.message), /ended before the bounded room turn produced a terminal result/);
+    assert.equal(run.value, undefined);
+    assert.deepEqual(run.checkpointed, [], "nothing is settled on weaker evidence");
+    assert.equal(run.terminals[0]!.terminalCause, "protocol_error");
+    assert.deepEqual(run.harness.workspaceGenerationEvents.map((event) => event.kind), ["create"]);
+  });
+}
 
 test("the production supervised wrapper blocks remote Cursor authority and retires its loopback proxy", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-remote-authority-"));
@@ -8511,5 +8790,232 @@ test("a Cursor turn that finished while its daemon was replaced is answered from
     assert.equal(current.room_agent_state.inbox.state, "empty", "nothing waits for a person");
   } finally {
     await agent.cleanup();
+  }
+});
+
+test("Cursor usage reads idle sessions without inference, throttles account reads, and clears missing context", async () => {
+  const h = createHarness();
+  let now = Date.parse("2026-10-11T10:00:00Z"), calls = 0, fail = false;
+  let reading: ReturnType<CursorProviderAdapterDependencies["readUsageContext"]> = {
+    context: { usedTokens: 39386, capacityTokens: 256000, observedAt: new Date(now).toISOString() }, rootId: "root", summaryId: null,
+  };
+  h.dependencies.now = () => new Date(now).toISOString();
+  h.dependencies.readUsageOwner = () => 12345;
+  h.dependencies.readUsageContext = (_config, cwd, id) => {
+    assert.equal(cwd, "/tmp/wa-cursor-1"); assert.equal(id, "sess-cursor-usage"); return reading;
+  };
+  h.dependencies.readUsageAccount = async (auth, at) => {
+    assert.equal(auth, "Bearer test-provider-authorization"); calls++;
+    if (fail) throw new Error("offline");
+    return { state: "available", windows: [{ id: "cursor-plan", label: "Included usage", usedPercent: 20, resetsAt: null, observedAt: at }] };
+  };
+  const adapter = supervisedAdapter(h);
+  const handle = await adapter.resume({ workAttemptId: "wa-cursor-1", providerContinuationId: "sess-cursor-usage" }, daemonSpawnRequest());
+  const [first, concurrent] = await Promise.all([adapter.readUsage(handle), adapter.readUsage(handle)]);
+  assert.equal(first?.account.windows[0]?.usedPercent, 20);
+  assert.deepEqual(first, concurrent);
+  assert.equal(first?.context?.usedTokens, 39386);
+  assert.equal(calls, 1);
+  assert.equal(h.launches.length, 0, "usage must never start an inference or room turn");
+  assert.equal(h.identityAttestations.length, 1);
+  assert.ok(!existsSync(h.identityAttestations[0]!.writableProfileRoot), "temporary identity profile is removed");
+  reading = { ...reading!, rootId: "compacted", summaryId: "summary", context: { ...reading!.context!, usedTokens: 9000 } };
+  now += 31000;
+  const compacted = await Promise.all([adapter.readUsage(handle), adapter.readUsage(handle)]);
+  assert.ok(compacted.every(value => value?.compaction === "compacted"));
+  assert.equal((await adapter.readUsage(handle))?.compaction, "compacted");
+  reading = null;
+  assert.equal((await adapter.readUsage(handle))?.context, null);
+  fail = true; now += 31000;
+  const stale = await adapter.readUsage(handle);
+  assert.equal(stale?.account.state, "stale");
+  assert.equal(stale?.account.windows[0]?.usedPercent, 20);
+  assert.equal(calls, 3);
+  await adapter.stop(handle);
+});
+
+test("Cursor usage rejects another account and discards a read after the exact handle is retired", async () => {
+  const h = createHarness();
+  let calls = 0, owner = 999, now = Date.now();
+  h.dependencies.readUsageOwner = () => owner;
+  h.dependencies.now = () => new Date(now).toISOString();
+  let complete!: (value: Awaited<ReturnType<CursorProviderAdapterDependencies["readUsageAccount"]>>) => void;
+  let started!: () => void;
+  const didStart = new Promise<void>(resolve => { started = resolve; });
+  h.dependencies.readUsageAccount = () => { calls++; started(); return new Promise(resolve => { complete = resolve; }); };
+  const adapter = supervisedAdapter(h);
+  const handle = await adapter.resume({ workAttemptId: "wa-cursor-1", providerContinuationId: "sess-cursor-usage" }, daemonSpawnRequest());
+  assert.equal((await adapter.readUsage(handle))?.account.state, "unavailable");
+  assert.equal(calls, 0, "never query the current account for another account's agent");
+  owner = 12345; now += 31000;
+  const pending = adapter.readUsage(handle);
+  await didStart;
+  await adapter.stop(handle);
+  complete({ state: "available", windows: [] });
+  assert.equal(await pending, null);
+  assert.equal(await adapter.readUsage(handle), null);
+});
+
+function stagedImageAttachments(folder: string) {
+  return [
+    { index: 1, fileName: "screen.png", mimeType: "image/png", sizeBytes: 12, status: "image" as const,
+      image: { mimeType: "image/png" as const, path: join(folder, "1.png") } },
+    { index: 2, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 5, status: "not_image" as const },
+  ];
+}
+
+test("a Cursor room turn names its staged images in the prompt and may only read their folder", async () => {
+  const folder = mkdtempSync(join(tmpdir(), "letagents-cursor-turn-images-"));
+  try {
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    assert.equal(adapter.roomTurnImageDelivery(), "file");
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    const pending = adapter.runRoomTurn(handle, { ...roomTurnRequest(), attachments: stagedImageAttachments(folder) });
+    await waitFor(() => harness.children[0]?.isReleased === true);
+    const launch = harness.launches[0]!;
+    const prompt = launch.args.at(-1)!;
+    assert.ok(prompt.includes([
+      `- Attachment 1: "screen.png" (image/png, 12 bytes). Included after this text as image 1.`,
+      `- Attachment 2: "notes.pdf" (application/pdf, 5 bytes). Not shown: only images (PNG, JPEG, GIF, WebP) reach agents.`,
+      "The attached images are files on this machine. Open each one with your file-reading tool to see it before you answer:",
+      `- Image 1 ("screen.png"): ${join(folder, "1.png")}`,
+    ].join("\n")), prompt.slice(-800));
+    const variants = [folder, realpathSync(folder)];
+    for (const path of variants) {
+      assert.equal(launch.allowedReadSubpaths?.includes(path), true, `read ${path}`);
+      assert.equal(launch.deniedWriteSubpaths?.includes(path), true, `no write ${path}`);
+      assert.equal(launch.deniedExecSubpaths?.includes(path), true, `no exec ${path}`);
+      assert.equal(launch.allowedWriteSubpaths?.includes(path) ?? false, false, `not writable ${path}`);
+    }
+    harness.children[0]!.emit({ type: "result", subtype: "success", is_error: false, result: "seen", session_id: "sess-cursor-1" });
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await withLoopAlive(pending);
+
+    // The read permission belongs to that one launch: the next turn on the same lane has none of it.
+    const next = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "inbox_cursor_2", actionId: "action_cursor_2" }));
+    await waitFor(() => harness.children[1]?.isReleased === true);
+    const nextLaunch = harness.launches[1]!;
+    assert.doesNotMatch(nextLaunch.args.at(-1)!, /Open each one with your file-reading tool/);
+    for (const path of variants) {
+      for (const list of [nextLaunch.allowedReadSubpaths, nextLaunch.deniedWriteSubpaths, nextLaunch.deniedExecSubpaths]) {
+        assert.equal(list?.includes(path) ?? false, false, `the next launch does not carry ${path}`);
+      }
+    }
+    harness.children[1]!.emit({ type: "result", subtype: "success", is_error: false, result: "next", session_id: "sess-cursor-1" });
+    harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await withLoopAlive(next);
+  } finally { rmSync(folder, { recursive: true, force: true }); }
+});
+
+test("a staged image folder replaced by a link is never named or opened to the sandbox", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-image-link-"));
+  try {
+    const target = join(root, "home-like");
+    mkdirSync(target);
+    const linked = join(root, "turn-linked");
+    symlinkSync(target, linked);
+    const prompt = boundedCursorRoomTurnPrompt({ ...roomTurnRequest(), attachments: stagedImageAttachments(linked) }, "cursor:turn");
+    assert.doesNotMatch(prompt, /Open each one with your file-reading tool/);
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    const handle = await adapter.spawn(daemonSpawnRequest({ permissionProfileId: "sandboxed_write", launchPolicy: { force: true, sandbox: "enabled" } }));
+    const pending = adapter.runRoomTurn(handle, { ...roomTurnRequest(), attachments: stagedImageAttachments(linked) });
+    await waitFor(() => harness.children[0]?.isReleased === true);
+    const launch = harness.launches[0]!;
+    for (const path of [linked, target, realpathSync(target)]) {
+      assert.equal(launch.allowedReadSubpaths?.includes(path) ?? false, false, `not readable ${path}`);
+    }
+    harness.children[0]!.emit({ type: "result", subtype: "success", is_error: false, result: "seen", session_id: "sess-cursor-1" });
+    harness.children[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await withLoopAlive(pending);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a Cursor prompt without staged images gets no image lines", async () => {
+  const prompt = boundedCursorRoomTurnPrompt(roomTurnRequest(), "cursor:turn");
+  assert.doesNotMatch(prompt, /Open each one with your file-reading tool/);
+  const unstaged = boundedCursorRoomTurnPrompt({ ...roomTurnRequest(), attachments: [
+    { index: 1, fileName: "screen.png", mimeType: "image/png", sizeBytes: 12, status: "provider_unsupported" },
+  ] }, "cursor:turn");
+  assert.match(unstaged, /Not shown: this agent cannot view images/);
+  assert.doesNotMatch(unstaged, /Open each one with your file-reading tool/);
+});
+
+test("under the real sandbox a Cursor turn reads its staged image but cannot write there or read another turn's images", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-image-sandbox-"));
+  try {
+    const workspace = join(root, "workspace");
+    const sourceHomeDir = join(root, "source-home");
+    const stableProfileRoot = join(root, "stable-profile");
+    const executable = join(root, "fake-cursor-agent");
+    const stagedRoot = join(root, "room-turn-attachments");
+    const ownFolder = join(stagedRoot, "turn-own");
+    const otherFolder = join(stagedRoot, "turn-other");
+    initializeGitWorkspace(workspace);
+    mkdirSync(join(sourceHomeDir, ".cursor"), { recursive: true });
+    mkdirSync(ownFolder, { recursive: true, mode: 0o700 });
+    mkdirSync(otherFolder, { recursive: true, mode: 0o700 });
+    writeFileSync(join(ownFolder, "1.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), { mode: 0o600 });
+    writeFileSync(join(otherFolder, "1.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]), { mode: 0o600 });
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const prompt = process.argv[process.argv.length - 1];
+const image = /- Image 1 \\("screen.png"\\): (.+)$/m.exec(prompt)[1];
+function attempt(run) { try { return { ok: true, value: run() }; } catch (error) { return { ok: false, code: error.code }; } }
+const outcome = {
+  read: attempt(() => fs.readFileSync(image).length),
+  write: attempt(() => fs.writeFileSync(path.join(path.dirname(image), "planted.txt"), "x")),
+  replace: attempt(() => fs.writeFileSync(image, "x")),
+  other: attempt(() => fs.readFileSync(${JSON.stringify(join(otherFolder, "1.png"))}).length),
+};
+${cursorConversationStoreFixtureSource("sess-image-sandbox")}
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-image-sandbox" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: JSON.stringify(outcome), session_id: "sess-image-sandbox" }) + "\\n");
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        attestSupervisedMcp: async () => {},
+      },
+      supervisedProfileFactory: (input) => prepareCursorSupervisedProfile({
+        ...input,
+        apiBaseUrl: "https://desktop.letagents.example",
+        workspaceRoot: input.cwd,
+        sourceHomeDir,
+        profileRoot: input.profileRoot ?? stableProfileRoot,
+        ...(input.inspectionOnly ? {} : {
+          mcpRuntime: {
+            entryPath: materializeAttestableMcpRuntime(join(dirname(sourceHomeDir), "attestable-mcp-runtime")),
+            readRoots: [join(dirname(sourceHomeDir), "attestable-mcp-runtime")],
+          },
+        }),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      cwd: workspace,
+      workAttemptId: "wa-image-sandbox",
+      permissionProfileId: "sandboxed_write",
+      launchPolicy: { force: true, sandbox: "enabled" },
+    }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, {
+      ...roomTurnRequest({ inboxItemId: "inbox-image-sandbox" }), attachments: stagedImageAttachments(ownFolder),
+    }));
+    const outcome = JSON.parse(result.text!) as Record<string, { ok: boolean; value?: number; code?: string }>;
+    assert.deepEqual(outcome.read, { ok: true, value: 8 }, "the staged image is readable");
+    assert.equal(outcome.write?.ok, false, "nothing can be planted next to it");
+    assert.equal(outcome.replace?.ok, false, "the image itself cannot be replaced");
+    assert.equal(outcome.other?.ok, false, "another turn's images stay unreadable");
+    assert.deepEqual(readdirSync(ownFolder), ["1.png"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

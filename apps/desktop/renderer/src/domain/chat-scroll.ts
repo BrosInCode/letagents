@@ -21,3 +21,5 @@ export function shouldRememberChatScrollPosition(input: {
     && normalizedRoomIdentifier === normalizedSelectedRoomIdentifier
   );
 }
+
+export type { ChatScrollPosition } from "../../../../../shared/chat-scroll-position";

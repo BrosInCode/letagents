@@ -42,7 +42,7 @@ export interface ProviderAdapterCapabilities {
    * Room-ingress modes this adapter can safely run. Daemon inbox support
    * requires bounded run/recover semantics, not merely a long-lived process.
    */
-  deliveryModes?: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox">;
+  deliveryModes?: ReadonlyArray<"mcp_polling" | "daemon_inbox">;
   /** Continue the SAME provider session across a restart (vs. starting fresh). */
   resume: boolean;
   /** Inject a message into a running session at its next tool boundary (poke). */
@@ -236,7 +236,7 @@ export interface ProviderSpawnRequest {
   workAttemptId: string;
   roomId: string;
   /** Durable ingress owner selected by the daemon, never inferred from policy. */
-  deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
+  deliveryMode?: "mcp_polling" | "daemon_inbox";
   /** Requested lifecycle authority, frozen when the returned native birth is checkpointed. */
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   /** Dormant, attested borrowed-worker profile. Launch returns idle; it never starts polling. */
@@ -260,6 +260,8 @@ export interface ProviderSpawnRequest {
    * rental, and every adapter refuses it for one.
    */
   homeHarness?: boolean;
+  /** The owner says this agent's model reads images. Only Open Model reads it; off unless exactly `true`. */
+  imageInput?: boolean;
   /** Exact configuration snapshot selected before this native runtime starts. */
   model?: string | null;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
@@ -296,6 +298,7 @@ export interface ProviderSpawnRequest {
     apiKey: string | null;
     baseUrl: string;
     model: string;
+    contextWindow?: number | null;
   };
 }
 
@@ -341,6 +344,8 @@ export interface ProviderHandle {
 export type ProviderAttachTerminal = {
   state: "terminal";
   terminal: ProviderTerminalPayload;
+  /** Lines for the owner, when the adapter itself stopped the runtime it found; the daemon records each in the agent's activity. */
+  notices?: readonly string[];
 };
 
 export interface ProviderStopOptions {
@@ -407,13 +412,37 @@ export interface ProviderStreamEvent {
   durablePayloadRef: string | null;
 }
 
+/** How a running provider takes images: bytes in memory, a daemon-owned file its own process reads, or not at all. */
+export type RoomTurnImageDelivery = "memory" | "file" | null;
+/** An image type every image-capable provider accepts. */
+export type RoomTurnImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+/**
+ * One file on the activating room message, as the daemon prepared it for this
+ * turn. The daemon alone downloads; an adapter never sees a bearer or a
+ * storage address, only bytes in memory or a daemon-owned file path.
+ */
+export type ProviderRoomTurnAttachment = {
+  /** 1-based position on the message. */
+  index: number;
+  fileName: string;
+  /** The sender's declared type; for an included image, the type its bytes show. */
+  mimeType: string;
+  sizeBytes: number | null;
+  status: "image" | "not_image" | "too_large" | "turn_limit" | "unavailable" | "provider_unsupported" | "local_room_unsupported";
+  /** Only for status "image": the bytes in memory, or a daemon-owned file the provider's own process reads. */
+  image?: { mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string };
+};
 /** A single daemon-owned inbox item executed on an existing provider thread. */
 export interface ProviderRoomTurnRequest {
+  /** Authoritative inbox scope; message IDs alone are only unique within a Room. */
+  roomId?: string;
   inboxItemId: string;
   sourceMessage: unknown;
   activation: Record<string, unknown>;
   actionId: string;
   observedContext?: unknown[];
+  /** The activating message's files, prepared by the daemon for this one turn. Never persisted. */
+  attachments?: ProviderRoomTurnAttachment[];
 }
 
 export type ProviderRoomTurnResult =
@@ -422,7 +451,19 @@ export type ProviderRoomTurnResult =
   /** Exact native terminal proof; never synthesized from an exception or stream classifier. */
   | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string;
     /** The provider declined this turn's content on policy grounds; `error` carries its reason. */
-    refusal?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+    refusal?: true;
+    /**
+     * The turn ended on a result of a shape the adapter does not know. `error` may hold the model's own
+     * words, which are for the owner to read: nothing may read them as a provider error and act on them.
+     */
+    unrecognizedResult?: true;
+    /**
+     * Claude Code's own structured account of a failed request to the model: the provider's HTTP status, the
+     * result's terminal reason and Claude Code's name for the error. Task continuity decides on these and not on `error`.
+     */
+    claudeApiFailure?: { status: number | null; terminalReason: string | null; category: string | null; usageLimit?: true; promptTooLong?: true };
+    /** The turn finished, but the wrapper could not prove its remote authority ended. Its journaled reply is never published. */
+    authorityUnproven?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
 export type ProviderRoomTurnCheckpointDisposition = {
   acceptedResult: ProviderRoomTurnResult;
@@ -443,6 +484,12 @@ export interface ProviderRoomTurnRecoveryRequest {
   originProcessEnded?: boolean;
   /** The turn's own conversation, when it is not the one this runtime continues. */
   providerContinuationId?: string;
+  /**
+   * The daemon has this turn saved as completed with an answer that could not
+   * be read, and this read is the second look at it. An adapter that finds no
+   * answer again may end the turn instead of reporting it unreadable again.
+   */
+  savedAsUnreadable?: boolean;
 }
 export interface ProviderContinuationRepairRequest {
   workAttemptId: string;
@@ -459,12 +506,21 @@ export interface ProviderContinuationRepairRequest {
   launchPolicy: unknown;
   model?: string | null;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  /** The agent, as its launch names it: a line this repair says is not said again by the agent's next launch. */
+  supervisorEntryId?: string;
 }
 export interface ProviderContinuationRepairResult {
   handle: ProviderHandle;
   outcome: "rematerialized" | "replaced";
   previousProviderContinuationId: string;
   replacementProviderContinuationId: string;
+  /** Owner-visible lines of this repair; the daemon records each in the agent's activity. */
+  notices?: readonly string[];
+  /**
+   * The daemon calls this when the repair is committed and its lines, if it has any, are in the agent's
+   * activity. A provider that says a line once counts it as said only then.
+   */
+  noticesRecorded?: () => void;
 }
 
 export class ProviderContinuationMissingError extends Error {
@@ -507,6 +563,7 @@ export interface ProviderRoomTurnOptions {
 }
 
 export interface ProviderAdapter {
+  readUsage?(handle: ProviderHandle): Promise<import("../../../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   readonly id: ProviderAdapterId;
 
@@ -560,6 +617,8 @@ export interface ProviderAdapter {
 
   /** Run one bounded room turn without launching or replacing the provider. */
   runRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRequest, options?: ProviderRoomTurnOptions): Promise<ProviderRoomTurnResult>;
+  /** How this running handle takes the activating message's images; absent or null means it cannot. */
+  roomTurnImageDelivery?(handle: ProviderHandle): RoomTurnImageDelivery;
   /** Recover only a persisted exact native turn; it must not start another turn. */
   recoverRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest, options?: {
     detachSignal?: AbortSignal;

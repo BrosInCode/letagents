@@ -3,6 +3,9 @@ import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerAccountRoomRoutes } = await import("../routes/account/rooms.js");
+const { generateRoomDisplayName } = await import("../rooms/display-name.js");
+const { resolveAccountRoomAliasIdentifier } = await import("../../../apps/desktop/renderer/src/domain/sidebar-rooms.js");
+import type { DesktopAccountRoomEntry } from "../../../apps/desktop/electron/ipc-types.js";
 
 type Handler = (req: Record<string, any>, res: Record<string, any>) => Promise<void>;
 
@@ -89,6 +92,47 @@ test("account room route requires authentication", async () => {
 
   assert.equal(res.statusCode, 401);
   assert.deepEqual(res.body, { error: "Authentication required" });
+});
+
+test("account listing resolves generated project aliases while retaining explicit room and focus names", async () => {
+  const app = captureAccountRoomHandlers();
+  const repo = "github.com/brosincode/letagents";
+  const room = { room_id: repo, kind: "main", display_name: generateRoomDisplayName(repo),
+    focus_rooms: [{ room_id: "focus_123", kind: "focus", display_name: "Focus: Launch" }] };
+  registerAccountRoomRoutes(app as never, {
+    getAccountRoomsForAccount: async () => [room,
+      { room_id: "github.com/team/custom", kind: "main", display_name: "Release planning", focus_rooms: [] },
+      { room_id: "ABCD-1234", kind: "main", display_name: "Design team", focus_rooms: [] },
+      { room_id: "github.com/team/new-project", kind: "main", display_name: "new-project", focus_rooms: [] }] as never,
+    getGitRoomBindingsForRooms: async () => new Map(),
+    archiveAccountRoomForAccount: async () => null,
+    deleteAccountRoomForAccount: async () => null,
+    updateAccountRoomPreferences: async () => null,
+  });
+  const res = responseStub();
+  await app.getHandler()({ query: {}, sessionAccount: { account_id: "account", login: "EmmyMay" } }, res);
+  assert.equal(res.statusCode, 200);
+  const rooms = (res.body as { rooms: Array<{ room_id: string; id: string; name: string; display_name: string; focus_rooms: Array<{ display_name: string }> }> }).rooms;
+  assert.deepEqual(rooms.map((entry) => entry.display_name), ["letagents", "Release planning", "Design team", "new-project"]);
+  assert.equal(rooms[0].room_id, repo);
+  assert.equal(rooms[0].id, repo);
+  assert.equal(rooms[0].name, "sky-lake");
+  assert.equal(rooms[1].name, "github.com/team/custom");
+  assert.equal(rooms[2].name, "ABCD-1234");
+  assert.equal(rooms[3].name, "github.com/team/new-project");
+  assert.equal(rooms[0].focus_rooms[0].display_name, "Focus: Launch");
+  // Same identity/name mapping used by Electron, consumed by the unchanged
+  // alias resolver shipped in older desktop releases.
+  const clientRooms = rooms.map((entry) => ({
+    roomIdentifier: entry.room_id, displayName: entry.display_name, name: entry.name,
+  })) as DesktopAccountRoomEntry[];
+  assert.equal(resolveAccountRoomAliasIdentifier("sky-lake", clientRooms), repo);
+  assert.equal(resolveAccountRoomAliasIdentifier(repo, clientRooms), null);
+  assert.equal(resolveAccountRoomAliasIdentifier("Release planning", clientRooms), "github.com/team/custom");
+  assert.equal(resolveAccountRoomAliasIdentifier("sky-lake", [...clientRooms,
+    { roomIdentifier: "other-room", displayName: "sky-lake", name: "other-room" } as DesktopAccountRoomEntry]), null);
+  assert.equal(resolveAccountRoomAliasIdentifier("sky-lake", [...clientRooms,
+    { roomIdentifier: "sky-lake", displayName: "Exact room", name: "sky-lake" } as DesktopAccountRoomEntry]), null);
 });
 
 test("account room route returns parent rooms with nested focus rooms", async () => {

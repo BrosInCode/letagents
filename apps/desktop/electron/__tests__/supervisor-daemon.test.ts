@@ -20,9 +20,7 @@ import {
   mapAgentInspectorDetail,
   mapEntry,
   SupervisorDaemonClient,
-  onSupervisorActivity,
   onSupervisorAgentStream,
-  publishSupervisorActivity,
   setFocusedAgentStream,
   supervisorStateWatchAcceptsStatus,
   supervisorStateWatchRetryDelay,
@@ -162,7 +160,7 @@ test("host approval client authenticates raw presentations and restores exact re
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 
-test("host approval client rejects stale recorded hashes, foreign actors, malformed candidates, and renderer authority fields", async () => {
+test("host approval client rejects a missing recorded hash, foreign actors, malformed candidates, and renderer authority fields", async () => {
   const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
   const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
   const verifier = new HostApprovalVerifier(7, signer.publicKey); const base = hostApprovalCandidate();
@@ -185,7 +183,7 @@ test("host approval client rejects stale recorded hashes, foreign actors, malfor
     }
     const recorded = { decisionId: "durable-decision", actorId: `host-${verifier.challenge()!.keyFingerprint}`,
       decision: "allow_once" as const, projectionSha256: createHash("sha256").update(JSON.stringify(base.presentation)).digest("hex") };
-    for (const decision of [null, { ...recorded, projectionSha256: null }, { ...recorded, projectionSha256: "b".repeat(64) }, { ...recorded, actorId: "other-host" }]) {
+    for (const decision of [null, { ...recorded, projectionSha256: null }, { ...recorded, actorId: "other-host" }]) {
       candidates = [{ ...base, status: "decision_recorded", recordedDecision: decision }];
       const snapshot = await client.listHostApprovals("room_1"); assert.equal(snapshot.available, true);
       assert.equal(snapshot.approvals[0]!.status, "unavailable"); assert.equal(snapshot.approvals[0]!.retryDecision, null);
@@ -217,6 +215,37 @@ test("host approval client rejects stale recorded hashes, foreign actors, malfor
       await assert.rejects(client.decideHostApproval({ id: prior.id, decision: "allow_once" }), /Refresh/);
     }
     assert.equal(decisions, 0);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval client retries a recorded choice against the digest it was made on when the card has moved on", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey); const candidate = hostApprovalCandidate();
+  // A saved mode changes the tool scope inside the card, so its digest is no longer the one the choice was made on.
+  const decidedOn = "b".repeat(64);
+  assert.notEqual(createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex"), decidedOn);
+  candidate.status = "decision_recorded";
+  candidate.recordedDecision = { decisionId: "durable-decision", actorId: `host-${verifier.challenge()!.keyFingerprint}`,
+    decision: "deny", projectionSha256: decidedOn };
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge(); const sent: HostApprovalDecision[] = [];
+  wire.hostApprovals.request = envelope => {
+    const request = verifier.verify(envelope); assert.ok(request);
+    if (request.operation === "list") return [candidate];
+    sent.push(request.input as HostApprovalDecision); return "decision_sent";
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
+  try {
+    const [view] = (await client.listHostApprovals("room_1")).approvals;
+    assert.equal(view!.status, "decision_recorded"); assert.equal(view!.retryDecision, "deny");
+    await assert.rejects(client.decideHostApproval({ id: view!.id, decision: "allow_once" }), /Refresh/, "only the recorded choice can be retried");
+    assert.equal(sent.length, 0);
+    assert.equal(await client.decideHostApproval({ id: view!.id, decision: "deny" }), "decision_sent");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]!.decisionId, "durable-decision", "no new decision is made");
+    assert.equal(sent[0]!.projectionSha256, decidedOn, "the retry names the digest the choice was made on, not the card's");
+    assert.deepEqual(sent[0]!.expected, candidate.reference, "the request is still named exactly");
   } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
 
@@ -373,7 +402,7 @@ test("host approval reads wait for scheduled startup preparation and daemon read
     child.emit("message", { type: "state_recovery_ready" });
     const [status, earlySnapshot, bootstrapSnapshot] = await Promise.all([startup, earlyRead, bootstrapRead]);
     assert.deepEqual(beforePreparation, { settled: false, spawns: 0, signerLoads: 0 });
-    assert.deepEqual(beforeReady, { settled: false, spawns: 1, signerLoads: 0 });
+    assert.deepEqual(beforeReady, { settled: false, spawns: 1, signerLoads: 1 });
     assert.equal(status.generation, 42);
     for (const snapshot of [earlySnapshot, bootstrapSnapshot]) {
       assert.equal(snapshot.available, true);
@@ -453,6 +482,73 @@ test("host approval client reports unenrolled or absent daemon without startup o
     assert.match(result.error!, /not enrolled.*Unlock.*restart/); assert.equal(loads, 0);
     assert.deepEqual(wire.requests.map(request => request.method), ["supervisor.host_approval_challenge"]);
   } finally { await closeServer(wire?.server ?? null, env.socketPath); await env.cleanup(); }
+});
+
+test("new daemon births prepare signing before the verifier deadline and keep maintenance fenced", async (t) => {
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  try {
+    for (const mode of ["available", "locked", "maintenance"] as const) await t.test(mode, async () => {
+      const env = await fixture();
+      const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+      let release!: (value: typeof signer) => void;
+      let deny!: (error: Error) => void;
+      const loading = new Promise<typeof signer>((resolve, reject) => { release = resolve; deny = reject; });
+      let entered!: () => void;
+      const didLoad = new Promise<void>(resolve => { entered = resolve; });
+      let loads = 0; let spawns = 0;
+      const retained: { wire: Awaited<ReturnType<typeof startWireDaemon>> | null } = { wire: null };
+      const child = new EventEmitter() as ChildProcess;
+      Object.defineProperty(child, "connected", { value: true });
+      const sent: Array<{ type?: string; publicKey?: string | null }> = [];
+      child.send = ((message: typeof sent[number], callback: () => void) => {
+        sent.push(message); callback();
+        setImmediate(() => child.emit("message", { type: "state_recovery_ready" }));
+        return true;
+      }) as ChildProcess["send"];
+      const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+        loadApprovalSigner: async () => { loads++; entered(); return loading; },
+        spawnDaemon: () => {
+          spawns++;
+          void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42).then(value => {
+            retained.wire = value;
+            child.emit("message", { type: "host_approval_verifier_request", id: "00000000-0000-4000-8000-000000000000" });
+          });
+          return child;
+        },
+      });
+      const startup = client.ensureRunning();
+      void startup.catch(() => undefined);
+      try {
+        await didLoad;
+        assert.equal(client.ensureRunning(), startup, "concurrent callers share the same preparation");
+        assert.equal(spawns, 0, "secure storage finishes before the child begins its verifier deadline");
+        if (mode === "maintenance") await client.stopForMaintenance().catch(() => undefined);
+        if (mode === "locked") deny(new Error("private-storage-error")); else release(signer);
+        if (mode === "maintenance") {
+          await assert.rejects(startup, /restart|paused/i);
+          assert.equal(spawns, 0, "maintenance requested during signing prevents a late spawn");
+        } else {
+          assert.equal((await startup).generation, 42);
+          assert.deepEqual(sent, [{ type: "host_approval_verifier", id: "00000000-0000-4000-8000-000000000000",
+            publicKey: mode === "available" ? signer.publicKey : null }]);
+          assert.equal(spawns, 1); assert.equal(loads, 1);
+          assert.doesNotMatch(JSON.stringify(sent), /private-storage-error/);
+          await client.ensureRunning();
+          assert.equal(loads, 1, "attaching to a compatible daemon does not unseal signing again");
+        }
+      } finally {
+        release(signer);
+        child.emit("message", { type: "state_recovery_ready" });
+        await startup.catch(() => undefined);
+        await closeServer(retained.wire?.server ?? null, env.socketPath);
+        await env.cleanup();
+      }
+    });
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+  }
 });
 
 test("host approval identity is OS-sealed, private, exclusive across creators, and stable on reopen", async () => {
@@ -865,6 +961,9 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
     database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
   }
   const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  // Newer Node versions protect sqlite_master by default. Only this disposable
+  // historical-schema fixture intentionally rewrites it; production keeps protection.
+  database.enableDefensive?.(false);
   database.exec("PRAGMA writable_schema=ON");
   database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
   database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
@@ -873,6 +972,7 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
   );
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
     UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
+  database.enableDefensive?.(true);
   database.close();
   await chmod(statePath, 0o600);
   const mainModule = new URL("../../daemon/main.ts", import.meta.url).href;
@@ -952,6 +1052,47 @@ function fakeChild(): ChildProcess {
   const child = { once() { return child; }, unref() { return child; } };
   return child as unknown as ChildProcess;
 }
+
+test("service health snapshot never starts a daemon and reads only matching bounded state", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { assert.fail("Troubleshooting must not start the daemon"); },
+    now: () => new Date("2026-10-09T12:00:00.000Z") });
+  try {
+    assert.deepEqual(await client.getServiceSnapshot(), {
+      status: null, state: null, observedAt: "2026-10-09T12:00:00.000Z",
+    });
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+    wire.entries.push(wireEntryWithCausalProjection());
+    try {
+      const snapshot = await client.getServiceSnapshot();
+      assert.equal(snapshot.status?.generation, 19);
+      assert.equal(snapshot.status?.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+      assert.equal(snapshot.state?.entries[0]?.id, "agent_1");
+      assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate", "manifest.watch_state"]);
+      assert.equal(wire.requests.at(-1)?.params?.wait_ms, 0);
+      wire.maintenance.id = "hold";
+      assert.equal((await client.getServiceSnapshot()).state, null, "maintenance is not an empty fleet");
+      wire.maintenance.id = null;
+      const watchState = client.watchState.bind(client);
+      client.watchState = async input => ({ ...await watchState(input), daemonGeneration: 20 });
+      await assert.rejects(client.getServiceSnapshot(), /restarted during this read/);
+    } finally { await closeServer(wire.server, env.socketPath); }
+    const old = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 18, undefined, "older");
+    try {
+      const snapshot = await client.getServiceSnapshot();
+      assert.equal(snapshot.status?.implementationVersion, "older");
+      assert.equal(snapshot.state, null);
+      assert.deepEqual(old.requests.map(request => request.method), ["daemon.negotiate"], "no handoff or unsupported state read");
+    } finally { await closeServer(old.server, env.socketPath); }
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
 
 function fakeDaemonProcessIdentity(
   overrides: Partial<Omit<DaemonProcessIdentity, "expectedScriptPath">> = {},
@@ -1364,12 +1505,14 @@ async function startWireDaemon(
   configurationApplyResponseDelayMs = 0,
 ) {
   const entries: Array<Record<string, any>> = [];
-  const legacyOwners: Array<Record<string, any>> = [];
   const requests: Array<{ method: string; params: Record<string, any> | undefined }> = [];
   const statusRecoveryDiagnostics: { value: unknown } = { value: undefined };
   const runtimeRecoveryCapability = { v2: true };
   const maintenance = { unresponsive: false, id: null as string | null };
+  const negotiation = { delayMs: 0, error: null as string | null };
   const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
+  // Extra wire fields a test wants the configuration replies to carry, such as an agent app that asks for image input.
+  const configurationExtras: { value: Record<string, unknown> } = { value: {} };
   const capturedEnvironment = supervisorDaemonSpawnEnvironment();
   const compatibilityFingerprint: { value: string | null } = {
     value: capturedEnvironment.LETAGENTS_SUPERVISOR_COMPATIBILITY_FINGERPRINT!,
@@ -1389,6 +1532,13 @@ async function startWireDaemon(
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
         if (maintenance.unresponsive) return;
+        if (request.method === "daemon.negotiate") {
+          if (negotiation.error) {
+            socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: negotiation.error })}\n`);
+            return;
+          }
+          responseDelayMs = negotiation.delayMs;
+        }
         result = { maintenance_hold_id: maintenance.id, healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? capturedEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, compatibility_fingerprint: compatibilityFingerprint.value, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_runtime_recovery_v2: runtimeRecoveryCapability.v2, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
           ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
@@ -1445,9 +1595,9 @@ async function startWireDaemon(
       } else if (request.method === "supervisor.get_agent_inspector_detail") {
         result = { availability: "not_loaded", entry_id: request.params!.entry_id, room_id: request.params!.room_id, requested_source_message_id: request.params!.source_message_id, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], items: [], history_boundary: null };
       } else if (request.method === "supervisor.get_agent_configuration") {
-        result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1 };
+        result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1, ...configurationExtras.value };
       } else if (request.method === "supervisor.update_agent_configuration") {
-        result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1 } };
+        result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1, ...configurationExtras.value } };
       } else if (request.method === "supervisor.apply_agent_configuration") {
         responseDelayMs = configurationApplyResponseDelayMs;
         result = { outcome: request.params!.entry_id === "agent_invalid" ? "invented" : "restarting" };
@@ -1468,39 +1618,9 @@ async function startWireDaemon(
         result = null;
       } else if (["supervisor.prepare_room_move", "supervisor.commit_room_move", "supervisor.get_room_move", "supervisor.get_current_room_move", "supervisor.acknowledge_room_move_source_revocation", "supervisor.rollback_room_move"].includes(request.method)) {
         result = { operation_id: request.params!.operation_id ?? `inspector-room-move:${request.params!.entry_id}:${request.params!.request_id}`, request_id: request.params!.request_id ? `inspector:${request.params!.request_id}` : "inspector:request_1", agent_id: request.params!.entry_id, source_room_id: "room_1", destination_room_id: "room_2", daemon_generation: request.params!.daemon_generation, work_attempt_id: "attempt_1", execution_generation_id: "execution_1", agent_session_id: "session_1", phase: request.method === "supervisor.prepare_room_move" ? "prepared" : "bootstrapping_destination_tail", remote_room_id: request.method === "supervisor.prepare_room_move" ? null : "room_2", destination_cursor: null, source_credentials_revoked: request.method !== "supervisor.prepare_room_move", error: null, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-01T00:00:01.000Z" };
-      } else if (request.method === "lane.reserve_legacy") {
-        const owner = {
-          reservation_id: request.params!.reservation_id,
-          room_id: request.params!.room_id,
-          provider: request.params!.provider,
-          owner_pid: request.params!.owner_pid,
-          owner_process_identity: request.params!.owner_process_identity,
-          state: "reserved",
-          session_id: null,
-          created_at: "2026-01-01T00:00:00.000Z",
-          updated_at: "2026-01-01T00:00:00.000Z",
-        };
-        legacyOwners.push(owner);
-        result = owner;
-      } else if (request.method === "lane.activate_legacy") {
-        const owner = legacyOwners.find((candidate) => candidate.reservation_id === request.params!.reservation_id)!;
-        owner.state = "active";
-        owner.session_id = request.params!.session_id;
-        result = owner;
-      } else if (request.method === "lane.release_legacy") {
-        const index = legacyOwners.findIndex((candidate) =>
-          candidate.reservation_id === request.params!.reservation_id
-          || candidate.session_id === request.params!.session_id
-          || (candidate.room_id === request.params!.room_id && candidate.provider === request.params!.provider));
-        if (index >= 0) legacyOwners.splice(index, 1);
-        result = { released: index >= 0 };
       } else if (request.method === "attempt.read") {
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         result = { entry_id: entry.id, work_attempt_id: null, workspace_path: entry.workspace_path, last_terminal: null, restart_count: 0, activity: entry.activity };
-      } else if (request.method === "manifest.append_activity") {
-        const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
-        entry.activity.push(request.params!.event);
-        result = entry;
       } else if (request.method === "supervisor.retry_room_delivery") {
         result = { accepted: true };
       } else if (request.method === "supervisor.install_host_grant") {
@@ -1521,13 +1641,13 @@ async function startWireDaemon(
         return;
       }
       const response = `${JSON.stringify({ version, id: request.id, ok: true, result })}\n`;
-      if (responseDelayMs) setTimeout(() => socket.end(response), responseDelayMs);
+      if (responseDelayMs) setTimeout(() => { if (!socket.destroyed) socket.end(response); }, responseDelayMs);
       else socket.end(response);
     });
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance };
+  return { server, entries, requests, hostApprovals, configurationExtras, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -1595,36 +1715,6 @@ async function runReleasedSocketHandoffScenario(input: {
   }
 }
 
-test("local supervisor activity subscribers receive only the canonical redacted event", async () => {
-  const canary = "canary-not-a-real-emitter-secret-123456789";
-  const originalAppend = supervisorDaemonClient.appendActivity;
-  let sentToDaemon: unknown;
-  let emitted: unknown;
-  (supervisorDaemonClient as unknown as { appendActivity: (id: string, event: unknown) => Promise<unknown> }).appendActivity = async (_id, event) => {
-    sentToDaemon = event;
-    return {};
-  };
-  const unsubscribe = onSupervisorActivity((event) => { emitted = event; });
-  try {
-    await publishSupervisorActivity({
-      entryId: "credential_emitter",
-      provider: `provider Authorization: Bearer ${canary}`,
-      kind: `kind clientSecret=${canary}`,
-      method: `method Authorization: Basic ${canary}`,
-      summary: `${"x".repeat(470)} Authorization: Bearer ${canary}`,
-      status: "working",
-      payload: { output: JSON.stringify({ clientSecret: canary }) },
-    });
-    assert.doesNotMatch(JSON.stringify(sentToDaemon), new RegExp(canary));
-    assert.doesNotMatch(JSON.stringify(emitted), new RegExp(canary));
-    assert.match(JSON.stringify(emitted), /REDACTED/i);
-    assert.match((emitted as { event: { summary: string } }).event.summary, /Authorization: Bearer \[REDACTED\]/);
-  } finally {
-    unsubscribe();
-    (supervisorDaemonClient as unknown as { appendActivity: typeof originalAppend }).appendActivity = originalAppend;
-  }
-});
-
 test("causal manifest projection accepts a fully valid room state and receipt timeline", () => {
   const wire = wireEntryWithCausalProjection();
   wire.source_repo_path = "/Users/test/project";
@@ -1647,6 +1737,53 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
   const settledReceipt = mapEntry(settled).deliveryReceipts?.[0];
   assert.equal(settledReceipt?.state, "acknowledged_failed");
   assert.equal(settledReceipt?.canonicalMessageId, null);
+});
+
+test("a follow-up crosses to the desktop only when every part of it is what the daemon writes", () => {
+  const followUp = (value: unknown) => {
+    const wire = wireEntryWithCausalProjection();
+    Object.assign(wire.delivery_receipts![0]!, { state: "pending", source_message_id: "task-continuation:inbox_0", follow_up: value });
+    const receipts = mapEntry(wire).deliveryReceipts!;
+    assert.equal(receipts.length, 1, "the receipt itself is kept whatever the follow-up holds");
+    return receipts[0]!.followUp;
+  };
+  const at = { at_ms: 1_790_000_030_000, attempt: 2, attempts: 3, kind: "provider_fault" };
+  const scheduled = (parts: object, for_message_id: unknown = "msg_1") => ({ for_message_id, state: "scheduled", scheduled: { ...at, ...parts } });
+  assert.deepEqual(followUp(scheduled({})),
+    { forMessageId: "msg_1", state: "scheduled", scheduled: { atMs: 1_790_000_030_000, attempt: 2, attempts: 3, kind: "provider_fault" } });
+  assert.deepEqual(followUp(scheduled({ attempt: 1, attempts: 1, kind: "no_reply" }, null)),
+    { forMessageId: null, state: "scheduled", scheduled: { atMs: 1_790_000_030_000, attempt: 1, attempts: 1, kind: "no_reply" } });
+  // One that waits for its owner, and one that ended with nothing started, hold no time.
+  assert.deepEqual(followUp({ for_message_id: "msg_1", state: "waiting_for_owner", scheduled: null }), { forMessageId: "msg_1", state: "waiting_for_owner", scheduled: null });
+  assert.deepEqual(followUp({ for_message_id: null, state: "ended", scheduled: null }), { forMessageId: null, state: "ended", scheduled: null });
+  // Why it waits for its owner or ended crosses with it, for each reason that the daemon writes.
+  for (const reason of ["stopped_by_owner", "skipped", "agent_changed", "task_not_held", "uncertain_action", "uncertain_resolved", "attempts_failed", "ownership_unverified", "other"]) {
+    const state = ["attempts_failed", "ownership_unverified", "other"].includes(reason) ? "waiting_for_owner" : "ended";
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state, reason, scheduled: null }), { forMessageId: "msg_1", state, reason, scheduled: null }, reason);
+  }
+  // Whether the owner has sent a message since crosses with it, when it is a boolean, and is dropped otherwise: the note then stays.
+  for (const later_person_turn of [true, false]) {
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state: "ended", reason: "stopped_by_owner", later_person_turn, scheduled: null }),
+      { forMessageId: "msg_1", state: "ended", reason: "stopped_by_owner", laterPersonTurn: later_person_turn, scheduled: null });
+  }
+  for (const later_person_turn of ["true", 1, null]) {
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state: "ended", reason: "stopped_by_owner", later_person_turn, scheduled: null }),
+      { forMessageId: "msg_1", state: "ended", reason: "stopped_by_owner", scheduled: null }, JSON.stringify(later_person_turn));
+  }
+  // A reason that this version does not know, or one that is not a text, reads as none: the follow-up is still shown, and its note stays.
+  for (const reason of ["resolved_elsewhere", "", 3, null, ["skipped"]]) {
+    assert.deepEqual(followUp({ for_message_id: "msg_1", state: "ended", reason, scheduled: null }), { forMessageId: "msg_1", state: "ended", scheduled: null }, JSON.stringify(reason));
+  }
+  // A daemon that sends none, or anything that is not what it writes, shows no follow-up.
+  for (const malformed of [undefined, null, "soon", [], {}, scheduled({ at_ms: "1790000030000" }), scheduled({ at_ms: 0 }), scheduled({ at_ms: 1.5 }),
+    scheduled({ attempt: 0 }), scheduled({ attempt: 4 }), scheduled({ attempts: "3" }), scheduled({ kind: "other" }), scheduled({ kind: undefined }),
+    scheduled({}, ""), scheduled({}, 7), { state: "scheduled", scheduled: at },
+    { for_message_id: "msg_1", state: "scheduled", scheduled: null }, { for_message_id: "msg_1", state: "scheduled" },
+    { for_message_id: "msg_1", state: "later", scheduled: null }, { for_message_id: "msg_1", scheduled: null },
+    { for_message_id: "msg_1", state: "ended", scheduled: at }, { for_message_id: "msg_1", state: "waiting_for_owner" }]) {
+    assert.equal(followUp(malformed), undefined, JSON.stringify(malformed));
+  }
+  assert.equal(Object.hasOwn(mapEntry(wireEntryWithCausalProjection()).deliveryReceipts![0]!, "followUp"), false, "a receipt that is no follow-up has no such field");
 });
 
 test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
@@ -1718,6 +1855,10 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
     uncertain_effects: [{ effect_id: "effect_1", tool_name: "send_message", mcp_request_id: "request_1", error: "May have completed.", created_at: "2026-01-01T00:00:01.000Z", updated_at: "2026-01-01T00:00:02.000Z" }],
     history_boundary: { earliest_retained_observed_message_id: "msg_1", earliest_retained_inbox_message_id: "msg_1", earliest_retained_receipt_sequence: 1, pruned_before_message_id: null, pruned_at: null },
   };
+  const usage = { providerContinuationId: "thread", executionGenerationId: "generation", daemonGeneration: 1,
+    account: { state: "available", windows: [{ id: "primary", label: "5 hours", usedPercent: 31, resetsAt: null, observedAt: "2026-10-10T20:00:00.000Z" }] }, context: null, compaction: null };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, usage }, input).usage, usage);
+  assert.equal(mapAgentInspectorDetail({ ...wire, usage: { ...usage, daemonGeneration: "1" } }, input).usage, null);
   const mapped = mapAgentInspectorDetail(wire, input);
   assert.equal(mapped.requested_source_message_id, "msg_1");
   assert.equal(mapped.items[0]?.sender, "Ada");
@@ -1869,6 +2010,75 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
     await assert.rejects(() => client.getAgentConfiguration("agent_1", "39" as unknown as number), /exact typed/);
     await assert.rejects(() => client.applyAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedConfigurationRevision: 0 }), /exact typed/);
     await assert.rejects(() => client.applyAgentConfiguration({ entryId: "agent_invalid", daemonGeneration: 39, expectedConfigurationRevision: 2 }), /invalid configuration apply result/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("saving an agent's settings sends the image-input choice only when the draft has one", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 39);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const base = { model: "local-model", reasoningEffort: null, charter: "help", permissionProfileId: "full_access" } as const;
+    const sentConfigurations = () => wire.requests.filter((request) => request.method === "supervisor.update_agent_configuration").map((request) => request.params!.configuration);
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 1, configuration: { ...base, imageInput: true } });
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 2, configuration: { ...base, imageInput: false } });
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 3, configuration: { ...base } });
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 4, configuration: { ...base, imageInput: undefined } });
+    // A value that is not a real boolean is never forwarded as a choice.
+    await client.updateAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedRevision: 5, configuration: { ...base, imageInput: "true" } as never });
+    const sent = sentConfigurations();
+    assert.equal(sent.length, 5);
+    assert.deepEqual(sent[0], { model: "local-model", reasoning_effort: null, charter: "help", permission_profile_id: "full_access", image_input: true });
+    assert.deepEqual(sent[1], { model: "local-model", reasoning_effort: null, charter: "help", permission_profile_id: "full_access", image_input: false },
+      "an explicit off is sent, so the owner can turn the choice back off");
+    for (const configuration of sent.slice(2)) {
+      assert.deepEqual(configuration, { model: "local-model", reasoning_effort: null, charter: "help", permission_profile_id: "full_access" });
+      assert.equal(Object.hasOwn(configuration, "image_input"), false);
+    }
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("an agent's image-input choice is read only when the background service says its agent app asks", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 39);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const update = async (expectedRevision: number) => {
+      const result = await client.updateAgentConfiguration({
+        entryId: "agent_1", daemonGeneration: 39, expectedRevision,
+        configuration: { model: null, reasoningEffort: null, charter: "help", permissionProfileId: "full_access" },
+      });
+      assert.equal(result.outcome, "updated");
+      return result.outcome === "updated" ? result.configuration : assert.fail("expected an updated configuration");
+    };
+
+    // An older background service says nothing about image input: no key at all, not "off".
+    assert.equal(Object.hasOwn(await client.getAgentConfiguration("agent_1", 39), "imageInput"), false);
+    assert.equal(Object.hasOwn(await update(1), "imageInput"), false);
+
+    wire.configurationExtras.value = { image_input_available: true, image_input: true };
+    assert.equal((await client.getAgentConfiguration("agent_1", 39)).imageInput, true);
+    assert.equal((await update(1)).imageInput, true);
+
+    wire.configurationExtras.value = { image_input_available: true, image_input: false };
+    assert.equal((await client.getAgentConfiguration("agent_1", 39)).imageInput, false);
+
+    // Available but unreadable reads as off, and the key stays present so the switch is offered.
+    for (const unreadable of [undefined, null, "true", 1]) {
+      wire.configurationExtras.value = { image_input_available: true, image_input: unreadable };
+      const configuration = await client.getAgentConfiguration("agent_1", 39);
+      assert.equal(Object.hasOwn(configuration, "imageInput"), true, String(unreadable));
+      assert.equal(configuration.imageInput, false, String(unreadable));
+    }
+
+    // Without an exact `image_input_available: true` the value is ignored, even when it says on.
+    for (const available of [undefined, false, "true", 1, null]) {
+      wire.configurationExtras.value = { image_input_available: available, image_input: true };
+      assert.equal(Object.hasOwn(await client.getAgentConfiguration("agent_1", 39), "imageInput"), false, String(available));
+      assert.equal(Object.hasOwn(await update(1), "imageInput"), false, String(available));
+    }
+    wire.configurationExtras.value = { image_input: true };
+    assert.equal(Object.hasOwn(await client.getAgentConfiguration("agent_1", 39), "imageInput"), false, "a bare image_input is not an offer");
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 
@@ -2426,6 +2636,65 @@ test("manifest list allows a cold rich projection beyond the generic control tim
   }
 });
 
+test("startup retries only a timed-out negotiation and validates the fresh daemon response", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 23);
+  wire.negotiation.delayMs = 60;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, requestTimeoutMs: 20,
+    spawnDaemon: () => assert.fail("a slow existing daemon must never permit another spawn") });
+  try {
+    const status = await client.ensureRunning();
+    assert.equal(status.generation, 23);
+    assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
+    assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate", "daemon.negotiate"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a daemon error that resembles a negotiation timeout is not retried", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 23);
+  wire.negotiation.error = "Supervisor daemon request timed out: daemon.negotiate";
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => assert.fail("an unsuccessful negotiation is not permission to spawn") });
+  try {
+    await assert.rejects(client.ensureRunning(), /request timed out: daemon.negotiate/);
+    assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("startup gives up after one bounded negotiation retry without spawning or mutating", { timeout: 18_000 }, async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 23);
+  wire.maintenance.unresponsive = true;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, requestTimeoutMs: 20,
+    spawnDaemon: () => assert.fail("timeout cannot authorize another spawn") });
+  try {
+    await assert.rejects(client.ensureRunning(), /request timed out: daemon.negotiate/);
+    assert.deepEqual(wire.requests.map(request => request.method), ["daemon.negotiate", "daemon.negotiate"]);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("Electron client uses a healthy daemon and maps manifest/attempt data", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -2437,7 +2706,7 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     assert.equal(status.generation, 3);
     const createInput = { creationRequestId: "request_alpha", roomIdentifier: "git-room:github.com:owner/repo", displayName: "Durable Codex", providerId: "codex" as const, charter: "Keep polling.", repoRootPath: "/tmp/work" };
     const created = await client.create(createInput);
-    assert.deepEqual([created.desiredState, created.observedState, created.condition], ["paused", "absent", "none"]);
+    assert.deepEqual([created.desiredState, created.observedState, created.condition], ["running", "absent", "none"]);
     assert.equal(created.deliveryMode, "daemon_inbox");
     assert.equal(created.runtimeGenerationId, null);
     wire.entries[0]!.runtime_generation_id = "opaque-birth";
@@ -2513,11 +2782,6 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
     const temporarilyUnbound = (await client.list(created.roomId)).find((entry) => entry.id === created.id)!;
     assert.equal(temporarilyUnbound.agentSessionId, "agent_session_rebound", "identity-only history keeps exact controls routed after live credentials unbind");
     assert.equal(temporarilyUnbound.agentSessionBindingState, "historical", "historical control identity never masquerades as an active room binding");
-    await assert.rejects(
-      () => client.assertLegacyStartAllowed(created.roomId, "codex"),
-      /already owns the codex lane through the supervised engine/,
-      "the paused transfer claim fences a concurrent legacy start before activation",
-    );
     assert.equal((await client.setDesiredState(created.id, "running")).desiredState, "running");
     assert.equal(await client.compareAndSetDesiredState(created.id, "paused", "stopped"), null);
     assert.equal((await client.setDesiredState(second.id, "running")).desiredState, "running");
@@ -2538,10 +2802,32 @@ test("Electron client uses a healthy daemon and maps manifest/attempt data", asy
       wire.entries.find((candidate) => candidate.provider === "claude-code")?.provider_launch_policy,
       { permissionMode: "acceptEdits", model: "sonnet" },
     );
-    const reservation = await client.reserveLegacyLane("room_legacy_client", "codex", "legacy_client");
-    assert.equal(reservation.owner_pid, process.pid);
-    assert.equal((await client.activateLegacyLane("legacy_client", "legacy_session_client")).state, "active");
-    assert.equal(await client.releaseLegacyLane({ roomIdentifier: "room_legacy_client", provider: "codex" }), true);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a supervised launch is saved running unless the caller asks for a paused rental entry", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 3);
+  try {
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath, spawnDaemon: () => { throw new Error("healthy daemon must be reused"); } });
+    const input = { creationRequestId: "request_default", roomIdentifier: "git-room:github.com:owner/repo", displayName: "Default Codex", providerId: "codex" as const, charter: "Keep polling.", repoRootPath: "/tmp/work" };
+    const normal = await client.create(input);
+    assert.equal(normal.desiredState, "running", "a normal launch has no paused claim step");
+    const rental = await client.create(
+      { ...input, creationRequestId: "request_rental", displayName: "Rental Codex" },
+      { desiredState: "paused" },
+    );
+    assert.equal(rental.desiredState, "paused", "a rental launch waits paused for the rental server to acknowledge it");
+    assert.deepEqual(
+      wire.requests.filter((request) => request.method === "manifest.put").map((request) => request.params?.entry.desired_state),
+      ["running", "paused"],
+    );
   } finally {
     await closeServer(wire.server, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
@@ -3113,7 +3399,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.208");
+    assert.equal(status.implementationVersion, "2.0.262");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
@@ -3666,6 +3952,19 @@ test("an agent's use of the owner's own setup is read as off unless the backgrou
   assert.equal(Object.hasOwn(wire({ provider_launch_policy: { letagentsOwnerIsolation: false } }), "homeHarness"), false);
 });
 
+test("an agent whose saved access level has not reached its process is marked pending only when the background service says exactly that", async () => {
+  const wire = (overrides: Record<string, unknown>) => mapEntry({
+    id: "agent", room_id: "room", display_name: "Agent", provider: "open-model", model: null, charter: "help",
+    desired_state: "running", observed_state: "idle", condition: "none", permission_profile_id: "ask_before_write",
+    created_by: "desktop", created_at: "2026-10-01T00:00:00.000Z", ...overrides,
+  } as never);
+  assert.equal(wire({ permission_pending: true }).permissionPending, true);
+  for (const value of [undefined, false, "true", 1, null]) {
+    assert.equal(Object.hasOwn(wire({ permission_pending: value }), "permissionPending"), false, String(value));
+  }
+  // The stored policy alone is never read as the state on this side.
+  assert.equal(Object.hasOwn(wire({ provider_launch_policy: { letagentsPermissionChangedAt4: false } }), "permissionPending"), false);
+});
 
 for (const takeover of [false, true]) test(`provider-aware ${takeover ? "startup takeover" : "application update"} keeps approvals available and honors deferred handoff`, { timeout: 10_000 }, async (t) => {
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -3803,3 +4102,62 @@ test("force maintenance held service suppresses ordinary generation wakes and re
     await assert.rejects(client.ensureRunning(), /maintenance/, "old Electron stays fenced until relaunch");
   } finally { if (!dead) await closeServer(wire.server, env.socketPath); await env.cleanup(); }
 });
+
+for (const transient of ["unverifiable", "changed"] as const) {
+  test(`maintenance resume waits through ${transient} identity until confirmed absence`, async () => {
+    const env = await fixture();
+    const hold = await createDaemonMaintenance(daemonMaintenancePath(env.root));
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 20);
+    wire.maintenance.id = hold.id;
+    let prepared = false; let dead = false; let observations = 0;
+    let closing: Promise<void> | undefined;
+    wire.handoff.prepare = async () => { prepared = true; };
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+      inspectDaemonProcess: () => {
+        if (!prepared) return fakeDaemonProcessIdentity();
+        if (dead) return null;
+        observations++;
+        if (observations === 2) closing = closeServer(wire.server, env.socketPath).then(() => { dead = true; });
+        return transient === "unverifiable" ? undefined : { ...fakeDaemonProcessIdentity(), command: "exiting" };
+      },
+      signalDaemon: () => assert.fail("resume cannot signal any process"),
+      spawnDaemon: () => assert.fail("resume cannot start a replacement"),
+      terminateTimeoutMs: 1_000, processPollIntervalMs: 5 });
+    try {
+      await client.stopForMaintenance(true);
+      assert.ok(observations >= 2, "transient identity loss must not end the wait");
+      assert.equal(dead, true);
+      assert.equal(await readDaemonMaintenance(daemonMaintenancePath(env.root)), null);
+      assert.ok(wire.requests.every(r => ["daemon.negotiate", "daemon.prepare_handoff"].includes(r.method)));
+    } finally { if (closing) await closing; else await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+  });
+}
+
+for (const outcome of ["live", "unverifiable", "changed", "match-after-loss", "zombie-after-loss", "socket-owned"] as const) {
+  test(`maintenance resume keeps its hold when exit proof is ${outcome}`, async () => {
+    const env = await fixture();
+    const hold = await createDaemonMaintenance(daemonMaintenancePath(env.root));
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 20);
+    wire.maintenance.id = hold.id;
+    let prepared = false; let observations = 0;
+    wire.handoff.prepare = async () => { prepared = true; };
+    const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+      inspectDaemonProcess: () => {
+        if (!prepared) return fakeDaemonProcessIdentity();
+        observations++;
+        if (outcome === "socket-owned") return null;
+        if (outcome === "unverifiable" || (outcome.endsWith("after-loss") && observations === 1)) return undefined;
+        if (outcome === "changed") return { ...fakeDaemonProcessIdentity(), command: "different" };
+        if (outcome === "zombie-after-loss") return { ...fakeDaemonProcessIdentity(), state: "zombie" };
+        return fakeDaemonProcessIdentity();
+      },
+      signalDaemon: () => assert.fail("uncertain resume cannot signal any process"),
+      spawnDaemon: () => assert.fail("uncertain resume cannot start a replacement"),
+      terminateTimeoutMs: 60, processPollIntervalMs: 5 });
+    try {
+      await assert.rejects(client.stopForMaintenance(true), /maintenance service has not stopped/);
+      assert.equal((await readDaemonMaintenance(daemonMaintenancePath(env.root)))?.id, hold.id);
+      assert.ok(wire.requests.every(r => ["daemon.negotiate", "daemon.prepare_handoff"].includes(r.method)));
+    } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+  });
+}

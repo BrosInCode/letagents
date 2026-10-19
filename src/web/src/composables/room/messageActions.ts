@@ -5,6 +5,8 @@ import { isVisibleRoomMessage } from './identity'
 import {
   appendRoomMessage,
   isLoadingOlderMessages,
+  olderMessagesError,
+  roomSessionVersion,
   lastSendError,
   messages,
   messagesHasOlder,
@@ -24,10 +26,12 @@ export function createRoomMessageActions() {
     onSent?: (messageId: string) => void,
   ): Promise<boolean> {
     if (!room.value) return false
+    const sendingRoom = room.value
+    const roomIdentifier = sendingRoom.identifier
     lastSendError.value = ''
     try {
       const preparedAttachments = attachments.length
-        ? await prepareMessageAttachments(room.value.identifier, attachments)
+        ? await prepareMessageAttachments(roomIdentifier, attachments)
         : []
       const body: Record<string, unknown> = {
         text,
@@ -48,16 +52,18 @@ export function createRoomMessageActions() {
       if (preparedAttachments.length) {
         body.attachments = preparedAttachments
       }
-      const msg = await apiFetch(`${roomPath(room.value.identifier)}/messages`, {
+      const msg = await apiFetch(`${roomPath(roomIdentifier)}/messages`, {
         method: 'POST',
         body: JSON.stringify(body),
       })
+      if (room.value !== sendingRoom) return true
       if (msg?.id && isVisibleRoomMessage(msg)) {
         onSent?.(msg.id)
         appendRoomMessage(msg)
       }
       return true
     } catch (error) {
+      if (room.value !== sendingRoom) return false
       const message = error instanceof Error ? error.message.trim() : ''
       lastSendError.value = /attachment object storage is not configured/i.test(
         message,
@@ -78,14 +84,21 @@ export function createRoomMessageActions() {
       return false
     }
 
+    const origin = room.value.identifier, version = roomSessionVersion
+    const current = () => roomSessionVersion === version && room.value?.identifier === origin
     isLoadingOlderMessages.value = true
+    olderMessagesError.value = ''
     try {
-      const page = await fetchMessages(room.value.identifier, firstMessageId)
+      const page = await fetchMessages(origin, firstMessageId)
+      if (!current()) return false
       replaceRoomMessages(mergeMessages(messages.value, page.messages))
       messagesHasOlder.value = page.hasOlder
       return page.messages.length > 0
+    } catch {
+      if (current()) olderMessagesError.value = 'Older messages could not be loaded. Try again.'
+      return false
     } finally {
-      isLoadingOlderMessages.value = false
+      if (current()) isLoadingOlderMessages.value = false
     }
   }
 

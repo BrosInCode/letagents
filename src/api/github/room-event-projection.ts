@@ -43,7 +43,7 @@ export interface GitHubRoomEventProjectionDeps {
   applyGitHubRefRoomLifecycle: typeof applyGitHubRefRoomLifecycle;
 }
 
-function githubProjectionMessageIdBase(event: Pick<GitHubRoomEvent, "semantic_id" | "idempotency_key">): string {
+export function githubProjectionMessageIdBase(event: Pick<GitHubRoomEvent, "semantic_id" | "idempotency_key">): string {
   const digest = crypto
     .createHash("sha256")
     .update(event.semantic_id ?? event.idempotency_key)
@@ -112,8 +112,9 @@ export async function handleMaterializedGitHubRoomEvent(
     ...input.deps,
   };
   const roomEvent = event.roomEvent;
-  let taskResolution = roomEvent
-    ? await deps.resolveLinkedTaskForRepoRoomEvent(project, roomEvent)
+  const routingEvent = event.routingEvent ?? roomEvent;
+  let taskResolution = routingEvent
+    ? await deps.resolveLinkedTaskForRepoRoomEvent(project, routingEvent)
     : emptyRepoRoomEventTaskResolution();
   let linkedTask = taskResolution.task;
   const githubRoutingContext = toGitHubRoutingContext(taskResolution);
@@ -141,6 +142,7 @@ export async function handleMaterializedGitHubRoomEvent(
   }
 
   if (!roomEvent) {
+    deps.emitGitHubRoomEventUpdate(eventProject.id, persisted.event);
     return {
       status: "processed",
       installationId: input.installationId,

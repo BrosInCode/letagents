@@ -1,9 +1,6 @@
-import { app, protocol } from "electron";
+import { app, autoUpdater, protocol } from "electron";
 import { join } from "node:path";
 
-import {
-  retireLegacyCodexBackedOpenModelSessions,
-} from "./main/agents/legacy-open-model-retirement.js";
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
 import { configureApplicationMenu } from "./main/menu.js";
@@ -12,6 +9,7 @@ import {
   initializeDesktopNotifications,
   prepareDesktopNotificationLaunch,
   prepareDesktopNotifications,
+  setDesktopNotificationBadgeCount,
 } from "./main/notifications.js";
 import { attachmentProtocolScheme, workspaceRoot } from "./main/paths.js";
 import {
@@ -19,7 +17,7 @@ import {
   stopDesktopRoomStream,
 } from "./main/room-stream.js";
 import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
-import { createWindow, hasOpenWindows } from "./main/window.js";
+import { allowMainWindowQuit, createWindow, focusMainWindow, hasOpenWindows } from "./main/window.js";
 import { supervisorDaemonClient } from "./main/supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./main/supervisor-grant-coordinator.js";
 import { initializeDesktopUpdates, stopDesktopUpdates } from "./main/updates.js";
@@ -49,11 +47,6 @@ app.once("ready", async (_event, launchInfo) => {
   const startupPreparation = (async () => {
     await startDesktopShellEnvironmentHydration().catch((error) => {
       console.warn(`Desktop shell environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
-    });
-    if (!await supervisorDaemonClient.isMaintenanceHeld()) await retireLegacyCodexBackedOpenModelSessions().catch((error) => {
-      console.warn(
-        `Legacy Open Model retirement failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
     });
   })();
   const backgroundStartup = (async () => {
@@ -98,13 +91,16 @@ app.once("ready", async (_event, launchInfo) => {
   });
 
   app.on("activate", () => {
-    if (!hasOpenWindows()) {
-      createWindow();
-    }
+    if (!hasOpenWindows()) createWindow();
+    focusMainWindow();
   });
 });
 
+autoUpdater.on("before-quit-for-update", allowMainWindowQuit);
+
 app.on("before-quit", () => {
+  allowMainWindowQuit();
+  setDesktopNotificationBadgeCount(0);
   stopDesktopUpdates();
   void stopDesktopRoomStream();
   void stopActiveRentalProviderHostManager();

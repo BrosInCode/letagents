@@ -7,13 +7,14 @@ import {
 } from "../../../shared/activation-routing.js";
 import { db } from "../client.js";
 import {
+  jev_routing_jobs,
   message_agent_receipts,
   messages,
   room_agent_sessions,
   task_leases,
 } from "../schema.js";
 import type { MessageAccountAgentRouting, MessageRow } from "../types.js";
-import { RequestValidationError } from "../../validation-error.js";
+import { MessageRoutingPendingError, RequestValidationError } from "../../validation-error.js";
 import { parseScopedId } from "../utils.js";
 import { getGlobalMessageThreadRoutingMembers } from "./thread-routing-membership.js";
 
@@ -159,6 +160,65 @@ export async function getBoundedActiveWorkLeaseOwners(
      LIMIT 2
   `);
   return result.rows;
+}
+
+/**
+ * A human can move an answered top-level question into its first thread.
+ * Only its captured recipients may follow; names and today's room population
+ * cannot expand that audience. Check the persisted follow-up too, including
+ * visibility set by a transactional creation hook. This does not change
+ * thread membership.
+ */
+export async function getHumanThreadRootRecipientOwners(
+  executor: Pick<AccountAgentRoutingExecutor, "execute">,
+  roomId: string,
+  rootNumber: number,
+  followUpNumber: number,
+  currentAgentKeys: readonly string[],
+): Promise<ReadonlyMap<string, string>> {
+  if (!currentAgentKeys.length) return new Map();
+  if (currentAgentKeys.length > MAX_ACCOUNT_ROUTING_TARGETS) {
+    throw new RequestValidationError("Thread recipient lookup exceeds the routing bound.");
+  }
+  const result = await executor.execute<{
+    agent_key: string | null; owner_account_id: string | null; routing_pending: boolean | null;
+  }>(sql`
+    SELECT receipt.agent_key, captured.owner_account_id,
+           (job.state <> 'completed' AND job.plan->>'mode' = 'active') AS routing_pending
+      FROM ${messages} AS root
+      JOIN ${messages} AS follow_up
+        ON follow_up.room_id = root.room_id AND follow_up.number = ${followUpNumber}
+          AND follow_up.visibility IS NULL AND follow_up.rental_session_id IS NULL
+      LEFT JOIN ${jev_routing_jobs} AS job
+        ON job.room_id = root.room_id AND job.message_number = root.number
+      LEFT JOIN ${message_agent_receipts} AS receipt
+        ON receipt.message_room_id = root.room_id AND receipt.message_number = root.number
+          AND receipt.room_id = root.room_id
+          AND receipt.agent_key IN (
+            SELECT value FROM jsonb_array_elements_text(${JSON.stringify(currentAgentKeys)}::jsonb)
+          )
+      LEFT JOIN ${room_agent_sessions} AS captured
+        ON captured.session_id = receipt.agent_session_id
+          AND captured.room_id = receipt.room_id AND captured.agent_key = receipt.agent_key
+          AND captured.session_kind = 'worker'
+     WHERE root.room_id = ${roomId} AND root.number = ${rootNumber}
+       AND root.source = 'browser' AND root.publisher_account_id IS NOT NULL
+       AND root.publisher_agent_key IS NULL AND root.thread_root_number IS NULL
+       AND (root.agent_prompt_kind IS DISTINCT FROM 'auto' OR BTRIM(root.text) <> '')
+       AND root.visibility IS NULL AND root.rental_session_id IS NULL
+     LIMIT ${currentAgentKeys.length + 1}
+  `);
+  if (result.rows.some(row => row.routing_pending)) throw new MessageRoutingPendingError();
+  const owners = new Map<string, string>();
+  const ambiguous = new Set<string>();
+  for (const row of result.rows) {
+    if (!row.agent_key || !row.owner_account_id || ambiguous.has(row.agent_key)) continue;
+    if (owners.has(row.agent_key) && owners.get(row.agent_key) !== row.owner_account_id) {
+      owners.delete(row.agent_key);
+      ambiguous.add(row.agent_key);
+    } else owners.set(row.agent_key, row.owner_account_id);
+  }
+  return owners;
 }
 
 /** Bounded send-time conversation focus, derived solely from captured receipts. */
@@ -325,6 +385,10 @@ export async function getMessageAccountAgentRoutings(
       agent_session_id: string;
       activation_reason: string;
       successor_agent_session_id: string | null;
+      turn_position: number | null;
+      turn_count: number | null;
+      prior_speakers: string[] | null;
+      hold_release_reason: string | null;
     }>(sql`
       WITH requested_account AS (
         SELECT value.account_id
@@ -340,6 +404,12 @@ export async function getMessageAccountAgentRoutings(
                receipt.agent_key,
                receipt.agent_session_id,
                receipt.activation_reason,
+               receipt.turn_position,
+               receipt.turn_count,
+               -- A hold past its deadline is released by the frontier even
+               -- before a sweep records it.
+               CASE WHEN receipt.hold_released_at IS NULL AND receipt.hold_release_after <= now()
+                      THEN 'deadline' ELSE receipt.hold_release_reason END AS hold_release_reason,
                captured.ended_at
           FROM ${message_agent_receipts} AS receipt
           JOIN input_message ON input_message.message_number = receipt.message_number
@@ -350,6 +420,15 @@ export async function getMessageAccountAgentRoutings(
           JOIN requested_account ON requested_account.account_id = captured.owner_account_id
          WHERE receipt.message_room_id = ${roomId}
            AND captured.session_kind = 'worker'
+      ), replied_turn AS (
+        -- Sequenced receipts that already answered: few rows, read once, so a
+        -- later turn can name who spoke before it.
+        SELECT replied.message_number, replied.turn_position, replied.actor_label
+          FROM ${message_agent_receipts} AS replied
+          JOIN input_message ON input_message.message_number = replied.message_number
+         WHERE replied.message_room_id = ${roomId}
+           AND replied.turn_position IS NOT NULL
+           AND replied.receipt_state = 'replied'
       ), receipt_key AS (
         SELECT DISTINCT owned_receipt.account_id, owned_receipt.agent_key
           FROM owned_receipt
@@ -376,7 +455,16 @@ export async function getMessageAccountAgentRoutings(
              owned_receipt.activation_reason,
              CASE WHEN owned_receipt.ended_at IS NOT NULL
                     THEN unique_live_successor.agent_session_id
-                  ELSE NULL END AS successor_agent_session_id
+                  ELSE NULL END AS successor_agent_session_id,
+             owned_receipt.turn_position,
+             owned_receipt.turn_count,
+             owned_receipt.hold_release_reason,
+             CASE WHEN owned_receipt.turn_position >= 2 THEN (
+               SELECT COALESCE(jsonb_agg(prior.actor_label ORDER BY prior.turn_position), '[]'::jsonb)
+                 FROM replied_turn AS prior
+                WHERE prior.message_number = owned_receipt.message_number
+                  AND prior.turn_position < owned_receipt.turn_position
+             ) END AS prior_speakers
         FROM owned_receipt
         LEFT JOIN unique_live_successor
           ON unique_live_successor.account_id = owned_receipt.account_id
@@ -397,6 +485,14 @@ export async function getMessageAccountAgentRoutings(
         activation_reason: receipt.activation_reason,
         ...(receipt.successor_agent_session_id
           ? { successor_agent_session_id: receipt.successor_agent_session_id }
+          : {}),
+        ...(receipt.turn_position !== null && receipt.turn_count !== null
+          ? {
+              turn_position: Number(receipt.turn_position),
+              turn_count: Number(receipt.turn_count),
+              ...(receipt.prior_speakers ? { prior_speakers: receipt.prior_speakers } : {}),
+              ...(receipt.hold_release_reason ? { hold_release_reason: receipt.hold_release_reason } : {}),
+            }
           : {}),
       };
       consumeTargetBudget(target);

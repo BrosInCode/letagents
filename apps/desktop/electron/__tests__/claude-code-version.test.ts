@@ -1,3 +1,4 @@
+import "./isolated-home.js";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,7 +12,12 @@ import {
   requireSupportedClaudeCodeVersion,
   resolveClaudeCodeExecutable,
 } from "../main/agents/claude-code-version.js";
+import { clearProbeCache } from "../main/agents/provider-probe-cache.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
+
+// Every preflight case below fakes the Claude CLI with different output; no
+// case may be answered from a probe that an earlier case memoised.
+test.beforeEach(() => clearProbeCache());
 
 test("Claude Code version readiness accepts supported output and rejects old or unreadable runtimes", () => {
   assert.equal(MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION, "2.1.70");
@@ -59,7 +65,7 @@ for (const approval of [false, true]) test(`Claude Code ${approval ? "tool appro
   try {
     const result = await runDesktopAgentProviderPreflight(
       "claude-code",
-      { repoRootPath: root, ...(approval ? { launchMode: "supervised" as const, permissionProfileId: "ask_before_write" as const } : {}) },
+      { repoRootPath: root, ...(approval ? { permissionProfileId: "ask_before_write" as const } : {}) },
       { commandTimeoutMs: 0 },
     );
     assert.equal(result.status, "error");

@@ -182,3 +182,38 @@ test("switching Inspector tabs keeps the hand-over's text, edits included, and n
   assert.equal(third.vm.draft.value, "");
   third.unmount();
 });
+
+test("Agents keeps stale state honest and task history requests land on Changes", async () => {
+  const props = {
+    recentActivity: [], participants: [], liveClearedCount: 0, presence: [], reasoningSessions: [], roomGitRoom: null,
+    roomIdentifier: "focus_1", roomArtifacts: [{ identityKey: "pr:7", kind: "pull_request", provider: "github", title: "Usage PR", url: "https://github.com/BrosInCode/letagents/pull/7", linkedTaskIds: ["task_7"], lastSeenAt: "2026-10-10T12:00:00Z" }], roomAgentWork: [], roomAgentWorkStatus: "ready", roomAgentWorkTruncated: false,
+    activityHistoryRequest: 0, artifactTaskFilterId: "task_7", tasks: [], messages: [], workers: [],
+    supervisorEntries: [busy.entry, idle.entry], agentProjections: [project(busy.entry, "stale"), idle],
+  };
+  const html = await renderToString(createSSRApp({ render: () => h(ActivityTab, props) }));
+  assert.match(html, /Updates delayed/);
+  assert.match(html, /Working <span>0<\/span>/);
+  assert.doesNotMatch(html, /data-testid="desktop-activity-correct-agent"/);
+  const history = await renderToString(createSSRApp({ render: () => h(ActivityTab, { ...props, activityHistoryRequest: 1 }) }));
+  assert.match(history, /Usage PR/);
+  assert.match(history, /aria-pressed="true"[^>]*>Changes<\/button>/);
+});
+
+
+test("Agents owner uses the durable room identity, never the launcher or a matching display name", async () => {
+  const candidate = entry('native-owner', 'QuartzPeak', false);
+  candidate.createdBy = 'desktop';
+  const props = {
+    recentActivity: [], participants: [], liveClearedCount: 0, presence: [], reasoningSessions: [], roomGitRoom: null,
+    roomIdentifier: 'focus_1', roomArtifacts: [], roomAgentWork: [], roomAgentWorkStatus: 'ready', roomAgentWorkTruncated: false,
+    activityHistoryRequest: 0, artifactTaskFilterId: null, tasks: [], messages: [], workers: [],
+    supervisorEntries: [candidate], agentProjections: [project(candidate)],
+  };
+  const render = (extra: object) => renderToString(createSSRApp({ render: () => h(ActivityTab, { ...props, ...extra }) }));
+  const history = { id: 'record', participantKind: 'agent', participantDisplayName: candidate.displayName, participantAgentKey: candidate.agentKey, participantOwnerLabel: 'EmmyMay', currentTasks: [], completedTasks: [], createdTasks: [] };
+  assert.match(await render({ recentActivity: [history] }), /class="agents-owner"[^>]*>EmmyMay</);
+  assert.match(await render({ participants: [{ kind: 'agent', agentKey: candidate.agentKey, ownerLabel: 'Ada', displayName: 'Renamed' }] }), /class="agents-owner"[^>]*>Ada</);
+  assert.match(await render({ presence: [{ agentKey: candidate.agentKey, ownerLabel: 'Grace', actorLabel: 'Grace/QuartzPeak', displayName: 'QuartzPeak', freshness: 'active' }] }), /class="agents-owner"[^>]*>Grace</);
+  const wrong = await render({ recentActivity: [{ ...history, participantAgentKey: 'other/quartzpeak' }] });
+  assert.doesNotMatch(wrong, /class="agents-owner"[^>]*>(?:desktop|EmmyMay|You)</);
+});

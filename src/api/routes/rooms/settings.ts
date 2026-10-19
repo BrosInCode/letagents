@@ -1,14 +1,18 @@
 import type { Express, Response } from "express";
 import {
+  DEFAULT_ROOM_AGENT_REPLY_ORDER,
   GITHUB_ROOM_CHAT_EVENT_KINDS,
   ROOM_AGENT_GUIDELINES_MAX_BYTES,
+  ROOM_AGENT_REPLY_ORDERS,
   ROOM_AGENT_GUIDELINES_NOTE,
   ROOM_AGENT_GUIDELINES_TOKEN_BUDGET,
   normalizeGitHubRoomChatEventKinds,
   normalizeRoomAgentGuidelines,
+  normalizeRoomAgentReplyOrder,
   roomAgentGuidelinesBytes,
   type GitHubRoomChatEventFilter,
   type RoomAgentGuidelines,
+  type RoomAgentReplyOrderSetting,
 } from "../../../../shared/room-settings.mjs";
 import type { Project } from "../../db.js";
 import * as store from "../../db/room-settings.js";
@@ -90,6 +94,69 @@ export function registerRoomSettingsRoutes(app: Express, deps: RoomSettingsRoute
       can_manage: await canManage(req, project),
     };
   }
+
+  // Per room, without inheritance: the send path reads it in the message
+  // transaction, where resolving parent and repository rooms is too costly.
+  async function replyOrderResponse(req: AuthenticatedRequest, project: Project): Promise<RoomAgentReplyOrderSetting> {
+    const chosen = await db.getRoomAgentReplyOrder(project.id);
+    return {
+      room_id: project.id,
+      order: chosen ?? DEFAULT_ROOM_AGENT_REPLY_ORDER,
+      chosen: chosen !== null,
+      can_manage: await canManage(req, project),
+    };
+  }
+
+  const expressionsResponse = async (req: AuthenticatedRequest, project: Project) => ({
+    room_id: project.id,
+    enabled: await db.getRoomExpressionsEnabled(project.id),
+    can_manage: await canManage(req, project),
+    gif_provider_configured: Boolean(process.env.GIPHY_API_KEY?.trim()),
+  });
+  app.get(/^\/rooms\/(.+)\/expressions$/, async (req: AuthenticatedRequest, res) => {
+    try { const project = await room(req, res); if (project) res.json(await expressionsResponse(req, project)); }
+    catch (error) { fail(res, error); }
+  });
+  app.put(/^\/rooms\/(.+)\/expressions$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await room(req, res); if (!project || !await requirePersonWhoIsAdmin(req, res, project)) return;
+      if (typeof req.body?.enabled !== "boolean") { res.status(400).json({ error: "enabled must be a boolean" }); return; }
+      await db.setRoomExpressionsEnabled(project.id, req.body.enabled);
+      res.json(await expressionsResponse(req, project));
+    } catch (error) { fail(res, error); }
+  });
+  // GIPHY requires requests from the client. This configuration is consumed
+  // inside the client transport, never returned by an agent tool or journaled.
+  // Keep it readable when off so previously sent GIFs can still render.
+  app.get(/^\/rooms\/(.+)\/gif-client-config$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await room(req, res); if (!project) return;
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ enabled: await db.getRoomExpressionsEnabled(project.id), api_key: process.env.GIPHY_API_KEY?.trim() || null });
+    } catch (error) { fail(res, error); }
+  });
+
+  app.get(/^\/rooms\/(.+)\/agent-reply-order$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await room(req, res); if (!project) return;
+      res.json(await replyOrderResponse(req, project));
+    } catch (error) { fail(res, error); }
+  });
+
+  app.put(/^\/rooms\/(.+)\/agent-reply-order$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await room(req, res); if (!project) return;
+      if (!await requirePersonWhoIsAdmin(req, res, project)) return;
+      // null resets the room to the default.
+      const order = req.body?.order === null ? null : normalizeRoomAgentReplyOrder(req.body?.order);
+      if (order === null && req.body?.order !== null) {
+        res.status(400).json({ error: `order must be one of: ${ROOM_AGENT_REPLY_ORDERS.join(", ")}, or null for the default` });
+        return;
+      }
+      await db.setRoomAgentReplyOrder(project.id, order);
+      res.json(await replyOrderResponse(req, project));
+    } catch (error) { fail(res, error); }
+  });
 
   app.get(/^\/rooms\/(.+)\/github-event-filter$/, async (req: AuthenticatedRequest, res) => {
     try {

@@ -60,10 +60,11 @@
                 <div class="room-message-info-identity">
                   <span class="room-message-info-name">{{ agent.actorLabel }}</span>
                   <span class="room-message-info-detail">
-                    <span class="room-message-info-dot" :data-tone="receiptTone(agent.receiptState, agent.observed)" aria-hidden="true" />
-                    {{ receiptStatusLabel(agent.receiptState, agent.observed) }}
+                    <span class="room-message-info-dot" :data-tone="workOutcome(agent) ? 'neutral' : receiptTone(agent.receiptState, agent.observed)" aria-hidden="true" />
+                    {{ workOutcome(agent) ? (agent.observed ? 'Observed' : 'Observation not recorded') : receiptStatusLabel(agent.receiptState, agent.observed) }}
                     <template v-if="agent.activationReasonLabel"> · {{ agent.activationReasonLabel }}</template>
                   </span>
+                  <span v-if="workOutcome(agent)" class="room-message-info-detail">{{ workOutcome(agent) }}</span>
                 </div>
                 <div v-if="activityTarget(agent) || agent.replyMessageId" class="room-message-info-agent-actions">
                   <button
@@ -137,9 +138,9 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
-import type { DesktopMessageInfo, DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
+import type { DesktopMessageInfo, DesktopRoomAgentWork, DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
-import { messageOutcomeTarget } from "../../../../domain/message-outcome";
+import { messageOutcomeTarget, messageWorkOutcome } from "../../../../domain/message-outcome";
 import { desktopIpc } from "../../../../ipc/index.js";
 
 const props = defineProps<{
@@ -147,6 +148,7 @@ const props = defineProps<{
   roomIdentifier: string;
   messageId: string;
   supervisorEntries?: readonly DesktopSupervisorManifestEntry[];
+  roomAgentWork?: readonly DesktopRoomAgentWork[];
   /** Which rendering of the message invoked the surface: a thread root also
    * renders in the timeline, so the same data-message-id appears twice. */
   invokerContext?: "timeline" | "thread-root" | "thread-reply" | null;
@@ -170,6 +172,10 @@ let restoreFocusElement: HTMLElement | null = null;
 
 function activityTarget(agent: DesktopMessageInfo["agentsAsked"][number]): AgentModalTarget | null {
   return messageOutcomeTarget(agent, props.messageId, props.roomIdentifier, props.supervisorEntries ?? []);
+}
+
+function workOutcome(agent: DesktopMessageInfo["agentsAsked"][number]): string | null {
+  return messageWorkOutcome(props.roomAgentWork ?? [], props.messageId, agent.agentKey);
 }
 
 function inspectAgent(agent: DesktopMessageInfo["agentsAsked"][number]): void {

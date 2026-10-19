@@ -91,6 +91,8 @@ export type ContinuationRepairCoordinatorOptions = {
   bindings: ContinuationRepairBindings;
   durability: ContinuationRepairDurability;
   runtime: ContinuationRepairRuntime;
+  /** Record a repair's owner-visible lines in the agent's activity. */
+  recordNotices(entryId: string, notices: readonly string[]): Promise<void>;
   notifyStateChanged(): void;
 };
 
@@ -103,6 +105,7 @@ export class ContinuationRepairCoordinator {
   private readonly bindings: ContinuationRepairBindings;
   private readonly durability: ContinuationRepairDurability;
   private readonly runtime: ContinuationRepairRuntime;
+  private readonly recordNotices: ContinuationRepairCoordinatorOptions["recordNotices"];
   private readonly notifyStateChanged: () => void;
 
   constructor(options: ContinuationRepairCoordinatorOptions) {
@@ -113,6 +116,7 @@ export class ContinuationRepairCoordinator {
     this.bindings = options.bindings;
     this.durability = options.durability;
     this.runtime = options.runtime;
+    this.recordNotices = options.recordNotices;
     this.notifyStateChanged = options.notifyStateChanged;
   }
 
@@ -236,6 +240,7 @@ export class ContinuationRepairCoordinator {
           launchPolicy: withoutHomeHarness(entry.provider_launch_policy),
           model: entry.model,
           reasoningEffort: entry.reasoning_effort ?? null,
+          supervisorEntryId: entry.id,
         }, {
           checkpointReplacement: async (replacementContinuation) => {
             await this.authority.assertCurrent();
@@ -296,6 +301,16 @@ export class ContinuationRepairCoordinator {
           result.replacementProviderContinuationId,
           continuityReset,
         );
+        // The provider returns its owner-visible lines. A line that it streams waits for this lane, and
+        // is dropped once the handle of a replaced conversation is promoted. The provider is told when
+        // its lines are recorded: a line that was not recorded was not said. Neither step undoes the
+        // repair: not when it rejects, and not when it throws before it returns a promise, which
+        // would otherwise reach the failure path below.
+        const notices = result.notices ?? [];
+        await Promise.resolve()
+          .then(() => (notices.length ? this.recordNotices(entry.id, notices) : undefined))
+          .then(() => result.noticesRecorded?.())
+          .catch(() => undefined);
         this.notifyStateChanged();
         return continuityReset ? "replaced" : "restored";
       } catch (error) {

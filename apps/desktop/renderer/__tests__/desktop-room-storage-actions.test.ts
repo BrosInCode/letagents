@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { renderToString } from "@vue/server-renderer";
 import { createSSRApp } from "vue";
 import { createServer, type ViteDevServer } from "vite";
+import { conversationSettingsSummary } from "../src/domain/room-settings-summary";
 
 let vite: ViteDevServer;
 let DesktopRoomActionPanel: object;
@@ -125,20 +126,25 @@ async function renderPanel(overrides: Record<string, unknown> = {}): Promise<str
   }));
 }
 
-test("local Git Rooms disable Cloud and explain how to unlock it", async () => {
+test("local Git Rooms offer explicit publishing and explain its effect before enabling Cloud", async () => {
   const html = await renderPanel();
 
-  assert.match(html, /No Git provider is attached to this room/);
-  assert.match(html, /Add an origin remote, then reopen the repository to use Cloud/);
-  assert.match(html, /Connect this project to a repository hosted online before sharing its room/);
+  assert.match(html, /Add a GitHub origin remote, then use Publish to cloud/);
+  assert.match(html, /Publishing uploads this room&#39;s messages and tasks/);
+  assert.match(html, /Adding a remote or connecting a folder does not upload anything/);
   // Unavailable, yet reachable: the reason is read out to someone who lands on it.
   assert.match(storageChoice(html, "cloud"), /aria-disabled="true"/);
   assert.match(storageChoice(html, "cloud"), /aria-describedby="room-settings-storage-cloud-reason"/);
   assert.doesNotMatch(storageChoice(html, "cloud"), / disabled/);
-  assert.match(html, /<span id="room-settings-storage-cloud-reason" class="sr-only">No Git provider is attached to this room/);
+  assert.match(html, /<span id="room-settings-storage-cloud-reason" class="sr-only">Add a GitHub origin remote/);
   assert.match(storageChoice(html, "cloud"), /aria-checked="false"/);
   assert.match(storageChoice(html, "local"), /aria-checked="true"/);
-  assert.doesNotMatch(html, /Publish to cloud/);
+  assert.match(html, /class="room-settings-button room-settings-publish"[^>]*>Publish to cloud/);
+});
+
+test("room publishing surfaces failures and skipped-history feedback", async () => {
+  assert.match(await renderPanel({ storageFeedback: { error: true, message: "Connect the project first." } }), /role="alert">Connect the project first\./);
+  assert.match(await renderPanel({ storageFeedback: { error: false, message: "2 items remain local." } }), /role="status">2 items remain local\./);
 });
 
 test("provider-backed rooms keep the Cloud control enabled", async () => {
@@ -183,13 +189,19 @@ test("a storage change in flight keeps the row's text and size still", async () 
 
 test("room-wide settings are offered only where the server can hold them", async () => {
   const cloud = await renderPanel({ room: githubRoom, storage: cloudStorage });
-  for (const testId of ["room-conversation-routing", "room-agent-guidelines", "room-github-event-filter"]) {
+  for (const testId of ["room-conversation-routing", "room-reply-order", "room-agent-guidelines", "room-github-event-filter"]) {
     assert.ok(cloud.includes(`data-testid="${testId}"`), `a cloud room offers ${testId}`);
   }
   assert.ok(cloud.includes('data-testid="desktop-room-settings-nav-conversation"'));
+  // Nav titles truncate instead of running under the summary beside them.
+  assert.match(cloud, /<span class="room-settings-nav-title">Conversation<\/span>/);
+  // "Answer in turns" sits directly after conversation routing, in the same section.
+  assert.ok(cloud.indexOf('data-testid="room-reply-order"') > cloud.indexOf('data-testid="room-conversation-routing"'));
+  assert.ok(cloud.indexOf('data-testid="room-reply-order"') < cloud.indexOf('data-section="guidelines"'));
+  assert.match(cloud, /Answer in turns/);
 
   const local = await renderPanel();
-  for (const testId of ["room-conversation-routing", "room-agent-guidelines", "room-github-event-filter"]) {
+  for (const testId of ["room-conversation-routing", "room-reply-order", "room-agent-guidelines", "room-github-event-filter"]) {
     assert.ok(!local.includes(`data-testid="${testId}"`), `a local room does not offer ${testId}`);
   }
   assert.ok(!local.includes('data-testid="desktop-room-settings-nav-conversation"'));
@@ -219,4 +231,13 @@ test("GitHub connection displays review permission evidence separately without p
     if (permission === "write") assert.match(html, /GitHub confirms authorization when a review is published/);
     else assert.match(html, /Ask the repository owner/);
   }
+});
+
+test("the Conversation nav summary stays short: one active setting by name, more as a count", () => {
+  assert.equal(conversationSettingsSummary(null, null), null);
+  assert.equal(conversationSettingsSummary("Standard", null), null);
+  assert.equal(conversationSettingsSummary("Smart", null), "Smart");
+  assert.equal(conversationSettingsSummary("Standard", "In turns"), "In turns");
+  assert.equal(conversationSettingsSummary(null, "In turns"), "In turns");
+  assert.equal(conversationSettingsSummary("Smart", "In turns"), "2 on");
 });

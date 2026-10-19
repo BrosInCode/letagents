@@ -16,9 +16,9 @@
         <span
           v-if="participant.kind === 'agent'"
           class="activity-connection-pill"
-          :data-connection="participant.activityState"
+          :data-connection="participant.freshness === 'stale' ? 'away' : participant.activityState"
         >
-          {{ connectionLabel(participant) }}
+          {{ participant.freshness === 'stale' ? 'Updates delayed' : connectionLabel(participant) }}
         </span>
         <span
           v-if="participant.workSignal"

@@ -28,6 +28,7 @@ import { openAllowedExternalUrl, openExternalWebUrl } from "../external-url.js";
 import { getGitHubPullRequestStats } from "../github-pr-stats.js";
 import {
   getDesktopNotificationStatus,
+  setDesktopNotificationBadgeCount,
   setDesktopNotificationsEnabled,
   takePendingDesktopNotificationActivation,
 } from "../notifications.js";
@@ -95,6 +96,10 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
     "desktop:updates:install",
     async (): Promise<DesktopUpdateStatus> => desktopUpdater.install(),
   );
+  targetIpcMain.handle("desktop:notifications:set-badge-count", (event, count: unknown) => {
+    assertHostApprovalSender(event);
+    setDesktopNotificationBadgeCount(count);
+  });
   targetIpcMain.handle("desktop:notifications:get-status", async () => getDesktopNotificationStatus());
   targetIpcMain.handle(
     "desktop:notifications:set-enabled",

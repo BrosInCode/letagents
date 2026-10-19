@@ -140,12 +140,17 @@ export function registerGitHubIntegrationSetupRoute(
         pull_requests: "write",
         issues: "write",
         checks: "write",
+        actions: "read",
         contents: "read",
         metadata: "read"
       },
       default_events: [
         "pull_request",
         "pull_request_review",
+        "pull_request_review_comment",
+        "pull_request_review_thread",
+        "workflow_run",
+        "workflow_job",
         "issues",
         "issue_comment",
         "check_run",

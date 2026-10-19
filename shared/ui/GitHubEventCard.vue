@@ -1,5 +1,5 @@
 <template>
-  <article class="github-event-card" :class="{ 'is-preview': compact, 'is-room-event': room, 'is-activity': room && !['pull-request', 'issue'].includes(event.kind) }" :data-tone="event.tone" :data-kind="event.kind" :data-status="event.statusLabel">
+  <article class="github-event-card" :class="{ 'is-preview': compact, 'is-history': history, 'is-room-event': room, 'is-activity': room && !['pull-request', 'issue'].includes(event.kind) }" :data-tone="event.tone" :data-kind="event.kind" :data-status="event.statusLabel">
     <div class="github-event-header">
       <svg class="github-event-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <template v-if="event.kind === 'pull-request'">
@@ -23,19 +23,23 @@
         <path v-else-if="event.kind === 'repository'" d="M2.5 4h4l1.5 2h5.5v6.5h-11z" />
         <template v-else><circle cx="8" cy="8" r="5.5" /><path d="M8 5v3M8 11h.01" /></template>
       </svg>
-      <p v-if="room" class="github-event-title">{{ title }}</p>
+      <button v-if="history" type="button" class="github-event-title github-history-toggle" :aria-expanded="historyDetails" @click="historyDetails = !historyDetails">{{ title }}<span aria-hidden="true">{{ historyDetails ? '−' : '+' }}</span></button>
+      <p v-else-if="room" class="github-event-title">{{ title }}</p>
       <span v-else class="github-event-kind">{{ event.kindLabel }}</span>
-      <span v-if="event.statusLabel" class="github-event-status">{{ statusLabel }}</span>
+      <time v-if="history && timestamp" :datetime="timestamp" :title="new Date(timestamp).toLocaleString()">{{ historyTime }}</time>
+      <span v-if="!history && event.statusLabel" class="github-event-status">{{ statusLabel }}</span>
     </div>
 
-    <div v-if="!room || description" class="github-event-content">
+    <div v-if="!history && (!room || description)" class="github-event-content">
       <p v-if="!room" class="github-event-title">{{ title }}</p>
       <p v-if="description" class="github-event-description">{{ description }}</p>
     </div>
 
-    <div v-if="event.repository || event.taskId" class="github-event-context">
-      <span v-if="event.repository" class="github-event-repository">{{ event.repository }}</span>
-      <span v-if="event.repository && event.taskId" class="github-event-separator" aria-hidden="true">·</span>
+    <details v-if="history && historyDetails && event.detail && !titleFirst" class="github-history-detail"><summary>Show details</summary><p>{{ event.detail }}</p></details>
+
+    <div v-if="(!history || historyDetails) && (event.repository || event.taskId)" class="github-event-context">
+      <span v-if="!history && event.repository" class="github-event-repository">{{ event.repository }}</span>
+      <span v-if="!history && event.repository && event.taskId" class="github-event-separator" aria-hidden="true">·</span>
       <button
         v-if="event.taskId && taskLinkEnabled"
         type="button"
@@ -47,14 +51,14 @@
       <span v-else-if="event.taskId" class="github-event-task">{{ event.taskId }}</span>
     </div>
 
-    <div v-if="event.url" class="github-event-actions">
+    <div v-if="event.url && (!history || historyDetails)" class="github-event-actions">
       <slot name="actions" />
       <a class="github-event-action" :href="event.url" target="_blank" rel="noopener noreferrer">
         {{ event.urlLabel }}
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 11 11 5M5 5h6v6" /></svg>
       </a>
       <button v-if="showEventLink && !compact" type="button" class="github-event-action is-secondary" @click="emit('openEvent', event.url)">
-        View in Events
+        View in Activity
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg>
       </button>
     </div>
@@ -62,7 +66,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 
 const props = defineProps<{
   event: {
@@ -78,6 +82,8 @@ const props = defineProps<{
     urlLabel: string;
   };
   compact?: boolean;
+  history?: boolean;
+  timestamp?: string;
   room?: boolean;
   taskLinkEnabled?: boolean;
   showEventLink?: boolean;
@@ -88,9 +94,12 @@ const emit = defineEmits<{
   openEvent: [url: string];
 }>();
 
+const historyDetails = ref(false);
+const historyTime = computed(() => props.timestamp ? new Date(props.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '');
+
 // PR/issue details carry the artifact title; other events carry supporting text.
 const titleFirst = computed(() => Boolean(props.event.detail) && ['pull-request', 'issue'].includes(props.event.kind));
-const title = computed(() => titleFirst.value ? props.event.detail : props.event.headline);
+const title = computed(() => !props.history && titleFirst.value ? props.event.detail : props.event.headline);
 const description = computed(() => titleFirst.value ? props.event.headline : props.event.detail);
 const statusLabel = computed(() => {
   const label = props.event.statusLabel || '';
@@ -226,4 +235,26 @@ button.github-event-task:focus-visible { outline: 2px solid var(--blue-text); ou
 @media (prefers-contrast: more) {
   .github-event-card.is-room-event { border-color: var(--event-accent); }
 }
+</style>
+
+<style scoped>
+.github-event-card.is-history { padding: 0; gap: 4px; max-width: 100%; background: none; border: 0; box-shadow: none; }
+.is-history .github-event-header { display: grid; grid-template-columns: 15px minmax(0, 1fr) auto; gap: 10px; min-height: 44px; }
+.is-history .github-event-icon { width: 14px; height: 14px; color: var(--text-tertiary); }
+.is-history .github-event-header time { font-size: 10px; color: var(--text-tertiary); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.github-history-toggle { display: flex; align-items: center; gap: 8px; padding: 8px 0; border: 0; background: none; text-align: left; font-family: inherit; cursor: pointer; }
+.github-history-toggle span { color: var(--text-tertiary); flex: none; font-size: 11px; }
+.github-history-toggle:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: 2px; }
+.is-history.is-activity { display: grid; }
+.is-history .github-event-actions, .is-history .github-history-detail, .is-history .github-event-context { margin-left: 25px; }
+.is-history .github-event-title { font-size: 12px; line-height: 20px; font-weight: 400; color: var(--text-secondary); }
+.is-history .github-event-actions { gap: 12px; margin: 0; padding: 0; font-size: 10px; }
+.is-history .github-event-action { font-size: 10px; line-height: 18px; }
+</style>
+
+<style scoped>
+.github-history-detail { color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.github-history-detail summary { cursor: pointer; font-size: 11px; color: var(--text-tertiary); }
+.github-history-detail p { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.is-history .github-event-context { font-size: 11px; }
 </style>

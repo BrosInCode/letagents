@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
@@ -44,6 +45,18 @@ async function seed(name = "routing-room", count = 4) {
   });
   const enable = (enabled: boolean) => client!.pool.query("UPDATE rooms SET jev_routing_enabled = $2 WHERE id = $1", [room.id, enabled]);
   return { room, ownerId, sessions, send, enable };
+}
+
+async function connect(a: Awaited<ReturnType<typeof seed>>, indices = a.sessions.map((_, i) => i)) {
+  for (const i of indices) {
+    const session = a.sessions[i]!;
+    await api!.markRoomAgentDeliveryConnected({
+      room_id: a.room.id, actor_label: session.actor_label, display_name: session.display_name,
+      agent_key: session.agent_key, agent_session_id: session.session_id, session_kind: "worker",
+      transport: "long_poll", delivery_instance_id: `poll-${session.session_id}`,
+      credential_fence: { kind: "session_token", token_hash: createHash("sha256").update(session.session_token).digest("hex") },
+    });
+  }
 }
 
 function hint(keys: string[]): import("../db/messages/jev-routing-hint.js").JevConversationRoutingHint {
@@ -230,3 +243,183 @@ test("shadow evaluations never hold the worker frontier", skip, async () => {
   assert.equal((await worker!.claimJevRoutingJobs()).length, 1);
   assert.equal((await api!.getLatestMessages(a.room.id, { wait_for_routing: true })).messages.at(-1)?.id, sent.message.id);
 });
+
+test("a Jev election answers in turns only in a room set to sequential", skip, async () => {
+  const settings = await import("../db/room-settings.js");
+  for (const order of ["sequential", null] as const) {
+    const a = await seed(`turns-${order ?? "default"}`);
+    if (order) await settings.setRoomAgentReplyOrder(a.room.id, order);
+    await connect(a);
+    const before = await a.send("@Agent0 hello");
+    await a.enable(true);
+    const asked = await a.send("Which agents can review the design?");
+    const elected = [a.sessions[1]!, a.sessions[2]!, a.sessions[3]!];
+    const read = (index: number) => api!.getMessagesAfter(a.room.id, before.message.id, {
+      wait_for_routing: true, hold_agent_key: a.sessions[index]!.agent_key,
+    }).then((page) => page.messages.map((message) => message.id));
+    assert.deepEqual(await read(1), [], "routing has not settled yet");
+    const [job] = await worker!.claimJevRoutingJobs();
+    await worker!.completeJevRoutingJob(job!, hint(elected.map((session) => session.agent_key)));
+    const receipts = (await client!.pool.query(
+      `SELECT agent_key, activation_reason, turn_position, turn_count, hold_released_at IS NOT NULL AS released
+         FROM message_agent_receipts WHERE message_room_id = $1 AND message_number = $2
+        ORDER BY turn_position NULLS LAST, agent_key`,
+      [a.room.id, job!.message_number],
+    )).rows;
+    assert.ok(receipts.every((row) => row.activation_reason === "jev_routed"));
+    const indexOf = (key: string) => a.sessions.findIndex((session) => session.agent_key === key);
+    if (!order) {
+      assert.deepEqual(receipts.map((row) => [row.turn_position, row.released]), [[null, false], [null, false], [null, false]],
+        "a room with no setting stays parallel");
+      for (const index of [1, 2, 3]) assert.deepEqual(await read(index), [asked.message.id]);
+      continue;
+    }
+    assert.deepEqual(receipts.map((row) => [row.turn_position, row.turn_count, row.released]), [[1, 3, true], [2, 3, false], [3, 3, false]]);
+    const [first, second, third] = receipts.map((row) => indexOf(row.agent_key));
+    assert.deepEqual(await read(first!), [asked.message.id], "position 1 sees it once routing settles");
+    assert.deepEqual(await read(second!), [], "the routing frontier released it, the hold frontier still hides it");
+    assert.deepEqual(await read(third!), []);
+    const reply = await api!.addMessageWithCreateStatus(a.room.id, a.sessions[first!]!.actor_label, "Agent here.", {
+      source: "agent", account_id: a.ownerId,
+      publisher_agent_key: a.sessions[first!]!.agent_key, publisher_agent_session_id: a.sessions[first!]!.session_id,
+      client_message_id: `supervised-room:supervised_jev:${a.room.id}:${asked.message.id}:reply:v1`,
+    });
+    assert.deepEqual(await read(second!), [asked.message.id, reply.message.id], "position 2 is released by the ready rule");
+    assert.deepEqual(await read(third!), []);
+  }
+});
+
+test("deferred Jev sequencing checks current worker delivery without dropping offline recipients", skip, async () => {
+  const settings = await import("../db/room-settings.js");
+  const a = await seed("turns-offline");
+  await settings.setRoomAgentReplyOrder(a.room.id, "sequential");
+  await a.enable(true);
+  await connect(a, [1, 2, 3]);
+  const asked = await a.send("Which agents can review the design?");
+  // A worker pauses after send but before Jev finishes.
+  await client!.pool.query("UPDATE room_agent_delivery_sessions SET active_connection_count=0 WHERE agent_session_id=$1", [a.sessions[1]!.session_id]);
+  const [job] = await worker!.claimJevRoutingJobs();
+  await worker!.completeJevRoutingJob(job!, hint(a.sessions.map(s => s.agent_key)));
+  const rows = (await client!.pool.query("SELECT agent_key, turn_position, turn_count FROM message_agent_receipts WHERE message_room_id=$1 AND message_number=$2 ORDER BY turn_position NULLS LAST", [a.room.id, Number(asked.message.id.slice(4))])).rows;
+  assert.equal(rows.length, 4);
+  assert.deepEqual(rows.map(row => row.turn_position), [1, 2, null, null]);
+  assert.ok(rows.slice(0, 2).every(row => row.turn_count === 2 && a.sessions.slice(2).some(s => s.agent_key === row.agent_key)));
+});
+
+test("a mention sent while Jev is still deciding is not hidden behind the Jev turn", skip, async () => {
+  const settings = await import("../db/room-settings.js");
+  const a = await seed("turns-mention");
+  await connect(a);
+  await settings.setRoomAgentReplyOrder(a.room.id, "sequential");
+  const before = await a.send("@Agent0 hello");
+  await a.enable(true);
+  // Elect Agent1..3 (keys sort in that order). Rotation by message number
+  // puts Agent3 in position (2 - number % 3) mod 3 + 1; keep it held.
+  if ((Number(before.message.id.slice(4)) + 1) % 3 === 2) await a.send("@Agent0 one more");
+  const asked = await a.send("Which agents can review the design?");
+  const mention = await a.send("@Agent3 urgent");
+  const read = (index: number) => api!.getMessagesAfter(a.room.id, before.message.id, {
+    wait_for_routing: true, hold_agent_key: a.sessions[index]!.agent_key,
+  }).then((page) => page.messages.map((message) => message.id));
+  const [job] = await worker!.claimJevRoutingJobs();
+  await worker!.completeJevRoutingJob(job!, hint([a.sessions[1]!.agent_key, a.sessions[2]!.agent_key, a.sessions[3]!.agent_key]));
+  const [agent3] = (await client!.pool.query(
+    `SELECT turn_position, hold_released_at IS NOT NULL AS released, hold_release_reason
+       FROM message_agent_receipts WHERE message_room_id = $1 AND message_number = $2 AND agent_key = $3`,
+    [a.room.id, job!.message_number, a.sessions[3]!.agent_key],
+  )).rows;
+  assert.ok(agent3.turn_position >= 2, "the probe puts Agent3 behind another position");
+  assert.deepEqual([agent3.released, agent3.hold_release_reason], [true, "activation"]);
+  assert.ok((await read(3)).includes(mention.message.id), "the mention reaches Agent3 at once");
+  assert.ok((await read(3)).includes(asked.message.id));
+});
+
+async function turnRows(room: string, number: number) {
+  return (await client!.pool.query(`SELECT agent_key,turn_position,receipt_state,
+    hold_released_at IS NOT NULL AS released FROM message_agent_receipts
+    WHERE message_room_id=$1 AND message_number=$2 ORDER BY turn_position NULLS LAST,agent_key`, [room,number])).rows;
+}
+async function orderedDeferred(name: string) {
+  const a=await seed(name); await connect(a);
+  const settings=await import("../db/room-settings.js"); await settings.setRoomAgentReplyOrder(a.room.id,"sequential");
+  await a.enable(true); await a.send("Who can help with the programme?");
+  const [job]=await worker!.claimJevRoutingJobs(); assert.ok(job);
+  return {...a,job};
+}
+for (const electedCount of [1,3]) {
+  test(`an older deferred ${electedCount}-agent election cannot flatten a newer human sequence`,skip,async()=>{
+    const a=await orderedDeferred(`older-${electedCount}`);
+    const newer=await a.send("@everyone pause while I decide");
+    const before=await turnRows(a.room.id,Number(newer.message.id.slice(4)));
+    await worker!.completeJevRoutingJob(a.job,hint(a.sessions.slice(0,electedCount).map(s=>s.agent_key)));
+    assert.deepEqual(await turnRows(a.room.id,Number(newer.message.id.slice(4))),before);
+    const older=await turnRows(a.room.id,a.job.message_number);
+    assert.equal(older.length,electedCount);
+    assert.ok(older.every(row=>row.turn_position===null || row.released),"late older holds cannot conceal the newer human");
+    assert.ok(older.every(row=>row.receipt_state==="queued"));
+    await worker!.completeJevRoutingJob(a.job,hint([]));
+    assert.deepEqual(await turnRows(a.room.id,Number(newer.message.id.slice(4))),before,"replay changes no sequence");
+  });
+}
+
+test("a newer deferred human releases only its elected recipients' older holds",skip,async()=>{
+  const a=await seed("overlap"); await connect(a);
+  const settings=await import("../db/room-settings.js"); await settings.setRoomAgentReplyOrder(a.room.id,"sequential");
+  const older=await a.send("@everyone discuss this");
+  const before=await turnRows(a.room.id,Number(older.message.id.slice(4)));
+  const held=before.filter(row=>!row.released); assert.equal(held.length,3);
+  const elected=held.slice(0,2).map(row=>row.agent_key);
+  await a.enable(true); const newer=await a.send("What should we change?");
+  const [job]=await worker!.claimJevRoutingJobs(); await worker!.completeJevRoutingJob(job!,hint(elected));
+  const after=await turnRows(a.room.id,Number(older.message.id.slice(4)));
+  for(const row of after) assert.equal(row.released, before.find(old=>old.agent_key===row.agent_key)!.released || elected.includes(row.agent_key));
+  assert.deepEqual((await turnRows(a.room.id,Number(newer.message.id.slice(4)))).map(row=>[row.turn_position,row.released]),[[1,true],[2,false]]);
+});
+
+for(const first of ["newer_send","older_election"] as const){
+ test(`concurrent human send and deferred election share the room fence: ${first} first`,skip,async()=>{
+  const a=await orderedDeferred(`concurrent-${first}`);
+  let release!:()=>void,entered!:()=>void,ownerPid=0;
+  const gate=new Promise<void>(resolve=>{release=resolve;}),ready=new Promise<void>(resolve=>{entered=resolve;});
+  let primary:Promise<unknown>,secondary:Promise<unknown>|undefined;
+  if(first==="newer_send") primary=a.send("@everyone pause before continuing",{
+   with_created_message_in_transaction:async(tx: import("../db/messages/create.js").MessageCreateTransaction)=>{
+    const {sql}=await import("drizzle-orm");ownerPid=Number((await tx.execute(sql`SELECT pg_backend_pid() AS pid`)).rows[0]!.pid);entered();await gate;
+   },
+  });
+  else primary=client!.db.transaction(async tx=>{
+   const {sql}=await import("drizzle-orm");ownerPid=Number((await tx.execute(sql`SELECT pg_backend_pid() AS pid`)).rows[0]!.pid);
+   await routing!.applyDeferredJevReceipts(tx,a.job.plan,{reason:"jev_routed",agentKeys:a.sessions.map(s=>s.agent_key)});entered();await gate;
+  });
+  try{
+   await ready;
+   let secondaryDone=false;
+   secondary=(first==="newer_send"?worker!.completeJevRoutingJob(a.job,hint(a.sessions.map(s=>s.agent_key))):a.send("@everyone pause before continuing"))
+    .finally(()=>{secondaryDone=true;});
+   let blocked=false;
+   for(let i=0;i<200 && !secondaryDone && !blocked;i++){
+    blocked=(await client!.pool.query("SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))",[ownerPid])).rowCount!>0;
+    if(!blocked)await new Promise(resolve=>setTimeout(resolve,10));
+   }
+   assert.ok(blocked && !secondaryDone,"the competing operation must reach the actual room row lock");
+  }finally{release();await Promise.allSettled([primary,secondary]);}
+  await primary;await secondary;
+  const newest=(await client!.pool.query("SELECT MAX(number) AS number FROM messages WHERE room_id=$1",[a.room.id])).rows[0].number;
+  assert.deepEqual((await turnRows(a.room.id,Number(newest))).map(row=>[row.turn_position,row.released]),[[1,true],[2,false],[3,false],[4,false]]);
+  assert.ok((await turnRows(a.room.id,a.job.message_number)).every(row=>row.released),"neither commit order resurrects an older hold");
+ });
+}
+
+for (const text of ["\t\n", "\u00a0\ufeff"]) {
+ test(`late election does not treat whitespace-only auto prompt ${JSON.stringify(text)} as human priority`,skip,async()=>{
+  const a=await orderedDeferred(`hidden-${text.codePointAt(0)}`);
+  await a.send("@everyone temporary routing text",{
+   with_created_message_in_transaction:async(tx: import("../db/messages/create.js").MessageCreateTransaction,message:{number:number})=>{
+    const {sql}=await import("drizzle-orm");
+    await tx.execute(sql`UPDATE messages SET text=${text},agent_prompt_kind='auto' WHERE room_id=${a.room.id} AND number=${message.number}`);
+   },
+  });
+  await worker!.completeJevRoutingJob(a.job,hint(a.sessions.slice(0,3).map(s=>s.agent_key)));
+  assert.deepEqual((await turnRows(a.room.id,a.job.message_number)).map(row=>row.released),[true,false,false]);
+ });
+}

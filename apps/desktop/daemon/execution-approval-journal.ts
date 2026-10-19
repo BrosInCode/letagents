@@ -1,4 +1,4 @@
-import { assertDecisionToolRule, hostToolDecisionWasWithdrawn } from "./host-tool-rules.js";
+import { assertDecisionToolRule, hostToolDecisionWasWithdrawn, isToolRuleDecision } from "./host-tool-rules.js";
 import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { executionIdentity, nativeRuntimeDeathSchema } from "./execution-protocol.js";
@@ -112,6 +112,22 @@ export class ApprovalJournalError extends Error {
     super(`Approval journal rejected: ${code}.`); this.name = "ApprovalJournalError";
   }
 }
+/** Recorded as the decider of an automatic review, so the journal shows that no person chose. */
+export const AUTOMATIC_REVIEW_ACTOR_ID = "automatic-review";
+/** A decision that is not stored yet: who chooses it, and whether a saved tool rule is created or used for it. */
+type PendingChoice = { actorId: string; toolRule: boolean };
+/**
+ * Whether a person's own Allow once or Deny stands behind a decision. The journal
+ * decides this from what it stores, never from what a caller says: a host decision,
+ * not made by the automatic reviewer, with no saved tool rule bound to it. A saved
+ * rule records its decisions under the owner's own actor, so the actor alone is not enough.
+ */
+function ownersAnswer(db: DatabaseSync, record: ExecutionApprovalRecord, pending?: PendingChoice): boolean {
+  const decision = record.decision;
+  if (decision) return decision.source === "host" && decision.actorId !== AUTOMATIC_REVIEW_ACTOR_ID
+    && !isToolRuleDecision(db, decision.decisionId);
+  return Boolean(pending) && pending!.actorId !== AUTOMATIC_REVIEW_ACTOR_ID && !pending!.toolRule;
+}
 function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const result = schema.safeParse(value);
   if (!result.success) throw new ApprovalJournalError("invalid_input");
@@ -171,7 +187,7 @@ function exact(db: DatabaseSync, expected: ApprovalReference): ExecutionApproval
   return found;
 }
 function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agentId" | "roomId" | "providerContinuationId" | "providerTurnId">, owned: ApprovalAuthority,
-  current: DaemonManifestEntry | undefined): { generation: string; runtimeId: string; turnId: string; sourceMessageId: string; createdAtMs: number } {
+  current: DaemonManifestEntry | undefined, savedEditMayWait: boolean): { generation: string; runtimeId: string; turnId: string; sourceMessageId: string; createdAtMs: number } {
   // Native pendingness comes from the broker's exact adapter callback. Storage
   // authority comes from the operational checkpoint, never observer projections.
   requireForeignKeys(db);
@@ -182,8 +198,17 @@ function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agent
     || current.provider_ref.provider_continuation_id !== expected.providerContinuationId
     || owned.providerConnection.kind !== (owned.provider === "codex" ? "codex_app_server" : owned.provider === "claude-code" ? "claude_cli" : "opencode_server")
     || !sameProviderActionConnectionIdentity(current.provider_ref.provider_connection, owned.providerConnection)) reject("missing_turn");
+  // The applied revision must be the one this runtime started with. The saved
+  // revision may be ahead of it: an owner's edit (a new permission mode, for
+  // example) waits for the next start, so the live runtime still runs the old
+  // configuration and its open requests are still its own. Admitting a request
+  // and the owner's own answer to it may proceed then. Anything that depends on
+  // the configuration in force (an automatic or delegated decision, a saved
+  // tool rule) may not. The saved revision can never trail the applied one.
   const configuration = db.prepare("SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(expected.agentId);
-  if (configuration?.config_revision !== owned.configurationRevision || configuration.runtime_configuration_revision !== owned.configurationRevision
+  if (configuration?.runtime_configuration_revision !== owned.configurationRevision
+    || (configuration.config_revision !== owned.configurationRevision
+      && (!savedEditMayWait || (configuration.config_revision as number) < owned.configurationRevision))
     || !db.prepare("SELECT 1 FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=? AND terminal_json IS NULL")
       .get(owned.executionGenerationId, owned.workAttemptId)) reject("missing_turn");
   const head = db.prepare(`SELECT inbox_item_id,room_id,state,provider_turn_id,outcome,source_message_id,created_at
@@ -213,18 +238,19 @@ function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agent
     sourceMessageId: String(head.source_message_id), createdAtMs };
 }
 export function validateExecutionApprovalAuthority(db: DatabaseSync, expected: ApprovalReference, input: ApprovalAuthority,
-  current: DaemonManifestEntry | undefined): void {
+  current: DaemonManifestEntry | undefined, pending?: PendingChoice): void {
   const r = parse(reference, expected); const owned = parse(authority, input);
-  if (exact(db, r).request.closedAtMs != null) reject("invalid_transition");
-  const turn = eligibleTurn(db, r, owned, current);
+  const record = exact(db, r);
+  if (record.request.closedAtMs != null) reject("invalid_transition");
+  const turn = eligibleTurn(db, r, owned, current, ownersAnswer(db, record, pending));
   if (r.executionGenerationId !== turn.generation || r.runtimeGenerationId !== turn.runtimeId || r.turnId !== turn.turnId) reject("missing_turn");
 }
 function liveSelection(db: DatabaseSync, record: ExecutionApprovalRecord, owned: ApprovalAuthority,
-  current: DaemonManifestEntry | undefined, atMs: number): void {
+  current: DaemonManifestEntry | undefined, atMs: number, pending?: PendingChoice): void {
   if (atMs < record.request.createdAtMs || atMs < (record.decision?.decidedAtMs ?? 0)) reject("invalid_input");
   if (atMs >= record.request.expiresAtMs) reject("expired");
   const expected = Object.fromEntries(Object.keys(reference.shape).map(key => [key, record.request[key as keyof ApprovalReference]])) as ApprovalReference;
-  validateExecutionApprovalAuthority(db, expected, owned, current);
+  validateExecutionApprovalAuthority(db, expected, owned, current, pending);
 }
 
 export function getExecutionApproval(db: DatabaseSync, input: ApprovalReference): ExecutionApprovalRecord | null {
@@ -260,7 +286,7 @@ export function admitExecutionApproval(db: DatabaseSync, input: AdmitOperational
       || Object.entries(parsed.request).some(([key, item]) => prior.request[key as keyof AdmitExecutionApproval] !== item)) reject("identity_mismatch");
     return { created: false, approval: prior }; // Receipt only; never reopens a request.
   }
-  const turn = eligibleTurn(db, parsed.request, parsed.authority, current);
+  const turn = eligibleTurn(db, parsed.request, parsed.authority, current, true);
   const value = parse(admission, { ...parsed.request, executionGenerationId: turn.generation, runtimeGenerationId: turn.runtimeId, turnId: turn.turnId });
   if (delegatable && (value.kind !== "file_change" || value.risk !== "low")) reject("invalid_input");
   // A caller cannot alias one native callback under another logical request ID.
@@ -310,7 +336,8 @@ export function admitExecutionApproval(db: DatabaseSync, input: AdmitOperational
   return { created: true, approval: read(db, value.requestId, value.requestVersion)! };
 }
 
-export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval, entry: DaemonManifestEntry | undefined): ExecutionApprovalRecord {
+export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval, entry: DaemonManifestEntry | undefined,
+  toolRule = false): ExecutionApprovalRecord {
   const value = parse(selection, input); const current = exact(db, value.expected);
   if (current.decision) {
     const old = current.decision;
@@ -319,7 +346,7 @@ export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval, 
     return current;
   }
   if (current.request.closedAtMs != null || current.request.state !== "requested") reject("invalid_transition");
-  liveSelection(db, current, value.authority, entry, value.atMs);
+  liveSelection(db, current, value.authority, entry, value.atMs, { actorId: value.actorId, toolRule });
   const r = current.request;
   db.prepare(`INSERT INTO execution_approval_decisions
     (decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,request_delegatable,request_sha256,
@@ -445,22 +472,26 @@ export function witnessedRuntimeApprovalClosures(db: DatabaseSync, agentId: stri
 }
 
 /**
- * Expired prompts of a native runtime other than the agent's live one. Expiry
- * already refuses every selection and dispatch, and only the live runtime has a
- * lane that can observe its prompts, so these can never become actionable. This
- * covers terminals without a death witness, such as those recorded before
- * witnesses existed, without inferring process death or decision application.
+ * Open prompts of a native runtime other than the agent's live one. Only the live
+ * runtime has a lane that can observe its prompts, and every selection and dispatch
+ * for another runtime is refused, so these can never become actionable.
+ *
+ * A runtime that another exact birth has replaced (a restart or a recovery put a
+ * new process in its place) is known to be gone, and its prompts close now.
+ * Without such a successor (a stopped agent, no provider reference) the old process
+ * may still be alive, so its prompts close only once they have expired. Either way
+ * this infers neither process death nor that a decision was applied.
  */
-export function expiredRetiredRuntimeApprovals(db: DatabaseSync, agentId: string, atMs: number,
+export function retiredRuntimeApprovals(db: DatabaseSync, agentId: string, atMs: number,
   currentEntry: () => DaemonManifestEntry | undefined): ExecutionApprovalRecord[] {
   parse(executionIdentity, agentId);
   const now = parse(time, atMs);
-  const rows = db.prepare(`SELECT request_id,request_version,execution_generation_id,runtime_generation_id
-    FROM execution_approval_requests r WHERE agent_id=? AND expires_at_ms<=?
+  const rows = db.prepare(`SELECT request_id,request_version,execution_generation_id,runtime_generation_id,expires_at_ms
+    FROM execution_approval_requests r WHERE agent_id=?
       AND state IN ('requested','decision_recorded','dispatching','lost')
       AND NOT EXISTS (SELECT 1 FROM execution_approval_requests newer WHERE newer.request_id=r.request_id AND newer.request_version>r.request_version)
       AND NOT EXISTS (SELECT 1 FROM execution_approval_request_closures c
-        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId, now);
+        WHERE c.request_id=r.request_id AND c.request_version=r.request_version)`).all(agentId);
   if (!rows.length) return [];
   const current = currentEntry();
   const ref = current?.id === agentId ? current.provider_ref : null;
@@ -474,6 +505,8 @@ export function expiredRetiredRuntimeApprovals(db: DatabaseSync, agentId: string
     // an older origin generation, so compare births in each request's generation.
     if (live && executionRuntimeStorageIdentity(agentId, String(row.execution_generation_id),
       live.kind, live.pid!, live.processIdentity!) === row.runtime_generation_id) continue;
+    // Another exact birth runs this agent. With none known, wait for expiry.
+    if (!live && Number(row.expires_at_ms) > now) continue;
     // Closure is hygiene. An old record whose evidence cannot be read stays as
     // it was rather than failing convergence for the agent on every pass.
     try { records.push(read(db, String(row.request_id), Number(row.request_version))!); }
@@ -487,7 +520,7 @@ export function settleWitnessedRuntimeApprovalClosures(db: DatabaseSync, agentId
   requireForeignKeys(db);
   if (!db.isTransaction) reject("invalid_transition");
   const records = [...new Map([...witnessedRuntimeApprovalClosures(db, agentId),
-    ...expiredRetiredRuntimeApprovals(db, agentId, nowMs(), currentEntry)]
+    ...retiredRuntimeApprovals(db, agentId, nowMs(), currentEntry)]
     .map(record => [JSON.stringify([record.request.requestId, record.request.requestVersion]), record])).values()];
   const insert = db.prepare(`INSERT INTO execution_approval_request_closures
     (request_id,request_version,decision_id,dispatch_id,observed_at_ms) VALUES(?,?,?,?,?)`);

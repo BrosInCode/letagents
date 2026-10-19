@@ -57,6 +57,7 @@ export interface CreateMessageBody {
   reply_to: unknown;
   thread_root_id: unknown;
   attachments: unknown;
+  gif: unknown;
   agent_session_id: string | null;
   agent_session_token: string | null;
   client_message_id: string | null;
@@ -68,9 +69,10 @@ export function parseCreateMessageBody(body: unknown): CreateMessageBody {
   }
   const record = body as Record<string, unknown>;
   const clientMessageId = optionalStringField(record, "client_message_id");
-  // Human answers commit their record and message together. Ordinary messages
-  // must not claim the key first and bypass that transaction on deduplication.
-  if (clientMessageId?.trim().startsWith("internal:attention-response:")) {
+  // Requests and human answers commit their record and message together.
+  // Ordinary messages must not claim the key first and bypass that
+  // transaction on deduplication.
+  if (/^internal:attention-(?:request|response):/.test(clientMessageId?.trim() ?? "")) {
     throw new RequestValidationError("client_message_id uses a reserved namespace");
   }
   return {
@@ -80,6 +82,7 @@ export function parseCreateMessageBody(body: unknown): CreateMessageBody {
     reply_to: record.reply_to,
     thread_root_id: record.thread_root_id,
     attachments: record.attachments,
+    gif: record.gif,
     agent_session_id: optionalStringField(record, "agent_session_id"),
     agent_session_token: optionalStringField(record, "agent_session_token"),
     client_message_id: clientMessageId,

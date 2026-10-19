@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { Worker } from 'node:worker_threads';
 import { parseRoomAgentWorkSummary } from '../../../../shared/room-agent-work.mjs';
 import { REVIEW_LIMIT, REVIEW_PAGE_SIZE } from '../../../../shared/workspace-review.mjs';
-import { releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
+import { captureRemoteTips, releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
 import { getLocalStatePath, readLocalStateSnapshot, updateLocalState } from '../../local-state/storage.js';
 import type { StoredAgentSessionState, StoredWorkspaceCapture } from '../../local-state/types.js';
 import { assertWorkerConnection } from '../../worker-call-context.js';
@@ -20,6 +20,8 @@ import { requireValidWorkerBearerRuntime } from './worker-bearer.js';
 const execute = promisify(execFile);
 const activeCalls = new Set<string>();
 let captureWorkerActive = false;
+// What the remotes held when each capture began. Memory only: after a restart the capture is compared plainly.
+const remoteTips = new Map<string, Promise<string[] | null>>();
 const validId = (id: string) => /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(id);
 const directory = (id: string) => join(`${getLocalStatePath()}.workspaces`, id);
 const preparationDirectory = (capture: StoredWorkspaceCapture) => {
@@ -61,14 +63,14 @@ async function exclusive<T>(key: string, operation: () => Promise<T>): Promise<T
   activeCalls.add(key);
   try { return await operation(); } finally { activeCalls.delete(key); }
 }
-async function runCapture(operation: 'begin' | 'finish', capture: StoredWorkspaceCapture, text?: string): Promise<{ baseline?: string | null }> {
+async function runCapture(operation: 'begin' | 'finish', capture: StoredWorkspaceCapture, text?: string, tips: string[] | null = null): Promise<{ baseline?: string | null }> {
   if (captureWorkerActive) throw new Error('Another workspace is being captured. Retry shortly; the original baseline is preserved.');
   captureWorkerActive = true;
   let worker: Worker | undefined;
   try {
     return await new Promise((resolve, reject) => {
       worker = new Worker(new URL('../../../../shared/mcp-workspace-capture-worker.mjs', import.meta.url), {
-        execArgv: [], workerData: { operation, capture, text, directory: operation === 'finish' ? preparationDirectory(capture) : null },
+        execArgv: [], workerData: { operation, capture, text, remoteTips: tips, directory: operation === 'finish' ? preparationDirectory(capture) : null },
       });
       const timeout = setTimeout(() => { reject(new Error('Capture exceeded its time limit. Retry using the same capture_id.')); void worker?.terminate(); }, 120_000);
       worker.once('message', result => { clearTimeout(timeout); result.error ? reject(new Error(result.error)) : resolve(result); });
@@ -96,6 +98,10 @@ export async function beginWorkspaceCapture(input: { room_id: string; agent_sess
         instruction: 'Continue this capture. Keep its capture_id and call publish_workspace_capture when finished.',
         ...(prior.baseline ? {} : { warning: 'The starting snapshot is unavailable. Exact changes for this piece of work cannot be attributed.' }) };
     }
+    // Asked before the work starts, and not awaited: a slow remote must not delay it. The remotes
+    // are the ones this clone configures: nothing outside the clone records where it came from,
+    // and an independent worker reports its own work. (The supervisor daemon asks its own record.)
+    const tips = captureRemoteTips(workspace);
     const baseRevision = await git(['rev-parse', '--verify', 'HEAD']);
     const capture: StoredWorkspaceCapture = { capture_id: randomUUID(), api_url: getApiUrl(), room_id: session.room_id,
       agent_key: session.agent_key, agent_instance_id: session.agent_instance_id!, workspace, base_revision: baseRevision,
@@ -108,7 +114,8 @@ export async function beginWorkspaceCapture(input: { room_id: string; agent_sess
       for (const [id, record] of Object.entries(records)) if (sameWorker(record, session)) delete records[id];
       records[capture.capture_id] = capture;
     });
-    for (const record of obsolete) await rm(directory(record.capture_id), { recursive: true, force: true });
+    for (const record of obsolete) { remoteTips.delete(record.capture_id); await rm(directory(record.capture_id), { recursive: true, force: true }); }
+    remoteTips.set(capture.capture_id, tips);
     try {
       const result = await runCapture('begin', capture);
       capture.baseline = result.baseline ?? null;
@@ -152,7 +159,7 @@ export async function publishWorkspaceCapture(input: { room_id: string; agent_se
       if (!text || text.length > 400) throw new Error('Supply a short summary of at most 400 characters.');
       const candidate = { ...capture, preparation_id: randomUUID() };
       try {
-        await runCapture('finish', candidate, text);
+        await runCapture('finish', candidate, text, await remoteTips.get(capture.capture_id) ?? null);
         await preparedCapture(candidate);
         // Commit one immutable preparation under the same lock that fences
         // reconnects. Stale processes only write their own disposable directory.
@@ -210,6 +217,7 @@ export async function publishWorkspaceCapture(input: { room_id: string; agent_se
       } finally { await review?.close(); }
       if (capture.next_page === total) {
         capture = { ...capture, phase: 'published' }; persist();
+        remoteTips.delete(capture.capture_id);
         await rm(directory(capture.capture_id), { recursive: true, force: true });
       }
       return { status: capture.phase === 'published' ? 'published' : 'uploading', capture_id: capture.capture_id,
@@ -220,6 +228,7 @@ export async function publishWorkspaceCapture(input: { room_id: string; agent_se
     } catch (error) {
       if (error instanceof ApiError && error.status === 410) {
         capture = { ...capture, phase: 'blocked' }; persist();
+        remoteTips.delete(capture.capture_id);
         await rm(directory(capture.capture_id), { recursive: true, force: true });
       }
       throw error;

@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 
 import {
   ensureLocalThreadRoutingProjectionSchemaAsync,
-  getLocalThreadRoutingAgentKeysForRoots,
   invalidateLocalThreadRoutingRoots,
   projectLocalThreadRoutingMessage,
   runLocalSqliteWriteTransactionAsync,
@@ -39,6 +38,7 @@ type LocalMessageRow = {
   source: string | null;
   publisher_agent_key: string | null;
   publisher_agent_session_id: string | null;
+  sender_profile_json: string | null;
   account_agent_routing_json: string | null;
   account_agent_routing_reader_key: string | null;
   control_authorized: number | null;
@@ -96,6 +96,7 @@ export type LocalChatMessageInput = {
   publisher_agent_key?: string | null;
   publisher_agent_session_id?: string | null;
   control_authorized?: boolean | null;
+  sender_profile?: RoomMessagePayload["sender_profile"];
 };
 
 export type LocalSyncMessagePayload = RoomMessagePayload & {
@@ -201,6 +202,7 @@ async function getDb(): Promise<SqliteDatabase> {
         addColumnIfMissing(database, "local_chat_messages", "account_agent_routing_json", "TEXT");
         addColumnIfMissing(database, "local_chat_messages", "account_agent_routing_reader_key", "TEXT");
         addColumnIfMissing(database, "local_chat_messages", "control_authorized", "INTEGER");
+        addColumnIfMissing(database, "local_chat_messages", "sender_profile_json", "TEXT");
         ensureLocalThreadReadsSchema(database);
         database.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS local_chat_messages_sync_key_idx
@@ -281,6 +283,7 @@ function mapRow(row: Record<string, unknown>): LocalMessageRow {
       typeof row.publisher_agent_key === "string" ? row.publisher_agent_key : null,
     publisher_agent_session_id:
       typeof row.publisher_agent_session_id === "string" ? row.publisher_agent_session_id : null,
+    sender_profile_json: typeof row.sender_profile_json === "string" ? row.sender_profile_json : null,
     account_agent_routing_json:
       typeof row.account_agent_routing_json === "string" ? row.account_agent_routing_json : null,
     account_agent_routing_reader_key:
@@ -333,6 +336,11 @@ function normalizeAttachmentPayload(
   };
 }
 
+function publicSenderProfile(value: unknown): RoomMessagePayload["sender_profile"] {
+  if (!value || typeof value !== "object" || !("login" in value) || typeof value.login !== "string" || !value.login.trim()) return null;
+  return { login: value.login, avatar_url: "avatar_url" in value && typeof value.avatar_url === "string" ? value.avatar_url : null };
+}
+
 function toMessagePayload(
   row: LocalMessageRow,
   replyTo?: LocalMessageRow | null,
@@ -364,7 +372,12 @@ function toMessagePayload(
     && row.account_agent_routing_reader_key
     && row.account_agent_routing_reader_key === normalizeReaderKey(readerKey),
   );
+  let senderProfile: RoomMessagePayload["sender_profile"];
+  if (row.source === "browser" && !row.publisher_agent_key && row.sender_profile_json) {
+    try { senderProfile = publicSenderProfile(JSON.parse(row.sender_profile_json)); } catch { senderProfile = null; }
+  }
   return {
+    ...(senderProfile === undefined ? {} : { sender_profile: senderProfile }),
     id: formatMessageId(row.number),
     ...(row.sync_key?.startsWith("desktop-send:") ? { client_message_id: row.sync_key } : {}),
     agent_identity: row.publisher_agent_key
@@ -455,9 +468,16 @@ async function hydrateMessageRows(
 
   const messageNumbers = rows.map((row) => row.number);
   for (const number of messageNumbers) {
+    // Older rows copied each image into data_url as well as the file. A row
+    // with a file URL is shown and published from that file, so its inline
+    // copy is never read and stays out of every message page.
     const attachments = database
       .prepare(`
-        SELECT *
+        SELECT room_id, message_number, attachment_id, file_name, mime_type, size_bytes,
+               url, download_url,
+               CASE WHEN url LIKE 'file:%' THEN NULL ELSE data_url END AS data_url,
+               CASE WHEN url LIKE 'file:%' THEN NULL ELSE content_base64 END AS content_base64,
+               created_at
         FROM local_chat_attachments
         WHERE room_id = ? AND message_number = ?
         ORDER BY created_at ASC
@@ -726,6 +746,7 @@ export async function addLocalChatMessage(
       source: input.source || null,
       publisher_agent_key: input.publisher_agent_key?.trim() || null,
       publisher_agent_session_id: input.publisher_agent_session_id?.trim() || null,
+      sender_profile_json: input.source === "browser" && !input.publisher_agent_key ? JSON.stringify(publicSenderProfile(input.sender_profile)) : null,
       account_agent_routing_json: null,
       account_agent_routing_reader_key: null,
       control_authorized: input.control_authorized === undefined
@@ -766,6 +787,8 @@ export async function addLocalChatMessage(
         insertedRow.timestamp,
         insertedRow.sync_key,
       );
+    database.prepare("UPDATE local_chat_messages SET sender_profile_json = ? WHERE room_id = ? AND number = ?")
+      .run(insertedRow.sender_profile_json, trimmedRoomId, number);
     projectLocalThreadRoutingMessage(database, insertedRow);
     captureLocalSupervisedRouting(database, insertedRow);
     for (const attachment of attachmentRows) {
@@ -888,85 +911,6 @@ export async function getLocalChatMessagesBefore(
   };
 }
 
-export async function searchLocalChatMessages(
-  roomId: string,
-  query: string,
-  options?: { limit?: number; include_prompt_only?: boolean },
-): Promise<LocalMessagePage> {
-  const trimmedQuery = query.trim().toLowerCase();
-  if (!trimmedQuery) {
-    return getLatestLocalChatMessages(roomId, options);
-  }
-
-  const limit = clampLimit(options?.limit);
-  const pattern = `%${escapeLikePattern(trimmedQuery)}%`;
-  const database = await getDb();
-  const rows = database
-    .prepare(`
-      SELECT * FROM local_chat_messages
-      WHERE room_id = ?
-        AND ${visibleMessageClause(options?.include_prompt_only)}
-        AND (
-          LOWER(text) LIKE ? ESCAPE '\\'
-          OR LOWER(sender) LIKE ? ESCAPE '\\'
-        )
-      ORDER BY number DESC
-      LIMIT ?
-    `)
-    .all(roomId, pattern, pattern, limit + 1)
-    .map(mapRow);
-  const hasMore = rows.length > limit;
-  const bounded = (hasMore ? rows.slice(0, limit) : rows).reverse();
-  return {
-    messages: await hydrateMessageRows(database, bounded),
-    has_more: hasMore,
-  };
-}
-
-export async function getLocalChatThreadMessages(
-  roomId: string,
-  rootMessageId: string,
-  options?: { limit?: number; include_prompt_only?: boolean },
-): Promise<LocalMessagePage> {
-  const rootNumber = parseMessageNumber(rootMessageId);
-  if (!rootNumber) {
-    return { messages: [], has_more: false };
-  }
-
-  const limit = clampLimit(options?.limit);
-  const database = await getDb();
-  const rows = database
-    .prepare(`
-      WITH RECURSIVE thread_numbers(number) AS (
-        SELECT number
-        FROM local_chat_messages
-        WHERE room_id = ?
-          AND number = ?
-          AND ${visibleMessageClause(options?.include_prompt_only)}
-        UNION ALL
-        SELECT child.number
-        FROM local_chat_messages child
-        JOIN thread_numbers parent ON child.reply_to_number = parent.number
-        WHERE child.room_id = ?
-          AND ${visibleMessageClause(options?.include_prompt_only, "child")}
-      )
-      SELECT *
-      FROM local_chat_messages
-      WHERE room_id = ?
-        AND number IN (SELECT number FROM thread_numbers)
-      ORDER BY number ASC
-      LIMIT ?
-    `)
-    .all(roomId, rootNumber, roomId, roomId, limit + 1)
-    .map(mapRow);
-  const hasMore = rows.length > limit;
-  const bounded = hasMore ? rows.slice(0, limit) : rows;
-  return {
-    messages: await hydrateMessageRows(database, bounded),
-    has_more: hasMore,
-  };
-}
-
 export async function getLocalChatMessagesAround(
   roomId: string,
   messageId: string,
@@ -1030,10 +974,6 @@ export async function getLocalChatMessagesAround(
     messages: await hydrateMessageRows(database, rows),
     has_more: hasMore,
   };
-}
-
-function escapeLikePattern(value: string): string {
-  return value.replace(/[\\%_]/g, "\\$&");
 }
 
 export async function getLocalMessageThread(
@@ -1229,52 +1169,6 @@ export async function markLocalMessageThreadRead(
   return buildLocalThreadSummaries(database, roomId, [rootNumber], options).get(rootNumber) ?? null;
 }
 
-/** Resolve exact local-thread membership without expanding display participants. */
-export async function getLocalChatThreadRoutingAgentKeys(
-  roomId: string,
-  rootMessageId: string,
-  identities: readonly {
-    agentKey?: string | null;
-    actorLabel?: string | null;
-    displayName?: string | null;
-  }[],
-): Promise<Set<string>> {
-  return (await getLocalChatThreadRoutingAgentKeysForRoots(
-    roomId,
-    [rootMessageId],
-    identities,
-  )).get(rootMessageId) ?? new Set();
-}
-
-/** Batch variant used by local poll pages so routing never becomes N+1. */
-export async function getLocalChatThreadRoutingAgentKeysForRoots(
-  roomId: string,
-  rootMessageIds: readonly string[],
-  identities: readonly {
-    agentKey?: string | null;
-    actorLabel?: string | null;
-    displayName?: string | null;
-  }[],
-): Promise<Map<string, Set<string>>> {
-  const rootIdsByNumber = new Map<number, string>();
-  for (const rootMessageId of rootMessageIds) {
-    const rootNumber = parseMessageNumber(rootMessageId);
-    if (rootNumber) rootIdsByNumber.set(rootNumber, formatMessageId(rootNumber));
-  }
-  if (rootIdsByNumber.size === 0 || identities.length === 0) return new Map();
-  const database = await getDb();
-  const matchedNumbers = await getLocalThreadRoutingAgentKeysForRoots(
-    database,
-    roomId,
-    [...rootIdsByNumber.keys()],
-    identities,
-  );
-  return new Map([...matchedNumbers].map(([rootNumber, keys]) => [
-    rootIdsByNumber.get(rootNumber) ?? formatMessageId(rootNumber),
-    keys,
-  ]));
-}
-
 function getLocalVisibleMessageRow(
   database: SqliteDatabase,
   roomId: string,
@@ -1418,6 +1312,8 @@ export async function importLocalChatMessages(
     for (const message of sortedMessages) {
       if (!message.id) continue;
       const publisherAgentKey = message.agent_identity?.agent_key?.trim() || null;
+      const senderProfileJson = message.source === "browser" && !publisherAgentKey && message.sender_profile !== undefined
+        ? JSON.stringify(publicSenderProfile(message.sender_profile)) : null;
       const publisherAgentSessionId = message.agent_identity?.agent_session_id?.trim() || null;
       const accountAgentRoutingJson = message.account_agent_routing
         ? JSON.stringify(message.account_agent_routing)
@@ -1462,6 +1358,7 @@ export async function importLocalChatMessages(
                      WHEN ? IS NOT NULL THEN ?
                      ELSE account_agent_routing_reader_key
                    END,
+                   sender_profile_json = COALESCE(?, sender_profile_json),
                    control_authorized = COALESCE(?, control_authorized)
              WHERE room_id = ? AND number = ?
           `).run(
@@ -1472,6 +1369,7 @@ export async function importLocalChatMessages(
             accountAgentRoutingJson,
             accountAgentRoutingJson,
             routingReaderKey,
+            senderProfileJson,
             importedControlAuthorized,
             trimmedRoomId,
             existingNumber,
@@ -1512,6 +1410,8 @@ export async function importLocalChatMessages(
           message.id,
           new Date().toISOString(),
         );
+      database.prepare("UPDATE local_chat_messages SET sender_profile_json = ? WHERE room_id = ? AND number = ?")
+        .run(senderProfileJson, trimmedRoomId, number);
       insertedNumbers.add(number);
       for (const attachment of message.attachments || []) {
         database
@@ -1609,22 +1509,3 @@ export async function getSyncedCloudMessageId(input: {
   return typeof row?.synced_cloud_id === "string" ? row.synced_cloud_id : null;
 }
 
-export async function getLocalChatMessageAttachment(
-  roomId: string,
-  messageId: string,
-  attachmentId: string,
-): Promise<LocalAttachmentRow | null> {
-  const messageNumber = parseMessageNumber(messageId);
-  const trimmedAttachmentId = attachmentId.trim();
-  if (!messageNumber || !trimmedAttachmentId) {
-    return null;
-  }
-  const database = await getDb();
-  const row = database
-    .prepare(`
-      SELECT * FROM local_chat_attachments
-      WHERE room_id = ? AND message_number = ? AND attachment_id = ?
-    `)
-    .get(roomId, messageNumber, trimmedAttachmentId) as Record<string, unknown> | undefined;
-  return row ? mapAttachmentRow(row) : null;
-}

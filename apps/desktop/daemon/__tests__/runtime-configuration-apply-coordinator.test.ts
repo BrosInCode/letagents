@@ -1124,6 +1124,80 @@ function managedHarness() {
   return { ...env, state };
 }
 
+test("a transient managed-contract check retries without stranding or replacing an idle native runtime", async () => {
+  const env = managedHarness();
+  env.state.receipt = "a".repeat(64);
+  const failure = Object.assign(new Error("contract probe timed out"), { transientProviderStart: true });
+  let reads = 0, entered!: () => void, resolve!: (contract: string) => void;
+  const reading = new Promise<void>(done => { entered = done; });
+  const contract = new Promise<string>(done => { resolve = done; });
+  env.options.provider!.describeManagedLaunchContract = async () => {
+    if (++reads === 1) throw failure;
+    entered();
+    return contract;
+  };
+  assert.deepEqual(await env.coordinator.refreshManaged("agent-1"), { retryAfterMs: 15_000 });
+  assert.equal(env.entry.condition, "none", "a read-only timeout must not install the generic blocked latch");
+  let admitted = false;
+  const admission = env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(installation), {})
+    .then(value => { admitted = value; return value; });
+  await reading;
+  assert.equal(admitted, false, "delivery still needs the verified contract");
+  const retry = env.coordinator.refreshManaged("agent-1");
+  resolve("a".repeat(64));
+  assert.equal(await admission, true);
+  assert.equal(await retry, undefined);
+  assert.equal(reads, 2, "the existing shared probe is reused");
+  assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+  assert.equal(env.options.streams.currentInstallation("agent-1"), installation);
+});
+
+test("managed-contract verification has a separate bounded retry episode for each installation", async () => {
+  const env = managedHarness();
+  const failure = Object.assign(new Error("contract probe timed out"), { transientProviderStart: true });
+  env.options.provider!.describeManagedLaunchContract = async () => { throw failure; };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    assert.deepEqual(await env.coordinator.refreshManaged("agent-1"), { retryAfterMs: 15_000 });
+  }
+  await assert.rejects(env.coordinator.refreshManaged("agent-1"), error => error === failure,
+    "exhaustion reaches the existing scheduler diagnostic instead of retrying forever");
+  env.options.streams.currentInstallation = () => ({ ...installation, nonce: Symbol("successor") });
+  const successor = env.options.streams.currentInstallation("agent-1")!;
+  env.options.streams.currentInstallation = () => successor;
+  assert.deepEqual(await env.coordinator.refreshManaged("agent-1"), { retryAfterMs: 15_000 },
+    "a different installation does not inherit an exhausted episode");
+  assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+});
+
+for (const change of ["pause", "handoff", "replacement", "blocked", "configuration"] as const) {
+  test(`a late managed-contract timeout cannot schedule verification after ${change}`, async () => {
+    const env = managedHarness();
+    let entered!: () => void, fail!: (error: Error) => void;
+    const reading = new Promise<void>(done => { entered = done; });
+    const contract = new Promise<string>((_resolve, reject) => { fail = reject; });
+    env.options.provider!.describeManagedLaunchContract = async () => { entered(); return contract; };
+    const checking = env.coordinator.refreshManaged("agent-1");
+    await reading;
+    if (change === "pause") env.entry.desired_state = "paused";
+    else if (change === "handoff") env.options.authority.isHandoffScheduled = () => true;
+    else if (change === "replacement") env.options.streams.currentInstallation = () => ({ ...installation });
+    else if (change === "blocked") env.entry.condition = "coordination_blocked";
+    else env.configuration.config_revision += 1;
+    fail(Object.assign(new Error("contract probe timed out"), { transientProviderStart: true }));
+    assert.equal(await checking, undefined);
+    assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+    if (change === "blocked") assert.equal(env.entry.condition, "coordination_blocked");
+  });
+}
+
+test("invalid managed-contract evidence still fails closed without a verification retry", async () => {
+  const env = managedHarness();
+  const failure = new Error("runtime integrity check failed");
+  env.options.provider!.describeManagedLaunchContract = async () => { throw failure; };
+  await assert.rejects(env.coordinator.refreshManaged("agent-1"), error => error === failure);
+  assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+});
+
 test("managed refresh normalizes an unknown legacy birth once without editing Inspector revisions or pending work", async () => {
   const env = managedHarness();
   await env.coordinator.refreshManaged("agent-1");
@@ -1347,7 +1421,7 @@ test("once the owner turns their setup off, no new turn starts on the process th
   assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), true);
   assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined);
   assert.deepEqual(env.counts(), { providerStops: 1, replacements: 1 }, "nothing is replaced twice");
-  assert.equal(env.configurationReads(), reads, "and nothing more is read for it");
+  assert.equal(env.configurationReads(), reads + 2, "and all that is read for it is whether its access level changed: once to admit, once after the pass");
 });
 
 test("a replacement that cannot happen yet is tried again, later each time, until it does", async () => {
@@ -1468,18 +1542,19 @@ test("only a process that still has a setup its owner turned off is held back or
   }
 });
 
-test("an agent whose process was not started with its owner's setup is admitted without reading anything, even when nothing can be read", async () => {
+test("an agent whose process was not started with its owner's setup is admitted whatever is stored about that setup, even when nothing can be read", async () => {
   // Every agent that never had the setup: Codex, Claude Code, Cursor, Open Model, whatever is stored for it.
   for (const provider of ["codex", "claude-code", "cursor", "open-model"]) {
     for (const policy of [{}, changedAt(2), { ...OWNER_SETUP_ON, ...changedAt(2) }]) {
-      const env = applyHarness({ head: pendingHead, configurationUnreadable: () => true });
-      Object.assign(env.configuration, { provider, provider_launch_policy: policy });
-      // A read that never comes back would hold the turn up just the same, so it must not be started at all.
-      env.options.store.getAgentConfiguration = () => assert.fail("nothing is read for an agent that never had the setup");
-      const admitted = await env.coordinator.canAdmitManagedDelivery({ ...deliveryAgentFor(installation), provider }, {});
-      assert.equal(admitted, true, provider);
-      assert.equal(env.configurationReads(), 0, provider);
-      assert.deepEqual(env.convergenceLifecycleStates, [], provider);
+      for (const unreadable of [false, true]) {
+        const env = applyHarness({ head: pendingHead, configurationUnreadable: () => unreadable });
+        Object.assign(env.configuration, { provider, provider_launch_policy: policy });
+        const admitted = await env.coordinator.canAdmitManagedDelivery({ ...deliveryAgentFor(installation), provider }, {});
+        assert.equal(admitted, true, `${provider} ${unreadable ? "unreadable" : "readable"}`);
+        assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined, provider);
+        assert.deepEqual(env.convergenceLifecycleStates, [], provider);
+        assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 }, provider);
+      }
     }
   }
 });
@@ -1517,6 +1592,156 @@ test("an agent that is paused or stopped is not restarted to end the owner's set
       assert.equal((await env.coordinator.refreshManaged("agent-1"))?.notice, undefined, desired);
     }
   }
+});
+
+// The access level (permission mode), as it is stored: the revision of its latest change is in a key's name.
+const permissionChangedAt = (revision: number) => ({ [`letagentsPermissionChangedAt${revision}`]: false });
+
+test("once the owner saves another access level, no new turn starts on the process that runs the old one, and it is replaced as soon as it is idle", async () => {
+  // The installed process started at revision 1. The access level was changed at revision 2, which is saved.
+  let turnRunning = true;
+  const env = applyHarness({ stopIfIdle: async () => !turnRunning, head: pendingHead });
+  env.configuration.provider = "open-model";
+  env.configuration.provider_launch_policy = permissionChangedAt(2);
+  const agent = { ...deliveryAgentFor(installation), provider: "open-model" };
+  const demand = {};
+
+  // The next room message is not handed to that process, however often delivery asks.
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), false);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), false);
+  assert.equal(env.convergenceLifecycleStates.length, 1, "one wake asks for the replacement once");
+  assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 }, "asking never stops anything itself");
+
+  // While its turn is still running it is left alone: a turn is never interrupted. It is asked again later.
+  assert.deepEqual(await env.coordinator.refreshManaged("agent-1"), { retryAfterMs: 1_000 });
+  assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, {}), false, "and still no new turn starts on it");
+
+  // The turn ends. A coordinator that knows nothing of the above, as after a restart of the background service, replaces it.
+  turnRunning = false;
+  const restarted = new RuntimeConfigurationApplyCoordinator(env.options);
+  const wakes = env.convergenceLifecycleStates.length;
+  assert.equal(await restarted.refreshManaged("agent-1"), undefined);
+  assert.deepEqual(env.counts(), { providerStops: 1, replacements: 1 });
+  assert.equal(env.deliveryReserved(), false);
+  assert.equal(env.convergenceLifecycleStates.length, wakes + 1, "the replacement is started at once");
+
+  // Its successor starts at the saved revision, where the level is applied, and takes the waiting turn.
+  env.configuration.runtime_configuration_revision = 2;
+  env.options.streams = { currentInstallation: () => ({ ...installation, handle: { ...handle, appliedConfigurationRevision: 2 } }) };
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), true);
+  assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined);
+  assert.deepEqual(env.counts(), { providerStops: 1, replacements: 1 }, "nothing is replaced twice");
+});
+
+test("only a process that started before the owner changed the access level is held back or replaced for it", async () => {
+  for (const [name, policy, revision] of [
+    ["never changed", {}, 1],
+    ["changed before it started", permissionChangedAt(1), 1],
+    ["changed when it started", permissionChangedAt(2), 2],
+    ["changed, and it started later", permissionChangedAt(2), 3],
+    // Not a record: only the exact form, with exactly false, is one.
+    ["a key that is not a record", { letagentsPermissionChangedAt2: true, letagentspermissionchangedat2: false }, 1],
+  ] as const) {
+    const env = applyHarness({ head: pendingHead, installed: { ...installation, handle: { ...handle, appliedConfigurationRevision: revision } } });
+    env.configuration.provider_launch_policy = policy;
+    assert.equal(await env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(env.options.streams.currentInstallation("agent-1")!), {}), true, name);
+    assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined, name);
+    assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 }, name);
+    assert.deepEqual(env.convergenceLifecycleStates, [], name);
+  }
+  // A process whose revision the handle does not carry is read against the revision the store says the agent last started at.
+  const { appliedConfigurationRevision: _unknown, ...withoutRevision } = handle;
+  for (const [stored, held] of [[permissionChangedAt(2), true], [permissionChangedAt(1), false]] as const) {
+    const env = applyHarness({ head: pendingHead, installed: { ...installation, handle: withoutRevision } });
+    env.configuration.provider_launch_policy = stored;
+    assert.equal(await env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(env.options.streams.currentInstallation("agent-1")!), {}), !held, JSON.stringify(stored));
+  }
+});
+
+test("an agent that collects its own messages, or is paused, keeps its level until it starts again and is not tried again for it", async () => {
+  for (const [name, change] of [
+    ["collects its own messages", (env: ReturnType<typeof applyHarness>) => { env.configuration.delivery_mode = "mcp_polling"; env.entry.delivery_mode = "mcp_polling"; }],
+    ["paused", (env: ReturnType<typeof applyHarness>) => { env.entry.desired_state = "paused"; }],
+    ["stopped", (env: ReturnType<typeof applyHarness>) => { env.entry.desired_state = "stopped"; }],
+  ] as const) {
+    const env = applyHarness({ head: pendingHead });
+    env.configuration.provider_launch_policy = permissionChangedAt(2);
+    change(env);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined, `${name}: nothing to wait for, so no retry loop`);
+    }
+    assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 }, name);
+  }
+});
+
+test("when the saved access level cannot be read, the agent goes on as it was and nothing is stopped on a guess", async () => {
+  const env = applyHarness({ head: pendingHead, configurationUnreadable: () => true });
+  env.configuration.provider_launch_policy = permissionChangedAt(2);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(installation), {}), true);
+  assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined);
+  assert.deepEqual(env.counts(), { providerStops: 0, replacements: 0 });
+  assert.deepEqual(env.convergenceLifecycleStates, []);
+});
+
+test("a replacement for the access level that cannot happen yet is tried again, later each time, and its owner is told once", async () => {
+  const env = applyHarness({ head: pendingHead });
+  env.configuration.provider_launch_policy = permissionChangedAt(2);
+  env.entry.condition = "coordination_blocked";
+  const answers: Array<{ retryAfterMs: number; notice?: string }> = [];
+  for (let attempt = 0; attempt < 7; attempt += 1) answers.push((await env.coordinator.refreshManaged("agent-1"))!);
+  assert.deepEqual(answers.map((answer) => answer.retryAfterMs), [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]);
+  assert.deepEqual(answers.map((answer) => Boolean(answer.notice)), [false, false, false, false, true, false, false], "said once, after the fifth try");
+  assert.match(answers[4]!.notice!, /^Still waiting to restart this agent so it runs with the access level you saved\. Its messages wait until then\. Pause the agent and resume it to do it now\.$/);
+  assert.deepEqual(env.convergenceLifecycleStates, [], "a try that replaced nothing does not converge again at once: there is no loop");
+  env.entry.condition = "none";
+  assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined);
+  assert.deepEqual(env.counts(), { providerStops: 1, replacements: 1 });
+});
+
+test("an agent that cannot be restarted to apply the saved access level ends in an error its owner sees", async () => {
+  const gone = Object.assign(new Error("native stop failed"), { providerRuntimeGone: true });
+  const env = applyHarness({ head: pendingHead, stopFailure: () => gone });
+  env.configuration.provider_launch_policy = permissionChangedAt(2);
+  const failure = await env.coordinator.refreshManaged("agent-1").then(() => null, (error: Error) => error);
+  assert.ok(failure, "the failure is not swallowed, so the scheduler records it as the agent's error");
+  assert.equal(failure.message, "LetAgents could not restart this agent to apply the access level you saved, so its messages are waiting. "
+    + "Pause the agent and resume it to finish applying it");
+  assert.equal(schedulerErrorDetail(failure), `${failure.message}; cause: native stop failed`);
+  assert.equal(providerRuntimeGoneFailure(failure), true);
+  assert.equal(env.deliveryReserved(), false);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(installation), {}), false, "and no turn runs under the old level meanwhile");
+});
+
+test("an agent that waits for its turn to end for a new access level is still restarted for a record that blocks its delivery", async () => {
+  // The saved state still says working, as it does for a runtime whose turn ended in the gap of its record; its provider says no turn runs.
+  const env = blockedRecordHarness({ turnBoundary: () => "idle" });
+  env.entry.observed_state = "working";
+  env.configuration.config_revision = 2;
+  env.configuration.provider_launch_policy = permissionChangedAt(2);
+  assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined);
+  assert.deepEqual(env.counts(), { providerStops: 1, replacements: 1 }, "the one restart serves both");
+  // Without a blocked record, the wait for the turn is all there is, and it is the sooner of the two waits that is kept.
+  const waiting = applyHarness({ head: async () => ({ state: "dispatching", provider_turn_id: "turn-1" }) });
+  waiting.configuration.provider_launch_policy = permissionChangedAt(2);
+  assert.deepEqual(await waiting.coordinator.refreshManaged("agent-1"), { retryAfterMs: 1_000 });
+  assert.deepEqual(waiting.counts(), { providerStops: 0, replacements: 0 });
+});
+
+test("a process with the owner's setup on is replaced for a changed access level as well, and one setup ending is still told as that", async () => {
+  const installed = ownerSetupInstallation();
+  const env = applyHarness({ installed, head: pendingHead });
+  env.configuration.provider_launch_policy = { ...OWNER_SETUP_ON, ...changedAt(1), ...permissionChangedAt(2) };
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(deliveryAgentFor(installed), {}), false);
+  assert.equal(await env.coordinator.refreshManaged("agent-1"), undefined);
+  assert.deepEqual(env.counts(), { providerStops: 1, replacements: 1 });
+  // The setup was turned off too: that is the reason given if it cannot be done.
+  const both = applyHarness({ installed, head: pendingHead });
+  both.configuration.provider_launch_policy = { ...changedAt(2), ...permissionChangedAt(2) };
+  both.entry.condition = "coordination_blocked";
+  const answers: Array<{ retryAfterMs: number; notice?: string }> = [];
+  for (let attempt = 0; attempt < 5; attempt += 1) answers.push((await both.coordinator.refreshManaged("agent-1"))!);
+  assert.match(answers[4]!.notice!, /stops running with your own setup/);
 });
 
 test("a turn held back for the end of the owner's setup is delivered by itself once the agent is replaced, even when the first try finds it busy", { timeout: 5_000 }, async () => {
@@ -1618,6 +1843,50 @@ test("managed delivery admission coalesces one demand but permits later wakes on
   assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, demand), true);
   assert.equal(env.state.desiredReads, 1);
   assert.equal(env.convergenceLifecycleStates.length, 2);
+});
+
+test("concurrent cold admissions share one desired contract probe and retry after failure", async () => {
+  const env = managedHarness();
+  env.state.receipt = "a".repeat(64);
+  let release!: (contract: string) => void;
+  let fail!: (error: Error) => void;
+  env.options.provider!.describeManagedLaunchContract = () => {
+    env.state.desiredReads++;
+    return new Promise<string>((resolve, reject) => { release = resolve; fail = reject; });
+  };
+  const agent = deliveryAgentFor(installation);
+  const first = env.coordinator.canAdmitManagedDelivery(agent, {});
+  const second = env.coordinator.canAdmitManagedDelivery(agent, {});
+  const failed = Promise.allSettled([first, second]);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(env.state.desiredReads, 1);
+  fail(new Error("probe unavailable"));
+  assert.ok((await failed).every(result => result.status === "rejected"));
+  const retry = env.coordinator.canAdmitManagedDelivery(agent, {});
+  const sharedRetry = env.coordinator.canAdmitManagedDelivery(agent, {});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(env.state.desiredReads, 2);
+  release("a".repeat(64));
+  assert.deepEqual(await Promise.all([retry, sharedRetry]), [true, true]);
+  assert.equal(await env.coordinator.canAdmitManagedDelivery(agent, {}), true);
+  assert.equal(env.state.desiredReads, 2);
+});
+
+test("desired contract probes stay separate for local and hosted Room routes", async () => {
+  const env = managedHarness();
+  env.state.receipt = "a".repeat(64);
+  const routes: string[] = [];
+  const releases: Array<() => void> = [];
+  env.options.provider!.describeManagedLaunchContract = ({ apiUrl }) => {
+    routes.push(apiUrl);
+    return new Promise(resolve => releases.push(() => resolve("a".repeat(64))));
+  };
+  const agent = deliveryAgentFor(installation);
+  const reads = ["https://letagents.chat", "letagents-local://rooms"].map(apiUrl => env.coordinator.canAdmitManagedDelivery({ ...agent, apiUrl }, {}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(routes, ["https://letagents.chat", "letagents-local://rooms"]);
+  releases.forEach(release => release());
+  assert.deepEqual(await Promise.all(reads), [true, true]);
 });
 
 test("an older admission read cannot overwrite or consume a newer delivery demand", async () => {

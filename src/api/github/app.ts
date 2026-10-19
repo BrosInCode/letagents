@@ -66,14 +66,38 @@ export interface GitHubWebhookPullRequest {
   };
   user?: {
     login: string;
+    id?: number;
   };
   merged_by?: {
     login: string;
   } | null;
+  requested_reviewers?: Array<{ login: string; id?: number }>;
+  assignees?: Array<{ login: string; id?: number }>;
+}
+
+export interface GitHubWorkflowRun {
+  workflow_id?: number;
+  id: number; run_attempt?: number; name?: string; display_title?: string;
+  html_url: string; status: string; conclusion: string | null;
+  head_sha: string; head_branch?: string | null;
+  created_at?: string; updated_at?: string; run_started_at?: string;
+  repository?: { id: number; full_name: string };
+  head_repository?: { id: number; full_name: string } | null;
+  pull_requests?: Array<{ number: number; head?: { sha?: string; ref?: string }; base?: { repo?: { id?: number } } }>;
 }
 
 export interface GitHubWebhookPayload {
   action?: string;
+  updated_at?: string;
+  workflow_run?: GitHubWorkflowRun;
+  workflow_job?: {
+    id: number; run_id: number; run_attempt?: number; name: string;
+    html_url: string; head_sha: string; head_branch?: string;
+    status: string; conclusion: string | null;
+    created_at?: string; started_at?: string | null; completed_at?: string | null;
+    steps?: Array<{ number: number; name: string; status: string; conclusion: string | null }>;
+  };
+  thread?: { node_id?: string; id?: number | string; updated_at?: string; comments?: Array<{ id: number; pull_request_review_id?: number; in_reply_to_id?: number; user?: { login: string } }> };
   ref?: string;
   ref_type?: string;
   before?: string;
@@ -132,6 +156,9 @@ export interface GitHubWebhookPayload {
   };
   comment?: {
     id: number;
+    pull_request_review_id?: number;
+    in_reply_to_id?: number;
+    commit_id?: string;
     body: string;
     html_url: string;
     created_at?: string | null;
@@ -140,12 +167,17 @@ export interface GitHubWebhookPayload {
   };
   review?: {
     id: number;
+    commit_id?: string;
     state: string;
     body?: string | null;
     html_url: string;
     submitted_at?: string | null;
-    user?: { login: string };
+    updated_at?: string | null;
+    user?: { login: string; id?: number };
   };
+  requested_reviewer?: { login: string; id?: number };
+  requested_team?: { slug: string; name?: string };
+  assignee?: { login: string; id?: number };
   check_run?: {
     id: number;
     name: string;
@@ -172,6 +204,7 @@ export interface GitHubWebhookPayload {
   };
   sender?: {
     login: string;
+    id?: number;
   };
 }
 

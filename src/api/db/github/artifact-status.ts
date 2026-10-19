@@ -1,5 +1,6 @@
 import { and, desc, eq, or, sql } from "drizzle-orm";
 
+import { PARTICIPANT_PULL_REQUEST_ACTION_LIST } from "../../github/room-events/pull-request.js";
 import { db } from "../client.js";
 import { github_room_events, tasks } from "../schema.js";
 import type { GitHubRoomEventMetadata } from "../schema.js";
@@ -54,7 +55,9 @@ function applyGitHubRoomEvent(
 ): void {
   const status = getOrCreateStatus(statusMap, taskId);
 
-  if (event.event_type === "pull_request" && status.pr_state === null) {
+  // Reviewer and assignee rows carry the PR state but not a PR action, so they never set the status.
+  const isParticipantAction = (PARTICIPANT_PULL_REQUEST_ACTION_LIST as readonly string[]).includes(event.action);
+  if (event.event_type === "pull_request" && !isParticipantAction && status.pr_state === null) {
     applyPullRequestEvent(status, event);
   }
 

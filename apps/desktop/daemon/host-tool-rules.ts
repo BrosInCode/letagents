@@ -203,6 +203,12 @@ export function bindHostToolRule(db: DatabaseSync, input: {
 export class HostToolRuleRevokedError extends Error {
   constructor(readonly ruleId: string, readonly ruleRevision: number) { super("This saved tool permission was revoked."); }
 }
+/** Whether a saved tool rule made or created this decision. Stores from before saved rules have none. */
+export function isToolRuleDecision(db: DatabaseSync, decisionId: string): boolean {
+  if (Number(db.prepare("PRAGMA user_version").get()!.user_version) < 44
+    && !db.prepare("SELECT 1 FROM sqlite_master WHERE name='host_tool_rule_decisions'").get()) return false;
+  return Boolean(db.prepare("SELECT 1 FROM host_tool_rule_decisions WHERE decision_id=?").get(decisionId));
+}
 export function assertDecisionToolRule(db: DatabaseSync, decisionId: string, entry: DaemonManifestEntry | undefined): void {
   if (Number(db.prepare("PRAGMA user_version").get()!.user_version) < 44
     && !db.prepare("SELECT 1 FROM sqlite_master WHERE name='host_tool_rule_decisions'").get()) return;

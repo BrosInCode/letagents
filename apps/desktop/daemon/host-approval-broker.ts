@@ -91,7 +91,7 @@ export type DelegatableApprovalAdmission = {
   sourceMessageId: string;
 };
 type Options = {
-  store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "closeExecutionApprovalRequest" | "validateExecutionApprovalAuthority" | "readHostToolContext" | "listHostToolRules" | "findHostToolRule" | "selectHostToolApproval" | "revokeHostToolRule" | "withdrawHostToolApproval">;
+  store: Pick<ManifestStore, "getEntry" | "getAgentConfiguration" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "closeExecutionApprovalRequest" | "validateExecutionApprovalAuthority" | "readHostToolContext" | "listHostToolRules" | "findHostToolRule" | "selectHostToolApproval" | "revokeHostToolRule" | "withdrawHostToolApproval">;
   inbox: Pick<SupervisedAgentInboxStore, "head">;
   provider: ProviderActionPort | undefined;
   currentHandle(agentId: string): ProviderActionHandle | undefined;
@@ -109,6 +109,7 @@ type Options = {
 const AUTOMATIC_REVIEW_TIMEOUT_MS = 10_000;
 const MAX_REQUESTS = 32;
 const MAX_PRESENTATION_BYTES = 24 * 1024;
+const SAVED_EDIT_WAITING = "You saved new settings for this agent. It keeps its old settings until it restarts. Your answer applies to this request only.";
 const CODEX_FILE_CHANGE_UNAVAILABLE = "Codex has requested file changes, but the actual edits are not available to inspect here. Decisions are disabled until those exact edits can be shown.";
 class ApprovalPreparationUnavailableError extends Error {}
 const id = z.string().min(1).max(256);
@@ -392,6 +393,8 @@ export class HostApprovalBroker {
             const expected = prepared.candidate.reference;
             if (!expected || prepared.candidate.status !== "pending" || prepared.approval.decision
               || prepared.approval.request.state !== "requested") continue;
+            // The saved mode is not the one this runtime runs, so no automatic answer is given for it.
+            if (prepared.savedEditWaiting) continue;
             lane.reviewed.add(native.native);
             if (await this.reviewWithin(lane, signal => reviewer.review({ entry, request: native.native, signal })) !== "allow") continue;
             prepared.assertCurrent();
@@ -482,7 +485,12 @@ export class HostApprovalBroker {
     if (!this.current(lane) || lane.state !== "pending" || !lane.connectionId || !lane.requests.includes(native)) throw new ApprovalPreparationUnavailableError("Approval unavailable.");
     if (Buffer.byteLength(literal(native.native)) > MAX_PRESENTATION_BYTES) throw new ApprovalPreparationUnavailableError("Approval presentation exceeds its limit.");
     const entry = await this.options.store.getEntry(lane.agentId);
-    if (!entry) throw new ApprovalPreparationUnavailableError("Approval authority changed.");
+    // The flat manifest entry never carries the applied revision, so it cannot
+    // name one. The revision this runtime started with is in its saved
+    // configuration; the journal still refuses a request while a newer saved
+    // configuration has not been applied.
+    const configuration = await this.options.store.getAgentConfiguration(lane.agentId);
+    if (!entry || !configuration) throw new ApprovalPreparationUnavailableError("Approval authority changed.");
     await assertAuthority(entry);
     // OpenCode answers its own compaction messages inside a turn. The head's
     // turn lets correlation prove such a step belongs to it; the head is
@@ -503,11 +511,12 @@ export class HostApprovalBroker {
     const owned: ApprovalAuthority = { inboxItemId: head.inbox_item_id, workAttemptId: lane.handle.workAttemptId,
       executionGenerationId: lane.generation, provider: native.provider,
       providerConnection: lane.connection as ApprovalAuthority["providerConnection"],
-      configurationRevision: entry.runtime_configuration_revision ?? 1 };
+      configurationRevision: configuration.runtime_configuration_revision };
     const requestId = approvalRequestId(lane.agentId, lane.connectionId, native.native.id);
     const requestSha256 = digest(inspected);
     let prior = await this.options.store.readLatestExecutionApproval(requestId);
     if (prior?.decision && !prior.decision.dispatchId && !prior.decision.withdrawnBeforeSend) {
+      // The journal tells the owner's own recorded choice, which stays retryable while a saved edit waits for a restart.
       try { await this.options.store.validateExecutionApprovalAuthority(reference(prior), owned); }
       catch (error) {
         if (error instanceof HostToolRuleRevokedError) {
@@ -557,7 +566,8 @@ export class HostApprovalBroker {
     await assertAuthority();
     assertCurrent();
     return { owned, approval, projection: admittedProjection, sourceMessageId: head.source_message_id,
-      assertCurrent, fileChanges, entry, now, kind: correlated.kind };
+      assertCurrent, fileChanges, entry, now, kind: correlated.kind,
+      savedEditWaiting: configuration.config_revision > configuration.runtime_configuration_revision };
   }
 
   private async prepare(lane: Lane, native: ProviderPermissionRequest) {
@@ -567,7 +577,9 @@ export class HostApprovalBroker {
         || (native.provider === "codex" && native.native.method === "mcpServer/elicitation/request") ? "Run a tool"
         : prepared.kind === "command" ? "Run a command"
         : prepared.kind === "file_change" ? "Change files" : "Grant for this turn", prepared.fileChanges);
-    if (this.options.hostActorId?.()) {
+    // A saved tool rule would outlive the configuration it was chosen under, so none is offered while an
+    // edit waits. A card that already holds a recorded decision keeps the presentation it was made against.
+    if (this.options.hostActorId?.() && (!prepared.savedEditWaiting || prepared.approval.decision)) {
       const scope = await resolveHostToolScope(prepared.entry, native, await this.options.store.readHostToolContext(prepared.owned.workAttemptId)).catch(() => null);
       prepared.assertCurrent();
       if (scope) presentation.alwaysAllow = scope;
@@ -576,7 +588,8 @@ export class HostApprovalBroker {
     const candidate: HostApprovalCandidate = { reference: reference(result.approval), presentation,
       recordedDecision: recordedDecision(result.approval),
       status: now >= result.approval.request.expiresAtMs ? "unavailable" : status(result.approval),
-      detail: now >= result.approval.request.expiresAtMs ? "This approval has expired. No new decision can be sent from this card." : null };
+      detail: now >= result.approval.request.expiresAtMs ? "This approval has expired. No new decision can be sent from this card."
+        : result.savedEditWaiting ? SAVED_EDIT_WAITING : null };
     return { ...result, candidate };
   }
 
@@ -620,8 +633,14 @@ export class HostApprovalBroker {
       decision: value.decision === "allow_always" ? "allow_once" : value.decision,
       projectionSha256: value.projectionSha256,
     }, async (prepared) => {
+      // A retry of a choice already recorded is judged against the digest that choice was made on. The card
+      // may differ from it now (a saved mode changes the tool scope inside the card) while the request does not.
+      const recorded = prepared.approval.decision;
+      const retry = value.decision !== "allow_always" && recorded?.decisionId === value.decisionId
+        && recorded.actorId === value.actorId && recorded.decision === value.decision
+        && recorded.projectionSha256 === value.projectionSha256;
       if (!isDeepStrictEqual(prepared.expected, value.expected)
-        || digest(prepared.presentation) !== value.projectionSha256) {
+        || (!retry && digest(prepared.presentation) !== value.projectionSha256)) {
         throw new Error("The displayed approval request has changed.");
       }
       const fence = (commit: () => Promise<void>) => this.options.fenceCommit(async () => {
@@ -631,6 +650,7 @@ export class HostApprovalBroker {
       const selection = { ...value, decision: value.decision === "allow_always" ? "allow_once" as const : value.decision,
         authority: prepared.approvalAuthority, atMs: this.now() };
       if (value.decision === "allow_always") {
+        if (!prepared.presentation.alwaysAllow) throw new Error("This request has no reusable tool permission.");
         const scope = hostToolScopeSchema.parse(prepared.presentation.alwaysAllow);
         if (this.options.hostActorId?.() !== value.actorId) throw new Error("The permission owner changed.");
         return this.options.store.selectHostToolApproval(selection, { scope, create: true }, fence);

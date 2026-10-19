@@ -1,3 +1,4 @@
+import { totalmem } from "node:os";
 import { PacedQueue } from "../../../shared/paced-queue.mjs";
 
 /**
@@ -21,7 +22,7 @@ export const SERVER_AUTHORITY_CONCURRENCY = 4;
  * new agent never waits for background convergence to free a slot.
  */
 export const INTERACTIVE_RESERVED_AUTHORITY_SLOTS = 1;
-/** Concurrent cold provider launches (spawn or resume, including a Claude bootstrap turn). */
+/** Default concurrent native provider launches; Claude releases before remote bootstrap. */
 export const PROVIDER_LAUNCH_CONCURRENCY = 3;
 /** Upper bound of the random pause before an operation that had to queue, so a released batch spreads out. */
 export const PACED_START_JITTER_MS = 200;
@@ -54,6 +55,8 @@ export type ConvergencePacerOptions = {
   random?: () => number;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
+  /** Physical RAM; injected in tests so launch pacing does not depend on the test host. */
+  totalMemoryBytes?: number;
 };
 
 export type ConvergencePacing = Pick<ConvergencePacer, "run" | "acquire">;
@@ -73,8 +76,14 @@ export class ConvergencePacer {
 
   constructor(private readonly options: ConvergencePacerOptions) {
     this.nowMs = options.nowMs ?? Date.now;
+    const memory = options.totalMemoryBytes ?? totalmem();
+    // Cold native processes compete with the UI and already-running agents.
+    // Keep the existing queue, priority and lease rules; reduce only its launch
+    // budget on small hosts so startup probes do not time out under swap load.
+    const launchCapacity = Number.isFinite(memory) && memory > 0 && memory <= 8 * 1024 ** 3
+      ? 1 : PROVIDER_LAUNCH_CONCURRENCY;
     const lane = (name: PacedLane) => new PacedQueue({
-      capacity: LANE_CAPACITY[name],
+      capacity: name === "launch" ? launchCapacity : LANE_CAPACITY[name],
       reservedForUrgent: LANE_RESERVED_FOR_INTERACTIVE[name],
       leaseMs: PACED_SLOT_LEASE_MS[name],
       startJitterMs: PACED_START_JITTER_MS,

@@ -359,3 +359,9 @@ function activityHistoryEntry(overrides: Partial<RoomActivityHistoryEntry> = {})
     ...overrides,
   }
 }
+
+
+test('assigned tasks and old reasoning do not override an explicitly idle agent', () => {
+  assert.equal(buildWorkSignal({ status: null, statusText: null, currentTasks: [{}], activeReasoning: [] }), null)
+  assert.equal(buildWorkSignal({ status: 'idle', statusText: null, currentTasks: [{}], activeReasoning: [{}] }), null)
+})

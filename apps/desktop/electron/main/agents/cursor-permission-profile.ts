@@ -37,21 +37,6 @@ export function cursorLaunchOptionsForPermissionProfile(
   }
 }
 
-export function cursorPermissionProfileRuntimeLine(
-  profileId: DesktopManagedAgentPermissionProfileId | null | undefined,
-): string {
-  switch (normalizeCursorPermissionProfileId(profileId)) {
-    case "sandboxed_write":
-      return "Runtime mode: Cursor sandboxed write. Cursor is launched with --force and --sandbox enabled; exposed MCP tools remain governed separately by the runtime.";
-    case "full_access":
-      return "Runtime mode: Cursor full access. Cursor is launched with --force and --sandbox disabled.";
-    case "ask_before_write":
-      return "Runtime mode: Cursor ask-before-write is not enabled here; treat this session as read-only.";
-    default:
-      return "Runtime mode: Cursor read-only. You are running in ask mode and must not edit files.";
-  }
-}
-
 export function cursorPermissionProfileInstructionLines(
   profileId: DesktopManagedAgentPermissionProfileId | null | undefined,
 ): string[] {
@@ -61,6 +46,7 @@ export function cursorPermissionProfileInstructionLines(
         "- You may edit files and run local commands when the room event requires implementation work.",
         "- Keep changes scoped to the selected repository/workspace and respect Cursor sandbox failures instead of trying to bypass them.",
         "- LetAgents carries ordinary nonignored file edits back after the turn. Do not create commits, switch branches, or rely on ignored build output being persisted.",
+        "- In this mode there is no network. git and gh usually fail inside the workspace, for example with an Xcode license error. This is caused by the sandbox, so do not report it as a problem with the owner's Mac. Ask a teammate or the owner to commit, push and open the pull request.",
         "- The Cursor sandbox does not prove that MCP tools are sandboxed; use only tools exposed by this runtime and allowed by the human's request.",
         "- Avoid destructive commands, secrets, keychains, global config, and LetAgents local state unless the human explicitly asks.",
       ];
@@ -79,38 +65,16 @@ export function cursorPermissionProfileInstructionLines(
   }
 }
 
-export function cursorPermissionProfileStartMessage(
-  profileId: DesktopManagedAgentPermissionProfileId | null | undefined,
-): string {
-  switch (normalizeCursorPermissionProfileId(profileId)) {
-    case "sandboxed_write":
-      return "Cursor sandboxed-write agent started with desktop-delivered room events.";
-    case "full_access":
-      return "Cursor full-access agent started with desktop-delivered room events.";
-    default:
-      return "Cursor read-only agent started with desktop-delivered room events.";
-  }
-}
-
 export function cursorPermissionProfileReadyDetail(
   profileId: DesktopManagedAgentPermissionProfileId | null | undefined,
-  supervised = false,
 ): string {
   switch (normalizeCursorPermissionProfileId(profileId)) {
     case "sandboxed_write":
-      if (supervised) {
-        return "Cursor edits a separate copy of your project with restricted file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and Git history is kept.";
-      }
-      return "Cursor can edit files with its own file and command restrictions enabled. Connected tools follow the access you selected for them.";
+      return "Cursor edits a separate copy of your project with restricted file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and Git history is kept.";
     case "full_access":
-      if (supervised) {
-        return "Cursor changes files directly and runs commands without approval prompts. It can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.";
-      }
-      return "Cursor can change files and run commands without its own restrictions or approval prompts. Connected tools follow the access you selected for them.";
+      return "Cursor changes files directly and runs commands without approval prompts. It can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.";
     default:
-      return supervised
-        ? "Cursor can inspect the selected workspace but cannot edit it."
-        : "Cursor can inspect files without editing them.";
+      return "Cursor can inspect the selected workspace but cannot edit it.";
   }
 }
 

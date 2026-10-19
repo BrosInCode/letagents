@@ -1,7 +1,24 @@
-import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
+import type { RoomGif } from "../../../shared/room-expressions.mjs";
+import type { RecordedReplyAttachment } from "../../../shared/message-attachments.mjs";
+import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
+import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult, type RoomTurnImageDelivery } from "./provider-action-port.js";
+import { ReplyTurnCompactionObserver, type ReplyTurnCompactionProof } from "./reply-turn-compaction.js";
+import { RoomLatencyTrace } from "./room-latency-trace.js";
+import type { PreparedRoomTurnAttachments, RoomTurnAttachmentStager } from "./room-turn-attachments.js";
+import { turnStartLatency } from "./turn-start-latency.js";
+import { queuedDeliveryKind, roomArrival } from "./queued-delivery-order.js";
 import { sameInboxHead, structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
-import { taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
+import { defaultFollowUpDelayMs, FOLLOW_UP_ENDED, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL, OWNERSHIP_UNVERIFIED_DETAIL, taskFailurePolicy, type ContinuityTask } from "./task-continuity.js";
+
+type CompactionReplyTurnAuthority = {
+  proof: ReplyTurnCompactionProof;
+  invocationId: number;
+  recoveryContext: string;
+  handle: ProviderActionHandle;
+  connection: ProviderActionConnectionRef;
+  originExecutionGenerationId: string;
+};
 
 function providerFailureDisplayText(message: string): string {
   const normalized = message
@@ -18,7 +35,7 @@ export type SupervisedIngressAgent = {
   provider: string;
   charter?: string;
   /** Daemon ingress is legal only after durable ownership commits. */
-  deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
+  deliveryMode?: "mcp_polling" | "daemon_inbox";
   /** Bound worker API origin; never inferred from a persisted credential. */
   apiUrl: string;
   agentSessionId: string;
@@ -34,6 +51,12 @@ export type SupervisedIngressAgent = {
   /** Exact daemon generation that owns this room worker binding. */
   executionGenerationId: string;
   daemonGeneration: number;
+  /**
+   * What happens to this lane if its current runtime ends now: restarted by
+   * the convergence loop, or left for the owner. Absent when unknown, and the
+   * messages then make no promise about it.
+   */
+  laneOutlook?: () => Promise<"restarts" | "needs_owner" | undefined>;
 };
 
 /** The bearer is intentionally memory-only and must never be persisted or logged. */
@@ -66,6 +89,16 @@ export type SupervisedPollResponse = {
 };
 
 export interface SupervisedDeliveryHttp {
+  /** Fresh public awareness only; never an activation, receipt or poll cursor. Null means an older/local server. */
+  context?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<Array<Record<string, unknown>> | null>;
+  /** Optional latency hint after durable no-reply settlement. Work publication remains the reply-order recovery path. */
+  reportNoReply?(input: {
+    roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
+  }): Promise<void>;
+  /** Relinquish only the speaking position for blocked preparation, native compaction or durable silence. */
+  yieldReplyTurn?(input: {
+    roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
+  }): Promise<void>;
   /** Existing task GETs, filtered to this exact worker's active work leases. */
   ownedTasks?(input: { roomId: string; apiUrl: string; bearer: string; agentSessionId: string;
     taskIds?: readonly string[]; heldBefore?: string; signal: AbortSignal }): Promise<ContinuityTask[]>;
@@ -80,17 +113,47 @@ export interface SupervisedDeliveryHttp {
   latest?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ messages?: Array<Record<string, unknown>> }>;
   /** Idempotent remote membership join used by the durable room-move journal. */
   joinRoom?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ roomId: string }>;
+  /**
+   * The bytes of one attachment on a room message, at most `maxBytes`. The
+   * bearer goes only to the room API; the storage address it redirects to
+   * gets no credential and is never returned, logged or shown. Rejects with
+   * RoomAttachmentDownloadError, or with the abort reason.
+   */
+  downloadAttachment?(input: {
+    roomId: string; apiUrl: string; bearer: string; messageId: string; attachmentId: string;
+    maxBytes: number; signal: AbortSignal;
+  }): Promise<Uint8Array>;
   publish(input: {
     roomId: string;
     apiUrl: string;
     bearer: string;
     text: string;
     clientMessageId: string;
+    gif?: RoomGif | null;
+    attachments?: Array<{ upload_id: string }>;
     replyTo: string | null;
     threadRootId: string | null;
     signal: AbortSignal;
   }): Promise<{ messageId: string; roomId: string }>;
+  /** Stage one file for the next publication with the worker's own bearer. */
+  stageAttachment?(input: {
+    roomId: string;
+    apiUrl: string;
+    bearer: string;
+    fileName: string;
+    mimeType: string;
+    bytes: Uint8Array;
+    signal: AbortSignal;
+  }): Promise<{ uploadId: string }>;
+  /** Discard a staged upload the reply did not use; a staged upload otherwise stays until it expires. */
+  discardAttachment?(input: { roomId: string; apiUrl: string; bearer: string; uploadId: string; signal: AbortSignal }): Promise<void>;
 }
+
+/** The daemon-owned copies of reply attachments; see ReplyAttachmentSpool. */
+export type SupervisedReplyAttachmentSpool = {
+  read(inboxItemId: string, file: RecordedReplyAttachment): Promise<Uint8Array>;
+  remove(inboxItemId: string): Promise<void>;
+};
 
 export type SupervisedPollWait = (delayMs: number, signal: AbortSignal) => Promise<void>;
 export type SupervisedRoomMoveCommitter = (input: {
@@ -188,8 +251,10 @@ export class SupervisedAgentDelivery {
   /** Delivery demand survives internal ingress restart on the same handle. */
   private readonly admissionDemands = new WeakMap<ProviderActionHandle, object>();
   private readonly pumpControllers = new Map<string, AbortController>();
+  /** The wait of each agent's scheduled follow-up. Its owner ends it early with Try now or Stop trying. */
+  private readonly followUpWaits = new Map<string, AbortController>();
   private readonly retries = new Map<string, Set<Promise<void>>>();
-  private readonly retryControllers = new Map<string, Set<AbortController>>();
+  private readonly auxiliaryControllers = new Map<string, Set<AbortController>>();
   private readonly agentWork = new Map<string, Set<Promise<void>>>();
   private readonly stoppingAgents = new Set<string>();
   private readonly idleReservations = new Set<string>();
@@ -235,6 +300,9 @@ export class SupervisedAgentDelivery {
     private readonly canAdmitNewTurn?: (agent: SupervisedIngressAgent, demand: object) => Promise<boolean>,
     /** Archive, in the agent's execution record, what its ended runtimes left open and no message still needs. */
     private readonly archiveEndedRuntimes?: (agentId: string) => Promise<void>,
+    private readonly replyAttachmentSpool?: SupervisedReplyAttachmentSpool,
+    /** Prepares the activating message's images for one turn; absent, no turn carries any. */
+    private readonly roomTurnAttachments?: Pick<RoomTurnAttachmentStager, "prepare">,
   ) {}
 
   /**
@@ -253,6 +321,17 @@ export class SupervisedAgentDelivery {
     // version. They cannot be rerun, so their already-retired exact aggregate
     // remains the publication source for that one recovered legacy turn.
     if (result.publicationContract === "legacy_cursor_aggregate_v0") return result;
+    // The wrapper could not prove this turn's authority ended, so even its
+    // journaled proposal stays unpublished. The turn is settled as lost, and its
+    // reason says truthfully what happens to the agent next.
+    if (result.outcome === "interrupted" && result.authorityUnproven) {
+      const outlook = await agent.laneOutlook?.().catch(() => undefined);
+      const next = outlook === "restarts" ? "LetAgents restarts the agent."
+        : outlook === "needs_owner"
+          ? "Automatic recovery was stopped after repeated provider exits. The agent needs you to recover it."
+          : "";
+      return { ...result, error: [result.error, next].filter(Boolean).join(" ") };
+    }
     const proposals = await this.inbox.roomTurnCompletionEffects(
       agent.agentId,
       originExecutionGenerationId,
@@ -272,9 +351,14 @@ export class SupervisedAgentDelivery {
       : { turnId: result.turnId, outcome: "reply", text: completion.text, evidence: "stream" };
   }
 
-  /** Pause new FIFO admissions without aborting an admitted turn or its approvals. */
+  /**
+   * Pause new FIFO admissions without aborting an admitted turn or its approvals. A pump that only waits for a
+   * follow-up's time holds no turn: its wait ends here, so a drain does not wait for it. The follow-up keeps its
+   * saved time, and whichever pump runs next waits for what is left of it.
+   */
   pauseDispatch(): void {
     this.dispatchPaused = true;
+    for (const wait of this.followUpWaits.values()) wait.abort();
   }
 
   async drainAdmittedTurns(agentIds: readonly string[]): Promise<void> {
@@ -599,7 +683,7 @@ export class SupervisedAgentDelivery {
     this.polling.get(agentId)?.abort();
     this.pumpControllers.get(agentId)?.abort();
     this.loopControllers.get(agentId)?.abort();
-    for (const controller of this.retryControllers.get(agentId) ?? []) controller.abort();
+    for (const controller of this.auxiliaryControllers.get(agentId) ?? []) controller.abort();
     // New work is barred before aborting. Re-check the registry until it is
     // empty so a child that was registered while its parent settled is joined.
     for (;;) {
@@ -717,7 +801,8 @@ export class SupervisedAgentDelivery {
       if (owner) this.roomAcceptsAgain(agent.agentId, owner);
       if (!await this.hasIngressAuthority(agent, controller)) return;
       const messages = activatedMessages(response.messages ?? []);
-      await this.inbox.ingestSuccessfulPoll({
+      const newlyInserted = new Set<string>();
+      const received = await this.inbox.ingestSuccessfulPoll({
         agent_id: agent.agentId,
         room_id: agent.roomId,
         execution_generation_id: agent.executionGenerationId,
@@ -730,11 +815,25 @@ export class SupervisedAgentDelivery {
           response.last_observed_message_id ?? lastMessageId(response.messages ?? []),
         messages,
         observed_messages: observedMessages(response.messages ?? []),
-        onInserted,
+        onInserted: ids => { for (const id of ids) newlyInserted.add(id); onInserted?.(ids); },
       });
+      for (const item of received) {
+        if (!newlyInserted.has(item.source_message_id)) continue;
+        turnStartLatency.received({ agentId: agent.agentId, item, busy: this.activeTurns.has(agent.agentId), liveHandle: Boolean(agent.handle) });
+      }
       // Ingest can be deliberately slow. Do not create detached delivery work
       // after a stop/rebind changed authority while its commit was pending.
       if (!await this.hasIngressAuthority(agent, controller)) return;
+      // Intake continues while an older native turn owns this local FIFO. Its
+      // busy worker need not hold up available teammates on a NEW human turn.
+      // Replayed sources never register another optional scheduling hint.
+      for (const item of received) {
+        if (!newlyInserted.has(item.source_message_id) || !orderedHumanSpeakingTurn(item)) continue;
+        const active = this.activeTurns.get(agent.agentId), abort = this.activeTurnAborts.get(agent.agentId);
+        if (active?.phase === "responding" && abort?.inboxItemId === active.inboxItemId) {
+          void this.reportReplyTurnReceipt(agent, item, abort.controller, "busy_yield").catch(() => {});
+        }
+      }
       this.wakePumpAfterSettlement(agent);
     } finally {
       if (this.polling.get(agent.agentId) === controller) this.polling.delete(agent.agentId);
@@ -748,13 +847,13 @@ export class SupervisedAgentDelivery {
     const controller = new AbortController();
     const operation = this.trackAgentWork(agent.agentId, this.track(controller, this.retryOperation(agent, sourceMessageId, controller)));
     const retries = this.retries.get(agent.agentId) ?? new Set<Promise<void>>();
-    const controllers = this.retryControllers.get(agent.agentId) ?? new Set<AbortController>();
+    const controllers = this.auxiliaryControllers.get(agent.agentId) ?? new Set<AbortController>();
     retries.add(operation); controllers.add(controller);
-    this.retries.set(agent.agentId, retries); this.retryControllers.set(agent.agentId, controllers);
+    this.retries.set(agent.agentId, retries); this.auxiliaryControllers.set(agent.agentId, controllers);
     const cleanup = () => {
       retries.delete(operation); controllers.delete(controller);
       if (this.retries.get(agent.agentId) === retries && retries.size === 0) this.retries.delete(agent.agentId);
-      if (this.retryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.retryControllers.delete(agent.agentId);
+      if (this.auxiliaryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.auxiliaryControllers.delete(agent.agentId);
     };
     void operation.then(cleanup, cleanup);
     return operation;
@@ -1142,9 +1241,18 @@ export class SupervisedAgentDelivery {
     const receipts = await this.inbox.receipts(agent.agentId);
     if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
     const item = receipts.find((receipt) => receipt.source_message_id === sourceMessageId && receipt.state === "blocked");
-    if (!item) throw new Error("The blocked room delivery is no longer available for this exact agent.");
+    const scheduled = item ? null : scheduledFollowUp(receipts, sourceMessageId);
+    if (!item && !scheduled) throw new Error(noLongerAvailable(sourceMessageId, "The blocked room delivery is no longer available for this exact agent."));
     if (!await this.hasExecutionAuthority(agent, controller)) throw new AuthorityLostError();
-    await this.inbox.retryBlocked(item.inbox_item_id);
+    if (scheduled) {
+      // Try now. The follow-up that waited for its time starts at once, as the attempt it already was.
+      await this.inbox.startTaskContinuationNow(scheduled.inbox_item_id);
+      if (!await this.hasExecutionAuthority(agent, controller)) throw new Error(AGENT_CHANGED_BEFORE_TRY_NOW);
+      this.followUpWaits.get(agent.agentId)?.abort();
+      if (!this.wake(agent)) throw new Error(AGENT_CHANGED_BEFORE_TRY_NOW);
+      return;
+    }
+    await this.inbox.retryBlocked(item!.inbox_item_id);
     // The row is now truthfully pending; if authority changed during the
     // durable transition, reject the stale control request rather than claim
     // it began provider work. The successor will recover this pending head.
@@ -1200,9 +1308,17 @@ export class SupervisedAgentDelivery {
 
   private async skipMessageOperation(agent: SupervisedIngressAgent, sourceMessageId: string, controller: AbortController): Promise<void> {
     if (!await this.hasIngressAuthority(agent, controller)) throw new AuthorityLostError();
-    const item = (await this.inbox.receipts(agent.agentId)).find((candidate) =>
-      candidate.source_message_id === sourceMessageId && candidate.state === "blocked");
-    if (!item) throw new Error("The blocked room message is no longer available for this exact agent.");
+    const receipts = await this.inbox.receipts(agent.agentId);
+    const item = receipts.find((candidate) => candidate.source_message_id === sourceMessageId && candidate.state === "blocked");
+    const scheduled = item ? null : scheduledFollowUp(receipts, sourceMessageId);
+    if (scheduled) {
+      // Stop trying. Nothing has started for this follow-up, and nothing more starts by itself for its task.
+      await this.inbox.stopTaskContinuation(scheduled.inbox_item_id, FOLLOW_UP_ENDED.stoppedByOwner);
+      this.followUpWaits.get(agent.agentId)?.abort();
+      this.wake(agent);
+      return;
+    }
+    if (!item) throw new Error(noLongerAvailable(sourceMessageId, "The blocked room message is no longer available for this exact agent."));
     // Blocked rows have no live consumer; refuse if this process still has one.
     if (this.activeTurns.get(agent.agentId)?.inboxItemId === item.inbox_item_id
       || this.activeTurnAborts.get(agent.agentId)?.inboxItemId === item.inbox_item_id) {
@@ -1273,11 +1389,14 @@ export class SupervisedAgentDelivery {
       if (!agent.handle || !await this.hasLaneAuthority(agent, controller)) return;
       const recoveryContext = this.recoveryContext(agent);
       if (this.startupRecovered.get(agent.agentId) !== recoveryContext) {
-        await this.inbox.normalizeStartupRecovery(agent.agentId, {
+        const recovered = await this.inbox.normalizeStartupRecovery(agent.agentId, {
           resetCheckpointGatedUnstartedDispatch: agent.provider === "cursor",
         });
         if (!await this.hasLaneAuthority(agent, controller)) return;
         this.startupRecovered.set(agent.agentId, recoveryContext);
+        if (recovered.some(item => item.state === "acknowledged_no_reply" || item.state === "acknowledged_failed")) {
+          this.onDeliverySettled?.(agent.agentId);
+        }
       }
       for (;;) {
         if (this.dispatchIsPaused(agent)) return;
@@ -1293,19 +1412,24 @@ export class SupervisedAgentDelivery {
             if (binding?.work_attempt_id !== agent.workAttemptId || binding.provider_continuation_id !== agent.providerContinuationId) return;
             const prior = await this.inbox.taskContinuation(failed.inbox_item_id);
             const attempt = (prior?.attempt ?? 0) + 1;
-            const policy = taskFailurePolicy(failed.last_error, attempt, await this.inbox.providerRefusedTurn(failed.inbox_item_id));
+            // Claude's structured fields, and Claude Code's own words, decide for a Claude failure. Any other
+            // provider's failure is read as before.
+            const claudeCode = agent.provider === "claude-code";
+            const policy = taskFailurePolicy(failed.last_error, attempt, await this.inbox.providerRefusedTurn(failed.inbox_item_id),
+              await this.inbox.providerResultUnrecognized(failed.inbox_item_id),
+              claudeCode ? await this.inbox.claudeApiFailure(failed.inbox_item_id) : null, claudeCode);
             let tasks: ContinuityTask[] = [];
             let lookupError: string | null = null;
             try { tasks = await this.ownedTasks(agent, { taskIds: prior?.tasks?.map((task) => task.id), heldBefore: prior?.heldBefore ?? String(failed.activation.task_continuity_failed_at), signal: controller.signal }); }
-            catch { lookupError = "Task ownership could not be verified. Check the room connection before continuing work."; }
+            catch { lookupError = OWNERSHIP_UNVERIFIED_DETAIL; }
             if (!await this.hasExecutionAuthority(agent, controller)) return;
             const queued = await this.inbox.enqueueTaskContinuation({ parentId: failed.inbox_item_id,
               agentId: agent.agentId, roomId: agent.roomId, workAttemptId: agent.workAttemptId,
               providerContinuationId: binding.provider_continuation_id, agentSessionId: agent.agentSessionId,
               tasks: lookupError ? null : prior?.tasks ? tasks.filter((task) => prior.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)) : tasks,
               blockReason: lookupError ?? (policy.automatic ? null : policy.detail), detail: policy.detail,
-              settleReason: policy.settle ? policy.detail : null, note: policy.note ?? null,
-              delayMs: this.retryDelayMs === 0 ? 0 : Math.min(60_000, 10_000 * 2 ** Math.min(attempt - 1, 3)),
+              settleReason: policy.settle ? policy.detail : null, note: policy.note ?? null, kind: policy.kind ?? null,
+              delayMs: this.retryDelayMs === 0 ? 0 : policy.delayMs ?? defaultFollowUpDelayMs(attempt),
             });
             if (queued) continue;
           }
@@ -1324,28 +1448,45 @@ export class SupervisedAgentDelivery {
           if (continuation) {
             if (continuation.workAttemptId !== agent.workAttemptId || continuation.agentSessionId !== agent.agentSessionId
               || continuation.providerContinuationId !== agent.providerContinuationId || head.room_id !== agent.roomId) {
-              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, "The original task owner changed; no continuation was started.");
+              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, FOLLOW_UP_ENDED.agentChanged);
               continue;
             }
             const delay = await this.inbox.taskContinuationDelay(head.inbox_item_id);
-            if (delay > 0) await this.waitForPollDelay(delay, controller.signal);
+            if (delay > 0) {
+              const wait = new AbortController();
+              const endWithPump = () => wait.abort();
+              controller.signal.addEventListener("abort", endWithPump, { once: true });
+              // An abort during the reads above has already happened: no event will come for it.
+              if (controller.signal.aborted || this.dispatchPaused) wait.abort();
+              this.followUpWaits.set(agent.agentId, wait);
+              try { await this.waitForPollDelay(delay, wait.signal); } finally {
+                controller.signal.removeEventListener("abort", endWithPump);
+                if (this.followUpWaits.get(agent.agentId) === wait) this.followUpWaits.delete(agent.agentId);
+              }
+              // The owner ended the wait. Read the head again: the follow-up is due now, or it is gone.
+              if (wait.signal.aborted && !controller.signal.aborted) continue;
+            }
             if (!await this.hasExecutionAuthority(agent, controller)) return;
             let tasks: ContinuityTask[];
             try {
               tasks = await this.ownedTasks(agent, { taskIds: continuation.tasks?.map((task) => task.id), heldBefore: continuation.heldBefore, signal: controller.signal });
             } catch {
-              if (await this.hasExecutionAuthority(agent, controller)) await this.inbox.transition(head.inbox_item_id, "blocked", { last_error: "Task ownership could not be verified. Check the room connection and use Retry delivery." });
+              if (await this.hasExecutionAuthority(agent, controller)) await this.inbox.transition(head.inbox_item_id, "blocked", { last_error: OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL });
               return;
             }
             if (!await this.hasExecutionAuthority(agent, controller)) return;
             const retained = continuation.tasks ? tasks.filter((task) => continuation!.tasks!.some((old) => old.id === task.id && old.leaseId === task.leaseId && old.epoch === task.epoch)) : tasks;
             if (!retained.length) {
-              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, "The task finished or its ownership changed; no continuation was started.");
+              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, FOLLOW_UP_ENDED.taskNotHeld);
               continue;
             }
-            continuation = await this.inbox.refreshTaskContinuationSnapshot(head.inbox_item_id, retained);
+            try { continuation = await this.inbox.refreshTaskContinuationSnapshot(head.inbox_item_id, retained); } catch (error) {
+              // Its owner stopped it at the moment its time came. That is not a fault: go on with the next head.
+              if ((await this.inbox.get(head.inbox_item_id))?.state !== "pending") continue;
+              throw error;
+            }
             if (await this.inbox.taskContinuationHasUncertainEffects(head.inbox_item_id)) {
-              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, "Automatic task continuation stopped because a previous action has an uncertain result. Check its external result, then send an instruction to continue only the verified unfinished work.");
+              await this.inbox.finishUnusedTaskContinuation(head.inbox_item_id, FOLLOW_UP_ENDED.uncertainEffects);
               return;
             }
           }
@@ -1480,7 +1621,12 @@ export class SupervisedAgentDelivery {
     const retryFailure = async (failure: Parameters<SupervisedAgentInboxStore["recordRetryFailure"]>[1]): Promise<void> => {
       if (!await this.hasLaneAuthority(agent, turnController)) return;
       const { item: recorded, attempt } = await this.inbox.recordRetryFailure(item.inbox_item_id, failure);
-      if (recorded.state === "blocked") return;
+      if (recorded.state === "blocked") {
+        if (failure.domain === "pre_dispatch" && !recorded.provider_turn_id && !recorded.outcome) {
+          void this.reportReplyTurnReceipt(agent, recorded, controller, "yield").catch(() => {});
+        }
+        return;
+      }
       await this.sleep(failure.domain === "publication" ? this.retryDelayMs
         : Math.min(2_000, this.retryDelayMs * (2 ** (attempt - 1))));
       const retryable = await this.inbox.get(item.inbox_item_id);
@@ -1497,6 +1643,16 @@ export class SupervisedAgentDelivery {
     let originProcessEnded = false;
     /** The saved turn's own conversation, when it is not the one this runtime continues. */
     let earlierContinuationId: string | null = null;
+    let compactionObserver: ReplyTurnCompactionObserver | null = null;
+    let disposeCompactionStream: (() => void) | null = null;
+    const closeCompactionObservation = () => {
+      compactionObserver?.close();
+      try { disposeCompactionStream?.(); } catch { /* Optional scheduling observation. */ }
+      disposeCompactionStream = null;
+    };
+    const startTrace = recovering ? null : turnStartLatency.begin(agent.agentId, item.inbox_item_id, agent.provider);
+    let preparedAttachments: PreparedRoomTurnAttachments | null = null;
+    let providerTurn: Promise<unknown> | undefined;
     try {
       if (await this.inbox.nativeFailure(item.inbox_item_id)) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
@@ -1530,6 +1686,7 @@ export class SupervisedAgentDelivery {
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome: item.outcome });
+        void this.reportNoReply(agent, item, controller).catch(() => {});
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
@@ -1576,9 +1733,34 @@ export class SupervisedAgentDelivery {
         if (!await hasProviderAuthority()) return;
         setActive("dispatching");
       }
-      const observedContext = recovering
+      let observedContext = recovering
         ? []
         : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
+      if (!recovering && item.activation.turn && /^msg_[1-9]\d*$/.test(item.source_message_id) && this.http.context) {
+        const bearer = agent.bearer;
+        const owner = this.loopOwners.get(agent.agentId);
+        const fresh = await this.http.context({ roomId: agent.roomId, apiUrl: agent.apiUrl,
+          bearer, signal: turnController.signal }).catch((error: unknown) => {
+          if (owner && error instanceof SupervisedRoomAuthorizationError && owner.bearer === bearer) owner.roomRefused = true;
+          throw error;
+        });
+        if (fresh !== null) observedContext = fresh;
+      }
+      if (!recovering && this.roomTurnAttachments && /^msg_[1-9]\d*$/.test(item.source_message_id)) {
+        // Only this turn's activating message, never history. A file that
+        // cannot be given becomes a note in the prompt, never a failed turn;
+        // only Stop or retirement ends the preparation early.
+        const handle = agent.handle;
+        const delivery: RoomTurnImageDelivery = handle && this.provider.roomTurnImageDelivery
+          ? await this.provider.roomTurnImageDelivery(handle).catch(() => null) : null;
+        preparedAttachments = await this.roomTurnAttachments.prepare({
+          delivery,
+          localRoom: isLocalRoomApi(agent.apiUrl),
+          sourceMessage: item.source_message, sourceMessageId: item.source_message_id,
+          roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer,
+          http: this.http, signal: turnController.signal,
+        });
+      }
       if (!await hasProviderAuthority()) return;
       // A runtime can itself have ended by the time it reports its turn's
       // exact ending: a crashed Cursor lane, or any provider whose handle
@@ -1596,7 +1778,9 @@ export class SupervisedAgentDelivery {
       // promise owns preflight/helper cleanup and must settle before drain can
       // release this daemon generation.
       let settledCursorEnding: ProviderRoomTurnCheckpointDisposition | null = null;
+      let silenceYieldRegistered = false;
       const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<ProviderRoomTurnCheckpointDisposition> => {
+        closeCompactionObservation(); // A terminal edge must cancel the hint before any checkpoint await.
         if (settledCursorEnding) return settledCursorEnding;
         const providerContinuationId = earlierContinuationId ?? agent.handle?.providerContinuationId ?? agent.providerContinuationId;
         if (result.outcome === "failed" || result.outcome === "interrupted") {
@@ -1676,6 +1860,12 @@ export class SupervisedAgentDelivery {
           acceptedResult,
           cleanupRecoveryEvidence: acceptedResult.outcome !== "unreadable",
         };
+        // Real adapters checkpoint here before returning. Do not wait for the
+        // outer idempotent authority/checkpoint pass to offer this slot.
+        if (!recovering && acceptedResult.outcome === "no_reply" && !silenceYieldRegistered) {
+          silenceYieldRegistered = true;
+          void this.reportReplyTurnReceipt(agent, item, turnController, "settlement_yield").catch(() => {});
+        }
         if (agent.provider === "cursor"
           && (acceptedResult.outcome === "failed" || acceptedResult.outcome === "interrupted")) {
           // Settle the row while this lane lease still holds. Right after this
@@ -1772,7 +1962,9 @@ export class SupervisedAgentDelivery {
       };
       let baselineObserved = false;
       const beforeDispatch = async () => {
+        const firstDispatch = !nativeDispatchEntered;
         nativeDispatchEntered = true;
+        if (firstDispatch) startTrace?.mark("provider_entry");
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         const continuation = await this.inbox.taskContinuation(item.inbox_item_id);
         if (continuation) {
@@ -1788,16 +1980,42 @@ export class SupervisedAgentDelivery {
         }
         if (!baselineObserved) {
           baselineObserved = true;
+          startTrace?.mark("dispatch_checks");
           try { workspaceBaseline = await this.observeStartingWorkspace?.(agent, item.source_message_id, item.inbox_item_id) || null; } catch { /* Optional observation. */ }
+          startTrace?.mark("workspace_begin");
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         await this.inbox.checkpointDispatchIntent(item.inbox_item_id, this.http.ownedTasks ? agent.agentSessionId : undefined, observedContext);
+        if (firstDispatch) startTrace?.mark("dispatch_intent");
       };
       // A turn the execution record holds open is closed there by its ending.
       // One the record never saw start has nothing to close, and its ending
       // would be a fact about a turn the record cannot place.
       const recordEnding = recovering
         && await this.inbox.recordedTurnIsOpen(item.inbox_item_id).catch(() => false);
+      if (agent.provider === "codex" && item.activation.turn && this.http.yieldReplyTurn
+        && this.provider.onStream && agent.handle && agent.providerContinuationId && agent.providerConnection
+        && sameProviderActionConnectionIdentity(agent.providerConnection, agent.handle.providerConnection)) {
+        const handle = agent.handle;
+        const connection = { ...agent.providerConnection };
+        compactionObserver = new ReplyTurnCompactionObserver({ workAttemptId: agent.workAttemptId,
+          providerContinuationId: agent.providerContinuationId }, proof => {
+          void this.reportReplyTurnReceipt(agent, item, turnController, "compaction_yield", {
+            proof, invocationId, recoveryContext, handle, connection,
+            originExecutionGenerationId: providerTurnOriginExecutionGenerationId,
+          }).catch(() => {});
+        });
+        try {
+          const observer = compactionObserver;
+          disposeCompactionStream = await this.provider.onStream(handle, event => {
+            try { observer.observe(event); } catch { observer.close(); }
+          });
+          if (item.provider_turn_id) observer.admit(item.provider_turn_id);
+        } catch { closeCompactionObservation(); }
+        if (!await hasProviderAuthority()) return;
+      }
+      if (startTrace) startTrace.providerCalled();
+      else turnStartLatency.unmeasuredTurnStarted(agent.agentId);
       providerCallEntered = true;
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
@@ -1806,17 +2024,21 @@ export class SupervisedAgentDelivery {
           ...(recordEnding ? { recordEnding: true } : {}),
           ...(originProcessEnded ? { originProcessEnded: true } : {}),
           ...(earlierContinuationId ? { providerContinuationId: earlierContinuationId } : {}),
+          ...(item.state === "result_recovery" ? { savedAsUnreadable: true } : {}),
         }, { detachSignal: turnController.signal, checkpointProviderState, settleLifecycleBeforeIdle, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
+        roomId: agent.roomId,
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
         activation: item.activation,
         actionId: item.action_id,
         observedContext,
+        ...(preparedAttachments?.attachments.length ? { attachments: preparedAttachments.attachments } : {}),
       }, { beforeNativeDispatch: beforeDispatch, markDispatched: async () => {
         await beforeDispatch();
         setActive("responding");
       }, checkpointTurnStarted: async (turnId) => {
+        startTrace?.mark("provider_start");
         // A provider that already entered its native operation may receive an
         // exact turn id while a full pump retirement is draining it. Commit
         // that recovery key before the successor starts. User Stop aborts only
@@ -1843,6 +2065,7 @@ export class SupervisedAgentDelivery {
           origin_execution_generation_id: agent.executionGenerationId,
           provider_continuation_id: providerContinuationId,
         });
+        startTrace?.mark("turn_checkpoint");
         admittedProviderTurnId = turnId;
         this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, turnId);
         // Only an acknowledged exact provider turn is projected responding.
@@ -1850,6 +2073,7 @@ export class SupervisedAgentDelivery {
         // Cursor additionally checkpoints its wrapper birth before allowing
         // retirement; every other adapter's exact turn id is its recovery key.
         if (agent.provider !== "cursor") markProviderTurnDurablyStarted();
+        compactionObserver?.admit(turnId);
       }, checkpointPreparedTurn, checkpointProviderState, settleLifecycleBeforeIdle, markDurableTurnStarted: () => {
         if (agent.provider === "cursor" && this.checkpointPreparedTurn) {
           cursorNativeReleased = true;
@@ -1857,6 +2081,7 @@ export class SupervisedAgentDelivery {
           markProviderTurnDurablyStarted();
         }
       }, checkpointTerminalResult, detachSignal: turnController.signal });
+      providerTurn = turn;
       // Native provider turns are intentionally not cancelable by the daemon:
       // a handoff must retire our authority, not kill a user's provider process.
       // Once an exact turn is durable, race its result with retirement. Before
@@ -1868,6 +2093,8 @@ export class SupervisedAgentDelivery {
         () => !providerTurnDurablyStarted,
         providerTurnDurable,
       );
+      if (providerResult) startTrace?.providerEnded(providerResult.outcome);
+      closeCompactionObservation();
       if (!providerResult) throw new Error("Provider does not support bounded room turns.");
       if (settledCursorEnding) return;
       if (!await (recovering ? hasProviderAuthority() : hasTerminalAuthority(providerResult))) return;
@@ -1875,44 +2102,58 @@ export class SupervisedAgentDelivery {
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
       const { acceptedResult: result } = await checkpointTerminalResult(providerResult);
-      // Optional review evidence is captured before another turn can mutate this workspace.
-      // Failure must not change the provider result or cause the turn to be rerun.
-      await observeWorkspace(result.text);
-      const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
-      const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
-      if (!await hasTerminalAuthority(result)) return;
-      if (result.outcome === "failed" || result.outcome === "interrupted") {
-        await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
-        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
-        return;
-      }
-      if (item.state !== "result_recovery") {
-        await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
-      }
-      if (result.outcome === "unreadable") {
-        if (item.state === "result_recovery") {
-          await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun." });
-        } else {
-          await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The provider completed, but its final answer could not be read. Re-reading the same completed turn." });
+      // Review capture and a successful reply may travel together. Keep this
+      // lane occupied until capture finishes, before ACK or another local turn.
+      const workspaceCapture = observeWorkspace(result.text);
+      try {
+        if (result.outcome !== "reply") await workspaceCapture;
+        const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
+        const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
+        if (!await hasTerminalAuthority(result)) return;
+        if (result.outcome === "failed" || result.outcome === "interrupted") {
+          await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
+          await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+          return;
         }
-        return;
-      }
-      if (result.outcome === "no_reply") {
-        if (!await this.hasExecutionAuthority(agent, turnController)) return;
-        await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
+        if (item.state !== "result_recovery") {
+          await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
+        }
+        if (result.outcome === "unreadable") {
+          if (item.state === "result_recovery") {
+            await this.inbox.transition(item.inbox_item_id, "blocked", { outcome, last_error: "The result of this turn is still unavailable after re-reading it. No new model turn was started." });
+          } else {
+            await this.inbox.transition(item.inbox_item_id, "result_recovery", { outcome, last_error: "The result of this turn is unavailable. Checking the existing provider turn without starting a new one." });
+          }
+          return;
+        }
+        if (result.outcome === "no_reply") {
+          const timing = new RoomLatencyTrace("silent_ack");
+          try {
+            if (!await this.hasExecutionAuthority(agent, turnController)) return;
+            timing.mark("authority");
+            await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome });
+            timing.mark("database");
+            void this.reportNoReply(agent, item, controller).catch(() => {});
+            await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+            return;
+          } finally { timing.finish(); }
+        }
+        const text = result.text?.trim();
+        if (!text) throw new Error("Provider returned an empty room answer without the no-reply outcome.");
+        // The terminal payload is checkpointed before the external publication.
+        // A crash after this point retries the same client id without rerunning the provider.
+        await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
+        setActive("publishing");
+        if (!await this.publish(agent, item, text, controller)) return;
+        await workspaceCapture;
+        if (!await this.hasExecutionAuthority(agent, controller)) return;
+        await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
-        return;
+      } finally {
+        // HTTP failure, Stop or authority loss must join before catch/recovery
+        // and before releaseWorkspace can remove the capture worker's refs.
+        await workspaceCapture;
       }
-      const text = result.text?.trim();
-      if (!text) throw new Error("Provider returned an empty room answer without the no-reply outcome.");
-      // The terminal payload is checkpointed before the external publication.
-      // A crash after this point retries the same client id without rerunning the provider.
-      await this.inbox.transition(item.inbox_item_id, "publishing", { outcome });
-      setActive("publishing");
-      if (!await this.publish(agent, item, text, controller)) return;
-      if (!await this.hasExecutionAuthority(agent, controller)) return;
-      await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
-      await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
     } catch (error) {
       // A turn-scoped abort (Stop / stop-then-resend) is a clean interruption,
       // not a delivery failure: the item is settled `cancelled_by_user` by
@@ -1972,6 +2213,7 @@ export class SupervisedAgentDelivery {
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome: current.outcome });
+        void this.reportNoReply(agent, item, controller).catch(() => {});
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
@@ -2088,6 +2330,18 @@ export class SupervisedAgentDelivery {
       }
       await retryFailure({ domain: "pre_dispatch", error: message });
     } finally {
+      if (preparedAttachments) {
+        // A staged file stays until the provider turn that reads it has ended.
+        // Codex reads its local image after its turn has started, and a
+        // detached observation (Stop, retirement) rejects while the native
+        // turn may still run: those files are left to the age sweep.
+        const { release, abandon } = preparedAttachments;
+        if (!providerTurn) void release();
+        else void providerTurn.then(() => release(), () => abandon());
+      }
+      if (startTrace) startTrace.end();
+      else if (providerCallEntered) turnStartLatency.unmeasuredTurnEnded(agent.agentId);
+      closeCompactionObservation();
       try { await this.releaseWorkspace?.(agent, item.source_message_id, item.inbox_item_id); } catch { /* Optional retention cleanup. */ }
       controller.signal.removeEventListener("abort", relayPumpAbort);
       const abort = this.activeTurnAborts.get(agent.agentId);
@@ -2122,6 +2376,104 @@ export class SupervisedAgentDelivery {
   }
 
   private readonly publishedIds = new Map<string, string>();
+  /** Silence is reported only after capture and Stop arbitration settle.
+   * Failed hints retain the existing publication/deadline release paths. */
+  private reportNoReply(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController): Promise<void> {
+    return this.reportReplyTurnReceipt(agent, item, parent, "no_reply");
+  }
+
+  private reportReplyTurnReceipt(agent: SupervisedIngressAgent, item: SupervisedInboxItem, parent: AbortController,
+    kind: "no_reply" | "yield" | "compaction_yield" | "settlement_yield" | "busy_yield", compaction?: CompactionReplyTurnAuthority): Promise<void> {
+    const report = kind === "no_reply" ? this.http.reportNoReply : this.http.yieldReplyTurn;
+    if (kind !== "no_reply" && !item.activation.turn) return Promise.resolve();
+    if (!report || this.fenced || this.isStopping(agent.agentId) || parent.signal.aborted
+      || isLocalRoomApi(agent.apiUrl) || item.room_id !== agent.roomId
+      || !/^msg_[1-9]\d*$/.test(item.source_message_id)) return Promise.resolve();
+    const native = kind === "settlement_yield" || kind === "busy_yield" ? {
+      active: this.activeTurns.get(agent.agentId), handle: agent.handle,
+      connection: agent.providerConnection ? { ...agent.providerConnection } : null,
+      continuation: agent.providerContinuationId, origin: agent.executionGenerationId,
+    } : null;
+    // The pump can finish before this optional request. Give it its own
+    // tracked lifetime so Stop and service handoff still cancel and join it.
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort();
+    parent.signal.addEventListener("abort", relayAbort, { once: true });
+    const controllers = this.auxiliaryControllers.get(agent.agentId) ?? new Set<AbortController>();
+    controllers.add(controller);
+    this.auxiliaryControllers.set(agent.agentId, controllers);
+    const operation = Promise.resolve().then(async () => {
+      const exactNative = () => Boolean(native?.active && native.handle && native.connection && native.continuation
+        && !controller.signal.aborted && !this.fenced && !this.isStopping(agent.agentId)
+        && this.activeTurns.get(agent.agentId) === native.active && native.active.phase === "responding"
+        && native.active.recoveryContext === this.recoveryContext(agent) && native.active.providerTurnId
+        && this.activeTurnAborts.get(agent.agentId)?.controller === parent
+        && (kind === "busy_yield" ? /^msg_[1-9]\d*$/.test(native.active.sourceMessageId)
+          && roomArrival(native.active.sourceMessageId) < roomArrival(item.source_message_id)
+          : native.active.inboxItemId === item.inbox_item_id)
+        && agent.handle === native.handle && agent.executionGenerationId === native.origin
+        && agent.providerContinuationId === native.continuation
+        && agent.handle.providerContinuationId === native.continuation
+        && sameProviderActionConnectionIdentity(native.connection, agent.providerConnection)
+        && sameProviderActionConnectionIdentity(native.connection, agent.handle.providerConnection));
+      const exactCompaction = () => {
+        const active = this.activeTurns.get(agent.agentId);
+        return compaction && compaction.proof.isCompacting()
+          && active?.invocationId === compaction.invocationId && active.phase === "responding"
+          && active.recoveryContext === compaction.recoveryContext && active.inboxItemId === item.inbox_item_id
+          && active.providerTurnId === compaction.proof.providerTurnId && agent.handle === compaction.handle
+          && agent.providerContinuationId === compaction.proof.providerContinuationId
+          && sameProviderActionConnectionIdentity(compaction.connection, agent.providerConnection)
+          && sameProviderActionConnectionIdentity(compaction.connection, agent.handle.providerConnection);
+      };
+      const settled = kind === "busy_yield" ? await this.inbox.untouchedPending(item.inbox_item_id) : await this.inbox.get(item.inbox_item_id);
+      const eligible = kind === "no_reply" ? settled?.state === "acknowledged_no_reply"
+        : kind === "yield" ? settled?.state === "blocked" && !settled.provider_turn_id && !settled.outcome
+        : kind === "busy_yield" ? settled && settled.agent_id === agent.agentId && settled.room_id === agent.roomId
+          && orderedHumanSpeakingTurn(settled) && exactNative()
+        : kind === "settlement_yield" ? exactNative()
+          && settled?.provider_turn_id === native!.active!.providerTurnId
+          && ["dispatching", "awaiting_result"].includes(settled.state)
+          && persistedAcceptedTerminal(settled.outcome)?.kind === "no_reply"
+        : exactCompaction() && settled?.provider_turn_id === compaction!.proof.providerTurnId
+          && !settled.outcome && ["dispatching", "awaiting_result"].includes(settled.state);
+      if (!eligible || !await this.hasLaneAuthority(agent, controller)) return;
+      if (kind === "settlement_yield" || kind === "busy_yield") {
+        const binding = await this.inbox.providerTurnBinding(native!.active!.inboxItemId);
+        if (!binding || binding.agent_id !== agent.agentId || binding.room_id !== agent.roomId
+          || binding.work_attempt_id !== agent.workAttemptId
+          || binding.origin_execution_generation_id !== native!.origin
+          || binding.provider_continuation_id !== native!.continuation
+          || binding.provider_turn_id !== native!.active!.providerTurnId
+          || !await this.hasExecutionAuthority(agent, controller) || !exactNative()) return;
+        if (kind === "busy_yield") {
+          const pending = await this.inbox.untouchedPending(item.inbox_item_id);
+          const older = await this.inbox.get(native!.active!.inboxItemId);
+          if (!pending || pending.agent_id !== agent.agentId || pending.room_id !== agent.roomId || !orderedHumanSpeakingTurn(pending)
+            || !older || older.agent_id !== agent.agentId || older.room_id !== agent.roomId
+            || older.provider_turn_id !== native!.active!.providerTurnId || older.outcome
+            || !["dispatching", "awaiting_result"].includes(older.state) || !exactNative()) return;
+        }
+      }
+      if (kind === "compaction_yield") {
+        const binding = await this.inbox.providerTurnBinding(item.inbox_item_id);
+        if (!compaction || !binding || binding.agent_id !== agent.agentId || binding.room_id !== agent.roomId
+          || binding.work_attempt_id !== agent.workAttemptId
+          || binding.origin_execution_generation_id !== compaction.originExecutionGenerationId
+          || binding.provider_continuation_id !== compaction.proof.providerContinuationId
+          || binding.provider_turn_id !== compaction.proof.providerTurnId
+          || !await this.hasExecutionAuthority(agent, controller) || !exactCompaction()) return;
+      }
+      await report.call(this.http, { apiUrl: agent.apiUrl, roomId: agent.roomId, bearer: agent.bearer,
+        sourceMessageId: item.source_message_id, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(2_000)]) });
+    }).finally(() => {
+      parent.signal.removeEventListener("abort", relayAbort);
+      controllers.delete(controller);
+      if (this.auxiliaryControllers.get(agent.agentId) === controllers && controllers.size === 0) this.auxiliaryControllers.delete(agent.agentId);
+    });
+    return this.trackAgentWork(agent.agentId, this.track(controller, operation));
+  }
+
   private async publish(agent: SupervisedIngressAgent, item: SupervisedInboxItem, text: string, parent: AbortController): Promise<boolean> {
     if (!await this.hasLaneAuthority(agent, parent)) return false;
     const controller = new AbortController();
@@ -2134,23 +2486,80 @@ export class SupervisedAgentDelivery {
         replyTarget.threadRootId = item.source_message_id;
       }
       if (!await this.hasLaneAuthority(agent, parent)) return false;
+      const gif = await this.inbox.replyGif(item.inbox_item_id);
+      const attached = await this.stageReplyAttachments(agent, item, controller);
+      // Uploads can take minutes; post only if this lane still owns the reply.
+      if (!await this.hasLaneAuthority(agent, parent)) {
+        await this.discardReplyAttachments(agent, attached.uploads);
+        return false;
+      }
       const publication = await this.track(controller, this.http.publish({
         roomId: agent.roomId,
         apiUrl: agent.apiUrl,
         bearer: agent.bearer,
-        text,
+        text: attached.unavailable.length ? `${text}\n\n(Could not attach: ${attached.unavailable.join(", ")})` : text,
+        ...(gif ? { gif } : {}),
+        ...(attached.uploads.length ? { attachments: attached.uploads } : {}),
         clientMessageId: item.reply_client_message_id,
         replyTo: replyTarget.replyTo,
         threadRootId: replyTarget.threadRootId,
         signal: controller.signal,
-      }));
+      })).catch(async (error: unknown) => {
+        // The next attempt stages fresh copies, so these uploads would only wait to expire.
+        await this.discardReplyAttachments(agent, attached.uploads);
+        throw error;
+      });
       if (!publication.messageId?.trim() || !publication.roomId?.trim() || publication.roomId !== agent.roomId) throw new Error("Room publication did not return a nonempty canonical message id in the matching room.");
+      await this.replyAttachmentSpool?.remove(item.inbox_item_id).catch(() => undefined);
       this.publishedIds.set(item.inbox_item_id, publication.messageId);
       const current = await this.hasLaneAuthority(agent, parent);
       if (!current) this.publishedIds.delete(item.inbox_item_id);
       return current;
     } catch (error) { this.publishedIds.delete(item.inbox_item_id); throw error; }
     finally { parent.signal.removeEventListener("abort", relayAbort); }
+  }
+  /**
+   * Upload the files the agent attached, just before the reply is posted:
+   * a staged upload expires after 15 minutes, and a turn can run longer.
+   * A file that cannot be uploaded never blocks the reply; the reply names it.
+   */
+  private async stageReplyAttachments(agent: SupervisedIngressAgent, item: SupervisedInboxItem, controller: AbortController): Promise<{
+    uploads: Array<{ upload_id: string }>;
+    unavailable: string[];
+  }> {
+    const recorded = await this.inbox.replyAttachments(item.inbox_item_id);
+    const uploads: Array<{ upload_id: string }> = [];
+    const unavailable: string[] = [];
+    const spool = this.replyAttachmentSpool;
+    const stage = this.http.stageAttachment?.bind(this.http);
+    for (const file of recorded) {
+      if (!spool || !stage) { unavailable.push(file.name); continue; }
+      const bytes = await spool.read(item.inbox_item_id, file).catch(() => null);
+      if (!bytes) { unavailable.push(file.name); continue; }
+      let staged: { uploadId: string } | null = null;
+      // One retry covers a dropped connection or a busy server; a lasting refusal fails twice.
+      for (let attempt = 0; attempt < 2 && !staged; attempt++) {
+        try {
+          staged = await this.track(controller, stage({
+            roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer,
+            fileName: file.name, mimeType: file.mime_type, bytes, signal: controller.signal,
+          }));
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          if (attempt === 0) await this.sleep(this.retryDelayMs);
+        }
+      }
+      if (staged) uploads.push({ upload_id: staged.uploadId });
+      else unavailable.push(file.name);
+    }
+    return { uploads, unavailable };
+  }
+
+  private async discardReplyAttachments(agent: SupervisedIngressAgent, uploads: Array<{ upload_id: string }>): Promise<void> {
+    if (!this.http.discardAttachment) return;
+    await Promise.all(uploads.map(({ upload_id }) => this.http.discardAttachment!({
+      roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, uploadId: upload_id, signal: AbortSignal.timeout(5_000),
+    }).catch(() => undefined)));
   }
   private async publishedMessageId(agent: SupervisedIngressAgent, item: SupervisedInboxItem): Promise<string> {
     const id = this.publishedIds.get(item.inbox_item_id);
@@ -2381,6 +2790,16 @@ function lastMessageId(messages: readonly Record<string, unknown>[]): string | n
   return null;
 }
 
+function orderedHumanSpeakingTurn(item: SupervisedInboxItem): boolean {
+  const message = item.source_message as Record<string, unknown> | null;
+  const turn = item.activation.turn as Record<string, unknown> | null;
+  return queuedDeliveryKind(item.source_message_id, item.source_message) === "person"
+    && message?.id === item.source_message_id && item.activation.decision === "activate"
+    && Boolean(turn && typeof turn === "object" && !Array.isArray(turn)
+      && Number.isSafeInteger(turn.count) && Number(turn.count) > 1
+      && Number.isSafeInteger(turn.position) && Number(turn.position) >= 1 && Number(turn.position) <= Number(turn.count));
+}
+
 function persistedAcceptedTerminal(outcome: string | null):
   | { kind: "reply"; text: string }
   | { kind: "no_reply"; text: null }
@@ -2400,6 +2819,21 @@ function persistedAcceptedTerminal(outcome: string | null):
 function pollErrorBackoffMs(consecutiveErrors: number): number {
   const exponent = Math.max(0, Math.min(30, consecutiveErrors - 1));
   return Math.min(POLL_ERROR_BACKOFF_CAP_MS, POLL_ERROR_BACKOFF_BASE_MS * (2 ** exponent));
+}
+
+/** What the owner reads when Try now was saved, and the agent changed before its attempt could start. */
+const AGENT_CHANGED_BEFORE_TRY_NOW = "The agent changed before it could try again. Refresh and check again.";
+
+/** The follow-up with this id that waits for its time, when nothing has started for it. */
+function scheduledFollowUp<Receipt extends Pick<SupervisedInboxItem, "source_message_id" | "state" | "next_attempt_at_ms" | "provider_turn_id" | "outcome">>(
+  receipts: readonly Receipt[], sourceMessageId: string): Receipt | null {
+  return receipts.find((receipt) => receipt.source_message_id === sourceMessageId && sourceMessageId.startsWith("task-continuation:")
+    && receipt.state === "pending" && receipt.next_attempt_at_ms !== null && !receipt.provider_turn_id && !receipt.outcome) ?? null;
+}
+
+/** What the owner reads when Try now or Stop trying comes too late: the automatic attempt is no longer waiting. */
+function noLongerAvailable(sourceMessageId: string, otherwise: string): string {
+  return sourceMessageId.startsWith("task-continuation:") ? "This automatic attempt has already started or ended." : otherwise;
 }
 
 /** An abortable delay that releases its signal listener on either completion path. */

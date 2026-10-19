@@ -151,10 +151,12 @@ test("per-entry purge revokes only its grant and removes local recovery only aft
     await replaceDesktopSupervisorGrantForAgent({ agentKey: "owner/agent-a", metadata: metadata("owner/agent-a", "a"), token: "lashg_a", entryId: "entry-a" }, { storage: keychain });
     await replaceDesktopSupervisorGrantForAgent({ agentKey: "owner/agent-b", metadata: metadata("owner/agent-b", "b"), token: "lashg_b", entryId: "entry-b" }, { storage: keychain });
     const calls: string[] = [];
+    let endBody: unknown = null;
     await revokeDesktopSupervisorGrantForEntry("entry-a", "session-a", {
       storage: keychain,
-      apiFetch: (async <T>(path: string) => {
+      apiFetch: (async <T>(path: string, init?: { body?: string }) => {
         calls.push(path);
+        if (path.endsWith("/end")) endBody = JSON.parse(init?.body ?? "null");
         return (path.endsWith("/end")
           ? { session_id: "session-a", ended_at: "2026-01-01T00:00:00.000Z" }
           : {}) as T;
@@ -164,6 +166,7 @@ test("per-entry purge revokes only its grant and removes local recovery only aft
       "/supervisor-host-grants/grant_a/worker-sessions/session-a/end",
       "/supervisor-host-grants/grant_a",
     ]);
+    assert.equal((endBody as { retired?: unknown } | null)?.retired, true, "retiring asks the server to close the agent's open requests");
     assert.equal(await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }), null);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, "lashg_b");
   });

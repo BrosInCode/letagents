@@ -6,6 +6,7 @@ import {
   entryLaunchPolicy,
   homeHarnessAvailability,
   homeHarnessDiffersFromSaved,
+  latestPermissionChange,
   namesHomeHarness,
   storedHomeHarness,
   storedLaunchPolicy,
@@ -13,14 +14,13 @@ import {
   type ProviderConfigurationSnapshot,
   type ProviderReasoningEffort,
 } from "./provider-configuration.js";
-import { describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
+import { CODEX_READ_ONLY_NEEDS_DELIVERY, codexReadOnlyNeedsDelivery, describeProfilesForAgent, describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
 import type {
   DaemonActivityEvent,
   DaemonAgentConfiguration,
   DaemonManifest,
   DaemonManifestEntry,
   DaemonPurgeRecord,
-  LegacyLaneOwner,
 } from "./types.js";
 import {
   agentDisplayNameKey,
@@ -42,6 +42,8 @@ export type StoredAgentConfiguration = {
   polling_contract?: DaemonAgentConfiguration["polling_contract"];
   /** How room messages reach the agent. Absent is read as the older polling delivery. */
   delivery_mode?: string;
+  /** The owner says this Open Model agent's model reads images. */
+  image_input: boolean;
 };
 
 export type ManifestAdministrationStore = {
@@ -54,7 +56,6 @@ export type ManifestAdministrationStore = {
   write(
     expectedGeneration: number,
     entries: DaemonManifestEntry[],
-    legacyLaneOwners: LegacyLaneOwner[] | undefined,
     commitFence: CommitFence,
   ): Promise<Pick<DaemonManifest, "generation">>;
   getAgentConfiguration(entryId: string): Promise<StoredAgentConfiguration | undefined>;
@@ -68,6 +69,7 @@ export type ManifestAdministrationStore = {
       charter: string;
       permissionProfileId: string | null;
       providerLaunchPolicy: unknown;
+      imageInput: boolean;
     },
     commitFence: CommitFence,
   ): Promise<{
@@ -75,15 +77,6 @@ export type ManifestAdministrationStore = {
     outcome: "updated" | "conflict" | "invalid";
     configuration?: StoredAgentConfiguration;
   }>;
-  appendActivity(
-    expectedGeneration: number,
-    entryId: string,
-    event: DaemonActivityEvent,
-    observedState: DaemonManifestEntry["observed_state"],
-    nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]>,
-    limit: number,
-    commitFence: CommitFence,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }>;
   appendActivityOnly(
     expectedGeneration: number,
     entryId: string,
@@ -119,7 +112,6 @@ export type ManifestAdministrationAuthority = {
 
 export type ManifestAdministrationPolicies = {
   projectCreateReplayParameters(entry: DaemonManifestEntry): unknown;
-  providerSupportsConcurrentAgents(provider: string): boolean;
   deriveProviderConfiguration(input: {
     provider: string;
     model: string | null;
@@ -136,9 +128,6 @@ export type ManifestAdministrationCoordinatorOptions = {
   store: ManifestAdministrationStore;
   authority: ManifestAdministrationAuthority;
   policies: ManifestAdministrationPolicies;
-  lanes: {
-    liveOwners(owners: readonly LegacyLaneOwner[]): LegacyLaneOwner[];
-  };
   convergence: {
     request(entryId: string): void;
   };
@@ -175,57 +164,9 @@ export class ManifestAdministrationCoordinator {
     if (!["running", "paused", "stopped"].includes(entry.desired_state)) {
       throw new Error("Invalid desired state.");
     }
-  }
-
-  isSupervisedLaneOwner(entry: DaemonManifestEntry): boolean {
-    return !(entry.desired_state === "stopped" && entry.observed_state === "stopped");
-  }
-
-  competingSupervisedLaneOwner(
-    entries: readonly DaemonManifestEntry[],
-    entry: DaemonManifestEntry,
-  ): DaemonManifestEntry | undefined {
-    if (this.options.policies.providerSupportsConcurrentAgents(entry.provider)) return undefined;
-    return entries.find((candidate) =>
-      candidate.id !== entry.id
-      && candidate.room_id === entry.room_id
-      && candidate.provider === entry.provider
-      && this.isSupervisedLaneOwner(candidate));
-  }
-
-  async quarantineDuplicateSupervisedLaneOwners(): Promise<void> {
-    await this.options.authority.serialize(async () => {
-      const manifest = await this.options.store.load();
-      const ownersByLane = new Map<string, DaemonManifestEntry[]>();
-      for (const entry of manifest.entries) {
-        if (this.options.policies.providerSupportsConcurrentAgents(entry.provider)) continue;
-        if (!this.isSupervisedLaneOwner(entry)) continue;
-        const key = `${entry.room_id}\u0000${entry.provider}`;
-        const owners = ownersByLane.get(key) ?? [];
-        owners.push(entry);
-        ownersByLane.set(key, owners);
-      }
-      const duplicateIds = new Set(
-        [...ownersByLane.values()]
-          .filter((owners) => owners.length > 1)
-          .flatMap((owners) => owners.map((entry) => entry.id)),
-      );
-      if (!duplicateIds.size) return;
-      const entries = manifest.entries.map((entry) => duplicateIds.has(entry.id)
-        ? {
-            ...entry,
-            desired_state: "stopped" as const,
-            last_error: "LetAgents found multiple supervised agents for this provider lane after restart and stopped them to prevent duplicate work.",
-          }
-        : entry);
-      const next = await this.options.store.write(
-        this.options.authority.currentManifestGeneration(),
-        entries,
-        manifest.legacy_lane_owners,
-        this.options.authority.fenceCommit,
-      );
-      this.options.authority.acceptManifestGeneration(next.generation);
-    });
+    if (entry.delivery_mode !== undefined && !["mcp_polling", "daemon_inbox"].includes(entry.delivery_mode)) {
+      throw new Error("Invalid delivery mode.");
+    }
   }
 
   /**
@@ -260,7 +201,6 @@ export class ManifestAdministrationCoordinator {
         throw new Error(`Supervised entry '${entry.id}' was permanently purged. Start a genuinely new agent with a new creation request id.`);
       }
       const manifest = await this.options.store.load();
-      const legacyOwners = this.options.lanes.liveOwners(manifest.legacy_lane_owners ?? []);
       const existing = manifest.entries.find((candidate) => candidate.id === entry.id);
       if (existing) {
         // The name is assigned here, and the room may since have assigned
@@ -273,17 +213,6 @@ export class ManifestAdministrationCoordinator {
         }
         return existing;
       }
-      if (entry.desired_state !== "stopped") {
-        const supervisedOwner = this.competingSupervisedLaneOwner(manifest.entries, entry);
-        if (supervisedOwner) {
-          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
-        }
-        const legacyOwner = legacyOwners.find((candidate) =>
-          candidate.room_id === entry.room_id && candidate.provider === entry.provider);
-        if (legacyOwner && entry.desired_state === "running") {
-          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
-        }
-      }
       const nextEntry: DaemonManifestEntry = {
         ...entry,
         display_name: this.assignDisplayName(manifest.entries, entry),
@@ -294,7 +223,6 @@ export class ManifestAdministrationCoordinator {
       const next = await this.options.store.write(
         this.options.authority.currentManifestGeneration(),
         [...manifest.entries, nextEntry],
-        legacyOwners,
         this.options.authority.fenceCommit,
       );
       this.options.authority.acceptManifestGeneration(next.generation);
@@ -319,46 +247,10 @@ export class ManifestAdministrationCoordinator {
       const next = await this.options.store.write(
         this.options.authority.currentManifestGeneration(),
         manifest.entries.map((candidate) => candidate.id === id ? updated : candidate),
-        this.options.lanes.liveOwners(manifest.legacy_lane_owners ?? []),
         this.options.authority.fenceCommit,
       );
       this.options.authority.acceptManifestGeneration(next.generation);
       return updated;
-    });
-  }
-
-  async appendActivity(id: string, event: DaemonActivityEvent): Promise<DaemonManifestEntry> {
-    if (!event || typeof event !== "object" || !event.observed_at) {
-      throw new Error("A bounded activity event is required.");
-    }
-    const sanitizedEvent = this.options.policies.sanitizeActivity(event);
-    return this.options.authority.serialize(async () => {
-      await this.options.authority.assertCurrent();
-      const entry = await this.options.store.getActivityState(id);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      const lastSequence = entry.last_sequence;
-      if (sanitizedEvent.sequence <= lastSequence) {
-        throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${lastSequence}.`);
-      }
-      const observedState = sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing"
-        ? "working"
-        : sanitizedEvent.status === "blocked" ? entry.observed_state : "idle";
-      const nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]> = {
-        state: sanitizedEvent.status === "idle" ? "idle" : "active",
-        observed_at: sanitizedEvent.observed_at,
-        detail: sanitizedEvent.summary,
-      };
-      const next = await this.options.store.appendActivity(
-        this.options.authority.currentManifestGeneration(),
-        id,
-        sanitizedEvent,
-        observedState,
-        nativeLiveness,
-        200,
-        this.options.authority.fenceCommit,
-      );
-      this.options.authority.acceptManifestGeneration(next.generation);
-      return next.entry;
     });
   }
 
@@ -387,8 +279,16 @@ export class ManifestAdministrationCoordinator {
     });
   }
 
-  /** Preserve native event admission without hydrating an unused history result. */
-  async appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> {
+  /**
+   * Preserve native event admission without hydrating an unused history result.
+   * A provider stream's event takes its position from the agent's activity
+   * before its write is serialized, and a notice written meanwhile can take
+   * that position. With `after_latest` such an event is written after the
+   * newest instead of being refused and lost; any other position is admitted
+   * exactly as given.
+   */
+  async appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean,
+    position: "exact" | "after_latest" = "exact"): Promise<void> {
     if (!event || typeof event !== "object" || !event.observed_at) {
       throw new Error("A bounded activity event is required.");
     }
@@ -397,13 +297,14 @@ export class ManifestAdministrationCoordinator {
       await this.options.authority.assertCurrent();
       const state = await this.options.store.getActivityState(id);
       if (!state) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      if (sanitizedEvent.sequence <= state.last_sequence) {
-        throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${state.last_sequence}.`);
+      const sequence = position === "after_latest" ? Math.max(sanitizedEvent.sequence, state.last_sequence + 1) : sanitizedEvent.sequence;
+      if (sequence <= state.last_sequence) {
+        throw new Error(`Native activity sequence ${sequence} is not newer than ${state.last_sequence}.`);
       }
       const observedState = sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing"
         ? "working" : sanitizedEvent.status === "blocked" ? state.observed_state : "idle";
       const next = await this.options.store.recordActivity(
-        this.options.authority.currentManifestGeneration(), id, sanitizedEvent,
+        this.options.authority.currentManifestGeneration(), id, { ...sanitizedEvent, sequence },
         activityOnly ? null : { observedState, nativeLiveness: {
           state: sanitizedEvent.status === "idle" ? "idle" : "active",
           observed_at: sanitizedEvent.observed_at, detail: sanitizedEvent.summary,
@@ -457,12 +358,15 @@ export class ManifestAdministrationCoordinator {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
       ...configuration,
-      supervised_permission_profiles: homeHarness ? describeProfilesWithOwnerSetup(configuration.provider, profiles) : profiles,
+      supervised_permission_profiles: describeProfilesForAgent(configuration.provider, configuration.delivery_mode,
+        homeHarness ? describeProfilesWithOwnerSetup(configuration.provider, profiles) : profiles),
       home_harness: homeHarness,
       // A running process started before the last change still runs the way it started.
       home_harness_pending: availability === "available"
         && homeHarnessDiffersFromSaved(configuration.provider_launch_policy, configuration.runtime_configuration_revision),
       home_harness_availability: availability,
+      // Only an Open Model agent's owner says whether its model reads images.
+      image_input_available: configuration.provider === "open-model",
     };
   }
 
@@ -516,6 +420,7 @@ export class ManifestAdministrationCoordinator {
             reasoningEffort: current.reasoning_effort ?? null,
             charter: current.charter,
             permissionProfileId: current.permission_profile_id,
+            imageInput: current.image_input,
             providerLaunchPolicy: storedLaunchPolicy(
               { launchPolicy: policy as Record<string, unknown>, ...(input.homeHarness ? { homeHarness: true as const } : {}) },
               {
@@ -556,6 +461,7 @@ export class ManifestAdministrationCoordinator {
     const model = input.configuration.model;
     const charter = input.configuration.charter;
     const profile = input.configuration.permission_profile_id;
+    const imageInput = input.configuration.image_input;
     if (!Object.hasOwn(input.configuration, "model")
       || !Object.hasOwn(input.configuration, "reasoning_effort")
       || !Object.hasOwn(input.configuration, "charter")
@@ -566,7 +472,8 @@ export class ManifestAdministrationCoordinator {
       || typeof charter !== "string"
       || !charter.trim()
       || charter.length > 32_768
-      || (profile !== null && (typeof profile !== "string" || !profile.trim() || profile.length > 128))) {
+      || (profile !== null && (typeof profile !== "string" || !profile.trim() || profile.length > 128))
+      || (Object.hasOwn(input.configuration, "image_input") && typeof imageInput !== "boolean")) {
       return {
         outcome: "invalid" as const,
         error: "The selected provider does not accept this model, effort, charter, or permission profile. Native launch policy is managed by the desktop supervisor.",
@@ -575,6 +482,11 @@ export class ManifestAdministrationCoordinator {
     const currentConfiguration = await this.options.store.getAgentConfiguration(input.entryId);
     if (!currentConfiguration) {
       return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
+    }
+    // An older desktop app leaves the choice out, and it then stays as saved.
+    const nextImageInput = typeof imageInput === "boolean" ? imageInput : currentConfiguration.image_input;
+    if (nextImageInput && currentConfiguration.provider !== "open-model") {
+      return { outcome: "invalid" as const, error: "Only an Open Model agent takes this choice. Other agent apps decide for themselves whether they read images." };
     }
     try {
       // A rental or an agent app with no owner setup never keeps the key, however it got there.
@@ -589,6 +501,22 @@ export class ManifestAdministrationCoordinator {
         permissionProfileId: profile === null ? null : (profile as string).trim(),
         configurationRevision: input.expectedRevision + 1,
       }, trustedPolicy);
+      // Refused where it is saved, with the reason: the launch would refuse it too, and its owner would learn it only then.
+      if (normalized.permissionProfileId === "read_only" && codexReadOnlyNeedsDelivery(currentConfiguration.provider, currentConfiguration.delivery_mode)) {
+        return { outcome: "invalid" as const, error: CODEX_READ_ONLY_NEEDS_DELIVERY };
+      }
+      // The access level the running process may have: what was saved before, as the next start would read it.
+      let before: string | null = null;
+      try {
+        before = this.options.policies.deriveProviderConfiguration({
+          provider: currentConfiguration.provider,
+          model: null,
+          reasoningEffort: null,
+          permissionProfileId: currentConfiguration.permission_profile_id,
+          configurationRevision: input.expectedRevision,
+        }, trustedPolicy).permissionProfileId;
+      } catch { /* A saved level that cannot be read counts as changed. */ }
+      const permissionChanged = before !== normalized.permissionProfileId;
       return this.options.authority.serialize(async () => {
         await this.options.authority.assertCurrent();
         const result = await this.options.store.updateAgentConfiguration(
@@ -600,8 +528,13 @@ export class ManifestAdministrationCoordinator {
             reasoningEffort: normalized.reasoningEffort,
             charter: charter.trim(),
             permissionProfileId: normalized.permissionProfileId,
-            // An edit to the model or access level keeps the owner's choice.
-            providerLaunchPolicy: storedLaunchPolicy(normalized, { policy: trustedPolicy }),
+            imageInput: nextImageInput,
+            // An edit to the model or access level keeps the owner's choice. The record of an earlier access
+            // level change is read from the stored policy: an agent that cannot use the owner's setup has it removed above.
+            providerLaunchPolicy: storedLaunchPolicy(normalized, {
+              policy: trustedPolicy,
+              permissionChangedAt: permissionChanged ? input.expectedRevision + 1 : latestPermissionChange(currentConfiguration.provider_launch_policy),
+            }),
           },
           this.options.authority.fenceCommit,
         );
@@ -609,6 +542,8 @@ export class ManifestAdministrationCoordinator {
         if (result.outcome === "invalid") {
           return { outcome: "invalid" as const, error: "The exact agent no longer exists." };
         }
+        // A running agent takes the new access level as soon as it is idle: convergence is what tries.
+        if (permissionChanged && result.outcome === "updated") this.options.convergence.request(input.entryId);
         return {
           outcome: result.outcome,
           configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration),

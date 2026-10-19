@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createApp, reactive, ref } from "vue";
+import { createApp, reactive, ref, shallowRef } from "vue";
 
 import type { DesktopAgentProvider, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
-import { managedAgentSessionsKey } from "../src/components/desktop/content/add-agent/managed-agent-sessions-context";
+import type { SupervisorEntriesResource } from "../src/domain/agent-inspector-identity";
+import { supervisorEntriesKey } from "../src/components/desktop/content/add-agent/supervisor-entries-context";
 import {
   useAddAgentController,
   type AddAgentModalProps,
@@ -57,8 +58,14 @@ function memorySessionStorage() {
   };
 }
 
-/** The Add agent form's first task wired to a launch, as the controller wires them. */
-function addAgentForm(supervisor: Record<string, unknown> = {}) {
+/**
+ * The Add agent form's first task wired to a launch, as the controller wires
+ * them. `pushed` is the room shell's supervisor entry list, which the launch follows.
+ */
+function addAgentForm(
+  supervisor: Record<string, unknown> = {},
+  pushed: readonly DesktopSupervisorManifestEntry[] = [entry()],
+) {
   Object.assign(globalThis, {
     window: {
       crypto: { randomUUID: () => "launch-1" },
@@ -84,6 +91,9 @@ function addAgentForm(supervisor: Record<string, unknown> = {}) {
     authCommand: () => null,
     authCommandForProvider: () => null,
     currentVersion: () => 0,
+    entries: () => pushed,
+    entriesState: () => "ready",
+    entriesError: () => null,
     isCurrentRequest: () => true,
     onChooseRepo: () => undefined,
     onCopyAuthCommand: () => undefined,
@@ -158,7 +168,10 @@ async function settle(): Promise<void> {
 }
 
 /** The real Add agent controller over a stubbed desktop bridge, open on Claude Code. */
-async function openAddAgentDialog(supervisor: Record<string, unknown>) {
+async function openAddAgentDialog(
+  supervisor: Record<string, unknown>,
+  pushed = shallowRef<readonly DesktopSupervisorManifestEntry[]>([]),
+) {
   const quiet = async () => null;
   addAgentForm(supervisor);
   const bridge = (globalThis as unknown as { window: { letagentsDesktop: Record<string, unknown> } }).window;
@@ -173,7 +186,12 @@ async function openAddAgentDialog(supervisor: Record<string, unknown>) {
     openModel: { getSettingsStatus: quiet },
   };
   const app = createApp({ render: () => null });
-  app.provide(managedAgentSessionsKey, { sessions: ref([]), refresh: async () => undefined, upsert: () => undefined });
+  app.provide(supervisorEntriesKey, {
+    entries: pushed,
+    state: ref<SupervisorEntriesResource["state"]>("ready"),
+    error: ref<string | null>(null),
+    refresh: async () => undefined,
+  });
   const props = reactive<AddAgentModalProps>({
     open: false,
     roomStorageMode: "local",
@@ -225,13 +243,16 @@ test("the Add agent dialog consumes a first task whose agent was saved after the
 
 test("the Add agent dialog consumes a first task when a failed create turns out to have saved the agent", async () => {
   let saved = false;
+  const pushed = shallowRef<readonly DesktopSupervisorManifestEntry[]>([]);
   const { controller, props } = await openAddAgentDialog({
     listAgents: async () => saved ? [entry({ charter: managerCharter })] : [],
     createAgent: async () => {
+      // The daemon saved the agent and pushed its entry; only the response was lost.
       saved = true;
+      pushed.value = [entry({ charter: managerCharter })];
       throw new Error("create response was lost");
     },
-  });
+  }, pushed);
 
   controller.supervisedCharter.value = managerCharter;
   await controller.startManagedAgent();

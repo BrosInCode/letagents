@@ -11,7 +11,7 @@ import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import {
   beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
-  closeExecutionApprovalRequest, witnessedRuntimeApprovalClosures, expiredRetiredRuntimeApprovals, settleWitnessedRuntimeApprovalClosures, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
+  closeExecutionApprovalRequest, witnessedRuntimeApprovalClosures, retiredRuntimeApprovals, settleWitnessedRuntimeApprovalClosures, recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
   type ApprovalAuthority, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
   type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
 } from "./execution-approval-journal.js";
@@ -97,14 +97,13 @@ import type {
   DaemonRoomMoveRecord,
   DaemonTurnControlEffect,
   ExecutionTerminalPayload,
-  LegacyLaneOwner,
   ReconciliationNotice,
   ReconciliationState,
 } from "./types.js";
 
 type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
-type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"]; delivery_mode: string };
+type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"]; delivery_mode: string; image_input: boolean };
 type PreMembershipRoomMoveCancellation = { agentId: string; detail: string };
 export type PendingTypedLifecycleEffect = {
   factId: string; agentId: string; factSequence: number;
@@ -300,31 +299,12 @@ export class ManifestStore {
     const generation = Number((this.reads.get(database, "generation").get() as Row).generation);
     const entries = (this.reads.get(database, "allEntries").all() as Row[])
       .map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)));
-
-    const legacyLaneOwners = (database.prepare(`
-      SELECT reservation_id, room_id, provider, owner_pid, owner_process_identity,
-             state, session_id, created_at, updated_at
-      FROM legacy_lane_owners ORDER BY sort_order
-    `).all() as Row[]).map((row): LegacyLaneOwner => ({
-      reservation_id: String(row.reservation_id),
-      room_id: String(row.room_id),
-      provider: String(row.provider),
-      owner_pid: Number(row.owner_pid),
-      owner_process_identity: String(row.owner_process_identity),
-      state: String(row.state) as LegacyLaneOwner["state"],
-      session_id: nullableString(row.session_id),
-      created_at: String(row.created_at),
-      updated_at: String(row.updated_at),
-    }));
-
-    return legacyLaneOwners.length
-      ? { generation, entries, legacy_lane_owners: legacyLaneOwners }
-      : { generation, entries };
+    return { generation, entries };
   }
 
-  async getEntry(agentId: string): Promise<DaemonManifestEntry | undefined> {
+  async getEntry(agentId: string, activityMode: "full" | "summary" = "full"): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
-    return this.readEntryFromDatabase(database, agentId);
+    return this.readEntryFromDatabase(database, agentId, activityMode);
   }
 
   async listRoomEntries(roomId: string): Promise<DaemonManifestEntry[]> {
@@ -685,7 +665,8 @@ export class ManifestStore {
       if (prior?.decision && !db.prepare("SELECT 1 FROM host_tool_rule_decisions WHERE decision_id=?").get(snapshot.input.decisionId)) {
         throw new Error("The existing decision did not create a saved tool permission.");
       }
-      const selected = selectHostApproval(db, snapshot.input, entry);
+      // A saved rule never answers on a saved edit that is not applied yet: the journal is told which path this is.
+      const selected = selectHostApproval(db, snapshot.input, entry, true);
       bindHostToolRule(db, { ...snapshot.rule, decisionId: snapshot.input.decisionId, ownerId: snapshot.input.actorId,
         atMs: snapshot.input.atMs }, entry);
       return selected;
@@ -732,7 +713,7 @@ export class ManifestStore {
     const pending = await this.serialize(async () => {
       const db = await this.getDatabase();
       return witnessedRuntimeApprovalClosures(db, agentId).length > 0
-        || expiredRetiredRuntimeApprovals(db, agentId, nowMs(), () => this.readEntryFromDatabase(db, agentId)).length > 0;
+        || retiredRuntimeApprovals(db, agentId, nowMs(), () => this.readEntryFromDatabase(db, agentId)).length > 0;
     });
     if (!pending) return 0;
     return this.writeOperationalJournal(db => settleWitnessedRuntimeApprovalClosures(db, agentId, nowMs,
@@ -868,9 +849,9 @@ export class ManifestStore {
 
   async getAgentConfiguration(agentId: string): Promise<StoredAgentConfiguration | undefined> {
     const database = await this.getDatabase();
-    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract,delivery_mode FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
+    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract,delivery_mode,image_input FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
     if (!row) return undefined;
-    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"], delivery_mode: String(row.delivery_mode) };
+    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"], delivery_mode: String(row.delivery_mode), image_input: bool(row.image_input) };
   }
 
   /** Explicit operator request only; startup and credential recovery never create this journal. */
@@ -1382,7 +1363,7 @@ export class ManifestStore {
     return { attachedWorkAttemptId, preservedWorkspacePath };
   }
 
-  async updateAgentConfiguration(expectedGeneration: number, input: { agentId: string; expectedRevision: number; model: string | null; reasoningEffort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permissionProfileId: string | null; providerLaunchPolicy: unknown }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; outcome: "updated" | "conflict" | "invalid"; configuration?: StoredAgentConfiguration }> {
+  async updateAgentConfiguration(expectedGeneration: number, input: { agentId: string; expectedRevision: number; model: string | null; reasoningEffort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permissionProfileId: string | null; providerLaunchPolicy: unknown; imageInput: boolean }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; outcome: "updated" | "conflict" | "invalid"; configuration?: StoredAgentConfiguration }> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
       const currentGeneration = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
@@ -1400,7 +1381,7 @@ export class ManifestStore {
         assertNoPollingActivation(database, input.agentId);
         const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
         if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during configuration update.");
-        const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.agentId, input.expectedRevision);
+        const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,image_input=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.imageInput ? 1 : 0, input.agentId, input.expectedRevision);
         if (Number(changed.changes) !== 1) throw new ManifestConflictError("Agent configuration revision changed during update.");
         database.exec("COMMIT"); transactionOpen = false; committed = true;
       };
@@ -1415,9 +1396,9 @@ export class ManifestStore {
     });
   }
 
-  private readEntryFromDatabase(database: DatabaseSync, agentId: string): DaemonManifestEntry | undefined {
+  private readEntryFromDatabase(database: DatabaseSync, agentId: string, activityMode: "full" | "summary" = "full"): DaemonManifestEntry | undefined {
     const row = this.reads.get(database, "entry").get(agentId) as Row | undefined;
-    return row ? composeDaemonManifestEntry(this.projectionFromRow(database, row)) : undefined;
+    return row ? composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)) : undefined;
   }
 
   async replaceEntry(
@@ -2651,20 +2632,6 @@ export class ManifestStore {
       last_sequence: row.last_sequence == null ? -1 : Number(row.last_sequence) } : undefined;
   }
 
-  async appendActivity(
-    expectedGeneration: number,
-    agentId: string,
-    event: DaemonActivityEvent,
-    observedState: DaemonManifestEntry["observed_state"],
-    nativeLiveness: NonNullable<DaemonManifestEntry["native_liveness"]>,
-    limit = 200,
-    commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
-    const result = await this.writeActivity(expectedGeneration, agentId, event, { observedState, nativeLiveness }, limit,
-      database => this.activityEntry(database, agentId), commitFence);
-    return { generation: result.generation, entry: result.value };
-  }
-
   /** Persist presentation detail without acquiring any runtime lifecycle field. */
   async appendActivityOnly(
     expectedGeneration: number,
@@ -2785,14 +2752,12 @@ export class ManifestStore {
   async write(
     expectedGeneration: number,
     entries: DaemonManifest["entries"],
-    legacyLaneOwners?: DaemonManifest["legacy_lane_owners"],
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
     roomMoveCancellation?: PreMembershipRoomMoveCancellation,
   ): Promise<DaemonManifest> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
       const normalizedEntries = entries.map(canonicalManifestEntry);
-      const owners = legacyLaneOwners ?? this.readLegacyLaneOwners(database);
       let committed = false;
       let transactionOpen = false;
       try {
@@ -2810,7 +2775,6 @@ export class ManifestStore {
           }
           if (roomMoveCancellation) this.failPreMembershipRoomMoves(database, roomMoveCancellation);
           this.replaceEntries(database, normalizedEntries);
-          this.replaceLegacyLaneOwners(database, owners ?? []);
           database.exec("COMMIT");
           transactionOpen = false;
           committed = true;
@@ -2833,9 +2797,7 @@ export class ManifestStore {
             },
           }
           : entry);
-        const manifest: DaemonManifest = owners?.length
-          ? { generation: expectedGeneration + 1, entries: returnedEntries, legacy_lane_owners: owners }
-          : { generation: expectedGeneration + 1, entries: returnedEntries };
+        const manifest: DaemonManifest = { generation: expectedGeneration + 1, entries: returnedEntries };
         return manifest;
       } catch (error) {
         if (transactionOpen) {
@@ -2916,7 +2878,6 @@ export class ManifestStore {
         entry.provider === "codex" && entry.provider_ref
           ? { ...entry, desired_state: "stopped" as const }
           : entry), false);
-      this.replaceLegacyLaneOwners(database, stored.manifest.legacy_lane_owners ?? []);
       run(database.prepare("UPDATE manifest_metadata SET generation = ? WHERE singleton = 1"), stored.manifest.generation);
       run(database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)"), migrationKey, stored.checksum, new Date().toISOString());
       database.exec("COMMIT");
@@ -2994,6 +2955,7 @@ export class ManifestStore {
     projection.configuration.permission_profile_id = nullableString(row.permission_profile_id);
     projection.configuration.config_revision = Number(row.config_revision);
     projection.configuration.runtime_configuration_revision = Number(row.runtime_configuration_revision);
+    projection.configuration.image_input = bool(row.image_input);
     if (bool(row.provider_launch_policy_present)) {
       projection.configuration.provider_launch_policy = bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json);
     } else {
@@ -3017,9 +2979,9 @@ export class ManifestStore {
     run(database.prepare(`
       INSERT INTO agent_configurations(
         agent_id, provider, model, reasoning_effort, charter, permission_profile_id, config_revision, runtime_configuration_revision, delivery_mode, delivery_cutover_json,
-        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json, polling_contract
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null, configuration.polling_contract ?? null);
+        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json, polling_contract, image_input
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null, configuration.polling_contract ?? null, configuration.image_input === true ? 1 : 0);
     const sourcePresent = Object.hasOwn(launch, "source_repo_path");
     run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
 
@@ -3270,15 +3232,6 @@ export class ManifestStore {
     };
   }
 
-  private readLegacyLaneOwners(database: DatabaseSync): LegacyLaneOwner[] {
-    return (database.prepare("SELECT * FROM legacy_lane_owners ORDER BY sort_order").all() as Row[]).map((row) => ({
-      reservation_id: String(row.reservation_id), room_id: String(row.room_id), provider: String(row.provider),
-      owner_pid: Number(row.owner_pid), owner_process_identity: String(row.owner_process_identity),
-      state: String(row.state) as LegacyLaneOwner["state"], session_id: nullableString(row.session_id),
-      created_at: String(row.created_at), updated_at: String(row.updated_at),
-    }));
-  }
-
   /**
    * A lifecycle stop/pause or exact runtime replacement may cancel a room move
    * only before destination join starts. The move, its MCP effect, the
@@ -3397,12 +3350,6 @@ export class ManifestStore {
       }
     }
     pruneSupervisedAgentHistory(database, input.agentId, () => timestamp);
-  }
-
-  private replaceLegacyLaneOwners(database: DatabaseSync, owners: LegacyLaneOwner[]): void {
-    database.exec("DELETE FROM legacy_lane_owners");
-    const insert = database.prepare("INSERT INTO legacy_lane_owners VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    owners.forEach((owner, index) => run(insert, owner.reservation_id, owner.room_id, owner.provider, owner.owner_pid, owner.owner_process_identity, owner.state, owner.session_id, owner.created_at, owner.updated_at, index));
   }
 
   /** Journal-first transaction helper. A manifest projection must perform its

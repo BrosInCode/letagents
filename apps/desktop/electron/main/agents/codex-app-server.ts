@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import { codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
+import { CODEX_TOKEN_SERVICE_OVERRIDES, codexHomeForSandboxedLaunch } from "./codex-agent-home.js";
 import { codexHomeHarnessOverrides, runCodexMcpListForLaunch } from "./codex-home-harness.js";
 import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
@@ -30,6 +31,16 @@ export interface CodexAppServerOutput {
 export interface CodexAppServerLaunch {
   pid: number | null;
   exited: Promise<CodexAppServerExit>;
+  /** The Codex home this launch was given in place of the owner's. */
+  codexHome?: string;
+  /** What the owner is to be told about this launch. */
+  notices?: readonly string[];
+  /**
+   * For a launch whose sandbox lets a command write the project: why a folder
+   * the Codex config lets it write too, as named at this launch, may not be
+   * written now. Null while there is none. Asked again before each turn.
+   */
+  writableFoldersCheck?: () => string | null;
 }
 
 interface CodexAppServerLaunchOptions {
@@ -50,6 +61,31 @@ interface CodexAppServerLaunchOptions {
    * `configOverrides`: the process environment then carries none of it.
    */
   homeHarness?: boolean;
+  /**
+   * The agent's access level has a sandbox. A managed launch then gives Codex
+   * a home without the owner's saved command rules, which let a matching
+   * command out of the sandbox, or does not start.
+   */
+  sandboxed?: boolean;
+  /** That sandbox lets a command write the project, so the folders the Codex config adds to it are checked. */
+  writableSandbox?: boolean;
+  /**
+   * The agent's access level is Read-only, and this is the name of the
+   * permission profile its conversations are started with. A managed launch
+   * then defines that profile, with a `deny` for the owner's sign-in file, or
+   * does not start.
+   */
+  hideSignInProfile?: string;
+  /**
+   * The agent's policy is the Read-only level's own: Codex's read-only
+   * sandbox, and nobody to ask. That sandbox alone keeps no file from a
+   * command, so a managed launch with this policy starts only together with
+   * the level's permission profile (`hideSignInProfile`). A caller that has
+   * the policy and did not name the level has none, and is refused.
+   */
+  readOnlySandbox?: boolean;
+  /** The Codex home for this launch, in place of the owner's. A managed launch sets it. */
+  codexHome?: string;
 }
 
 function readyUrlFromServerUrl(serverUrl: string): string {
@@ -455,7 +491,7 @@ export function codexAppServerLaunchArgs(
  * never carry the owner's identity.
  */
 export function codexAppServerEnvironment(
-  options: Pick<CodexAppServerLaunchOptions, "env" | "commitEnvironment" | "homeHarness"> = {},
+  options: Pick<CodexAppServerLaunchOptions, "env" | "commitEnvironment" | "homeHarness" | "codexHome"> = {},
 ): { env: NodeJS.ProcessEnv; commitEnvironment: Record<string, string>; rental: boolean } {
   const runtimeEnv = desktopRuntimeEnvironment();
   const configuredEnv = options.env && Object.keys(options.env).length
@@ -481,8 +517,12 @@ export function codexAppServerEnvironment(
   // Codex hands its own environment to every hook, the notifier and every
   // command. With the owner's setup on those are the owner's programs, so the
   // room agent's coordinates stay out of it; the room's server has its own copy.
-  if (options.homeHarness === true && !rental) return { env: withoutRoomAuthority(env), commitEnvironment, rental };
-  return { env, commitEnvironment, rental };
+  const launchEnv = { ...(options.homeHarness === true && !rental ? withoutRoomAuthority(env) : env) };
+  // Codex sends its sign-in tokens where these say. No launch inherits one, whatever this process was started with.
+  for (const key of CODEX_TOKEN_SERVICE_OVERRIDES) delete launchEnv[key];
+  // Set last, so a rental's isolated environment carries it too.
+  if (options.codexHome) launchEnv.CODEX_HOME = options.codexHome;
+  return { env: launchEnv, commitEnvironment, rental };
 }
 
 /**
@@ -523,8 +563,20 @@ export function launchCodexAppServer(
   return {
     pid: child.pid ?? null,
     exited,
+    ...(options.codexHome ? { codexHome: options.codexHome } : {}),
   };
 }
+
+/**
+ * Why a launch that has the Read-only policy and does not name the Read-only access level is not started. No launch
+ * of the product is put together that way, so this is an error in LetAgents, and the owner is told what still helps.
+ */
+export const READ_ONLY_POLICY_WITHOUT_LEVEL = "This Codex agent was to be started with the Read-only policy and without the name of the Read-only access level, "
+  + "so nothing would keep your Codex sign-in file from its commands. LetAgents starts no agent that way. "
+  + "Choose the agent's access level again in its settings and start it. If this comes back, it is an error in LetAgents: please report it.";
+/** Why a Read-only launch is not started when the launch was given no permission profile for it. */
+export const READ_ONLY_PROFILE_NOT_GIVEN = "LetAgents did not get the permission profile that keeps your Codex sign-in file from a Read-only agent's commands, "
+  + "so it will not start Codex at this access level. Start the agent again. If it happens again, choose another access level.";
 
 /**
  * Launch a managed agent's app-server without the owner's Codex extensions:
@@ -537,14 +589,36 @@ export function launchCodexAppServer(
  * that would commit as the host's global Git identity commits as the owner's
  * GitHub noreply identity instead. When the owner has turned their own setup
  * on for this agent, only the extensions are left alone; the rest holds.
+ * At a sandboxed access level, with or without that setup, Codex gets a home
+ * without the owner's saved command rules. A Read-only launch also defines
+ * the permission profile that keeps the owner's sign-in file from the agent's
+ * commands.
  */
 export async function launchManagedCodexAppServer(
   serverUrl: string,
   codexBin: string,
   options: CodexAppServerLaunchOptions = {},
+  /** How the home of a sandboxed launch is decided. Only a test gives another. */
+  dependencies: { homeForSandboxedLaunch?: typeof codexHomeForSandboxedLaunch } = {},
 ): Promise<CodexAppServerLaunch> {
-  const { env, rental } = codexAppServerEnvironment(options);
+  const { env: ownerHomeEnv, rental } = codexAppServerEnvironment({ ...options, codexHome: undefined });
   const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
+  const hideSignInProfile = options.hideSignInProfile?.trim() || undefined;
+  // The profile belongs to a sandbox. A launch that names one without a sandbox was put together wrongly, and is not started.
+  if (hideSignInProfile && options.sandboxed !== true) throw new Error("A Codex launch that names a Read-only permission profile must be a sandboxed one.");
+  // The Read-only policy without the level's name has no profile, and Codex's read-only sandbox alone keeps no file
+  // from a command. Refused before anything is asked of Codex: nothing is started this way.
+  if (options.readOnlySandbox === true && !hideSignInProfile) throw new Error(READ_ONLY_POLICY_WITHOUT_LEVEL);
+  // Decided before anything else is asked of Codex, so every listing below reads the home the launch will.
+  const home = options.sandboxed === true
+    ? await (dependencies.homeForSandboxedLaunch ?? codexHomeForSandboxedLaunch)(codexBin, {
+        cwd: trustedProjectPath, env: ownerHomeEnv, writableSandbox: options.writableSandbox === true, ...(hideSignInProfile ? { hideSignInProfile } : {}),
+      })
+    : null;
+  // A Read-only launch is never started without its profile, whatever answered above.
+  if (hideSignInProfile && !home?.configOverrides?.length) throw new Error(READ_ONLY_PROFILE_NOT_GIVEN);
+  const codexHome = home?.codexHome ?? undefined;
+  const env = codexHome ? { ...ownerHomeEnv, CODEX_HOME: codexHome } : ownerHomeEnv;
   // The launch's own directory and overrides, so the server list matches.
   const view = { cwd: trustedProjectPath, env, configOverrides: options.configOverrides ?? [] };
   const [isolation, commitEnvironment] = await Promise.all([
@@ -554,11 +628,14 @@ export async function launchManagedCodexAppServer(
       : codexOwnerIsolationOverrides(codexBin, view, runCodexMcpListForLaunch),
     rental ? {} : managedAgentCommitEnvironment(trustedProjectPath),
   ]);
-  return launchCodexAppServer(serverUrl, codexBin, {
+  const launch = launchCodexAppServer(serverUrl, codexBin, {
     ...options,
     commitEnvironment,
-    configOverrides: [...isolation, ...(options.configOverrides ?? [])],
+    // The profile's overrides last: nothing a caller passes can name the same profile after them.
+    configOverrides: [...isolation, ...(options.configOverrides ?? []), ...(home?.configOverrides ?? [])],
+    codexHome,
   });
+  return { ...launch, ...(home?.notices.length ? { notices: home.notices } : {}), ...(home?.writableFoldersCheck ? { writableFoldersCheck: home.writableFoldersCheck } : {}) };
 }
 
 export function terminateSpawnedProcess(pid: number): void {

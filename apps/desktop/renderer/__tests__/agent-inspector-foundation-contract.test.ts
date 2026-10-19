@@ -31,14 +31,14 @@ test("the Inspector is the single selected-agent detail owner after cutover", ()
 
 test("the Inspector has one exclusive surface for durable, external, loading, error, and ambiguous selections", () => {
   assert.match(host, /AgentInspectorParticipantSurface/);
-  assert.match(host, /projectAgentInspectorParticipant\(\s*props\.selection,\s*props\.managedSessions,\s*props\.roomIdentifier\s*\)/);
+  assert.match(host, /projectAgentInspectorParticipant\(props\.selection\)/);
   assert.match(host, /surfaceComponentType/);
   assert.match(participantProjection, /selection\.kind === "resolving"/);
   assert.match(participantProjection, /unavailableReason === "load_error"/);
   assert.match(participantProjection, /selection\.kind === "external"/);
-  assert.match(participantSurface, /Room participant/);
+  assert.match(participantSurface, /shared\.ownerLabel/);
   assert.doesNotMatch(participantSurface, /useManagedAgentSessionsContext/);
-  assert.match(participantSurface, /desktopIpc\.workers\.stopManagedAgent/);
+  assert.doesNotMatch(participantSurface, /desktopIpc\.workers/);
   assert.doesNotMatch(participantSurface, /aria-live/);
   assert.doesNotMatch(activity, /v-if="selectedTruthfulAgent" class="desktop-activity-detail"/);
   assert.doesNotMatch(activity, /selectedLegacyTruthfulAgent|selectedTruthfulAgent/);
@@ -51,14 +51,15 @@ test("unavailable agent details stay product-safe and can retry the background s
   assert.match(statusSurface, /v-if="canRetry"/);
   assert.match(statusSurface, /@click="emit\('retry'\)"/);
   assert.match(shell, /@retry="retryAgentInspectorState"/);
-  assert.match(shell, /function retryAgentInspectorState\(\)[\s\S]{0,300}supervisorEntriesError\.value = null;[\s\S]{0,120}refreshManagedAgentSessions\(\)/);
+  assert.match(shell, /function retryAgentInspectorState\(\)[\s\S]{0,300}supervisorEntriesError\.value = null;[\s\S]{0,120}refreshSupervisorEntries\(\)/);
 });
 
 test("Activity opens the exact shared projection only after an explicit click", () => {
-  assert.match(activity, /@click="selectInspectorAgent\(agent\)"/);
+  assert.match(activity, /@select="selectRosterAgent"/);
+  assert.match(activity, /nativeById\.value\.get\(id\)/);
+  assert.match(activity, /if \(native\) selectInspectorAgent\(native\)/);
   assert.match(activity, /supervisedAgentInspectorRequest\(agent\.entry/);
   assert.match(activity, /autoSelectLive: false/);
-  assert.match(activity, /watch\(inspectorTruthfulAgents[\s\S]{0,300}selectedTruthfulId\.value = null/);
   assert.match(shell, /:agent-projections="agentInspectorProjections"/);
 });
 
@@ -66,7 +67,7 @@ test("Mention uses the shared room candidate path and exact durable agent key", 
   assert.match(composer, /function focusWithMention\(mentionText: string\)/);
   assert.match(composer, /defineExpose\(\{ focusWithMention \}\)/);
   assert.match(chat, /function focusComposerWithMention\(mentionText: string\)/);
-  assert.match(chat, /defineExpose\(\{ openThread, focusComposerWithMention \}\)/);
+  assert.match(chat, /defineExpose\(\{ openThread: revealThread, focusComposerWithMention \}\)/);
   assert.match(shell, /candidate\.agentKey === projection\.agentKey/);
   assert.match(shell, /roomMentionCandidates\(\s*roomParticipants\.value,/);
   assert.match(shell, /focusComposerWithMention\(mention\.insertText\)/);

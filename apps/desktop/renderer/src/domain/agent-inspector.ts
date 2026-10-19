@@ -11,6 +11,7 @@ import {
   canReconnectRoomAgent,
   canRecoverSavedRoomAgent,
   roomAgentRecoveryAction,
+  roomAgentSandboxStartupBlocked,
 } from "./room-agent-delivery";
 import {
   agentCompactionProgress,
@@ -18,7 +19,9 @@ import {
   isHumanVisibleSupervisorActivity,
 } from "./managed-agents";
 import { ownerSetupRefusalReason, ownerSetupStartHint } from "./agent-home-harness";
+import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
+import { agentInspectorRuntimeControlMatchesFence, type AgentInspectorWorkResource } from "./agent-inspector-work";
 
 export type AgentInspectorOverallState =
   | "retired"
@@ -298,6 +301,8 @@ export interface AgentInspectorProjection {
   actions: AgentInspectorActionAvailability[];
   mentionInsertText: string | null;
   resourceFreshness: "fresh" | "stale";
+  /** Fresh exact runtime observation; overrides retained native progress hints. */
+  runtimeExited?: boolean;
   entry: DesktopSupervisorManifestEntry;
 }
 
@@ -328,6 +333,8 @@ export function agentInspectorLiveAnnouncement(
 
 export interface AgentInspectorProjectionOptions {
   roomId: string | null;
+  workResource?: AgentInspectorWorkResource;
+  daemonGeneration?: number | null;
   tasks?: readonly DesktopTaskSummary[];
   deliveryRetryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
@@ -403,6 +410,12 @@ const STARTUP_OBSERVATIONS_TAIL = new RegExp(
 function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   const detail = entry.lastError?.trim() || null;
   if (!detail) return null;
+  if (roomAgentSandboxStartupBlocked(entry)) {
+    const recovery = roomAgentRecoveryAction(entry);
+    const nextStep = recovery === "recovery_options" ? " Use Recovery options to restart and resume."
+      : recovery === "recover" ? " Recover the agent to restart and resume." : "";
+    return `Agent startup needs attention. Review the startup error.${nextStep}`;
+  }
   // A start refused over the owner's own setup leads with what the launch said, not with the scheduler's prefix.
   const refusal = ownerSetupRefusalReason(detail);
   if (refusal) return refusal;
@@ -412,8 +425,12 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   if (/durable execution generation remains live without an attachable provider handle/i.test(detail)) {
     return "LetAgents is verifying whether the previous provider process is still running.";
   }
-  if (/daemon-safe bootstrap turn \(failed_response\).*assistant_error=rate_limit/i.test(detail)) {
-    return "Claude's usage limit was reached. LetAgents retries automatically once the limit resets.";
+  if (claudeUsageLimitReached(detail)) {
+    // The daemon checks again by itself when the limit resets; the owner can also ask for a check now.
+    const recovery = roomAgentRecoveryAction(entry);
+    const nextStep = recovery === "recovery_options" ? " To try again now, open Recovery options."
+      : recovery === "recover" ? " To try again now, recover the agent." : "";
+    return `${CLAUDE_USAGE_LIMIT_REASON}${nextStep}`;
   }
   // The daemon deliberately does not retry a startup deadline: a stalled
   // resume can spend tokens on every attempt.
@@ -1062,7 +1079,7 @@ function actionAvailability(
     { kind: "reconnect", label: "Reconnect", available: stateDependentActionsAvailable && canReconnectRoomAgent(entry) },
     { kind: "recover", label: "Recover agent", available: stateDependentActionsAvailable && canRecoverSavedRoomAgent(entry) },
     { kind: "recovery_options", label: "Recovery options", available: stateDependentActionsAvailable && roomAgentRecoveryAction(entry) === "recovery_options" },
-    { kind: "reconnect_runtime", label: "Reconnect", available: canRestartRuntime && entry.desiredState === "running" && !entry.runtimeRecovery },
+    { kind: "reconnect_runtime", label: "Reconnect", available: canRestartRuntime && entry.desiredState === "running" && !entry.runtimeRecovery && !roomAgentSandboxStartupBlocked(entry) },
     { kind: "restart_runtime", label: entry.runtimeRecovery?.mode === "resume" ? "Continue restart" : "Restart and resume", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "resume"), danger: true },
     { kind: "fresh_runtime", label: entry.runtimeRecovery?.mode === "fresh" ? "Continue fresh start" : "Start fresh", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "fresh"), danger: true },
     { kind: "stop_turn", label: "Stop current turn", available: stateDependentActionsAvailable && canStopTurn },
@@ -1137,10 +1154,23 @@ export function projectAgentInspector(
   // take a while mid-turn. The drained delivery would read as disconnected
   // meanwhile, so this desktop's open request decides the state until then.
   const pausing = entry.desiredState === "running" && Boolean(options.pauseRequestedEntryIds?.has(entry.id));
-  const overallState = pausing ? "paused" : agentInspectorOverallState(entry);
-  const presentation = pausing ? pausingPresentation : overallPresentation(overallState);
   const resourceFreshness = options.resourceFreshness ?? "fresh";
-  const now = nowProjection(resourceFreshness === "fresh" ? entry : { ...entry, providerProgress: null }, overallState);
+  const detail = options.workResource?.detail;
+  // Overview and Diagnostics must use the same exact runtime observation.
+  // Retained PIDs and an unreachable control channel are not proof of exit.
+  const providerStopped = resourceFreshness === "fresh" && options.workResource?.status === "ready"
+    && entry.deliveryMode === "daemon_inbox"
+    && entry.desiredState === "running" && !entry.runtimeRecovery
+    && detail?.entry_id === entry.id && detail.room_id === entry.roomId
+    && detail.runtime_control?.runtime_state === "exited"
+    && agentInspectorRuntimeControlMatchesFence(detail.runtime_control, entry.executionGenerationId,
+      options.daemonGeneration ?? null, entry.runtimeGenerationId);
+  const overallState = pausing ? "paused" : providerStopped ? "needs_attention" : agentInspectorOverallState(entry);
+  const presentation = pausing ? pausingPresentation : overallPresentation(overallState);
+  const now: AgentInspectorNowProjection | null = providerStopped && !pausing
+    ? { kind: "attention", label: "Agent stopped", summary: "Open Recovery options to restart this agent with its saved conversation.",
+      observedAt: detail?.runtime_control?.observed_at ?? null }
+    : nowProjection(resourceFreshness === "fresh" ? entry : { ...entry, providerProgress: null }, overallState);
   const mentionInsertText = options.mentionInsertTextByEntryId?.get(entry.id) ?? null;
   const rawTurnControl = projectAgentInspectorTurnControl(entry);
   // A stale Inspector keeps its last meaningful explanation but never offers a
@@ -1163,7 +1193,10 @@ export function projectAgentInspector(
     resourceFreshness,
     mentionInsertText,
     turnControl,
-  );
+  ).map(action => providerStopped && !pausing
+    ? action.kind === "reconnect" || action.kind === "reconnect_runtime" ? { ...action, available: false }
+      : action.kind === "recovery_options" ? { ...action, available: true } : action
+    : action);
   return {
     entryId: entry.id,
     roomId: entry.roomId,
@@ -1175,7 +1208,7 @@ export function projectAgentInspector(
     charter: entry.charter,
     overallState,
     overallLabel: presentation.label,
-    overallDetail: resourceFreshness === "fresh" && agentCompactionProgress(entry)
+    overallDetail: resourceFreshness === "fresh" && !providerStopped && agentCompactionProgress(entry)
       ? "Compacting conversation" : presentation.detail,
     deliveryProgress: deliveryProgress(
       entry,
@@ -1191,6 +1224,7 @@ export function projectAgentInspector(
     actions,
     mentionInsertText,
     resourceFreshness,
+    runtimeExited: providerStopped && !pausing,
     entry,
   };
 }

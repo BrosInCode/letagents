@@ -1,15 +1,21 @@
 import { readableContributionText } from "../../../shared/contribution-text.mjs";
 import { hasReviewableRoomContribution } from "../../../shared/room-agent-work.mjs";
 import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
-import { captureWorkspaceTree, captureWorkspacePair, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
+import { captureRecordedRemoteTips, captureWorkspaceHead, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
+import { WorkspaceCapture } from "./workspace-capture.js";
 import type { DatabaseSync } from "node:sqlite";
-import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
+import { publishRoomWork, reportGroupedNoReply, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
+import { PENDING_PEER_REPORT_SQL, resolvePeerReceipt } from "./queued-peer-deliveries.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import { ExecutionShadowStore } from "./execution-shadow-store.js";
 import { RoomWorkPublicationStore, type RoomWorkOrigin, type RoomWorkPublication } from "./room-work-publication-store.js";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { currentWorkerPublicationAuthority, sameWorkerPublicationOrigin } from "./worker-publication-authority.js";
+import { isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
+import { isNetworkRemote, type WorkspaceMarker } from "./workspace-provisioner.js";
+import { RecordedRemoteAnswers } from "./recorded-remote-answers.js";
+import { RoomLatencyTrace } from "./room-latency-trace.js";
 
 type Options = {
   custody: Pick<WorkerRuntimeCustody, "hostGrant" | "workerAuthorization">;
@@ -17,9 +23,12 @@ type Options = {
   isClosing(): boolean;
   assertCurrent(): Promise<void>;
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
+  reportGroupedNoReply?: typeof reportGroupedNoReply;
   diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict"): void;
   now?(): number;
-  workspaceLocation?(workAttemptId: string): Promise<{ path: string; revision: string | null }>;
+  /** `remote` is the remote to ask what upstream held (recordedRemote); without it a turn is compared plainly. */
+  workspaceLocation?(workAttemptId: string): Promise<{ path: string; revision: string | null; remote?: string | null }>;
+  askRemote?(remote: string): Promise<string[] | null>;
 };
 type Row = Record<string, string | number | null>;
 const COALESCE_MS = 1_000;
@@ -29,6 +38,48 @@ const FAILED_RECEIPTS_PER_PASS = 4;
 const canonicalSource = (id: string) => /^msg_[1-9]\d{0,9}$/.test(id) && Number(id.slice(4)) <= 2147483647;
 const key = (record: Pick<RoomWorkPublication, "agentId" | "roomId" | "sourceMessageId">) =>
   JSON.stringify([record.agentId, record.roomId, record.sourceMessageId]);
+const terminalState = (state: unknown) => ["completed", "completed_no_reply", "failed", "interrupted"].includes(String(state));
+
+/** Reserve one place for completion; the other three keep recovery moving.
+ * This changes queue order only, never evidence, authority or retry eligibility. */
+function completionFirst<T>(items: T[], pendingCompletion: (item: T) => boolean): T[] {
+  const index = items.findIndex(pendingCompletion);
+  if (index > 0) items.unshift(...items.splice(index, 1));
+  return items;
+}
+
+/**
+ * The remote to ask what a workspace's upstream held: the one the daemon recorded when it
+ * provisioned the workspace, never one that the repository's own configuration names. An agent
+ * can add a remote or point `origin` at a repository of its own; it cannot change this record.
+ * Null when the record is not a repository reached over the network. A room-only workspace has
+ * none. A project folder without an origin, a local path, a file: URL and a server on this
+ * machine itself are places that any agent here can commit to.
+ */
+export function recordedRemote(identity: Pick<WorkspaceMarker, "remote_url" | "resolved_revision" | "bare_path">): string | null {
+  const url = identity.remote_url;
+  if (isEphemeralWorkspaceMarker(identity) || !isNetworkRemote(url)) return null;
+  // scheme://[user@]host[:port]/path, or Git's scp-like [user@]host:path.
+  const host = (/^[a-z][a-z0-9+.-]*:\/\/(?:[^/@]*@)?(\[[^\]]*\]|[^/:]*)/i.exec(url) ?? /^(?:[^/@:\s]+@)?(\[[^\]]*\]|[^/:\s]+):/.exec(url))?.[1] ?? "";
+  return isThisMachine(host) ? null : url;
+}
+
+/**
+ * A host that is this machine itself: localhost, an address in 127.0.0.0/8, ::1, the same
+ * as IPv4 addresses inside IPv6, and the unspecified addresses, in any way of writing them
+ * (127.1, 0x7f.1, 2130706433). An ssh alias or a name that only resolves to this machine
+ * cannot be known without resolving it, and is not.
+ */
+function isThisMachine(host: string): boolean {
+  let name: string;
+  // The URL parser gives each address one form: 127.0.0.1, [::1], [::ffff:7f00:1].
+  try { name = new URL(`http://${host}/`).hostname.replace(/\.$/, ""); } catch { return true; }
+  if (name === "localhost" || name.endsWith(".localhost")) return true;
+  const inside = /^\[::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})\]$/.exec(name)?.slice(1).map((part) => parseInt(part, 16));
+  const address = inside ? [inside[0] >> 8, inside[0] & 255, inside[1] >> 8, inside[1] & 255]
+    : /^\d+\.\d+\.\d+\.\d+$/.test(name) ? name.split(".").map(Number) : null;
+  return address ? address[0] === 127 || address.every((part) => part === 0) : name === "[::1]" || name === "[::]";
+}
 
 /** Optional, bounded evidence upload. Owns no provider, delivery or credential-recovery port. */
 export class RoomWorkPublisher {
@@ -38,11 +89,19 @@ export class RoomWorkPublisher {
   private readonly stamps = new Map<string, Map<string, string>>();
   private readonly attemptedAt = new Map<string, number>();
   private readonly stagingAttemptedAt = new Map<string, number>();
+  /** The commit each open turn started on, and what the remotes held then. Like the delivery's own baseline, neither outlives this process. */
+  private readonly turnStarts = new Map<string, { head: string; remoteTips: Promise<string[] | null> }>();
+  /** One set of answers for all agents and turns of this daemon. It does not outlive this process either. */
+  private readonly remoteAnswers = new RecordedRemoteAnswers(
+    (remote) => (this.options.askRemote ?? captureRecordedRemoteTips)(remote), () => this.now());
   private readonly cancellation = new AbortController();
+  private readonly workspaceCapture = new WorkspaceCapture();
   private scheduled: NodeJS.Timeout | null = null;
   private scheduledFor = Infinity;
   private running = false;
-  private pendingWake = false;
+  private readonly changedAgents = new Set<string>();
+  private readonly settledAgents = new Set<string>();
+  private sweepNext = false;
   private closed = false;
   private scanAfter = "";
 
@@ -96,11 +155,16 @@ export class RoomWorkPublisher {
     try {
       if (!this.workspaces.begin(identity)) return null;
       const location = await this.options.workspaceLocation(agent.workAttemptId);
-      const tree = await captureWorkspaceTree(location.path, JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]));
+      const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
+      // Decided now, before the agent runs, and not awaited: a slow remote must not delay the turn.
+      const remoteTips = location.remote ? this.remoteAnswers.forTurn(location.remote) : Promise.resolve(null);
+      const tree = await this.workspaceCapture.begin(location.path, ref);
+      const head = tree ? await captureWorkspaceHead(location.path) : null;
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
       if (current?.authority.worker !== context.authority.worker || current?.authority.grant !== context.authority.grant) return null;
       this.workspaces.setBaseline(identity, tree);
+      if (head) this.turnStarts.set(ref, { head, remoteTips });
       return tree;
     } catch { this.report("storage_unavailable"); return null; }
   }
@@ -108,16 +172,23 @@ export class RoomWorkPublisher {
   /** Save immutable settled bytes even when delayed native execution evidence isn't ready yet. */
   async captureWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string, summaryText?: string | null, invocationBaseline: string | null = null): Promise<void> {
     if (this.unavailable() || !this.options.workspaceLocation) return;
+    const timing = new RoomLatencyTrace("workspace_capture");
     const context = this.captureAuthority(agent, sourceMessageId);
-    if (!context || context.record.summary?.workspace || this.workspaces.settled(agent.agentId, agent.roomId, sourceMessageId)) return;
+    const alreadySettled = context && (context.record.summary?.workspace || this.workspaces.settled(agent.agentId, agent.roomId, sourceMessageId));
+    timing.mark("lookup");
+    if (!context || alreadySettled) { timing.finish(); return; }
     const identity: WorkspaceCaptureIdentity = { ...agent, sourceMessageId, inboxItemId };
     try {
       const location = await this.options.workspaceLocation(agent.workAttemptId);
+      timing.mark("location");
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
-      const pair = await captureWorkspacePair(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref);
+      const start = this.turnStarts.get(ref);
+      const pair = await this.workspaceCapture.settle(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref, start?.head, start?.remoteTips);
+      timing.mark("capture");
       pair.contribution.summary = readableContributionText(summaryText);
       await this.options.assertCurrent();
       const current = this.captureAuthority(agent, sourceMessageId);
+      timing.mark("authority");
       if (current?.authority.worker !== context.authority.worker || current?.authority.grant !== context.authority.grant) return;
       const captured = this.capture.roomWorkSummary(agent.agentId, agent.roomId, sourceMessageId);
       const execution = captured.availability === "available" ? captured.summary : {
@@ -128,42 +199,59 @@ export class RoomWorkPublisher {
       const { review, ...preview } = pair;
       const summary = { ...execution, version: 3 as const, ...preview };
       const reviewable = hasReviewableRoomContribution(summary);
+      timing.mark("projection");
       // Settlement is also the durable no-review decision. Preserve unavailable
       // evidence instead of treating it as no change or recapturing on restart.
       this.workspaces.settle(identity, summary, reviewable ? review : undefined);
       if (captured.availability === "available") this.store.stage(current.record,
         reviewable ? { ...captured, summary } : captured);
+      timing.mark("persistence");
       this.changed(agent.agentId);
       await releaseWorkspaceTree(location.path, ref);
+      timing.mark("cleanup");
     } catch { this.report("storage_unavailable"); }
+    finally { timing.finish(); }
   }
 
   /** Release only our private retention refs, including Stop, recovery and fencing exits. */
   async releaseWorkspace(agent: SupervisedIngressAgent, sourceMessageId: string, inboxItemId: string): Promise<void> {
+    const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
+    this.turnStarts.delete(ref);
     if (!this.options.workspaceLocation) return;
     try {
       const location = await this.options.workspaceLocation(agent.workAttemptId);
-      const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
       await releaseWorkspaceTree(location.path, ref);
       await releaseWorkspaceTree(location.path, `${ref}:settled`);
     } catch { /* Optional retention cleanup cannot change delivery outcomes. */ }
   }
 
   /** Capture supplies only a postcommit hint; no SQL or HTTP runs on its stack. */
-  changed(_agentId: string): void {
+  changed(agentId: string): void {
     if (this.unavailable()) return;
-    this.pendingWake = true;
+    this.changedAgents.add(agentId);
     this.schedule(COALESCE_MS);
+  }
+
+  /** Delivery released its lane. This is only a prompt hint: durable evidence
+   * and the usual authority checks still decide what can be published. */
+  settled(agentId: string): void {
+    if (this.unavailable()) return;
+    this.changedAgents.add(agentId);
+    this.settledAgents.add(agentId);
+    this.schedule(0);
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.workspaceCapture.close();
     this.cancellation.abort();
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduled = null;
     this.scheduledFor = Infinity;
-    this.stamps.clear(); this.attemptedAt.clear(); this.stagingAttemptedAt.clear();
+    this.changedAgents.clear();
+    this.settledAgents.clear();
+    this.stamps.clear(); this.attemptedAt.clear(); this.stagingAttemptedAt.clear(); this.turnStarts.clear(); this.remoteAnswers.clear();
     // Never drain capture or upload a shutdown tail. Late responses are fenced.
     try { this.database.close(); } catch { this.report("storage_unavailable"); }
   }
@@ -173,10 +261,10 @@ export class RoomWorkPublisher {
   private report(code: Parameters<NonNullable<Options["diagnostic"]>>[0]): void {
     try { if (this.options.diagnostic) this.options.diagnostic(code); else console.warn(`[room_work_publication] ${code}`); } catch { /* optional diagnostics */ }
   }
-  private schedule(delay: number): void {
+  private schedule(delay: number, replace = false): void {
     if (this.unavailable()) return;
     const due = Date.now() + delay;
-    if (this.scheduled && this.scheduledFor <= due) return;
+    if (!replace && this.scheduled && this.scheduledFor <= due) return;
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduledFor = due;
     this.scheduled = setTimeout(() => {
@@ -240,7 +328,7 @@ export class RoomWorkPublisher {
       || archived.size > 0;
     const previous = this.stamps.get(agentId) ?? new Map<string, string>();
     this.stamps.set(agentId, previous);
-    const candidates: Array<{ record: RoomWorkPublication; stamp: string }> = [];
+    const candidates: Array<{ record: RoomWorkPublication; stamp: string; pendingCompletion: boolean }> = [];
     let scanned = 0;
     for (const record of records) {
       if (++scanned % 64 === 0) {
@@ -258,7 +346,10 @@ export class RoomWorkPublisher {
       const boundaries = [...evidence.runtimes].filter(runtime => archived.has(runtime)).sort();
       const stamp = JSON.stringify([attempt.attempt_id, attempt.state, attempt.conclusion, sequence, incomplete, boundaries]);
       const recordKey = key(record);
-      if (previous.get(recordKey) !== stamp) candidates.push({ record, stamp });
+      const state = attempt.state === "cleanly_concluded"
+        ? attempt.conclusion === "replied" ? "completed" : "completed_no_reply" : attempt.state;
+      if (previous.get(recordKey) !== stamp) candidates.push({ record, stamp,
+        pendingCompletion: terminalState(state) && record.summary?.recorded_state !== state });
     }
     // A capture gap means a message's turn was never recorded and never will
     // be. Its delivery receipt still says whether it failed. A few per pass;
@@ -277,7 +368,7 @@ export class RoomWorkPublisher {
       return prior === undefined || this.now() - prior >= RETRY_MS;
     }).sort((a, b) => (this.stagingAttemptedAt.get(key(a.record)) ?? -Infinity)
       - (this.stagingAttemptedAt.get(key(b.record)) ?? -Infinity));
-    for (const { record, stamp } of eligible.slice(0, 4)) {
+    for (const { record, stamp } of completionFirst(eligible, item => item.pendingCompletion).slice(0, 4)) {
       await new Promise<void>(resolve => setImmediate(resolve));
       await this.options.assertCurrent();
       if (this.unavailable()) return false;
@@ -302,29 +393,60 @@ export class RoomWorkPublisher {
     return eligible.length > 4;
   }
 
+  private pendingGroupedReports(agentId: string) {
+    const authority = this.authority(agentId);
+    if (!authority) return [];
+    // Filter the current Room before limiting: unavailable old-room custody
+    // never starves reports for the worker's actual current Room.
+    const rows = this.database.prepare(`SELECT i.inbox_item_id,i.source_message_id FROM supervised_agent_inbox i
+      WHERE i.agent_id=? AND i.room_id=? AND i.state='acknowledged_no_reply' AND ${PENDING_PEER_REPORT_SQL}
+      ORDER BY i.fifo_sequence`).all(agentId, authority.origin.roomId);
+    return rows.flatMap(row => {
+      const inboxItemId = String(row.inbox_item_id);
+      const prior = this.attemptedAt.get(`peer:${inboxItemId}`);
+      if (prior !== undefined && this.now() - prior < RETRY_MS) return [];
+      const pin = this.store.get(agentId, authority.origin.roomId, String(row.source_message_id));
+      return pin && this.sameOrigin(authority.origin, pin) ? [{ inboxItemId, pin, authority }] : [];
+    });
+  }
+
   /** Separable from the timer for deterministic real-store tests. No caller awaits this to run an agent. */
   async flush(): Promise<void> {
     if (this.unavailable() || this.running) return;
-    this.pendingWake = false;
     this.running = true;
     let more = false;
+    let failed = false;
     try {
       await this.options.assertCurrent();
       if (this.unavailable()) return;
-      // One agent (at most 10k pins/facts) per pass. Cursor-based sweeping also
-      // repairs missed/failed staging hints and catches up after restart, without
-      // ever materializing all historical agents' pending bodies at once.
+      // Give changed agents the next pass, alternating with the recovery sweep
+      // so continuous live output cannot starve missed hints or retry work.
+      // Still only one agent (at most 10k pins/facts) per pass.
       const nextAgent = () => this.database.prepare(`SELECT agent_id FROM room_work_publications
         WHERE state='open' AND agent_id>? ORDER BY agent_id LIMIT 1`).get(this.scanAfter);
-      let row = nextAgent();
-      if (!row) { this.scanAfter = ""; row = nextAgent(); }
-      if (!row) return;
-      const agentId = String(row.agent_id);
-      this.scanAfter = agentId;
-      more = !!nextAgent();
+      const changedAgent = this.settledAgents.values().next().value ?? this.changedAgents.values().next().value;
+      let agentId: string;
+      if (changedAgent && !this.sweepNext) {
+        agentId = changedAgent;
+        this.sweepNext = true;
+        more = true;
+      } else {
+        let row = nextAgent();
+        if (!row) { this.scanAfter = ""; row = nextAgent(); }
+        if (!row && !changedAgent) return;
+        agentId = row ? String(row.agent_id) : changedAgent!;
+        if (row) this.scanAfter = agentId;
+        this.sweepNext = false;
+        more = !!nextAgent();
+      }
+      // Consume before awaiting: a hint arriving during staging/upload must
+      // remain queued for another pass, including a terminal no-reply update.
+      this.changedAgents.delete(agentId);
+      this.settledAgents.delete(agentId);
       try { more = await this.stageChanged(agentId) || more; }
       catch { this.report("storage_unavailable"); }
       if (this.unavailable()) return;
+      const grouped = this.pendingGroupedReports(agentId);
       const pending = this.store.list(agentId)
         .filter(record => record.state === "open" && record.summary && (record.revision > record.acknowledgedRevision || this.pendingReviewPage(record)))
         .sort((a, b) => (this.attemptedAt.get(key(a)) ?? -Infinity) - (this.attemptedAt.get(key(b)) ?? -Infinity));
@@ -335,8 +457,10 @@ export class RoomWorkPublisher {
         const authority = this.authority(record.agentId);
         if (authority && this.sameOrigin(authority.origin, record)) eligible.push({ record, authority });
       }
-      more = eligible.length > 4 || more;
-      for (const { record, authority } of eligible.slice(0, 4)) {
+      const uploadLimit = grouped.length ? 3 : 4;
+      more = eligible.length > uploadLimit || more;
+      for (const { record, authority } of completionFirst(eligible,
+        ({ record }) => record.revision > record.acknowledgedRevision && terminalState(record.summary?.recorded_state)).slice(0, uploadLimit)) {
         await this.options.assertCurrent();
         const current = this.authority(record.agentId);
         if (this.unavailable() || current?.grant !== authority.grant || current?.worker !== authority.worker) continue;
@@ -364,10 +488,31 @@ export class RoomWorkPublisher {
           }
         } catch { if (!this.unavailable()) this.report("publication_unavailable"); }
       }
-    } catch { if (!this.unavailable()) this.report("authority_unavailable"); }
+      // Grouped deliveries have no native attempt or RoomWork summary. Spend
+      // at most one remaining slot after ordinary completion uploads.
+      more = grouped.length > 1 || more;
+      for (const { inboxItemId, pin, authority } of grouped.slice(0, 1)) {
+        await this.options.assertCurrent();
+        const current = this.authority(agentId);
+        if (this.unavailable() || current?.grant !== authority.grant || current?.worker !== authority.worker) continue;
+        const reportKey = `peer:${inboxItemId}`;
+        this.attemptedAt.set(reportKey, this.now());
+        try {
+          const result = await (this.options.reportGroupedNoReply ?? reportGroupedNoReply)({ apiUrl: pin.apiOrigin,
+            roomId: pin.roomId, sourceMessageId: pin.sourceMessageId, bearer: current.worker.bearer, signal: this.cancellation.signal });
+          await this.options.assertCurrent();
+          const after = this.authority(agentId);
+          if (this.unavailable() || after?.grant !== current.grant || after?.worker !== current.worker) continue;
+          resolvePeerReceipt(this.database, inboxItemId, result, new Date(this.now()).toISOString());
+          this.attemptedAt.delete(reportKey);
+        } catch { if (!this.unavailable()) this.report("publication_unavailable"); }
+      }
+    } catch { failed = true; if (!this.unavailable()) this.report("authority_unavailable"); }
     finally {
       this.running = false;
-      this.schedule(more || this.pendingWake ? COALESCE_MS : RETRY_MS);
+      // A failed pass may not have consumed its hint. Preserve it, but replace
+      // even a wake queued during the failure so lost authority cannot spin.
+      this.schedule(failed ? RETRY_MS : this.settledAgents.size ? 0 : more || this.changedAgents.size ? COALESCE_MS : RETRY_MS, failed);
     }
   }
 }

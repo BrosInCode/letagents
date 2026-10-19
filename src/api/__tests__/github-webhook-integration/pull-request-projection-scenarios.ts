@@ -1,19 +1,85 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import test from "node:test";
 
 import {
   createAssignedTask,
   createInReviewTaskWithLease,
   createRepoRoom,
   createWorkLeaseForPr,
+  databaseSkipReason,
   pool,
   postGitHubWebhook,
+  requiresDatabase,
   webhookIntegrationTest,
 } from "./harness.js";
 import {
   buildPullRequestPayload,
   buildPullRequestReviewPayload,
 } from "./payloads.js";
+import { projectRepoRoomEvent, type TaskStatusLike } from "../../repo-workflow.js";
+
+// The board projection and the task status table are two lists. A change the
+// projection names that the table refuses fails the live webhook. This keeps
+// the two in step: a projected change is valid for the table, or it is one
+// only a GitHub event may make, on purpose.
+test(
+  "every status change a GitHub event can project is valid for the table or one only a GitHub event may make",
+  { skip: requiresDatabase ? databaseSkipReason : false },
+  async () => {
+    const { GITHUB_EVENT_TRANSITIONS, VALID_TRANSITIONS, isValidTransition } = await import("../../db/tasks.js");
+    const statuses = Object.keys(VALID_TRANSITIONS) as TaskStatusLike[];
+    const events: Array<{ label: string; event: Record<string, unknown>; approvalSettlesRequestedChanges?: boolean }> = [];
+    for (const action of ["opened", "reopened", "ready_for_review", "synchronize", "converted_to_draft", "closed", "edited"]) {
+      for (const merged of [false, true]) {
+        events.push({ label: `pull request ${action}${merged ? " merged" : ""}`, event: { kind: "pull_request", action, pullRequest: { merged } } });
+      }
+    }
+    for (const action of ["submitted", "edited", "dismissed"]) {
+      for (const state of ["approved", "changes_requested", "commented", "dismissed"]) {
+        for (const approvalSettlesRequestedChanges of [false, true]) {
+          events.push({
+            label: `review ${action} ${state}${approvalSettlesRequestedChanges ? " settling" : ""}`,
+            event: { kind: "pull_request_review", action, review: { state } },
+            approvalSettlesRequestedChanges,
+          });
+        }
+      }
+    }
+    for (const action of ["opened", "closed", "reopened"]) {
+      events.push({ label: `issue ${action}`, event: { kind: "issue", action } });
+    }
+
+    const named = new Set<string>();
+    for (const currentStatus of statuses) {
+      for (const { label, event, approvalSettlesRequestedChanges } of events) {
+        const projected = projectRepoRoomEvent({ event: event as never, currentStatus, approvalSettlesRequestedChanges });
+        if (!projected) continue;
+        named.add(`${currentStatus} -> ${projected.newStatus}`);
+        assert.ok(
+          isValidTransition(currentStatus, projected.newStatus, { githubEvent: true }),
+          `${label} moves ${currentStatus} to ${projected.newStatus}, which neither the table nor the GitHub-only table allows`
+        );
+      }
+    }
+
+    assert.ok(named.has("in_review -> merged"), "the projection still names the merge from in_review");
+    for (const [from, targets] of Object.entries(GITHUB_EVENT_TRANSITIONS) as Array<[TaskStatusLike, TaskStatusLike[]]>) {
+      for (const to of targets) {
+        // Listed there, so a person, a worker or a board intent must not have it.
+        assert.ok(!VALID_TRANSITIONS[from].includes(to), `${from} -> ${to} is in the table now: drop it from the GitHub-only table`);
+        assert.equal(isValidTransition(from, to), false, `${from} -> ${to} must stay refused without the GitHub flag`);
+        assert.ok(named.has(`${from} -> ${to}`), `no event projects ${from} -> ${to}: drop it from the GitHub-only table`);
+      }
+    }
+    for (const from of ["assigned", "in_progress", "blocked"] as const) {
+      assert.ok(named.has(`${from} -> merged`), `a merged pull request moves a ${from} task`);
+      // Whatever the tables hold: refused by hand, allowed for a GitHub event.
+      assert.equal(isValidTransition(from, "merged"), false, `${from} -> merged must be refused without the GitHub flag`);
+      assert.equal(isValidTransition(from, "merged", { githubEvent: true }), true, `${from} -> merged must be allowed for a GitHub event`);
+    }
+  }
+);
 
 webhookIntegrationTest(
   "pull_request opened transitions an assigned task to in_review through the real webhook route",

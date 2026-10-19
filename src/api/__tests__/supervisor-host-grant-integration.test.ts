@@ -971,6 +971,35 @@ test("supervisor worker end is idempotent after a committed response is lost", {
   );
 });
 
+test("an owner retiring a supervised worker closes its open requests; ending it otherwise keeps them", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const { createKnowledgeRecord } = await import("../../../shared/room-knowledge.mjs");
+  const knowledge = await import("../db/room-knowledge.js");
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const end = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end"); assert.ok(end);
+  const ask = (id: string, authorId: string) => knowledge.createRoomKnowledge(createKnowledgeRecord(room.id, "attention",
+    { client_id: id, category: "question", title: "Which port?", body: "Pick one." }, { id: authorId, label: "Route Agent", kind: "agent" }));
+  const startWorker = async (instance: string) => {
+    const minted = recorder();
+    await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: instance } }, minted);
+    assert.equal(minted.statusCode, 201, JSON.stringify(minted.body));
+    return (minted.body as any).session_id as string;
+  };
+  await ask("route-open-1", agent.canonical_key);
+  await ask("other-open-1", "owner/other-agent");
+  // A move or rotation ends the session without `retired`: the request stays open.
+  const moved = recorder();
+  await end({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: await startWorker("rotated-worker") }, body: { generation: 1 } }, moved);
+  assert.equal(moved.statusCode, 200);
+  assert.equal((await knowledge.getRoomKnowledge(room.id, "route-open-1"))!.response, null);
+  const retired = recorder();
+  await end({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: await startWorker("retired-worker") }, body: { generation: 1, retired: true } }, retired);
+  assert.equal(retired.statusCode, 200);
+  const closed = (await knowledge.getRoomKnowledge(room.id, "route-open-1"))!.response!;
+  assert.deepEqual([closed.body, closed.closed, closed.actor.id, closed.actor.kind], ["Agent retired.", true, "owner_route", "human"]);
+  assert.equal((await knowledge.getRoomKnowledge(room.id, "other-open-1"))!.response, null, "another agent keeps its requests");
+});
+
 test("supervisor worker retry collapses all historical active duplicates before rotating the retained session", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const common = {
@@ -1757,6 +1786,28 @@ test("room work survives in-place renewal and same-instance successor but refuse
   assert.equal(moved.statusCode, 201);
   await assert.rejects(publishRoomAgentWork({ ...recovered, session_id: moved.body.session_id, revision: 4,
     fence: { grant_id: otherHost.grant.grant_id, generation: 1, token_version: 1 } }), { code: "publisher_conflict" });
+});
+
+test("a sequenced turn that ends without a reply releases the next reply position", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  const now = new Date().toISOString();
+  await client!.pool.query(
+    "UPDATE message_agent_receipts SET turn_position = 1, turn_count = 2, hold_released_at = now() WHERE message_room_id = $1 AND message_number = 1",
+    [f.room.id],
+  );
+  await client!.db.insert(schema!.message_agent_receipts).values({
+    id: randomUUID(), room_id: f.room.id, message_room_id: f.room.id, message_number: 1,
+    agent_session_id: "session_next", agent_key: "owner_route/next-agent", actor_label: "Next Agent",
+    activation_reason: "broadcast", receipt_state: "queued", created_at: now, updated_at: now,
+    turn_position: 2, turn_count: 2, hold_release_after: new Date(Date.now() + 90_000).toISOString(),
+  });
+  const held = async () => (await client!.pool.query(
+    "SELECT hold_released_at IS NOT NULL AS released FROM message_agent_receipts WHERE agent_key = 'owner_route/next-agent'",
+  )).rows[0]!.released;
+  await publishRoomAgentWork(f.input);
+  assert.equal(await held(), false, "an active turn keeps the next position waiting");
+  await publishRoomAgentWork({ ...f.input, revision: 2, summary: { ...workSummary, recorded_state: "completed_no_reply" } });
+  assert.equal(await held(), true, "a turn that ended without a reply releases the next position");
 });
 
 test("room work grant handoff fences stale generation without duplicating the public attempt", { skip: requiresDatabase }, async () => {

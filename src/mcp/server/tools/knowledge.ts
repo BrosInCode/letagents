@@ -86,7 +86,7 @@ export function registerRoomKnowledgeTools(server: McpServer) {
     ...content, category: z.enum(['question', 'decision', 'approval', 'review']),
     recommendation: z.string().max(2000).optional(), unblocks: z.string().max(1000).optional(),
   }, input => save('attention', input));
-  server.tool('get_human_requests', 'Read this room’s human input requests and recorded answers. Responses are also posted to room chat. Check this on resume so a lost connection does not lose a human’s decision.', scope,
+  server.tool('get_human_requests', 'Read this room’s human input requests and recorded answers. Responses are also posted to room chat. A response with `closed: true` means a person closed the request without a decision (for example because the agent that asked was retired); stop waiting on it and do not treat it as an approval. Check this on resume so a lost connection does not lose a human’s decision.', scope,
     async ({ room_id }) => {
       try { return jsonToolResponse(await readRoomKnowledge('attention', room_id)); }
       catch (error) { return taskToolError(String(error)); }

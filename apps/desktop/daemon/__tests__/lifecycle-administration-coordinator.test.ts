@@ -198,7 +198,6 @@ function harness() {
         return {
           generation: manifestGeneration,
           entries: currentEntry ? [currentEntry] : [],
-          legacy_lane_owners: [],
         };
       },
       async getEntry(entryId) {

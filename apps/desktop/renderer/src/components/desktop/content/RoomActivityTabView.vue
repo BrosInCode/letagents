@@ -1,376 +1,50 @@
 <template>
-  <section class="room-tab-page room-activity-page" data-testid="room-activity-tab-view">
-    <div class="desktop-activity-toolbar">
-      <div class="desktop-activity-switcher" role="tablist" aria-label="Activity view">
-        <button type="button" :data-active="activeView === 'live'" @click="activeView = 'live'">Live</button>
-        <button type="button" :data-active="activeView === 'history'" @click="activeView = 'history'">History</button>
-      </div>
-      <button
-        class="desktop-activity-add-agent"
-        type="button"
-        data-testid="desktop-activity-add-agent"
-        @click="emit('open-add-agent')"
-      >
-        Add agent
-      </button>
+  <section ref="surface" class="room-tab-page room-agents-page agents-ui" data-testid="room-activity-tab-view">
+    <div v-show="activeView === 'live'">
+      <header class="agents-heading"><h2>Agents</h2><button class="agents-primary" type="button" data-testid="desktop-activity-add-agent" @click="emit('open-add-agent')">+ Add agent</button></header>
+      <AgentRoster :rows="rosterRows" :state="agentRosterState" @select="selectRosterAgent" @refresh="refreshActivity">
+        <template #provider="{ row }"><ProviderBadge :label="row.provider" :agent-key="nativeById.get(row.id)?.agentKey" /></template>
+        <template #detail="{ row }"><WakeRuleLine v-if="waitingRules(rosterAgentKey(row.id)).length && row.state === 'Online'" :rules="waitingRules(rosterAgentKey(row.id))" /><template v-else>{{ row.detail }}</template></template>
+        <template #badges="{ row }"><template v-for="agent in nativeById.has(row.id) ? [nativeById.get(row.id)!] : []" :key="agent.entryId">
+          <span v-if="agent.entry.homeHarness" class="desktop-activity-mini-pill" :title="homeHarnessBadge(agent.provider, agent.entry.homeHarness).title" data-testid="desktop-activity-own-setup">{{ homeHarnessBadge(agent.provider, agent.entry.homeHarness).label }}</span>
+          <span v-if="agent.entry.permissionPending" class="desktop-activity-mini-pill" :title="permissionPendingBadge(agent.entry.deliveryMode).title" data-testid="desktop-activity-settings-pending">{{ permissionPendingBadge().label }}</span>
+        </template></template>
+        <template #action="{ row }"><button v-if="nativeById.get(row.id) && canCorrect(nativeById.get(row.id)!)" class="agents-quiet agents-correct" type="button" :aria-label="`Correct ${row.name}'s current turn`" title="Interrupt this turn and redirect the agent in the same session. Room messages wait until the turn ends." data-testid="desktop-activity-correct-agent" @click="correctAgent(nativeById.get(row.id)!)">Correct</button></template>
+        <template #empty><button class="agents-quiet" type="button" @click="refreshActivity">Refresh</button></template>
+      </AgentRoster>
+      <footer class="agents-footer"><button ref="pastButton" class="agents-quiet" type="button" @click="archiveMode = 'past'; navigate('history', $event)">Past agents →</button></footer>
     </div>
-
-    <div v-if="activeView === 'live'" class="desktop-activity-layout" :data-empty="!hasLiveActivity">
-      <article v-if="!hasLiveActivity" class="desktop-activity-live-empty">
-        <span>Live activity</span>
-        <h3>No agents are live right now</h3>
-        <p>Agents you can message will appear here when they are online or working in this room.</p>
-        <div class="desktop-activity-empty-actions">
-          <button type="button" @click="emit('open-add-agent')">Add agent</button>
-          <button type="button" @click="refreshActivity">Refresh</button>
-        </div>
-      </article>
-
-      <template v-else>
-        <div class="desktop-activity-groups">
-          <section
-            v-for="group in inspectorTruthfulGroups"
-            :key="group.key"
-            v-show="group.agents.length"
-            class="desktop-activity-group"
-            :data-room-agent-state="group.key"
-          >
-            <header><div><h3>{{ group.label }}</h3><p v-if="group.description">{{ group.description }}</p></div><strong>{{ group.agents.length }}</strong></header>
-            <div
-              v-for="agent in group.agents"
-              :key="agent.entryId"
-              class="desktop-activity-roster-row"
-            >
-              <button
-                class="desktop-activity-roster-item"
-                :data-selected="selectedInspectorAgent?.entryId === agent.entryId"
-                :data-state="group.key"
-                type="button"
-                @click="selectInspectorAgent(agent)"
-              >
-                <span class="desktop-activity-avatar" :data-state="group.key">{{ initials(agent.displayName) }}</span>
-                <span>
-                  <strong>{{ agent.displayName }}</strong>
-                  <small v-if="agent.resourceFreshness === 'stale'">Reconnecting to this agent…</small>
-                  <small v-else-if="agent.overallDetail">{{ agent.overallDetail }}</small>
-                  <small v-else-if="waitingRules(agent.agentKey).length"><WakeRuleLine :rules="waitingRules(agent.agentKey)" /></small>
-                </span>
-                <span class="desktop-activity-row-meta">
-                  <span class="state-pill" :data-state="group.key">
-                    {{ group.key === "status_unavailable" ? "Status unavailable" : agent.overallLabel }}
-                  </span>
-                  <span v-if="agent.entry.homeHarness" class="desktop-activity-mini-pill" :title="homeHarnessBadge(agent.provider, agent.entry.homeHarness).title" data-testid="desktop-activity-own-setup">{{ homeHarnessBadge(agent.provider, agent.entry.homeHarness).label }}</span>
-                </span>
-              </button>
-              <button
-                v-if="canCorrect(agent)"
-                class="desktop-activity-row-action"
-                type="button"
-                :aria-label="`Correct ${agent.displayName}'s current turn`"
-                title="Interrupt this turn and redirect the agent in the same session. Room messages wait until the turn ends."
-                data-testid="desktop-activity-correct-agent"
-                @click="correctAgent(agent)"
-              >
-                Correct
-              </button>
-            </div>
-          </section>
-
-          <section v-if="legacyReachableAgents.length" class="desktop-activity-group">
-            <header>
-              <div>
-                <h3>Available now</h3>
-                <p>Agents available for new room messages.</p>
-              </div>
-              <strong>{{ legacyReachableAgents.length }}</strong>
-            </header>
-
-            <button
-              v-for="agent in legacyReachableAgents"
-              :key="agent.key"
-              class="desktop-activity-roster-item"
-              :data-selected="selectedLiveKey === agent.key"
-              :data-state="agent.activityState || 'offline'"
-              type="button"
-              @click="selectParticipantAgent(agent)"
-            >
-              <span class="desktop-activity-avatar" :data-state="agent.activityState || 'offline'">{{ initials(agent.label) }}</span>
-              <span>
-                <strong>{{ agent.label }}</strong>
-                <small v-if="waitingRules(agent.agentKey).length"><WakeRuleLine :rules="waitingRules(agent.agentKey)" /></small>
-                <small v-else>{{ agent.statusText || branchLabel(agent) || agent.workLabel || agent.runtime || "Ready for room messages" }}</small>
-              </span>
-              <span class="desktop-activity-row-meta">
-                <span class="state-pill" :data-state="agent.activityState || 'offline'">{{ connectionLabel(agent) }}</span>
-                <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
-              </span>
-            </button>
-          </section>
-
-          <section v-if="legacyWorkingAgents.length" class="desktop-activity-group">
-            <header>
-              <div>
-                <h3>Working</h3>
-                <p>Recent task, status, or progress updates from agents at work.</p>
-              </div>
-              <strong>{{ legacyWorkingAgents.length }}</strong>
-            </header>
-
-            <button
-              v-for="agent in legacyWorkingAgents"
-              :key="agent.key"
-              class="desktop-activity-roster-item"
-              :data-selected="selectedLiveKey === agent.key"
-              :data-state="agent.workState || 'working'"
-              type="button"
-              @click="selectParticipantAgent(agent)"
-            >
-              <span class="desktop-activity-avatar" :data-state="agent.workState || 'active'">
-                <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <path d="M4 8.2 6.5 11 12 5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              </span>
-              <span>
-                <strong>{{ agent.label }}</strong>
-                <small>{{ signalLabel(agent) }}<template v-if="agent.statusText"> · {{ agent.statusText }}</template></small>
-              </span>
-              <span class="desktop-activity-row-meta">
-                <span class="desktop-activity-mini-pill">work update</span>
-                <span v-if="agent.activeReasoning.length" class="desktop-activity-mini-pill">{{ agent.activeReasoning.length }} progress</span>
-                <small>{{ formatRelativeTime(agent.lastSeenAt) }}</small>
-              </span>
-            </button>
-          </section>
-        </div>
+    <AgentHistory v-if="activeView === 'history'" v-model:mode="archiveMode" v-model:tab="archiveTab" v-model:query="historyQuery" :people="historyPeople" :work="historyWork" @back="navigate('live', $event)">
+      <template #provider="{ person }"><ProviderBadge v-if="person.kind === 'agent'" :label="person.provider" /><span v-else>{{ person.name.slice(0,1) }}</span></template>
+      <template #status><p v-if="roomAgentWorkStatus === 'loading'" class="agents-note" role="status">Loading saved work…</p><p v-else-if="roomAgentWorkStatus === 'error'" class="agents-note" role="status">Saved work is temporarily unavailable. <button class="agents-quiet" type="button" @click="refreshActivity">Retry</button></p><p v-else-if="roomAgentWorkStatus === 'stale'" class="agents-note">Showing saved work while updates reconnect.</p></template>
+      <template #work-detail="{ record }"><template v-if="recordedWorkById.get(record.id)"><ContributionDescription :work="recordedWorkById.get(record.id)!" /><p v-if="recordedWorkEvidenceIncomplete(recordedWorkById.get(record.id)!)" class="agents-note">Some work details weren't recorded.</p><button class="agents-quiet" type="button" @click="emit('reveal-message', recordedWorkById.get(record.id)!.sourceMessageId)">View in room →</button></template></template>
+      <template #changes="{ query }">
+        <p v-if="artifactTaskFilterId" class="agents-filter-note">{{ artifactTimelineDescription }} <button class="agents-quiet" type="button" @click="emit('clear-artifact-task-filter')">Show all</button></p>
+        <AgentChanges :records="changeRecords" :query="query" :empty-text="artifactTaskFilterId ? 'No changes or pull requests are linked to this task yet.' : undefined">
+          <template #default="{ record }">
+            <template v-for="artifact in [artifactsById.get(record.id)!]" :key="artifact.identityKey">
+              <ChangeSummaryFilePanel v-if="artifact.kind === 'change_summary' && artifact.detail" :detail="artifact.detail" :expanded="isChangeExpanded(artifact)" :list-id="fileListId(artifact)" :label="record.title" :linked-pull-request="findLinkedPullRequest(artifact, roomArtifacts, changePrRepoScope)" @toggle="toggleChange(artifact)" />
+              <p v-else-if="!record.url && !record.branch && !record.tasks.length">No further details were shared.</p>
+            </template>
+          </template>
+        </AgentChanges>
       </template>
-    </div>
-
-    <div v-else class="desktop-activity-layout">
-      <div class="desktop-activity-groups">
-        <section
-          v-if="roomAgentWorkStatus !== 'unavailable' && (roomAgentWorkStatus !== 'idle' || roomAgentWork.length)"
-          class="desktop-activity-group"
-          data-testid="desktop-recorded-room-work"
-        >
-          <header>
-            <div>
-              <h3>Recorded work</h3>
-              <p>
-                Results saved from earlier work.
-                <template v-if="roomAgentWorkTruncated"> Showing the latest 50 records.</template>
-              </p>
-            </div>
-            <span class="desktop-activity-artifact-header-actions">
-              <span v-if="roomAgentWorkStatus === 'stale'" class="desktop-activity-mini-pill">Refresh pending</span>
-              <strong>{{ roomAgentWork.length }}</strong>
-            </span>
-          </header>
-
-          <button
-            v-for="work in roomAgentWork"
-            :key="`${work.attemptId}:${work.agentKey}`"
-            class="desktop-activity-roster-item"
-            data-state="recorded"
-            type="button"
-            @click="emit('reveal-message', work.sourceMessageId)"
-          >
-            <span class="desktop-activity-avatar" data-state="recorded">{{ initials(recordedAgentName(work.agentKey)) }}</span>
-            <span>
-              <strong>{{ recordedAgentName(work.agentKey) }}</strong>
-              <small>{{ recordedWorkDetail(work) }}</small>
-            </span>
-            <span class="desktop-activity-row-meta">
-              <span class="desktop-activity-mini-pill">{{ recordedWorkStateLabel(work) }}</span>
-              <span
-                v-if="recordedWorkEvidenceIncomplete(work)"
-                class="desktop-activity-mini-pill"
-              >
-                Some details missing
-              </span>
-              <small>{{ formatRelativeTime(work.updatedAt) }}</small>
-            </span>
-          </button>
-
-          <article v-if="!roomAgentWork.length" class="desktop-activity-empty">
-            <template v-if="roomAgentWorkStatus === 'loading'">Loading work history…</template>
-            <template v-else-if="roomAgentWorkStatus === 'error'">Work history is temporarily unavailable.</template>
-            <template v-else>No work results have been shared in this room yet.</template>
-          </article>
-        </section>
-
-        <section v-if="artifactTimeline.length || artifactTaskFilterId" class="desktop-activity-group">
-          <header>
-            <div>
-              <h3>{{ artifactTimelineTitle }}</h3>
-              <p>{{ artifactTimelineDescription }}</p>
-            </div>
-            <span class="desktop-activity-artifact-header-actions">
-              <button
-                v-if="artifactTaskFilterId"
-                type="button"
-                @click="emit('clear-artifact-task-filter')"
-              >
-                Show all
-              </button>
-              <strong>{{ artifactTimeline.length }}</strong>
-            </span>
-          </header>
-
-          <ol v-if="artifactTimeline.length" class="desktop-activity-artifact-timeline">
-            <li
-              v-for="item in artifactTimeline"
-              :key="item.artifact.identityKey"
-              class="desktop-activity-artifact-event"
-            >
-              <span class="desktop-activity-artifact-marker" :data-kind="item.artifact.kind" aria-hidden="true"></span>
-              <div class="desktop-activity-artifact-content">
-                <span class="desktop-activity-artifact-title-line">
-                  <span class="desktop-activity-mini-pill">{{ item.kindLabel }}</span>
-                  <a
-                    v-if="item.artifact.url"
-                    :href="item.artifact.url"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    {{ item.title }}
-                  </a>
-                  <strong v-else>{{ item.title }}</strong>
-                </span>
-                <small v-if="item.metaLabel">{{ item.metaLabel }}</small>
-                <small v-if="item.occurredAt">
-                  {{ item.wasUpdated ? "Updated" : "First seen" }} {{ formatRelativeTime(item.occurredAt) }}
-                  <template v-if="item.wasUpdated && item.firstSeenAt">
-                    · first seen {{ formatRelativeTime(item.firstSeenAt) }}
-                  </template>
-                </small>
-                <ChangeSummaryFilePanel
-                  v-if="item.artifact.kind === 'change_summary' && item.artifact.detail"
-                  :detail="item.artifact.detail"
-                  :expanded="isChangeExpanded(item.artifact)"
-                  :list-id="fileListId(item.artifact)"
-                  :label="item.title"
-                  :linked-pull-request="findLinkedPullRequest(item.artifact, roomArtifacts, changePrRepoScope)"
-                  @toggle="toggleChange(item.artifact)"
-                />
-              </div>
-              <span v-if="item.taskCountLabel" class="desktop-activity-row-meta">
-                <span class="desktop-activity-mini-pill">{{ item.taskCountLabel }}</span>
-              </span>
-            </li>
-          </ol>
-          <article v-else class="desktop-activity-empty">
-            No changes or pull requests are linked to this task yet.
-          </article>
-        </section>
-
-        <section class="desktop-activity-group">
-          <header>
-            <div>
-              <h3>Room history</h3>
-              <p>Participants ordered by latest activity in this room and related focus rooms.</p>
-            </div>
-            <strong>{{ recentActivity.length }}</strong>
-          </header>
-
-          <button
-            v-for="entry in recentActivity"
-            :key="entry.id"
-            class="desktop-activity-roster-item"
-            :data-selected="selectedHistoryEntry?.id === entry.id"
-            :data-state="entry.activityState || 'offline'"
-            type="button"
-            @click="selectedHistoryKey = entry.id"
-          >
-            <span class="desktop-activity-avatar" :data-state="entry.activityState || 'offline'">
-              {{ initials(entry.participantDisplayName) }}
-            </span>
-            <span>
-              <strong>{{ entry.participantDisplayName }}</strong>
-              <small>
-                {{ entry.room?.displayName || "This room" }} · {{ entry.participantKind }}
-                <template v-if="entry.repoBranch"> · branch {{ entry.repoBranch }}</template>
-              </small>
-            </span>
-            <span class="desktop-activity-row-meta">
-              <span class="desktop-activity-mini-pill">{{ entry.currentTasks.length }} open</span>
-              <small>{{ formatRelativeTime(entry.lastRoomActivityAt) }}</small>
-            </span>
-          </button>
-
-          <article v-if="!recentActivity.length" class="desktop-activity-empty">No room history has been recorded yet.</article>
-        </section>
-      </div>
-
-      <aside v-if="selectedHistoryEntry" class="desktop-activity-detail">
-        <div class="desktop-activity-detail-header">
-          <div>
-            <span>History detail</span>
-            <h3>{{ selectedHistoryEntry.participantDisplayName }}</h3>
-            <p>
-              {{ selectedHistoryEntry.room?.displayName || "This room" }}
-              · last active {{ formatRelativeTime(selectedHistoryEntry.lastRoomActivityAt) }}
-              <template v-if="selectedHistoryEntry.repoBranch">
-                · branch {{ selectedHistoryEntry.repoBranch }}
-              </template>
-            </p>
-          </div>
-          <span class="state-pill" :data-state="selectedHistoryEntry.activityState || 'offline'">
-            {{ selectedHistoryEntry.activityState || "history" }}
-          </span>
-        </div>
-
-        <div class="desktop-activity-detail-stats">
-          <article>
-            <strong>{{ selectedHistoryEntry.currentTasks.length }}</strong>
-            <span>Current</span>
-          </article>
-          <article>
-            <strong>{{ selectedHistoryEntry.completedTasks.length }}</strong>
-            <span>Completed</span>
-          </article>
-          <article>
-            <strong>{{ selectedHistoryEntry.createdTasks.length }}</strong>
-            <span>Created</span>
-          </article>
-          <article>
-            <strong>{{ formatRelativeTime(selectedHistoryEntry.firstSeenAt) }}</strong>
-            <span>First seen</span>
-          </article>
-        </div>
-
-        <section class="desktop-activity-detail-section">
-          <header>
-            <h4>Current work</h4>
-            <span>{{ selectedHistoryEntry.currentTasks.length }}</span>
-          </header>
-          <article v-for="task in selectedHistoryEntry.currentTasks" :key="task.id" class="desktop-activity-task">
-            <strong>{{ task.title }}</strong>
-            <a v-if="task.workflowRefs[0]" :href="task.workflowRefs[0].url" target="_blank" rel="noopener noreferrer">
-              {{ task.workflowRefs[0].label }}
-            </a>
-            <span v-else>{{ taskStatusLabel(task.status) }}</span>
-          </article>
-          <p v-if="!selectedHistoryEntry.currentTasks.length" class="desktop-activity-muted">No open tasks found in this room or its related rooms.</p>
-        </section>
-
-        <section class="desktop-activity-detail-section">
-          <header>
-            <h4>Recent completed work</h4>
-            <span>{{ selectedHistoryEntry.completedTasks.length }}</span>
-          </header>
-          <article v-for="task in selectedHistoryEntry.completedTasks" :key="task.id" class="desktop-activity-task">
-            <strong>{{ task.title }}</strong>
-            <span>{{ taskStatusLabel(task.status) }}</span>
-          </article>
-          <p v-if="!selectedHistoryEntry.completedTasks.length" class="desktop-activity-muted">No completed work tracked yet.</p>
-        </section>
-      </aside>
-    </div>
+      <template #footer><span>{{ roomAgentWorkTruncated ? 'Showing the latest 50 saved work records.' : 'Saved in this room' }}<template v-if="recentActivity.length >= 50"> · Latest 50 participants</template></span><button class="agents-quiet" type="button" @click="refreshActivity">Refresh history</button></template>
+    </AgentHistory>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, useId, watch } from "vue";
+import AgentRoster from "../../../../../../../shared/ui/agents/AgentRoster.vue";
+import AgentChanges from "../../../../../../../shared/ui/agents/AgentChanges.vue";
+import { agentChange } from "../../../../../../../shared/ui/agents/changes";
+import AgentHistory from "../../../../../../../shared/ui/agents/AgentHistory.vue";
+import { mergeHistoryWork, type AgentRosterRow, type AgentHistoryPerson } from "../../../../../../../shared/ui/agents/types";
+import { useAgentsNavigation } from "../../../../../../../shared/ui/agents/useAgentsNavigation";
+import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
+import { agentInspectorSignal, agentInspectorProviderLabel } from "../../../domain/agent-inspector-presentation";
+
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -385,8 +59,6 @@ import type {
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
 import {
-  agentInspectorActivityGroupState,
-  type AgentInspectorActivityGroupState,
   type AgentInspectorProjection,
 } from "../../../domain/agent-inspector";
 import { activityParticipantToAgentTarget, ownerAttribution } from "./room-activity/agentTarget";
@@ -396,12 +68,14 @@ import {
 } from "../../../domain/agent-inspector-identity";
 import { managedAgentRoomBranchMismatchLabel } from "../../../domain/managed-agents";
 import { homeHarnessBadge } from "../../../domain/agent-home-harness";
+import { permissionPendingBadge } from "../../../domain/agent-inspector-settings";
 import { isProjectedSupervisedActivityParticipant, supervisedActivityIdentity } from "../../../domain/room-agent-delivery";
 import {
   findLinkedPullRequest,
   retainExpandableChangeArtifacts,
-  roomArtifactTimelineItems,
 } from "../../../domain/room-artifacts";
+import ContributionDescription from "./room-chat/ContributionDescription.vue";
+import { readableContributionText } from "../../../../../../../shared/contribution-text.mjs";
 import ChangeSummaryFilePanel from "./room-activity/ChangeSummaryFilePanel.vue";
 import { useRoomActivityViewModel } from "./room-activity/useRoomActivityViewModel";
 import WakeRuleLine from "../../../../../../../shared/ui/WakeRuleLine.vue";
@@ -427,6 +101,7 @@ const props = defineProps<{
   workers: WorkerSnapshot[];
   supervisorEntries: DesktopSupervisorManifestEntry[];
   agentProjections: AgentInspectorProjection[];
+  agentRosterState?: "loading" | "refreshing" | "ready" | "error";
 }>();
 
 const emit = defineEmits<{
@@ -443,7 +118,8 @@ function recordedAgentName(agentKey: string): string {
   return props.supervisorEntries.find(entry => entry.agentKey === agentKey)?.displayName
     || props.presence.find(entry => entry.agentKey === agentKey)?.displayName
     || props.participants.find(entry => entry.agentKey === agentKey)?.displayName
-    || "Agent";
+    || props.recentActivity.find(entry => entry.participantAgentKey === agentKey)?.participantDisplayName
+    || agentKey.split("/").at(-1) || "Agent";
 }
 
 const expandedChangeArtifacts = ref<Set<string>>(new Set());
@@ -496,19 +172,12 @@ watch(
   },
 );
 
-const {
-  activeView,
-  selectedLiveKey,
-  selectedHistoryKey,
-  reachableAgents,
-  workingAgents,
-  selectedHistoryEntry,
-  initials,
-  connectionLabel,
-  formatRelativeTime,
-  signalLabel,
-  taskStatusLabel,
-} = useRoomActivityViewModel(props, { autoSelectLive: false });
+const { activeView, selectedLiveKey, reachableAgents, workingAgents } = useRoomActivityViewModel(props, { autoSelectLive: false });
+const surface = ref<HTMLElement>();
+const { navigate, pastButton } = useAgentsNavigation(activeView, surface);
+const archiveMode = ref<'past' | 'history'>('past');
+const historyQuery = ref('');
+const archiveTab = ref<'Work' | 'Changes' | 'People'>('Work');
 
 const wakeRules = injectRoomWakeRules();
 const NO_RULES: never[] = [];
@@ -517,7 +186,6 @@ function waitingRules(agentKey: string | null | undefined) {
   return (agentKey && wakeRules?.activeByAgentKey.value.get(agentKey)) || NO_RULES;
 }
 
-const selectedTruthfulId = ref<string | null>(null);
 const inspectorTruthfulAgents = computed(() =>
   props.agentProjections.filter((agent) => agent.overallState !== "retired"),
 );
@@ -531,47 +199,53 @@ const isProjectedSupervisedAgent = (agent: Parameters<typeof isProjectedSupervis
 );
 const legacyReachableAgents = computed(() => reachableAgents.value.filter((agent) => !isProjectedSupervisedAgent(agent)));
 const legacyWorkingAgents = computed(() => workingAgents.value.filter((agent) => !isProjectedSupervisedAgent(agent)));
-const hasLiveActivity = computed(() => Boolean(
-  inspectorTruthfulAgents.value.length
-    || legacyReachableAgents.value.length
-    || legacyWorkingAgents.value.length,
-));
-const inspectorTruthfulGroups = computed(() => {
-  const groups: Array<{
-    key: AgentInspectorActivityGroupState;
-    label: string;
-    description: string | null;
-    agents: AgentInspectorProjection[];
-  }> = [
-    { key: "online", label: "Online", description: null, agents: [] as AgentInspectorProjection[] },
-    { key: "responding", label: "Responding", description: "A bounded room turn is in progress.", agents: [] as AgentInspectorProjection[] },
-    { key: "restoring_conversation", label: "Restoring conversation", description: "Recovering a missing private conversation without restarting the provider.", agents: [] as AgentInspectorProjection[] },
-    { key: "recovering", label: "Recovering agent", description: "Restoring room access for the running provider.", agents: [] as AgentInspectorProjection[] },
-    { key: "reconnecting", label: "Reconnecting", description: "Restoring the room observation path.", agents: [] as AgentInspectorProjection[] },
-    { key: "needs_attention", label: "Needs attention", description: "A runtime or delivery step needs your input.", agents: [] as AgentInspectorProjection[] },
-    { key: "starting", label: "Starting", description: "Preparing the provider and room observation path.", agents: [] as AgentInspectorProjection[] },
-    { key: "paused", label: "Paused", description: "Room work is held until the agent resumes.", agents: [] as AgentInspectorProjection[] },
-    { key: "disconnected", label: "Disconnected", description: "The provider is not currently reachable.", agents: [] as AgentInspectorProjection[] },
-    { key: "status_unavailable", label: "Status unavailable", description: "Reconnecting to this agent…", agents: [] as AgentInspectorProjection[] },
-  ];
-  for (const agent of inspectorTruthfulAgents.value) {
-    const groupState = agentInspectorActivityGroupState(agent);
-    const group = groups.find((candidate) => candidate.key === groupState);
-    if (group) group.agents.push(agent);
-  }
-  return groups;
-});
-const selectedInspectorAgent = computed(() => inspectorTruthfulAgents.value.find((agent) => agent.entryId === selectedTruthfulId.value) || null);
-watch(inspectorTruthfulAgents, (agents) => {
-  if (selectedTruthfulId.value && !agents.some((agent) => agent.entryId === selectedTruthfulId.value)) {
-    selectedTruthfulId.value = null;
-  }
-});
+const nativeById = computed(() => new Map(inspectorTruthfulAgents.value.map(agent => [agent.entryId, agent])));
+const legacyAgents = computed(() => [...legacyReachableAgents.value, ...legacyWorkingAgents.value]);
+const rosterRows = computed<AgentRosterRow[]>(() => [
+  ...inspectorTruthfulAgents.value.map(agent => {
+    const signal = agentInspectorSignal(agent);
+    return { id: agent.entryId, name: agent.displayName, provider: agentInspectorProviderLabel(agent.provider), model: agent.model, owner: nativeOwner(agent), state: signal.label, detail: signal.detail, tone: signal.tone, working: ['responding', 'publishing', 'compacting'].includes(signal.state), attention: signal.state === 'needs_attention', moving: signal.moving };
+  }),
+  ...legacyAgents.value.map(agent => {
+    const stale = agent.freshness === 'stale';
+    const reachable = !stale && (agent.activityState === 'active' || agent.activityState === 'away');
+    const working = reachable && (agent.status === 'working' || agent.status === 'reviewing');
+    const attention = reachable && agent.status === 'blocked';
+    return { id: agent.key, name: agent.label, provider: agent.ideLabel || agent.runtime || 'Agent', owner: agent.ownerLabel || '', state: stale ? 'Updates delayed' : attention ? 'Needs attention' : working ? 'Working' : reachable ? 'Online' : 'Offline', detail: stale ? 'Waiting for a fresh update from the host.' : agent.statusText || branchLabel(agent) || (reachable ? 'Ready for room work.' : 'Last shared update'), tone: stale || attention ? 'amber' as const : working ? 'blue' as const : reachable ? 'green' as const : 'neutral' as const, working, attention, moving: working };
+  }),
+]);
+function rosterAgentKey(id: string) { return nativeById.value.get(id)?.agentKey || legacyAgents.value.find(agent => agent.key === id)?.agentKey; }
+function selectRosterAgent(id: string) {
+  const native = nativeById.value.get(id);
+  if (native) selectInspectorAgent(native);
+  else { const legacy = legacyAgents.value.find(agent => agent.key === id); if (legacy) selectParticipantAgent(legacy); }
+}
+const historyPeople = computed<AgentHistoryPerson[]>(() => props.recentActivity.map(entry => ({
+  id: entry.id, name: entry.participantDisplayName, kind: entry.participantKind, provider: entry.participantIdeLabel || 'Agent', owner: entry.participantOwnerLabel || '', room: entry.room?.displayName || 'This room', branch: entry.repoBranch, firstSeen: entry.firstSeenAt, lastSeen: entry.lastRoomActivityAt,
+  past: entry.activityState !== 'active' && entry.activityState !== 'away',
+})));
+const recordedWorkById = computed(() => new Map(props.roomAgentWork.map(work => [`record:${work.attemptId}:${work.agentKey}`, work])));
+const historyWork = computed(() => mergeHistoryWork([
+  ...props.recentActivity.flatMap(entry => [...entry.currentTasks, ...entry.completedTasks, ...entry.createdTasks].map(task => ({ id: `task:${task.id}`, title: task.title, people: [entry.id], byline: entry.participantDisplayName, state: task.status.replaceAll('_', ' '), time: task.updatedAt, links: task.workflowRefs }))),
+  ...props.roomAgentWork.map(work => {
+    const actor = props.presence.find(agent => agent.agentKey === work.agentKey)?.actorLabel || props.participants.find(agent => agent.agentKey === work.agentKey)?.actorLabel;
+    return { id: `record:${work.attemptId}:${work.agentKey}`, title: recordedWorkTitle(work), people: props.recentActivity.filter(entry => entry.participantAgentKey === work.agentKey || (Boolean(actor) && entry.participantActorLabel === actor)).map(entry => entry.id), byline: recordedAgentName(work.agentKey), state: recordedWorkStateLabel(work), time: work.updatedAt, detail: recordedWorkDetail(work), links: [] };
+  }),
+]));
+// createdBy identifies the launcher (often "desktop"), not necessarily the owner.
+// Use the same room identity as People, keyed by durable agent identity, never name.
+function nativeOwner(agent: AgentInspectorProjection): string {
+  const key = agent.agentKey;
+  if (!key) return '';
+  return props.participants.find(person => person.kind === 'agent' && person.agentKey === key && person.ownerLabel)?.ownerLabel
+    || props.presence.find(person => person.agentKey === key && person.ownerLabel)?.ownerLabel
+    || props.recentActivity.find(person => person.participantKind === 'agent' && person.participantAgentKey === key && person.participantOwnerLabel)?.participantOwnerLabel
+    || '';
+}
 function selectInspectorAgent(agent: AgentInspectorProjection): void {
   selectedLiveKey.value = null;
-  selectedTruthfulId.value = agent.entryId;
   emit("open-agent-detail", supervisedAgentInspectorRequest(agent.entry, {
-    ownerAttribution: ownerAttribution(agent.entry.createdBy),
+    ownerAttribution: ownerAttribution(nativeOwner(agent)),
   }));
 }
 
@@ -582,27 +256,26 @@ function canCorrect(agent: AgentInspectorProjection): boolean {
 
 function correctAgent(agent: AgentInspectorProjection): void {
   selectedLiveKey.value = null;
-  selectedTruthfulId.value = agent.entryId;
   emit("open-agent-correction", agent.entryId);
 }
 
 function selectParticipantAgent(agent: Parameters<typeof activityParticipantToAgentTarget>[0]): void {
-  selectedTruthfulId.value = null;
   selectedLiveKey.value = agent.key;
   emit("open-agent-detail", participantAgentInspectorRequest(activityParticipantToAgentTarget(agent)));
 }
-const artifactTimeline = computed(() =>
-  roomArtifactTimelineItems(props.roomArtifacts, {
-    taskId: props.artifactTaskFilterId,
-  })
-);
+const artifactsById = computed(() => new Map(props.roomArtifacts.map(artifact => [artifact.identityKey, artifact])));
+const changeRecords = computed(() => props.roomArtifacts
+  .filter(artifact => !props.artifactTaskFilterId || artifact.linkedTaskIds.includes(props.artifactTaskFilterId))
+  .map(artifact => agentChange({
+    id: artifact.identityKey, kind: artifact.kind, provider: artifact.provider,
+    title: artifact.title, number: artifact.artifactNumber, state: artifact.state,
+    time: artifact.updatedAt || artifact.firstSeenAt, url: artifact.url, branch: artifact.ref,
+    tasks: artifact.linkedTaskIds.map(id => props.tasks.find(task => task.id === id)?.title || id),
+  })));
 const artifactFilterTask = computed(() =>
   props.artifactTaskFilterId
     ? props.tasks.find((task) => task.id === props.artifactTaskFilterId) || null
     : null
-);
-const artifactTimelineTitle = computed(() =>
-  props.artifactTaskFilterId ? "Task artifact timeline" : "Artifact timeline"
 );
 const artifactTimelineDescription = computed(() => {
   if (!props.artifactTaskFilterId) {
@@ -615,11 +288,16 @@ const artifactTimelineDescription = computed(() => {
 });
 
 watch(() => props.activityHistoryRequest, (request) => {
-  if (request > 0) activeView.value = "history";
+  if (request > 0) { archiveMode.value = "history"; archiveTab.value = "Changes"; activeView.value = "history"; }
 }, { immediate: true });
 
 function refreshActivity(): void {
   emit("refresh-room");
+}
+
+function recordedWorkTitle(work: DesktopRoomAgentWork): string {
+  const summary = readableContributionText('contribution' in work.summary ? work.summary.contribution?.summary : null);
+  return summary?.split('\n').find(line => line.trim())?.replace(/^#{1,6}\s*/, '').slice(0, 120) || 'Room work';
 }
 
 function recordedWorkEvidenceIncomplete(work: DesktopRoomAgentWork): boolean {
@@ -665,3 +343,10 @@ function roomBranchMismatchLabel(participant: { repoBranch: string | null }): st
 
 onMounted(refreshActivity);
 </script>
+
+<style scoped>
+.room-agents-page { display: block; padding: 28px 32px; overflow-y: auto; min-height: 0; }
+.agents-correct { display: flex; margin: -10px 32px 10px auto; }
+.agents-ui :deep(.desktop-activity-mini-pill) { padding: 0; background: none; min-height: 20px; margin-right: 10px; font-size: 10px; font-weight: 400; color: var(--text-tertiary); }
+@media(max-width:640px) { .room-agents-page { padding: 22px 16px; } }
+</style>

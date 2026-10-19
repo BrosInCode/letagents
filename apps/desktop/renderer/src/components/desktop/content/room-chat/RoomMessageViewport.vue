@@ -1,6 +1,7 @@
 <template>
   <div class="room-message-viewport" data-testid="room-chat-viewport">
-    <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @scroll="handleScroll" @scrollend="finishMessageReveal">
+    <div class="room-message-scroll">
+    <div ref="messagesElement" class="room-message-list" data-testid="room-chat-list" @wheel.passive="cancelInitialRestore" @touchstart.passive="cancelInitialRestore" @pointerdown="cancelInitialRestore" @keydown="cancelInitialRestore" @scroll="handleScroll" @scrollend="finishMessageReveal">
       <p v-if="olderMessagesError" role="status" class="room-load-older-error">{{ olderMessagesError }}</p>
       <button
         v-if="(threadMessages.length || hasFilteredRoomActivity) && hasOlderMessages"
@@ -13,7 +14,7 @@
         {{ loadingOlderMessages ? "Loading earlier messages..." : olderMessagesError ? "Retry loading earlier messages" : "Load earlier messages" }}
       </button>
 
-      <template v-for="entry in timelineEntries" :key="entry.type === 'message' ? entry.message.clientMessageId || entry.id : entry.id">
+      <template v-for="entry in timelineEntries" :key="`${messageNamespace}:${entry.type === 'message' ? entry.message.clientMessageId || entry.id : entry.id}`">
         <div
           v-if="entry.type === 'date'"
           class="room-date-separator"
@@ -24,27 +25,29 @@
         </div>
 
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
-        <template v-else>
-        <div v-if="entry.message.id === unreadTimeline.dividerId.value" class="room-explicit-unread" role="separator">New messages</div>
+        <RoomGitHubUpdates v-else :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
+        <template #default="{ message, history }">
+        <div v-if="message.id === unreadTimeline.dividerId.value" class="room-explicit-unread" role="separator">New messages</div>
         <DesktopChatMessage
-          :message="entry.message"
-          :compact-with-previous="entry.compactWithPrevious"
-          :thread-summary="threadIndicatorSummary(entry.message)"
-          :active-thread-root="entry.message.id === activeThreadParentId"
+          :message="message"
+          :github-history="history"
+          :compact-with-previous="entry.type === 'message' && entry.compactWithPrevious"
+          :thread-summary="threadIndicatorSummary(message)"
+          :active-thread-root="message.id === activeThreadParentId"
           :highlight-query="searchQuery"
           :room-identifier="roomIdentifier"
           :message-reference-ids="messageReferenceIds"
           :task-reference-ids="taskReferenceIds"
-          :search-active="entry.message.id === activeSearchMessageId"
-          :animate-arrival="arrivingMessageIds.has(entry.message.id)"
-          :delivery-receipts="deliveryReceiptsByMessage[entry.message.id] || []"
+          :search-active="message.id === activeSearchMessageId"
+          :animate-arrival="arrivingMessageIds.has(message.id)"
+          :delivery-receipts="deliveryReceiptsByMessage[message.id] || []"
           :delivery-recovery-available="deliveryRecoveryAvailable"
           :continuation-repair-available="continuationRepairAvailable"
           :room-delivery-skip-available="roomDeliverySkipAvailable"
           :delivery-retry-keys="deliveryRetryKeys"
           :continuation-repair-keys="continuationRepairKeys"
           :room-delivery-skip-keys="roomDeliverySkipKeys"
-          :provider-label="resolveProviderLabel(entry.message)"
+          :provider-label="resolveProviderLabel(message)"
           @quote-reply="$emit('quote-reply', $event)"
           @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
@@ -57,48 +60,14 @@
           @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
           @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
           @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
-        />
+        >
+          <template v-if="message.id === activeThreadParentId" #thread>
+            <slot name="thread" />
+          </template>
+        </DesktopChatMessage>
         </template>
+        </RoomGitHubUpdates>
       </template>
-
-      <div
-        v-if="displayedAgentWork.length && !roomLoading"
-        class="room-local-agent-work-list"
-        data-testid="room-local-agent-work-list"
-      >
-        <button
-          v-for="work in collapsedAgentWork.visible"
-          :key="work.id"
-          data-motion-work
-          :data-motion-session="work.agentSessionId"
-          :data-motion-agent="work.agentKey"
-          :data-motion-after="work.sourceMessageId"
-          type="button"
-          class="room-local-agent-work"
-          :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"
-          data-testid="room-local-agent-work"
-          @click="$emit('open-agent', workIndicatorAgentTarget(work))"
-        >
-          <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
-          <span class="room-local-agent-work-copy">
-            <strong>{{ work.displayName }}</strong>
-            <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
-          </span>
-          <span class="room-local-agent-work-dots" aria-hidden="true">
-            <i></i>
-            <i></i>
-            <i></i>
-          </span>
-        </button>
-        <p
-          v-if="collapsedAgentWork.hiddenCount > 0"
-          class="room-local-agent-work-overflow"
-          data-testid="room-local-agent-work-overflow"
-          aria-live="polite"
-        >
-          +{{ collapsedAgentWork.hiddenCount }} more {{ collapsedAgentWork.hiddenCount === 1 ? "agent" : "agents" }} working
-        </p>
-      </div>
 
       <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
         <div
@@ -151,12 +120,97 @@
     >
       {{ unreadCount > 0 ? `↓ ${unreadCount} new message${unreadCount === 1 ? "" : "s"}` : "↓ Scroll to latest" }}
     </button>
+    </div>
+    <!-- Live strip: who is working or typing right now. It sits outside the
+         scrolling list so it stays in view while the reader is in older history. -->
+    <div ref="liveStripElement" class="room-live-strip" data-testid="room-live-strip">
+      <div
+        v-if="displayedAgentWork.length && !roomLoading"
+        class="room-local-agent-work-list"
+        data-testid="room-local-agent-work-list"
+      >
+        <div v-for="work in collapsedAgentWork.visible" :key="work.id" class="room-local-agent-work-group">
+          <!-- Another member's agent, known from room presence only: a label, since this desktop has no live stream to open. -->
+          <div
+            v-if="work.remote"
+            data-motion-work=""
+            :data-motion-session="work.agentSessionId"
+            :data-motion-agent="work.agentKey"
+            data-remote="true"
+            role="group"
+            class="room-local-agent-work"
+            :aria-label="`${work.displayName} is working: ${work.summary}`"
+            data-testid="room-local-agent-work"
+          >
+            <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+            <span class="room-local-agent-work-copy" aria-hidden="true">
+              <strong>{{ work.displayName }}</strong>
+              <span>·</span>
+              <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
+            </span>
+            <span class="room-local-agent-work-dots" aria-hidden="true">
+              <i></i>
+              <i></i>
+              <i></i>
+            </span>
+          </div>
+          <button
+            v-else
+            :data-motion-work="work.awaitingRoomTurn ? undefined : ''"
+            :data-motion-session="work.agentSessionId"
+            :data-motion-agent="work.agentKey"
+            :data-motion-after="work.sourceMessageId"
+            :data-waiting="work.waiting || undefined"
+            type="button"
+            class="room-local-agent-work"
+            :aria-label="`${work.displayName}: ${work.summary}. Open live activity`"
+            data-testid="room-local-agent-work"
+            @click="$emit('open-agent', workIndicatorAgentTarget(work))"
+          >
+            <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+            <span class="room-local-agent-work-copy">
+              <strong>{{ work.displayName }}</strong>
+              <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
+            </span>
+            <span class="room-local-agent-work-dots" aria-hidden="true">
+              <i></i>
+              <i></i>
+              <i></i>
+            </span>
+          </button>
+          <button
+            v-if="work.waitsForBackgroundWork"
+            type="button"
+            class="room-local-agent-work-action"
+            title="Post the answer that the agent has now. A command in the background keeps running. A sub-agent that still runs is stopped. No later result is posted."
+            data-testid="room-local-agent-work-post-now"
+            @click="$emit('post-agent-answer-now', work.id, work.sourceMessageId ?? null)"
+          >
+            Post answer now
+          </button>
+        </div>
+        <p
+          v-if="collapsedAgentWork.hiddenCount > 0"
+          class="room-local-agent-work-overflow"
+          data-testid="room-local-agent-work-overflow"
+          aria-live="polite"
+        >
+          {{ workIndicatorOverflowLabel(collapsedAgentWork) }}
+        </p>
+      </div>
+      <TypingIndicator :key="roomIdentifier ?? ''" :names="roomLoading ? [] : typingNames ?? []" :color-for="typingColor" />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
+import type { ChatScrollPosition } from "../../../../domain/chat-scroll";
+import RoomGitHubUpdates from "../../../../../../../../shared/ui/RoomGitHubUpdates.vue";
+import { createGitHubTimeline } from "../../../../../../../../shared/grouped-github-updates";
+import { parseGitHubEvent } from "../desktop-chat-message/github-event";
 import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import { provide } from "vue";
+import TypingIndicator from "../../../../../../../../shared/ui/TypingIndicator.vue";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, watch } from "vue";
@@ -175,6 +229,7 @@ import {
   WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
   coalesceWorkIndicatorEchoes,
   collapseWorkIndicators,
+  workIndicatorOverflowLabel,
   workIndicatorSupersededByAgentMessage,
   type ManagedAgentWorkIndicator,
   type WorkIndicatorEchoState,
@@ -182,14 +237,14 @@ import {
 import { workIndicatorAgentTarget } from "../../../../domain/agent-inspector-identity";
 import RoomContribution from "./RoomContribution.vue";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
-import { parseSenderIdentity } from "../desktop-chat-message/identity";
+import { getSenderColor, parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
 import { createMessageProviderLabelResolver } from "../../../../domain/agent-provider";
 import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
-import { buildMessageTimelineEntries } from "./timeline";
+import { buildMessageTimelineEntries, type MessageTimelineEntry } from "./timeline";
 
 interface ThreadActivityNotice {
   parentId: string;
@@ -211,6 +266,7 @@ const props = defineProps<{
   active: boolean;
   activeSearchMessageId: string | null;
   activeThreadParentId: string | null;
+  readingThreadParentId?: string | null;
   hasOlderMessages: boolean;
   loadingOlderMessages: boolean;
   olderMessagesError?: string | null;
@@ -218,6 +274,8 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  /** People typing in this room now; shown as the last row of the live strip. */
+  typingNames?: readonly string[];
   participants?: DesktopParticipantSummary[];
   presence?: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
@@ -234,7 +292,7 @@ const props = defineProps<{
   roomLoading: boolean;
   searchQuery: string;
   taskReferenceIds: ReadonlySet<string>;
-  initialScrollTop?: number | null;
+  initialScrollPosition?: ChatScrollPosition | null;
 }>();
 
 const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
@@ -242,8 +300,10 @@ const emit = defineEmits<{
   "load-older": [];
   "open-workspace": [work: DesktopRoomAgentWork];
   "open-agent": [target: AgentModalTarget];
+  "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
+  "reveal-thread": [messageId: string];
   "quote-reply": [messageId: string];
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   "retry-delivery": [agentId: string, sourceMessageId: string];
@@ -251,7 +311,7 @@ const emit = defineEmits<{
   "skip-delivery": [agentId: string, sourceMessageId: string];
   "reveal-message": [messageId: string];
   "quote-selection": [messageId: string, text: string];
-  "scroll-position": [scrollTop: number];
+  "scroll-position": [position: ChatScrollPosition];
   "open-github-event": [url: string];
   "open-task": [taskId: string];
 }>();
@@ -275,6 +335,8 @@ const emptyStateDescription = computed(() => {
 });
 
 const messagesElement = ref<HTMLElement | null>(null);
+const liveStripElement = ref<HTMLElement | null>(null);
+const typingColor = (name: string) => getSenderColor(name, null);
 const unreadRoom = computed(() => props.roomIdentifier);
 provide(unreadMenuKey, { client: roomUnread, room: unreadRoom });
 const revealUnreadMessage = inject(unreadRevealKey, null);
@@ -313,6 +375,8 @@ function followLatestAfterLayout(): void {
     if (revision === scrollRevision && props.active && messagesElement.value?.scrollTop === top) jumpToBottom();
   });
 }
+let restoreRequestPending = false;
+let restorePagesRequested = 0;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
 let shouldJumpToLatestOnActivate = false;
@@ -328,8 +392,8 @@ onUpdated(() => { anchorElements = null; });
 
 function getAnchorElements(): HTMLElement[] {
   if (!anchorElements) {
-    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []);
-    anchorElementsById = new Map(anchorElements.map(element => [element.dataset.messageId!, element]));
+    anchorElements = Array.from(messagesElement.value?.querySelectorAll<HTMLElement>(".room-message-list > [data-message-id], .room-message-list > [data-scroll-anchor-id]") ?? []);
+    anchorElementsById = new Map(anchorElements.map(element => [(element.dataset.messageId || element.dataset.scrollAnchorId)!, element]));
   }
   return anchorElements;
 }
@@ -344,7 +408,9 @@ const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages
 const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
   props.participants, props.presence, props.supervisorEntries,
 ));
-const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages, props.roomAgentWork));
+const buildGroupedTimeline = createGitHubTimeline<MessageTimelineEntry, DesktopRoomMessage>();
+const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork),
+  entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
 const messageReferenceIds = computed(() =>
   new Set(props.messages.map((message) => message.id))
 );
@@ -388,6 +454,7 @@ watch(
       }
       return;
     }
+    if (shouldRestoreInitialScroll && restoreInitialScrollPosition()) return;
     if (isPrepend && messagesElement.value) {
       if (!restoreScrollAnchor(prependAnchor)) {
         setInstantScrollTop(
@@ -431,10 +498,12 @@ const motionMessages = () => props.messages.map(toMotionMessage);
 
 const messageMotion = useRoomMessageMotion({
   element: messagesElement,
+  work: liveStripElement,
   scope: () => props.messageNamespace,
   // Loading older history must not disable navigation for a new own send.
   // The motion watcher independently excludes prepended/historical messages.
   ready: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll,
+  onOwnSend: () => { if (props.active && !props.roomLoading) cancelInitialRestore(); },
   following: () => isScrolledToBottom,
   scrollToLatest: () => scrollToBottom("auto"),
   messages: motionMessages,
@@ -473,7 +542,7 @@ const currentLocalAgentWork = computed(() => {
 const workHandoff = useRoomWorkHandoff({
   work: () => currentLocalAgentWork.value,
   identity: work => ({ session: work.agentSessionId, key: work.agentKey }),
-  after: work => work.sourceMessageId,
+  after: work => work.awaitingRoomTurn ? null : work.sourceMessageId,
   // A thread reply retires its source work just like a main-timeline reply.
   // Keep the animation watcher above restricted to rows rendered in this list.
   messages: () => [...props.messages, ...props.threadMessages].sort(compareRoomMessages).map(toMotionMessage),
@@ -505,7 +574,7 @@ watch(
   { immediate: true, deep: true },
 );
 
-const collapsedAgentWork = computed(() => collapseWorkIndicators(displayedAgentWork.value));
+const collapsedAgentWork = computed(() => collapseWorkIndicators(displayedAgentWork.value, 0));
 
 watch(
   // Key off the rate-limited displayed set (not raw props) so scroll effects
@@ -553,14 +622,14 @@ watch(
     );
     const latestReply = newestMessage(newThreadReplies);
     const parentId = latestReply ? threadParentId(latestReply) : null;
-    if (!latestReply || !parentId || parentId === props.activeThreadParentId) return;
+    if (!latestReply || !parentId || parentId === props.readingThreadParentId) return;
 
     threadActivityNotice.value = buildThreadActivityNotice(latestReply, parentId);
   },
 );
 
 watch(
-  () => props.activeThreadParentId,
+  () => props.readingThreadParentId,
   (parentId) => {
     if (parentId && threadActivityNotice.value?.parentId === parentId) {
       threadActivityNotice.value = null;
@@ -629,13 +698,15 @@ watch(
     isScrolledFarUp.value = false;
     isScrolledToBottom = false;
     hasAppliedInitialScroll = false;
+    restorePagesRequested = 0;
+    restoreRequestPending = false;
     shouldRestoreInitialScroll = hasInitialScrollPosition();
     shouldJumpToLatestOnActivate = false;
     shouldRestoreKeepAliveScroll = false;
     autoViewportBackfillCount.value = 0;
     cancelAutoFillViewport();
     void nextTick(() => {
-      if (!restoreInitialScrollPosition()) {
+      if (!hasAppliedInitialScroll && !restoreInitialScrollPosition()) {
         scrollToBottom("auto");
       }
     });
@@ -643,12 +714,18 @@ watch(
 );
 
 watch(
-  () => props.initialScrollTop,
+  () => props.initialScrollPosition,
   () => {
     if (hasAppliedInitialScroll) return;
     shouldRestoreInitialScroll = hasInitialScrollPosition();
   },
 );
+
+watch(() => props.loadingOlderMessages, (loading, previous) => {
+  if (previous && !loading) restoreRequestPending = false;
+}, { flush: "sync" });
+watch(() => [props.roomLoading, props.loadingOlderMessages, props.olderMessagesError, props.messages.length],
+  () => { if (shouldRestoreInitialScroll) void nextTick(restoreInitialScrollPosition); }, { flush: "post" });
 
 // Reactions or previews appearing under a message make the list taller without a
 // new message. A reader at the newest message stays there.
@@ -675,8 +752,9 @@ function keepLatestInViewOnResize(): void {
 
 onMounted(() => {
   void nextTick(() => {
-    if (!restoreInitialScrollPosition()) {
-      updateScrollState();
+    if (!hasAppliedInitialScroll && !restoreInitialScrollPosition()) {
+      if (props.messages.length && !props.roomLoading) scrollToBottom("auto");
+      else updateScrollState();
     }
     scheduleAutoFillViewport();
   });
@@ -801,7 +879,7 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   unreadTimeline.programmaticScroll();
   if (!messagesElement.value) return;
   // Choosing latest settles initial navigation too. The parent feeds our live
-  // scroll reports back as initialScrollTop; they must not re-arm restoration.
+  // scroll reports back as initialScrollPosition; they must not re-arm restoration.
   hasAppliedInitialScroll = true;
   shouldRestoreInitialScroll = false;
   cancelMessageReveal();
@@ -834,7 +912,14 @@ function jumpToBottom(): void {
   emitScrollPosition();
 }
 
+function cancelInitialRestore(): void {
+  if (!shouldRestoreInitialScroll) return;
+  shouldRestoreInitialScroll = false;
+  hasAppliedInitialScroll = true;
+}
+
 function handleScroll(): void {
+  if (shouldRestoreInitialScroll) return;
   scrollRevision++;
   cancelMessageRevealFrame();
   if (messagesElement.value?.scrollTop !== layoutRestoredScrollTop) cancelLayoutAnchorRestore();
@@ -895,42 +980,47 @@ function updateScrollState(): void {
 
 function restoreInitialScrollPosition(): boolean {
   if (hasAppliedInitialScroll || !shouldRestoreInitialScroll || !messagesElement.value) return false;
-  const scrollTop = props.initialScrollTop;
-  if (typeof scrollTop !== "number" || !Number.isFinite(scrollTop)) return false;
-  if (!props.messages.length) return false;
+  const position = props.initialScrollPosition;
+  if (position === null || position === undefined) return false;
   const element = messagesElement.value;
-  const maxScrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
-  if (scrollTop > maxScrollTop + 24) {
-    hasAppliedInitialScroll = true;
-    shouldRestoreInitialScroll = false;
-    return false;
+  // Loading/hidden viewports must not consume the saved position or publish 0.
+  if (props.roomLoading || !props.messages.length || !isMeasurableScrollViewport(element)) return true;
+  const bookmark = position;
+  if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
+    && props.hasOlderMessages && !props.olderMessagesError && restorePagesRequested < 20) {
+    if (!props.loadingOlderMessages && !restoreRequestPending) {
+      restoreRequestPending = true; restorePagesRequested++; emit("load-older");
+    }
+    return true;
   }
-  setInstantScrollTop(element, Math.max(0, Math.min(scrollTop, maxScrollTop)));
   hasAppliedInitialScroll = true;
   shouldRestoreInitialScroll = false;
+  if (bookmark.latest) { jumpToBottom(); return true; }
+  if (bookmark.anchor && restoreScrollAnchor(bookmark.anchor)) return true;
+  const max = Math.max(0, element.scrollHeight - element.clientHeight);
+  // A remembered offset can exceed a fresh bounded page; never strand at top.
+  setInstantScrollTop(element, Math.max(0, Math.min(bookmark.top, max)));
   updateScrollState();
   emitScrollPosition();
   return true;
 }
 
 function hasInitialScrollPosition(): boolean {
-  const scrollTop = props.initialScrollTop;
-  return typeof scrollTop === "number" && Number.isFinite(scrollTop);
+  const position = props.initialScrollPosition;
+  return Boolean(position);
 }
 
 function emitScrollPosition(): void {
   const element = messagesElement.value;
-  if (!element) return;
+  if (!element || !isMeasurableScrollViewport(element) || props.roomLoading || shouldRestoreInitialScroll) return;
   lastKnownScrollTop = element.scrollTop;
-  if (props.active && element.isConnected && element.clientHeight > 0) {
-    lastKnownScrollAnchor = captureScrollAnchor();
-  }
-  emit("scroll-position", element.scrollTop);
+  lastKnownScrollAnchor = captureScrollAnchor();
+  emit("scroll-position", { top: element.scrollTop, latest: isScrolledToBottom, anchor: lastKnownScrollAnchor });
 }
 
 function rememberScrollAnchor(): void {
   const element = messagesElement.value;
-  if (!element) return;
+  if (!element || !isMeasurableScrollViewport(element)) return;
   const nextAnchor = captureScrollAnchor();
   if (nextAnchor) {
     lastKnownScrollAnchor = nextAnchor;
@@ -1010,7 +1100,7 @@ function captureScrollAnchor(): ScrollAnchor | null {
     else low = middle + 1;
   }
   const anchorElement = messageElements[low];
-  const messageId = anchorElement?.dataset.messageId;
+  const messageId = anchorElement?.dataset.messageId || anchorElement?.dataset.scrollAnchorId;
   if (!anchorElement || !messageId) return null;
   return {
     messageId,
@@ -1018,11 +1108,18 @@ function captureScrollAnchor(): ScrollAnchor | null {
   };
 }
 
+function findScrollAnchor(messageId: string): HTMLElement | null {
+  getAnchorElements();
+  // Prepending a page can place this original inside a group whose stable anchor
+  // belongs to the newer page. Restore the containing group, not its hidden row.
+  return anchorElementsById.get(messageId)
+    || messagesElement.value?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(messageId)}"]`)?.closest<HTMLElement>('.room-github-updates') || null;
+}
+
 function restoreScrollAnchor(anchor: ScrollAnchor | null): boolean {
   const element = messagesElement.value;
   if (!element || !anchor || !isMeasurableScrollViewport(element)) return false;
-  getAnchorElements();
-  const anchorElement = anchorElementsById.get(anchor.messageId);
+  const anchorElement = findScrollAnchor(anchor.messageId);
   if (!anchorElement) return false;
   const viewportTop = element.getBoundingClientRect().top;
   const nextOffsetTop = anchorElement.getBoundingClientRect().top - viewportTop;
@@ -1057,7 +1154,7 @@ function openThreadActivityNotice(): void {
   const notice = threadActivityNotice.value;
   if (!notice) return;
   threadActivityNotice.value = null;
-  emit("open-thread", notice.parentId);
+  emit("reveal-thread", notice.parentId);
 }
 
 function revealOrScrollToMessage(messageId: string | null): void {
@@ -1065,12 +1162,19 @@ function revealOrScrollToMessage(messageId: string | null): void {
   if (!scrollToMessage(messageId)) emit("reveal-message", messageId);
 }
 
-function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "smooth"): boolean {
+function scrollToMessage(messageId: string | null, behavior: ScrollBehavior = "smooth", historyReady = false): boolean {
+  cancelInitialRestore();
   messageMotion.cancel();
   unreadTimeline.programmaticScroll();
   if (!messageId || !messagesElement.value) return false;
   const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
   if (!target) return false;
+  const group = target.closest('.room-github-updates');
+  if (group && !historyReady) {
+    const namespace = props.messageNamespace, revision = scrollRevision;
+    group.dispatchEvent(new CustomEvent('reveal-github-message', { detail: { id: messageId, ready: () => { if (namespace === props.messageNamespace && revision === scrollRevision) scrollToMessage(messageId, behavior, true); } } }));
+    return true;
+  }
   scrollRevision++;
   cancelLayoutAnchorRestore();
   isScrolledToBottom = false;
