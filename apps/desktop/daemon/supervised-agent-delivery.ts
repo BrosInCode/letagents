@@ -1,6 +1,7 @@
 import { performance } from "node:perf_hooks";
 
 import type { RoomGif } from "../../../shared/room-expressions.mjs";
+import type { RoomHistoryTurnSummary } from "../../../shared/room-history-summary.mjs";
 import type { RecordedReplyAttachment } from "../../../shared/message-attachments.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult, type RoomTurnImageDelivery } from "./provider-action-port.js";
@@ -93,6 +94,8 @@ export type SupervisedPollResponse = {
 export interface SupervisedDeliveryHttp {
   /** Fresh public awareness only; never an activation, receipt or poll cursor. Null means an older/local server. */
   context?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<Array<Record<string, unknown>> | null>;
+  /** The room's history summary for an agent's first turn. Null when the room or server has none; never throws for that. */
+  historySummary?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<RoomHistoryTurnSummary | null>;
   /** Optional latency hint after durable no-reply settlement. Work publication remains the reply-order recovery path. */
   reportNoReply?(input: {
     roomId: string; apiUrl: string; bearer: string; sourceMessageId: string; signal: AbortSignal;
@@ -257,6 +260,30 @@ export class SupervisedAgentDelivery {
   private readonly loopEpochs = new Map<string, number>();
   /** Memory-only registration identity; only a same-session bearer rotation
    * changes it in place. The bearer is never logged or persisted. */
+  /**
+   * The provider continuations each agent got the room history summary in
+   * (or had none to get). A new continuation (a new agent, or one a restart
+   * could not resume) gets it on its next turn; one that has it does not. A
+   * continuation whose id changes during its first turn (Cursor's pending id)
+   * is recorded under both ids.
+   */
+  private readonly historySummaryGiven = new Map<string, Set<string>>();
+
+  private continuationOf(agent: SupervisedIngressAgent): string {
+    return agent.handle?.providerContinuationId ?? agent.providerContinuationId ?? "";
+  }
+
+  private markHistorySummaryGiven(agentId: string, continuations: readonly string[]): void {
+    const given = this.historySummaryGiven.get(agentId) ?? new Set<string>();
+    for (const continuation of continuations) if (continuation) given.add(continuation);
+    // A few recent ids are enough; older continuations are not resumed.
+    while (given.size > 4) given.delete(given.values().next().value!);
+    if (!given.size) return;
+    // Most recent last; a daemon supervises far fewer agents than this.
+    this.historySummaryGiven.delete(agentId);
+    this.historySummaryGiven.set(agentId, given);
+    while (this.historySummaryGiven.size > 256) this.historySummaryGiven.delete(this.historySummaryGiven.keys().next().value!);
+  }
   private readonly loopOwners = new Map<string, { context: string; bearer: string; agent: SupervisedIngressAgent; roomRefused?: boolean }>();
   /** Lanes whose bearer a same-session rotation is replacing; see holdIngressForBearerRotation. */
   private readonly bearerRotations = new Map<string, BearerRotationHold>();
@@ -1876,6 +1903,17 @@ export class SupervisedAgentDelivery {
         });
         if (fresh !== null) observedContext = fresh;
       }
+      // A continuation that has not had the room's history summary gets it on
+      // this turn, before the recent context. It is optional: no summary, an
+      // older server or a failed read never delays or fails the turn.
+      const historyContinuation = this.continuationOf(agent);
+      const historyDue = !recovering && /^msg_[1-9]\d*$/.test(item.source_message_id)
+        && Boolean(this.http.historySummary) && !this.historySummaryGiven.get(agent.agentId)?.has(historyContinuation);
+      // undefined: the read failed, so the continuation is not marked and a later turn asks again.
+      const historySummary = historyDue
+        ? await this.http.historySummary!({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer,
+          signal: turnController.signal }).catch(() => undefined)
+        : undefined;
       if (!recovering && this.roomTurnAttachments && /^msg_[1-9]\d*$/.test(item.source_message_id)) {
         // Only this turn's activating message, never history. A file that
         // cannot be given becomes a note in the prompt, never a failed turn;
@@ -2116,6 +2154,9 @@ export class SupervisedAgentDelivery {
         }
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         await this.inbox.checkpointDispatchIntent(item.inbox_item_id, this.http.ownedTasks ? agent.agentSessionId : undefined, observedContext);
+        // None to give: later turns need not ask. A summary counts as given
+        // only once the provider has answered the turn that carried it.
+        if (historyDue && historySummary === null) this.markHistorySummaryGiven(agent.agentId, [historyContinuation]);
         if (firstDispatch) startTrace?.mark("dispatch_intent");
       };
       // A turn the execution record holds open is closed there by its ending.
@@ -2163,6 +2204,7 @@ export class SupervisedAgentDelivery {
         activation: item.activation,
         actionId: item.action_id,
         observedContext,
+        ...(historySummary ? { historySummary } : {}),
         ...(preparedAttachments?.attachments.length ? { attachments: preparedAttachments.attachments } : {}),
       }, { beforeNativeDispatch: beforeDispatch, markDispatched: async () => {
         await beforeDispatch();
@@ -2224,6 +2266,10 @@ export class SupervisedAgentDelivery {
         providerTurnDurable,
       );
       if (providerResult) startTrace?.providerEnded(providerResult.outcome);
+      if (providerResult && historySummary) {
+        this.markHistorySummaryGiven(agent.agentId, [historyContinuation, this.continuationOf(agent),
+          "providerContinuationId" in providerResult ? providerResult.providerContinuationId : ""]);
+      }
       closeCompactionObservation();
       if (!providerResult) throw new Error("Provider does not support bounded room turns.");
       if (settledCursorEnding) return;

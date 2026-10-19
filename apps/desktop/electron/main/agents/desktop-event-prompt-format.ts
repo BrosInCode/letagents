@@ -1,5 +1,6 @@
 import type { ProviderRoomTurnAttachment, ProviderRoomTurnRequest, RoomTurnImageMimeType } from "./provider-adapter.js";
 import { ROOM_EXPRESSION_GUIDANCE } from "../../../../../shared/room-expressions.mjs";
+import { formatRoomHistoryTurnSummary } from "../../../../../shared/room-history-summary.mjs";
 import { withoutInlineFileBytes } from "../attachments/inline-bytes.js";
 import { isDeepStrictEqual } from "node:util";
 
@@ -36,7 +37,7 @@ function conversationMessage(message: unknown): unknown {
 /** Routing guidance belongs to this turn, not to every historical message.
  * This compacts one prompt, never assumes that an earlier turn retained context.
  */
-export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "observedContext" | "sourceMessage" | "activation" | "attachments">): string[] {
+export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "observedContext" | "sourceMessage" | "activation" | "attachments" | "historySummary">): string[] {
   const source = conversationMessage(request.sourceMessage);
   const sourceRecord = record(source);
   const context = (request.observedContext ?? []).map(conversationMessage).filter(message =>
@@ -77,6 +78,7 @@ export function formatRoomTurnContext(request: Pick<ProviderRoomTurnRequest, "ob
     };
   };
   return [
+    ...formatRoomHistoryTurnSummary(request.historySummary),
     `Recent bounded room context: ${JSON.stringify(context.map(compact))}`,
     `Source message: ${JSON.stringify(compact(source))}`,
     `Activation: ${JSON.stringify(withoutInlineFileBytes(request.activation))}`,

@@ -12,6 +12,7 @@ import {
   type ExecutionDelegationDecisionIntent,
 } from "../../../shared/execution-delegation-decision.mjs";
 import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
+import { ROOM_HISTORY_TURN_VIEW_LINES, roomHistoryTurnSummary } from "../../../shared/room-history-summary.mjs";
 import type { PeerReceiptResult } from "./queued-peer-deliveries.js";
 
 /** Exact self-receipt reporting for messages explicitly delivered in another turn. */
@@ -479,6 +480,21 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
       throw new Error("Room context response is invalid.");
     }
     return body.messages;
+  },
+  async historySummary(input) {
+    // Null: the room has no summary to give (local room, older server, off,
+    // no summarizer, nothing yet). A failed read throws, so a later turn asks again.
+    if (isLocalRoomApi(input.apiUrl)) return null;
+    const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/history-summary?max_lines=${ROOM_HISTORY_TURN_VIEW_LINES}`, {
+      headers: { authorization: `Bearer ${input.bearer}` }, redirect: "error",
+      // Short: a first turn waits for this read, and the summary is optional.
+      signal: AbortSignal.any([input.signal, AbortSignal.timeout(4_000)]),
+    });
+    // A refused bearer is found and handled by the turn's own context read.
+    if (response.status === 404 || response.status === 409) return null;
+    if (!response.ok) throw new Error(`Room history summary read failed with HTTP ${response.status}.`);
+    const body = await response.json() as Record<string, unknown>;
+    return body?.room_id === input.roomId ? roomHistoryTurnSummary(body) : null;
   },
   async reportNoReply(input) {
     // The local adapter has no self-receipt PUT route. Never interpret its
