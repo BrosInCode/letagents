@@ -207,18 +207,18 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return this.observeRecordedTurnChild(connection);
   }
 
-  stopRef(
+  async stopRef(
     ref: ProviderContinuationRef,
     options: ProviderStopOptions = {},
   ): Promise<ProviderTerminalPayload> {
     return stopRef(this, ref, options);
   }
 
-  poke(providerHandle: ProviderHandle, message: string): Promise<void> {
+  async poke(providerHandle: ProviderHandle, message: string): Promise<void> {
     return poke(this, providerHandle, message);
   }
 
-  controlTurn(
+  async controlTurn(
     providerHandle: ProviderHandle,
     correction?: string | null,
     options: ProviderTurnControlOptions = {},
@@ -229,7 +229,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   /** The daemon stages a file that this turn's sandbox may read; see cursor-room-turn-images.ts. */
   roomTurnImageDelivery(): "file" { return "file"; }
 
-  runRoomTurn(
+  async runRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRequest,
     options: ProviderRoomTurnOptions = {},
@@ -237,7 +237,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return runRoomTurn(this, providerHandle, request, options);
   }
 
-  recoverRoomTurn(
+  async recoverRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRecoveryRequest,
     options: {
@@ -250,7 +250,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return recoverRoomTurn(this, providerHandle, request, options);
   }
 
-  recoverOwnedRoomTurn(providerHandle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest,
+  async recoverOwnedRoomTurn(providerHandle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest,
     options: Parameters<CursorProviderAdapter["recoverRoomTurn"]>[2] = {}): Promise<ProviderRoomTurnResult> {
     return recoverOwnedRoomTurn(this, providerHandle, request, options);
   }
@@ -272,7 +272,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return removeDurableTurnJournal(this, handle, turnId);
   }
 
-  stop(
+  async stop(
     providerHandle: ProviderHandle,
     options: ProviderStopOptions = {},
   ): Promise<ProviderTerminalPayload> {
@@ -331,14 +331,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return result;
   }
 
-  start(
+  async start(
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<CursorProviderHandle> {
     return start(this, req, resumeRef);
   }
 
-  beginTurn(
+  async beginTurn(
     handle: CursorProviderHandle,
     prompt: string,
     resumeSessionId: string | null,
@@ -354,7 +354,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return beginTurn(this, handle, prompt, resumeSessionId, roomTurnId, checkpointProviderState, checkpointTurnStarted, checkpointPreparedTurn, launchSignal, markDurableTurnStarted, settleLifecycleBeforeIdle, readOnlyImageFolders);
   }
 
-  completeTurn(
+  async completeTurn(
     handle: CursorProviderHandle,
     turn: LiveTurn,
     unsubscribe: () => void,
@@ -369,7 +369,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return readTrustedDurableTurnTerminal(this, handle, turn);
   }
 
-  retireTurnWorkspaceGeneration(
+  async retireTurnWorkspaceGeneration(
     handle: CursorProviderHandle,
     turn: LiveTurn,
     trustedRemoteAuthorityEvidence?: CursorTurnTerminal | true,
@@ -390,7 +390,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return recordGenerationSettlement(this, handle, turnId, manifestPath, phase);
   }
 
-  abandonTurnWorkspaceGeneration(
+  async abandonTurnWorkspaceGeneration(
     generation: SupervisedWorkspaceGenerationHandle,
   ): Promise<void> {
     return abandonTurnWorkspaceGeneration(this, generation);
@@ -449,13 +449,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return providerRoomTurnResult(this, turnId, terminal, providerContinuationId, protocolError);
   }
 
-  observeRecordedTurnChild(
+  async observeRecordedTurnChild(
     connection: Extract<ProviderConnectionRef, { kind: "cursor_cli" }>,
   ): Promise<null> {
     return observeRecordedTurnChild(this, connection);
   }
 
-  terminateTurnChild(
+  async terminateTurnChild(
     pid: number,
     exited: Promise<ProviderProcessExit>,
     processIdentity?: string | null,
@@ -465,7 +465,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return terminateTurnChild(this, pid, exited, processIdentity, ownsDescendantReaping, nativeLaunchIsDeferred);
   }
 
-  readTerminatedTurnExit(turn: LiveTurn): Promise<ProviderProcessExit> {
+  async readTerminatedTurnExit(turn: LiveTurn): Promise<ProviderProcessExit> {
     return readTerminatedTurnExit(this, turn);
   }
 
@@ -481,28 +481,28 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return signalExactProcess(this, pid, processIdentity, signal);
   }
 
-  awaitTurnTerminal(
+  async awaitTurnTerminal(
     handle: CursorProviderHandle,
     turn: LiveTurn,
   ): Promise<ProviderTerminalPayload> {
     return awaitTurnTerminal(this, handle, turn);
   }
 
-  finishAfterVerifiedWrapperAbsence(
+  async finishAfterVerifiedWrapperAbsence(
     handle: CursorProviderHandle,
     turn: LiveTurn,
   ): Promise<ProviderTerminalPayload> {
     return finishAfterVerifiedWrapperAbsence(this, handle, turn);
   }
 
-  awaitDeferredRoomTurnSettlement(
+  async awaitDeferredRoomTurnSettlement(
     handle: CursorProviderHandle,
     turn: LiveTurn,
   ): Promise<void> {
     return awaitDeferredRoomTurnSettlement(this, handle, turn);
   }
 
-  settlePreparedTurnIdle(
+  async settlePreparedTurnIdle(
     handle: CursorProviderHandle,
     turn: LiveTurn,
     exit: ProviderProcessExit,
