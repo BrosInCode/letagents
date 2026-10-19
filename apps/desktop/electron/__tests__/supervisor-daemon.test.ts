@@ -1786,6 +1786,66 @@ test("a follow-up crosses to the desktop only when every part of it is what the 
   assert.equal(Object.hasOwn(mapEntry(wireEntryWithCausalProjection()).deliveryReceipts![0]!, "followUp"), false, "a receipt that is no follow-up has no such field");
 });
 
+/** A receipt timeline as the daemon keeps it for manifest.list: every phase of one delivered message, with a retry. */
+function wireEntryWithFullReceiptTimeline(): Parameters<typeof mapEntry>[0] {
+  const wire = wireEntryWithCausalProjection();
+  const phases = ["received", "queued", "turn_started", "retry_scheduled", "turn_started", "turn_finished",
+    "conversation_restoring", "conversation_restored", "publish_started", "published"] as const;
+  wire.delivery_receipts = [
+    { ...wire.delivery_receipts![0]!, state: "acknowledged", error: null,
+      timeline: phases.map((phase, index) => ({ event_sequence: index + 1, phase, observed_at: `2026-01-01T00:00:0${index}.000Z`,
+        detail: phase === "conversation_restored" ? "The saved conversation is available again." : null })) },
+    // A receipt none of whose events the state channel keeps.
+    { ...wire.delivery_receipts![0]!, inbox_item_id: "inbox_2", source_message_id: "msg_2", fifo_sequence: 8, state: "pending",
+      attempt_count: 0, canonical_message_id: null, reply_client_message_id: "supervised-room:agent_1:msg_2:reply:v1", error: null,
+      timeline: [{ event_sequence: 1, phase: "received", observed_at: "2026-01-01T00:00:10.000Z", detail: null },
+        { event_sequence: 2, phase: "queued", observed_at: "2026-01-01T00:00:10.000Z", detail: null }] },
+  ];
+  return wire;
+}
+
+test("a state watch snapshot with trimmed receipt timelines keeps every receipt and the kept events", async () => {
+  const full = wireEntryWithFullReceiptTimeline();
+  // The shape the daemon's state-watch projection sends (daemon/state-watch-projection.ts, tested there):
+  // every receipt, each timeline cut to its turn_started and conversation_restored events, in order.
+  const trimmed: Parameters<typeof mapEntry>[0] = { ...full, delivery_receipts: full.delivery_receipts!.map((receipt) => ({
+    ...receipt, timeline: receipt.timeline!.filter((event) => event.phase === "turn_started" || event.phase === "conversation_restored") })) };
+  const mappedFull = mapEntry(full);
+  const mappedTrimmed = mapEntry(trimmed);
+  assert.equal(mappedTrimmed.deliveryReceipts?.length, 2, "a receipt with an emptied timeline is not dropped");
+  assert.deepEqual(mappedTrimmed.deliveryReceipts![0]!.timeline, [
+    { sequence: 3, phase: "turn_started", observedAt: "2026-01-01T00:00:02.000Z", detail: null },
+    { sequence: 5, phase: "turn_started", observedAt: "2026-01-01T00:00:04.000Z", detail: null },
+    { sequence: 8, phase: "conversation_restored", observedAt: "2026-01-01T00:00:07.000Z", detail: "The saved conversation is available again." },
+  ]);
+  assert.deepEqual(mappedTrimmed.deliveryReceipts![1]!.timeline, []);
+  assert.deepEqual(
+    mappedTrimmed.deliveryReceipts!.map((receipt) => ({ ...receipt, timeline: [] })),
+    mappedFull.deliveryReceipts!.map((receipt) => ({ ...receipt, timeline: [] })),
+    "every other receipt field reads the same",
+  );
+
+  // The same snapshot over the client's own watch_state call.
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, daemonScriptPath,
+    spawnDaemon: () => { assert.fail("This read must not start the daemon"); } });
+  try {
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+    wire.entries.push(trimmed);
+    try {
+      await client.connectIfRunning();
+      const snapshot = await client.watchState({ afterDaemonGeneration: 0, afterSequence: 0, waitMs: 0 });
+      assert.deepEqual(snapshot.entries[0]?.deliveryReceipts, mappedTrimmed.deliveryReceipts);
+    } finally { await closeServer(wire.server, env.socketPath); }
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
   const legacy = wireEntryWithCausalProjection();
   legacy.delivery_receipts![0]!.timeline = Array.from({ length: 64 }, (_, index) => ({
