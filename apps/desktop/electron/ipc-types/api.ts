@@ -17,7 +17,7 @@ export interface DesktopMessageReactionChange { changed: boolean; reactions: Mes
 export interface DesktopRoomMessageSearchPage { terms: string[]; messages: DesktopRoomMessage[]; has_more: boolean; next_before: string | null; }
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
 import type { DesktopAccountActivityState } from "./account-activity.js";
-import type { DesktopAgentAsk, DesktopAgentAskLink, DesktopAgentAskModel, DesktopAskResult, DesktopCreateAgentAskInput, DesktopGiveAgentInput } from "./asks.js";
+import type { DesktopAgentAsk, DesktopAgentAskLink, DesktopAgentAskModel, DesktopAgentAskProposal, DesktopAgentAskWorkspace, DesktopAskResult, DesktopCreateAgentAskInput, DesktopGiveAgentInput } from "./asks.js";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
 import type { RoomNotificationPreferenceChange, RoomNotificationPreferenceEntry, RoomNotificationPreferenceList } from "../../../../shared/room-notification-preferences.mjs";
 import type { WakeRule, WakeRulePage } from "../../../../shared/wake-rules.mjs";
@@ -385,6 +385,8 @@ export interface DesktopApi {
     listMine: () => Promise<DesktopAskResult<DesktopAgentAsk[]>>;
     act: (askId: string, action: "cancel" | "accept" | "decline" | "remove") => Promise<DesktopAskResult<DesktopAgentAsk>>;
     preview: (token: string) => Promise<DesktopAskResult<DesktopAgentAskLink>>;
+    workspace: (askId: string) => Promise<DesktopAskResult<DesktopAgentAskWorkspace>>;
+    decide: (askId: string, proposalId: string, approve: boolean) => Promise<DesktopAskResult<DesktopAgentAskProposal>>;
     canGive: (providerId: string) => Promise<boolean>;
     give: (input: DesktopGiveAgentInput) => Promise<DesktopAskResult<DesktopAgentAsk>>;
     cantHelp: (token: string) => Promise<DesktopAskResult<void>>;

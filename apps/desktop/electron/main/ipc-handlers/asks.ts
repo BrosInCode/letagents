@@ -22,6 +22,9 @@ export function registerDesktopAskIpcHandlers(targetIpcMain: IpcMain): void {
     if (action !== "cancel" && action !== "accept" && action !== "decline" && action !== "remove") throw new Error("invalid action");
     return askApi.act(text(askId), action);
   }));
+  targetIpcMain.handle("desktop:asks:workspace", (_event, askId: unknown) => result(() => askApi.workspace(text(askId))));
+  targetIpcMain.handle("desktop:asks:decide", (_event, askId: unknown, proposalId: unknown, approve: unknown) =>
+    result(() => askApi.decide(text(askId), text(proposalId), approve === true)));
   targetIpcMain.handle("desktop:asks:preview", (_event, token: unknown) => result(() => askApi.preview(text(token))));
   targetIpcMain.handle("desktop:asks:can-give", (_event, providerId: unknown) => giftPermissionProfile(text(providerId)) !== null);
   targetIpcMain.handle("desktop:asks:give", (_event, input: DesktopGiveAgentInput) => result(() => askGiveCoordinator.give(input)));

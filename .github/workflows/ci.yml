@@ -498,6 +498,7 @@ jobs:
           --test-concurrency=1
           src/api/__tests__/agent-asks-db.test.ts
           src/api/__tests__/agent-asks-routes.test.ts
+          src/api/__tests__/agent-ask-workspace-db.test.ts
 
       - name: Run webhook integration tests
         if: matrix.group == 1

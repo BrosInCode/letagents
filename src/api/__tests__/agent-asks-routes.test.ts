@@ -26,6 +26,11 @@ function harness(ask: Record<string, unknown> | null = row(), extra: Record<stri
     release: async () => row(), authority: async () => { throw new Error("ask_not_claimed"); }, joined: async () => row({ state: "active" }),
     accept: async () => row({ state: "active" }), decline: async () => row(), end: async (_a: any, reason: string) => { calls.push(["end", reason]); return row({ state: "ended" }); },
     name: async (id: string | null) => id === "sam" ? "Sam" : "John", isAdmin: async () => false, room: async () => ({ display_name: "feat-auth" }),
+    forWorker: async (sessionId: string) => sessionId === "given" ? ask : null,
+    files: async () => { calls.push(["files"]); return ["src/a.ts"]; },
+    read: async (_a: any, path: string) => { calls.push(["read", path]); return { path, content: "x", redacted: false }; },
+    search: async () => [], propose: async () => ({ id: "chg_1", state: "waiting" }),
+    proposals: async () => [], reads: async () => [], decide: async () => null,
   } as any);
   async function request(method: string, path: string, body: any = {}, auth: string | null = "session", account = "john") {
     const route = routes.find(r => r.method === method && (r.path instanceof RegExp ? r.path.test(path)
@@ -33,7 +38,8 @@ function harness(ask: Record<string, unknown> | null = row(), extra: Record<stri
     assert.ok(route, `${method} ${path}`);
     const params = route.path instanceof RegExp ? Object.fromEntries(path.match(route.path)!.slice(1).map((v: string, i: number) => [i, v]))
       : Object.fromEntries((route.path.match(/:[a-z]+/g) ?? []).map((name: string) => [name.slice(1), path.split("/")[route.path.split("/").indexOf(name)]]));
-    const req = { params, body, query: {}, authKind: auth, sessionAccount: auth ? { account_id: account } : undefined, headers: {}, protocol: "https", get: () => "letagents.chat" };
+    const req = { params, body, query: {}, authKind: auth, sessionAccount: auth && auth !== "agent_session" ? { account_id: account } : undefined,
+      agentSession: auth === "agent_session" ? { agent_session_id: account } : undefined, headers: {}, protocol: "https", get: () => "letagents.chat" };
     const res = { code: 200, body: null as any, status(code: number) { this.code = code; return this; }, json(value: any) { this.body = value; return this; } };
     await route.handler(req, res);
     return res;
@@ -114,4 +120,17 @@ test("only the asker (or a room admin, for remove) can act on an ask", async () 
   assert.equal((await h.request("post", `/agent-asks/${ID}/accept`, {}, "session", "john")).code, 403);
   assert.equal((await h.request("post", `/agent-asks/${ID}/accept`, {}, "session", "sam")).code, 200);
   assert.equal((await h.request("post", `/agent-asks/${ID}/remove`, {}, "session", "john")).code, 403);
+});
+
+test("only a given agent, while its ask runs, can use the code tools; the ask comes from its own session", async () => {
+  const h = harness(row({ state: "active", giver_account_id: "john" }));
+  const path = "/rooms/github.com%2Facme%2Fapp/agent-ask-workspace/read";
+  assert.equal((await h.request("post", path, { path: "src/a.ts" }, "session", "sam")).code, 403);
+  assert.equal((await h.request("post", path, { path: "src/a.ts" }, "agent_session", "someone-else")).code, 403);
+  const ok = await h.request("post", path, { path: "src/a.ts" }, "agent_session", "given");
+  assert.equal(ok.code, 200);
+  assert.equal(ok.body.result.path, "src/a.ts");
+  assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/github.com/acme/app/agent-ask-workspace/read"), "coordination.read");
+  assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/github.com/acme/app/agent-ask-workspace/proposals"), "coordination.propose");
+  assert.equal(requiredAgentSessionRouteCapability("POST", "/rooms/github.com/acme/app/agent-ask-workspace/delete"), null);
 });

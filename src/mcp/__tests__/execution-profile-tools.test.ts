@@ -247,3 +247,20 @@ test("reply attachments are a strict bounded-only control for supervised room tu
     }
   } finally { await client.close(); await server.close(); }
 });
+
+test("only an agent given to someone else's room gets the ask code tools, and its reads are read-only", () => {
+  const askTools = ["ask_list_files", "ask_read_file", "ask_search", "ask_propose_change"];
+  const previous = process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+  try {
+    process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = "supervised_owner_entry";
+    for (const name of askTools) assert.equal(discovered("supervised_room_turn", "cursor").has(name), false, name);
+    process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = "supervised_rental_ask_0123456789abcdef0123456789abcdef";
+    const given = discovered("supervised_room_turn", "cursor");
+    for (const name of askTools) assert.equal(given.has(name), true, name);
+    for (const name of askTools) assert.equal(discovered("autonomous_mcp_worker").has(name), false, name);
+    assert.deepEqual(askTools.map(supervisedToolIsMutation), [false, false, false, true]);
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+    else process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = previous;
+  }
+});

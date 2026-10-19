@@ -1,6 +1,6 @@
 import { apiFetch, DesktopApiError } from "../main/auth.js";
 import type {
-  DesktopAgentAsk, DesktopAgentAskLink, DesktopAgentAskModel, DesktopCreateAgentAskInput,
+  DesktopAgentAsk, DesktopAgentAskLink, DesktopAgentAskModel, DesktopAgentAskProposal, DesktopAgentAskWorkspace, DesktopCreateAgentAskInput,
 } from "../ipc-types/asks.js";
 
 type Json = Record<string, unknown>;
@@ -36,6 +36,9 @@ export const askApi = {
   launchAuthority: async (token: string, body: Json) => apiFetch<Json>(link(token, "launch-authority"), json(body)),
   joined: async (token: string, roomAgentSessionId: string) =>
     (await apiFetch<{ ask: DesktopAgentAsk }>(link(token, "joined"), json({ room_agent_session_id: roomAgentSessionId }))).ask,
+  workspace: async (askId: string) => apiFetch<DesktopAgentAskWorkspace>(`/agent-asks/${encodeURIComponent(askId)}/workspace`),
+  decide: async (askId: string, proposalId: string, approve: boolean) =>
+    (await apiFetch<{ proposal: DesktopAgentAskProposal }>(`/agent-asks/${encodeURIComponent(askId)}/proposals/${encodeURIComponent(proposalId)}/${approve ? "approve" : "decline"}`, json({}))).proposal,
   end: async (token: string, reason: "amount_used" | "provider_limit") => apiFetch<Json>(link(token, "end"), json({ reason })),
 };
 export type AskApi = typeof askApi;

@@ -33,6 +33,9 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   { method: "POST", path: /^\/rooms\/.+\/(?:tasks|board-intents)$/, capability: "coordination.propose" },
   { method: "POST", path: /^\/rooms\/.+\/board-intents\/[^/]+\/(?:approve|deny)$/, capability: "coordination.self_write" },
   { method: "POST", path: /^\/rooms\/.+\/artifacts$/, capability: "artifacts.self_write" },
+  // A given agent reads the asker's code and proposes changes through LetAgents (Ask for an agent).
+  { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/(?:files|read|search)$/, capability: "coordination.read" },
+  { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/proposals$/, capability: "coordination.propose" },
 ];
 
 export function requiredAgentSessionRouteCapability(method: string, path: string): AgentSessionBearerCapability | null {

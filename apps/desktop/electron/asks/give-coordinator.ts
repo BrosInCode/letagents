@@ -37,6 +37,7 @@ export function giftCharter(asker: string): string {
   return [
     `Someone added you to ${asker}'s room to help them. LetAgents has already introduced you, so don't introduce yourself again.`,
     "Wait until someone in the room addresses you, then help with what they ask.",
+    "If the room has a repo, its code is with LetAgents, not in your folder: use ask_list_files, ask_read_file and ask_search to read it, and ask_propose_change to change it. The person who asked reviews every change.",
     "You run in a locked folder on another person's computer: you can't use Docker, apps, or files outside your folder. If a task needs those, say so plainly instead of retrying.",
   ].join("\n");
 }

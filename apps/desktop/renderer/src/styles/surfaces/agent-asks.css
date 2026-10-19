@@ -38,3 +38,12 @@
 .desktop-composer-add-menu button { font: inherit; font-size: 13px; text-align: left; color: var(--text); background: transparent; border: 0; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
 .desktop-composer-add-menu button:hover,
 .desktop-composer-add-menu button:focus-visible { background: var(--accent-hover); }
+.agent-review-dialog { width: min(640px, calc(100vw - 32px)); max-height: 80vh; overflow: auto; }
+.agent-review-section { display: flex; flex-direction: column; gap: 8px; }
+.agent-review-section h4 { margin: 0; font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+.agent-review-proposal { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--border); border-radius: 10px; }
+.agent-review-proposal[data-state="waiting"] { border-color: var(--blue); }
+.agent-review-proposal-head { display: flex; justify-content: space-between; gap: 12px; }
+.agent-review-state { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
+.agent-review-file pre { max-height: 240px; overflow: auto; margin: 4px 0 8px; padding: 8px; border-radius: 6px; background: var(--bg-card); font-family: var(--font-mono); font-size: 12px; white-space: pre; }
+.agent-review-seen { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }

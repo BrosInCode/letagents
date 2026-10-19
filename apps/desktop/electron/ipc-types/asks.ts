@@ -49,3 +49,18 @@ export interface DesktopGiveAgentInput {
 
 /** One line per outcome; `ok: false` carries a sentence to show as-is. */
 export type DesktopAskResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+export interface DesktopAgentAskProposal {
+  id: string;
+  summary?: string;
+  state: "waiting" | "approved" | "declined" | "failed";
+  error: string | null;
+  pr_url: string | null;
+  files?: Array<{ path: string; deleted: boolean; content: string | null }>;
+  created_at?: string;
+}
+
+export interface DesktopAgentAskWorkspace {
+  proposals: DesktopAgentAskProposal[];
+  files_seen: Array<{ kind: "file" | "list" | "search"; target: string; blocked: boolean; at: string }>;
+}

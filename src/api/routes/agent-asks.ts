@@ -10,6 +10,7 @@ import {
   ASKABLE_MODELS, ASK_NOTE_MAX, findAskableModel, parseAmountPercent, type AgentAskEndReason,
 } from "../agent-asks/lifecycle.js";
 import * as asks from "../agent-asks/store.js";
+import * as workspace from "../agent-asks/workspace.js";
 import type { AgentAsk } from "../agent-asks/store.js";
 
 const databaseStore = {
@@ -17,7 +18,9 @@ const databaseStore = {
   listAccount: asks.listAccountAsks, cancel: asks.cancelAsk, claim: asks.claimAsk, release: asks.releaseClaim,
   authority: asks.createAskLaunchAuthority, joined: asks.acknowledgeAskJoin, accept: asks.acceptSubstitute,
   decline: asks.declineSubstitute, end: asks.endAsk, name: asks.personName, isAdmin: isProjectAdmin,
-  room: getProjectById,
+  room: getProjectById, forWorker: asks.askForWorker,
+  files: workspace.listFiles, read: workspace.readRepoFile, search: workspace.searchRepo, propose: workspace.proposeChange,
+  proposals: workspace.listProposals, reads: workspace.listReads, decide: workspace.decideProposal,
 };
 export type AgentAskStore = typeof databaseStore;
 
@@ -38,6 +41,7 @@ function fail(res: Response, error: unknown) {
     agent_identity_not_owned: [403, "That agent isn't yours."],
   };
   if (known[code]) { res.status(known[code][0]).json({ code, error: known[code][1] }); return; }
+  if (error instanceof workspace.AskWorkspaceError) { res.status(error.status).json({ code: error.code, error: error.message }); return; }
   const pg = (error as { code?: string; cause?: { code?: string } })?.code ?? (error as { cause?: { code?: string } })?.cause?.code;
   if (pg === "55P03") { res.status(503).json({ code: "ask_busy", error: "Busy right now. Try again." }); return; }
   console.error("[agent asks]", error);
@@ -230,4 +234,47 @@ export function registerAgentAskRoutes(app: Express, deps: RoomMessageRouteDeps,
   action("accept", false, ask => store.accept(ask));
   action("decline", false, ask => store.decline(ask));
   action("remove", true, ask => store.end(ask, "removed" satisfies AgentAskEndReason));
+
+  /** The given agent's code tools. The ask comes from the agent's own grant, never from the request. */
+  const agentTool = (name: "files" | "read" | "search" | "proposals", run: (ask: AgentAsk, body: Record<string, unknown>) => Promise<unknown>) =>
+    app.post(new RegExp(`^\\/rooms\\/(.+)\\/agent-ask-workspace\\/${name}$`), async (req: AuthenticatedRequest, res) => {
+      const session = req.authKind === "agent_session" ? req.agentSession : null;
+      if (!session) { res.status(403).json({ code: "agent_required", error: "Only a given agent can use these tools." }); return; }
+      try {
+        const ask = await store.forWorker(session.agent_session_id);
+        if (!ask) { res.status(403).json({ code: "not_given", error: "These tools are only for an agent someone gave to this room, while it's active." }); return; }
+        res.json({ result: await run(ask, (req.body ?? {}) as Record<string, unknown>) });
+      } catch (error) { fail(res, error); }
+    });
+  agentTool("files", (ask, body) => store.files(ask, body.path));
+  agentTool("read", (ask, body) => store.read(ask, body.path));
+  agentTool("search", (ask, body) => store.search(ask, body.query));
+  agentTool("proposals", async (ask, body) => {
+    const proposal = await store.propose(ask, body.summary, body.files, await store.name(ask.giver_account_id));
+    return { id: proposal.id, state: proposal.state, message: "Proposed. The person who asked will review it." };
+  });
+
+  /** The asker's review: proposed changes and what the agent has seen. */
+  app.get("/agent-asks/:id/workspace", async (req: AuthenticatedRequest, res) => {
+    try {
+      const ask = await askerAction(req, res, true); if (!ask) return;
+      const [proposals, reads] = await Promise.all([store.proposals(ask.id), store.reads(ask.id)]);
+      res.json({
+        proposals: proposals.map(row => ({ id: row.id, summary: row.summary, state: row.state, error: row.error, pr_url: row.pr_url,
+          files: (row.files as Array<{ path: string; content: string | null }>).map(file => ({ path: file.path, deleted: file.content === null, content: file.content })),
+          created_at: row.created_at })),
+        files_seen: reads.map(row => ({ kind: row.kind, target: row.target, blocked: row.blocked, at: row.created_at })),
+      });
+    } catch (error) { fail(res, error); }
+  });
+  for (const decision of ["approve", "decline"] as const) {
+    app.post(`/agent-asks/:id/proposals/:proposalId/${decision}`, async (req: AuthenticatedRequest, res) => {
+      try {
+        const ask = await askerAction(req, res, false); if (!ask) return;
+        const decided = await store.decide(ask, String(req.params.proposalId ?? ""), decision === "approve");
+        if (!decided) { res.status(409).json({ code: "proposal_changed", error: "This change was already reviewed." }); return; }
+        res.json({ proposal: { id: decided.id, state: decided.state, error: decided.error, pr_url: decided.pr_url } });
+      } catch (error) { fail(res, error); }
+    });
+  }
 }

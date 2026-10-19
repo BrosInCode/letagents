@@ -11,6 +11,7 @@ import { db } from "../db/client.js";
 import { accounts, agent_asks, room_agent_sessions, supervisor_host_grants } from "../db/schema.js";
 import { hashToken } from "../db/utils.js";
 import { emitProjectMessage } from "../server/events.js";
+import { removeWorkspace } from "./workspace.js";
 import {
   ASK_CLAIM_TTL_MS, ASK_HOLD_TTL_MS, ASK_LINK_TTL_MS, ASK_LIVE_STATES, ASK_OFFLINE_AFTER_MS, ASK_OPEN_LIMIT,
   ASK_PAUSE_TTL_MS, ASK_ROOM_TEXT, isExactMatch, type AgentAskEndReason, type AgentAskState,
@@ -218,6 +219,7 @@ export async function acceptSubstitute(ask: AgentAsk) {
 export async function declineSubstitute(ask: AgentAsk) {
   if (ask.state !== "on_hold") return null;
   await revokeAskAuthority(ask);
+  await removeWorkspace(ask.id);
   const reopen = Date.parse(ask.expires_at) > Date.now();
   const declined = await move(ask.id, ["on_hold"], reopen ? openAgain() : { state: "expired", ended_at: now() });
   if (declined) await say(ask, `declined:${randomUUID()}`, ASK_ROOM_TEXT.ended.substitute_declined(await personName(ask.giver_account_id)), ask.giver_account_id);
@@ -226,6 +228,7 @@ export async function declineSubstitute(ask: AgentAsk) {
 
 export async function endAsk(ask: AgentAsk, reason: AgentAskEndReason) {
   await revokeAskAuthority(ask);
+  await removeWorkspace(ask.id);
   const ended = await move(ask.id, ["on_hold", "active", "paused"], { state: "ended", ended_reason: reason, ended_at: now() });
   if (ended) {
     const giver = await personName(ended.giver_account_id);
@@ -250,6 +253,15 @@ export async function revokeAskAuthority(ask: AgentAsk): Promise<void> {
     }).catch(error => console.error("[agent asks] could not end worker", worker.session_id, error));
   }
   await revokeSupervisorHostGrant({ grant_id: grant.grant_id, owner_account_id: grant.owner_account_id });
+}
+
+/** The running ask a given agent's room session belongs to, found from its grant; the agent never names it. */
+export async function askForWorker(agentSessionId: string): Promise<AgentAsk | null> {
+  const [row] = await db.select({ ask: agent_asks }).from(room_agent_sessions)
+    .innerJoin(agent_asks, eq(agent_asks.grant_id, room_agent_sessions.supervisor_grant_id))
+    .where(and(eq(room_agent_sessions.session_id, agentSessionId), isNull(room_agent_sessions.ended_at),
+      inArray(agent_asks.state, ["active", "paused"]))).limit(1);
+  return row?.ask ?? null;
 }
 
 /** Grants scoped to an ask work only while that ask still has, or is starting, an agent. */

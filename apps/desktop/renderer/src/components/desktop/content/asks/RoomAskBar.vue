@@ -11,10 +11,14 @@
           <button type="button" @click="act(ask.id, 'accept')">Accept</button>
           <button type="button" @click="act(ask.id, 'decline')">Remove</button>
         </template>
-        <button v-else-if="ask.is_asker && (ask.state === 'active' || ask.state === 'paused')" type="button" @click="act(ask.id, 'remove')">Remove</button>
+        <template v-else-if="ask.is_asker && (ask.state === 'active' || ask.state === 'paused')">
+          <button type="button" @click="reviewing = ask">Review</button>
+          <button type="button" @click="act(ask.id, 'remove')">Remove</button>
+        </template>
       </span>
     </div>
     <p v-if="error" class="agent-ask-bar-error" role="alert">{{ error }}</p>
+    <AskReviewDialog :ask-id="reviewing?.id ?? null" :title="reviewing ? `Work from ${reviewing.giver}'s agent` : ''" @close="reviewing = null" />
   </div>
 </template>
 
@@ -23,11 +27,13 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { DesktopAgentAsk } from "../../../../../../electron/ipc-types/asks";
 import { desktopIpc } from "../../../../ipc/index.js";
 import { askLinkFor } from "./ask-links";
+import AskReviewDialog from "./AskReviewDialog.vue";
 
 const props = defineProps<{ roomIdentifier: string | null; refreshKey?: number }>();
 const asks = ref<DesktopAgentAsk[]>([]);
 const error = ref<string | null>(null);
 const copiedId = ref<string | null>(null);
+const reviewing = ref<DesktopAgentAsk | null>(null);
 let timer: ReturnType<typeof setInterval> | null = null;
 
 const visible = computed(() => asks.value.filter(ask => ask.is_asker || ask.state === "on_hold" || ask.state === "active" || ask.state === "paused"));
