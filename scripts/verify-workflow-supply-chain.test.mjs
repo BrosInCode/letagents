@@ -510,7 +510,7 @@ test("the required checks wait for every check job and fail closed", () => {
     assert.ok(found, `ci.yml must define the ${name} job`);
     return found;
   };
-  const gates = ["build"].map(job);
+  const gates = ["build", "integration-tests"].map(job);
 
   // A skipped required check counts as passing, so each gate runs after any
   // outcome and passes only when every job it waits for succeeded.
@@ -536,6 +536,27 @@ test("the required checks wait for every check job and fail closed", () => {
   for (const name of ["npm-publish", "docker"]) {
     assert.deepEqual(job(name).needs, ["build", "integration-tests"], `${name} must wait for both required checks`);
   }
+});
+
+test("every integration test step runs in exactly one existing group", () => {
+  const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
+  const groupList = workflowJobText(workflow, "integration-db-tests").match(/^ {8}group:\s*\[([^\]]*)\]\s*$/m);
+  assert.ok(groupList, "integration-db-tests must list its groups");
+  const groups = groupList[1].split(",").map((group) => group.trim());
+  const integration = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === "integration-db-tests");
+
+  const used = new Set();
+  for (const step of integration.steps) {
+    const runsTests = /(?:^|\s)--test(?:\s|$)/.test(step.run ?? "");
+    if (!runsTests) {
+      assert.equal(step.condition, null, `setup step "${step.name}" must run in every group`);
+      continue;
+    }
+    const group = step.condition?.match(/^matrix\.group == (\S+)$/)?.[1];
+    assert.ok(groups.includes(group), `"${step.name}" must name one of the groups ${groups.join(", ")}`);
+    used.add(group);
+  }
+  assert.deepEqual([...used].sort(), [...groups].sort(), "every group must run at least one test step");
 });
 
 test("the electron shards together cover every shard of one total", () => {
