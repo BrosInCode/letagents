@@ -43,6 +43,8 @@ import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalCand
 import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
 import { SUPERVISOR_DAEMON_PROTOCOL_VERSION, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT, REQUEST_TIMEOUT_MS, MANIFEST_LIST_REQUEST_TIMEOUT_MS, CONFIGURATION_APPLY_REQUEST_TIMEOUT_MS, RETIRE_REQUEST_TIMEOUT_MS, BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS, INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS, RECOVERY_REQUEST_TIMEOUT_MS, HANDOFF_DRAIN_REQUEST_TIMEOUT_MS, TURN_CONTROL_REQUEST_TIMEOUT_MS, START_TIMEOUT_MS, NATURAL_EXIT_TIMEOUT_MS, TERMINATE_EXIT_TIMEOUT_MS, KILL_EXIT_TIMEOUT_MS, PROCESS_POLL_INTERVAL_MS } from "./supervisor-daemon/constants.js";
 export { SUPERVISOR_DAEMON_PROTOCOL_VERSION, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT, BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS } from "./supervisor-daemon/constants.js";
+import type { WireResponse, WireEntry, WireActivityEvent, DaemonProcessState, DaemonProcessIdentity, DaemonIdentityInspection, RetiredDaemonObservation, DaemonHandoffDiagnostic, SupervisorDaemonLifecycleOptions } from "./supervisor-daemon/types.js";
+export type { DaemonProcessState, DaemonProcessIdentity, DaemonHandoffDiagnostic, SupervisorDaemonLifecycleOptions } from "./supervisor-daemon/types.js";
 
 const STATE_WATCH_RETRY_BASE_MS = 1_000;
 const STATE_WATCH_RETRY_MAX_MS = 30_000;
@@ -116,141 +118,6 @@ export function onSupervisorDaemonGeneration(
   return supervisorDaemonClient.onGeneration(listener);
 }
 
-type WireResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
-type WireEntry = {
-  provider_progress?: DesktopSupervisorManifestEntry["providerProgress"];
-  runtime_recovery?: DesktopSupervisorManifestEntry["runtimeRecovery"];
-  local_room_id?: string;
-  runtime_generation_id?: string | null;
-  id: string;
-  room_id: string;
-  display_name: string;
-  provider: string;
-  model: string | null;
-  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
-  config_revision?: number;
-  runtime_configuration_revision?: number;
-  charter: string;
-  desired_state: DesktopSupervisorDesiredState;
-  observed_state: DesktopSupervisorManifestEntry["observedState"];
-  condition: DesktopSupervisorManifestEntry["condition"];
-  last_error?: string | null;
-  permission_profile_id: string | null;
-  delivery_mode?: "mcp_polling" | "daemon_inbox";
-  polling_contract?: "custodial_polling_v1" | null;
-  home_harness?: string;
-  permission_pending?: boolean;
-  provider_launch_policy?: unknown;
-  created_by: string;
-  created_at: string;
-  source_repo_path?: string | null;
-  workspace_path?: string | null;
-  work_attempt_id?: string | null;
-  provider_ref?: {
-    provider_continuation_id: string;
-    execution_generation_id: string;
-    provider_connection?: { pid?: number | null } | null;
-  } | null;
-  worker_binding?: {
-    agent_session_id: string;
-    work_attempt_id: string;
-    execution_generation_id: string;
-    updated_at: string;
-  } | null;
-  last_worker_binding?: {
-    agent_session_id: string;
-    work_attempt_id: string;
-    execution_generation_id: string;
-    updated_at: string;
-  } | null;
-  workplace_liveness?: { state: string; observed_at: string | null; detail: string | null };
-  native_liveness?: { state: string; observed_at: string | null; detail: string | null };
-  ready_reached_at?: string | null;
-  activity?: WireActivityEvent[];
-  last_turn_control_sequence?: number;
-  reconciliation?: { exit_timestamps_ms?: number[]; last_terminal?: Record<string, unknown> };
-  turn_control?: {
-    action_id: string;
-    action_sequence: number;
-    work_attempt_id: string;
-    execution_generation_id: string;
-    target_room_id?: string | null;
-    target_source_message_id?: string | null;
-    target_provider_continuation_id?: string | null;
-    inbox_item_id?: string | null;
-    provider_turn_id?: string | null;
-    // Older daemons can still report a turn-control journal while a desktop
-    // handoff is in progress. Treat the extra display hint as additive.
-    has_correction?: boolean;
-    correction_text?: string | null;
-    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
-    capability: "native_interrupt" | "restart_resume" | "unsupported";
-    interrupted: boolean | null;
-    resumed: boolean | null;
-    state: "idle" | "working" | null;
-    stages: DesktopSupervisorTurnControlResult["stages"];
-    error: string | null;
-    recorded_at: string;
-    updated_at: string;
-  } | null;
-  room_agent_state?: {
-    connection: { state: string; observed_at: string | null; detail: string | null };
-    ingress: { state: string; observed_at: string | null; detail: string | null };
-    inbox: { state: string; pending_count: number; blocked_by_message_id: string | null; detail: string | null };
-    turn: { state: string; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
-    task: { state: string; task_id: string | null; title: string | null };
-  } | null;
-  delivery_attention?: {
-    reason: string; source_message_id: string; blocked_since: string; detail: string | null; waiting_count: number;
-    provider_work_started: boolean; retry: string; can_skip: boolean; skip_unavailable_reason: string | null;
-  } | null;
-  delivery_receipts?: Array<{
-    inbox_item_id: string; source_message_id: string; fifo_sequence?: number; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
-    provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code?: string | null; terminal_reason?: string | null; updated_at: string;
-    follow_up?: { for_message_id: string | null; state: string; reason?: string; later_person_turn?: boolean; scheduled: { at_ms: number; attempt: number; attempts: number; kind: string } | null };
-    timeline?: Array<{ event_sequence?: number; phase: string; observed_at: string; detail: string | null }>;
-  }>;
-};
-type WireActivityEvent = {
-  observed_at: string;
-  sequence: number;
-  provider: string;
-  kind: string;
-  method: string;
-  summary: string;
-  status: DesktopSupervisorActivityEvent["status"];
-  payload: unknown;
-  payload_truncated: boolean;
-  payload_redacted: boolean;
-  durable_payload_ref: string | null;
-};
-
-export type DaemonProcessState = "live" | "zombie";
-export type DaemonProcessIdentity = {
-  pid: number;
-  kernelStartTime: string;
-  command: string;
-  state: DaemonProcessState;
-  expectedScriptPath: string;
-};
-
-type DaemonIdentityInspection = Omit<DaemonProcessIdentity, "expectedScriptPath">;
-type RetiredDaemonObservation =
-  | { kind: "same"; identity: DaemonProcessIdentity }
-  | { kind: "absent" }
-  | { kind: "zombie" }
-  | { kind: "unverifiable" }
-  | { kind: "changed"; reason: string };
-
-export type DaemonHandoffDiagnostic = {
-  event: "supervisor_daemon_handoff";
-  outcome: string;
-  pid: number;
-  implementationVersion: string;
-  authorityReleased: boolean;
-  detail: string;
-};
-
 const PS_DAEMON_IDENTITY = /^(\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\S+)\s+(.+)$/;
 
 export function defaultInspectDaemonProcess(pid: number): DaemonIdentityInspection | null | undefined {
@@ -320,34 +187,6 @@ const approvalCandidate = z.strictObject({
   recordedDecision: z.strictObject({ decisionId: approvalId, actorId: approvalId,
     decision: z.enum(["allow_once", "deny"]), projectionSha256: approvalSha.nullable() }).nullable(),
 });
-
-export interface SupervisorDaemonLifecycleOptions {
-  loadApprovalSigner?: typeof loadHostApprovalSigner;
-  socketPath?: string;
-  daemonScriptPath?: string;
-  daemonWorkingDirectory?: string;
-  lifecycleLogPath?: string;
-  spawnDaemon?: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
-  /** @deprecated Prefer signalDaemon so tests can distinguish TERM from KILL. */
-  terminateDaemon?: (pid: number) => void;
-  signalDaemon?: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
-  inspectDaemonProcess?: (pid: number) => DaemonIdentityInspection | null | undefined;
-  reportHandoffDiagnostic?: (diagnostic: DaemonHandoffDiagnostic) => void;
-  handoffTimeoutMs?: number;
-  terminateTimeoutMs?: number;
-  killTimeoutMs?: number;
-  processPollIntervalMs?: number;
-  startTimeoutMs?: number;
-  statePreparationWaitMs?: number;
-  requestTimeoutMs?: number;
-  turnControlRequestTimeoutMs?: number;
-  now?: () => Date;
-  /**
-   * How long a verified-ready status answers `ensureRunning` without a new
-   * negotiation. Default 2000 ms. Zero turns the cache off.
-   */
-  readyStatusTtlMs?: number;
-}
 
 export function supervisorDaemonSpawnEnvironment(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
