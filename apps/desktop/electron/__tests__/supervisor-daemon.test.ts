@@ -42,7 +42,7 @@ import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/h
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
 const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
 const desktopPackagePath = join(dirname(fileURLToPath(import.meta.url)), "../../package.json");
-const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon.ts");
+const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon/client-lifecycle.ts");
 
 function approvalStorage() {
   const key = randomBytes(32);
