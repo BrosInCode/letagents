@@ -1,4 +1,5 @@
 import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { cursorRoomTurnImageFolders, cursorRoomTurnImageLines, withReadOnlyImageFolders } from "./cursor-room-turn-images.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants as fsConstants, fsyncSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -299,6 +300,7 @@ export function boundedCursorRoomTurnPrompt(
     `Turn id: ${turnId}`,
     `Inbox item: ${request.inboxItemId}`,
     ...formatRoomTurnContext(request),
+    ...cursorRoomTurnImageLines(request),
   ].join("\n");
 }
 
@@ -857,6 +859,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
     };
   }
 
+  /** The daemon stages a file that this turn's sandbox may read; see cursor-room-turn-images.ts. */
+  roomTurnImageDelivery(): "file" { return "file"; }
+
   async runRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRequest,
@@ -910,6 +915,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           turnAbortController.signal,
           markDurableTurnStarted,
           options.settleLifecycleBeforeIdle,
+          cursorRoomTurnImageFolders(request),
         );
       } catch (error) {
         if (!(error instanceof CursorPostDispatchCheckpointError)) throw error;
@@ -1642,6 +1648,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     launchSignal?: AbortSignal,
     markDurableTurnStarted?: ProviderRoomTurnOptions["markDurableTurnStarted"],
     settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"],
+    readOnlyImageFolders: readonly string[] = [], // Daemon-staged images: this launch may read, never write or run.
   ): Promise<LiveTurn> {
     return this.processCustody.acquire(handle.workAttemptId, async () => {
       throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
@@ -1884,7 +1891,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           deniedWriteRegexes = profile.nativeDeniedWriteRegexes;
           deniedWritePaths = profile.nativeDeniedWritePaths;
           deniedWriteStructuralPaths = profile.nativeDeniedWriteStructuralPaths;
-          deniedWriteSubpaths = profile.nativeDeniedWriteSubpaths;
+          deniedWriteSubpaths = withReadOnlyImageFolders(profile.nativeDeniedWriteSubpaths, readOnlyImageFolders);
           deniedExecSubpaths = profile.nativeDeniedExecSubpaths;
           allowedWriteSubpaths = profile.nativeAllowedWriteSubpaths?.length
             ? [...new Set([
@@ -1900,11 +1907,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
                 ...cursorSandboxPathVariants(entry.sourcePath),
                 ...(entry.generationPath ? cursorSandboxPathVariants(entry.generationPath) : []),
               ]) ?? []),
+              ...readOnlyImageFolders.flatMap(cursorSandboxPathVariants),
             ])]
             : undefined;
           deniedExecSubpaths = [...new Set([
             ...(deniedExecSubpaths ?? []),
             ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
+            ...readOnlyImageFolders.flatMap(cursorSandboxPathVariants),
           ])];
           mcpRuntimeEntryPath = profile.mcpRuntimeEntryPath;
           if (!profile.mcpRuntimeEnv) {
