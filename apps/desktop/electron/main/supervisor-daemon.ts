@@ -62,6 +62,7 @@ import { mapEntry, mapActivity } from "./supervisor-daemon/entry-mapping.js";
 export { mapEntry } from "./supervisor-daemon/entry-mapping.js";
 import { STATE_WATCH_RETRY_BASE_MS, supervisorStateWatchRetryDelay, supervisorStateWatchAcceptsStatus } from "./supervisor-daemon/state-watch-policy.js";
 export { supervisorStateWatchRetryDelay, supervisorStateWatchAcceptsStatus } from "./supervisor-daemon/state-watch-policy.js";
+import { SupervisorDaemonClientBase } from "./supervisor-daemon/client-base.js";
 
 /**
  * While a focused agent's feed sits ended, re-poll at this cadence. The daemon
@@ -121,34 +122,7 @@ const approvalCandidate = z.strictObject({
     decision: z.enum(["allow_once", "deny"]), projectionSha256: approvalSha.nullable() }).nullable(),
 });
 
-export class SupervisorDaemonClient {
-  readonly socketPath: string;
-  readonly daemonScriptPath: string;
-  private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
-  /**
-   * Short-lived answer for `ensureRunning`.
-   *
-   * Problem: every supervisor IPC (list-agents, state push, inspector poll every
-   * 5 s, approvals) ran a full negotiation: a maintenance-file read, an
-   * environment copy with two SHA-256 fingerprints, and a `daemon.negotiate`
-   * request on a new socket.
-   * Rule: after a negotiation that proved the daemon ready and current, reuse
-   * that status for `readyStatusTtlMs`.
-   * Invalidation: any lost connection, timeout or disconnect, daemon exit, a
-   * disconnect seen by the observer, a handoff, a maintenance request, an
-   * application-update step, or an environment refresh clears it at once.
-   * A held maintenance status is never cached.
-   */
-  private readyStatus: { status: DesktopSupervisorDaemonStatus; expiresAt: number } | null = null;
-  private readonly readyStatusTtlMs: number;
-  private applicationUpdateHandoff: Promise<void> | null = null;
-  private environmentRefreshHandoff: Promise<DesktopSupervisorDaemonStatus> | null = null;
-  private applicationUpdatePrepared = false;
-  private maintenanceRequested = false;
-  private readonly maintenanceRequests = new Set<() => void>();
-  private maintenanceTarget: DaemonProcessIdentity | null = null;
-  private maintenanceOperation: Promise<void> | null = null;
-  private get maintenancePath(): string { return daemonMaintenancePath(dirname(this.socketPath)); }
+export class SupervisorDaemonClient extends SupervisorDaemonClientBase {
   async isMaintenanceHeld(): Promise<boolean> {
     if (this.maintenanceRequested) return true;
     const hold = await readDaemonMaintenance(this.maintenancePath);
@@ -160,9 +134,6 @@ export class SupervisorDaemonClient {
     const status = await this.request<Record<string, unknown>>("daemon.negotiate", undefined,
       SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.requestTimeoutMs, false, undefined, undefined, true).catch(() => null);
     return { held: true, ready: status?.maintenance_hold_id === hold.id };
-  }
-  private assertNotRestarting(): void {
-    if (this.maintenanceRequested) throw new Error(DAEMON_MAINTENANCE_MESSAGE);
   }
   /** Native-confirmed action. The caller relaunches Electron after success. */
   stopForMaintenance(resume = false): Promise<void> {
@@ -215,85 +186,6 @@ export class SupervisorDaemonClient {
     void operation.finally(() => { if (this.maintenanceOperation === operation) this.maintenanceOperation = null; }).catch(() => undefined);
     return operation;
   }
-  private drainingCurrentDaemon = false;
-  private readonly startupApprovalWaiters = new Set<() => void>();
-  private lastReadyGeneration: number | null = null;
-  private readonly generationListeners = new Set<(status: DesktopSupervisorDaemonStatus) => void>();
-  private readonly spawnDaemon: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
-  private readonly daemonWorkingDirectory: string;
-  private readonly lifecycleLogPath: string;
-  private readonly signalDaemon: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
-  private readonly inspectDaemonProcess: (pid: number) => DaemonIdentityInspection | null | undefined;
-  private readonly reportHandoffDiagnostic: (diagnostic: DaemonHandoffDiagnostic) => void;
-  private readonly naturalExitTimeoutMs: number;
-  private readonly terminateTimeoutMs: number;
-  private readonly killTimeoutMs: number;
-  private readonly processPollIntervalMs: number;
-  private readonly startTimeoutMs: number;
-  private readonly statePreparationWaitMs: number;
-  private readonly requestTimeoutMs: number;
-  private readonly turnControlRequestTimeoutMs: number;
-  private readonly now: () => Date;
-  private attachedDaemonObservation: {
-    identity: DaemonProcessIdentity;
-    generation: number;
-  } | null = null;
-  // Caller deadlines do not end child custody. Retain the launch and its
-  // readiness fences until process exit or a completed negotiated handoff.
-  private ownedDaemon: {
-    pid: number | null;
-    ready: boolean;
-    retiredGeneration: number | undefined;
-    runtimeEnvironmentFingerprint: string;
-    compatibilityFingerprint: string;
-  } | null = null;
-  private readonly loadApprovalSigner: typeof loadHostApprovalSigner;
-  private approvalSigner: { fingerprint: string; promise: Promise<HostApprovalSigner> } | null = null;
-  private readonly approvalPresentations = new Map<string, {
-    roomId: string; view: DesktopHostApproval; candidate: HostApprovalCandidate; challenge: HostApprovalChallenge;
-    presentationSha256: string; touchedAt: number;
-    /** A recorded choice carries the digest it was made on; a choice minted here is signed against the card. */
-    decision: { id: string; choice: HostApprovalSelection; projectionSha256: string | null } | null;
-  }>();
-
-  constructor(options: SupervisorDaemonLifecycleOptions = {}) {
-    this.loadApprovalSigner = options.loadApprovalSigner ?? loadHostApprovalSigner;
-    this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
-    this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
-    this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
-    this.lifecycleLogPath = options.lifecycleLogPath ?? join(dirname(this.socketPath), "daemon-lifecycle.jsonl");
-    this.signalDaemon = options.signalDaemon ?? ((pid, signal) => {
-      if (signal === "SIGTERM" && options.terminateDaemon) {
-        options.terminateDaemon(pid);
-        return;
-      }
-      process.kill(pid, signal);
-    });
-    this.inspectDaemonProcess = options.inspectDaemonProcess ?? defaultInspectDaemonProcess;
-    this.reportHandoffDiagnostic = options.reportHandoffDiagnostic ?? ((diagnostic) => {
-      console.error(JSON.stringify(diagnostic));
-    });
-    this.naturalExitTimeoutMs = options.handoffTimeoutMs ?? NATURAL_EXIT_TIMEOUT_MS;
-    this.terminateTimeoutMs = options.terminateTimeoutMs ?? TERMINATE_EXIT_TIMEOUT_MS;
-    this.killTimeoutMs = options.killTimeoutMs ?? KILL_EXIT_TIMEOUT_MS;
-    this.processPollIntervalMs = options.processPollIntervalMs ?? PROCESS_POLL_INTERVAL_MS;
-    this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
-    this.statePreparationWaitMs = options.statePreparationWaitMs ?? 30_000;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
-    this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
-    this.now = options.now ?? (() => new Date());
-    this.readyStatusTtlMs = options.readyStatusTtlMs ?? 2000;
-    this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd, env) => {
-      const child = spawn(process.execPath, [scriptPath], {
-        cwd,
-        detached: true,
-        stdio: ["ignore", "ignore", "ignore", "ipc"],
-        env,
-      });
-      child.unref();
-      return child;
-    });
-  }
 
   ensureRunning(startupPreparation?: Promise<void>): Promise<DesktopSupervisorDaemonStatus> {
     if (this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
@@ -318,18 +210,6 @@ export class SupervisorDaemonClient {
         .finally(() => { this.ensureOperation = null; });
     }
     return this.ensureOperation;
-  }
-
-  private cacheReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
-    if (this.readyStatusTtlMs > 0 && !this.maintenanceRequested && !status.maintenanceHoldId
-      && !this.applicationUpdateHandoff && !this.applicationUpdatePrepared) {
-      this.readyStatus = { status, expiresAt: Date.now() + this.readyStatusTtlMs };
-    }
-    return status;
-  }
-
-  private invalidateReadyStatus(): void {
-    this.readyStatus = null;
   }
 
   /** Join startup already registered by the app without starting another service. */
@@ -630,11 +510,6 @@ export class SupervisorDaemonClient {
     }
   }
 
-  onGeneration(listener: (status: DesktopSupervisorDaemonStatus) => void): () => void {
-    this.generationListeners.add(listener);
-    return () => this.generationListeners.delete(listener);
-  }
-
   /** Troubleshooting observes the service without taking lifecycle ownership. */
   async getServiceSnapshot(): Promise<DesktopSupervisorServiceSnapshot> {
     const status = await this.connectIfRunning();
@@ -647,17 +522,6 @@ export class SupervisorDaemonClient {
       }
     }
     return { status, state, observedAt: this.now().toISOString() };
-  }
-
-  private rememberReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
-    if (this.maintenanceRequested || status.maintenanceHoldId) return status;
-    if (this.lastReadyGeneration !== status.generation) {
-      this.lastReadyGeneration = status.generation;
-      queueMicrotask(() => {
-        for (const listener of this.generationListeners) listener(status);
-      });
-    }
-    return status;
   }
 
   async list(roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> {
@@ -1802,77 +1666,6 @@ export class SupervisorDaemonClient {
     });
   }
 
-  private request<T = unknown>(
-    method: string,
-    params?: unknown,
-    version = SUPERVISOR_DAEMON_PROTOCOL_VERSION,
-    timeoutMs = this.requestTimeoutMs,
-    unrefSocket = false,
-    signal?: AbortSignal,
-    assertDispatch?: () => void,
-    maintenance = false,
-  ): Promise<T> {
-    if (!maintenance && this.maintenanceRequested) return Promise.reject(new Error(DAEMON_MAINTENANCE_MESSAGE));
-    return new Promise<T>((resolve, reject) => {
-      const id = randomUUID();
-      const socket = createConnection(this.socketPath);
-      if (unrefSocket) socket.unref();
-      const chunks: string[] = [];
-      let settled = false;
-      let onAbort: (() => void) | null = null;
-      const finish = (error?: Error, value?: T) => {
-        if (settled) return;
-        settled = true;
-        if (onAbort) signal?.removeEventListener("abort", onAbort);
-        this.maintenanceRequests.delete(cancelForMaintenance);
-        socket.destroy();
-        if (error && (isConnectionUnavailable(error) || error instanceof SupervisorDaemonRequestTimeoutError
-          || /disconnected before replying/.test(error.message))) this.invalidateReadyStatus();
-        if (error) reject(error); else resolve(value as T);
-      };
-      const cancelForMaintenance = () => finish(new Error(DAEMON_MAINTENANCE_MESSAGE));
-      if (!maintenance) this.maintenanceRequests.add(cancelForMaintenance);
-      onAbort = () => finish(new Error(`Supervisor daemon request aborted: ${method}`));
-      if (signal?.aborted) {
-        onAbort();
-        return;
-      }
-      signal?.addEventListener("abort", onAbort, { once: true });
-      socket.setEncoding("utf8");
-      socket.setTimeout(timeoutMs, () => finish(new SupervisorDaemonRequestTimeoutError(method)));
-      socket.once("error", (error) => finish(error));
-      socket.once("close", () => finish(new Error(`Supervisor daemon disconnected before replying: ${method}`)));
-      socket.on("data", (chunk: string) => {
-        if (settled) return;
-        // Each earlier chunk is already known to contain no newline. Scanning
-        // the growing response again makes large state snapshots quadratic.
-        const newline = chunk.indexOf("\n");
-        chunks.push(newline < 0 ? chunk : chunk.slice(0, newline));
-        if (newline < 0) return;
-        try {
-          const response = JSON.parse(chunks.join("")) as WireResponse;
-          if (response.id !== id) throw new Error("Supervisor daemon response id mismatch.");
-          if (!response.ok) {
-            // The daemon refused. Generation and capability fences answer this way, and the cached
-            // status the request was built from may be what is stale, so the next call negotiates again.
-            this.invalidateReadyStatus();
-            if (/Protocol version mismatch/i.test(response.error ?? "")) {
-              throw new SupervisorDaemonProtocolMismatchError(version, response.version, response.error ?? "Protocol version mismatch.");
-            }
-            throw new Error(response.error || `Supervisor daemon request failed: ${method}`);
-          }
-          finish(undefined, response.result as T);
-        } catch (error) {
-          finish(error instanceof Error ? error : new Error("Invalid supervisor daemon response."));
-        }
-      });
-      socket.once("connect", () => {
-        if (settled) return;
-        try { if (!maintenance) this.assertNotRestarting(); assertDispatch?.(); socket.write(`${JSON.stringify({ version, id, method, params })}\n`); }
-        catch (error) { finish(error instanceof Error ? error : new Error("Supervisor request was not dispatched.")); }
-      });
-    });
-  }
 }
 
 function delay(ms: number): Promise<void> {
