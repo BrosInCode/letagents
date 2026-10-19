@@ -1,4 +1,4 @@
-import type { ActivityWrite } from "./manifest-store.js";
+import { ManifestConflictError, type ActivityWrite, type ManifestStore } from "./manifest-store.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "./types.js";
 
 /**
@@ -48,6 +48,36 @@ export function isSingleEventActivityError(error: unknown): boolean {
       || primary === SQLITE_MISMATCH || primary === SQLITE_RANGE;
   }
   return error instanceof TypeError || error instanceof SyntaxError || error instanceof RangeError;
+}
+
+/**
+ * One batch commit, as the daemon makes it. A generation conflict means a
+ * writer outside the manifest lane committed first; within the lane none can,
+ * since every other mutation flushes pending activity before it runs. The only
+ * such writer is the retiring daemon's provider birth checkpoint
+ * (ProviderExecutionCoordinator.persistReturnedProviderForHandoff), which
+ * retires its entry's pending activity inside the commit lane right after it
+ * commits. So the whole batch is retried once against the current generation,
+ * with mayWrite still checked inside the transaction: the retired entry stays
+ * skipped and every other entry's events, often their final idle state before
+ * a handoff, are kept. A second conflict throws, and the batch is dropped.
+ */
+export async function commitActivityBatch(input: {
+  store: Pick<ManifestStore, "recordActivityBatch" | "readGeneration">;
+  items: readonly ActivityWrite[];
+  expectedGeneration: number;
+  fence: (commit: () => Promise<void>) => Promise<void>;
+  mayWrite: (agentId: string) => boolean;
+}): Promise<{ generation: number; written: number; skipped: number; retriedAfterConflict: boolean }> {
+  try {
+    const result = await input.store.recordActivityBatch(input.expectedGeneration, input.items, input.fence, input.mayWrite);
+    return { ...result, retriedAfterConflict: false };
+  } catch (error) {
+    if (!(error instanceof ManifestConflictError)) throw error;
+    const current = await input.store.readGeneration();
+    const result = await input.store.recordActivityBatch(current, input.items, input.fence, input.mayWrite);
+    return { ...result, retriedAfterConflict: true };
+  }
 }
 
 export type ActivityWriteBatcherOptions = {
@@ -252,7 +282,7 @@ export class ActivityWriteBatcher {
       this.options.diagnostic?.(batchError, batch.length);
       return;
     }
-    const now = this.options.now ?? Date.now;
+    const now = this.options.now ?? (() => performance.now());
     const deadline = now() + (this.options.retryBudgetMs ?? ACTIVITY_BATCH_RETRY_BUDGET_MS);
     let failed = 0;
     let lastError: unknown = batchError;

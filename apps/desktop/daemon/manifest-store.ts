@@ -595,6 +595,12 @@ export class ManifestStore {
       LIMIT 1`).get(input.agentId, input.executionGenerationId, runtimeId));
   }
 
+  /** The committed manifest generation, read now. */
+  async readGeneration(): Promise<number> {
+    const database = await this.getDatabase();
+    return Number((this.reads.get(database, "generation").get() as Row).generation);
+  }
+
   /**
    * The daemon's batched activity: the newest runtime state of an entry's
    * admitted but uncommitted events. Durable-idle checks consult it, since a

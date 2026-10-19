@@ -31,8 +31,14 @@ export class DaemonAuthority {
     return this.manifestGeneration;
   }
 
+  /**
+   * The stored generation only grows, so an accepted value lower than the
+   * current one is a stale acceptance: a writer outside the manifest lane (the
+   * handoff birth checkpoint) can accept its generation after an activity
+   * batch retried past it. Never move backwards.
+   */
   set generation(generation: number) {
-    this.manifestGeneration = generation;
+    if (generation > this.manifestGeneration) this.manifestGeneration = generation;
   }
 
   /**

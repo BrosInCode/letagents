@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { ActivityWriteBatcher } from "../activity-write-batcher.js";
+import { ActivityWriteBatcher, commitActivityBatch } from "../activity-write-batcher.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
@@ -15,7 +15,7 @@ import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
-import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
+import type { DaemonActivityEvent, DaemonManifest, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
@@ -6915,47 +6915,126 @@ test("managed launch receipts survive reopening, reject relabeling, and legacy m
 });
 
 
-test("batched activity admitted before a handoff never overwrites the retiring daemon's provider birth", async () => {
+test("a birth committed while a two-entry batch is in flight keeps the other entry's events and skips the retired one", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "handoff-birth" };
   const agent: DaemonManifestEntry = { ...entry, condition: "none", observed_state: "idle", delivery_mode: "daemon_inbox",
     turn_control: undefined, work_attempt_id: "attempt_1", provider_ref: { work_attempt_id: "attempt_1", execution_generation_id: "run_1",
       provider_continuation_id: "thread_1", provider_connection: connection } };
+  const peer: DaemonManifestEntry = { ...entry, id: "agent_2", display_name: "Peer", observed_state: "working", turn_control: undefined,
+    reconciliation: undefined, reconciliation_notices: undefined, activity: [] };
   const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => true, notifyStateChanged: () => {} });
   const diagnostics: number[] = [];
+  const results: { skipped: number; written: number; retriedAfterConflict: boolean }[] = [];
   const batcher = new ActivityWriteBatcher({
     serialize: (operation) => authority.serializeManifestMutationWithoutFlush(operation),
-    // As main.ts: the admitted-state fence and the retired-entry filter.
+    // Exactly as main.ts commits a batch.
     commit: async (items) => {
-      const next = await store.recordActivityBatch(authority.generation, items,
-        (commit) => authority.fenceAdmittedTransitionCommit(commit), (agentId) => batcher.mayWrite(agentId));
+      const next = await commitActivityBatch({ store, items, expectedGeneration: authority.generation,
+        fence: (commit) => authority.fenceAdmittedTransitionCommit(commit), mayWrite: (agentId) => batcher.mayWrite(agentId) });
+      results.push({ skipped: next.skipped, written: next.written, retriedAfterConflict: next.retriedAfterConflict });
       authority.generation = next.generation;
     },
     diagnostic: (_error, dropped) => diagnostics.push(dropped),
   });
+  // The retiring daemon's birth path: persistReturnedProviderForHandoff's commit
+  // fence, which calls retirePendingActivity right after its commit.
+  const retirePendingActivity = (entryId: string) => batcher.retireEntry(entryId);
+  const late = (id: string, sequence: number, status: DaemonActivityEvent["status"]) => ({ agentId: id,
+    event: { ...entry.activity![0]!, sequence, status, summary: `${id} ${status}` },
+    runtimeUpdate: { observedState: status === "idle" ? "idle" as const : "working" as const,
+      nativeLiveness: { state: status === "idle" ? "idle" as const : "active" as const, observed_at: "2026-07-19T00:05:00.000Z", detail: `${id} ${status}` } },
+    limit: 200 });
+  let releaseBirth!: () => void;
+  const birthGate = new Promise<void>((resolve) => { releaseBirth = resolve; });
+  let birthHoldsStore!: () => void;
+  const birthStarted = new Promise<void>((resolve) => { birthHoldsStore = resolve; });
   try {
-    authority.generation = (await store.write(0, [agent])).generation;
+    authority.generation = (await store.write(0, [agent, peer])).generation;
     seedTerminalExecution(env.databasePath, "attempt_1", "run_1");
-    // Admitted just before retirement began: a working event still in the window.
-    await batcher.serializeAdmission(async () => batcher.admit({ agentId: agent.id,
-      event: { ...entry.activity![0]!, sequence: 50, status: "working", summary: "late event" },
-      runtimeUpdate: { observedState: "working", nativeLiveness: { state: "active", observed_at: "2026-07-19T00:05:00.000Z", detail: "late event" } },
-      limit: 200 }));
-    // The retiring daemon journals the returned birth outside the manifest lane, as
-    // persistReturnedProviderForHandoff does, and retires the entry's pending activity.
-    const birth = await store.checkpointProviderBirth(authority.generation, {
+    // Admitted just before retirement began: a late working event for the
+    // retiring entry, and the peer's final idle state.
+    await batcher.serializeAdmission(async () => {
+      batcher.admit(late(agent.id, 50, "working"));
+      batcher.admit(late(peer.id, 60, "idle"));
+    });
+    const birth = store.checkpointProviderBirth(authority.generation, {
       entry: { ...agent, observed_state: "idle" }, executionGenerationId: "run_1", providerConnection: connection,
       appliedRevision: 1, requestedAuthorityMode: "typed_shadow", observedAtMs: 100, managedLaunchContract: "c".repeat(64),
-    }, (commit) => authority.serializeManifestCommit(async () => { await commit(); batcher.retireEntry(agent.id); }));
-    authority.generation = birth.generation;
-    await batcher.flush();
-    await batcher.close();
+    }, async (commit) => {
+      birthHoldsStore();
+      await birthGate;
+      await authority.serializeManifestCommit(async () => { await commit(); retirePendingActivity(agent.id); });
+    });
+    await birthStarted;
+    // The batch reads generation G and waits behind the birth on the store.
+    const flushed = batcher.flush();
+    for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(results.length, 0, "the batch is in flight, not yet committed");
+    releaseBirth();
+    authority.generation = (await birth).generation;
+    await flushed;
+    assert.deepEqual(results, [{ skipped: 1, written: 1, retriedAfterConflict: true }],
+      "one whole-batch retry after the conflict; mayWrite skipped the retired entry inside the transaction");
+    assert.deepEqual(diagnostics, []);
     const saved = (await store.getEntry(agent.id))!;
     assert.equal(saved.observed_state, "idle", "the birth record keeps its state");
     assert.equal(saved.activity?.some((event) => event.sequence === 50), false, "the older event was not written after the birth");
-    assert.deepEqual(diagnostics, [1], "the dropped event is reported");
-  } finally { await batcher.close(); await store.close(); await env.cleanup(); }
+    const savedPeer = (await store.getEntry(peer.id))!;
+    assert.equal(savedPeer.observed_state, "idle", "the peer's final idle state survived the conflict");
+    assert.equal(savedPeer.activity?.at(-1)?.sequence, 60);
+  } finally { releaseBirth?.(); await batcher.close(); await store.close(); await env.cleanup(); }
+});
+
+test("a second generation conflict on the retry drops and reports the batch", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const peer: DaemonManifestEntry = { ...entry, turn_control: undefined, reconciliation: undefined, reconciliation_notices: undefined, activity: [] };
+  try {
+    const written = await store.write(0, [peer]);
+    let conflicts = 0;
+    // An out-of-lane writer that commits before every attempt.
+    const racing = {
+      readGeneration: () => store.readGeneration(),
+      recordActivityBatch: async (...args: Parameters<ManifestStore["recordActivityBatch"]>) => {
+        conflicts += 1;
+        const current = await store.getEntry(peer.id);
+        await store.replaceEntry(await store.readGeneration(), { ...current!, display_name: `Peer ${conflicts}` });
+        return store.recordActivityBatch(...args);
+      },
+    };
+    await assert.rejects(commitActivityBatch({ store: racing, expectedGeneration: written.generation,
+      items: [{ agentId: peer.id, event: { ...entry.activity![0]!, sequence: 70 }, runtimeUpdate: null, limit: 200 }],
+      fence: (commit) => commit(), mayWrite: () => true }), ManifestConflictError);
+    assert.equal(conflicts, 2, "one whole-batch retry, then the conflict is final");
+    assert.equal((await store.getEntry(peer.id))!.activity?.some((event) => event.sequence === 70), false);
+
+    // In the batcher the final conflict drops the whole batch, with no per-event retry.
+    const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => false, notifyStateChanged: () => {} },
+      await store.readGeneration());
+    const dropped: { error: unknown; count: number }[] = [];
+    let attempts = 0;
+    const batcher = new ActivityWriteBatcher({
+      serialize: (operation) => authority.serializeManifestMutationWithoutFlush(operation),
+      commit: async (items) => {
+        attempts += 1;
+        const next = await commitActivityBatch({ store: racing, items, expectedGeneration: authority.generation,
+          fence: (commit) => authority.fenceAdmittedTransitionCommit(commit), mayWrite: () => true });
+        authority.generation = next.generation;
+      },
+      diagnostic: (error, count) => dropped.push({ error, count }),
+    });
+    await batcher.serializeAdmission(async () => {
+      batcher.admit({ agentId: peer.id, event: { ...entry.activity![0]!, sequence: 80 }, runtimeUpdate: null, limit: 200 });
+      batcher.admit({ agentId: peer.id, event: { ...entry.activity![0]!, sequence: 81 }, runtimeUpdate: null, limit: 200 });
+    });
+    await batcher.close();
+    assert.equal(attempts, 1, "no per-event retry after a conflict");
+    assert.equal(dropped.length, 1);
+    assert.equal(dropped[0]!.count, 2);
+    assert.ok(dropped[0]!.error instanceof ManifestConflictError);
+  } finally { await store.close(); await env.cleanup(); }
 });
 
 test("a managed runtime replacement is refused while a working event is still pending", async () => {

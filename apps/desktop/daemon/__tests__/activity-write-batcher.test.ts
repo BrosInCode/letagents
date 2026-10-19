@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { ActivityWriteBatcher, ACTIVITY_BATCH_MAX_EVENTS, isSingleEventActivityError } from "../activity-write-batcher.js";
+import { ActivityWriteBatcher, ACTIVITY_BATCH_MAX_EVENTS, commitActivityBatch, isSingleEventActivityError } from "../activity-write-batcher.js";
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { schedulerErrorDetail } from "../daemon-error-policy.js";
@@ -72,8 +72,9 @@ async function harness(options: {
     commit: async (items) => {
       await options.beforeCommit?.(items);
       commits.push(items.length);
-      const next = await store.recordActivityBatch(authority.generation, items, (commit) => authority.fenceDaemonCommit(commit),
-        (agentId) => batcher.mayWrite(agentId));
+      // The same commit main.ts makes, with the ordinary fence.
+      const next = await commitActivityBatch({ store, items, expectedGeneration: authority.generation,
+        fence: (commit) => authority.fenceDaemonCommit(commit), mayWrite: (agentId) => batcher.mayWrite(agentId) });
       authority.generation = next.generation;
     },
     diagnostic: (error, dropped) => diagnostics.push({ error, dropped }),
@@ -353,7 +354,7 @@ test("a failed batch is retried event by event, so one bad event costs only itse
   let failBatches = true;
   const h = await harness({
     beforeCommit: async (items) => {
-        // A batch-wide failure caused by one event's content (a constraint), and
+      // A batch-wide failure caused by one event's content (a constraint), and
       // that event failing again on its own.
       if (failBatches && items.length > 1) throw sqliteError(1555, "UNIQUE constraint failed");
       if (items.some((item) => item.agentId === "b" && item.event.sequence === 2)) throw sqliteError(275, "CHECK constraint failed");

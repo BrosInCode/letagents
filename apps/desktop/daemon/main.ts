@@ -36,7 +36,7 @@ import { LifecycleAdministrationCoordinator } from "./lifecycle-administration-c
 import { projectDaemonCreateRequestReplayParameters } from "./manifest-entry-projection.js";
 import { ManifestAdministrationCoordinator } from "./manifest-administration-coordinator.js";
 import { ManifestStore } from "./manifest-store.js";
-import { ActivityWriteBatcher } from "./activity-write-batcher.js";
+import { ActivityWriteBatcher, commitActivityBatch } from "./activity-write-batcher.js";
 import { withProtectedStateUpgrade, reportStateRecoveryReady, type StateRecoveryBootstrap } from "./state-recovery-key.js";
 import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator.js";
 import { startDaemonLifecycleDiagnostics, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
@@ -220,14 +220,17 @@ export class SupervisorDaemon {
         // uses the admitted-state fence: it commits while this daemon still
         // owns the singleton, even if a handoff began while it waited for the
         // commit lane, and never once the singleton is lost.
-        const next = await this.store.recordActivityBatch(this.manifestGeneration, items,
-          (commit) => this.fenceAdmittedTransitionCommit(commit),
+        const next = await commitActivityBatch({
+          store: this.store, items, expectedGeneration: this.manifestGeneration,
+          fence: (commit) => this.fenceAdmittedTransitionCommit(commit),
           // A retiring daemon's provider birth record is never overwritten by older activity.
-          (agentId) => this.activityWrites.mayWrite(agentId));
+          mayWrite: (agentId) => this.activityWrites.mayWrite(agentId),
+        });
         this.manifestGeneration = next.generation;
-        if (next.skipped > 0) {
+        if (next.skipped > 0 || next.retriedAfterConflict) {
           console.warn("[activity_batch]", JSON.stringify({ skipped: next.skipped, written: next.written,
-            reason: "entry gone or sequence no longer newer" }));
+            retriedAfterConflict: next.retriedAfterConflict,
+            reason: "entry gone, entry retired by a handoff birth, or sequence no longer newer" }));
         }
       },
       diagnostic: (error, dropped) => console.warn("[activity_batch]", JSON.stringify({ dropped, error: String(error) })),
