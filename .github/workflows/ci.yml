@@ -179,6 +179,7 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
           BEFORE_SHA: ${{ github.event.before }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           base=""
@@ -189,6 +190,10 @@ jobs:
           elif [ -n "${BEFORE_SHA}" ] && [ "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]; then
             if git fetch --no-tags --depth=1 origin "${BEFORE_SHA}"; then
               base="${BEFORE_SHA}"
+            fi
+          elif [ -n "${MERGE_GROUP_BASE_SHA}" ]; then
+            if git fetch --no-tags --depth=1 origin "${MERGE_GROUP_BASE_SHA}"; then
+              base="${MERGE_GROUP_BASE_SHA}"
             fi
           fi
           run=true
@@ -311,6 +316,10 @@ jobs:
               cd apps/desktop
               node ../../scripts/select-test-shard.mjs --shard "${shard}" electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt"
               mapfile -t files < "${RUNNER_TEMP}/electron-shard.txt"
+              if [ "${#files[@]}" -eq 0 ]; then
+                echo "Electron shard ${shard} has no test files." >&2
+                exit 1
+              fi
               echo "Electron shard ${shard} runs ${#files[@]} files:"
               printf '  %s\n' "${files[@]}"
               npm run test:electron:files -- "${files[@]}"
