@@ -102,6 +102,9 @@ test("URL passwords of any scheme are redacted, for the owner's own view too", (
   assert.equal(redactCredentialText(PSQL).value, "psql postgres://admin:[REDACTED]@db.internal/prod -c select 1");
   assert.equal(redactCredentialText("redis://:pw@cache:6379").value, "redis://:[REDACTED]@cache:6379");
   assert.equal(redactCredentialText("mysql://root:x@localhost/db").value, "mysql://root:[REDACTED]@localhost/db");
+  // People write passwords with an unescaped @ or /: the password runs to the word's last @.
+  assert.equal(redactCredentialText("postgres://admin:p@ss@db/app").value, "postgres://admin:[REDACTED]@db/app");
+  assert.equal(redactCredentialText("amqp://u:ab/cd@broker").value, "amqp://u:[REDACTED]@broker");
   assert.equal(redactCredentialText("https://example.com/a:b@c").value, "https://example.com/a:b@c", "a path is not userinfo");
   const owner = sanitizeDaemonActivityEvent({ observed_at: "2026-10-15T00:00:00.000Z", sequence: 1, provider: "claude-code",
     kind: "provider_event", method: "letagents/backgroundWork", summary: `Waiting up to 5 min for a background command: "${PSQL}".`,
