@@ -39,6 +39,7 @@ import { LifecycleAdministrationCoordinator } from "./lifecycle-administration-c
 import { projectDaemonCreateRequestReplayParameters } from "./manifest-entry-projection.js";
 import { ManifestAdministrationCoordinator } from "./manifest-administration-coordinator.js";
 import { ManifestStore } from "./manifest-store.js";
+import { DaemonActivityWrites } from "./activity-write-batcher.js";
 import { withProtectedStateUpgrade, reportStateRecoveryReady, type StateRecoveryBootstrap } from "./state-recovery-key.js";
 import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator.js";
 import { startDaemonLifecycleDiagnostics, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
@@ -120,6 +121,8 @@ export class SupervisorDaemon {
   private maintenance: DaemonMaintenanceService | null = null;
   private readonly authority: DaemonAuthority;
   private readonly store: ManifestStore;
+  /** Native activity events wait here briefly and are written in batches. */
+  private readonly activityWrites: DaemonActivityWrites;
   private readonly manifestAdministration: ManifestAdministrationCoordinator;
   private readonly manifestTransitions: ManifestTransitionCoordinator;
   private readonly readModel: DaemonReadModel;
@@ -214,6 +217,8 @@ export class SupervisorDaemon {
       drive: (entryId, signal) => this.deliveryCutoverExecution.drive(entryId, signal),
     });
     this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath, undefined, undefined, /* schemaPrepared */ true);
+    this.activityWrites = new DaemonActivityWrites({ authority: this.authority, store: this.store,
+      isHandoffScheduled: () => this.handoffScheduled, admittedFence: (commit) => this.fenceAdmittedTransitionCommit(commit) });
     this.manifestAdministration = new ManifestAdministrationCoordinator({
       store: this.store,
       authority: {
@@ -234,6 +239,7 @@ export class SupervisorDaemon {
       convergence: {
         request: (entryId) => this.requestConvergence(entryId),
       },
+      activity: this.activityWrites.admission,
       liveSharing: {
         changed: (entryId, saved) => this.liveRoomShare.setSharing(entryId, saved),
       },
@@ -407,8 +413,8 @@ export class SupervisorDaemon {
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
-        getEntry: (entryId) => this.store.getEntry(entryId),
-        load: () => this.store.load(),
+        getEntry: (entryId) => this.activityWrites.overlayEntry(this.store.getEntry(entryId)),
+        load: () => this.activityWrites.overlayManifest(this.store.load()),
         updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
         readRuntimeLifecycleAuthority: (input) => this.store.readRuntimeLifecycleAuthority(input),
       },
@@ -459,6 +465,7 @@ export class SupervisorDaemon {
     this.providerExecution = providerPort
       ? new ProviderExecutionCoordinator({
         notifyProgressChanged: () => this.notifyStateChanged(),
+        retirePendingActivity: (entryId) => this.activityWrites.retireEntry(entryId),
         refreshManagedRuntime: (entryId) => this.runtimeConfigurationApply.refreshManaged(entryId),
         exitSettling: (entryId) => this.providerTerminals.settling(entryId),
         settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
@@ -1128,6 +1135,7 @@ export class SupervisorDaemon {
       () => this.providerReconciliation?.disposeAll(),
       () => this.providerExecution?.drainConvergence(),
       () => this.providerStreams.disposeAll(),
+      () => this.activityWrites.close(),
       () => this.socket.stop(),
       () => this.serializeManifestCommit(() => this.singleton.release()),
       () => this.store.close(),
@@ -1159,6 +1167,7 @@ export class SupervisorDaemon {
     this.convergencePacer.close();
     this.wakeRoomMoveReconciliationWaiters();
     const failures: unknown[] = [...this.handoffCleanupFailures];
+    try { await this.activityWrites.close(); } catch (error) { failures.push(error); }
     try { await this.deliveryCutovers.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.fenceAndDrainRoomMoveReconciliations(); } catch (error) { failures.push(error); }

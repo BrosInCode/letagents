@@ -15,6 +15,7 @@ import {
   type ProviderReasoningEffort,
 } from "./provider-configuration.js";
 import { CODEX_READ_ONLY_NEEDS_DELIVERY, codexReadOnlyNeedsDelivery, describeProfilesForAgent, describeProfilesWithOwnerSetup } from "./supervised-permission-profiles.js";
+import type { ActivityWrite } from "./manifest-store.js";
 import type {
   DaemonActivityEvent,
   DaemonAgentConfiguration,
@@ -138,8 +139,17 @@ export type ManifestAdministrationPolicies = {
   safeErrorDetail(error: unknown): string;
 };
 
+/** Batched admission for native activity events (see ActivityWriteBatcher). */
+export type ManifestActivityBatch = {
+  serializeAdmission<T>(operation: () => Promise<T>): Promise<T>;
+  pendingState(entryId: string): { lastSequence: number; observedState: DaemonManifestEntry["observed_state"] | null } | null;
+  admit(item: ActivityWrite): void;
+};
+
 export type ManifestAdministrationCoordinatorOptions = {
   store: ManifestAdministrationStore;
+  /** When present, native activity is admitted here and written in batches. */
+  activity?: ManifestActivityBatch;
   authority: ManifestAdministrationAuthority;
   policies: ManifestAdministrationPolicies;
   convergence: {
@@ -312,6 +322,8 @@ export class ManifestAdministrationCoordinator {
       throw new Error("A bounded activity event is required.");
     }
     const sanitizedEvent = this.options.policies.sanitizeActivity(event);
+    const batch = this.options.activity;
+    if (batch) return this.admitNativeActivity(batch, id, sanitizedEvent, activityOnly, position);
     return this.options.authority.serialize(async () => {
       await this.options.authority.assertCurrent();
       const state = await this.options.store.getActivityState(id);
@@ -330,6 +342,38 @@ export class ManifestAdministrationCoordinator {
         } }, 200, this.options.authority.fenceCommit,
       );
       this.options.authority.acceptManifestGeneration(next.generation);
+    });
+  }
+
+  /**
+   * The same admission as the direct path, against committed plus pending
+   * activity, but the write joins the next batch. Returns once admitted; the
+   * state notification fires when the batch commits.
+   */
+  private admitNativeActivity(batch: ManifestActivityBatch, id: string, sanitizedEvent: DaemonActivityEvent,
+    activityOnly: boolean, position: "exact" | "after_latest"): Promise<void> {
+    return batch.serializeAdmission(async () => {
+      await this.options.authority.assertCurrent();
+      const committed = await this.options.store.getActivityState(id);
+      if (!committed) throw new Error(`Unknown daemon manifest entry: ${id}`);
+      const pending = batch.pendingState(id);
+      const lastSequence = Math.max(committed.last_sequence, pending?.lastSequence ?? -1);
+      const observedStateNow = pending?.observedState ?? committed.observed_state;
+      const sequence = position === "after_latest" ? Math.max(sanitizedEvent.sequence, lastSequence + 1) : sanitizedEvent.sequence;
+      if (sequence <= lastSequence) {
+        throw new Error(`Native activity sequence ${sequence} is not newer than ${lastSequence}.`);
+      }
+      const observedState = sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing"
+        ? "working" : sanitizedEvent.status === "blocked" ? observedStateNow : "idle";
+      batch.admit({
+        agentId: id,
+        event: { ...sanitizedEvent, sequence },
+        runtimeUpdate: activityOnly ? null : { observedState, nativeLiveness: {
+          state: sanitizedEvent.status === "idle" ? "idle" : "active",
+          observed_at: sanitizedEvent.observed_at, detail: sanitizedEvent.summary,
+        } },
+        limit: 200,
+      });
     });
   }
 
