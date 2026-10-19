@@ -87,6 +87,7 @@
 
 <script setup lang="ts">
 import MessageRemindersSection from "./MessageRemindersSection.vue";
+import { useNow } from "../../../composables/useNow";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ArrowRight, ArrowUpRight, Check, CheckCheck, ChevronDown, ChevronRight, CircleCheck, Inbox, Link2, LoaderCircle, MessageSquare, RefreshCw, Send, SlidersHorizontal, Lightbulb, TriangleAlert, X } from '@lucide/vue';
 import type { DesktopRentalRequest, DesktopRoomThreadInboxPage } from '../../../../../electron/ipc-types.js';
@@ -113,7 +114,7 @@ const showNoticeButton = ref<HTMLButtonElement | null>(null);
 const dismissedSourceNotices = ref<Record<string, string>>({});
 const noticeScope = computed(() => JSON.stringify([...props.rooms].sort()));
 // Ages advance between refreshes; the clock starts only in a mounted view.
-const now = ref(Date.now()); let clock: ReturnType<typeof setInterval> | undefined;
+const now = useNow(30_000);
 const sectionTitle = computed(() => props.section === 'needs-you' ? 'Needs you' : props.section === 'updates' ? 'Updates' : 'Answered');
 const sectionDescription = computed(() => props.section === 'needs-you' ? 'Questions and decisions waiting on your input.' : props.section === 'updates' ? 'Replies, progress, and issues across your rooms.' : 'Your decisions, saved with the original requests.');
 // Loading issues follow the room filter; rental requests belong to no room.
@@ -239,8 +240,8 @@ function toggleRoom(id: string) { emit('update:rooms', props.rooms.includes(id) 
 function roomMenuToggled() { if (roomMenu.value?.open) void nextTick(() => roomSearch.value?.focus({ preventScroll: true })); else roomQuery.value = ''; }
 function closeRoomMenu() { if (roomMenu.value) { roomMenu.value.open = false; roomMenu.value.querySelector('summary')?.focus(); } }
 function outsideRoomMenu(event: PointerEvent) { if (roomMenu.value?.open && event.target instanceof Node && !roomMenu.value.contains(event.target)) roomMenu.value.open = false; }
-onMounted(() => { document.addEventListener('pointerdown', outsideRoomMenu); clock = setInterval(() => { now.value = Date.now(); }, 30_000); });
-onBeforeUnmount(() => { alive = false; clearInterval(clock); clearTimeout(settleTimer); document.removeEventListener('pointerdown', outsideRoomMenu); });
+onMounted(() => { document.addEventListener('pointerdown', outsideRoomMenu); });
+onBeforeUnmount(() => { alive = false; clearTimeout(settleTimer); document.removeEventListener('pointerdown', outsideRoomMenu); });
 function date(time: string) { return Number.isFinite(Date.parse(time)) ? new Date(time).toLocaleString() : ''; }
 function actionLabel(item: UniversalInboxItem) { if (item.taskId) return 'Open task'; return ({ thread: 'Open thread', github_failure: 'Open check', agent_blocked: 'Open agent', agent_offline: 'Open room activity', rental_request: 'Review rental request', agent_attention: 'Open diagnostics', board_intent: 'Review request' } as Record<string, string>)[item.category] || 'Open room'; }
 function openRoom(item: UniversalInboxItem, mode?: 'room' | 'source') {

@@ -8,7 +8,9 @@ import type {
   DesktopRoomSnapshot,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
+import { toRaw } from "vue";
 import { normalizeRoomIdentifier } from "./sidebar-rooms";
+import { reuseUnchanged } from "./reuse-unchanged";
 
 export function snapshotMatchesRoom(snapshot: DesktopRoomSnapshot | null, roomIdentifier: string | null): boolean {
   if (!roomIdentifier || !snapshot) return false;
@@ -282,24 +284,51 @@ export function applyRoomLiveMetadata(
   if (!snapshotMatchesRoom(snapshot, metadata.roomIdentifier)) return snapshot;
   const states = metadata.sourceStates;
   const errored = (key: keyof typeof states): boolean => states[key]?.status === "error";
+  // Unwrap the top-level Vue proxy. Nested sections read from it are then raw
+  // objects, so reused sections stay plain data in the new snapshot.
+  const current = toRaw(snapshot);
+  // Sections equal to what the snapshot already holds keep their old reference,
+  // so a tick that changed nothing changes no reference at all.
+  const focusRooms = errored("focusRooms") ? current.focusRooms : reuseUnchanged(current.focusRooms, metadata.focusRooms);
+  const participants = errored("participants")
+    ? current.participants
+    : reuseUnchanged(current.participants, metadata.participants);
+  const participantHiddenCount = errored("participants")
+    ? current.participantHiddenCount
+    : metadata.participantHiddenCount;
+  const presence = errored("presence") ? current.presence : reuseUnchanged(current.presence, metadata.presence);
+  const recentActivity = errored("activityHistory")
+    ? current.recentActivity
+    : reuseUnchanged(current.recentActivity, metadata.recentActivity);
+  const boardSettings = errored("boardSettings")
+    ? current.boardSettings
+    : reuseUnchanged(current.boardSettings, metadata.boardSettings);
+  const sourceStates = reuseUnchanged(current.sourceStates, {
+    ...current.sourceStates,
+    focusRooms: states.focusRooms,
+    participants: states.participants,
+    presence: states.presence,
+    activityHistory: states.activityHistory,
+    boardSettings: states.boardSettings,
+  });
+  if (
+    focusRooms === current.focusRooms
+    && participants === current.participants
+    && participantHiddenCount === current.participantHiddenCount
+    && presence === current.presence
+    && recentActivity === current.recentActivity
+    && boardSettings === current.boardSettings
+    && sourceStates === current.sourceStates
+  ) return snapshot;
   return {
-    ...snapshot,
-    focusRooms: errored("focusRooms") ? snapshot.focusRooms : metadata.focusRooms,
-    participants: errored("participants") ? snapshot.participants : metadata.participants,
-    participantHiddenCount: errored("participants")
-      ? snapshot.participantHiddenCount
-      : metadata.participantHiddenCount,
-    presence: errored("presence") ? snapshot.presence : metadata.presence,
-    recentActivity: errored("activityHistory") ? snapshot.recentActivity : metadata.recentActivity,
-    boardSettings: errored("boardSettings") ? snapshot.boardSettings : metadata.boardSettings,
-    sourceStates: {
-      ...snapshot.sourceStates,
-      focusRooms: states.focusRooms,
-      participants: states.participants,
-      presence: states.presence,
-      activityHistory: states.activityHistory,
-      boardSettings: states.boardSettings,
-    },
+    ...current,
+    focusRooms,
+    participants,
+    participantHiddenCount,
+    presence,
+    recentActivity,
+    boardSettings,
+    sourceStates,
   };
 }
 

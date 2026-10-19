@@ -87,7 +87,7 @@ test("remote rows follow the local rows in the strip and never replace one", () 
 
 test("the room shell adds remote rows after its local rows", () => {
   const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
-  assert.match(shell, /\], \[\.\.\.pendingResponseParticipants\.value, [^\n]*\.\.\.remoteAgentWorkIndicators\(props\.presence,\s*supervisorEntries\.value\)\], props\.messages\)/);
+  assert.match(shell, /\], \[\.\.\.pendingResponseParticipants\.value, [^\n]*\.\.\.remoteAgentWorkIndicators\(props\.presence,\s*supervisorEntries\.value, \[\], workWindowNow\.value\)\], props\.messages\)/);
 });
 
 test("the live strip shows a remote row as a label with the same look, marked data-remote, that opens nothing", async () => {
