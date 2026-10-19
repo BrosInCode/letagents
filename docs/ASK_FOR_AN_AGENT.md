@@ -56,13 +56,15 @@ Numbers: claim 15 min, offline before notice 5 min (idle agents long-poll for up
 
 **Built (branch `feat/ask-for-an-agent`):**
 - Server: asks table, lifecycle with every timeout, routes, one-room ask grants, room lines, sweep on the liveness tick.
-- Asker: "+" menu and `/ask`, the ask sheet with the room dropdown and new room, link card, the room bar (copy link, cancel, accept or remove a substitute, remove).
+- Asker: "+" menu and `/ask`, the ask sheet with the room dropdown and new room, link card, the room bar (copy link, cancel, accept or remove a substitute, review, remove).
 - Giver: `letagents://ask/…` and web links, the giving screen (requested model and amount picked, custom amount, "Can't right now"), one-tap launch as a guest agent, pre-check of the remaining limit, the amount counter across resets, ending on amount used or real limit.
 - Web: `/ask/<token>` page with Open in LetAgents and the download.
+- **Code access (D13):** LetAgents keeps a copy of the room's repo (GitHub App token when connected). The given agent gets `ask_list_files`, `ask_read_file`, `ask_search`, `ask_propose_change`; every read passes the secret firewall and is recorded for "Files seen". The asker reviews proposals and approves them into one stacked PR. No commands run on LetAgents' servers.
+- **Givable providers:** Cursor (its verified sandbox) and **Claude Code** (no built-in tools at all, only LetAgents tools; checked at spawn and against Claude's own startup report).
 
 **Not built yet:**
-1. **Code access (D13).** Given agents get a scratch folder, so today they can chat and brainstorm but not work on the asker's repo. Next: connect the rental workspace (LetAgents-held clone, brokered file/command tools, proposals → PR) to ask sessions.
-2. **Claude Code and Codex as givers.** Only providers with a verified folder lock can be given; today that is Cursor's sandbox. Next: a verified lock for Claude Code (`srt`) and Codex (deny profile), then add them to the guest-safe list.
-3. **Ask for more (D38), Ask again (F6), goodbye summary (F8), first-time explainers (F11), the "Asked and given" inbox list (F5).**
-4. **The 30-minute no-usage pause** and the giver's "Sign in to Claude again" notice.
+1. **Codex as a giver.** Commands can be locked with Codex's own sandbox, but Codex also has in-process tools (such as viewing images) that read files outside any sandbox. Turning them off needs config keys confirmed against live Codex turns. Until then Codex is refused everywhere and shows "Can't be given yet".
+2. **Ask for more (D38), Ask again (F6), goodbye summary (F8), first-time explainers (F11), the "Asked and given" inbox list (F5).**
+3. **The 30-minute no-usage pause** and the giver's "Sign in to Claude again" notice.
+4. **Running commands** (tests, builds) for the given agent: a separate decision, since they would run the asker's code on LetAgents' servers.
 5. A full manual run in the app with two accounts.
