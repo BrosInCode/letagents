@@ -6,7 +6,7 @@ import { stageCloudMessageAttachment } from "../../../shared/message-attachments
 import { SupervisedRoomAuthorizationError, type SupervisedDeliveryHttp, type SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
 import type { RemoteExecutionDelegationRevision } from "./execution-delegation-journal.js";
-import { RoomAttachmentDownloadError } from "./room-turn-attachments.js";
+import { LOCAL_ROOM_ATTACHMENT_ID, RoomAttachmentDownloadError } from "./room-turn-attachments.js";
 import {
   parseExecutionDelegationDecisionIntent,
   type ExecutionDelegationDecisionIntent,
@@ -73,6 +73,8 @@ export interface SupervisorGrantHttp {
   }>;
   endWorkerSession?(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; sessionId: string;
+    /** The agent starts again in the same room; the server keeps the turn it shared there. */
+    restarting?: boolean;
   }): Promise<void>;
   renewHostGrant?(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
@@ -240,24 +242,63 @@ export async function storageResolvesToThisMachine(hostname: string, signal: Abo
   } finally { detach(); }
 }
 
+/** The work's result, or the abort reason as soon as `signal` aborts; the work itself goes on. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {});
+    return Promise.reject(signal.reason);
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 /**
  * Two hops, so the worker bearer never leaves the room API: the room route
  * answers with a redirect to presigned object storage, and that address is
  * fetched with no credential and no further redirect. Every failure, a 401 or
  * 403 included, is only this file being unavailable: an older server that
  * does not grant workers this route must not mark the room as refused.
+ *
+ * A local room's route is in this process and answers with the bytes: its
+ * file is read from the local files folder, never from a path the message
+ * names, and only when it fits in `maxBytes`.
  */
 export async function downloadRoomAttachment(input: {
   roomId: string; apiUrl: string; bearer: string; messageId: string; attachmentId: string;
   maxBytes: number; signal: AbortSignal;
 }): Promise<Uint8Array> {
-  if (isLocalRoomApi(input.apiUrl) || !/^msg_[1-9]\d*$/.test(input.messageId) || !/^att_[1-9]\d*$/.test(input.attachmentId)) {
+  const localRoom = isLocalRoomApi(input.apiUrl);
+  if (!/^msg_[1-9]\d*$/.test(input.messageId) || !Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1
+    || !(localRoom ? LOCAL_ROOM_ATTACHMENT_ID.test(input.attachmentId) : /^att_[1-9]\d*$/.test(input.attachmentId))) {
     throw new RoomAttachmentDownloadError("unavailable");
   }
   const unavailable = (): never => {
     input.signal.throwIfAborted();
     throw new RoomAttachmentDownloadError("unavailable");
   };
+  if (localRoom) {
+    // A file read in this process cannot be cancelled, so Stop and the deadline end the wait for it.
+    const response = await untilAborted(roomRequest(`${LOCAL_ROOM_API_ORIGIN}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.messageId}/attachments/${encodeURIComponent(input.attachmentId)}?max_bytes=${input.maxBytes}`, {
+      headers: { authorization: `Bearer ${input.bearer}` }, signal: input.signal,
+    }), input.signal).catch(unavailable);
+    if (response.status === 413) {
+      await response.body?.cancel().catch(() => {});
+      throw new RoomAttachmentDownloadError("too_large");
+    }
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      unavailable();
+    }
+    try {
+      return await boundedBody(response, input.maxBytes);
+    } catch (error) {
+      if (error instanceof RoomAttachmentDownloadError) throw error;
+      return unavailable();
+    }
+  }
   const redirect = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/${input.messageId}/attachments/${input.attachmentId}`, {
     headers: { authorization: `Bearer ${input.bearer}` }, redirect: "manual", signal: input.signal,
   }).catch(unavailable);
@@ -772,7 +813,7 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<
     const response = await roomRequest(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions/${encodeURIComponent(input.sessionId)}/end`, {
       method: "POST",
       headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
-      body: JSON.stringify({ generation: input.grantGeneration }),
+      body: JSON.stringify({ generation: input.grantGeneration, ...(input.restarting ? { restarting: true } : {}) }),
       signal: boundedCloudSignal(),
     });
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session end");
@@ -924,4 +965,82 @@ export function workplaceLivenessStaleAfterMs(rawPollMaxMs = process.env.LETAGEN
     ? DEFAULT_ROOM_POLL_MAX_MS
     : Math.min(parsed, MAX_ROOM_POLL_MAX_MS);
   return Math.max(NATIVE_LIVENESS_STALE_AFTER_MS, pollMaxMs + LIVENESS_GRACE_MS);
+}
+
+/** A request about an agent's shared live activity that the room server refused. */
+export class LiveActivityRejectedError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+/** The room server predates live sessions: it would keep the snapshot as an ordinary reasoning session. */
+export class LiveActivityUnsupportedError extends Error {
+  readonly unsupported = true;
+  constructor() {
+    super("The room server does not support shared live activity.");
+  }
+}
+
+type LiveActivityRequest = { apiUrl: string; roomId: string; bearer: string };
+
+/**
+ * Start the live session of the agent's current turn. The server replaces
+ * the agent's earlier live sessions in the room. Returns the new session id.
+ */
+export async function createLiveActivitySession(input: LiveActivityRequest & { body: { summary: string; live: unknown } }): Promise<string> {
+  const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/reasoning-sessions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
+    body: JSON.stringify({ kind: "live", summary: input.body.summary, live: input.body.live }),
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!response.ok) throw new LiveActivityRejectedError(`Live activity was refused with HTTP ${response.status}.`, response.status);
+  const payload = await response.json() as { session?: { id?: unknown; kind?: unknown } };
+  if (typeof payload.session?.id !== "string" || !payload.session.id) throw new Error("The room server returned no live session.");
+  if (payload.session.kind !== "live") {
+    // An older server ignored the kind and opened a reasoning session: close it, so no reasoning list shows it.
+    await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/reasoning-sessions/${encodeURIComponent(payload.session.id)}`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({ closed_at: new Date().toISOString() }),
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
+    }).catch(() => undefined);
+    throw new LiveActivityUnsupportedError();
+  }
+  return payload.session.id;
+}
+
+/** Replace the snapshot of the agent's live session. False when the session is gone. */
+export async function updateLiveActivitySession(input: LiveActivityRequest & { sessionId: string; body: { summary: string; live: unknown } }): Promise<boolean> {
+  const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/reasoning-sessions/${encodeURIComponent(input.sessionId)}/updates`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
+    body: JSON.stringify({ summary: input.body.summary, live: input.body.live }),
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (response.status === 404) return false;
+  if (!response.ok) throw new LiveActivityRejectedError(`Live activity was refused with HTTP ${response.status}.`, response.status);
+  return true;
+}
+
+/** Remove every live session of the agent in the room, so no member sees its activity any more. */
+export async function withdrawLiveActivity(input: LiveActivityRequest): Promise<void> {
+  const response = await roomRequest(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/live-activity`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${input.bearer}` },
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  });
+  // A server without the route never stored a live session, so nothing is left to remove. It answers 404 or
+  // 405, or refuses a worker bearer on a route it does not know with this exact 403; any other refusal stands.
+  if (response.status === 404 || response.status === 405) return;
+  if (response.status === 403) {
+    const payload = await response.json().catch(() => null) as { error?: unknown } | null;
+    if (payload?.error === "This worker bearer is not authorized for the requested route.") return;
+  }
+  if (!response.ok) throw new LiveActivityRejectedError(`Withdrawing live activity was refused with HTTP ${response.status}.`, response.status);
 }

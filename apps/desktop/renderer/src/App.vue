@@ -187,6 +187,7 @@
           :participant-hidden-count="selectedSnapshot?.participantHiddenCount || 0"
           :presence="selectedSnapshot?.presence || []"
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
+          :live-activity-sessions="selectedSnapshot?.liveActivitySessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :room-artifacts="selectedSnapshot?.roomArtifacts || []"
           :room-agent-work="roomAgentWork"

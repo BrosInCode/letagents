@@ -5,6 +5,7 @@ import type {
 
 export type DesktopReasoningSessionPayload = {
   id: string;
+  kind?: string | null;
   room_id?: string | null;
   actor_label?: string | null;
   agent_key?: string | null;
@@ -44,6 +45,7 @@ export function mapDesktopReasoningSessionPayload(
 ): DesktopReasoningSession {
   return {
     id: session.id,
+    ...(session.kind === "live" || session.kind === "reasoning" ? { kind: session.kind } : {}),
     roomId: session.room_id || null,
     actorLabel: session.actor_label || null,
     agentKey: session.agent_key || null,

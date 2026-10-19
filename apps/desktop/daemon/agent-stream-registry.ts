@@ -59,8 +59,8 @@ export class AgentStreamRegistry {
     this.clearTimer = options.clearTimeout ?? clearTimeout;
   }
 
-  /** Append one redacted event to an agent's ephemeral live feed. */
-  push(entryId: string, event: DaemonActivityEvent): void {
+  /** Append one redacted event to an agent's ephemeral live feed. Returns it as the feed holds it, or null for an ended feed. */
+  push(entryId: string, event: DaemonActivityEvent): DaemonAgentStreamEvent | null {
     const buffer = this.streams.get(entryId) ?? {
       sequence: 0,
       generation: 1,
@@ -68,21 +68,23 @@ export class AgentStreamRegistry {
       events: [],
       ended: false,
     };
-    if (buffer.ended) return;
+    if (buffer.ended) return null;
     buffer.sequence += 1;
-    buffer.events.push({
+    const stored: DaemonAgentStreamEvent = {
       sequence: buffer.sequence,
       observed_at: event.observed_at,
       kind: event.kind,
       method: event.method,
       summary: event.summary || null,
       payload: event.payload,
-    });
+    };
+    buffer.events.push(stored);
     if (buffer.events.length > this.bufferLimit) {
       buffer.events.splice(0, buffer.events.length - this.bufferLimit);
     }
     this.streams.set(entryId, buffer);
     this.notifyWaiters(entryId);
+    return stored;
   }
 
   /** Start one bounded display generation without replaying an older turn. */
@@ -115,6 +117,24 @@ export class AgentStreamRegistry {
     this.notifyWaiters(entryId);
     this.streams.delete(entryId);
     this.waiters.delete(entryId);
+  }
+
+  /** The newest sequence an agent's feed has given out; 0 before its first event. */
+  highWater(entryId: string): number {
+    return this.streams.get(entryId)?.sequence ?? 0;
+  }
+
+  /**
+   * Every retained event after `afterSequence`, oldest first, without waiting
+   * or advancing any watcher. `dropped` says the buffer no longer holds some
+   * of them.
+   */
+  retainedAfter(entryId: string, afterSequence: number): { events: DaemonAgentStreamEvent[]; dropped: boolean } {
+    const buffer = this.streams.get(entryId);
+    if (!buffer) return { events: [], dropped: false };
+    const events = buffer.events.filter((event) => event.sequence > afterSequence);
+    const oldestRetained = buffer.events[0]?.sequence ?? buffer.sequence + 1;
+    return { events, dropped: buffer.sequence > afterSequence && oldestRetained > afterSequence + 1 };
   }
 
   async watch(input: AgentStreamWatchInput): Promise<AgentStreamWatchResult> {
