@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, existsSync, statSync } from "node:fs";
 import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -77,8 +77,51 @@ export function getProjectBindingsStorePath(
     );
 }
 
+type OpenStore = { database: SqliteDatabase; dev: number; ino: number };
+
+const openStores = new Map<string, OpenStore>();
+const OPEN_STORE_LIMIT = 4;
+
+/**
+ * One long-lived connection per store file. Every statement runs
+ * synchronously, so callers never interleave inside a transaction. The file's
+ * identity is checked on each use: a deleted or replaced store reopens.
+ */
 function openStore(options: ProjectBindingsStoreOptions = {}): SqliteDatabase {
   const storePath = getProjectBindingsStorePath(options);
+  const cached = openStores.get(storePath);
+  if (cached) {
+    try {
+      const current = statSync(storePath);
+      if (current.dev === cached.dev && current.ino === cached.ino) return cached.database;
+    } catch {
+      // Missing store: reopen below, which recreates it.
+    }
+    openStores.delete(storePath);
+    try { cached.database.close(); } catch { /* already closed */ }
+  }
+  const database = openStoreConnection(storePath);
+  const identity = statSync(storePath);
+  if (openStores.size >= OPEN_STORE_LIMIT) {
+    const [oldestPath, oldest] = openStores.entries().next().value as [string, OpenStore];
+    openStores.delete(oldestPath);
+    try { oldest.database.close(); } catch { /* already closed */ }
+  }
+  openStores.set(storePath, { database, dev: identity.dev, ino: identity.ino });
+  return database;
+}
+
+/** Test-only: close long-lived connections and forget every validation memo. */
+export function resetProjectBindingsStoreCachesForTest(): void {
+  for (const { database } of openStores.values()) {
+    try { database.close(); } catch { /* already closed */ }
+  }
+  openStores.clear();
+  validatedBindings.clear();
+  filesystemNamespaces.clear();
+}
+
+function openStoreConnection(storePath: string): SqliteDatabase {
   require("node:fs").mkdirSync(dirname(storePath), { recursive: true });
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => SqliteDatabase;
@@ -102,6 +145,10 @@ function openStore(options: ProjectBindingsStoreOptions = {}): SqliteDatabase {
     if (existsSync(path)) chmodSync(path, 0o600);
   }
   return database;
+}
+
+function releaseStore(_database: SqliteDatabase): void {
+  // The connection is shared and long-lived; see openStore.
 }
 
 function parseStringArray(value: string): string[] | null {
@@ -191,7 +238,7 @@ function readBindings(options: ProjectBindingsStoreOptions = {}): DesktopProject
       ORDER BY created_at ASC
     `).all().map(mapRow).filter((binding): binding is DesktopProjectBinding => Boolean(binding));
   } finally {
-    database.close();
+    releaseStore(database);
   }
 }
 
@@ -208,7 +255,7 @@ function readBindingById(
       WHERE id = ?
     `).get(bindingId));
   } finally {
-    database.close();
+    releaseStore(database);
   }
 }
 
@@ -226,22 +273,39 @@ async function canonicalDirectory(rootPath: string): Promise<string> {
   return canonical;
 }
 
+/**
+ * Mount device number -> volume UUID (from df + diskutil). Device numbers are
+ * reassigned when volumes mount, so an entry lives 10 minutes at most, and a
+ * failed or empty answer is dropped at once so the next call asks again.
+ */
+const filesystemNamespaces = new Map<string, { expiresAt: number; namespace: Promise<string | null> }>();
+const FILESYSTEM_NAMESPACE_TTL_MS = 10 * 60_000;
+const FILESYSTEM_NAMESPACE_LIMIT = 64;
+
+function cachedFilesystemNamespace(path: string, device: bigint): Promise<string | null> {
+  const key = device.toString();
+  const now = Date.now();
+  const hit = filesystemNamespaces.get(key);
+  if (hit && hit.expiresAt > now) return hit.namespace;
+  if (filesystemNamespaces.size >= FILESYSTEM_NAMESPACE_LIMIT) filesystemNamespaces.clear();
+  const entry = { expiresAt: now + FILESYSTEM_NAMESPACE_TTL_MS, namespace: defaultFilesystemNamespace(path) };
+  filesystemNamespaces.set(key, entry);
+  const forget = () => {
+    if (filesystemNamespaces.get(key) === entry) filesystemNamespaces.delete(key);
+  };
+  entry.namespace.then((namespace) => { if (!namespace) forget(); }, forget);
+  return entry.namespace;
+}
+
 async function filesystemVerificationKeys(
   rootPath: string,
   context: DesktopProjectBindingContext,
   options: ProjectBindingsStoreOptions,
-  namespaceCache: Map<string, Promise<string | null>> = new Map(),
 ): Promise<FilesystemVerification> {
   const rootStats = await stat(rootPath, { bigint: true });
   const resolveNamespace = async (path: string, device: bigint): Promise<string | null> => {
     if (options.resolveFilesystemNamespace) return options.resolveFilesystemNamespace(path);
-    const cacheKey = device.toString();
-    let namespace = namespaceCache.get(cacheKey);
-    if (!namespace) {
-      namespace = defaultFilesystemNamespace(path);
-      namespaceCache.set(cacheKey, namespace);
-    }
-    return namespace;
+    return cachedFilesystemNamespace(path, device);
   };
   const rootNamespace = await resolveNamespace(rootPath, rootStats.dev);
   const rootNamespaceKey = rootNamespace ? namespaceDigest(rootNamespace) : null;
@@ -305,7 +369,7 @@ function replaceVerificationKeysIfCurrent(
     ) as { changes?: number | bigint };
     return Number(result.changes || 0) === 1;
   } finally {
-    database.close();
+    releaseStore(database);
   }
 }
 
@@ -327,20 +391,122 @@ function sameLocalProjectAfterGitSetup(
     && compareVerificationKeys(filesystemKeys, current).matches;
 }
 
+/**
+ * Bindings that passed the full validation below, keyed by binding id. A memo
+ * is reused only while all of these still hold:
+ *  - the stored row is byte-for-byte the row that was validated;
+ *  - the folder still canonicalizes to the same path and is not a managed
+ *    worktree (canonicalDirectory runs on every call);
+ *  - the folder and its `.git` directory are the same filesystem objects
+ *    (device, inode, birth time) - a swapped folder or Git directory differs;
+ *  - HEAD, config, packed-refs and refs/remotes/origin/HEAD are unchanged
+ *    (device, inode, size, mtime, ctime) - these feed the derived room;
+ *  - fewer than 45 seconds have passed (fallback for anything not listed,
+ *    for example a nested local branch file).
+ * Only folders whose `.git` is a real directory are memoized. Plain folders,
+ * linked worktrees (`.git` file) and nested checkouts validate in full.
+ */
+type ValidatedBinding = {
+  row: string;
+  fingerprint: string;
+  expiresAt: number;
+};
+
+const validatedBindings = new Map<string, ValidatedBinding>();
+const VALIDATED_BINDING_TTL_MS = 45_000;
+const VALIDATED_BINDING_LIMIT = 256;
+
+/** Test-only counters: full validations and memo hits. */
+export const projectBindingValidationCountsForTest = { full: 0, memo: 0 };
+
+function bindingRowKey(binding: DesktopProjectBinding): string {
+  return JSON.stringify([
+    binding.id,
+    binding.identityKey,
+    binding.verificationKeys,
+    binding.aliases,
+    binding.rootPath,
+    binding.source,
+    binding.createdAt,
+    binding.updatedAt,
+  ]);
+}
+
+async function statIdentity(path: string, content: boolean): Promise<string> {
+  try {
+    const info = await lstat(path, { bigint: true });
+    const identity = [info.dev, info.ino, info.birthtimeNs, info.mode];
+    if (content) identity.push(info.size, info.mtimeNs, info.ctimeNs);
+    return identity.join(":");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "-";
+    throw error;
+  }
+}
+
+async function bindingFingerprint(rootPath: string): Promise<string | null> {
+  try {
+    const gitPath = join(rootPath, ".git");
+    const gitInfo = await lstat(gitPath);
+    if (!gitInfo.isDirectory()) return null;
+    const parts = await Promise.all([
+      statIdentity(rootPath, false),
+      statIdentity(gitPath, false),
+      ...["HEAD", "config", "packed-refs", join("refs", "remotes", "origin", "HEAD")]
+        .map((name) => statIdentity(join(gitPath, name), true)),
+    ]);
+    return JSON.stringify([rootPath, ...parts]);
+  } catch {
+    return null;
+  }
+}
+
+function rememberValidatedBinding(binding: DesktopProjectBinding, fingerprint: string): void {
+  const now = Date.now();
+  if (validatedBindings.size >= VALIDATED_BINDING_LIMIT) {
+    for (const [id, entry] of validatedBindings) {
+      if (entry.expiresAt <= now) validatedBindings.delete(id);
+    }
+    if (validatedBindings.size >= VALIDATED_BINDING_LIMIT) validatedBindings.clear();
+  }
+  validatedBindings.set(binding.id, {
+    row: bindingRowKey(binding),
+    fingerprint,
+    expiresAt: now + VALIDATED_BINDING_TTL_MS,
+  });
+}
+
 async function validateProjectBinding(
   binding: DesktopProjectBinding,
   options: ProjectBindingsStoreOptions,
-  namespaceCache: Map<string, Promise<string | null>>,
   rereadOnConflict: boolean,
 ): Promise<DesktopProjectBinding | null> {
   try {
     const rootPath = await canonicalDirectory(binding.rootPath);
+    // Taken before validation: a change during validation alters the next
+    // fingerprint, so a racing swap can never be served from this memo.
+    const fingerprint = await bindingFingerprint(rootPath);
+    const memo = validatedBindings.get(binding.id);
+    if (
+      memo && fingerprint
+      && memo.expiresAt > Date.now()
+      && memo.row === bindingRowKey(binding)
+      && memo.fingerprint === fingerprint
+    ) {
+      projectBindingValidationCountsForTest.memo += 1;
+      return binding;
+    }
+    validatedBindings.delete(binding.id);
+    projectBindingValidationCountsForTest.full += 1;
     const derived = await deriveFilesystemContext(rootPath);
-    const current = await filesystemVerificationKeys(rootPath, derived.context, options, namespaceCache);
+    const current = await filesystemVerificationKeys(rootPath, derived.context, options);
     const comparison = compareVerificationKeys(binding.verificationKeys, current);
     const gitSetup = !comparison.matches && sameLocalProjectAfterGitSetup(binding, current, derived.source);
     if (!comparison.matches && !gitSetup) return null;
-    if (!comparison.shouldUpgrade && !gitSetup) return binding;
+    if (!comparison.shouldUpgrade && !gitSetup) {
+      if (fingerprint) rememberValidatedBinding(binding, fingerprint);
+      return binding;
+    }
     try {
       if (replaceVerificationKeysIfCurrent(binding, current.keys, options)) {
         return { ...binding, verificationKeys: current.keys };
@@ -351,7 +517,7 @@ async function validateProjectBinding(
     if (!rereadOnConflict) return null;
     const latest = readBindingById(binding.id, options);
     return latest
-      ? validateProjectBinding(latest, options, namespaceCache, false)
+      ? validateProjectBinding(latest, options, false)
       : null;
   } catch {
     return null;
@@ -373,9 +539,8 @@ export async function listProjectBindings(
   options: ProjectBindingsStoreOptions = {},
 ): Promise<DesktopProjectBinding[]> {
   const bindings = readBindings(options);
-  const namespaceCache = new Map<string, Promise<string | null>>();
   const available = await Promise.all(bindings.map((binding) =>
-    validateProjectBinding(binding, options, namespaceCache, true)
+    validateProjectBinding(binding, options, true)
   ));
   return available.filter((binding): binding is DesktopProjectBinding => Boolean(binding));
 }
@@ -449,7 +614,7 @@ export async function bindProjectRoot(input: {
     }
     throw error;
   } finally {
-    database.close();
+    releaseStore(database);
   }
 }
 
