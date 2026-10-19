@@ -1,16 +1,13 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { randomBytes } from "node:crypto";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { NO_REPLY_FAILURE } from "../../../../../shared/room-turn-no-reply.mjs";
-import { probeScratchWorkspaceGit } from "../../../../../shared/scratch-workspace-repository.mjs";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
 import { ProviderContinuationMissingError, PROCESS_ENDED_DURING_TURN, sameProviderConnectionIdentity, synthesizeTerminalPayload, type ProviderActivityEvent, type ProviderAdapter, type ProviderAdapterCapabilities, type ProviderAttachTerminal, type ProviderConnectionRef, type ProviderContinuationRef, type ProviderContinuationRepairRequest, type ProviderContinuationRepairResult, type ProviderHandle, type ProviderObservedState, type ProviderRoomTurnOptions, type ProviderRoomTurnRecoveryRequest, type ProviderRoomTurnRequest, type RoomTurnImageDelivery, type ProviderRoomTurnResult, type ProviderSpawnRequest, type ProviderStopOptions, type ProviderStreamEvent, type ProviderTerminalPayload, ProviderTurnControlError, type ProviderTurnControlOptions, type ProviderTurnControlResult } from "./provider-adapter.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
-import { DEFAULT_STOP_GRACE_MS, defaultGetProcessIdentity, defaultObserveProcessExit, defaultSignalProcess, delay, redactCredentialText, safeStreamPayload, sameProcessBirthIdentity, terminateFreshLaunch, type ProviderProcessExit } from "./provider-evidence.js";
+import { DEFAULT_STOP_GRACE_MS, delay, redactCredentialText, safeStreamPayload, sameProcessBirthIdentity, terminateFreshLaunch, type ProviderProcessExit } from "./provider-evidence.js";
 import { credentialBoundaryPluginSource, minimalOpenCodeEnvironment, OPEN_MODEL_OPENCODE_PROVIDER_ID, OPENCODE_SERVER_USERNAME, openCodeAuthContent, openCodeConfig, parseConfiguredOpenModel, parseConfiguredOpenModelImageInput, seedOpenCodeConfigHome, shieldOwnerInstructions, supervisedOpenCodeMcpEnvironment, workspaceOpenCodeEnvironment, supervisedOpenCodePermissionProfileId } from "./opencode-launch-contract.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
 import { resolveOpenModelLimits } from "./open-model-limits.js";
@@ -21,6 +18,7 @@ import { assistantsFor, eventReferencesSession, finalAssistantFor, messageComple
 import { CAPABILITIES, MAX_ASSISTANT_STEPS, type OpenCodePermissionObservation, type OpenModelProviderAdapterDependencies, type OpenModelProviderAdapterOptions, SESSION_ORDERING_SCAN_LIMIT, START_TIMEOUT_MS, TURN_CONTROL_TIMEOUT_MS, TURN_TIMEOUT_MS } from "./open-model/types.js";
 import { MAX_CONSECUTIVE_DENIED_STEPS, TOOL_CALLS_UNFINISHED, type TurnStep, boundedRoomTurnPrompt, classifyTurn, deniedToolCall, deniedToolState, roomTurnImageParts, unansweredCompletionReason, unfinishedToolCalls } from "./open-model/turn-results.js";
 import { OPEN_MODEL_PROVIDER_RETRY_METHOD, OpenCodeBoundedTurnError, type OpenCodeRetryStatus, OpenCodeRuntimeGoneError, OpenCodeStartTimeoutError, OpenCodeTerminalTurnError, openCodeRetryStatus, openModelProviderRetrySummary, safeProviderErrorMessage } from "./open-model/errors.js";
+import { type OpenCodeRuntimeControl, defaultDependencies, nextEventBefore, readRuntimeControl, resolveBeforeDeadline, safeRuntimeId, terminalFromExit, withRuntimeLaunchOwnership, writeRuntimeControl } from "./open-model/runtime-launch.js";
 export type { OpenModelProviderAdapterDependencies } from "./open-model/types.js";
 export type { OpenModelProviderAdapterOptions } from "./open-model/types.js";
 export type { OpenCodePermissionObservation } from "./open-model/types.js";
@@ -29,175 +27,6 @@ export { openModelProviderRetrySummary } from "./open-model/errors.js";
 export { OpenCodeStartTimeoutError } from "./open-model/errors.js";
 export { OpenCodeRuntimeGoneError } from "./open-model/errors.js";
 
-
-function safeRuntimeId(value: string): string {
-  return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 160);
-}
-
-const runtimeLaunchTails = new Map<string, Promise<void>>();
-
-async function withRuntimeLaunchOwnership<T>(
-  runtimePath: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const previous = runtimeLaunchTails.get(runtimePath) ?? Promise.resolve();
-  let release!: () => void;
-  const current = new Promise<void>((resolve) => { release = resolve; });
-  runtimeLaunchTails.set(runtimePath, current);
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (runtimeLaunchTails.get(runtimePath) === current) runtimeLaunchTails.delete(runtimePath);
-  }
-}
-
-type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
-  lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
-  startupIntent?: {
-    url: string;
-  };
-  startupProcess?: {
-    url: string;
-    pid: number;
-    processIdentity: string | null;
-  };
-  connection?: {
-    url: string;
-    pid: number;
-    processIdentity: string;
-  };
-};
-
-function defaultLaunch(input: {
-  binary: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv;
-}): { child: ChildProcess; exited: Promise<ProviderProcessExit> } {
-  const child = spawn(input.binary, input.args, {
-    cwd: input.cwd,
-    env: input.env,
-    detached: true,
-    stdio: ["ignore", "ignore", "ignore"],
-  });
-  const exited = new Promise<ProviderProcessExit>((resolve) => {
-    child.once("error", (error) => resolve({ type: "error", error }));
-    child.once("exit", (code, signal) => resolve({ type: "exit", code, signal }));
-  });
-  child.unref();
-  return { child, exited };
-}
-
-async function defaultAllocatePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.unref();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = address && typeof address === "object" ? address.port : 0;
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-function execFileText(file: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(file, args, { encoding: "utf8", maxBuffer: 64 * 1024 }, (error, stdout) => {
-      if (error) reject(error);
-      else resolve(stdout);
-    });
-  });
-}
-
-async function defaultDiscoverRuntimeConnection(
-  runtimeRoot: string,
-): Promise<{ pid: number; url: string } | null> {
-  let owners: string;
-  try {
-    owners = await execFileText(
-      "/usr/sbin/lsof",
-      ["-t", "--", join(runtimeRoot, "data", "opencode", "opencode.db")],
-    );
-  } catch {
-    return null;
-  }
-  const pids = [...new Set(owners.split(/\s+/)
-    .filter((value) => /^\d+$/.test(value))
-    .map(Number)
-    .filter((pid) => Number.isSafeInteger(pid) && pid > 0))];
-  const candidates: Array<{ pid: number; url: string }> = [];
-  for (const pid of pids) {
-    let command: string;
-    try {
-      command = (await execFileText("/bin/ps", ["-p", String(pid), "-o", "command="])).trim();
-    } catch {
-      continue;
-    }
-    if (!/(?:^|\s)serve(?:\s|$)/.test(command)
-      || !/(?:^|\s)--hostname(?:=|\s+)127\.0\.0\.1(?:\s|$)/.test(command)) continue;
-    const port = Number(command.match(/(?:^|\s)--port(?:=|\s+)(\d+)(?:\s|$)/)?.[1]);
-    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) continue;
-    candidates.push({ pid, url: `http://127.0.0.1:${port}` });
-  }
-  return candidates.length === 1 ? candidates[0]! : null;
-}
-
-async function nextEventBefore(
-  events: AsyncIterator<OpenCodeEvent>,
-  deadline: number,
-): Promise<IteratorResult<OpenCodeEvent>> {
-  const remainingMs = deadline - Date.now();
-  if (remainingMs <= 0) throw new OpenCodeBoundedTurnError("OpenCode bounded turn timed out.");
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      events.next(),
-      new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(
-          () => reject(new OpenCodeBoundedTurnError("OpenCode bounded turn timed out.")),
-          remainingMs,
-        );
-      }),
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
-}
-
-/**
- * Bound a single in-flight operation to a wall-clock deadline. A hung server
- * response must never stretch a turn-control budget past its ceiling, so the
- * losing operation is abandoned (its late rejection is swallowed to avoid an
- * unhandled rejection).
- */
-async function resolveBeforeDeadline<T>(operation: Promise<T>, deadline: number, message: string): Promise<T> {
-  const remainingMs = deadline - Date.now();
-  if (remainingMs <= 0) { void operation.catch(() => undefined); throw new Error(message); }
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      operation,
-      new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(() => reject(new Error(message)), remainingMs);
-      }),
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-    void operation.catch(() => undefined);
-  }
-}
-
-const defaultDependencies: OpenModelProviderAdapterDependencies = {
-  launch: defaultLaunch,
-  getProcessIdentity: defaultGetProcessIdentity,
-  observeProcessExit: defaultObserveProcessExit,
-  signalProcess: defaultSignalProcess,
-  allocatePort: defaultAllocatePort,
-  probeGit: (workspace, environment) => probeScratchWorkspaceGit(workspace, environment),
-  discoverRuntimeConnection: defaultDiscoverRuntimeConnection,
-  fetch: (input, init) => fetch(input, init),
-  now: () => new Date().toISOString(),
-};
 
 class OpenModelHandle implements ProviderHandle {
   private observed: ProviderObservedState;
@@ -1931,84 +1760,6 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     for (const listener of handle.exitListeners) listener(terminal);
     handle.exitListeners.clear();
   }
-}
-
-async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl> {
-  const info = await lstat(path);
-  if (!info.isFile() || info.isSymbolicLink() || info.size > 8_192) {
-    throw new Error("OpenCode server authentication sidecar is invalid.");
-  }
-  const value = JSON.parse(await readFile(path, "utf8")) as Partial<OpenCodeRuntimeControl>;
-  if (typeof value.username !== "string" || !value.username
-    || typeof value.password !== "string" || !value.password) {
-    throw new Error("OpenCode server authentication sidecar is malformed.");
-  }
-  if (value.lifecycleAuthorityMode !== undefined
-    && value.lifecycleAuthorityMode !== "legacy"
-    && value.lifecycleAuthorityMode !== "typed_shadow"
-    && value.lifecycleAuthorityMode !== "typed") {
-    throw new Error("OpenCode server authentication sidecar contains an invalid lifecycle authority.");
-  }
-  if (value.startupIntent !== undefined
-    && (typeof value.startupIntent !== "object"
-      || typeof value.startupIntent.url !== "string"
-      || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.startupIntent.url))) {
-    throw new Error("OpenCode server authentication sidecar contains an invalid startup intent.");
-  }
-  if (value.startupProcess !== undefined
-    && (typeof value.startupProcess !== "object"
-      || typeof value.startupProcess.url !== "string"
-      || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.startupProcess.url)
-      || !Number.isSafeInteger(value.startupProcess.pid)
-      || value.startupProcess.pid < 1
-      || (value.startupProcess.processIdentity !== null
-        && (typeof value.startupProcess.processIdentity !== "string"
-          || !value.startupProcess.processIdentity)))) {
-    throw new Error("OpenCode server authentication sidecar contains invalid startup process evidence.");
-  }
-  if (value.connection !== undefined
-    && (typeof value.connection !== "object"
-      || typeof value.connection.url !== "string"
-      || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.connection.url)
-      || !Number.isSafeInteger(value.connection.pid)
-      || value.connection.pid < 1
-      || typeof value.connection.processIdentity !== "string"
-      || !value.connection.processIdentity)) {
-    throw new Error("OpenCode server authentication sidecar contains invalid connection evidence.");
-  }
-  return {
-    username: value.username,
-    password: value.password,
-    ...(value.lifecycleAuthorityMode ? { lifecycleAuthorityMode: value.lifecycleAuthorityMode } : {}),
-    ...(value.startupIntent ? { startupIntent: value.startupIntent } : {}),
-    ...(value.startupProcess ? { startupProcess: value.startupProcess } : {}),
-    ...(value.connection ? { connection: value.connection } : {}),
-  };
-}
-
-async function writeRuntimeControl(path: string, value: OpenCodeRuntimeControl): Promise<void> {
-  const temporaryPath = `${path}.${randomUUID()}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(value)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
-  await chmod(temporaryPath, 0o600);
-  await rename(temporaryPath, path);
-}
-
-function terminalFromExit(
-  exit: ProviderProcessExit,
-  continuationId: string,
-  endedAt: string,
-  stopRequested: boolean,
-): ProviderTerminalPayload {
-  return synthesizeTerminalPayload({
-    exitCode: exit.type === "exit" ? exit.code : null,
-    signal: exit.type === "exit" ? exit.signal : null,
-    providerContinuationId: continuationId,
-    endedAt,
-    stopRequested,
-  });
 }
 
 export const openModelProviderAdapter = new OpenModelProviderAdapter();
