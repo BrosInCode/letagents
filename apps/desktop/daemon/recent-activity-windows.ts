@@ -42,6 +42,11 @@ function sameStoredFields(left: DaemonActivityEvent, right: DaemonActivityEvent)
  * notice, an entry replacement, another daemon) costs one full read, never a
  * stale answer.
  *
+ * The check relies on one rule of every activity writer: stored events are
+ * appended with a newer sequence and trimmed from the oldest, never changed
+ * in place. A writer that rewrote an older event's payload, and kept every
+ * checked field the same, would not be seen; none does.
+ *
  * Events the batches commit are added to the window after their commit, as a
  * full read would return them. The result of read() is the same as
  * overlay(getEntry(entryId)): the batcher's overlay adds the events that are
