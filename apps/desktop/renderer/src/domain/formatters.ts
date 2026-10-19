@@ -6,6 +6,11 @@
  * Cache rule: one instance per preset below (a closed set, so the cache cannot
  * grow). They resolve the default locale when first used. The app does not
  * change locale while it runs, and a restart builds fresh instances.
+ *
+ * Invalidation: an Intl object fixes its time zone when it is created. The date
+ * formats are dropped when the system time zone changes. `syncTimeZone` checks
+ * the zone; `formatDate` calls it at most once per `zoneCheckIntervalMs`, so
+ * the check costs far less than building a formatter for each call.
  */
 
 const dateTimePresets = {
@@ -30,6 +35,31 @@ let compactNumberFormat: Intl.NumberFormat | null = null;
 let decimalNumberFormat: Intl.NumberFormat | null = null;
 let textCollator: Intl.Collator | null = null;
 
+const zoneCheckIntervalMs = 1000;
+let knownTimeZone: string | null = null;
+let lastZoneCheck = 0;
+/** Moves each time a zone change is seen, so other caches can tell. */
+export const timeZoneEpoch = { value: 0 };
+
+/**
+ * Drop the date formats when the system time zone changed since the last check.
+ * Returns true when it changed. Pass `force` to skip the throttle.
+ */
+export function syncTimeZone(force = false): boolean {
+  const now = Date.now();
+  if (!force && knownTimeZone !== null && now - lastZoneCheck < zoneCheckIntervalMs) return false;
+  lastZoneCheck = now;
+  const zone = new Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (knownTimeZone === zone) return false;
+  const changed = knownTimeZone !== null;
+  knownTimeZone = zone;
+  if (changed) {
+    dateTimeFormats.clear();
+    timeZoneEpoch.value += 1;
+  }
+  return changed;
+}
+
 /** Count of Intl objects built, so tests can prove the cache is hit. */
 export const formatterBuildCount = { dateTime: 0, number: 0, collator: 0 };
 
@@ -40,6 +70,7 @@ export const formatterBuildCount = { dateTime: 0, number: 0, collator: 0 };
 export function formatDate(preset: DateTimePreset, value: Date | string | number): string {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "Invalid Date";
+  syncTimeZone();
   let format = dateTimeFormats.get(preset);
   if (!format) {
     format = new Intl.DateTimeFormat(undefined, dateTimePresets[preset]);

@@ -1,4 +1,4 @@
-import { formatDate } from "../../../../domain/formatters";
+import { formatDate, syncTimeZone, timeZoneEpoch } from "../../../../domain/formatters";
 import { contributionChanges } from "../../../../domain/room-contributions";
 import type { DesktopRoomAgentWork, DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 
@@ -124,20 +124,21 @@ function messageSenderKey(message: DesktopRoomMessage): string {
 // Day keys and divider labels depend only on the timestamp and the local time
 // zone. They are cached by timestamp string and by day key.
 //
-// Invalidation: both caches are cleared when the time zone offset changes (the
-// signature below), and when they pass the size bound.
+// Invalidation: both caches are cleared when the time zone changes, and when they pass the size bound.
 const maxCachedDayKeys = 20_000;
 const dayKeyByTimestamp = new Map<string, string>();
 const dividerLabelByDayKey = new Map<string, string>();
-let timeZoneSignature = "";
 
 /** Counts cache fills so tests can prove a timestamp is formatted once. */
 export const timelineFormatBuilds = { dayKeys: 0, dividerLabels: 0 };
 
+let seenZoneEpoch = 0;
+
 function refreshDayCaches(): void {
-  const signature = `${new Date(2026, 0, 1).getTimezoneOffset()}:${new Date(2026, 6, 1).getTimezoneOffset()}`;
-  if (signature !== timeZoneSignature) {
-    timeZoneSignature = signature;
+  // One zone check per build. It also drops the shared date formats.
+  syncTimeZone(true);
+  if (seenZoneEpoch !== timeZoneEpoch.value) {
+    seenZoneEpoch = timeZoneEpoch.value;
     dayKeyByTimestamp.clear();
     dividerLabelByDayKey.clear();
   }

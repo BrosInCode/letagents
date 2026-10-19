@@ -211,6 +211,9 @@ describe('timeline entries', () => {
       const dates = buildMessageTimelineEntries(messages).filter(entry => entry.type === 'date')
       assert.equal(dates.length, 1, 'both messages fall on 2 June in Auckland')
       assert.equal(dates[0]!.type === 'date' && dates[0]!.dateTime, '2026-06-02')
+      assert.equal(dates[0]!.type === 'date' && dates[0]!.label, new Date('2026-06-01T23:30:00.000Z').toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }))
+      assert.match(String(dates[0]!.type === 'date' && dates[0]!.label), /Jun 2/)
+      assert.equal(formatDate('clockTime', '2026-06-01T23:30:00.000Z'), new Date('2026-06-01T23:30:00.000Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }))
     } finally {
       if (previousZone === undefined) delete process.env.TZ; else process.env.TZ = previousZone
     }
