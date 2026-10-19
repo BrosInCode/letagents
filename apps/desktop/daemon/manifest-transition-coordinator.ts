@@ -48,12 +48,16 @@ export class ManifestTransitionCoordinator {
 
   /**
    * With `readsNoActivity`, the callback promises to read no activity event and
-   * to depend only on the entry it is given (it may run twice). The entry is
-   * first read without its activity payloads, and the callback runs on that
-   * read; when it returns the entry unchanged, that read is returned (its
-   * activity is the short summary window). When it returns a change, the full
-   * entry is read inside the same lock and the callback runs again on it, so
-   * the committed write always starts from the full committed row.
+   * to depend only on the entry it is given (it may run twice, so it must reset
+   * any state it sets). The first run gets the entry without its activity: the
+   * `activity` property is a non-enumerable getter that throws, so a callback
+   * that reads it fails at once (spreading the entry is safe). When the
+   * callback returns that entry unchanged, a summary read is returned, and its
+   * `activity` is only the short summary window, not the full stored list.
+   * When it returns a change, the full entry is read inside the same lock and
+   * the callback runs again on it, so the committed write always starts from
+   * the full committed row. Callers of this option must not use the returned
+   * entry's activity.
    */
   async updateEntry(
     entryId: string,
@@ -66,7 +70,11 @@ export class ManifestTransitionCoordinator {
       if (options?.readsNoActivity) {
         const scalars = await this.ports.store.getEntry(entryId, "summary");
         if (!scalars) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
-        if (update(scalars) === scalars) return scalars;
+        const guarded = Object.defineProperty({ ...scalars }, "activity", {
+          enumerable: false,
+          get(): never { throw new Error("An update that declares readsNoActivity read the entry's activity."); },
+        }) as DaemonManifestEntry;
+        if (update(guarded) === guarded) return scalars;
       }
       const entry = await this.ports.store.getEntry(entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);

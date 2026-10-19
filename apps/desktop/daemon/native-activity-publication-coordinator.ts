@@ -91,6 +91,8 @@ export class NativeActivityPublicationCoordinator {
       && verifiedBinding.agent_session_id === currentBinding.agent_session_id) {
       let recoveredCredentialHandoff = false;
       await this.ports.updateEntry(entryId, (current) => {
+        // The callback may run twice; only the last run counts.
+        recoveredCredentialHandoff = false;
         const recoversCredentialHandoff = current.desired_state === "running"
           && current.condition === "coordination_blocked"
           && current.last_error === "Provider is running; waiting for desktop credential handoff."

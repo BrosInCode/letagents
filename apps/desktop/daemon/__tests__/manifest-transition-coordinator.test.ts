@@ -58,6 +58,22 @@ test("an update that declares it reads no activity and changes the entry writes 
   assert.deepEqual(replaced[0]!.activity, full.activity, "the committed write keeps every stored event");
 });
 
+test("an update that declares it reads no activity fails at once when it reads activity", async () => {
+  const { coordinator, replaced } = harness();
+  await assert.rejects(
+    coordinator.updateEntry("agent-1", (current) => (current.activity?.length ? current : { ...current, observed_state: "idle" }),
+      undefined, { readsNoActivity: true }),
+    /readsNoActivity read the entry's activity/,
+  );
+  assert.deepEqual(replaced, []);
+});
+
+test("an update that declares it reads no activity may spread the entry", async () => {
+  const { coordinator, replaced, full } = harness();
+  await coordinator.updateEntry("agent-1", (current) => ({ ...current, observed_state: "idle" }), undefined, { readsNoActivity: true });
+  assert.deepEqual(replaced[0]!.activity, full.activity);
+});
+
 test("an update without the declaration still reads the full entry once", async () => {
   const { coordinator, reads, replaced } = harness();
   await coordinator.updateEntry("agent-1", (current) => current);
