@@ -828,6 +828,39 @@ export async function getLocalChatMessageByClientId(
   return row ? (await hydrateMessageRows(database, [mapRow(row)], options))[0] ?? null : null;
 }
 
+/**
+ * One attachment row of one local message. Like a message page, a row with a
+ * file URL comes without its older inline copy, which is never read.
+ */
+export async function getLocalMessageAttachment(
+  roomId: string, messageId: string, attachmentId: string,
+): Promise<RoomMessageAttachmentPayload | null> {
+  const number = parseMessageNumber(messageId);
+  if (!number) return null;
+  const database = await getDb();
+  const row = database
+    .prepare(`
+      SELECT attachment_id, file_name, mime_type, size_bytes, url, download_url,
+             CASE WHEN url LIKE 'file:%' THEN NULL ELSE data_url END AS data_url,
+             CASE WHEN url LIKE 'file:%' THEN NULL ELSE content_base64 END AS content_base64
+      FROM local_chat_attachments
+      WHERE room_id = ? AND message_number = ? AND attachment_id = ?
+    `)
+    .get(roomId, number, attachmentId);
+  if (!row) return null;
+  const attachment = mapAttachmentRow(row);
+  return {
+    id: attachment.attachment_id,
+    file_name: attachment.file_name,
+    mime_type: attachment.mime_type,
+    size_bytes: attachment.size_bytes,
+    url: attachment.url,
+    download_url: attachment.download_url,
+    data_url: attachment.data_url,
+    content_base64: attachment.content_base64,
+  };
+}
+
 export async function getLocalChatMessages(
   roomId: string,
   options?: {

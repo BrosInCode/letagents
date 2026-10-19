@@ -12,6 +12,10 @@ import type { SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
  * path. Nothing here is persisted with the turn, and no failure here stops
  * the turn: a file that cannot be given becomes a note in the prompt.
  *
+ * A local room has no download: the same request reads the file from local
+ * room storage in this process, looked up by the message and attachment ids.
+ * Its bytes then take the same checks and limits as a hosted image.
+ *
  * Only the activating message is read, never history, and only png, jpeg,
  * gif and webp, decided by the bytes rather than the declared type. Each
  * adapter says how its running provider takes images (`RoomTurnImageDelivery`):
@@ -34,6 +38,8 @@ const PREPARATION_DEADLINE_MS = 60_000;
 export const STAGED_FOLDER_MAX_AGE_MS = 6 * 60 * 60_000;
 const STAGED_FOLDER_PREFIX = "turn-";
 const DECLARED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"]);
+/** A local upload id ("local:<uuid>"), an older row's UUID, or the id of a message imported from a hosted room. */
+export const LOCAL_ROOM_ATTACHMENT_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
 const IMAGE_EXTENSIONS: Record<RoomTurnImageMimeType, string> = {
   "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
 };
@@ -132,6 +138,7 @@ export class RoomTurnAttachmentStager {
    */
   async prepare(input: {
     delivery: RoomTurnImageDelivery;
+    /** A local room's attachment ids are local upload ids, read from local storage. */
     localRoom: boolean;
     sourceMessage: unknown;
     sourceMessageId: string;
@@ -167,14 +174,14 @@ export class RoomTurnAttachmentStager {
         input.signal.throwIfAborted();
         const base = { index: file.index, fileName: file.fileName, mimeType: file.mimeType, sizeBytes: file.sizeBytes };
         const status = (value: ProviderRoomTurnAttachment["status"]) => { attachments.push({ ...base, status: value }); };
-        if (input.localRoom) { status("local_room_unsupported"); continue; }
         if (!DECLARED_IMAGE_TYPES.has(file.mimeType)) { status("not_image"); continue; }
         if (!input.delivery) { status("provider_unsupported"); continue; }
         if (file.sizeBytes !== null && file.sizeBytes > ROOM_TURN_IMAGE_MAX_BYTES) { status("too_large"); continue; }
         if (total + (file.sizeBytes ?? 0) > ROOM_TURN_IMAGES_MAX_TOTAL_BYTES) { status("turn_limit"); continue; }
-        if (!input.http.downloadAttachment || !file.id || !/^att_[1-9]\d*$/.test(file.id)
-          || !/^msg_[1-9]\d*$/.test(input.sourceMessageId)) { status("unavailable"); continue; }
+        if (!input.http.downloadAttachment || !file.id || !/^msg_[1-9]\d*$/.test(input.sourceMessageId)
+          || !(input.localRoom ? LOCAL_ROOM_ATTACHMENT_ID : /^att_[1-9]\d*$/).test(file.id)) { status("unavailable"); continue; }
         const maxBytes = Math.min(ROOM_TURN_IMAGE_MAX_BYTES, ROOM_TURN_IMAGES_MAX_TOTAL_BYTES - total);
+        if (maxBytes < 1) { status("turn_limit"); continue; }
         let bytes: Uint8Array;
         try {
           bytes = await input.http.downloadAttachment({
