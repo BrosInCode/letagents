@@ -536,6 +536,7 @@ test("the required checks wait for every check job and fail closed", () => {
   for (const name of ["npm-publish", "docker"]) {
     assert.deepEqual(job(name).needs, ["build", "integration-tests"], `${name} must wait for both required checks`);
   }
+  assert.deepEqual(job("deploy").needs, ["docker"], "deploy must wait for the images built after both checks");
 });
 
 test("every integration test step runs in exactly one existing group", () => {
@@ -570,15 +571,23 @@ test("desktop-tests runs every desktop suite, with electron shards of one total"
   assert.deepEqual(suites.filter((suite) => !suite.startsWith("electron ")).sort(), ["daemon", "renderer"]);
 
   // A suite added to `npm test` in apps/desktop must also run in CI.
-  const desktopTest = JSON.parse(readFileSync("apps/desktop/package.json", "utf8")).scripts.test;
-  const suiteScripts = [...desktopTest.matchAll(/npm run (test:[\w:-]+)/g)].map((match) => match[1]);
-  assert.equal(desktopTest, suiteScripts.map((name) => `npm run ${name}`).join(" && "));
+  const desktopScripts = JSON.parse(readFileSync("apps/desktop/package.json", "utf8")).scripts;
+  const suiteScripts = [...desktopScripts.test.matchAll(/npm run (test:[\w:-]+)/g)].map((match) => match[1]);
+  assert.equal(desktopScripts.test, suiteScripts.map((name) => `npm run ${name}`).join(" && "));
   const desktopJob = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === "desktop-tests");
   const testStep = desktopJob.steps.find((step) => step.name === "Test desktop (${{ matrix.suite }})");
   for (const name of suiteScripts) {
     const command = name === "test:electron" ? "npm run test:electron:files -- " : `npm --prefix apps/desktop run ${name}\n`;
     assert.ok(`${testStep.run}\n`.includes(command), `desktop-tests must run ${name}`);
   }
+
+  // The shards must choose from the same files `npm test` runs locally.
+  const electronFiles = desktopScripts["test:electron"].match(/^npm run test:electron:files -- (\S+)$/)?.[1];
+  assert.ok(electronFiles, "test:electron must pass one file pattern to test:electron:files");
+  assert.ok(
+    testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" ${electronFiles} > `),
+    `the electron shards must select from ${electronFiles}, as test:electron does`,
+  );
   assert.ok(shards.length > 0, "desktop-tests must run the electron suite");
   assert.deepEqual(
     shards.map(({ index, total }) => `${index}/${total}`).sort(),
