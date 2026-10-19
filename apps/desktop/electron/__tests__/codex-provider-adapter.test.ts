@@ -2099,6 +2099,8 @@ test("a Read-only Codex found before the daemon supplied its policy is held to i
 const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused"> = {
   // Reads of what the room says: one request to the room's own server, nothing written anywhere.
   read_messages: "approved",          // the room's recent messages
+  get_room_history_summary: "approved",    // a summary of the room's whole history
+  expand_room_history_summary: "approved", // one summary line opened, down to a message
   get_current_room: "approved",       // which room the agent is in, and as whom
   get_room_guidelines: "approved",    // the conventions the room's admins wrote
   get_room_memory: "approved",        // the room's saved goals, decisions and terms
@@ -2160,8 +2162,9 @@ test("a Read-only Codex agent's room tools are an exact named list, and every ot
   // The adapter's list is exactly the approved decisions.
   assert.deepEqual([...CODEX_READ_ONLY_ROOM_TOOLS].sort(), approved);
   assert.deepEqual(approved, [
-    "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events",
-    "get_room_guidelines", "get_room_memory", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
+    "expand_room_history_summary", "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts",
+    "get_room_events", "get_room_guidelines", "get_room_history_summary", "get_room_memory", "list_board_intents", "list_wake_rules",
+    "post_reasoning", "post_status",
     "react_to_message", "read_messages", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_thread",
   ]);
   // An approved tool that is not chat or status is one the room server itself classes as a read,

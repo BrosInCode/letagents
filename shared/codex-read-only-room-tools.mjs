@@ -18,7 +18,7 @@
 export const CODEX_READ_ONLY_ROOM_TOOLS = new Set([
   "search_gifs", "react_to_message", "set_reply_gif",
   // What the room says.
-  "read_messages", "get_current_room", "get_room_guidelines", "get_room_memory", "get_human_requests",
+  "read_messages", "get_room_history_summary", "expand_room_history_summary", "get_current_room", "get_room_guidelines", "get_room_memory", "get_human_requests",
   "get_board", "get_board_settings", "list_board_intents", "list_wake_rules", "get_room_artifacts", "get_room_events",
   // What the agent says in it.
   "send_message", "send_thread_message", "post_status", "post_reasoning", "request_human_input", "set_reply_thread",

@@ -46,6 +46,8 @@ test("message and status tool registration preserves the public surface", () => 
     "send_message",
     "send_thread_message",
     "read_messages",
+    "get_room_history_summary",
+    "expand_room_history_summary",
     "wait_for_messages",
   ]);
   assert.ok(registrations.every((registration) => typeof registration.handler === "function"));

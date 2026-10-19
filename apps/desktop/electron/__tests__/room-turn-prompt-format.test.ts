@@ -433,3 +433,17 @@ test("the context cache carries the attachment notes cold, warm and for syntheti
   assert.ok(!cache.prepare(without, "native-1").lines.join("\n").includes(ATTACHMENT_HEADER));
   assert.deepEqual(request, before, "never mutate the caller's request");
 });
+
+test("a turn's history summary comes first, oldest line first, with how to expand it", () => {
+  const historySummary = { covered_through_message_id: "msg_8", lines: [
+    { node: "2:0", first_message_id: "msg_1", last_message_id: "msg_4", last_at: "2026-10-18T09:00:00.000Z", text: "Planning.", pending: false },
+    { node: "0:5", first_message_id: "msg_8", last_message_id: "msg_8", last_at: "2026-10-19T09:00:00.000Z", text: "Emmy: ship it", pending: true },
+  ] };
+  const lines = formatRoomTurnContext({ sourceMessage: { id: "msg_9", text: "Go" }, activation: {}, historySummary });
+  assert.match(lines[0]!, /^Room history summary, oldest first\..*expand_room_history_summary.*It reaches msg_8/);
+  assert.equal(lines[1], "- [2:0] msg_1..msg_4 (2026-10-18): Planning.");
+  assert.equal(lines[2], "- [0:5] msg_8 (2026-10-19) not summarized yet: Emmy: ship it");
+  assert.match(lines[3]!, /^Recent bounded room context: /);
+  // Without one, the prompt is unchanged.
+  assert.match(formatRoomTurnContext({ sourceMessage: { id: "msg_9", text: "Go" }, activation: {} })[0]!, /^Recent bounded room context: /);
+});
