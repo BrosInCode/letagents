@@ -16,7 +16,7 @@ import {
   prepareCursorTurnRuntimeDataDir,
   removeCursorTurnRuntimeDataDir,
 } from "../cursor-sandbox-policy.js";
-import type { CursorSupervisedProfileOptions } from "../cursor-managed-profile.js";
+import type { CursorSupervisedProfileOptions } from "./managed-profile.js";
 import { cursorMcpInspectionEnv } from "../cursor-mcp-authority.js";
 import { buildCursorChildEnv, cursorDaemonChildEnv } from "../cursor-runner.js";
 import { managedCommitEnvironmentFor } from "../managed-agent-commit-identity.js";

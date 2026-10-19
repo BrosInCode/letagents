@@ -13,7 +13,7 @@ import type {
 import { ProviderExecutionObserver, type NativeLifecycleCheckpoint } from "../provider-execution-observer.js";
 import type { CursorCliChild } from "./turn-launcher.js";
 import type { ProviderProcessExit } from "../provider-evidence.js";
-import type { CursorManagedProfile } from "../cursor-managed-profile.js";
+import type { CursorManagedProfile } from "./managed-profile.js";
 import type { SupervisedWorkspaceGenerationHandle } from "../supervised-workspace-generation.js";
 
 export type CursorStreamMessage = Record<string, unknown> & {

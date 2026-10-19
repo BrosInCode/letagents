@@ -16,7 +16,7 @@ import type { CursorCliChild } from "./turn-launcher.js";
 import { attestProviderSpawnPolicy } from "../provider-spawn-configuration.js";
 import type { ProviderProcessExit } from "../provider-evidence.js";
 import { apiUrl as desktopApiUrl } from "../../paths.js";
-import type { CursorManagedProfile, CursorSupervisedProfileOptions } from "../cursor-managed-profile.js";
+import type { CursorManagedProfile, CursorSupervisedProfileOptions } from "./managed-profile.js";
 import type { SupervisedWorkspaceGenerationHandle } from "../supervised-workspace-generation.js";
 import {
   CursorPostDispatchCheckpointError,

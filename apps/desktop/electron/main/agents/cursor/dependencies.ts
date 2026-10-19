@@ -11,7 +11,7 @@ import {
   type CursorPersonalIdentity,
   type CursorManagedProfile,
   type CursorSupervisedProfileOptions,
-} from "../cursor-managed-profile.js";
+} from "./managed-profile.js";
 import { assertCursorSupervisedMcpAuthority } from "../cursor-mcp-authority.js";
 import { readCursorAccountUsage, readCursorContext, readCursorUsageOwner } from "../cursor-usage.js";
 import {

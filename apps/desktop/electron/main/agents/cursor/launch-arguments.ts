@@ -5,7 +5,7 @@ import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "../deskto
 import { cursorRoomTurnImageLines } from "../cursor-room-turn-images.js";
 import type { ProviderAdapterCapabilities, ProviderRoomTurnRequest, ProviderSpawnRequest } from "../provider-adapter.js";
 import { MAX_CURSOR_SESSION_ID_LENGTH, CURSOR_SESSION_ID_PATTERN } from "../cursor-provider-constants.js";
-import type { CursorSupervisedProfileOptions } from "../cursor-managed-profile.js";
+import type { CursorSupervisedProfileOptions } from "./managed-profile.js";
 import { cursorPermissionProfileInstructionLines } from "../cursor-permission-profile.js";
 
 export function cursorPermissionUsesWorkspaceGeneration(

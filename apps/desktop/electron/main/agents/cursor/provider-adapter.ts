@@ -30,7 +30,7 @@ import {
   safeStreamPayload,
   type ProviderProcessExit,
 } from "../provider-evidence.js";
-import { prepareCursorSupervisedProfile } from "../cursor-managed-profile.js";
+import { prepareCursorSupervisedProfile } from "./managed-profile.js";
 import { resolveLetAgentsMcpRuntime } from "../letagents-mcp-runtime.js";
 import { createCursorUsageReader } from "../cursor-usage.js";
 import type { ProviderUsage } from "../../../../shared/provider-usage.js";
