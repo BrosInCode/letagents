@@ -45,7 +45,7 @@ function executeInput(overrides: Partial<ExecuteBoundedToolInput> = {}): Execute
     ...coordinates,
     mcpRequestId: "request-a",
     toolName: "send_message",
-    input: { text: "hello" },
+    input: { reply_to: "other-message", text: "hello" },
     ...overrides,
   };
 }
@@ -75,7 +75,7 @@ function effect(overrides: Partial<SupervisedEffectRecord> = {}): SupervisedEffe
     provider_turn_id: "turn-a",
     mcp_request_id: "request-a",
     tool_name: "send_message",
-    request: { text: "hello" },
+    request: { reply_to: "other-message", text: "hello" },
     mutation: true,
     state: "prepared",
     result: null,
@@ -136,11 +136,14 @@ type HarnessOptions = {
   missingEntry?: boolean;
   execute?: SupervisedToolRuntime["executeDaemonTool"];
   complete?: BoundedEffectCoordinatorOptions["journal"]["complete"];
+  replyAttachments?: BoundedEffectCoordinatorOptions["replyAttachments"];
+  apiUrl?: string;
 };
 
 function harness(options: HarnessOptions = {}) {
   const events: string[] = [];
   const context = boundedContext(options.provider, options.permissionProfileId === undefined ? "full_access" : options.permissionProfileId);
+  if (options.apiUrl) context.agent.apiUrl = options.apiUrl;
   let contextCalls = 0;
   let capturedPrepare: Record<string, unknown> | null = null;
   let capturedRoomMove: Record<string, unknown> | null = null;
@@ -249,6 +252,7 @@ function harness(options: HarnessOptions = {}) {
       },
     },
     policy: { structuredRoomTurnCompletion },
+    ...(options.replyAttachments ? { replyAttachments: options.replyAttachments } : {}),
   });
   return {
     subject,
@@ -405,6 +409,12 @@ test("prepare preserves idempotent terminal, uncertain, duplicate, and final-ans
   );
 
   for (const [toolName, input] of [
+    ["send_message", { text: "answer" }],
+    ["send_message", { reply_to: "", text: "answer" }],
+    ["send_message", { reply_to: "  ", text: "answer" }],
+    ["send_message", { thread_parent_id: "  ", text: "answer" }],
+    ["send_message", { thread_parent_id: "  ", reply_to: "source-a", text: "answer" }],
+    ["send_message", { reply_to: " source-a ", text: "answer" }],
     ["send_message", { reply_to: "source-a", text: "answer" }],
     ["send_message", { thread_parent_id: "source-a", text: "answer" }],
     ["send_thread_message", { thread_parent_id: "source-a", text: "answer" }],
@@ -419,6 +429,30 @@ test("prepare preserves idempotent terminal, uncertain, duplicate, and final-ans
     });
     assert.equal(finalAnswer.events.includes("journal:mark"), false);
     assert.deepEqual(finalAnswer.capturedPrepare?.request, input, "the exact reply choice remains durably journaled");
+  }
+});
+
+test("untargeted room answers use final publication instead of sending an answer followed by a recap", async () => {
+  for (const provider of ["codex", "claude-code", "open-model", "cursor"]) {
+    const state = harness({ provider });
+    const input = executeInput({ input: { room_id: "room-a", text: "The actual answer." } });
+    const result = await state.subject.execute(input) as { result: { structuredContent: Record<string, unknown> } };
+    assert.equal(result.result.structuredContent.code, "USE_FINAL_ANSWER", provider);
+    assert.match(String(result.result.structuredContent.instruction), provider === "cursor" ? /complete_room_turn/ : /final answer/);
+    assert.equal(state.events.includes("runtime:execute"), false, `${provider}: no first post for a final recap to duplicate`);
+    assert.equal(state.events.includes("journal:mark"), false, `${provider}: the intercepted send never starts`);
+    assert.deepEqual(await state.subject.execute(input), result, `${provider}: retrying the intercepted send stays intercepted`);
+  }
+
+  for (const [toolName, input] of [
+    ["send_message", { reply_to: "other-message", text: "A separate reply." }],
+    ["send_message", { thread_parent_id: "  ", reply_to: " other-message ", text: "A separate reply." }],
+    ["send_message", { thread_parent_id: "other-message", text: "A separate thread reply." }],
+    ["send_thread_message", { thread_parent_id: "other-message", text: "A separate thread reply." }],
+  ] as const) {
+    const state = harness();
+    await state.subject.execute(executeInput({ toolName, input }));
+    assert.equal(state.events.includes("runtime:execute"), true, `${toolName}: deliberate replies to other messages still send`);
   }
 });
 
@@ -716,6 +750,47 @@ test("raw daemon thread intent rejects arguments before admitting a journal effe
   }
 });
 
+test("reply attachments are copied before anything is journaled, and the journal never gets a path", async () => {
+  const snapshots: unknown[] = [];
+  const kept: Array<[string, readonly string[]]> = [];
+  const recorded = { files: [{ spool_id: "a".repeat(32), name: "shot.png", mime_type: "image/png", size_bytes: 3, sha256: "b".repeat(64) }] };
+  const h = harness({
+    replyAttachments: {
+      snapshot: async (input) => { snapshots.push(input); return recorded; },
+      keepOnly: async (inboxItemId, spoolIds) => { kept.push([inboxItemId, spoolIds]); },
+    },
+    prepareResult: { created: true, effect: effect({ tool_name: "set_reply_attachments", request: recorded, state: "completed", result: { ok: true } }) },
+  });
+  await h.subject.execute(executeInput({ toolName: "set_reply_attachments", input: { files: ["shots/shot.png"] } }));
+  assert.deepEqual(snapshots, [{ workspacePath: "/workspace/a", inboxItemId: "inbox-a", agentId: "agent-a",
+    providerTurnId: "turn-a", mcpRequestId: "request-a", files: ["shots/shot.png"] }]);
+  assert.deepEqual(h.capturedPrepare?.request, recorded);
+  assert.deepEqual(kept, [["inbox-a", ["a".repeat(32)]]], "a journaled choice drops the copies it replaced");
+
+  const cleared = harness({ replyAttachments: {
+    snapshot: async () => { throw new Error("must not copy to clear"); },
+    keepOnly: async (inboxItemId, spoolIds) => { kept.push([inboxItemId, spoolIds]); },
+  },
+    prepareResult: { created: true, effect: effect({ tool_name: "set_reply_attachments", request: { files: null }, state: "completed", result: {} }) } });
+  await cleared.subject.execute(executeInput({ toolName: "set_reply_attachments", input: { files: null } }));
+  assert.deepEqual(cleared.capturedPrepare?.request, { files: null });
+  assert.deepEqual(kept.at(-1), ["inbox-a", []], "clearing the choice drops every copy");
+});
+
+test("reply attachments refuse bad input, local rooms and a daemon without a spool before anything is journaled", async () => {
+  const spool = { snapshot: async () => { throw new Error("must not copy"); }, keepOnly: async () => {} };
+  for (const input of [{ files: [] }, { files: ["a.png"], room_id: "other" }, { paths: ["a.png"] }, { files: ["a", "b", "c", "d", "e"] }, { files: [""] }]) {
+    const h = harness({ replyAttachments: spool });
+    await assert.rejects(h.subject.execute(executeInput({ toolName: "set_reply_attachments", input })), /takes \{ files/);
+    assert.equal(h.events.includes("journal:prepare"), false);
+  }
+  const local = harness({ replyAttachments: spool, apiUrl: "letagents-local://rooms" });
+  await assert.rejects(local.subject.execute(executeInput({ toolName: "set_reply_attachments", input: { files: ["a.png"] } })), /need a cloud room/);
+  const old = harness();
+  await assert.rejects(old.subject.execute(executeInput({ toolName: "set_reply_attachments", input: { files: ["a.png"] } })), /cannot attach files yet/);
+  for (const h of [local, old]) assert.equal(h.events.includes("journal:prepare"), false);
+});
+
 /** Every room tool the room server registers for a supervised turn, by its own registration code. */
 async function registeredRoomTools(): Promise<string[]> {
   const { letAgentsRuntimeContract } = await import(new URL("../../../../src/mcp/server/runtime-contract.ts", import.meta.url).href);
@@ -724,16 +799,23 @@ async function registeredRoomTools(): Promise<string[]> {
 }
 
 /** A call the coordinator accepts for the tool, as far as its own input checks go. */
-const roomToolCall = (toolName: string) => ({ toolName, input: toolName === "set_reply_thread" ? {} : toolName === "join_room" ? { name: "room-b" } : { text: "hello" } });
+const roomToolCall = (toolName: string) => ({
+  toolName,
+  input: toolName === "set_reply_thread" ? {}
+    : toolName === "set_reply_gif" ? { gif: { provider: "giphy", id: "example", title: "A small win" } }
+    : toolName === "send_message" ? { reply_to: "other-message", text: "hello" }
+    : toolName === "send_thread_message" ? { thread_parent_id: "other-message", text: "hello" }
+    : toolName === "join_room" ? { name: "room-b" } : { text: "hello" },
+});
 const READ_ONLY_REFUSAL = (toolName: string) => new RegExp(`^Error: Read-only access does not allow the room tool "${toolName}"\\. This agent can read the room and post in it\\. `
   + "It cannot change the task board, join rooms or submit reviews\\. Its owner can choose another access level\\.$");
 
-test("the daemon lets a Read-only Codex agent use the 17 named room tools and refuses every other one, before anything is journaled or run", { timeout: 30_000 }, async () => {
+test("the daemon lets a Read-only Codex agent use the named room tools and refuses every other one, before anything is journaled or run", { timeout: 30_000 }, async () => {
   const registered = await registeredRoomTools();
   const allowed = [
     "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events",
     "get_room_guidelines", "get_room_memory", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
-    "read_messages", "request_human_input", "send_message", "send_thread_message", "set_reply_thread",
+    "react_to_message", "read_messages", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_thread",
   ];
   // One list: the one Codex is told is the one the daemon keeps.
   assert.deepEqual([...CODEX_READ_ONLY_ROOM_TOOLS].sort(), allowed);

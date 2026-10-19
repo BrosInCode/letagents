@@ -1,9 +1,18 @@
 .desktop-composer-input-row {
   position: relative;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  /* add-agent, textarea, trailing actions group. Keep trailing controls
+     inside .desktop-composer-actions so optional buttons never add a track. */
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: end;
   gap: 7px;
+}
+
+.desktop-composer-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 7px;
+  min-width: 0;
 }
 
 .desktop-composer-events {
@@ -279,7 +288,6 @@
 }
 
 .desktop-composer-attach {
-  margin-left: auto;
   display: inline-grid;
   place-items: center;
   width: 30px;
@@ -296,7 +304,7 @@
 }
 
 .desktop-composer-attach:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.1);
+  background: color-mix(in srgb, var(--text) 10%, transparent);
   color: var(--text);
 }
 

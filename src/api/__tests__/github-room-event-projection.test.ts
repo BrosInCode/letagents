@@ -236,3 +236,18 @@ test("failed duplicate GitHub webhook deliveries continue through room projectio
     expectedMessageIdBase(event),
   ]);
 });
+
+test("Activity-only events stream to the resolved focus room without task, chat, or artifact side effects", async () => {
+  const calls: string[] = [];
+  const event = {...createMaterializedEvent(), event_type: "workflow_job" as const, roomEvent: null, routingEvent: pullRequestRoomEvent};
+  const deps = createProjectionDeps(calls, []);
+  const focus = {...createProject("focus-owned"), kind:"focus" as const};
+  deps.getHardIsolatedFocusRoomForGitHubEvent = async () => focus;
+  deps.persistMaterializedGitHubRoomEvent = async (value, input) => {
+    assert.equal(input.roomId, focus.id);
+    return {event:{...createPersistedEvent(value),room_id:focus.id},duplicate:false};
+  };
+  deps.emitGitHubRoomEventUpdate = (roomId) => {assert.equal(roomId, focus.id);calls.push("stream");};
+  await handleMaterializedGitHubRoomEvent(createProject(), event, {deliveryId:"job-delivery",installationId:"1",githubRepoId:"1",deps});
+  assert.deepEqual(calls,["resolve-task","stream"]);
+});

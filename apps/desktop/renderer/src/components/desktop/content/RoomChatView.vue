@@ -51,7 +51,7 @@
           :room-loading="roomLoading"
           :search-query="searchQuery"
           :task-reference-ids="taskReferenceIds"
-          :initial-scroll-top="initialScrollTop"
+          :initial-scroll-position="initialScrollPosition"
           @load-older="emit('load-older')"
           @open-agent="openAgentModal"
           @post-agent-answer-now="(agentId, sourceMessageId) => emit('post-agent-answer-now', agentId, sourceMessageId)"
@@ -152,11 +152,8 @@
           :presence-chips="presenceChips"
           :message-namespace="messageNamespace"
           :participants="participants"
-          :permission-approvals="permissionApprovals"
-          :permission-error="permissionError"
           :pending-attachment-drafts="pendingAttachmentDrafts"
           :reply-to="replyTarget"
-          :resolving-permission-ids="resolvingPermissionIds"
           :room-identifier="roomIdentifier"
           :room-loading="roomLoading"
           :send-error="sendError"
@@ -164,12 +161,10 @@
           :correctable-agents="correctableAgents"
           @clear-reply="clearReplyTarget"
           @open-add-agent="emit('open-add-agent')"
-          @open-permission-detail="emit('open-permission-detail', $event)"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
           @open-event-preview="openEventPreview"
           @dismiss-event-preview="emit('dismiss-event-preview', $event)"
-          @resolve-permission="(approval, behavior) => emit('resolve-permission', approval, behavior)"
           @stop-agent-turn="(agentId, approvalId) => emit('stop-agent-turn', agentId, approvalId)"
           @send-message="handleComposerSend"
           @open-agent-correction="(handoff, opened) => emit('open-agent-correction', handoff, opened)"
@@ -194,6 +189,7 @@
       :message-id="messageInfoTargetId ?? ''"
       :invoker-context="messageInfoInvokerContext"
       :supervisor-entries="roomSupervisorEntries"
+      :room-agent-work="roomAgentWorkStatus === 'ready' ? roomAgentWork : []"
       @close="messageInfoTargetId = null"
       @scroll-to-message="revealMessageFromInfo"
       @inspect-agent="emit('open-agent-detail', $event)"
@@ -202,6 +198,9 @@
 </template>
 
 <script setup lang="ts">
+import type { RoomGif } from "../../../../../../../shared/room-expressions.mjs";
+
+import type { ChatScrollPosition } from "../../../domain/chat-scroll";
 import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoomMessageMotion";
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
 import { computed, nextTick, onBeforeUnmount, provide, ref, toRef, watch } from "vue";
@@ -211,7 +210,6 @@ import { provideRoomMessagePins, useRoomMessagePins } from "../../../composables
 import { provideRoomMessageReactions, useRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import type {
   DesktopAgentPresence,
-  DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
@@ -224,14 +222,12 @@ import type {
 import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
 import {
   normalizeManagedAgentRoomIdentifier,
-  type ManagedAgentPermissionApproval,
   type ManagedAgentWorkIndicator,
 } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import type { AgentCorrectionTarget, ComposerCorrectionHandoff } from "../../../domain/agent-inspector";
 import {
   isGitHubRoomMessage,
-  isLowSignalGitHubCheckMessage,
 } from "./desktop-chat-message/github-event";
 import { useDesktopMessageDraft } from "../../../domain/desktop-message-drafts";
 import { useAgentPresenceChips } from "../../../composables/useAgentPresenceChips";
@@ -267,8 +263,6 @@ const props = defineProps<{
   continuationRepairKeys?: ReadonlySet<string>;
   roomDeliverySkipKeys?: ReadonlySet<string>;
   revealedMessageId?: string | null;
-  permissionApprovals: ManagedAgentPermissionApproval[];
-  permissionError: string | null;
   composerEventPreviews: ComposerEventPreview[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
@@ -287,12 +281,11 @@ const props = defineProps<{
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   roomAgentWorkTruncated?: boolean;
-  resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
   reasoningSessions: DesktopReasoningSession[];
   tasks: DesktopTaskSummary[];
   searchQuery: string;
   activeSearchMessageId: string | null;
-  initialScrollTop?: number | null;
+  initialScrollPosition?: ChatScrollPosition | null;
 }>();
 
 const { pushActionToast } = useDesktopActionToasts();
@@ -318,7 +311,7 @@ const roomSupervisorEntries = computed(() => {
 });
 
 const emit = defineEmits<{
-  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId: string | null, complete: (sent: boolean) => void];
+  "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId: string | null, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "load-older": [];
   "discard-attachment": [uploadId: string];
   "open-reasoning": [sessionId: string];
@@ -326,8 +319,7 @@ const emit = defineEmits<{
   "open-agent-detail": [target: AgentModalTarget];
   "open-agent-correction": [handoff: ComposerCorrectionHandoff, opened: (opened: boolean) => void];
   "open-add-agent": [];
-  "open-permission-detail": [approval: ManagedAgentPermissionApproval];
-  "scroll-position": [scrollTop: number];
+  "scroll-position": [scrollTop: ChatScrollPosition];
   "open-github-event": [url: string];
   "open-events": [];
   "open-task": [taskId: string];
@@ -337,10 +329,6 @@ const emit = defineEmits<{
   "reveal-message": [messageId: string];
   "message-reveal-unavailable": [messageId: string];
   "dismiss-event-preview": [messageId: string];
-  "resolve-permission": [
-    approval: ManagedAgentPermissionApproval,
-    behavior: DesktopManagedAgentPermissionDecisionBehavior,
-  ];
   "thread-read": [threadRootId: string, summary: DesktopRoomMessageThreadSummary];
   "stop-agent-turn": [agentId: string, approvalId: string];
   "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];
@@ -535,13 +523,14 @@ function sendThreadMessage(
   replyToId: string | null,
   attachments: Array<{ upload_id: string }>,
   complete: (sent: boolean) => void,
+  gif?: RoomGif | null,
 ): void {
   const namespace = props.messageNamespace;
   emit("send-message", text, replyToId, attachments, threadRootId, (sent) => {
     if (namespace !== props.messageNamespace) return;
     if (sent) threadAttachmentDrafts.value = threadAttachmentDrafts.value.filter((draft) => !attachments.some((attachment) => attachment.upload_id === draft.uploadId));
     complete(sent);
-  });
+  }, gif);
 }
 
 async function loadThread(threadRootId: string): Promise<void> {
@@ -617,8 +606,7 @@ async function markThreadRead(
 }
 
 function isThreadMessageVisible(message: DesktopRoomMessage): boolean {
-  return !isLowSignalGitHubCheckMessage(message)
-    && (props.githubEventsVisible || !isGitHubRoomMessage(message));
+  return props.githubEventsVisible || !isGitHubRoomMessage(message);
 }
 
 function isActiveThreadContext(
@@ -747,6 +735,7 @@ function handleComposerSend(
   replyToId: string | null,
   attachments: Array<{ upload_id: string }>,
   complete: (sent: boolean) => void,
+  gif?: RoomGif | null,
 ): void {
   const namespace = props.messageNamespace;
   const submittedReply = replyTarget.value;
@@ -757,7 +746,7 @@ function handleComposerSend(
       attachmentDrafts.value = attachmentDrafts.value.filter((draft) => !attachments.some((attachment) => attachment.upload_id === draft.uploadId));
     }
     complete(sent);
-  });
+  }, gif);
 }
 
 watch(toRef(props, "messageNamespace"), () => {

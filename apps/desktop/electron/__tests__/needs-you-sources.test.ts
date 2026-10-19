@@ -104,3 +104,47 @@ test("Needs you forgets agent state once the daemon stops or its watch fails", a
   stopAgain();
   assert.equal(liveSupervisorStateEntries(), null, "a failing watch forgets what it can no longer confirm");
 });
+
+test("Needs you marks each focus room with the room it is listed under, and says whether it read updates", async (t) => {
+  const repo = "github.com/acme/app";
+  const entry = (roomIdentifier: string, focusRooms: unknown[] = []) => ({ roomIdentifier, displayName: roomIdentifier, role: "participant", latestMessageAt: null, focusRooms });
+  const updatesRead: string[] = [];
+  t.mock.module("../main/auth.js", { namedExports: {
+    readStoredAuth: async () => ({ token: "token" }),
+    apiFetch: async () => ({ records: [], truncated: false, tasks: [] }),
+  } });
+  t.mock.module("../main/rooms/local-store.js", { namedExports: {
+    resolveLocalAwareRoomStorageMode: async () => ({ effectiveMode: "cloud" }),
+    cloudRoomIdentifierForStorage: (_storage: unknown, roomIdentifier: string) => roomIdentifier,
+    localRoomIdentifierForStorage: (_storage: unknown, roomIdentifier: string) => roomIdentifier,
+    listLocalRoomEntries: async () => [],
+    listLocalTasks: async () => [],
+  } });
+  t.mock.module("../main/rooms/local-db.js", { namedExports: { getLocalChatDatabase: async () => { throw new Error("cloud rooms only"); } } });
+  t.mock.module("../main/rooms/messages/local-store.js", { namedExports: { addLocalChatMessage: async () => undefined } });
+  t.mock.module("../main/rooms/board-governance.js", { namedExports: { listDesktopPendingBoardIntents: async () => [] } });
+  t.mock.module("../main/rooms/account-rooms.js", { namedExports: {
+    listDesktopAccountRooms: async () => [entry(repo, [entry("focus_1"), entry("focus_2")]), entry("ad-hoc")],
+  } });
+  t.mock.module("../main/rooms/inbox.js", { namedExports: {
+    getDesktopInboxUpdates: async (roomIdentifier: string) => {
+      updatesRead.push(roomIdentifier);
+      return { threads: { threads: [], hasMore: false, unreadThreadCount: 0 }, tasks: [], githubEvents: null, reasoningSessions: [], presence: [], unavailable: [], limited: false };
+    },
+  } });
+  const { getDesktopNeedsYou } = await import(new URL(`../main/rooms/knowledge.js?${encodeURIComponent(t.name)}`, import.meta.url).href) as typeof import("../main/rooms/knowledge.js");
+  const parentsOf = (result: Awaited<ReturnType<typeof getDesktopNeedsYou>>) =>
+    Object.fromEntries(result.rooms.map((room) => [room.roomIdentifier, room.parentRoomIdentifier ?? null]));
+
+  const withUpdates = await getDesktopNeedsYou(true);
+  assert.equal(withUpdates.updatesIncluded, true);
+  assert.deepEqual(parentsOf(withUpdates), { [repo]: null, focus_1: repo, focus_2: repo, "ad-hoc": null });
+  assert.deepEqual(updatesRead.sort(), ["ad-hoc", "focus_1", "focus_2", repo].sort());
+  assert.ok(withUpdates.rooms.every((room) => room.updates));
+
+  const withoutUpdates = await getDesktopNeedsYou();
+  assert.equal(withoutUpdates.updatesIncluded, false, "a read made outside the Inbox says its updates are missing");
+  assert.deepEqual(parentsOf(withoutUpdates), parentsOf(withUpdates));
+  assert.ok(withoutUpdates.rooms.every((room) => room.updates === undefined));
+  assert.equal(updatesRead.length, 4);
+});

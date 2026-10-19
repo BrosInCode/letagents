@@ -79,6 +79,7 @@ export interface StoredOpenModelSettings {
   baseUrl: string;
   model: string;
   savedAt: string | null;
+  contextWindow?: number | null;
 }
 
 interface PersistedOpenModelSettings {
@@ -86,6 +87,7 @@ interface PersistedOpenModelSettings {
   baseUrl?: string | null;
   model?: string | null;
   savedAt?: string | null;
+  contextWindow?: number | null;
 }
 
 function getElectronMain(): {
@@ -218,6 +220,7 @@ export async function readOpenModelSettings(
       baseUrl: normalizeBaseUrl(parsed.baseUrl),
       model: normalizeModel(parsed.model),
       savedAt: parsed.savedAt || null,
+      contextWindow: Number.isSafeInteger(parsed.contextWindow) && (parsed.contextWindow ?? 0) >= 2 ? parsed.contextWindow : null,
     };
   } catch {
     return {
@@ -246,10 +249,17 @@ export async function saveOpenModelSettings(
     input.baseUrl === undefined ? current.baseUrl : input.baseUrl,
   );
   assertValidOpenModelBaseUrl(nextBaseUrl);
+  const model = normalizeModel(input.model === undefined ? current.model : input.model);
+  const contextWindow = input.contextWindow !== undefined ? input.contextWindow
+    : model === current.model && nextBaseUrl === current.baseUrl ? current.contextWindow ?? null : null;
+  if (contextWindow !== null && (!Number.isSafeInteger(contextWindow) || contextWindow < 2)) {
+    throw new Error("The model context window must be a whole number of at least 2 tokens.");
+  }
   const nextSettings: StoredOpenModelSettings = {
     apiKey: nextApiKey,
     baseUrl: nextBaseUrl,
-    model: normalizeModel(input.model === undefined ? current.model : input.model),
+    model,
+    contextWindow,
     savedAt: new Date().toISOString(),
   };
   const persisted: PersistedOpenModelSettings = {
@@ -257,6 +267,7 @@ export async function saveOpenModelSettings(
     baseUrl: nextSettings.baseUrl,
     model: nextSettings.model,
     savedAt: nextSettings.savedAt,
+    contextWindow: nextSettings.contextWindow,
   };
   await mkdir(dirname(settingsPath), { recursive: true });
   await writeFile(settingsPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
@@ -278,6 +289,7 @@ export async function getOpenModelSettingsStatus(
       hasApiKey: Boolean(settings.apiKey),
       baseUrl: settings.baseUrl,
       model: settings.model,
+      contextWindow: settings.contextWindow ?? null,
       savedAt: settings.savedAt,
       settingsPath,
       error: null,

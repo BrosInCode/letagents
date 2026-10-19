@@ -8,11 +8,11 @@ const viewportSource = readFileSync(fileURLToPath(new URL(
   import.meta.url,
 )), "utf8");
 
-test("the work indicator renders the live activity echo and collapses many agents", () => {
+test("the work indicator renders every participant with the live activity echo", () => {
   assert.match(viewportSource, /coalesceWorkIndicatorEchoes/);
   assert.match(viewportSource, /collapseWorkIndicators/);
-  // Collapses the rate-limited displayed set, not the raw prop.
-  assert.match(viewportSource, /const collapsedAgentWork = computed\(\(\) => collapseWorkIndicators\(displayedAgentWork\.value\)\)/);
+  // Show every name from the rate-limited displayed set.
+  assert.match(viewportSource, /const collapsedAgentWork = computed\(\(\) => collapseWorkIndicators\(displayedAgentWork\.value, 0\)\)/);
   assert.match(viewportSource, /v-for="work in collapsedAgentWork\.visible"/);
   assert.match(viewportSource, /data-testid="room-local-agent-work-echo"/);
   assert.match(viewportSource, /data-testid="room-local-agent-work-overflow"/);
@@ -89,7 +89,7 @@ const chatViewSource = readFileSync(fileURLToPath(new URL(
 
 test("the wait for background work has a button of its own that asks for the existing stop of the turn", () => {
   // A button beside the indicator, never inside it: the indicator is a button itself.
-  assert.match(viewportSource, /<template v-for="work in collapsedAgentWork\.visible" :key="work\.id">\s*<button[\s\S]*?class="room-local-agent-work"[\s\S]*?<\/button>\s*<button\s+v-if="work\.waitsForBackgroundWork"\s+type="button"\s+class="room-local-agent-work-action"/);
+  assert.match(viewportSource, /<div v-for="work in collapsedAgentWork\.visible" :key="work\.id" class="room-local-agent-work-group">\s*(?:<!--[^\n]*-->\s*<div\s+v-if="work\.remote"[\s\S]*?<\/div>\s*)?<button[\s\S]*?class="room-local-agent-work"[\s\S]*?<\/button>\s*<button\s+v-if="work\.waitsForBackgroundWork"\s+type="button"\s+class="room-local-agent-work-action"/);
   // What the title says is what the adapter's interrupt does: a command goes on, a sub-agent is stopped (each captured).
   assert.match(viewportSource, /title="Post the answer that the agent has now\. A command in the background keeps running\. A sub-agent that still runs is stopped\. No later result is posted\."/);
   // The click names the turn that the button was shown for, by the room message that started it.
@@ -105,7 +105,7 @@ test("the wait for background work has a button of its own that asks for the exi
   assert.match(cssSource, /\.room-local-agent-work-action:focus-visible\s*\{[\s\S]*?outline:/);
   // The row of a held turn keeps the look of work, because something runs. Only an agent that waits for the time of
   // its next attempt has a row at rest: that mark is never set from the wait for background work.
-  assert.match(viewportSource, /<template v-for="work in collapsedAgentWork\.visible" :key="work\.id">\s*<button[^>]*?:data-waiting="work\.waiting \|\| undefined"[^>]*?class="room-local-agent-work"/);
+  assert.match(viewportSource, /<div v-for="work in collapsedAgentWork\.visible" :key="work\.id" class="room-local-agent-work-group">\s*(?:<!--[^\n]*-->\s*<div\s+v-if="work\.remote"[\s\S]*?<\/div>\s*)?<button[^>]*?:data-waiting="work\.waiting \|\| undefined"[^>]*?class="room-local-agent-work"/);
   assert.equal(viewportSource.match(/data-waiting/g)?.length, 1);
   assert.doesNotMatch(cssSource, /waitsForBackgroundWork|room-local-agent-work-action[^{]*data-waiting/);
 });
@@ -134,7 +134,7 @@ test("DesktopRoomShell line count stays strictly under 3000 lines", () => {
 
 test("an agent that waits to try again has a row at rest in the live strip, and the inspector's line for it follows a clock that moves", () => {
   // The shell puts the rows that wait in the same list as the rows that work, so they are in the strip that stays in view.
-  assert.match(shellSource, /const localAgentWork = computed\(\(\) =>\s*\[\s*\.\.\.waitingAgentIndicators\(supervisorEntries\.value, props\.room\.identifier\),/);
+  assert.match(shellSource, /const localAgentWork = computed\(\(\) =>\s*mergeRoomResponseParticipants\(\[\s*\.\.\.waitingAgentIndicators\(supervisorEntries\.value, props\.room\.identifier\),/);
   // The row is the strip's own button, marked as one that waits. Its look is the strip's: the mark only puts it at rest.
   assert.match(viewportSource, /<button[\s\S]*?:data-waiting="work\.waiting \|\| undefined"[\s\S]*?class="room-local-agent-work"/);
   assert.match(cssSource, /\.room-local-agent-work\[data-waiting\] \.room-local-agent-work-pulse\s*\{[^}]*animation:\s*none;/);

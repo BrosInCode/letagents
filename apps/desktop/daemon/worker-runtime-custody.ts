@@ -41,6 +41,7 @@ export type InstalledOpenModelCredential = {
   apiKey: string | null;
   baseUrl: string;
   model: string;
+  contextWindow?: number | null;
   daemonGeneration: number;
 };
 

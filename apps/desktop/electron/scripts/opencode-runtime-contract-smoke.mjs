@@ -507,6 +507,7 @@ async function observeOwnerIsolation({ binary, provider, registry, runtimeRoot, 
     OPENCODE_SERVER_USERNAME: auth.username,
     OPENCODE_SERVER_PASSWORD: auth.password,
     OPENCODE_CONFIG_CONTENT: JSON.stringify(openCodeConfig({
+    limits: { context: 262144, output: 8192 },
       model: "contract-model",
       baseUrl: provider.url,
       pluginUrl: pathToFileURL(pluginPath).href,
@@ -611,6 +612,7 @@ async function verifyAutoStaysInProject(binary, provider, registry, workspaceKin
       OPENCODE_SERVER_USERNAME: auth.username,
       OPENCODE_SERVER_PASSWORD: auth.password,
       OPENCODE_CONFIG_CONTENT: JSON.stringify(openCodeConfig({
+    limits: { context: 262144, output: 8192 },
         model: "contract-model",
         baseUrl: provider.url,
         pluginUrl: pathToFileURL(pluginPath).href,
@@ -703,6 +705,7 @@ const auth = {
   password: randomBytes(24).toString("base64url"),
 };
 const config = openCodeConfig({
+    limits: { context: 262144, output: 8192 },
   model: "contract-model",
   baseUrl: provider.url,
   pluginUrl: pathToFileURL(pluginPath).href,

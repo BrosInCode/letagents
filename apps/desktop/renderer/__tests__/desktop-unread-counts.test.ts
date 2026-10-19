@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { effectScope, nextTick, ref } from "vue";
 import type { DesktopAuthAccount, DesktopRoomLatestMessage, DesktopRoomMessage } from "../../electron/ipc-types";
 import { useDesktopUnreadCounts } from "../src/composables/useDesktopUnreadCounts";
+import { rememberGitHubEventsVisible } from "../src/components/desktop/content/room-shell/preferences";
 
 const accountA = { id: "account-a", login: "Emmy", displayName: null } as DesktopAuthAccount;
 const room = (id: string, latest: number): DesktopRoomLatestMessage => ({ roomIdentifier: id, latestMessageId: `msg_${latest}`, latestMessageAt: null });
@@ -90,5 +91,55 @@ test("changing storage history resets counts and follows new local message IDs",
     rooms.value = [room("room-a", 7)];
     await nextTick(); await counts.refresh(); assert.equal(counts.totalCount.value, 2);
     assert.deepEqual(cursors, ["msg_99", "msg_5", "msg_6"]);
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("room and app badges exclude hidden GitHub events and react to visibility changes", async () => {
+  const originalWindow = globalThis.window;
+  const storage = new Map<string, string>();
+  const badges: number[] = [];
+  const events = [2, 3].map(id => ({ ...message(id), source: "github", sender: "github" }) as DesktopRoomMessage);
+  const deferred: { resolve?: (page: { messages: DesktopRoomMessage[]; hasMore: boolean }) => void } = {};
+  let delay = false;
+  globalThis.window = {
+    localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
+    letagentsDesktop: {
+      room: { getMessagesAfter: async (id: string) => {
+        if (id === "room-b") return { messages: [message(2), message(3)], hasMore: false };
+        if (delay) return new Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>(resolve => { deferred.resolve = resolve; });
+        return { messages: events, hasMore: false };
+      } },
+      notifications: { setBadgeCount: async (count: number) => { badges.push(count); } },
+    },
+  } as never;
+  const scope = effectScope();
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms: ref([room("room-a", 3), room("room-b", 3)]),
+    readMarkers: ref({ "room-a": "msg_1", "room-b": "msg_1" }), storageMode: ref("cloud"),
+  }))!;
+  try {
+    await counts.refresh(); await nextTick();
+    assert.deepEqual(counts.roomCounts.value, { "room-a": 0, "room-b": 2 });
+    assert.equal(badges.at(-1), 2);
+    rememberGitHubEventsVisible("ROOM-A", true);
+    await nextTick(); await counts.refresh(); await nextTick();
+    assert.deepEqual(counts.roomCounts.value, { "room-a": 2, "room-b": 2 });
+    assert.equal(badges.at(-1), 4);
+    rememberGitHubEventsVisible("room-a", false);
+    await nextTick(); await counts.refresh(); await nextTick();
+    assert.deepEqual(counts.roomCounts.value, { "room-a": 0, "room-b": 2 });
+    assert.equal(badges.at(-1), 2);
+
+    delay = true;
+    rememberGitHubEventsVisible("room-a", true);
+    await nextTick();
+    const resolve = deferred.resolve;
+    assert.ok(resolve, "a recount should be in flight");
+    rememberGitHubEventsVisible("room-a", false);
+    delay = false;
+    resolve({ messages: events, hasMore: false });
+    await nextTick(); await counts.refresh(); await nextTick();
+    assert.deepEqual(counts.roomCounts.value, { "room-a": 0, "room-b": 2 }, "stale visible results cannot restore hidden events");
+    assert.equal(badges.at(-1), 2);
   } finally { scope.stop(); globalThis.window = originalWindow; }
 });

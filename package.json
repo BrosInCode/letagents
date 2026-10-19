@@ -1,6 +1,6 @@
 {
   "name": "letagents",
-  "version": "0.12.37",
+  "version": "0.12.40",
   "description": "Let Agents Chat \u2014 MCP server for AI agent communication",
   "type": "module",
   "main": "dist/mcp/server.js",
@@ -24,7 +24,6 @@
     "build:all": "npm run build && npm run build:web",
     "test:mcp": "node --import tsx --test src/mcp/__tests__/*.test.ts",
     "test:package-runtime": "node --test scripts/package-runtime.test.mjs",
-    "test:orchestrator": "node --import tsx --test src/orchestrator/__tests__/*.test.ts",
     "test:web": "node --import tsx --test src/web/tests/*.test.ts src/web/src/composables/*.test.ts",
     "test:dependency-age": "node --test scripts/verify-dependency-age.test.mjs",
     "test:docker-context": "node --test scripts/verify-docker-context.test.mjs",

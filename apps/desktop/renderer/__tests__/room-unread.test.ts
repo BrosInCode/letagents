@@ -10,6 +10,7 @@ import { createServer } from "vite";
 import { createRenderer, h, reactive, ref, ssrContextKey } from "vue";
 import { createRoomUnreadStore } from "../../../../shared/room-unread.mjs";
 import { markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
+import { normalizeRoomIdentifier } from "../src/domain/sidebar-rooms";
 
 test("per-room storage controls refresh the unread history namespace, including a local fork", async () => {
   async function functionsFrom(path: string, names: string[]): Promise<string> {
@@ -26,19 +27,23 @@ test("per-room storage controls refresh the unread history namespace, including 
   const roomIdentifier = "github.com/acme/repo";
   const chatStorageSettings = ref({ mode: "cloud", roomOverrides: {} as Record<string, string> });
   const sidebarLatestMessages = ref<Record<string, any>>({ [roomIdentifier]: { storageMode: "cloud", latestMessageId: "msg_900" } });
-  let persistedMode = "cloud", settingsReads = 0, refreshes = 0;
+  let persistedMode = "cloud", settingsReads = 0, refreshes = 0, appliedSnapshots = 0;
   let pendingRefresh: Promise<void> | undefined;
   const snapshot = () => ({ roomIdentifier, storage: { effectiveMode: persistedMode } });
+  const selectedSnapshot = ref(snapshot());
+  const selectedRootRoomIdentifier = ref(roomIdentifier);
+  const activeEntry = ref({ id: roomIdentifier });
   const bridge = {
     getSettings: async () => { settingsReads++; return { mode: "cloud", roomOverrides: { [roomIdentifier]: persistedMode } }; },
     setRoomMode: async (_room: string, mode: string) => { persistedMode = mode; },
     forkRoomToLocal: async () => { persistedMode = "local"; return { snapshot: snapshot() }; },
   };
   const app = runInNewContext(appCode + "\n({ handleRoomShellRefresh, roomHistoryMode })", {
-    roomReadKey, chatStorageSettings, sidebarLatestMessages,
+    roomReadKey, chatStorageSettings, sidebarLatestMessages, normalizeRoomIdentifier,
+    selectedSnapshot, selectedRootRoomIdentifier, activeEntry, sidebarProjectEntries: ref([]),
     accountRooms: ref([{ roomIdentifier, source: "cloud", focusRooms: [] }]),
     sessionGeneration: ref(1), getChatStorageBridge: () => bridge,
-    chatStorageFeedback: ref(null), handleRefreshRoom() {}, syncSelectedRoomStream() {},
+    chatStorageFeedback: ref(null), handleRefreshRoom() { appliedSnapshots++; }, syncSelectedRoomStream() {},
     refreshSidebarLatestMessages: async () => {
       refreshes++;
       assert.equal(app.roomHistoryMode(roomIdentifier), persistedMode, "discard metadata from the previous history before refreshing");
@@ -60,6 +65,22 @@ test("per-room storage controls refresh the unread history namespace, including 
   }
   assert.equal(settingsReads, 3);
   assert.equal(refreshes, 3);
+  assert.equal(appliedSnapshots, 3);
+
+  // A delayed storage refresh must not apply the previous room after navigation.
+  let resumeSettings!: () => void;
+  const pendingSettings = new Promise<void>((resolve) => { resumeSettings = resolve; });
+  bridge.getSettings = async () => { await pendingSettings; return { mode: "cloud", roomOverrides: { [roomIdentifier]: persistedMode } }; };
+  persistedMode = "cloud";
+  const lateRefresh = app.handleRoomShellRefresh(snapshot());
+  selectedSnapshot.value = { ...snapshot(), roomIdentifier: "other-room" };
+  selectedRootRoomIdentifier.value = "other-room";
+  activeEntry.value = { id: "other-room" };
+  resumeSettings();
+  await lateRefresh;
+  assert.equal(appliedSnapshots, 3);
+  assert.equal(refreshes, 3);
+  assert.equal(selectedSnapshot.value.roomIdentifier, "other-room");
 });
 
 test("App's explicit sidebar read action clears its bookmark even when the old marker is already current", async () => {

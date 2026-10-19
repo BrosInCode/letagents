@@ -7,14 +7,19 @@ export interface DesktopPushAuthorizationDeps {
   resolveAccess(input: {
     project: Project;
     sessionAccount: RoomAccessAccount;
-    freshCollaboratorCheck: true;
+    freshCollaboratorCheck: boolean;
   }): Promise<ProjectRepoAccessDecision>;
 }
 
 export type DesktopPushAuthorizationDecision = "allow" | "deny" | "retry";
 
 export async function authorizeDesktopPushNotification(
-  input: { accountId: string; roomId: string },
+  input: {
+    accountId: string;
+    roomId: string;
+    /** Defaults to true. The push worker keeps the default; the emit path passes false. */
+    freshCollaboratorCheck?: boolean;
+  },
   deps: DesktopPushAuthorizationDeps,
 ): Promise<DesktopPushAuthorizationDecision> {
   const [project, account] = await Promise.all([
@@ -26,7 +31,7 @@ export async function authorizeDesktopPushNotification(
   const access = await deps.resolveAccess({
     project,
     sessionAccount: account,
-    freshCollaboratorCheck: true,
+    freshCollaboratorCheck: input.freshCollaboratorCheck ?? true,
   });
   if (!access.isRepoBacked || access.decision.kind === "allow") return "allow";
 

@@ -6,7 +6,7 @@ import type {
 
 export type AgentInspectorConfigurationDraft = Pick<
   DesktopSupervisorAgentConfiguration,
-  "model" | "reasoningEffort" | "charter" | "permissionProfileId"
+  "model" | "reasoningEffort" | "charter" | "permissionProfileId" | "imageInput"
 >;
 
 export type AgentInspectorConfigurationResource = {
@@ -130,6 +130,7 @@ export function configurationDraft(configuration: DesktopSupervisorAgentConfigur
     reasoningEffort: configuration.reasoningEffort,
     charter: configuration.charter,
     permissionProfileId: configuration.permissionProfileId,
+    ...(configuration.imageInput === undefined ? {} : { imageInput: configuration.imageInput }),
   };
 }
 
@@ -164,6 +165,13 @@ export function permissionTimingNote(deliveryMode: string | undefined, pending =
     ? "Choose what the agent can access. A new level applies as soon as the agent is idle. A turn that is running is not stopped."
     : "Choose what the agent can access the next time it starts.";
 }
+
+/**
+ * Only an Open Model agent asks: its model is whatever the owner set, and a
+ * model that cannot read images gets an error text in each image's place.
+ */
+export const IMAGE_INPUT_TITLE = "This model can read images";
+export const IMAGE_INPUT_DESCRIPTION = "When this is on, the agent gets the images that people attach to the message that wakes it. Turn it on only if your model accepts image input. It applies the next time the agent starts.";
 
 export function configurationHasRuntimeLag(configuration: DesktopSupervisorAgentConfiguration | null): boolean {
   return Boolean(configuration && configuration.runtimeConfigurationRevision < configuration.configRevision);

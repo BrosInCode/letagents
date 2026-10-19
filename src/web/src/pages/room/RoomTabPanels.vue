@@ -1,3 +1,7 @@
+<script lang="ts">
+import type { ChatScrollPosition } from '../../../../../shared/chat-scroll-position'
+const roomScrollPositions = new Map<string, ChatScrollPosition>()
+</script>
 <template>
   <div class="room-view-viewport">
     <div v-if="activeTab === 'chat' && historySearch.state.value.status !== 'idle'" class="room-history-search">
@@ -24,6 +28,8 @@
         ref="messageListRef"
         class="room-tab-panel"
         :messages="messages"
+        :initial-scroll-position="roomScrollPositions.get(scrollKey(room?.identifier || ''))"
+        @scroll-position="(id, position) => roomScrollPositions.set(scrollKey(id), position)"
         :roomIdentifier="room?.identifier || ''"
         :unreadRoomId="room?.projectId || ''"
         :reasoningSessions="reasoningSessions"
@@ -31,6 +37,7 @@
         :hasOlderMessages="messagesHasOlder"
         :messagesLoaded="messagesLoaded"
         :isLoadingOlderMessages="isLoadingOlderMessages"
+        :olderMessagesError="olderMessagesError"
         :searchQuery="searchQuery"
         :stalePromptTaskStates="stalePromptTaskStates"
         :taskReferenceIds="taskReferenceIds"
@@ -53,6 +60,10 @@
         key="events"
         class="room-tab-panel"
         :events="githubEvents"
+        :roomIdentifier="room?.identifier || ''"
+        @refresh="emit('refreshGitHubEvents')"
+        @loadOlder="emit('loadOlderGitHubEvents')"
+        @openTask="emit('openTask', $event)"
         :repository="githubEventsRepository"
         :isAvailable="githubEventsAvailable"
         :hasMore="githubEventsHasMore"
@@ -140,6 +151,7 @@
 </template>
 
 <script setup lang="ts">
+import { useAuth } from '@/composables/useAuth'
 import { onScopeDispose } from "vue";
 import { useRoomUnread } from "@/composables/roomUnread";
 import PinnedMessages from '../../../../../shared/ui/PinnedMessages.vue'
@@ -179,6 +191,9 @@ import type {
   TaskUpdatePayload,
 } from './types'
 
+const scrollAuth = useAuth()
+const scrollKey = (room: string) => JSON.stringify([scrollAuth.user.value?.id || null, room])
+
 const props = defineProps<{
   activeTab: RoomTab
   tabTransitionName: string
@@ -186,6 +201,7 @@ const props = defineProps<{
   messagesHasOlder: boolean
   messagesLoaded?: boolean
   isLoadingOlderMessages: boolean
+  olderMessagesError?: string
   tasks: readonly RoomTask[]
   focusRooms: readonly FocusRoomInfo[]
   presence: readonly RoomAgentPresence[]
@@ -231,6 +247,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  refreshGitHubEvents: []
+  loadOlderGitHubEvents: []
   loadOlder: []
   reply: [message: RoomMessage]
   threadMessages: [messages: RoomMessage[]]

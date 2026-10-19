@@ -1,6 +1,7 @@
 import { getPullRequestLabel } from "./providers.js";
 import { buildTaskWorkflowArtifactMatches } from "./task-artifacts.js";
 import type {
+  RepoPullRequestParticipant,
   RepoPullRequestRef,
   RepoRoomEvent,
   RepoWorkflowProvider,
@@ -39,6 +40,49 @@ export function formatRepoPullRequestEventMessage(input: {
         return `${prLabel} was merged by ${merger} in ${input.repositoryFullName}${taskSuffix}${titleSegment} ${input.pullRequest.url}`;
       }
       return `${prLabel} was closed by ${actor} in ${input.repositoryFullName}${taskSuffix}${titleSegment} ${input.pullRequest.url}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Review requests and assignments. A user is named with an @ mention so the
+ * room names them. A team has no account to mention, so it is named in words.
+ */
+export function formatRepoPullRequestParticipantEventMessage(input: {
+  provider: RepoWorkflowProvider;
+  action: string;
+  repositoryFullName: string;
+  pullRequest: RepoPullRequestRef;
+  participant: RepoPullRequestParticipant;
+  senderLogin?: string | null;
+  linkedTaskId?: string | null;
+  redactTitle?: boolean;
+}): string | null {
+  // Only the sender names the actor. With no sender, the " by <login>" clause is omitted.
+  const by = input.senderLogin ? ` by ${input.senderLogin}` : "";
+  const prLabel = getPullRequestLabel(input.provider, input.pullRequest.number);
+  const title = input.pullRequest.title.trim();
+  const titleSegment = input.redactTitle || !title ? "" : `: ${title}`;
+  const taskSuffix = input.linkedTaskId ? ` linked to ${input.linkedTaskId}` : "";
+  const context = `in ${input.repositoryFullName}${taskSuffix}${titleSegment} ${input.pullRequest.url}`;
+  const { participant } = input;
+  const login = participant.login;
+  // A team is named by its slug only, never by its display name.
+  const teamOwner = input.repositoryFullName.split("/")[0];
+  const teamLabel = participant.team_slug ? `${teamOwner}/${participant.team_slug}` : null;
+
+  switch (input.action) {
+    case "review_requested":
+      if (login) return `@${login} review requested${by} on ${prLabel} ${context}`;
+      return teamLabel ? `Review requested from team ${teamLabel}${by} on ${prLabel} ${context}` : null;
+    case "review_request_removed":
+      if (login) return `Review request for @${login} removed${by} on ${prLabel} ${context}`;
+      return teamLabel ? `Review request for team ${teamLabel} removed${by} on ${prLabel} ${context}` : null;
+    case "assigned":
+      return login ? `@${login} assigned${by} to ${prLabel} ${context}` : null;
+    case "unassigned":
+      return login ? `@${login} unassigned${by} from ${prLabel} ${context}` : null;
     default:
       return null;
   }
@@ -210,6 +254,7 @@ function isLowSignalCheckRunConclusion(conclusion: string | null | undefined): b
 export function buildRepoRoomEventArtifactMatches(event: RepoRoomEvent): TaskWorkflowArtifactMatch[] {
   switch (event.kind) {
     case "pull_request":
+    case "pull_request_participant":
       return buildTaskWorkflowArtifactMatches({
         provider: event.provider,
         kind: "pull_request",
@@ -276,6 +321,7 @@ export function getRepoRoomEventReferenceTexts(
 ): Array<string | null | undefined> {
   switch (event.kind) {
     case "pull_request":
+    case "pull_request_participant":
       return [event.pullRequest.title, event.pullRequest.body];
     case "issue":
       return [event.issue.title];
@@ -307,6 +353,17 @@ export function formatRepoRoomEventMessage(input: {
         action: input.event.action,
         repositoryFullName: input.event.repositoryFullName,
         pullRequest: input.event.pullRequest,
+        senderLogin: input.event.senderLogin,
+        linkedTaskId: input.linkedTaskId,
+        redactTitle: input.redactUntrustedTaskReference,
+      });
+    case "pull_request_participant":
+      return formatRepoPullRequestParticipantEventMessage({
+        provider: input.event.provider,
+        action: input.event.action,
+        repositoryFullName: input.event.repositoryFullName,
+        pullRequest: input.event.pullRequest,
+        participant: input.event.participant,
         senderLogin: input.event.senderLogin,
         linkedTaskId: input.linkedTaskId,
         redactTitle: input.redactUntrustedTaskReference,

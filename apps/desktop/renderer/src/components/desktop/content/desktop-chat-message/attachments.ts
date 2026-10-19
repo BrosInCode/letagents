@@ -6,19 +6,15 @@ export function formatDisplayBytes(bytes: number): string {
 }
 
 export function attachmentName(attachment: DesktopRoomMessageAttachment): string {
-  return attachment.fileName || attachment.name || "attachment";
+  return attachment.fileName;
 }
 
 export function attachmentMimeType(attachment: DesktopRoomMessageAttachment): string {
-  return attachment.mimeType || "application/octet-stream";
+  return attachment.mimeType;
 }
 
 export function attachmentHref(attachment: DesktopRoomMessageAttachment): string {
-  if (attachment.url) return attachment.url;
-  if (attachment.downloadUrl) return attachment.downloadUrl;
-  if (attachment.dataUrl) return attachment.dataUrl;
-  if (attachment.contentBase64) return `data:${attachmentMimeType(attachment)};base64,${attachment.contentBase64}`;
-  return "#";
+  return attachment.href || "#";
 }
 
 export function attachmentKey(attachment: DesktopRoomMessageAttachment): string {

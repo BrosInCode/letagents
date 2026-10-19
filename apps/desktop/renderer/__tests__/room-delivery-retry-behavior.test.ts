@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { parse, compileScript, compileTemplate } from "@vue/compiler-sfc";
 import * as Vue from "vue";
 import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
-import { createServer, type ViteDevServer } from "vite";
+import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-retry";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
 import { HOST_APPROVAL_ARM_MS, hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
@@ -57,6 +57,9 @@ Object.assign(globalThis, {
     requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0),
     cancelAnimationFrame: clearTimeout, innerWidth: 1200, innerHeight: 800,
     location: { href: "http://localhost/" }, getSelection: () => null,
+    matchMedia: (media: string) => ({
+      matches: false, media, addEventListener: () => undefined, removeEventListener: () => undefined,
+    }),
     document: { documentElement: { style: { scrollBehavior: "" } } },
   },
   document: { documentElement: { style: { scrollBehavior: "" } }, addEventListener() {}, removeEventListener() {}, visibilityState: "visible", hasFocus: () => true },
@@ -159,7 +162,8 @@ async function attachClientRender(component: object, modulePath: string): Promis
   const clientCode = compiled.code
     .replace(/^import \{([\s\S]*?)\} from "vue"\n/, (_match, bindings: string) => `const {${bindings.replace(/\s+as\s+/g, ": ")}} = vue\n`)
     .replace("export function render", "function render");
-  (component as { render?: unknown }).render = Function("vue", `${clientCode}\nreturn render;`)(Vue);
+  const transformed = await transformWithEsbuild(clientCode, `${modulePath}.ts`, { loader: "ts", target: "esnext" });
+  (component as { render?: unknown }).render = Function("vue", `${transformed.code}\nreturn render;`)(Vue);
 }
 
 before(async () => {
@@ -180,6 +184,10 @@ before(async () => {
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposer.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposerEventChips.vue").then((module) => module.default),
   ]);
+  // This test mounts client templates onto SSR-loaded components. Compile the
+  // timeline's transparent grouping wrapper too so ordinary message slots run.
+  const groupedUpdates = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/RoomGitHubUpdates.vue", import.meta.url)));
+  await attachClientRender(groupedUpdates.default, "../../../../shared/ui/RoomGitHubUpdates.vue");
   await Promise.all([
     attachClientRender(DesktopChatMessage, "components/desktop/content/DesktopChatMessage.vue"),
     attachClientRender(RoomMessageViewport, "components/desktop/content/room-chat/RoomMessageViewport.vue"),
@@ -197,8 +205,7 @@ beforeEach(() => { hostApprovals?.resetHostApprovals(); });
 
 function composerProps() {
   return { attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], participants: [],
-    pendingAttachmentDrafts: [], permissionApprovals: [], permissionError: null, replyTo: null, resolvingPermissionIds: {},
-    roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false };
+    pendingAttachmentDrafts: [], replyTo: null, roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false };
 }
 
 function hostApproval(): DesktopHostApproval {
@@ -1613,7 +1620,7 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
     } : composerProps();
     const mounted = mount(thread ? RoomThreadPanel : RoomComposer, {
       ...props,
-      [thread ? "onSendThreadMessage" : "onSendMessage"]: (...args: unknown[]) => { complete = args.at(-1) as typeof complete; },
+      [thread ? "onSendThreadMessage" : "onSendMessage"]: (...args: unknown[]) => { complete = args[thread ? 4 : 3] as typeof complete; },
     });
     try {
       const input = descendants(mounted.root).find(node => node.type === "textarea")!;
@@ -1815,7 +1822,7 @@ test("room drafts survive switching and remount, stay account isolated, and neve
   Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
   let sends = 0;
   let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
-  const open = (room: string) => mount(RoomComposer, { ...composerProps(), roomIdentifier: room, messageNamespace: `${room}:cloud:cloud`, onSendMessage: (...args: unknown[]) => { sends += 1; complete = args.at(-1) as typeof complete; } });
+  const open = (room: string) => mount(RoomComposer, { ...composerProps(), roomIdentifier: room, messageNamespace: `${room}:cloud:cloud`, onSendMessage: (...args: unknown[]) => { sends += 1; complete = args[3] as typeof complete; } });
   const input = (view: ReturnType<typeof mount>) => descendants(view.root).find(node => node.type === "textarea")!;
   const value = (view: ReturnType<typeof mount>) => (input(view) as unknown as { value: string }).value;
   let view = open("Messaging-QA");
@@ -1866,7 +1873,7 @@ test("thread reopen restores text and selection quote and accepted send clears o
     attachmentDrafts: [], attachmentError: null, pendingAttachmentDrafts: [], hasOlderReplies: false,
     loadingOlderReplies: false, revealMessageId: null, searchQuery: "", activeSearchMessageId: null,
     taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
-    onSendThreadMessage: (...args: unknown[]) => { sends.push(args); complete = args.at(-1) as typeof complete; },
+    onSendThreadMessage: (...args: unknown[]) => { sends.push(args); complete = args[4] as typeof complete; },
   });
   const input = (view: ReturnType<typeof mount>) => descendants(view.root).find(node => node.type === "textarea")!;
   const value = (view: ReturnType<typeof mount>) => (input(view) as unknown as { value: string }).value;
@@ -1915,7 +1922,7 @@ test("acceptance after switching threads clears only the original submitted text
     sending: false, sendError: null, attaching: false, attachmentDrafts: [], attachmentError: null,
     pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false, searchQuery: "",
     activeSearchMessageId: null, taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
-    onSendThreadMessage: (...args: unknown[]) => { complete = args.at(-1) as typeof complete; },
+    onSendThreadMessage: (...args: unknown[]) => { complete = args[4] as typeof complete; },
   }) };
   const view = mount(component, {});
   try {
@@ -1940,7 +1947,7 @@ test("attachment-only thread acceptance restores composer focus without requirin
     attachmentDrafts: [{ uploadId: "upload-focus", fileName: "note.txt", mimeType: "text/plain", sizeBytes: 3, previewDataUrl: null }],
     attachmentError: null, pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false,
     searchQuery: "", activeSearchMessageId: null, taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
-    onSendThreadMessage: (...args: unknown[]) => (args.at(-1) as (accepted: boolean) => void)(true),
+    onSendThreadMessage: (...args: unknown[]) => (args[4] as (accepted: boolean) => void)(true),
   });
   try {
     await nextTick();

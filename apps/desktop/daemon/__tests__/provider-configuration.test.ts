@@ -19,7 +19,6 @@ import {
   permissionChangeKey,
   permissionChangedSince,
   startedWithHomeHarness,
-  providerSupportsConcurrentSupervisedAgents,
   resolveProviderConfigurationSnapshot,
   storedHomeHarness,
   storedLaunchPolicy,
@@ -432,14 +431,6 @@ test("rental admission rejects trusted-local profiles at the daemon launch bound
   );
 });
 
-test("isolated supervised provider runtimes admit multiple agents in one room", () => {
-  assert.equal(providerSupportsConcurrentSupervisedAgents("codex"), true);
-  assert.equal(providerSupportsConcurrentSupervisedAgents("claude-code"), true);
-  assert.equal(providerSupportsConcurrentSupervisedAgents("claude"), true);
-  assert.equal(providerSupportsConcurrentSupervisedAgents("open-model"), true);
-  assert.equal(providerSupportsConcurrentSupervisedAgents("cursor"), true);
-});
-
 test("Auto hands approval review to the provider and leaves no trace when switched away", () => {
   const codex = { provider: "codex", model: null, reasoningEffort: null, configurationRevision: 3 } as const;
   const codexAuto = deriveProviderConfigurationSnapshot({ ...codex, permissionProfileId: "auto_review" }, {
@@ -825,7 +816,8 @@ test("the owner's own setup is offered only for an owner's Codex and Claude Code
 test("an agent that collects its own room messages never gets the owner's own setup, whatever is stored", () => {
   const stored = { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, ...OWN_SETUP, ...changedAt(4) };
   // The daemon can hold an agent back from its next turn only when it delivers the room's messages itself.
-  for (const deliveryMode of ["mcp_polling", "desktop_events", undefined, null, "", "DAEMON_INBOX", "daemon_inbox "]) {
+  // "desktop_events" is a retired mode, so it is an unknown value now and counts as polling like the rest.
+  for (const deliveryMode of ["mcp_polling", undefined, null, "", "DAEMON_INBOX", "daemon_inbox ", "desktop_events"]) {
     for (const provider of ["codex", "claude-code"]) {
       const agent = { id: "supervised_abc", provider, deliveryMode };
       assert.equal(homeHarnessAvailability(agent), "polling", `${provider}/${String(deliveryMode)}`);

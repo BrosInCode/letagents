@@ -108,6 +108,7 @@ export function projectContextsCompatibleForConnection(
   current: DesktopProjectBindingContext,
   selected: DesktopProjectBindingContext,
   selectedSource: DesktopProjectBindingSource,
+  sameVerifiedProjectRoot = false,
 ): boolean {
   const selectedAliases = new Set(projectBindingAliases(selected));
   const overlaps = projectBindingVerificationKeys(current).some(
@@ -116,6 +117,13 @@ export function projectContextsCompatibleForConnection(
   const currentHost = normalize(current.gitRoom?.host);
   if (currentHost && currentHost !== "local") {
     return selectedSource === "git_remote" && overlaps;
+  }
+  const localProject = currentHost === "local"
+    || /^(?:local-[a-z0-9-]+-[a-f0-9]{10}|git-room:local:[a-f0-9]+)$/.test(
+      canonicalProjectRoomIdentifier(current.roomIdentifier) || "",
+    );
+  if (sameVerifiedProjectRoot && localProject && (selectedSource === "local_git" || selectedSource === "git_remote")) {
+    return true;
   }
   if (selectedSource === "git_remote" && overlaps) return true;
   if (

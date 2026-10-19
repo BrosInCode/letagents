@@ -89,25 +89,8 @@ const defaultStreamBufferMaxBytes = 1024 * 1024;
 
 interface PendingDeliveryRepairState {
   token: number;
-  baseline: DesktopRoomSnapshot | null;
   retryDelayMs: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
-}
-
-export function buildRoomStreamDeliveryRepair(
-  previous: DesktopRoomSnapshot,
-  repaired: DesktopRoomSnapshot,
-): { messages: DesktopRoomMessage[]; tasks: DesktopTaskSummary[] } {
-  const previousMessageIds = new Set(previous.messages.map((message) => message.id));
-  const previousTaskVersions = new Map(
-    previous.tasks.map((task) => [task.id, task.updatedAt]),
-  );
-  return {
-    messages: repaired.messages.filter((message) => !previousMessageIds.has(message.id)),
-    tasks: repaired.tasks.filter(
-      (task) => previousTaskVersions.get(task.id) !== task.updatedAt,
-    ),
-  };
 }
 
 export function useDesktopAppData(options: DesktopAppDataOptions) {
@@ -213,9 +196,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     clearPendingDeliveryRepair(roomKey);
     pendingDeliveryRepairs.set(roomKey, {
       token,
-      baseline: snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)
-        ? options.selectedSnapshot.value
-        : null,
       retryDelayMs: options.deliveryRepairRetryMs ?? defaultDeliveryRepairRetryMs,
       retryTimer: null,
     });
@@ -242,9 +222,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     pending.retryDelayMs = Math.min(delayMs * 2, maxDeliveryRepairRetryMs);
   }
 
-  async function repairManagedAgentDeliveryFromSnapshot(
+  /**
+   * Tells the main process that this authoritative snapshot closed a live gap,
+   * so the stream's event cursor may advance. The acknowledgement waits until
+   * the snapshot's messages and tasks loaded; a cursor that moved past a gap
+   * the UI never showed would lose those messages.
+   */
+  async function acknowledgeStreamGapRepairFromSnapshot(
     roomIdentifier: string,
-    previousSnapshot: DesktopRoomSnapshot | null,
     repairedSnapshot: DesktopRoomSnapshot,
     token: number | null,
   ): Promise<boolean> {
@@ -256,9 +241,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       || !pending
       || pending.token !== token
     ) return true;
-    const baseline = pending.baseline
-      || (snapshotMatchesRoom(previousSnapshot, roomIdentifier) ? previousSnapshot : null);
-    if (baseline && !pending.baseline) pending.baseline = baseline;
     const deliverySourcesReady = repairedSnapshot.access.status === "ready" && (!repairedSnapshot.sourceStates
       || (
         repairedSnapshot.sourceStates.messages?.status === "ready"
@@ -269,19 +251,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       return false;
     }
     try {
-      await desktopIpc.room.repairStreamDelivery(roomIdentifier, {
-        token,
-        ...(baseline
-          ? buildRoomStreamDeliveryRepair(baseline, repairedSnapshot)
-          : { messages: repairedSnapshot.messages, tasks: repairedSnapshot.tasks }),
-      });
+      await desktopIpc.room.repairStreamDelivery(roomIdentifier, { token });
       if (pendingDeliveryRepairs.get(roomKey) === pending) {
         clearPendingDeliveryRepair(roomKey);
       }
       return true;
     } catch {
-      // Keep the broker cursor uncommitted and retry this same repair token.
-      // The main-process delivery tracker makes repeated handoffs idempotent.
+      // Keep the broker cursor uncommitted and retry this same repair token;
+      // the main process ignores an acknowledgement whose token is stale.
       schedulePendingDeliveryRepair(roomIdentifier, token);
       return false;
     }
@@ -349,9 +326,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       );
       if (!sessionIsCurrent(sessionGeneration)) return;
       const nextRootRoomKey = normalizeRoomIdentifier(nextRootRoomSnapshot.roomIdentifier);
-      await repairManagedAgentDeliveryFromSnapshot(
+      await acknowledgeStreamGapRepairFromSnapshot(
         nextRootRoomSnapshot.roomIdentifier || "",
-        options.selectedSnapshot.value,
         nextRootRoomSnapshot,
         nextRootRoomKey ? pendingDeliveryRepairs.get(nextRootRoomKey)?.token ?? null : null,
       );
@@ -553,9 +529,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       const nextSnapshot = await getRoomSnapshot(roomIdentifier);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
       const roomKey = normalizeRoomIdentifier(roomIdentifier);
-      await repairManagedAgentDeliveryFromSnapshot(
+      await acknowledgeStreamGapRepairFromSnapshot(
         roomIdentifier,
-        options.selectedSnapshot.value,
         nextSnapshot,
         roomKey ? pendingDeliveryRepairs.get(roomKey)?.token ?? null : null,
       );
@@ -741,7 +716,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     if (event.type === "message") {
       const priorMessages = options.selectedSnapshot.value?.messages ?? [];
-      setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, event.message));
+      setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, event.message, event.live === true));
       if (messageReferencesMissingThreadContext(event.message, priorMessages)) {
         options.scheduleLiveMetadataRefresh();
       }
@@ -828,10 +803,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         || !roomKey
         || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
       ) return;
-      const previousSnapshot = options.selectedSnapshot.value;
-      await repairManagedAgentDeliveryFromSnapshot(
+      await acknowledgeStreamGapRepairFromSnapshot(
         roomIdentifier,
-        previousSnapshot,
         snapshot,
         deliveryRepairToken,
       );
@@ -910,7 +883,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   function handleMessageSent(message: DesktopRoomMessage): void {
     const priorMessages = options.selectedSnapshot.value?.messages ?? [];
-    setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, message));
+    setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, message, true));
     if (messageReferencesMissingThreadContext(message, priorMessages)) {
       options.scheduleLiveMetadataRefresh();
     }

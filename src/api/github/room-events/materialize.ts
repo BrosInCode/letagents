@@ -4,6 +4,7 @@ import {
   materializeBranchLifecycleEvent,
   materializePushEvent,
 } from "./branch.js";
+import { materializeActivityEvent } from "./activity.js";
 import { materializeCheckRunEvent } from "./check-run.js";
 import {
   getRepoIdentity,
@@ -77,6 +78,11 @@ export function materializeGitHubWebhookEvent(
   const repoIdentity = getRepoIdentity(payload.repository.full_name);
 
   switch (eventName) {
+    case "workflow_run":
+    case "workflow_job":
+    case "pull_request_review_comment":
+    case "pull_request_review_thread":
+      return materializeActivityEvent(eventName, payload, action, normalizedDeliveryId, repoIdentity);
     case "pull_request":
       return materializePullRequestEvent(
         payload,

@@ -39,6 +39,7 @@ test('inline replies omit the implicit root quote but retain explicit reply refe
   assert.equal((html.match(/class="reply-preview"/g) || []).length, 1)
   assert.match(html, /Quoted reply/)
   assert.match(html, /aria-label="Reply to Ada"/)
+  assert.match(html, /class="inline-thread-latest"[^>]*disabled[^>]*aria-hidden="true"/, "the unavailable latest control keeps its layout footprint but is inaccessible")
 })
 
 test('a delayed thread send stays routed to its original room and does not insert into a different room', async () => {
@@ -147,4 +148,74 @@ test('incoming messages do not repeat a finished reply reveal', async () => {
     await nextTick(); await nextTick()
     assert.equal(reveals, 1, 'new arrivals preserve the user reading position after navigation')
   } finally { surface.close(); globalThis.fetch = originalFetch; (globalThis as any).CSS = originalCSS }
+})
+
+for (const returnToOrigin of [false, true]) {
+  test(`older backfill ignores a stale response after A→B${returnToOrigin ? '→A' : ''}`, async () => {
+    const { createRoomMessageActions } = await vite.ssrLoadModule('/src/composables/room/messageActions.ts')
+    const state = await vite.ssrLoadModule('/src/composables/room/state.ts')
+    const originalFetch = globalThis.fetch
+    let finish!: (response: Response) => void
+    globalThis.fetch = (() => new Promise<Response>(resolve => { finish = resolve })) as typeof fetch
+    const reset = () => state.resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'idle' })
+    try {
+      reset(); state.room.value = { identifier: 'room-a' }; state.replaceRoomMessages([message('msg_20', 'A')]); state.messagesHasOlder.value = true
+      const pending = createRoomMessageActions().loadOlderMessages()
+      reset(); state.room.value = { identifier: 'room-b' }
+      if (returnToOrigin) { reset(); state.room.value = { identifier: 'room-a' } }
+      state.replaceRoomMessages([message('msg_30', 'Current session')]); state.isLoadingOlderMessages.value = true; state.messagesHasOlder.value = true
+      finish(new Response(JSON.stringify({ messages: [message('msg_1', 'Stale')], has_older: false }), { status: 200 }))
+      assert.equal(await pending, false)
+      assert.deepEqual(state.messages.value.map((m: any) => m.id), ['msg_30'])
+      assert.equal(state.isLoadingOlderMessages.value, true, 'stale finally must not clear the current request')
+      assert.equal(state.messagesHasOlder.value, true)
+    } finally { globalThis.fetch = originalFetch; reset() }
+  })
+}
+test('failed older backfill exposes an error and a manual retry can recover', async () => {
+  const { createRoomMessageActions } = await vite.ssrLoadModule('/src/composables/room/messageActions.ts')
+  const state = await vite.ssrLoadModule('/src/composables/room/state.ts')
+  const originalFetch = globalThis.fetch
+  try {
+    state.room.value = { identifier: 'room-a' }; state.replaceRoomMessages([message('msg_20', 'A')]); state.messagesHasOlder.value = true
+    globalThis.fetch = (async () => { throw new Error('offline') }) as typeof fetch
+    const actions = createRoomMessageActions()
+    assert.equal(await actions.loadOlderMessages(), false)
+    assert.ok(state.olderMessagesError.value)
+    assert.equal(state.isLoadingOlderMessages.value, false)
+    globalThis.fetch = (async () => new Response(JSON.stringify({ messages: [message('msg_1', 'Recovered')], has_older: false }), { status: 200 })) as typeof fetch
+    assert.equal(await actions.loadOlderMessages(), true)
+    assert.equal(state.olderMessagesError.value, '')
+  } finally { globalThis.fetch = originalFetch; state.resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'idle' }) }
+})
+
+test('bookmark restore recognizes regrouped originals, and a failed page stops automatic requests', async () => {
+  const Component = (await vite.ssrLoadModule('/src/components/room/MessageList.vue')).default
+  const originalCSS = globalThis.CSS
+  ;(globalThis as any).CSS = { escape: (id: string) => id }
+  const surface = mountSetup(Component, { messages: [message('msg_20', 'Latest')], roomIdentifier: 'bookmark-room', messagesLoaded: false,
+    hasOlderMessages: true, isLoadingOlderMessages: false, olderMessagesError: '', initialScrollPosition: { top: 420, latest: false, anchor: { messageId: 'msg_1', offsetTop: -20 } } })
+  let found = false
+  const el: any = Object.assign(new EventTarget(), { isConnected: true, clientHeight: 400, scrollHeight: 1200, scrollTop: 0,
+    getBoundingClientRect: () => ({ top: 0, bottom: 400 }), querySelectorAll: () => [],
+    querySelector: () => found ? { closest: () => ({ getBoundingClientRect: () => ({ top: 400 - el.scrollTop }) }) } : null,
+    scrollTo: ({ top, behavior }: any) => { assert.equal(behavior, 'instant'); el.scrollTop = top } })
+  try {
+    surface.vm.messagesEl.value = el
+    surface.props.messagesLoaded = true
+    await nextTick(); await nextTick()
+    assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 1)
+    surface.props.isLoadingOlderMessages = true; await nextTick()
+    surface.props.isLoadingOlderMessages = false
+    await nextTick(); await nextTick(); await nextTick()
+    assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 2, 'a filtered page must not stall restoration')
+    surface.props.isLoadingOlderMessages = true; await nextTick()
+    surface.props.olderMessagesError = 'offline'; surface.props.isLoadingOlderMessages = false
+    await nextTick(); await nextTick(); await nextTick()
+    assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 2, 'failed restore must not retry in a loop')
+    surface.props.roomIdentifier = 'regrouped-room'; found = true; surface.props.olderMessagesError = ''
+    await nextTick(); await nextTick(); await nextTick()
+    assert.equal(el.scrollTop, 420, 'resolve the original to its new containing group')
+    assert.equal(surface.events.filter(([name]) => name === 'loadOlder').length, 2)
+  } finally { surface.close(); globalThis.CSS = originalCSS }
 })

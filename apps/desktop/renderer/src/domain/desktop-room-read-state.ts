@@ -4,6 +4,7 @@ import type {
   DesktopRoomLatestMessage,
 } from "../../../electron/ipc-types";
 import { normalizeRoomIdentifier } from "./sidebar-rooms";
+import { isGitHubRoomMessage, isLowSignalGitHubCheckMessage } from "../components/desktop/content/desktop-chat-message/github-event";
 
 export const noRoomMessageId = "__none__";
 
@@ -149,6 +150,7 @@ export interface RoomUnreadSnapshot {
   readMessageId: string;
   latestMessageId: string;
   count: number;
+  githubEventsVisible?: boolean;
 }
 
 function messageNumber(id: string | null | undefined): number {
@@ -164,15 +166,18 @@ export async function countUnreadRoomMessages(input: {
   latestMessageId: string;
   previous?: RoomUnreadSnapshot;
   ownSenderNames: readonly string[];
+  githubEventsVisible?: boolean;
   loadPage(afterMessageId: string | null): Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
   isCurrent(): boolean;
 }): Promise<RoomUnreadSnapshot | null> {
   const readNumber = messageNumber(input.readMessageId);
   const latestNumber = messageNumber(input.latestMessageId);
   if (readNumber < 0 || latestNumber < 0) return null;
-  const result = { readMessageId: input.readMessageId, latestMessageId: input.latestMessageId, count: 0 };
+  const githubEventsVisible = input.githubEventsVisible ?? false;
+  const result = { readMessageId: input.readMessageId, latestMessageId: input.latestMessageId, count: 0, githubEventsVisible };
   if (latestNumber <= readNumber) return result;
   const previous = input.previous?.readMessageId === input.readMessageId
+    && (input.previous.githubEventsVisible ?? false) === githubEventsVisible
     && messageNumber(input.previous.latestMessageId) <= latestNumber ? input.previous : undefined;
   let cursor = previous?.latestMessageId || input.readMessageId;
   let cursorNumber = messageNumber(cursor);
@@ -191,7 +196,9 @@ export async function countUnreadRoomMessages(input: {
       nextNumber = Math.max(nextNumber, number);
       const ownMessage = message.source === "browser" && ownNames.has(message.sender.trim().toLowerCase());
       const promptOnly = message.agentPromptKind === "auto" && !message.text.trim();
-      if (!ownMessage && !promptOnly) result.count += 1;
+      const hiddenGitHubEvent = isLowSignalGitHubCheckMessage(message)
+        || (!githubEventsVisible && isGitHubRoomMessage(message));
+      if (!ownMessage && !promptOnly && !hiddenGitHubEvent) result.count += 1;
     }
     if (!page.hasMore || page.messages.some((message) => messageNumber(message.id) >= latestNumber)) break;
     if (nextNumber <= cursorNumber) throw new Error("Unread message history did not advance.");

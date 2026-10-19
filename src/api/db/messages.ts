@@ -28,7 +28,9 @@ export {
 export { getMessageAccountAgentRoutingById } from "./messages/account-agent-routing.js";
 export {
   createMessageAttachmentUpload,
+  deleteExpiredPendingMessageAttachmentUpload,
   deletePendingMessageAttachmentUpload,
   getMessageAttachment,
   getMessageAttachmentUpload,
+  listExpiredPendingMessageAttachmentUploads,
 } from "./messages/attachments.js";

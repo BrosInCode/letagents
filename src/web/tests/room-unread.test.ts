@@ -75,7 +75,7 @@ test("the actual web list reuses bounded reveal for an older bookmark and retain
     querySelectorAll: () => [],
     querySelector: (selector: string) => {
       const id = props.messages.find(row => selector.includes(row.id))?.id;
-      return id ? { scrollIntoView: () => { el.scrollTop = 100; }, classList: { add() {}, remove() {} } } : null;
+      return id ? { closest: () => null, scrollIntoView: () => { el.scrollTop = 100; }, classList: { add() {}, remove() {} } } : null;
     },
   });
   const app = renderer.createApp({ setup() {
@@ -247,7 +247,7 @@ async function webScrollSurface() {
   const el = Object.assign(new EventTarget(), { scrollHeight: 2000, clientHeight: 400, scrollTop: 1600,
     getBoundingClientRect: () => ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }),
     scrollTo: () => { el.scrollTop = el.scrollHeight - el.clientHeight; calls.push("bottom"); },
-    querySelectorAll: () => [], querySelector: () => ({ scrollIntoView: () => { if (revealTop !== null) el.scrollTop = revealTop; calls.push("reveal"); }, classList: { add() {}, remove() {} } }),
+    querySelectorAll: () => [], querySelector: () => ({ closest: () => null, scrollIntoView: () => { if (revealTop !== null) el.scrollTop = revealTop; calls.push("reveal"); }, classList: { add() {}, remove() {} } }),
   });
   const row = (id: string) => ({ id, sender: "Ada", source: "browser", text: id, timestamp: "2026-10-02T00:00:00Z" });
   const props = reactive<any>({ messages: [row("msg_1"), row("msg_2")], roomIdentifier: "room", messagesLoaded: true, hasOlderMessages: false, searchQuery: "" });
@@ -390,3 +390,51 @@ for (const started of ["second frame", "scroll event"]) {
     } finally { s.close(); }
   });
 }
+
+test("web room round-trips retain the visible message or latest intent and ignore detached scroll resets", async () => {
+  const old = { window: globalThis.window, document: globalThis.document };
+  Object.assign(globalThis, {
+    window: Object.assign(new EventTarget(), { localStorage: { getItem: () => null, setItem() {} }, setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, cancelAnimationFrame() {} }),
+    document: Object.assign(new EventTarget(), { visibilityState: "visible", hasFocus: () => true }),
+  });
+  let bookmark: any;
+  function mount(initial: any, anchorTop = 700, height = 2000) {
+    let vm: any;
+    const message = { id: 'msg_10', source: 'browser', sender: 'Ada', text: 'Reading here', timestamp: '2026-10-12T00:00:00Z' };
+    const props = reactive({ initialScrollPosition: initial, roomIdentifier: 'return-room', messages: [message], messagesLoaded: true, hasOlderMessages: false });
+    const el = Object.assign(new EventTarget(), {
+      isConnected: true, scrollTop: 0, scrollHeight: height, clientHeight: 400,
+      getBoundingClientRect: () => ({ top: 0, bottom: 400, left: 0, right: 800, width: 800, height: 400 }),
+      scrollTo: ({ top, behavior }: any) => { assert.equal(behavior, 'instant', 'restoration must not inherit smooth CSS scrolling'); el.scrollTop = Math.min(top, height - 400); },
+      querySelectorAll: (selector: string) => selector.startsWith(':scope') ? [{ dataset: { msgId: 'msg_10' }, getBoundingClientRect: () => ({ top: anchorTop - el.scrollTop, bottom: anchorTop + 100 - el.scrollTop }) }] : [],
+      querySelector: () => null,
+    });
+    const app = renderer.createApp({ setup() {
+      vm = MessageList.setup(props, { expose() {}, emit: (event: string, room: string, position: unknown) => {
+        if (event === 'scrollPosition') { assert.equal(room, 'return-room'); bookmark = position; }
+      } });
+      vm.messagesEl.value = el;
+      return () => h('div');
+    } });
+    app.provide(ssrContextKey, { modules: new Set() });
+    app.mount({});
+    return { vm, el, close: () => app.unmount() };
+  }
+  let current: ReturnType<typeof mount> | undefined;
+  try {
+    current = mount(null); await flush();
+    assert.equal(current.el.scrollTop, 1600, 'first visit starts at latest');
+    current.el.scrollTop = 720; current.vm.handleScroll();
+    assert.deepEqual(bookmark.anchor, { messageId: 'msg_10', offsetTop: -20 });
+    current.close();
+    current = mount(bookmark, 900); await flush();
+    assert.equal(current.el.scrollTop, 920, 'same message offset after reflow');
+    current.vm.scrollToBottom('instant'); current.vm.handleScroll(); current.close();
+    assert.equal(bookmark.latest, true);
+    current = mount(bookmark, 900, 2300); await flush();
+    assert.equal(current.el.scrollTop, 1900, 'latest tracks the new bottom');
+    current.el.isConnected = false; current.el.clientHeight = 0; current.el.scrollTop = 0;
+    current.vm.rememberPosition(); current.close(); current = undefined;
+    assert.equal(bookmark.top, 1900, 'hidden teardown cannot replace remembered position with zero');
+  } finally { current?.close(); Object.assign(globalThis, old); }
+});

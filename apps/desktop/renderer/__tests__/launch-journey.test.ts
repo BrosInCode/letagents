@@ -346,6 +346,290 @@ test("cancelling a launch that never reached ready reads as launch cancelled (fi
   assert.match(view.headline, /cancelled/i);
 });
 
+test("a saved agent stopped before ready after a failed launch reports the failure, not a cancel", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1 }),
+      evt("supervisor.connected", { sequence: 2 }),
+      evt("agent.saved", { sequence: 3, durable: true }),
+      evt("launch.failed", {
+        sequence: 4,
+        durable: true,
+        detail: "Choose a project folder before starting Codex.",
+        diagnostic: "authority install failed: grant store unavailable",
+        recovery: "choose_project",
+      }),
+    ],
+    entry: entry({ desiredState: "stopped", observedState: "stopped", readyReachedAt: null }),
+  });
+  assert.equal(view.status, "failed");
+  assert.equal(view.failed, true);
+  assert.equal(view.stopped, false);
+  assert.equal(view.stopFailed, false);
+  assert.equal(view.durable, true);
+  assert.equal(view.ready, false);
+  assert.equal(view.currentPhaseId, "saving_agent");
+  assert.equal(stateOf(view, "saving_agent"), "failed");
+  assert.equal(stateOf(view, "connecting_supervisor"), "done");
+  assert.equal(view.phases.filter((phase) => phase.state === "cancelled").length, 0);
+  assert.equal(view.headline, "Couldn't add the Codex agent");
+  assert.equal(view.failureDetail, "Choose a project folder before starting Codex.");
+  assert.equal(view.failureDiagnostic, "authority install failed: grant store unavailable");
+  assert.equal(view.recovery, "choose_project");
+  assert.equal(view.failureImpact, "The saved agent was stopped. Your room and project are unchanged.");
+});
+
+test("a saved agent stopped before ready with no event recovery defaults to retry", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("supervisor.connected", { sequence: 1 }),
+      evt("agent.saved", { sequence: 2, durable: true }),
+      evt("launch.failed", { sequence: 3, durable: true }),
+    ],
+    entry: entry({ desiredState: "stopped", observedState: "stopped", readyReachedAt: null }),
+  });
+  assert.equal(view.status, "failed");
+  assert.equal(view.recovery, "retry");
+  assert.equal(view.failureDiagnostic, null);
+  assert.match(view.failureDetail ?? "", /saved this agent but couldn.t finish setting it up/);
+});
+
+test("a saved agent stopped before ready after a Keychain block reports a blocked, self-service setup", () => {
+  const detail = "LetAgents needs access to your Mac login keychain to save this agent securely. Open Keychain Access, unlock the login keychain, then try again.";
+  const view = foldLaunchJourney({
+    events: [
+      evt("supervisor.connected", { sequence: 1 }),
+      evt("agent.saved", { sequence: 2, durable: true }),
+      evt("launch.blocked", { sequence: 3, durable: true, detail, recovery: "open_keychain" }),
+    ],
+    entry: entry({ desiredState: "stopped", observedState: "stopped", readyReachedAt: null }),
+  });
+  assert.equal(view.status, "blocked");
+  assert.equal(view.failed, true);
+  assert.equal(view.stopped, false);
+  assert.equal(stateOf(view, "saving_agent"), "failed");
+  assert.equal(view.headline, "Unlock Keychain to finish setup");
+  assert.equal(view.failureDetail, detail);
+  assert.equal(view.recovery, "open_keychain");
+});
+
+test("a saved agent stopped before ready after a user cancel still reads as launch cancelled", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1 }),
+      evt("supervisor.connected", { sequence: 2 }),
+      evt("agent.saved", { sequence: 3, durable: true }),
+      evt("launch.cancelled", { sequence: 4, durable: true, detail: "You stopped this launch." }),
+    ],
+    entry: entry({ desiredState: "stopped", observedState: "stopped", readyReachedAt: null }),
+  });
+  assert.equal(view.status, "cancelled");
+  assert.equal(view.stopped, true);
+  assert.equal(view.failed, false);
+  assert.match(view.headline, /cancelled/i);
+  assert.equal(view.phases.filter((phase) => phase.state === "failed").length, 0);
+  assert.equal(view.phases.some((phase) => phase.state === "cancelled"), true);
+  assert.equal(view.failureDetail, null);
+});
+
+test("a saved agent still stopping after a failed launch reports the failure, not Cancelling", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1 }),
+      evt("supervisor.connected", { sequence: 2 }),
+      evt("agent.saved", { sequence: 3, durable: true }),
+      evt("launch.failed", {
+        sequence: 4,
+        durable: true,
+        detail: "Choose a project folder before starting Codex.",
+        diagnostic: "authority install failed: grant store unavailable",
+        recovery: "choose_project",
+      }),
+    ],
+    entry: entry({ desiredState: "stopped", observedState: "stopping", readyReachedAt: null }),
+  });
+  assert.equal(view.status, "failed");
+  assert.equal(view.failed, true);
+  assert.equal(view.stopped, false);
+  assert.equal(view.stopFailed, false);
+  assert.equal(view.durable, true);
+  assert.equal(view.ready, false);
+  assert.equal(view.currentPhaseId, "saving_agent");
+  assert.equal(stateOf(view, "saving_agent"), "failed");
+  assert.equal(stateOf(view, "connecting_supervisor"), "done");
+  assert.equal(view.phases.some((phase) => phase.state === "stopping"), false, "no step reads Cancelling launch");
+  assert.equal(view.phases.some((phase) => phase.label === "Cancelling launch"), false);
+  assert.doesNotMatch(view.headline, /Cancelling/);
+  assert.equal(view.headline, "Couldn't add the Codex agent");
+  assert.equal(view.failureDetail, "Choose a project folder before starting Codex.");
+  assert.equal(view.failureDiagnostic, "authority install failed: grant store unavailable");
+  assert.equal(view.recovery, "choose_project");
+});
+
+test("a saved agent that never started after a failed launch reports the failure with its detail and recovery", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1 }),
+      evt("supervisor.connected", { sequence: 2 }),
+      evt("agent.saved", { sequence: 3, durable: true }),
+      evt("launch.failed", {
+        sequence: 4,
+        durable: true,
+        detail: "Choose a project folder before starting Codex.",
+        diagnostic: "authority install failed: grant store unavailable",
+        recovery: "choose_project",
+      }),
+    ],
+    entry: entry({ desiredState: "running", observedState: "absent", readyReachedAt: null }),
+  });
+  assert.equal(view.status, "failed");
+  assert.equal(view.failed, true);
+  assert.equal(view.stopped, false);
+  assert.equal(view.stopFailed, false);
+  assert.equal(view.durable, true);
+  assert.equal(view.ready, false);
+  assert.equal(view.currentPhaseId, "saving_agent");
+  assert.equal(stateOf(view, "saving_agent"), "failed");
+  assert.equal(stateOf(view, "connecting_supervisor"), "done");
+  assert.equal(activeCount(view), 0);
+  assert.equal(view.headline, "Couldn't add the Codex agent");
+  assert.equal(view.failureDetail, "Choose a project folder before starting Codex.");
+  assert.equal(view.failureDiagnostic, "authority install failed: grant store unavailable");
+  assert.equal(view.recovery, "choose_project");
+  assert.equal(view.failureImpact, "The saved agent was stopped. Your room and project are unchanged.");
+
+  const defaults = foldLaunchJourney({
+    events: [
+      evt("supervisor.connected", { sequence: 1 }),
+      evt("agent.saved", { sequence: 2, durable: true }),
+      evt("launch.failed", { sequence: 3, durable: true }),
+    ],
+    entry: entry({ desiredState: "running", observedState: "absent", readyReachedAt: null }),
+  });
+  assert.equal(defaults.status, "failed");
+  assert.equal(defaults.recovery, "retry", "no event recovery defaults to retry");
+  assert.equal(defaults.failureDiagnostic, null);
+  assert.match(defaults.failureDetail ?? "", /saved this agent but couldn.t finish setting it up/);
+});
+
+test("a saved agent that never started after a Keychain block reports a blocked, self-service setup", () => {
+  const detail = "LetAgents needs access to your Mac login keychain to save this agent securely. Open Keychain Access, unlock the login keychain, then try again.";
+  const events = [
+    evt("supervisor.connected", { sequence: 1 }),
+    evt("agent.saved", { sequence: 2, durable: true }),
+    evt("launch.blocked", { sequence: 3, durable: true, detail, recovery: "open_keychain" }),
+  ];
+  for (const saved of [
+    entry({ desiredState: "running", observedState: "absent", readyReachedAt: null }),
+    entry({ desiredState: "stopped", observedState: "stopping", readyReachedAt: null }),
+  ]) {
+    const view = foldLaunchJourney({ events, entry: saved });
+    assert.equal(view.status, "blocked", `${saved.desiredState}/${saved.observedState}`);
+    assert.equal(view.failed, true);
+    assert.equal(stateOf(view, "saving_agent"), "failed");
+    assert.equal(view.headline, "Unlock Keychain to finish setup");
+    assert.equal(view.failureDetail, detail);
+    assert.equal(view.recovery, "open_keychain");
+  }
+});
+
+test("a just-saved agent that has not started yet and has no terminal event is still in progress", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1 }),
+      evt("supervisor.connected", { sequence: 2 }),
+      evt("agent.saved", { sequence: 3, durable: true }),
+      evt("launch.activated", { sequence: 4, durable: true }),
+    ],
+    entry: entry({ desiredState: "running", observedState: "absent", readyReachedAt: null }),
+  });
+  assert.equal(view.status, "in_progress");
+  assert.equal(view.failed, false);
+  assert.equal(view.stopped, false);
+  assert.equal(view.stopFailed, false);
+  assert.equal(view.ready, false);
+  assert.equal(view.durable, true);
+  assert.equal(view.failureDetail, null);
+  assert.equal(view.recovery, null);
+  assert.equal(stateOf(view, "connecting_supervisor"), "done");
+  assert.equal(stateOf(view, "saving_agent"), "done");
+  assert.equal(stateOf(view, "preparing_workspace"), "active");
+  assert.equal(activeCount(view), 1);
+  assert.equal(view.phases.some((phase) => phase.state === "failed"), false);
+
+  // The same entry with no events at all (for example after a window reload) is also just in progress.
+  const reloaded = foldLaunchJourney({
+    entry: entry({ desiredState: "running", observedState: "absent", readyReachedAt: null }),
+  });
+  assert.equal(reloaded.status, "in_progress");
+  assert.equal(reloaded.failed, false);
+  assert.equal(reloaded.failureDetail, null);
+});
+
+test("a saved agent still stopping after a user cancel stays Cancelling", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("launch.requested", { sequence: 1 }),
+      evt("supervisor.connected", { sequence: 2 }),
+      evt("agent.saved", { sequence: 3, durable: true }),
+      evt("launch.cancelled", { sequence: 4, durable: true, detail: "You stopped this launch." }),
+    ],
+    entry: entry({ desiredState: "stopped", observedState: "stopping", readyReachedAt: null }),
+  });
+  assert.equal(view.status, "stopping");
+  assert.equal(view.failed, false);
+  assert.equal(view.stopped, false);
+  assert.equal(view.stopFailed, false);
+  assert.match(view.headline, /Cancelling Codex launch/);
+  const cancelling = view.phases.find((phase) => phase.state === "stopping");
+  assert.equal(cancelling?.label, "Cancelling launch");
+  assert.equal(view.phases.some((phase) => phase.state === "failed"), false);
+  assert.equal(view.failureDetail, null);
+});
+
+test("a stopping or never-started agent that already reached ready is never re-reported as a failed launch", () => {
+  const events = [
+    evt("supervisor.connected", { sequence: 1 }),
+    evt("agent.saved", { sequence: 2, durable: true }),
+    evt("launch.failed", { sequence: 3, durable: true, detail: "Late failure from the launch session." }),
+  ];
+  const stopping = foldLaunchJourney({
+    events,
+    entry: entry({ desiredState: "stopped", observedState: "stopping", readyReachedAt: "2026-07-17T00:05:00.000Z" }),
+  });
+  assert.equal(stopping.status, "stopping");
+  assert.equal(stopping.failed, false);
+  assert.equal(stopping.failureDetail, null);
+
+  const absent = foldLaunchJourney({
+    events,
+    entry: entry({ desiredState: "running", observedState: "absent", readyReachedAt: "2026-07-17T00:05:00.000Z" }),
+  });
+  assert.equal(absent.failed, false);
+  assert.notEqual(absent.status, "failed");
+  assert.equal(absent.failureDetail, null);
+});
+
+test("a stopped agent that already reached ready is never re-reported as a failed launch", () => {
+  const view = foldLaunchJourney({
+    events: [
+      evt("supervisor.connected", { sequence: 1 }),
+      evt("agent.saved", { sequence: 2, durable: true }),
+      evt("launch.failed", { sequence: 3, durable: true, detail: "Late failure from the launch session." }),
+    ],
+    entry: entry({
+      desiredState: "stopped",
+      observedState: "stopped",
+      agentSessionBindingState: "historical",
+      readyReachedAt: "2026-07-17T00:05:00.000Z",
+    }),
+  });
+  assert.equal(view.status, "cancelled");
+  assert.equal(view.stopped, true);
+  assert.equal(view.failed, false);
+  assert.match(view.headline, /stopped/i);
+});
+
 test("the sign_in recovery is only offered when a provider sign-in command exists (finding 2b)", () => {
   const blocked = entry({
     observedState: "recovering",

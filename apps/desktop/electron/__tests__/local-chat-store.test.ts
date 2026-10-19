@@ -4,6 +4,7 @@ import { registerLocalBoardOwner } from "../../../../shared/local-board-owner.mj
 registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { mkdtemp, realpath, rename } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -12,9 +13,6 @@ import { promisify } from "node:util";
 
 import type {
   DesktopGitRoomInfo,
-  DesktopManagedAgentSession,
-  DesktopRoomMessage,
-  DesktopRoomStreamEvent,
   DesktopTaskSummary,
 } from "../ipc-types.js";
 import { createElectronTestEnv } from "./harness.js";
@@ -26,6 +24,7 @@ const nodeRequire = createRequire(import.meta.url);
 const { tempDir } = createElectronTestEnv({
   prefix: "letagents-desktop-local-chat-",
   paths: ["chatStorage", "localChatDb", "localProfile"],
+  extraEnvFiles: { LETAGENTS_PROJECT_BINDINGS_PATH: "project-bindings.sqlite" },
 });
 
 const {
@@ -35,7 +34,6 @@ const {
   getLocalChatMessagesBefore,
   getLocalMessageThread,
   getLocalMessageThreads,
-  getLocalChatThreadRoutingAgentKeysForRoots,
   getSyncedCloudMessageId,
   importLocalChatMessages,
   markLocalChatMessageSynced,
@@ -64,6 +62,7 @@ const {
   importLocalTasks,
   localRoomIdentifierForStorage,
   listLocalRoomEntries,
+  linkLocalRoomToCloud,
   listLocalTasks,
   markLocalTaskSynced,
   releaseLocalTaskPublishClaim,
@@ -83,68 +82,9 @@ const {
   syncLocalRoomArtifactsForTask,
 } = await import("../main/rooms/artifacts/local-store.js");
 const {
-  executeManagedAgentContextRequest,
-} = await import("../main/agents/managed-agent-context.js");
-const {
   resolveLocalCloudPublishAuthority,
+  syncDesktopLocalChatRoom,
 } = await import("../main/rooms/messages.js");
-const {
-  clearLocalManagedMessageDeliveryRetriesForTest,
-  deliverDesktopRoomMessageToManagedAgents,
-  emitPersistedLocalRoomMessage,
-  inspectLocalManagedMessageDeliveryRetriesForTest,
-  setLocalAccountAgentRoutingHydratorForTest,
-  setManagedAgentRoomStreamDispatcherForTest,
-  startDesktopRoomStream,
-  stopDesktopRoomStream,
-} = await import("../main/room-stream.js");
-const { mapRoomMessagePayload } = await import("../main/rooms/messages/mappers.js");
-const { buildLocalLegacyAccountAgentRouting } = await import(
-  "../main/agents/codex-event-routing.js"
-);
-
-function localRoutingWorker(input: {
-  id: string;
-  key: string;
-  label: string;
-  startedAt: string;
-}): DesktopManagedAgentSession {
-  return {
-    id: input.id,
-    providerId: "codex",
-    runtime: `codex:${input.id}`,
-    roomIdentifier: "github.com/BrosInCode/local-managed-delivery",
-    roomDisplayName: "Local managed delivery",
-    repoRootPath: tempDir,
-    repoBranch: null,
-    status: "running",
-    deliveryMode: "desktop_events",
-    permissionProfileId: "sandboxed_write",
-    permissionProfile: {
-      id: "sandboxed_write",
-      label: "Sandboxed write",
-      description: "test",
-      status: "available",
-      risk: "medium",
-      detail: null,
-      isDefault: true,
-    },
-    canStop: true,
-    agentSessionId: input.id,
-    actorLabel: input.label,
-    agentKey: input.key,
-    displayName: input.label,
-    ownerLabel: "Owner",
-    ideLabel: "Codex",
-    reasoningSessionId: null,
-    activeWork: null,
-    pendingPermissionRequests: [],
-    startedAt: input.startedAt,
-    updatedAt: input.startedAt,
-    lastError: null,
-  };
-}
-
 
 test("local cloud sync preserves exact worker provenance and never promotes it to human control", () => {
   const worker = {
@@ -222,225 +162,6 @@ test("desktop local database initialization is single-flight for concurrent cold
   assert.equal(schemaInitializations, 2, "a failed schema attempt is retried once and shared");
   setLocalChatDatabaseInitializationObserverForTest(null);
   setLocalMessageSchemaInitializationObserverForTest(null);
-});
-
-test("local managed delivery retries transient routing authority before consuming dedupe", async () => {
-  const cloudRoomIdentifier = "github.com/BrosInCode/local-routing-retry";
-  await createLocalRoom({
-    roomIdentifier: "local_routing_retry",
-    displayName: "Routing Retry",
-    cloudRoomIdentifier,
-  });
-  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
-  let attempts = 0;
-  setLocalAccountAgentRoutingHydratorForTest(async (_roomIdentifier, _localRoomIdentifier, messages) => {
-    attempts += 1;
-    if (attempts === 1) throw new Error("projection temporarily unavailable");
-    return messages.map((message) => ({
-      ...message,
-      accountAgentRouting: {
-        version: 1,
-        authority: "legacy" as const,
-        recipientAgentKeys: [],
-        recipientSessions: [],
-        controlAuthorized: true,
-      },
-    }));
-  });
-  try {
-    await deliverDesktopRoomMessageToManagedAgents(cloudRoomIdentifier, {
-      id: "msg_9001",
-      sender: "Human",
-      text: "continue",
-      attachments: [],
-      agentPromptKind: null,
-      source: "browser",
-      timestamp: "2026-08-11T00:00:00.000Z",
-      actorLabel: null,
-      agentIdentity: null,
-      threadRootId: "msg_9000",
-      threadReplyToId: "msg_9000",
-      thread: null,
-      replyTo: null,
-    });
-    assert.equal(attempts, 1, "the unavailable result returns without marking the message delivered");
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    assert.equal(attempts, 2, "the exact persisted message is rehydrated after projection recovery");
-  } finally {
-    setLocalAccountAgentRoutingHydratorForTest(null);
-  }
-});
-
-test("local managed delivery never reinterprets an explicit invalid routing envelope", async () => {
-  let hydrationAttempts = 0;
-  setLocalAccountAgentRoutingHydratorForTest(async (_roomIdentifier, _localRoomIdentifier, messages) => {
-    hydrationAttempts += 1;
-    return [...messages];
-  });
-  try {
-    await deliverDesktopRoomMessageToManagedAgents("local_invalid_authority", {
-      id: "msg_9002",
-      sender: "Imported worker",
-      text: "@everyone",
-      attachments: [],
-      agentPromptKind: null,
-      source: "agent",
-      timestamp: "2026-08-11T00:00:00.000Z",
-      actorLabel: null,
-      agentIdentity: null,
-      accountAgentRouting: { version: 1, authority: "invalid" },
-      threadRootId: "msg_9002",
-      threadReplyToId: null,
-      thread: null,
-      replyTo: null,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    assert.equal(
-      hydrationAttempts,
-      0,
-      "present-but-invalid imported authority stays silent instead of falling back to legacy routing",
-    );
-  } finally {
-    setLocalAccountAgentRoutingHydratorForTest(null);
-  }
-});
-
-test("local managed delivery coalesces persistent projection failures into one bounded room retry", async () => {
-  let hydrationAttempts = 0;
-  setLocalAccountAgentRoutingHydratorForTest(async () => {
-    hydrationAttempts += 1;
-    throw new Error("projection remains unavailable");
-  });
-  try {
-    await Promise.all(Array.from({ length: 1_000 }, (_, index) =>
-      deliverDesktopRoomMessageToManagedAgents("local_retry_storm", {
-        id: `msg_${10_000 + index}`,
-        sender: "Human",
-        text: `continue ${index}`,
-        attachments: [],
-        agentPromptKind: null,
-        source: "browser",
-        timestamp: "2026-08-11T00:00:00.000Z",
-        actorLabel: null,
-        agentIdentity: null,
-        threadRootId: `msg_${10_000 + index}`,
-        threadReplyToId: null,
-        thread: null,
-        replyTo: null,
-      })));
-    assert.deepEqual(inspectLocalManagedMessageDeliveryRetriesForTest(), {
-      rooms: 1,
-      messages: 500,
-    });
-    await new Promise((resolve) => setTimeout(resolve, 180));
-    assert.equal(
-      hydrationAttempts,
-      1_001,
-      "one room retry probes the oldest pending message instead of spawning 1,000 timers",
-    );
-  } finally {
-    clearLocalManagedMessageDeliveryRetriesForTest();
-    setLocalAccountAgentRoutingHydratorForTest(null);
-  }
-});
-
-test("persisted local agent messages reach other managed workers once without poll duplicates", async () => {
-  const cloudRoomIdentifier = "github.com/BrosInCode/local-managed-delivery";
-  const localRoomIdentifier = "local_managed_delivery";
-  await createLocalRoom({
-    roomIdentifier: localRoomIdentifier,
-    displayName: "Local managed delivery",
-    cloudRoomIdentifier,
-  });
-  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
-
-  const oak = localRoutingWorker({
-    id: "agent_session_oak",
-    key: "owner/oak",
-    label: "Oak",
-    startedAt: "2026-08-11T00:00:00.000Z",
-  });
-  const cedar = localRoutingWorker({
-    id: "agent_session_cedar",
-    key: "owner/cedar",
-    label: "Cedar",
-    startedAt: "2026-08-11T00:00:01.000Z",
-  });
-  const workers = [oak, cedar];
-  const managedEvents: Array<Extract<DesktopRoomStreamEvent, { type: "message" }>> = [];
-
-  setManagedAgentRoomStreamDispatcherForTest((event) => {
-    if (event.type === "message") managedEvents.push(event);
-  });
-  setLocalAccountAgentRoutingHydratorForTest(async (_room, _localRoom, messages) =>
-    messages.map((message) => ({
-      ...message,
-      accountAgentRouting: buildLocalLegacyAccountAgentRouting(
-        workers,
-        message,
-        message.threadRootId && message.threadRootId !== message.id
-          ? [oak.agentKey!, cedar.agentKey!]
-          : [],
-      ),
-    })));
-
-  try {
-    await startDesktopRoomStream(cloudRoomIdentifier);
-    const root = await addLocalChatMessage(localRoomIdentifier, {
-      sender: "Human",
-      text: "Coordinate here",
-      source: "browser",
-    });
-    const inputs = [
-      { text: "@Oak please inspect", reply_to: null, thread_root_id: null },
-      { text: "@everyone status", reply_to: null, thread_root_id: null },
-      { text: "Thread update", reply_to: root.id, thread_root_id: root.id },
-    ];
-    const messages: DesktopRoomMessage[] = [];
-    for (const [index, input] of inputs.entries()) {
-      const payload = await addLocalChatMessage(localRoomIdentifier, {
-        sender: "Cedar",
-        text: input.text,
-        source: "agent",
-        reply_to: input.reply_to,
-        thread_root_id: input.thread_root_id,
-        publisher_agent_key: cedar.agentKey,
-        publisher_agent_session_id: cedar.agentSessionId,
-        idempotency_key: `local-managed-delivery:${index}`,
-      });
-      const message = mapRoomMessagePayload(payload);
-      messages.push(message);
-      emitPersistedLocalRoomMessage(cloudRoomIdentifier, message);
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    for (const message of messages) {
-      // This is the same persisted row the durable poll later observes. The
-      // immediate delivery must win once; replay must be a no-op.
-      await deliverDesktopRoomMessageToManagedAgents(cloudRoomIdentifier, message);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-
-    for (const message of messages) {
-      const deliveries = managedEvents.filter((event) => event.message.id === message.id);
-      assert.equal(deliveries.length, 1, `${message.text} is dispatched exactly once`);
-      assert.deepEqual(deliveries[0]?.message.accountAgentRouting, {
-        version: 1,
-        authority: "legacy",
-        recipientAgentKeys: ["owner/oak"],
-        recipientSessions: [{
-          agentKey: "owner/oak",
-          agentSessionId: "agent_session_oak",
-          activationReason: "local_legacy",
-        }],
-        controlAuthorized: false,
-      }, message.text);
-    }
-  } finally {
-    await stopDesktopRoomStream(cloudRoomIdentifier);
-    setManagedAgentRoomStreamDispatcherForTest(null);
-    setLocalAccountAgentRoutingHydratorForTest(null);
-  }
 });
 
 test("desktop local chat store persists messages, replies, and sync metadata", async () => {
@@ -776,58 +497,6 @@ test("desktop cloud import resolves reply edges independently of timestamp order
   assert.deepEqual(thread?.replies.map((message) => message.text), ["first reply", "nested reply"]);
 });
 
-test("desktop cloud edge correction removes the reply's obsolete phantom root", async () => {
-  const room = "room_import_reply_before_root";
-  const timestamp = "2026-01-01T00:00:00.000Z";
-  const reply = {
-    id: "msg_201",
-    sender: "Oak",
-    text: "reply before root",
-    attachments: [],
-    source: "agent",
-    timestamp,
-    thread_root_id: "msg_200",
-    thread_reply_to_id: "msg_200",
-    reply_to: { id: "msg_200", sender: "Human", text: "root", source: "browser", timestamp },
-    thread: null,
-    agent_identity: {
-      actor_label: "Oak",
-      agent_key: "owner/oak",
-      agent_session_id: "oak-session",
-    },
-  };
-  await importLocalChatMessages(room, [reply]);
-  await importLocalChatMessages(room, [{
-    id: "msg_200",
-    sender: "Human",
-    text: "root",
-    attachments: [],
-    source: "browser",
-    timestamp,
-    thread_root_id: "msg_200",
-    thread_reply_to_id: null,
-    reply_to: null,
-    thread: null,
-  }, reply]);
-
-  let membership: Awaited<ReturnType<typeof getLocalChatThreadRoutingAgentKeysForRoots>> | null = null;
-  for (let attempt = 0; attempt < 50 && !membership; attempt += 1) {
-    try {
-      membership = await getLocalChatThreadRoutingAgentKeysForRoots(
-        room,
-        ["msg_1", "msg_2"],
-        [{ agentKey: "owner/oak", actorLabel: "Oak", displayName: "Oak" }],
-      );
-    } catch (error) {
-      if ((error as { name?: string }).name !== "LocalThreadRoutingProjectionUnavailableError") throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 10));
-    }
-  }
-  assert.ok(membership);
-  assert.deepEqual([...(membership.get("msg_1") ?? [])], []);
-  assert.deepEqual([...(membership.get("msg_2") ?? [])], ["owner/oak"]);
-});
-
 test("desktop cloud-to-local import preserves durable publisher routing authority", async () => {
   // Model a staggered rollout: the first import came from a client that did
   // not persist the new trusted publisher/control fields.
@@ -970,69 +639,6 @@ test("desktop cloud-to-local import preserves durable publisher routing authorit
     authority: "invalid",
   });
   assert.equal(otherAccountOwnerStop?.local_control_authorized, false);
-
-  const membership = await getLocalChatThreadRoutingAgentKeysForRoots(
-    "room_import_durable_publisher",
-    ["msg_1"],
-    [
-      {
-        agentKey: "local/stable-key",
-        actorLabel: "Renamed legitimate worker",
-        displayName: "Maple",
-      },
-      {
-        agentKey: "local/impostor",
-        actorLabel: "Old visible label",
-        displayName: "Old visible label",
-      },
-    ],
-  );
-  assert.deepEqual(
-    [...(membership.get("msg_1") ?? [])],
-    ["local/stable-key"],
-    "the imported authenticated key outranks a later worker reusing the old display alias",
-  );
-});
-
-test("desktop cloud publisher correction replaces stale local routing projection", async () => {
-  const base = {
-    id: "msg_30",
-    sender: "Historical label",
-    text: "root",
-    attachments: [],
-    source: "agent",
-    timestamp: "2026-01-03T00:00:00.000Z",
-    thread_root_id: "msg_30",
-    thread_reply_to_id: null,
-    reply_to: null,
-    thread: null,
-  };
-  await importLocalChatMessages("room_import_publisher_correction", [{
-    ...base,
-    agent_identity: {
-      actor_label: "Historical label",
-      agent_key: "owner/key-a",
-      agent_session_id: "session_a",
-    },
-  }]);
-  await importLocalChatMessages("room_import_publisher_correction", [{
-    ...base,
-    agent_identity: {
-      actor_label: "Historical label",
-      agent_key: "owner/key-b",
-      agent_session_id: "session_b",
-    },
-  }]);
-
-  const membership = await getLocalChatThreadRoutingAgentKeysForRoots(
-    "room_import_publisher_correction",
-    ["msg_1"],
-    [
-      { agentKey: "owner/key-a", actorLabel: "A", displayName: "A" },
-      { agentKey: "owner/key-b", actorLabel: "B", displayName: "B" },
-    ],
-  );
-  assert.deepEqual([...(membership.get("msg_1") ?? [])], ["owner/key-b"]);
 });
 
 test("desktop cloud publisher correction invalidates a large root without foreground replay", async () => {
@@ -1062,6 +668,7 @@ test("desktop cloud publisher correction invalidates a large root without foregr
       exec(sql: string): void;
       prepare(sql: string): {
         get(...params: unknown[]): Record<string, unknown> | undefined;
+        all(...params: unknown[]): Record<string, unknown>[];
         run(...params: unknown[]): void;
       };
       close(): void;
@@ -1162,24 +769,29 @@ test("desktop cloud publisher correction invalidates a large root without foregr
     foregroundGuard.close();
   }
 
-  let membership: Awaited<ReturnType<typeof getLocalChatThreadRoutingAgentKeysForRoots>> | null = null;
-  for (let attempt = 0; attempt < 100 && !membership; attempt += 1) {
-    try {
-      membership = await getLocalChatThreadRoutingAgentKeysForRoots(
-        room,
-        ["msg_1"],
-        [
-          { agentKey: "owner/old-key", actorLabel: "Old", displayName: "Old" },
-          { agentKey: "owner/new-key", actorLabel: "New", displayName: "New" },
-        ],
-      );
-    } catch (error) {
-      if ((error as { name?: string }).name !== "LocalThreadRoutingProjectionUnavailableError") throw error;
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  // The invalidated root is rebuilt in bounded background batches. Wait for
+  // that repair at the table level instead of through a membership read.
+  const repairReader = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
+  try {
+    let invalidatedCount = 1;
+    for (let attempt = 0; attempt < 200 && invalidatedCount > 0; attempt += 1) {
+      invalidatedCount = Number(repairReader.prepare(`
+        SELECT COUNT(*) AS invalidated_count
+          FROM local_chat_thread_routing_invalidated_roots_v2
+         WHERE room_id = ? AND thread_root_number = 1
+      `).get(room)?.invalidated_count);
+      if (invalidatedCount > 0) await new Promise<void>((resolve) => setTimeout(resolve, 50));
     }
+    assert.equal(invalidatedCount, 0, "the queued root repair eventually completes");
+    const rebuilt = repairReader.prepare(`
+      SELECT agent_key FROM local_chat_thread_routing_agents_v2
+       WHERE room_id = ? AND thread_root_number = 1
+       ORDER BY agent_key
+    `).all(room);
+    assert.deepEqual(rebuilt.map((row) => row.agent_key), ["owner/new-key"]);
+  } finally {
+    repairReader.close();
   }
-  assert.ok(membership, "the queued root repair eventually completes");
-  assert.deepEqual([...(membership.get("msg_1") ?? [])], ["owner/new-key"]);
 });
 
 test("desktop local chat store claims unsynced messages with stable sync keys", async () => {
@@ -1466,52 +1078,6 @@ test("desktop local room artifacts persist and link to tasks", async () => {
     }),
     /stable identity/,
   );
-});
-
-test("managed agent local context resolves linked local room artifacts", async () => {
-  const cloudRoomIdentifier = "github.com/BrosInCode/context-linked-local-room";
-  const linked = await createLocalRoom({
-    roomIdentifier: "context_linked_local_room",
-    displayName: "Context Linked Local Room",
-    cloudRoomIdentifier,
-  });
-  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
-  await publishLocalRoomArtifact({
-    roomId: linked.roomIdentifier,
-    artifact: {
-      provider: "git",
-      kind: "commit",
-      id: "ctx123",
-      title: "Context commit",
-    },
-  });
-
-  const result = await executeManagedAgentContextRequest({
-    session_id: "context_session",
-    room_id: cloudRoomIdentifier,
-    room_identifier: cloudRoomIdentifier,
-    joined_via: "join_room",
-    cwd: tempDir,
-    stop_phrase: "stop",
-    max_minutes: 30,
-    token: "token",
-    thread_id: "thread",
-    turn_id: "turn",
-    server_url: "http://127.0.0.1",
-    launched_server: false,
-    codex_bin: "codex",
-    status: "completed",
-    started_at: "2026-07-04T00:00:00.000Z",
-    updated_at: "2026-07-04T00:00:00.000Z",
-  } as any, {
-    tool: "get_room_context_summary",
-    arguments: {},
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.storage, "local");
-  assert.equal(result.roomIdentifier, linked.roomIdentifier);
-  assert.equal((result.artifacts as any[])?.[0]?.identityKey, "git:commit:id:ctx123");
 });
 
 test("desktop linked local rooms use the cloud room as the visible account identity", async () => {
@@ -2062,4 +1628,182 @@ test("desktop outbox idempotency preserves attachments and rejects changed retry
   assert.equal((await getLocalChatMessageByClientId(roomId, input.idempotency_key))?.id, first.id);
   await assert.rejects(addLocalChatMessage(roomId, { ...input, text: "Changed" }), /different content/);
   await assert.rejects(addLocalChatMessage(roomId, { ...input, attachments: [] }), /different content/);
+});
+
+
+test("human publisher avatars and identity survive local acknowledgement, cloud import and refresh", async () => {
+  const profile = { login: "EmmyMay", avatar_url: "https://avatars.githubusercontent.com/u/1?v=4" };
+  const sent = await addLocalChatMessage("room_profile", { sender: "Emmy", text: "Hello", source: "browser", sender_profile: profile });
+  assert.deepEqual(sent.sender_profile, profile);
+  assert.deepEqual((await getLocalChatMessages("room_profile")).messages[0]?.sender_profile, profile);
+  const legacy = await addLocalChatMessage("room_profile", { sender: "EmmyMay", text: "Unknown publisher", source: "browser" });
+  assert.equal(legacy.sender_profile, null);
+  const imported = { id: "msg_400", sender: "Emmy", text: "Cloud", source: "browser", timestamp: "2026-10-12T10:00:00Z", sender_profile: profile };
+  await importLocalChatMessages("room_imported_profile", [imported]);
+  assert.deepEqual((await getLocalChatMessages("room_imported_profile")).messages[0]?.sender_profile, profile);
+  await importLocalChatMessages("room_imported_profile", [{ ...imported, sender_profile: { ...profile, avatar_url: null } }]);
+  assert.deepEqual((await getLocalChatMessages("room_imported_profile")).messages[0]?.sender_profile, { ...profile, avatar_url: null });
+});
+
+async function localGitPublishFixture(branch = "feature/local-history") {
+  const root = await mkdtemp(join(tempDir, "publish-project-"));
+  const git = (...args: string[]) => execFileAsync("git", ["-C", root, ...args]);
+  await git("init", "-b", branch);
+  const { resolveRoomIdentifierFromPath } = await import("../repo-status.js");
+  const resolved = await resolveRoomIdentifierFromPath(root);
+  const room = await createLocalRoom({ roomIdentifier: resolved.roomIdentifier, displayName: "My original project", gitRoom: resolved.gitRoom });
+  await setRoomStorageMode(room.roomIdentifier, "local");
+  const { bindProjectRoot } = await import("../main/project-bindings-store.js");
+  await bindProjectRoot({ context: { roomIdentifier: room.roomIdentifier, gitRoom: room.gitRoom }, rootPath: root, source: "local_git" });
+  const slug = root.split("/").at(-1)!;
+  const repository = `github.com/example/${slug.toLowerCase()}`;
+  const hostedGit: DesktopGitRoomInfo = { ...room.gitRoom!, provider: "github", host: "github.com",
+    repository: { id: slug, fullName: `example/${slug.toLowerCase()}`, owner: "example", name: slug.toLowerCase() },
+    ref: { ...room.gitRoom!.ref, defaultBranch: "main" }, visibility: "private", accessMode: "private", source: "github" };
+  return { root, git, room, repository, hostedGit, async addOrigin() {
+    await git("remote", "add", "origin", `https://${repository}.git`);
+    await git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+  } };
+}
+
+test("explicit Publish connects original local branch history to GitHub without switching storage or renumbering messages", async () => {
+  const fixture = await localGitPublishFixture();
+  const rootMessage = await addLocalChatMessage(fixture.room.roomIdentifier, { sender: "Human", text: "Original", source: "browser", control_authorized: true });
+  const reply = await addLocalChatMessage(fixture.room.roomIdentifier, { sender: "Human", text: "Reply", source: "browser", control_authorized: true, reply_to: rootMessage.id, thread_root_id: rootMessage.id });
+  await fixture.addOrigin();
+  await fixture.git("symbolic-ref", "HEAD", "refs/heads/main");
+  const { buildGitHubBranchRoomIdentifier } = await import("../repo-status.js");
+  const target = buildGitHubBranchRoomIdentifier(fixture.repository, "feature/local-history")!;
+  const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const path = decodeURIComponent(new URL(String(url)).pathname);
+    const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+    calls.push({ path, body });
+    if (path.endsWith("/join")) return Response.json({ room_id: path === `/rooms/${fixture.repository}/join` ? fixture.repository : target, authenticated: true, git_room: fixture.hostedGit });
+    assert.equal(path, `/rooms/${target}/messages`);
+    return Response.json({ id: `msg_${100 + calls.length}` });
+  };
+  try {
+    assert.equal((await getLocalRoomIncludingArchived(fixture.room.roomIdentifier))?.cloudRoomIdentifier, null, "adding origin never publishes");
+    const result = await syncDesktopLocalChatRoom(fixture.room.roomIdentifier);
+    assert.equal(result.cloudRoomIdentifier, target);
+    assert.equal(result.syncedCount, 2);
+    assert.equal(calls[0]?.path, `/rooms/${fixture.repository}/join`, "GitHub supplies authoritative repository metadata");
+    assert.equal(calls[1]?.path, `/rooms/${target}/join`, "the room's original branch wins over the current checkout");
+    assert.equal(calls[3]?.body.reply_to, "msg_103");
+    assert.equal(calls[3]?.body.thread_root_id, "msg_103");
+    const preserved = await getLocalRoomIncludingArchived(fixture.room.roomIdentifier);
+    assert.equal(preserved?.displayName, "My original project");
+    assert.equal(preserved?.gitRoom?.host, "github.com");
+    const { listProjectBindings } = await import("../main/project-bindings-store.js");
+    const { findProjectBinding } = await import("../project-bindings.js");
+    assert.equal(findProjectBinding(await listProjectBindings(), { roomIdentifier: target, gitRoom: fixture.hostedGit })?.rootPath, await realpath(fixture.root),
+      "the hosted snapshot still resolves the same connected project");
+    assert.deepEqual((await getLocalChatMessages(fixture.room.roomIdentifier)).messages.map(message => message.id), [rootMessage.id, reply.id]);
+    assert.equal((await resolveLocalAwareRoomStorageMode(target)).effectiveMode, "local");
+    const retry = await syncDesktopLocalChatRoom(fixture.room.roomIdentifier);
+    assert.equal(retry.syncedCount, 0, "retry uses existing sync records");
+    assert.equal(calls.length, 4, "retry neither creates another room nor republishes messages");
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("local Git Publish without origin or with a replaced project never writes cloud history", async () => {
+  const fixture = await localGitPublishFixture("main");
+  const previousFetch = globalThis.fetch;
+  let networkCalls = 0;
+  globalThis.fetch = async () => { networkCalls++; throw new Error("Unexpected network"); };
+  try {
+    await assert.rejects(syncDesktopLocalChatRoom(fixture.room.roomIdentifier), /Add this project's GitHub origin/);
+    await fixture.addOrigin();
+    await rename(join(fixture.root, ".git"), join(fixture.root, ".original-git"));
+    await fixture.git("init", "-b", "main");
+    await fixture.git("remote", "add", "origin", `https://${fixture.repository}.git`);
+    await assert.rejects(syncDesktopLocalChatRoom(fixture.room.roomIdentifier), /Connect this room to its project folder/);
+    assert.equal(networkCalls, 0);
+    assert.equal((await getLocalRoomIncludingArchived(fixture.room.roomIdentifier))?.cloudRoomIdentifier, null);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("linking local Git history refuses competing local histories and preserves the original link", async () => {
+  const fixture = await localGitPublishFixture("main");
+  await createLocalRoom({ roomIdentifier: fixture.repository });
+  await assert.rejects(linkLocalRoomToCloud({ roomIdentifier: fixture.room.roomIdentifier, cloudRoomIdentifier: fixture.repository, gitRoom: fixture.hostedGit }), /separate local history/);
+  const untouched = await getLocalRoomIncludingArchived(fixture.room.roomIdentifier);
+  assert.equal(untouched?.cloudRoomIdentifier, null);
+  assert.equal(untouched?.gitRoom?.accessMode, "local");
+  const target = `${fixture.repository}/focus/git:branch:b3RoZXI`;
+  await linkLocalRoomToCloud({ roomIdentifier: fixture.room.roomIdentifier, cloudRoomIdentifier: target, gitRoom: fixture.hostedGit });
+  const competing = await createLocalRoom({ displayName: "Other local history" });
+  await assert.rejects(linkLocalRoomToCloud({ roomIdentifier: competing.roomIdentifier, cloudRoomIdentifier: target }), /separate local history/);
+  await assert.rejects(linkLocalRoomToCloud({ roomIdentifier: fixture.room.roomIdentifier, cloudRoomIdentifier: `${fixture.repository}-other` }), /already linked/);
+  assert.equal((await getLocalRoomIncludingArchived(fixture.room.roomIdentifier))?.cloudRoomIdentifier, target);
+});
+
+test("a project created as a plain folder publishes to its new repository rather than an unrelated standalone room", async () => {
+  const root = await mkdtemp(join(tempDir, "publish-folder-"));
+  const { resolveRoomIdentifierFromPath } = await import("../repo-status.js");
+  const { bindProjectRoot } = await import("../main/project-bindings-store.js");
+  const resolved = await resolveRoomIdentifierFromPath(root);
+  const room = await createLocalRoom({ roomIdentifier: resolved.roomIdentifier, displayName: "New project" });
+  await setRoomStorageMode(room.roomIdentifier, "local");
+  await bindProjectRoot({ context: { roomIdentifier: room.roomIdentifier }, rootPath: root, source: "local_folder" });
+  await execFileAsync("git", ["-C", root, "init", "-b", "main"]);
+  await assert.rejects(syncDesktopLocalChatRoom(room.roomIdentifier), /Add this project's GitHub origin/);
+  const repository = `github.com/example/${root.split("/").at(-1)!.toLowerCase()}`;
+  await execFileAsync("git", ["-C", root, "remote", "add", "origin", `https://${repository}.git`]);
+  const gitRoom: DesktopGitRoomInfo = { provider: "github", host: "github.com", repository: { id: "new-folder", fullName: repository.slice(11), owner: "example", name: "new-folder" },
+    ref: { type: "default_branch", name: "main", defaultBranch: "main", baseRef: "main", headRef: null, headRepository: null }, visibility: "private", accessMode: "private", isDefault: true, source: "github" };
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async url => {
+    assert.equal(decodeURIComponent(new URL(String(url)).pathname), `/rooms/${repository}/join`);
+    return Response.json({ room_id: repository, authenticated: true, git_room: gitRoom });
+  };
+  try {
+    const result = await syncDesktopLocalChatRoom(room.roomIdentifier);
+    assert.equal(result.cloudRoomIdentifier, repository);
+    assert.equal((await getLocalRoomIncludingArchived(room.roomIdentifier))?.displayName, "New project");
+    assert.equal((await resolveLocalAwareRoomStorageMode(repository)).effectiveMode, "local");
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("failed hosted authorization and origin changes during Publish preserve unlinked local history", async () => {
+  for (const scenario of ["auth", "origin"] as const) {
+    const fixture = await localGitPublishFixture("main");
+    await fixture.addOrigin();
+    const previousFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async url => {
+      calls++;
+      assert.equal(decodeURIComponent(new URL(String(url)).pathname), `/rooms/${fixture.repository}/join`);
+      if (scenario === "origin") await fixture.git("remote", "set-url", "origin", "https://github.com/example/foreign.git");
+      return Response.json({ room_id: fixture.repository, authenticated: scenario !== "auth", git_room: fixture.hostedGit });
+    };
+    try {
+      await assert.rejects(syncDesktopLocalChatRoom(fixture.room.roomIdentifier), scenario === "auth" ? /Sign in with access/ : /project changed/);
+      assert.equal(calls, 1, "no message or task upload follows a failed target proof");
+      const room = await getLocalRoomIncludingArchived(fixture.room.roomIdentifier);
+      assert.equal(room?.cloudRoomIdentifier, null);
+      assert.equal(room?.gitRoom?.accessMode, "local");
+    } finally { globalThis.fetch = previousFetch; }
+  }
+});
+
+test("Publish uses GitHub's default branch when an initial push has no origin HEAD", async () => {
+  const fixture = await localGitPublishFixture("master");
+  await fixture.addOrigin();
+  await fixture.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD");
+  const { buildGitHubBranchRoomIdentifier } = await import("../repo-status.js");
+  const target = buildGitHubBranchRoomIdentifier(fixture.repository, "master")!;
+  const calls: string[] = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async url => {
+    const path = decodeURIComponent(new URL(String(url)).pathname);
+    calls.push(path);
+    return Response.json({ room_id: calls.length === 1 ? fixture.repository : target, authenticated: true, git_room: fixture.hostedGit });
+  };
+  try {
+    assert.equal((await syncDesktopLocalChatRoom(fixture.room.roomIdentifier)).cloudRoomIdentifier, target);
+    assert.deepEqual(calls, [`/rooms/${fixture.repository}/join`, `/rooms/${target}/join`]);
+  } finally { globalThis.fetch = previousFetch; }
 });

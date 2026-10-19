@@ -37,6 +37,7 @@ const cursorSourceHome = join(tempDir, "cursor-source-home");
 const cursorManagedHome = join(tempDir, "cursor-managed-home");
 const fakeCursorBin = join(tempDir, "cursor-agent-fake.js");
 const fakeCursorMcpMode = join(tempDir, ".fake-cursor-mcp-mode");
+const fakeCursorProbeLog = join(tempDir, ".fake-cursor-probes");
 const runtimePackageRoot = join(tempDir, "runtime", "node_modules", "letagents");
 const runtimeEntry = join(runtimePackageRoot, "dist", "mcp", "server.js");
 process.env.LETAGENTS_CURSOR_SOURCE_HOME = cursorSourceHome;
@@ -60,6 +61,9 @@ writeFileSync(fakeCursorBin, `#!/usr/bin/env node
 const fs = require("node:fs");
 const path = require("node:path");
 const args = process.argv.slice(2);
+if (args[0] === "--version" || args[0] === "--help") {
+  fs.appendFileSync(path.join(path.dirname(process.argv[1]), ".fake-cursor-probes"), args[0] + " " + process.cwd() + "\\n");
+}
 if (args[0] === "--version") {
   console.log("cursor-agent fake 1.0.0");
   process.exit(0);
@@ -89,48 +93,19 @@ if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === 
   else console.log(serverName + ": ready");
   process.exit(0);
 }
-if (args.includes("status")) {
-  const teamFixture = path.join(process.cwd(), ".fake-cursor-team-account");
-  const teamManaged = fs.existsSync(teamFixture);
-  if (teamManaged) {
-    const configPath = path.join(process.env.HOME, ".cursor", "cli-config.json");
-    let config = {};
-    try { config = JSON.parse(fs.readFileSync(configPath, "utf8")); } catch {}
-    config.authInfo = { ...(config.authInfo || {}), email: "team@example.test", teamId: 42 };
-    fs.writeFileSync(configPath, JSON.stringify(config));
-  }
-  if (args.includes("--format") && args.includes("json")) {
-    console.log(JSON.stringify({
-      status: "authenticated",
-      isAuthenticated: true,
-      userInfo: {
-        email: teamManaged ? "team@example.test" : "personal@example.test",
-        userId: 12345,
-        ...(teamManaged ? { teamId: 42 } : {}),
-      },
-    }));
-    process.exit(0);
-  }
-  console.log("Logged in");
-  process.exit(0);
-}
-if (args[0] === "mcp" && args[1] === "list") {
-  const fixture = path.join(process.cwd(), ".fake-cursor-mcp-list");
-  console.log(fs.existsSync(fixture) ? fs.readFileSync(fixture, "utf-8") : "filesystem");
-  process.exit(0);
-}
 console.error("Unexpected cursor-agent args: " + args.join(" "));
 process.exit(2);
 `);
 chmodSync(fakeCursorBin, 0o755);
 
 const { runDesktopCursorProviderPreflight } = await import("../main/agents/cursor-provider-preflight.js");
+const { clearProbeCache } = await import("../main/agents/provider-probe-cache.js");
 const { CursorIdentityAuthRequiredError } = await import("../main/agents/cursor-provider-adapter.js");
 const cursorProvider: DesktopAgentProvider = {
   id: "cursor",
   name: "Cursor",
   description: "Start Cursor.",
-  capabilities: ["external_mcp", "desktop_managed_runtime"],
+  capabilities: ["external_mcp", "supervised_runtime"],
   runtimeCommand: "cursor-agent",
   mcpTargetId: "cursor",
   permissionProfiles: [],
@@ -186,24 +161,15 @@ function setFakeCursorMcpMode(mode: string | null): void {
   else writeFileSync(fakeCursorMcpMode, `${mode}\n`);
 }
 
-test("Cursor preflight defaults to filter_letagents MCP policy", async () => {
-  const workspace = workspaceFixture("default-filter");
+// The fake CLI answers `--help` from a per-workspace fixture file, so a probe
+// memoised by an earlier case must not decide a later one.
+test.beforeEach(() => clearProbeCache());
 
-  const result = await runPreflight({ repoRootPath: workspace });
-
-  assert.equal(result.status, "ready");
-  assert.equal(result.canStart, true);
-  assert.equal(result.message, "Cursor Agent is ready to start with Read-only.");
-  assert.match(result.detail ?? "", /connected tools remain available, except LetAgents/);
-  assert.deepEqual(
-    JSON.parse(readFileSync(join(cursorManagedHome, ".cursor", "mcp.json"), "utf-8")),
-    {
-      mcpServers: {
-        filesystem: { command: "npx" },
-      },
-    },
-  );
-});
+function recordedProbes(): string[] {
+  return existsSync(fakeCursorProbeLog)
+    ? readFileSync(fakeCursorProbeLog, "utf8").split("\n").filter(Boolean)
+    : [];
+}
 
 test("Cursor preflight validates write-capable permission profile flags", async () => {
   const workspace = workspaceFixture("full-access");
@@ -211,13 +177,18 @@ test("Cursor preflight validates write-capable permission profile flags", async 
   const result = await runPreflight({
     repoRootPath: workspace,
     permissionProfileId: "full_access",
-    cursorMcpPolicy: "filter_letagents",
   });
 
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
-  assert.equal(result.message, "Cursor Agent is ready to start with Full access.");
-  assert.match(result.detail ?? "", /without its own restrictions or approval prompts/);
+  assert.equal(result.message, "Cursor Agent is ready to start supervised with Full access.");
+  assert.match(result.detail ?? "", /without approval prompts/);
+
+  const withoutForce = workspaceFixture("full-access-without-force-flag");
+  writeFileSync(join(withoutForce, ".fake-cursor-help"), "Usage: cursor-agent --sandbox <mode> --trust\n");
+  const rejected = await runPreflight({ repoRootPath: withoutForce, permissionProfileId: "full_access" });
+  assert.equal(rejected.status, "error");
+  assert.equal(rejected.message, "Cursor Agent does not support the selected permission profile.");
 });
 
 test("Cursor supervised preflight requires and accepts its isolated LetAgents bridge", async () => {
@@ -226,8 +197,6 @@ test("Cursor supervised preflight requires and accepts its isolated LetAgents br
 
   const result = await runPreflight({
     repoRootPath: workspace,
-    launchMode: "supervised",
-    cursorMcpPolicy: "normal",
   });
 
   assert.equal(result.status, "ready");
@@ -247,7 +216,6 @@ test("Cursor supervised preflight preserves explicit read-only and full-access c
     const workspace = workspaceFixture(name);
     const result = await runPreflight({
       repoRootPath: workspace,
-      launchMode: "supervised",
       permissionProfileId,
     });
     assert.equal(result.status, "ready");
@@ -268,7 +236,6 @@ test("Cursor supervised preflight gates writable generations without gating read
   try {
     const writable = await runPreflight({
       repoRootPath: workspace,
-      launchMode: "supervised",
       permissionProfileId: "sandboxed_write",
     }, unsupported);
     assert.equal(writable.status, "error");
@@ -278,14 +245,12 @@ test("Cursor supervised preflight gates writable generations without gating read
 
     const readOnly = await runPreflight({
       repoRootPath: workspace,
-      launchMode: "supervised",
       permissionProfileId: "read_only",
     }, unsupported);
     assert.equal(readOnly.status, "ready");
     assert.equal(readOnly.canStart, true);
     const fullAccess = await runPreflight({
       repoRootPath: workspace,
-      launchMode: "supervised",
       permissionProfileId: "full_access",
     }, unsupported);
     assert.equal(fullAccess.status, "ready");
@@ -296,7 +261,7 @@ test("Cursor supervised preflight gates writable generations without gating read
   }
 });
 
-test("Cursor supervised preflight admits repo-less read-only without relaxing the legacy repo gate", async () => {
+test("Cursor supervised preflight admits repo-less read-only without relaxing the repo gate for writable profiles", async () => {
   let checks = 0;
   const checker: NonNullable<DesktopCursorPreflightOptions["workspaceGenerationSupportChecker"]> = async () => {
     checks += 1;
@@ -307,7 +272,6 @@ test("Cursor supervised preflight admits repo-less read-only without relaxing th
     const readOnly = await runPreflight({
       repoRootPath: null,
       roomOnly: true,
-      launchMode: "supervised",
       permissionProfileId: "read_only",
     }, checker);
     assert.equal(readOnly.status, "ready");
@@ -318,7 +282,7 @@ test("Cursor supervised preflight admits repo-less read-only without relaxing th
     for (const permissionProfileId of ["sandboxed_write", "full_access"] as const) {
       let identityChecks = 0;
       const writable = await runDesktopCursorProviderPreflight(cursorProvider, {
-        repoRootPath: null, roomOnly: true, launchMode: "supervised", permissionProfileId,
+        repoRootPath: null, roomOnly: true, permissionProfileId,
       }, "installed", { commandTimeoutMs: 0,
         personalIdentityAttestor: async () => { identityChecks += 1; throw new Error("account check must not run without a profile directory"); },
         runtimeEnvironment: { ...process.env, LETAGENTS_TEST_CURSOR_PROBE_ENV: "present" },
@@ -329,9 +293,9 @@ test("Cursor supervised preflight admits repo-less read-only without relaxing th
       assert.equal(identityChecks, 0);
     }
 
-    const legacy = await runPreflight({ repoRootPath: null, roomOnly: true });
-    assert.equal(legacy.status, "repo_required");
-    assert.equal(legacy.canStart, false);
+    const defaultProfile = await runPreflight({ repoRootPath: null, roomOnly: true });
+    assert.equal(defaultProfile.status, "repo_required");
+    assert.equal(defaultProfile.canStart, false);
   } finally {
     setFakeCursorMcpMode(null);
   }
@@ -352,7 +316,6 @@ test("Cursor supervised preflight does not traverse project files before launch"
     try {
       return await runPreflight({
         repoRootPath: workspace,
-        launchMode: "supervised",
         permissionProfileId: "full_access",
       });
     } finally {
@@ -372,7 +335,6 @@ test("Cursor supervised preflight fails closed when the bridge is not visible", 
 
   const result = await runPreflight({
     repoRootPath: workspace,
-    launchMode: "supervised",
   });
 
   assert.equal(result.status, "error");
@@ -390,7 +352,7 @@ test("Cursor supervised preflight rejects extra and false-substring MCP entries"
     const workspace = workspaceFixture(name);
     setFakeCursorMcpMode(mode);
 
-    const result = await runPreflight({ repoRootPath: workspace, launchMode: "supervised" });
+    const result = await runPreflight({ repoRootPath: workspace });
 
     assert.equal(result.status, "error");
     assert.equal(result.canStart, false);
@@ -406,7 +368,6 @@ test("Cursor supervised preflight rejects a CLI without headless workspace trust
   writeFileSync(join(workspace, ".fake-cursor-help"), "Usage: cursor-agent --force --sandbox <mode>\n");
   const result = await runPreflight({
     repoRootPath: workspace,
-    launchMode: "supervised",
   });
 
   assert.equal(result.status, "error");
@@ -420,7 +381,7 @@ test("Cursor supervised preflight rejects a CLI without native project-config is
   const workspace = workspaceFixture("supervised-no-project-isolation");
   setFakeCursorMcpMode("unsupported");
 
-  const result = await runPreflight({ repoRootPath: workspace, launchMode: "supervised" });
+  const result = await runPreflight({ repoRootPath: workspace });
 
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
@@ -433,7 +394,7 @@ test("Cursor supervised preflight fails closed for authenticated team accounts",
   writeFileSync(join(workspace, ".fake-cursor-team-account"), "team\n");
   setFakeCursorMcpMode("ready");
 
-  const result = await runPreflight({ repoRootPath: workspace, launchMode: "supervised" });
+  const result = await runPreflight({ repoRootPath: workspace });
 
   assert.equal(result.status, "error");
   assert.equal(result.canStart, false);
@@ -445,7 +406,7 @@ test("Cursor supervised preflight preserves the sign-in recovery action", async 
   const workspace = workspaceFixture("supervised-auth-required");
   writeFileSync(join(workspace, ".fake-cursor-auth-required"), "signed out\n");
 
-  const result = await runPreflight({ repoRootPath: workspace, launchMode: "supervised" });
+  const result = await runPreflight({ repoRootPath: workspace });
 
   assert.equal(result.status, "auth_required");
   assert.equal(result.canStart, false);
@@ -479,50 +440,35 @@ test("Cursor preflight blocks unknown permission profiles", async () => {
   assert.match(result.detail ?? "", /unknown_profile/);
 });
 
-test("Cursor preflight blocks visible LetAgents MCP for managed MCP policies", async () => {
-  for (const policy of ["filter_letagents", "none"] as const) {
-    const workspace = workspaceFixture(`blocked-${policy}`);
-    writeFileSync(join(workspace, ".fake-cursor-mcp-list"), "letagents\n");
+test("Cursor preflight reuses its CLI probes inside the window and re-runs them after the cache is cleared", async () => {
+  const first = workspaceFixture("probe-cache-first");
+  const second = workspaceFixture("probe-cache-second");
+  writeFileSync(join(second, ".fake-cursor-help"), "Usage: cursor-agent --force --sandbox <mode>\n");
+  rmSync(fakeCursorProbeLog, { force: true });
+  setFakeCursorMcpMode("ready");
+  const probeFlags = () => recordedProbes().map((probe) => probe.split(" ", 1)[0]);
+  try {
+    for (let run = 0; run < 3; run += 1) {
+      const result = await runPreflight({ repoRootPath: first });
+      assert.equal(result.status, "ready");
+    }
+    assert.deepEqual(probeFlags(), ["--version", "--help"], "three runs spawn each CLI probe once");
 
-    const result = await runPreflight({
-      repoRootPath: workspace,
-      cursorMcpPolicy: policy,
-    });
+    // `--help` is read from the workspace, so another workspace is a new probe
+    // and must not be answered from the first workspace's cached output.
+    const unsupported = await runPreflight({ repoRootPath: second });
+    assert.equal(unsupported.status, "error");
+    assert.equal(unsupported.message, "Cursor Agent does not support the selected permission profile.");
+    assert.deepEqual(probeFlags(), ["--version", "--help", "--help"]);
+    assert.ok(recordedProbes()[2]?.endsWith("probe-cache-second"), "the second `--help` ran in the second workspace");
 
-    assert.equal(result.status, "error");
-    assert.equal(result.canStart, false);
-    assert.equal(result.message, "Cursor can still see LetAgents MCP.");
+    clearProbeCache();
+    const again = await runPreflight({ repoRootPath: first });
+    assert.equal(again.status, "ready");
+    assert.deepEqual(probeFlags(), ["--version", "--help", "--help", "--version", "--help"]);
+  } finally {
+    setFakeCursorMcpMode(null);
   }
-});
-
-test("Cursor preflight blocks any visible MCP server for none policy", async () => {
-  const workspace = workspaceFixture("none-visible-non-letagents");
-  writeFileSync(join(workspace, ".fake-cursor-mcp-list"), "filesystem\n");
-
-  const result = await runPreflight({
-    repoRootPath: workspace,
-    cursorMcpPolicy: "none",
-  });
-
-  assert.equal(result.status, "error");
-  assert.equal(result.canStart, false);
-  assert.equal(result.message, "Cursor can still see MCP servers.");
-});
-
-test("Cursor preflight allows normal MCP policy even when LetAgents is configured", async () => {
-  const workspace = workspaceFixture("normal-with-letagents");
-  mkdirSync(join(workspace, ".cursor"), { recursive: true });
-  writeFileSync(join(workspace, ".cursor", "mcp.json"), '{"mcpServers":{"letagents":{"command":"npx"}}}\n');
-  writeFileSync(join(workspace, ".fake-cursor-mcp-list"), "letagents\n");
-
-  const result = await runPreflight({
-    repoRootPath: workspace,
-    cursorMcpPolicy: "normal",
-  });
-
-  assert.equal(result.status, "ready");
-  assert.equal(result.canStart, true);
-  assert.match(result.detail ?? "", /Cursor can use your configured tools/);
 });
 
 function workspaceFixture(name: string): string {

@@ -357,7 +357,7 @@
 /* The switch reaches 6px past its track for a 44px target; the padding keeps that inside the row. */
 .agent-inspector-home-harness-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; padding-inline-end: 6px; }
 .agent-inspector-home-harness-row > strong { min-width: 0; color: var(--text, #fafafa); font-size: .77rem; font-weight: 670; overflow-wrap: anywhere; }
-.agent-inspector-home-harness > .agent-inspector-settings-note { margin-top: 0; }
+.agent-inspector-home-harness > .agent-inspector-settings-note, .agent-inspector-image-input > .agent-inspector-settings-note { margin-top: 0; }
 .agent-inspector-own-setup { flex: 0 0 auto; padding: 2px 7px; border: 1px solid rgba(251, 191, 36, .3); border-radius: 999px; color: var(--amber-text); font-size: .66rem; font-weight: 720; line-height: 1.35; white-space: nowrap; }
 .agent-inspector-settings-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }.agent-inspector-settings-actions button, .agent-inspector-conflict button, .agent-inspector-danger button, .agent-inspector-settings-load-error button { min-height: 44px; padding: 0 11px; border: 1px solid rgba(255,255,255,.14); border-radius: 10px; background: rgba(255,255,255,.07); color: var(--text,#fafafa); font: inherit; font-size: .73rem; font-weight: 670; cursor: pointer; }.agent-inspector-settings-actions button:disabled, .agent-inspector-conflict button:disabled, .agent-inspector-danger button:disabled, .agent-inspector-settings-load-error button:disabled { cursor: default; opacity: .5; }.agent-inspector-conflict, .agent-inspector-move-status { display: grid; gap: 5px; margin-top: 13px; padding: 11px; border: 1px solid rgba(251,191,36,.25); border-radius: 11px; background: rgba(251,191,36,.07); color: var(--amber-text); font-size: .72rem; line-height: 1.4; }.agent-inspector-conflict p { margin: 0; }.agent-inspector-conflict .primary { background: rgba(96,165,250,.18); }
 .agent-inspector-move-status { border-color: rgba(96,165,250,.28); background: rgba(96,165,250,.08); color: var(--text,#fafafa); }.agent-inspector-move-status span { color: var(--text-secondary,#a1a1aa); }.agent-inspector-settings-error { margin: 12px 0 0; color: var(--red-text); font-size: .73rem; line-height: 1.4; overflow-wrap: anywhere; }.agent-inspector-settings-load-error { padding: 15px; border: 1px solid rgba(251,113,133,.24); border-radius: 14px; background: rgba(251,113,133,.055); }.agent-inspector-settings-load-error p { margin: 7px 0 12px; color: var(--text-secondary,#a1a1aa); font-size: .73rem; line-height: 1.45; }.agent-inspector-danger { padding: 15px; border: 1px solid rgba(251,113,133,.24); border-radius: 16px; background: rgba(251,113,133,.045); }.agent-inspector-danger > button { margin-top: 12px; }.agent-inspector-retire-confirmation { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }.agent-inspector-retire-confirmation p { flex: 1 1 100%; margin: 0; color: var(--red-text); font-size: .72rem; line-height: 1.4; }.agent-inspector-purge { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(251,113,133,.18); }.agent-inspector-purge code { overflow-wrap: anywhere; }.agent-inspector-purge p { color: var(--text-secondary,#a1a1aa); font-size: .69rem; line-height: 1.4; }.agent-inspector-danger button.danger { border-color: rgba(251,113,133,.45); background: transparent; color: var(--red-text); }
@@ -384,16 +384,7 @@
 }
 
 .agent-inspector-participant-scroll { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
-.agent-inspector-participant-permission + .agent-inspector-participant-permission { margin-top: 13px; padding-top: 13px; border-top: 1px solid rgba(255,255,255,.075); }
-.agent-inspector-participant-permission strong { display: block; font-size: .8rem; line-height: 1.35; }
-.agent-inspector-participant-permission p { margin: 6px 0 0; color: var(--text-secondary, #a1a1aa); font-size: .74rem; line-height: 1.45; }
-.agent-inspector-participant-transcript { display: grid; gap: 8px; margin: 11px 0 0; padding: 0; list-style: none; }
-.agent-inspector-participant-transcript li { padding-left: 11px; border-left: 1px solid rgba(96,165,250,.38); color: var(--text-secondary, #a1a1aa); font-size: .73rem; line-height: 1.45; }
 .agent-inspector-inline-action { min-height: 32px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--blue); font: inherit; font-size: .7rem; font-weight: 680; cursor: pointer; }
-.agent-inspector-participant-reasoning { display: grid; gap: 8px; margin-top: 10px; }
-.agent-inspector-participant-reasoning > strong { font-size: .82rem; line-height: 1.35; }
-.agent-inspector-participant-reasoning > p { margin: 0; color: var(--text-secondary, #a1a1aa); font-size: .76rem; line-height: 1.5; }
-.agent-inspector-participant-reasoning > small { color: var(--text-secondary, #a1a1aa); font-size: .69rem; line-height: 1.4; }
 
 @media (min-width: 560px) and (max-width: 919px) {
   .agent-inspector-surface[data-compact="true"] {

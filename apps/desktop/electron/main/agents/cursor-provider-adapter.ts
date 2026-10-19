@@ -1,4 +1,5 @@
-import { MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { cursorRoomTurnImageFolders, cursorRoomTurnImageLines, withReadOnlyImageFolders } from "./cursor-room-turn-images.js";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants as fsConstants, fsyncSync, mkdtempSync, openSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -252,8 +253,8 @@ const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
   },
   deliveryModes: ["mcp_polling", "daemon_inbox"],
   // `--resume <session_id>` is the documented continuation across per-turn
-  // children (the legacy engine already relies on it); the adapter asserts the
-  // session identity echo per turn. Subject to TrailDelta's task_38 spike cell.
+  // children; the adapter asserts the session identity echo per turn. Subject
+  // to TrailDelta's task_38 spike cell.
   resume: true,
   // cursor-agent takes its prompt as a positional argument and ignores stdin —
   // there is NO channel into a RUNNING turn. poke() delivers at the next turn
@@ -298,9 +299,8 @@ export function boundedCursorRoomTurnPrompt(
     "After complete_room_turn succeeds, end this provider turn without revising or repeating the proposal.",
     `Turn id: ${turnId}`,
     `Inbox item: ${request.inboxItemId}`,
-    `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
-    `Source message: ${JSON.stringify(request.sourceMessage)}`,
-    `Activation: ${JSON.stringify(request.activation)}`,
+    ...formatRoomTurnContext(request),
+    ...cursorRoomTurnImageLines(request),
   ].join("\n");
 }
 
@@ -859,6 +859,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
     };
   }
 
+  /** The daemon stages a file that this turn's sandbox may read; see cursor-room-turn-images.ts. */
+  roomTurnImageDelivery(): "file" { return "file"; }
+
   async runRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRequest,
@@ -912,6 +915,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           turnAbortController.signal,
           markDurableTurnStarted,
           options.settleLifecycleBeforeIdle,
+          cursorRoomTurnImageFolders(request),
         );
       } catch (error) {
         if (!(error instanceof CursorPostDispatchCheckpointError)) throw error;
@@ -1605,7 +1609,6 @@ export class CursorProviderAdapter implements ProviderAdapter {
       roomIdentifier: req.roomId,
       joinedVia: looksLikeInviteCode(req.roomId) ? "join_code" : "join_room",
       cwd: req.cwd,
-      deliveryMode: "mcp_polling",
       stopPhrase: DEFAULT_CODEX_STOP_PHRASE,
       token: makeCodexStopToken(),
       suggestedDisplayName: req.agentDisplayName.trim(),
@@ -1645,6 +1648,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     launchSignal?: AbortSignal,
     markDurableTurnStarted?: ProviderRoomTurnOptions["markDurableTurnStarted"],
     settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"],
+    readOnlyImageFolders: readonly string[] = [], // Daemon-staged images: this launch may read, never write or run.
   ): Promise<LiveTurn> {
     return this.processCustody.acquire(handle.workAttemptId, async () => {
       throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
@@ -1887,7 +1891,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           deniedWriteRegexes = profile.nativeDeniedWriteRegexes;
           deniedWritePaths = profile.nativeDeniedWritePaths;
           deniedWriteStructuralPaths = profile.nativeDeniedWriteStructuralPaths;
-          deniedWriteSubpaths = profile.nativeDeniedWriteSubpaths;
+          deniedWriteSubpaths = withReadOnlyImageFolders(profile.nativeDeniedWriteSubpaths, readOnlyImageFolders);
           deniedExecSubpaths = profile.nativeDeniedExecSubpaths;
           allowedWriteSubpaths = profile.nativeAllowedWriteSubpaths?.length
             ? [...new Set([
@@ -1903,11 +1907,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
                 ...cursorSandboxPathVariants(entry.sourcePath),
                 ...(entry.generationPath ? cursorSandboxPathVariants(entry.generationPath) : []),
               ]) ?? []),
+              ...readOnlyImageFolders.flatMap(cursorSandboxPathVariants),
             ])]
             : undefined;
           deniedExecSubpaths = [...new Set([
             ...(deniedExecSubpaths ?? []),
             ...cursorSandboxPathVariants(supervisedRuntimeDataDir),
+            ...readOnlyImageFolders.flatMap(cursorSandboxPathVariants),
           ])];
           mcpRuntimeEntryPath = profile.mcpRuntimeEntryPath;
           if (!profile.mcpRuntimeEnv) {

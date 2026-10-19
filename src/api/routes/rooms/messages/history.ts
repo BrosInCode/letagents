@@ -77,6 +77,22 @@ export function registerMessageHistoryRoutes(
       const accountId = req.sessionAccount?.account_id ?? null;
       const accountAgentRouting = isAppSession(req);
       const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
+      if (req.query.context_only === "true") {
+        // Observation is not delivery. A later held turn must not hide a
+        // public human correction from the turn this worker is answering now.
+        // Keep prompt-only messages and activation/cursor authority out of
+        // this read; ordinary history, poll and SSE keep their frontiers.
+        if (!activationIdentity || before !== "latest" || after) {
+          res.status(400).json({ error: "Context reads require a worker and before=latest." });
+          return;
+        }
+        const context = await getLatestMessages(project.id, {
+          limit: Math.min(limit ?? 30, 30), include_prompt_only: false,
+          account_id: accountId, account_agent_routing: false,
+        });
+        res.json({ room_id: project.id, context_only: true, messages: context.messages });
+        return;
+      }
       const workerFrontier = {
         wait_for_routing: activationIdentity?.session_kind === "worker",
         hold_agent_key: replyTurnHoldAgentKey(activationIdentity),

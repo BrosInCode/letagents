@@ -3,6 +3,7 @@
     ref="messageElement"
     class="message"
     :class="{
+      'is-github-history': githubHistory,
       'system-message': isSystem,
       'ambient-system-message': isAmbientSystem,
       'thinking-message': Boolean(thinkingCard),
@@ -13,9 +14,11 @@
       'wake-notice': isWakeNotice,
     }"
     :data-msg-id="message.id"
+    :data-chat-role="senderRole"
     @contextmenu.stop="openContextMenu"
   >
     <WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" />
+    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="message.sender_profile?.avatar_url" :agent="senderRole.endsWith('agent')" :provider="ideLabel" :agent-key="message.agent_identity?.agent_key" />
     <div v-else class="message-avatar" :style="{ '--sender-color': senderColor }" />
     <div v-if="isWakeNotice" class="message-body wake-notice-body">
       <p class="wake-notice-line">
@@ -34,10 +37,9 @@
       <slot name="thread" />
     </div>
     <div v-else class="message-body">
-      <MessageMeta
+      <MessageMeta v-if="!githubHistory"
         :display-name="displayName"
-        :owner-attribution="identity.ownerAttribution"
-        :ide-label="ideLabel"
+        :owner-attribution="senderRole?.endsWith('agent') ? identity.ownerAttribution : null"
         :provenance-badge="provenanceBadge"
         :inline-prompt-injection="inlinePromptInjection"
         :formatted-time="formattedTime"
@@ -77,6 +79,8 @@
         />
         <GitHubEventCard
           v-if="githubEvent"
+          :history="githubHistory"
+          :timestamp="message.timestamp"
           room
           :event="githubEvent"
           :taskLinkEnabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
@@ -93,6 +97,8 @@
           :text="visibleText"
           :html="renderedMessage.html"
           :messageId="message.id"
+          :sender="readerSender"
+          :room-identifier="roomIdentifier"
           @taskReferenceClick="emit('openTask', $event)"
         />
         <GitHubEventCard
@@ -101,6 +107,9 @@
           :event="linkPreviewPresentation(preview)"
           compact
         />
+        <p v-if="message.gif" class="message-gif-link">
+          <a :href="roomGifPageUrl(message.gif) ?? undefined" target="_blank" rel="noopener noreferrer">{{ message.gif.title || 'GIF' }} · View on GIPHY</a>
+        </p>
         <MessageAttachments
           v-if="attachments.length"
           :message-id="message.id"
@@ -177,6 +186,13 @@
 </template>
 
 <script setup lang="ts">
+import { roomGifPageUrl } from '../../../../../shared/room-expressions.mjs'
+import ChatAvatar from '../../../../../shared/ui/ChatAvatar.vue'
+import type { MessageReaderSender } from '../../../../../shared/ui/message-reader'
+import { chatSenderRole } from '../../../../../shared/chat-appearance'
+import '../../../../../shared/ui/chat-palette.css'
+import { useAuth } from '@/composables/useAuth'
+
 import { inject, computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
@@ -227,6 +243,7 @@ import {
 } from '@/domain/roomRoutes'
 
 const props = defineProps<{
+  githubHistory?: boolean;
   message: RoomMessage
   roomIdentifier?: string
   thread?: MessageThreadSummary | null
@@ -448,16 +465,22 @@ onUnmounted(() => {
   window.removeEventListener('blur', handleMenuDismiss)
 })
 const identity = computed(() => resolveAgentIdentity(props.message.sender, props.message.agent_identity))
-const displayName = computed(() => identity.value.displayName || 'anonymous')
-const isSystem = computed(() => ['letagents', 'system'].includes((props.message.sender || '').toLowerCase()))
+const displayName = computed(() => props.message.source === 'browser' ? props.message.sender : identity.value.displayName || 'anonymous')
+const isSystem = computed(() => props.message.source !== 'browser' && ['letagents', 'system'].includes((props.message.sender || '').toLowerCase()))
 const isAmbientSystem = computed(() =>
-  isAmbientSystemMessage(props.message.sender, visibleText.value)
+  props.message.source !== "browser" && isAmbientSystemMessage(props.message.sender, visibleText.value)
 )
 /** An agent's wake rule fired: one quiet line, not a conversation to reply to. */
 const isWakeNotice = computed(() => props.message.source === WAKE_NOTICE_SOURCE)
+const { user: viewer } = useAuth()
+const senderRole = computed(() => chatSenderRole({
+  human: !isSystem.value && !isWakeNotice.value && !githubEvent.value && (props.message.source === "browser" || isHumanSender(props.message.sender, props.message.source)),
+  agent: props.message.source !== 'browser' && !isSystem.value && !isWakeNotice.value && !githubEvent.value && (props.message.source === 'agent' || Boolean(props.message.agent_identity || identity.value.ownerAttribution)),
+  login: props.message.sender_profile?.login, viewerLogin: viewer.value?.login, agentKey: props.message.agent_identity?.agent_key,
+}))
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source))
 const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
-const githubEvent = computed(() => parseGitHubEventPresentation(props.message))
+const githubEvent = computed(() => props.message.source === 'browser' ? null : parseGitHubEventPresentation(props.message))
 const thinkingCard = computed(() => buildAgentThinkingEntry(props.message))
 const attachments = computed(() => props.message.attachments || [])
 
@@ -492,6 +515,19 @@ const ideLabel = computed(() => {
   if (fromParsed && fromParsed !== 'Agent') return fromParsed
   return null
 })
+
+const readerSender = computed<MessageReaderSender>(() => ({
+  name: displayName.value,
+  context: senderRole.value === 'own-agent' ? 'Your agent'
+    : senderRole.value === 'self' ? 'You'
+      : senderRole.value === 'other-agent' ? identity.value.ownerAttribution || 'Agent'
+        : senderRole.value === 'human' ? 'Human' : null,
+  timestamp: props.message.timestamp,
+  avatarUrl: props.message.sender_profile?.avatar_url,
+  agent: Boolean(senderRole.value?.endsWith('agent')),
+  provider: ideLabel.value,
+  agentKey: props.message.agent_identity?.agent_key,
+}))
 
 const replyDisplayName = computed(() => {
   const reply = props.message.reply_to
@@ -889,4 +925,28 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 .message:is(.has-thread, .is-thread-open) > .message-body > .message-bubble > :deep(.reply-preview .reply-preview-text) {
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
+</style>
+
+<style scoped>
+.message[data-chat-role] { gap: 12px; }
+.message[data-chat-role] > .message-body { flex: initial; width: fit-content; max-width: min(78%, 68ch); }
+.message[data-chat-role] > .message-body > .message-bubble { background: var(--chat-bubble); border-color: var(--chat-border); color: light-dark(#252524, #e9e9e7); box-shadow: none; padding: 12px 16px; border-radius: 4px 13px 13px 13px; }
+.message[data-chat-role="self"] { flex-direction: row-reverse; }
+.message[data-chat-role="self"] > .message-body > .message-bubble { margin-left: auto; border-radius: 13px 4px 13px 13px; }
+.message[data-chat-role="self"] :deep(.message-meta) { justify-content: flex-end; }
+.message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: min(78%, 68ch); }
+.message[data-chat-role].is-inline-reply > .message-body { max-width: calc(100% - 56px); }
+@media (max-width: 760px) {
+  .message[data-chat-role] > .message-body { max-width: calc(100% - 64px); }
+  .message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: calc(100% - 64px); }
+}
+</style>
+
+<style scoped>
+.message.is-github-history { display: block; width: 100%; padding: 0 4px 0 0; border-bottom: 1px solid var(--border); }
+.message.is-github-history > .message-avatar { display: none; }
+.message.is-github-history > .message-body { width: 100%; }
+.message.is-github-history :deep(.message-meta) { min-height: 20px; margin-bottom: 3px; }
+.message.is-github-history :deep(.message-sender), .message.is-github-history :deep(.message-owner), .message.is-github-history :deep(.provenance-badge) { display: none; }
+.message.is-github-history .message-bubble { margin-top: 0; }
 </style>

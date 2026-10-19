@@ -7,14 +7,17 @@ import {
   statSync,
   writeSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { redactCredentialText } from "./credential-redaction.js";
+import { setRoomLatencyReporter } from "./room-latency-trace.js";
+import { setTurnStartLatencyReporter } from "./turn-start-latency.js";
 
 const MAX_LIFECYCLE_LOG_BYTES = 256 * 1024;
 
 export type DaemonLifecycleEvent = {
-  event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit";
+  event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit" | "room_latency"
+    | "turn_start_latency" | "provider_launch_latency";
   detail?: string | null;
   exitCode?: number | null;
 };
@@ -46,6 +49,15 @@ export class DaemonLifecycleLog {
   append(event: DaemonLifecycleEvent): void {
     if (this.descriptor === null) return;
     try {
+      // Slow-operation samples can recur throughout a long-lived process.
+      // Keep the same two-file retention used at startup.
+      if (statSync(this.path).size >= this.maxBytes) {
+        closeSync(this.descriptor);
+        this.descriptor = null;
+        renameSync(this.path, `${this.path}.previous`);
+        this.descriptor = openSync(this.path, "a", 0o600);
+        chmodSync(this.path, 0o600);
+      }
       const detail = event.detail == null
         ? null
         : redactCredentialText(event.detail, 4_096).value;
@@ -71,6 +83,32 @@ export class DaemonLifecycleLog {
     }
     this.descriptor = null;
   }
+}
+
+/** Install process-level diagnostics only from the executable entrypoint. */
+export function startDaemonLifecycleDiagnostics(path: string): DaemonLifecycleLog {
+  const lifecycle = new DaemonLifecycleLog(path);
+  setRoomLatencyReporter(sample => lifecycle.append({ event: "room_latency", detail: JSON.stringify(sample) }));
+  // One start-up sample per turn would soon push process failures out of the
+  // lifecycle file, so they get a sibling file, created at the first sample.
+  const turnLatencyPath = join(dirname(path), "daemon-turn-latency.jsonl");
+  let turnLatency: DaemonLifecycleLog | null = null;
+  setTurnStartLatencyReporter(record => {
+    turnLatency ??= new DaemonLifecycleLog(turnLatencyPath);
+    turnLatency.append({ event: record.event, detail: JSON.stringify(record.sample) });
+  });
+  lifecycle.append({ event: "daemon_starting" });
+  process.on("uncaughtExceptionMonitor", error => {
+    lifecycle.append({ event: "fatal_exception", detail: daemonLifecycleErrorDetail(error) });
+  });
+  process.on("exit", exitCode => {
+    setRoomLatencyReporter(null);
+    setTurnStartLatencyReporter(null);
+    turnLatency?.close();
+    lifecycle.append({ event: "process_exit", exitCode });
+    lifecycle.close();
+  });
+  return lifecycle;
 }
 
 export function daemonLifecycleErrorDetail(error: unknown): string {

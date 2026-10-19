@@ -30,6 +30,7 @@ import type { PollingActivationRecord } from "../custodial-polling-activation.js
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
 import { providerRef as recoveryProviderRef } from "../runtime-recovery-coordinator.js";
+import { setTurnStartLatencyReporter, type StartLatencyRecord } from "../turn-start-latency.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -748,6 +749,44 @@ test("a provider whose process is up returns its launch slot before its remote b
   finishBootstrap!();
   await converging;
   assert.equal(runtime.installed.length, 1);
+});
+
+test("a completed launch reports its start-up phases, split at the native ready signal; a stopped one reports nothing", async () => {
+  const records: StartLatencyRecord[] = [];
+  setTurnStartLatencyReporter(record => { records.push(record); });
+  try {
+    for (const nativeSignal of [true, false]) {
+      records.length = 0;
+      const runtime = harness({ provider: provider({ spawn: async (request) => {
+        if (nativeSignal) request.onNativeStarted?.();
+        return returnedHandle;
+      } }) });
+      await runtime.coordinator.converge("agent-1");
+      assert.equal(runtime.installed.length, 1);
+      assert.deepEqual(records.map(record => [record.event, record.sample.provider, "launch" in record.sample ? record.sample.launch : null,
+        Object.keys(record.sample.phases_ms)]), [["provider_launch_latency", "codex", "fresh",
+        ["prepare", "slot_wait", "admission", "process", ...(nativeSignal ? ["bootstrap"] : []), "install"]]]);
+    }
+
+    records.length = 0;
+    let admit: (() => void) | null = null;
+    const runtime = harness({ provider: provider({ spawn: async () => returnedHandle }) });
+    const coordinator = new ProviderExecutionCoordinator({
+      ...runtime.options,
+      pacing: {
+        acquire: async () => { await new Promise<void>((resolve) => { admit = resolve; }); return () => {}; },
+        run: async () => { throw new Error("launches pace through acquire"); },
+      },
+    });
+    const converging = coordinator.converge("agent-1");
+    for (let turn = 0; turn < 20 && !admit; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    runtime.bumpControlEpoch();
+    admit!();
+    await converging;
+    assert.deepEqual(records, []);
+  } finally {
+    setTurnStartLatencyReporter(null);
+  }
 });
 
 test("delivery handoff freezes convergence and draining never creates a successor", async () => {
@@ -1975,6 +2014,83 @@ test("resume after a crashed generation names the frozen lifecycle authority of 
 
   assert.deepEqual(resumed, [{ ref: "typed", request: "typed" }],
     "a daemon-inbox resume carries the typed birth instead of defaulting to typed_shadow");
+});
+
+const imageInputHandles = { codex: returnedHandle, "claude-code": claudeHandle, "open-model": openModelHandle } as const;
+
+async function launchWithImageChoice(providerId: keyof typeof imageInputHandles, imageInput: boolean | undefined): Promise<ProviderActionSpawn> {
+  let request: ProviderActionSpawn | null = null;
+  const runtime = harness({
+    entry: { ...baseEntry(), provider: providerId, delivery_mode: "daemon_inbox" },
+    provider: provider({ spawn: async input => { request = input; return imageInputHandles[providerId]; } }),
+  });
+  if (imageInput !== undefined) {
+    const readConfiguration = runtime.options.store.getAgentConfiguration;
+    runtime.options.store.getAgentConfiguration = async id => ({ ...(await readConfiguration(id))!, image_input: imageInput });
+  }
+  await runtime.coordinator.converge("agent-1");
+  assert.ok(request, `${providerId} launched`);
+  return request;
+}
+
+test("a launch tells the provider that an Open Model agent's model reads images only when its owner said so", async () => {
+  const on = await launchWithImageChoice("open-model", true);
+  assert.equal(on.imageInput, true);
+  assert.equal(on.provider, "open-model");
+  assert.equal(Object.hasOwn(on, "homeHarness"), false, "the image choice is not the owner's own setup");
+
+  const off = await launchWithImageChoice("open-model", false);
+  assert.equal(Object.hasOwn(off, "imageInput"), false, "off leaves the key out, so the launch is exactly as before");
+
+  const unsaid = await launchWithImageChoice("open-model", undefined);
+  assert.equal(Object.hasOwn(unsaid, "imageInput"), false, "an agent whose stored configuration has no value launches as before");
+  assert.deepEqual({ ...on, imageInput: undefined, onProgress: undefined, onNativeStarted: undefined },
+    { ...off, imageInput: undefined, onProgress: undefined, onNativeStarted: undefined }, "nothing else about the launch changes");
+});
+
+test("a launch never carries the image choice for an agent app other than Open Model, whatever is stored", async () => {
+  for (const providerId of ["codex", "claude-code"] as const) {
+    const request = await launchWithImageChoice(providerId, true);
+    assert.equal(request.provider, providerId);
+    assert.equal(Object.hasOwn(request, "imageInput"), false, providerId);
+  }
+});
+
+test("a resumed Open Model launch carries the image choice as a fresh one does", async () => {
+  for (const imageInput of [true, false]) {
+    const requests: ProviderActionSpawn[] = [];
+    const runtime = harness({
+      entry: {
+        ...baseEntry(), provider: "open-model", delivery_mode: "daemon_inbox", observed_state: "failed",
+        provider_ref: {
+          work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+          provider_continuation_id: "continuation-1", provider_connection: openModelHandle.providerConnection!,
+        },
+      },
+      frozenAuthorityMode: "typed",
+      provider: provider({
+        capabilities: async () => ({
+          deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
+          transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true,
+        }),
+        attach: async () => null,
+        resume: async (_ref, request) => { requests.push(request); return openModelHandle; },
+      }),
+    });
+    const readConfiguration = runtime.options.store.getAgentConfiguration;
+    runtime.options.store.getAgentConfiguration = async id => ({ ...(await readConfiguration(id))!, image_input: imageInput });
+    runtime.executionGenerations.push({
+      execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "test", generation: 1,
+      terminal: runtime.options.terminalPayload({ ...terminal(openModelHandle), exitCode: 1, terminalCause: "crashed" }, "test"),
+    });
+
+    await runtime.coordinator.converge("agent-1");
+
+    assert.equal(requests.length, 1, `image choice ${imageInput}: the saved conversation was resumed`);
+    assert.equal(Object.hasOwn(requests[0]!, "imageInput"), imageInput);
+    if (imageInput) assert.equal(requests[0]!.imageInput, true);
+  }
 });
 
 test("a successful grant-bound resume resets scheduler retry budgets", async () => {

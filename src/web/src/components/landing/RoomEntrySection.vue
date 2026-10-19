@@ -1,289 +1,182 @@
 <template>
-  <section id="start" class="section entry-section">
-    <span class="section-label">Open a Room</span>
-    <h2 class="entry-title">Jump straight in.</h2>
-    <p class="entry-sub">
-      Enter an invite code or GitHub repo path to join a room — or spin up a fresh one instantly.
-    </p>
-
-    <div class="entry-card">
-      <label class="join-label" for="room-identifier">Invite code or GitHub repository</label>
-      <form class="join-row" @submit.prevent="handleJoin">
-        <div class="input-wrap">
-          <svg class="input-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
-            <polyline points="10 17 15 12 10 7"/>
-            <line x1="15" y1="12" x2="3" y2="12"/>
-          </svg>
-          <input
-            v-model="identifier"
-            id="room-identifier"
-            type="text"
-            class="join-input"
-            placeholder="ABCX-7291"
-            aria-describedby="room-identifier-hint"
-            autocapitalize="none"
-            :spellcheck="false"
-            enterkeyhint="go"
-            :disabled="loading"
-          />
-        </div>
-        <button class="join-btn" type="submit" :disabled="!identifier.trim() || loading">
-          {{ loading ? 'Joining…' : 'Join →' }}
-        </button>
-      </form>
-      <p id="room-identifier-hint" class="join-hint">Or paste a repo path like github.com/owner/repo.</p>
-
-      <div class="divider-row">
-        <span class="divider-line" />
-        <span class="divider-text">OR</span>
-        <span class="divider-line" />
-      </div>
-
-      <button class="create-btn" :disabled="creating" @click="handleCreate">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <line x1="12" y1="5" x2="12" y2="19"/>
-          <line x1="5" y1="12" x2="19" y2="12"/>
-        </svg>
-        {{ creating ? 'Creating…' : 'Create New Room' }}
-      </button>
-    </div>
-
-    <p class="entry-hint">
-      Public and invite rooms need no account. Private repo rooms require GitHub sign-in.
-    </p>
-
-    <p v-if="error" class="entry-error">{{ error }}</p>
+  <section id="start" class="section entry-section" aria-labelledby="web-new-room-title">
+    <form class="entry-card" @submit.prevent="handleSubmit">
+      <NewRoomFrame
+        :tab="tab" :tabs="tabs" :busy="busy" heading-id="web-new-room-title" panel-id="web-new-room-panel"
+        @select-tab="selectTab"
+      >
+        <template v-if="tab === 'project'">
+          <label class="new-room-field" for="project-repository">
+            <span>GitHub repository</span>
+            <input id="project-repository" v-model="repository" placeholder="github.com/owner/repository"
+              autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy"
+              aria-describedby="project-repository-hint new-room-error" :aria-invalid="Boolean(error)" />
+          </label>
+          <p id="project-repository-hint" class="new-room-hint">Open the shared room for an existing repository. Private repositories require GitHub sign-in.</p>
+          <div class="entry-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="m4 16-2 4h20l-2-4"/></svg>
+            <div><strong>Starting with a folder?</strong><p>Use the desktop app to create a project or open a folder on your computer.</p></div>
+          </div>
+        </template>
+        <template v-else-if="tab === 'blank'">
+          <label class="new-room-field" for="blank-room-name">
+            <span>Room name <span class="entry-optional">Optional</span></span>
+            <input id="blank-room-name" v-model="roomName" maxlength="64" placeholder="e.g. Product planning"
+              autocomplete="off" :disabled="busy || !auth.isSignedIn.value" :aria-invalid="Boolean(roomNameError)"
+              :aria-describedby="roomNameError ? 'blank-room-name-hint blank-room-name-error' : 'blank-room-name-hint'" @input="roomNameError = ''" />
+          </label>
+          <p v-if="roomNameError" id="blank-room-name-error" class="new-room-error" role="alert">{{ roomNameError }}</p>
+          <p id="blank-room-name-hint" class="new-room-hint">
+            <template v-if="auth.isSignedIn.value">A name for the conversation. You can change it later.</template>
+            <template v-else><button class="entry-text-button" type="button" :disabled="busy || auth.isSigningIn.value" @click="auth.signIn('/#start')">Sign in with GitHub</button> to choose a name, or create an unnamed room.</template>
+          </p>
+          <div class="entry-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h11a4 4 0 0 0 0-8h-.7A6 6 0 0 0 5.5 9 4.5 4.5 0 0 0 7 18Z"/></svg>
+            <div><strong>Shared online</strong><p>Invite people and agents with the room’s invite code. Local rooms are available in the desktop app.</p></div>
+          </div>
+        </template>
+        <template v-else>
+          <label class="new-room-field" for="room-invitation">
+            <span>Invite code or room link</span>
+            <input id="room-invitation" v-model="invitation" placeholder="ABCD-1234 or https://letagents.chat/in/…"
+              autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy"
+              aria-describedby="room-invitation-hint new-room-error" :aria-invalid="Boolean(error)" />
+          </label>
+          <p id="room-invitation-hint" class="new-room-hint">Ask someone in the room to share an invitation.</p>
+          <div class="entry-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="9" r="5"/><path d="m12 13 8 8m-5-5 3-3m0 6 3-3"/></svg>
+            <div><strong>Join with your profile.</strong><p>Your agents can join you once you’re in.</p></div>
+          </div>
+        </template>
+        <p v-if="error" id="new-room-error" class="new-room-error" role="alert">{{ error }}</p>
+        <template #footer>
+          <button v-if="tab === 'blank' && createdRoomId && error" type="button" class="new-room-cancel" :disabled="busy" @click="openCreatedRoom">Open without a name</button>
+          <button type="submit" class="new-room-primary" :disabled="!canSubmit" :aria-busy="busy">
+            {{ actionLabel }}
+            <svg v-if="!busy" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+          </button>
+        </template>
+      </NewRoomFrame>
+    </form>
   </section>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import NewRoomFrame from '../../../../../shared/ui/NewRoomFrame.vue'
+import { normalizePreviewRepository } from '../../../../../shared/message-link-previews.mjs'
+import { parseLetAgentsMessageUrl } from '../../../../../shared/room-message-urls.mjs'
+import { useAuth } from '@/composables/useAuth'
 
 const router = useRouter()
-const identifier = ref('')
-const loading = ref(false)
-const creating = ref(false)
+const auth = useAuth()
+const tabs = [{ id: 'project', label: 'Project' }, { id: 'blank', label: 'Blank room' }, { id: 'join', label: 'Join room' }] as const
+const tab = ref('project')
+const repository = ref('')
+const invitation = ref('')
+const roomName = ref('')
+const roomNameError = ref('')
+const busy = ref(false)
 const error = ref('')
+const createdRoomId = ref('')
+let mounted = true
+onBeforeUnmount(() => { mounted = false })
 
-function handleJoin() {
-  const value = identifier.value.trim()
-  if (!value) return
+const canSubmit = computed(() => !busy.value && (tab.value === 'blank' || Boolean((tab.value === 'project' ? repository.value : invitation.value).trim())))
+const actionLabel = computed(() => busy.value ? (tab.value === 'blank' ? 'Creating…' : 'Opening…')
+  : tab.value === 'project' ? 'Open project room' : tab.value === 'blank' ? (createdRoomId.value ? 'Open room' : 'Create room') : 'Join room')
 
+function selectTab(next: string) {
+  if (busy.value || !tabs.some(item => item.id === next)) return
+  tab.value = next
   error.value = ''
-  loading.value = true
-
-  // Force a full document navigation so repo-backed room redirects and auth
-  // checks happen on the server entry path, not only inside the SPA.
-  window.location.assign(`/in/${encodeURIComponent(value)}`)
+  roomNameError.value = ''
 }
 
-async function handleCreate() {
+function openRoom(identifier: string) {
+  // A document navigation retains the server's repository authorization gate.
+  window.location.assign(`/in/${encodeURIComponent(identifier)}`)
+}
+
+async function openCreatedRoom() {
+  if (!createdRoomId.value || busy.value) return
+  busy.value = true
   error.value = ''
-  creating.value = true
   try {
-    const res = await fetch('/projects', { method: 'POST' })
-    if (!res.ok) throw new Error('Failed to create room')
-    const data = await res.json()
-    const roomId = data.project?.id || data.id
-    if (!roomId) throw new Error('No room ID returned')
-    router.push(`/in/${encodeURIComponent(roomId)}`)
-  } catch (e: any) {
-    error.value = e.message || 'Something went wrong'
+    await router.push(`/in/${encodeURIComponent(createdRoomId.value)}`)
+  } catch {
+    error.value = 'The room is ready, but could not be opened. Try again.'
   } finally {
-    creating.value = false
+    busy.value = false
+  }
+}
+
+async function handleSubmit() {
+  if (busy.value) return
+  error.value = ''
+  roomNameError.value = ''
+  if (tab.value === 'project') {
+    const value = normalizePreviewRepository(repository.value.trim().replace(/\/+$/, '').replace(/\.git$/i, ''))
+    if (!value) { error.value = 'Enter a GitHub repository, such as github.com/owner/repository.'; return }
+    busy.value = true
+    try { openRoom(`github.com/${value}`) } catch { busy.value = false; error.value = 'The room could not be opened. Try again.' }
+    return
+  }
+  if (tab.value === 'join') {
+    const value = invitation.value.trim()
+    const linkedRoom = parseLetAgentsMessageUrl(value)?.roomIdentifier
+    const compactCode = (linkedRoom || value).replace(/[\s-]/g, '').toUpperCase()
+    const code = /^(?:[A-Z0-9]{4}){2,3}$/.test(compactCode) ? compactCode.match(/.{4}/g)?.join('-') : null
+    const room = code || linkedRoom
+    if (!room) { error.value = 'Enter an invite code or a LetAgents room URL.'; return }
+    busy.value = true
+    try { openRoom(room) } catch { busy.value = false; error.value = 'The room could not be opened. Try again.' }
+    return
+  }
+
+  // Match the API's normalizeRoomDisplayName before creating an invite room.
+  const name = auth.isSignedIn.value ? roomName.value.trim().replace(/\s+/g, ' ') : ''
+  if (name && (name.length < 2 || name.length > 64)) {
+    roomNameError.value = 'Use between 2 and 64 characters for the room name.'
+    return
+  }
+  busy.value = true
+  try {
+    if (!createdRoomId.value) {
+      const response = await fetch('/projects', { method: 'POST', credentials: 'include' })
+      if (!response.ok) throw new Error('The room could not be created. Try again.')
+      const data = await response.json()
+      const id = data.project?.id || data.id
+      if (typeof id !== 'string' || !id.trim()) throw new Error('The server did not return a room. Try again.')
+      createdRoomId.value = id
+    }
+    if (!mounted) return
+    if (name) {
+      const response = await fetch(`/rooms/${encodeURIComponent(createdRoomId.value)}`, {
+        method: 'PATCH', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ display_name: name }),
+      })
+      if (!response.ok) throw new Error('Your room was created, but its name could not be saved. Retry or open it without a name.')
+    }
+    if (mounted) await router.push(`/in/${encodeURIComponent(createdRoomId.value)}`)
+  } catch (cause) {
+    if (mounted) error.value = cause instanceof Error ? cause.message : 'The room could not be created. Try again.'
+  } finally {
+    busy.value = false
   }
 }
 </script>
 
 <style scoped>
-.entry-section {
-  padding: 120px 40px;
-  max-width: var(--max-width);
-  margin: 0 auto;
-}
-
-.entry-title {
-  font-size: 3rem;
-  font-weight: 800;
-  letter-spacing: -0.03em;
-  line-height: 1.15;
-  margin-bottom: var(--space-md);
-  color: var(--text);
-}
-
-.entry-sub {
-  font-size: 1.08rem;
-  color: var(--text-secondary);
-  max-width: 560px;
-  line-height: 1.7;
-  margin-bottom: var(--space-2xl);
-}
-
-.entry-card {
-  border-radius: 28px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background: #161616;
-  padding: 40px 36px;
-}
-
-.join-row {
-  display: flex;
-  align-items: stretch;
-  gap: var(--space-sm);
-}
-
-.join-label {
-  display: block;
-  margin-bottom: var(--space-sm);
-  color: var(--text-secondary);
-  font-size: 0.85rem;
-  font-weight: 600;
-}
-
-.join-hint {
-  margin-top: var(--space-sm);
-  color: var(--text-tertiary);
-  font-size: 0.8rem;
-  overflow-wrap: anywhere;
-}
-
-.input-wrap {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: 0 var(--space-md);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid var(--border);
-  transition: border-color var(--duration-fast);
-}
-
-.input-wrap:focus-within {
-  border-color: var(--border-accent);
-}
-
-.input-icon {
-  flex-shrink: 0;
-  color: var(--text-tertiary);
-}
-
-.join-input {
-  flex: 1;
-  min-width: 0;
-  padding: 14px 0;
-  font-size: 1rem;
-  color: var(--text);
-  background: transparent;
-  border: none;
-  outline: none;
-  font-family: inherit;
-}
-
-.join-input::placeholder {
-  color: var(--text-tertiary);
-}
-
-.join-btn {
-  padding: 12px 20px;
-  border-radius: var(--radius-md);
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--bg);
-  background: var(--text);
-  border: none;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: opacity var(--duration-fast);
-}
-
-.join-btn:hover:not(:disabled) {
-  opacity: 0.9;
-}
-
-.join-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.divider-row {
-  display: flex;
-  align-items: center;
-  gap: var(--space-md);
-  margin: var(--space-xl) 0;
-}
-
-.divider-line {
-  flex: 1;
-  height: 1px;
-  background: var(--border);
-}
-
-.divider-text {
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  color: var(--text-tertiary);
-}
-
-.create-btn {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-xs);
-  padding: 14px;
-  border-radius: var(--radius-md);
-  font-size: 0.88rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: transparent;
-  border: 1px solid var(--border);
-  cursor: pointer;
-  transition: all var(--duration-fast);
-}
-
-.create-btn:hover:not(:disabled) {
-  color: var(--text);
-  border-color: var(--border-strong);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.create-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.entry-hint {
-  margin-top: var(--space-lg);
-  font-size: 0.88rem;
-  color: var(--text-tertiary);
-}
-
-.entry-error {
-  overflow-wrap: anywhere;
-  margin-top: var(--space-md);
-  font-size: 0.82rem;
-  color: #ef4444;
-}
-
-@media (max-width: 768px) {
-  .entry-section { padding: 80px 20px; }
-  .entry-title { font-size: 2.2rem; }
-  .entry-card { border-radius: 20px; padding: 16px 18px; }
-}
-
-@media (max-width: 480px) {
-  .entry-section { padding: 64px 16px; }
-  .entry-card { border-radius: 16px; padding: 14px 16px; }
-}
-
-@media (max-width: 600px) {
-  .join-row { flex-direction: column; }
-  .join-btn, .create-btn { min-height: 44px; }
-}
+.entry-section { padding: 100px 24px; max-width: var(--max-width); margin: 0 auto; }
+.entry-card { max-width: 560px; margin: 0 auto; padding: 28px; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg-elevated); }
+.entry-optional { margin-left: 6px; color: var(--text-tertiary); font-weight: 400; }
+.entry-note { display: flex; gap: 13px; align-items: flex-start; padding: 18px 0 4px; margin-top: 22px; border-top: 1px solid var(--border); }
+.entry-note > svg { margin-top: 2px; color: var(--text-secondary); }
+.entry-note strong { font-size: 12px; font-weight: 550; }
+.entry-note p { margin: 5px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.65; }
+.entry-text-button { padding: 0; border: 0; background: none; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 600px) { .entry-section { padding: 64px 16px; } .entry-card { padding: 22px; border-radius: 14px; } }
+@media (max-width: 380px) { .entry-card { padding: 18px; } }
 </style>

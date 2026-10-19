@@ -10,6 +10,8 @@ RUN npm ci
 COPY tsconfig.json ./
 COPY src/ src/
 COPY shared/ shared/
+# Shared chat avatars use these provider images in the web bundle.
+COPY apps/desktop/renderer/src/assets/harness-icons/ apps/desktop/renderer/src/assets/harness-icons/
 COPY drizzle/ drizzle/
 COPY drizzle.config.ts ./
 

@@ -61,6 +61,7 @@
       :messagesHasOlder="messagesHasOlder"
       :messagesLoaded="messagesLoaded"
       :isLoadingOlderMessages="isLoadingOlderMessages"
+        :olderMessagesError="olderMessagesError"
       :tasks="tasks"
       :focusRooms="focusRooms"
       :presence="presence"
@@ -98,6 +99,8 @@
       :loadActivityHistory="loadActivityHistory"
       :clearDisconnectedParticipants="clearDisconnectedParticipants"
       @loadOlder="loadOlderMessages"
+      @refreshGitHubEvents="refreshRoomGitHubEvents()"
+      @loadOlderGitHubEvents="loadOlderGitHubEvents"
       @reply="selectedReply = $event"
       @thread-messages="threadImageMessages = $event"
       @openImageViewer="openImageViewer"
@@ -210,6 +213,7 @@ const {
   messagesHasOlder,
   messagesLoaded,
   isLoadingOlderMessages,
+  olderMessagesError,
   tasks,
   focusRooms,
   presence,
@@ -260,6 +264,7 @@ const {
   refreshRoomBoard,
   refreshRoomFocusRooms,
   refreshRoomGitHubEvents,
+  loadOlderGitHubEvents,
 } = useRoom()
 const auth = useAuth()
 const toast = useToast()

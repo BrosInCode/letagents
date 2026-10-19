@@ -107,6 +107,35 @@ export function registerRoomSettingsRoutes(app: Express, deps: RoomSettingsRoute
     };
   }
 
+  const expressionsResponse = async (req: AuthenticatedRequest, project: Project) => ({
+    room_id: project.id,
+    enabled: await db.getRoomExpressionsEnabled(project.id),
+    can_manage: await canManage(req, project),
+    gif_provider_configured: Boolean(process.env.GIPHY_API_KEY?.trim()),
+  });
+  app.get(/^\/rooms\/(.+)\/expressions$/, async (req: AuthenticatedRequest, res) => {
+    try { const project = await room(req, res); if (project) res.json(await expressionsResponse(req, project)); }
+    catch (error) { fail(res, error); }
+  });
+  app.put(/^\/rooms\/(.+)\/expressions$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await room(req, res); if (!project || !await requirePersonWhoIsAdmin(req, res, project)) return;
+      if (typeof req.body?.enabled !== "boolean") { res.status(400).json({ error: "enabled must be a boolean" }); return; }
+      await db.setRoomExpressionsEnabled(project.id, req.body.enabled);
+      res.json(await expressionsResponse(req, project));
+    } catch (error) { fail(res, error); }
+  });
+  // GIPHY requires requests from the client. This configuration is consumed
+  // inside the client transport, never returned by an agent tool or journaled.
+  // Keep it readable when off so previously sent GIFs can still render.
+  app.get(/^\/rooms\/(.+)\/gif-client-config$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await room(req, res); if (!project) return;
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ enabled: await db.getRoomExpressionsEnabled(project.id), api_key: process.env.GIPHY_API_KEY?.trim() || null });
+    } catch (error) { fail(res, error); }
+  });
+
   app.get(/^\/rooms\/(.+)\/agent-reply-order$/, async (req: AuthenticatedRequest, res) => {
     try {
       const project = await room(req, res); if (!project) return;

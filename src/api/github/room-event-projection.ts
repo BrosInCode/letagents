@@ -112,8 +112,9 @@ export async function handleMaterializedGitHubRoomEvent(
     ...input.deps,
   };
   const roomEvent = event.roomEvent;
-  let taskResolution = roomEvent
-    ? await deps.resolveLinkedTaskForRepoRoomEvent(project, roomEvent)
+  const routingEvent = event.routingEvent ?? roomEvent;
+  let taskResolution = routingEvent
+    ? await deps.resolveLinkedTaskForRepoRoomEvent(project, routingEvent)
     : emptyRepoRoomEventTaskResolution();
   let linkedTask = taskResolution.task;
   const githubRoutingContext = toGitHubRoutingContext(taskResolution);
@@ -141,6 +142,7 @@ export async function handleMaterializedGitHubRoomEvent(
   }
 
   if (!roomEvent) {
+    deps.emitGitHubRoomEventUpdate(eventProject.id, persisted.event);
     return {
       status: "processed",
       installationId: input.installationId,

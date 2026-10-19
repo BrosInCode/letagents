@@ -8,6 +8,7 @@ export const messageRowSelection = {
   sender: messages.sender,
   text: messages.text,
   display_text: messages.display_text,
+  gif: messages.gif,
   agent_prompt_kind: messages.agent_prompt_kind,
   source: messages.source,
   client_message_id: messages.client_message_id,
@@ -23,6 +24,7 @@ export const messageReplySelection = {
   sender: messages.sender,
   text: messages.text,
   display_text: messages.display_text,
+  gif: messages.gif,
   source: messages.source,
   publisher_agent_key: messages.publisher_agent_key,
   publisher_agent_session_id: messages.publisher_agent_session_id,
@@ -57,4 +59,6 @@ export const messageAttachmentUploadSelection = {
   attached_message_number: message_attachment_uploads.attached_message_number,
   created_at: message_attachment_uploads.created_at,
   attached_at: message_attachment_uploads.attached_at,
+  uploader_account_id: message_attachment_uploads.uploader_account_id,
+  uploader_agent_session_id: message_attachment_uploads.uploader_agent_session_id,
 };

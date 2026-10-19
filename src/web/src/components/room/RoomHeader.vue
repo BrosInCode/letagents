@@ -63,7 +63,7 @@ import { useSlidingTabIndicator } from '../../../../../shared/ui/useSlidingTabIn
 type RoomTab = 'chat' | 'events' | 'board' | 'activity' | 'rooms'
 const BASE_TABS: ReadonlyArray<{ id: RoomTab; label: string; icon: string; requiresEvents?: boolean }> = [
   { id: 'chat', label: 'Chat', icon: 'M3 3h10v7H7l-4 3V3Z' },
-  { id: 'events', label: 'Events', icon: 'M5 5v8m6-2V7a3 3 0 0 0-3-3M3 3a2 2 0 1 0 4 0 2 2 0 0 0-4 0Zm6 10a2 2 0 1 0 4 0 2 2 0 0 0-4 0Z', requiresEvents: true },
+  { id: 'events', label: 'Activity', icon: 'M5 5v8m6-2V7a3 3 0 0 0-3-3M3 3a2 2 0 1 0 4 0 2 2 0 0 0-4 0Zm6 10a2 2 0 1 0 4 0 2 2 0 0 0-4 0Z', requiresEvents: true },
   { id: 'board', label: 'Board', icon: 'M3 2.5h10v11H3zM6.5 2.5v11M10 2.5v11' },
   { id: 'activity', label: 'Agents', icon: 'M10 13v-1.5A2.5 2.5 0 0 0 7.5 9h-3A2.5 2.5 0 0 0 2 11.5V13M8 4.5a2 2 0 1 1-4 0 2 2 0 0 1 4 0Zm3-2a2 2 0 0 1 0 4M14 13v-1.5A2.5 2.5 0 0 0 12 9' },
   { id: 'rooms', label: 'Rooms', icon: 'M2.5 2.5h11v11h-11zM2.5 6h11M7 6v7.5' },

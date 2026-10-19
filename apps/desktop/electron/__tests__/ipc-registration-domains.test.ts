@@ -60,11 +60,13 @@ const expectedDirectChannels = [
   "desktop:open-model:get-settings-status",
   "desktop:open-model:save-settings",
   "desktop:repos:connect-project",
+  "desktop:repos:create-project",
   "desktop:repos:create-worktree",
   "desktop:repos:get-status",
   "desktop:repos:list-project-bindings",
   "desktop:repos:migrate-project-bindings",
   "desktop:repos:open-room",
+  "desktop:repos:pick-project-parent",
   "desktop:repos:pick-room",
   "desktop:repos:start-status-watch",
   "desktop:repos:stop-status-watch",
@@ -86,6 +88,7 @@ const expectedDirectChannels = [
   "desktop:room:get-artifacts",
   "desktop:room:get-board-governance",
   "desktop:room:get-conversation-routing",
+  "desktop:room:get-expressions",
   "desktop:room:get-github-event-filter",
   "desktop:room:get-github-events",
   "desktop:room:get-github-integration-status",
@@ -124,15 +127,18 @@ const expectedDirectChannels = [
   "desktop:room:rename",
   "desktop:room:repair-stream-delivery",
   "desktop:room:report-typing",
+  "desktop:room:resolve-gif",
   "desktop:room:restart-account-activity",
   "desktop:room:restore-wake-rule",
   "desktop:room:run-task-review-worker-action",
   "desktop:room:run-task-worker-action",
+  "desktop:room:search-gifs",
   "desktop:room:search-messages",
   "desktop:room:send-message",
   "desktop:room:set-agent-guidelines",
   "desktop:room:set-board-manager-mode",
   "desktop:room:set-conversation-routing",
+  "desktop:room:set-expressions",
   "desktop:room:set-github-event-filter",
   "desktop:room:set-message-pin",
   "desktop:room:set-message-reaction",
@@ -178,7 +184,6 @@ const expectedDirectChannels = [
   "desktop:supervisor:recover-agent-runtime",
   "desktop:supervisor:resolve-turn-control",
   "desktop:supervisor:restore-agent-conversation",
-  "desktop:supervisor:resume-ownership-transfer",
   "desktop:supervisor:retire-agent",
   "desktop:supervisor:retry-room-delivery",
   "desktop:supervisor:revoke-host-tool-rule",
@@ -190,18 +195,11 @@ const expectedDirectChannels = [
   "desktop:updates:check",
   "desktop:updates:get-status",
   "desktop:updates:install",
-  "desktop:workers:get-managed-agent-change-summary",
-  "desktop:workers:inspect-managed-agent",
   "desktop:workers:list",
   "desktop:workers:list-agent-provider-models",
   "desktop:workers:list-agent-providers",
-  "desktop:workers:list-managed-agent-sessions",
-  "desktop:workers:resolve-managed-agent-permission",
-  "desktop:workers:retry-managed-agent",
   "desktop:workers:run-agent-provider-preflight",
   "desktop:workers:run-agent-provider-setup",
-  "desktop:workers:start-managed-agent",
-  "desktop:workers:stop-managed-agent",
 ] as const;
 
 function readDomainSource(domain: string): string {
@@ -324,9 +322,6 @@ test("application registers startup preparation before rental recovery without d
     mock.module("../main/desktop-shell-environment.js", { namedExports: {
       startDesktopShellEnvironmentHydration: () => preparation,
     } }),
-    mock.module("../main/agents/legacy-open-model-retirement.js", { namedExports: {
-      retireLegacyCodexBackedOpenModelSessions: async () => { calls.push("prepared"); },
-    } }),
     mock.module("../main/supervisor-daemon.js", { namedExports: { supervisorDaemonClient: {
       async isMaintenanceHeld() { return false; },
       async ensureRunning(prerequisite: Promise<void>) {
@@ -371,7 +366,7 @@ test("application registers startup preparation before rental recovery without d
     releaseDaemon();
     if (process.platform === "darwin") {
       await reconciled;
-      assert.deepEqual(calls.slice(-3), ["prepared", "native-start", "grants"]);
+      assert.deepEqual(calls.slice(-2), ["native-start", "grants"]);
     }
   } finally {
     releasePreparation(); releaseDaemon();

@@ -1,4 +1,4 @@
-import { and, asc, between, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, between, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 
 import {
   MESSAGE_REACTION_MAX_DISTINCT_PER_MESSAGE,
@@ -7,7 +7,7 @@ import {
   type MessageReaction,
 } from "../../../../shared/message-reactions.mjs";
 import { db } from "../client.js";
-import { accounts, message_reactions, messages } from "../schema.js";
+import { accounts, message_reactions, messages, room_settings } from "../schema.js";
 import { visibleMessageCondition } from "./visibility.js";
 
 type ReactionReader = Pick<typeof db, "select">;
@@ -49,9 +49,11 @@ export async function loadMessageReactions(
       message_number: message_reactions.message_number,
       emoji: message_reactions.emoji,
       account_id: message_reactions.account_id,
+      agent_key: message_reactions.agent_key,
+      agent_name: message_reactions.agent_name,
       reactor_count: sql<number>`(count(*) OVER (${perEmoji}))::int`.as("reactor_count"),
       first_reacted_at: sql<string>`min(${message_reactions.created_at}) OVER (${perEmoji})`.as("first_reacted_at"),
-      position: sql<number>`(row_number() OVER (${perEmoji} ORDER BY ${message_reactions.created_at}, ${message_reactions.account_id}))::int`.as("position"),
+      position: sql<number>`(row_number() OVER (${perEmoji} ORDER BY ${message_reactions.created_at}, ${message_reactions.account_id}, ${message_reactions.agent_key}))::int`.as("position"),
     })
     .from(message_reactions)
     .where(and(
@@ -67,6 +69,8 @@ export async function loadMessageReactions(
       message_number: ranked.message_number,
       emoji: ranked.emoji,
       reactor_count: ranked.reactor_count,
+      agent_key: ranked.agent_key,
+      agent_name: ranked.agent_name,
       login: accounts.login,
       display_name: accounts.display_name,
       avatar_url: accounts.avatar_url,
@@ -95,9 +99,9 @@ export async function loadMessageReactions(
       reactions.set(row.message_number, list);
     }
     reaction.reactors.push({
-      login: row.login,
-      name: row.display_name?.trim() || row.login,
-      avatar_url: row.avatar_url || null,
+      login: row.agent_key ? `agent:${row.agent_key}` : row.login,
+      name: row.agent_key ? `${row.agent_name || "Agent"} (agent)` : row.display_name?.trim() || row.login,
+      avatar_url: row.agent_key ? null : row.avatar_url || null,
     });
   }
   return { reactions, nextFirst };
@@ -119,6 +123,7 @@ export async function loadViewerMessageReactions(
       eq(message_reactions.room_id, roomId),
       between(message_reactions.message_number, range.first, range.last),
       eq(message_reactions.account_id, accountId),
+      eq(message_reactions.agent_key, ""),
     ))
     .orderBy(asc(message_reactions.message_number), asc(message_reactions.created_at), asc(message_reactions.emoji));
   for (const row of rows) mine.set(row.message_number, [...(mine.get(row.message_number) ?? []), row.emoji]);
@@ -130,16 +135,22 @@ export async function getMessageReactions(roomId: string, messageNumber: number)
   return reactions.get(messageNumber) ?? [];
 }
 
-export type AddMessageReactionResult = "added" | "exists" | "message_not_found" | "limit_reached";
+export type AddMessageReactionResult = "added" | "exists" | "message_not_found" | "limit_reached" | "disabled";
 
 export async function addMessageReaction(input: {
   roomId: string;
   messageNumber: number;
   accountId: string;
   emoji: string;
+  agent?: { key: string; name: string };
 }): Promise<AddMessageReactionResult> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`SET LOCAL lock_timeout = '3s'`);
+    if (input.agent) {
+      const [setting] = await tx.select({ enabled: room_settings.expressions_enabled }).from(room_settings)
+        .where(eq(room_settings.room_id, input.roomId)).for("share");
+      if (!setting?.enabled) return "disabled";
+    }
     // One writer per message at a time, so the distinct-emoji limit holds.
     // NO KEY UPDATE leaves the message's other child rows writable.
     const [message] = await tx
@@ -149,6 +160,9 @@ export async function addMessageReaction(input: {
         eq(messages.room_id, input.roomId),
         eq(messages.number, input.messageNumber),
         visibleMessageCondition(),
+        // Expressions currently belong to ordinary Room conversations. Rental
+        // projections have a separate visibility contract; fail closed there.
+        ...(input.agent ? [isNull(messages.visibility), isNull(messages.rental_session_id)] : []),
       ))
       .for("no key update");
     if (!message) return "message_not_found";
@@ -171,6 +185,8 @@ export async function addMessageReaction(input: {
         room_id: input.roomId,
         message_number: input.messageNumber,
         account_id: input.accountId,
+        agent_key: input.agent?.key ?? "",
+        agent_name: input.agent?.name ?? null,
         emoji: input.emoji,
       })
       .onConflictDoNothing()
@@ -185,6 +201,7 @@ export async function removeMessageReaction(input: {
   messageNumber: number;
   accountId: string;
   emoji: string;
+  agent?: { key: string; name: string };
 }): Promise<boolean> {
   const removed = await db
     .delete(message_reactions)
@@ -192,8 +209,18 @@ export async function removeMessageReaction(input: {
       eq(message_reactions.room_id, input.roomId),
       eq(message_reactions.message_number, input.messageNumber),
       eq(message_reactions.account_id, input.accountId),
+      eq(message_reactions.agent_key, input.agent?.key ?? ""),
       eq(message_reactions.emoji, input.emoji),
     ))
     .returning({ emoji: message_reactions.emoji });
   return removed.length > 0;
+}
+
+/** Fail closed for prompt-only or rental/internal messages. */
+export async function canAgentReactToMessage(roomId: string, messageNumber: number): Promise<boolean> {
+  const [row] = await db.select({ number: messages.number }).from(messages).where(and(
+    eq(messages.room_id, roomId), eq(messages.number, messageNumber), visibleMessageCondition(),
+    isNull(messages.visibility), isNull(messages.rental_session_id),
+  )).limit(1);
+  return Boolean(row);
 }

@@ -140,8 +140,9 @@
           <small>{{ candidate.label }}</small>
         </button>
       </div>
+      <div v-if="selectedGif">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
       <div class="room-thread-composer-footer">
-        <button v-if="isScrolledUp" type="button" class="room-thread-latest" aria-label="Latest replies" @click="scrollToLatest">Latest ↓</button>
+        <button type="button" class="room-thread-latest" :class="{ available: isScrolledUp }" :disabled="!isScrolledUp" :aria-hidden="!isScrolledUp" aria-label="Latest replies" @click="scrollToLatest">Latest ↓</button>
         <p v-if="sendError || attachmentError" class="room-thread-composer-error" data-testid="room-thread-send-error">
           {{ sendError || attachmentError }}
         </p>
@@ -157,6 +158,7 @@
           >
             <Paperclip :size="14" aria-hidden="true" />
           </button>
+          <RoomGifPicker :room-identifier="roomIdentifier ?? ''" :disabled="sending" @select="selectedGif = $event" />
           <button type="submit" :disabled="!canSend" :aria-label="sending ? 'Sending reply' : 'Send reply'" data-testid="room-thread-send">
             <ArrowUp :size="16" aria-hidden="true" />
           </button>
@@ -167,6 +169,8 @@
 </template>
 
 <script setup lang="ts">
+import type { RoomGif } from "../../../../../../../../shared/room-expressions.mjs";
+import RoomGifPicker from "./RoomGifPicker.vue";
 import { useDesktopMessageDraft } from "../../../../domain/desktop-message-drafts";
 import RoomContribution from "./RoomContribution.vue";
 import { contributionChanges, workspaceAgentTarget } from "../../../../domain/room-contributions";
@@ -248,7 +252,7 @@ const emit = defineEmits<{
   "reading-latest": [reading: boolean];
   "scroll-position": [parentId: string, top: number, namespace: string];
   "open-image": [imageId: string];
-  "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void];
+  "send-thread-message": [text: string, threadRootId: string, replyToId: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "open-github-event": [url: string];
   "open-agent": [target: AgentModalTarget];
   "open-task": [taskId: string];
@@ -268,6 +272,8 @@ const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
 const { text: draft, quote: quoteTarget, selectedQuoteText, captureSubmittedDraft } = useDesktopMessageDraft(
   () => props.messageNamespace || props.roomIdentifier, () => props.parent.id,
 );
+const selectedGif = ref<RoomGif | null>(null);
+watch(() => [props.messageNamespace, props.roomIdentifier, props.parent.id], () => { selectedGif.value = null; });
 const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const panelElement = ref<HTMLElement | null>(null);
 const bodyElement = ref<HTMLElement | null>(null);
@@ -399,7 +405,7 @@ const composerPlaceholder = computed(() =>
   props.roomIdentifier ? `Reply to ${displayName(props.parent)}...` : "Open a room to reply"
 );
 const canSend = computed(() =>
-  Boolean(props.roomIdentifier && !props.sending && (draft.value.trim() || props.attachmentDrafts.length > 0))
+  Boolean(props.roomIdentifier && !props.sending && (draft.value.trim() || selectedGif.value || props.attachmentDrafts.length > 0))
 );
 const mentionOpen = computed(() => mentionQuery.value !== null && mentionCandidates.value.length > 0);
 const mentionCandidates = computed(() => {
@@ -530,7 +536,8 @@ function handleAttachmentDrop(event: DragEvent): void {
 
 function submitThreadReply(): void {
   const text = draft.value.trim();
-  if ((!text && props.attachmentDrafts.length === 0) || !props.roomIdentifier || props.sending) return;
+  if ((!text && !selectedGif.value && props.attachmentDrafts.length === 0) || !props.roomIdentifier || props.sending) return;
+  const submittedGif = selectedGif.value;
   const clearSubmittedText = captureSubmittedDraft();
   const roomIdentifier = props.roomIdentifier;
   const parentId = props.parent.id;
@@ -546,10 +553,12 @@ function submitThreadReply(): void {
       if (!sent) return;
       const cleared = clearSubmittedText();
       if (props.roomIdentifier !== roomIdentifier || props.parent.id !== parentId) return;
+      if (selectedGif.value === submittedGif) selectedGif.value = null;
       if (cleared) mentionQuery.value = null;
       void nextTick(scrollToLatest);
       void nextTick(() => textareaElement.value?.focus({ preventScroll: true }));
     },
+    submittedGif,
   );
 }
 

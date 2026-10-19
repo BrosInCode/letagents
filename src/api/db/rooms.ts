@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 
-import { generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
+import { defaultRoomDisplayName, generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
 import { isInviteCode, isReservedMainRoomCreationId, normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
 import { db } from "./client.js";
 import { ensureGitHubRepoRoomBinding } from "./git-room-bindings.js";
@@ -80,7 +80,7 @@ export async function getOrCreateCanonicalRoom(
   }
 
   const created_at = new Date().toISOString();
-  const display_name = generateRoomDisplayName(canonicalId);
+  const display_name = defaultRoomDisplayName(canonicalId);
   try {
     await db.transaction(async (tx) => {
       await tx.insert(rooms).values({ id: canonicalId, display_name, created_at });

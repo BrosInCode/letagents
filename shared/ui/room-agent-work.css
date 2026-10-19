@@ -176,3 +176,18 @@
 @media (prefers-reduced-motion: reduce) {
   .room-local-agent-work-pulse, .room-local-agent-work-dots i { animation: none; }
 }
+
+/* Another member's agent: the same row, as a label. Nothing opens from it. */
+.room-local-agent-work[data-remote] {
+  cursor: default;
+}
+
+.room-local-agent-work[data-remote]:active {
+  background: transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .room-local-agent-work[data-remote]:hover {
+    background: transparent;
+  }
+}

@@ -1,4 +1,7 @@
+import { Lexer, Tokenizer, type Token, type Tokens } from "marked";
+
 import { desktopHighlighter } from "./code-highlighter";
+import { sanitizeMarkdownHtml } from "./markdown-sanitize";
 
 export interface DesktopMarkdownOptions {
   highlightQuery?: string;
@@ -9,10 +12,14 @@ export interface DesktopMarkdownOptions {
 }
 
 const MAX_BLOCKQUOTE_DEPTH = 8;
+const MAX_CONTAINER_DEPTH = 16;
+const MAX_INDENT_COLUMNS = 64;
 
 export function renderDesktopMarkdown(value: string, options: DesktopMarkdownOptions = {}): string {
-  if (options.block) return renderBlockMarkdown(value, options);
-  return renderInlineMarkdown(value, options).replace(/\n/g, "<br>");
+  const html = options.block
+    ? renderBlockMarkdown(value, options)
+    : renderInlineMarkdown(value, options).replace(/\n/g, "<br>");
+  return sanitizeMarkdownHtml(html);
 }
 
 export function renderInlineMarkdown(value: string, options: DesktopMarkdownOptions = {}): string {
@@ -25,9 +32,14 @@ export function renderInlineMarkdown(value: string, options: DesktopMarkdownOpti
   };
   // File references are display text here. Only the receipt's verified file actions
   // may open a local workspace; never turn a path supplied in prose into a URL.
-  let tokenized = value.replace(/\u0000/g, "").replace(/`([^`\n]+)`/g, (_match, code: string) =>
-    markdownToken(tokens, `<code>${escapeHtml(options.preservePaths ? code : localFileName(code) ?? code)}</code>`)
-  );
+  let tokenized = value.replace(/\u0000/g, "").replace(/`([^`\n]+)`/g, (_match, code: string) => {
+    // A URL on its own is still a link when an agent wraps it in backticks.
+    // Commands containing URLs and fenced code retain their literal rendering.
+    if (/^https?:\/\/[^\s<>"']+$/i.test(code)) {
+      return linkToken(code, `<code><a href="${escapeAttr(code)}" target="_blank" rel="noopener noreferrer">${escapeHtml(code)}</a></code>`);
+    }
+    return markdownToken(tokens, `<code>${escapeHtml(options.preservePaths ? code : localFileName(code) ?? code)}</code>`);
+  });
   tokenized = tokenized.replace(/\[([^\]\n]+)\]\((<[^>\n]+>|[^)\n]+)\)/g, (match, label: string, target: string) => {
     const path = target.replace(/^<|>$/g, "");
     if (/^https?:\/\/[^\s]+$/.test(path)) {
@@ -76,110 +88,150 @@ function localFileName(value: string, linked = false): string | null {
   try { return decodeURIComponent(name); } catch { return name; }
 }
 
-function renderBlockMarkdown(value: string, options: DesktopMarkdownOptions, quoteDepth = 0): string {
-  const lines = value.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  const blocks: string[] = [];
-  let index = 0;
+// Block structure comes from marked's GFM lexer. Inline text is still rendered by
+// renderInlineMarkdown so that links, file names, mentions, link collection and
+// search highlight behave as before. Raw HTML in a message is shown as text.
+class ChatTokenizer extends Tokenizer {
+  private containerDepth = 0;
 
-  while (index < lines.length) {
-    const line = lines[index]!;
-    const trimmed = line.trim();
-    if (!trimmed) {
-      index += 1;
-      continue;
-    }
-
-    const fence = /^```([A-Za-z0-9_+-]*)\s*$/.exec(trimmed);
-    if (fence) {
-      const code: string[] = [];
-      index += 1;
-      while (index < lines.length && !/^```\s*$/.test(lines[index]!.trim())) {
-        code.push(lines[index]!);
-        index += 1;
-      }
-      if (index < lines.length) index += 1;
-      blocks.push(desktopHighlighter.renderCodeBlock(code.join("\n"), fence[1]));
-      continue;
-    }
-
-    const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed);
-    if (heading) {
-      const level = heading[1]!.length;
-      blocks.push(`<h${level}>${renderInlineMarkdown(heading[2]!, options)}</h${level}>`);
-      index += 1;
-      continue;
-    }
-
-    if (/^(?:-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
-      blocks.push("<hr>");
-      index += 1;
-      continue;
-    }
-
-    if (/^>\s?/.test(trimmed)) {
-      const quote: string[] = [];
-      while (index < lines.length && /^>\s?/.test(lines[index]!.trim())) {
-        quote.push(lines[index]!.trim().replace(/^>\s?/, ""));
-        index += 1;
-      }
-      const quoteBody = quoteDepth >= MAX_BLOCKQUOTE_DEPTH
-        ? `<p>${renderInlineMarkdown(quote.map((value) => value.replace(/^>+\s?/, "")).join("\n"), options).replace(/\n/g, "<br>")}</p>`
-        : renderBlockMarkdown(quote.join("\n"), options, quoteDepth + 1);
-      blocks.push(`<blockquote>${quoteBody}</blockquote>`);
-      continue;
-    }
-
-    const listMatch = listItem(line);
-    if (listMatch) {
-      const ordered = listMatch.ordered;
-      const items: string[] = [];
-      while (index < lines.length) {
-        const item = listItem(lines[index]!);
-        if (!item || item.ordered !== ordered) break;
-        items.push(renderListItem(item.text, options));
-        index += 1;
-      }
-      const tag = ordered ? "ol" : "ul";
-      blocks.push(`<${tag}>${items.map((item) => `<li>${item}</li>`).join("")}</${tag}>`);
-      continue;
-    }
-
-    const paragraph: string[] = [];
-    while (index < lines.length && lines[index]!.trim() && !startsMarkdownBlock(lines[index]!)) {
-      paragraph.push(lines[index]!);
-      index += 1;
-    }
-    if (!paragraph.length) {
-      paragraph.push(line);
-      index += 1;
-    }
-    blocks.push(`<p>${renderInlineMarkdown(paragraph.join("\n"), options).replace(/\n/g, "<br>")}</p>`);
+  // Chat text is often indented by accident. Four leading spaces must not turn a
+  // paragraph into a code block; only fenced code is code.
+  override code(): undefined {
+    return undefined;
   }
 
-  return blocks.join("");
+  // marked lexes nested lists and quotes recursively. Hostile messages with
+  // thousands of levels would overflow the stack, so deeper levels stay text.
+  override list(src: string): Tokens.List | undefined {
+    return this.nested(() => super.list(src));
+  }
+
+  override blockquote(src: string): Tokens.Blockquote | undefined {
+    return this.nested(() => super.blockquote(src));
+  }
+
+  private nested<T>(lex: () => T): T | undefined {
+    if (this.containerDepth >= MAX_CONTAINER_DEPTH) return undefined;
+    this.containerDepth += 1;
+    try {
+      return lex();
+    } finally {
+      this.containerDepth -= 1;
+    }
+  }
 }
 
-function renderListItem(value: string, options: DesktopMarkdownOptions): string {
-  const task = /^\[([ xX])\]\s+(.+)$/.exec(value);
-  if (!task) return renderInlineMarkdown(value, options);
-  const checked = task[1]!.toLowerCase() === "x" ? " checked" : "";
-  return `<input class="markdown-task-checkbox" type="checkbox" disabled${checked}>${renderInlineMarkdown(task[2]!, options)}`;
+const FENCE_LANGUAGE = /^[A-Za-z0-9_+-]*$/;
+
+function renderBlockMarkdown(value: string, options: DesktopMarkdownOptions): string {
+  const source = capIndentation(value.replace(/\r\n/g, "\n").replace(/\r/g, "\n"));
+  let tokens: Token[];
+  try {
+    // Block tokens only: inline text is rendered by renderInlineMarkdown below.
+    tokens = new Lexer({ gfm: true, breaks: true, tokenizer: new ChatTokenizer() }).blockTokens(source, []);
+  } catch {
+    return `<p>${renderTextBlock(source, options)}</p>`;
+  }
+  return renderBlocks(tokens, options, 0);
 }
 
-function listItem(line: string): { ordered: boolean; text: string } | null {
-  const unordered = /^\s*[-*+]\s+(.+)$/.exec(line);
-  if (unordered) return { ordered: false, text: unordered[1]! };
-  const ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
-  return ordered ? { ordered: true, text: ordered[1]! } : null;
+// marked's list lexer re-scans deeply indented text level by level, so a message
+// indented a little more on each line is quadratic. No real Markdown needs more
+// than 64 columns of indentation; deeper indentation collapses to 64 spaces.
+function capIndentation(source: string): string {
+  return source.replace(/^[ \t]{17,}/gm, (indent) => {
+    let columns = 0;
+    for (const char of indent) columns += char === "\t" ? 4 : 1;
+    return columns > MAX_INDENT_COLUMNS ? " ".repeat(MAX_INDENT_COLUMNS) : indent;
+  });
 }
 
-function startsMarkdownBlock(line: string): boolean {
-  const trimmed = line.trim();
-  return /^```/.test(trimmed)
-    || /^#{1,6}\s+/.test(trimmed)
-    || /^(?:-{3,}|\*{3,}|_{3,})$/.test(trimmed)
-    || /^>\s?/.test(trimmed)
-    || Boolean(listItem(line));
+function renderBlocks(tokens: readonly Token[], options: DesktopMarkdownOptions, quoteDepth: number): string {
+  return tokens.map((token) => renderBlock(token, options, quoteDepth)).join("");
+}
+
+function renderBlock(token: Token, options: DesktopMarkdownOptions, quoteDepth: number): string {
+  switch (token.type) {
+    case "space":
+      return "";
+    case "code": {
+      const code = token as Tokens.Code;
+      const lang = (code.lang ?? "").trim().split(/\s+/)[0] ?? "";
+      if (!FENCE_LANGUAGE.test(lang)) return `<p>${renderTextBlock(code.raw, options)}</p>`;
+      return desktopHighlighter.renderCodeBlock(code.text, lang);
+    }
+    case "heading": {
+      const heading = token as Tokens.Heading;
+      const level = Math.min(Math.max(heading.depth, 1), 6);
+      return `<h${level}>${renderTextBlock(heading.text, options)}</h${level}>`;
+    }
+    case "hr":
+      return "<hr>";
+    case "blockquote": {
+      const quote = token as Tokens.Blockquote;
+      const body = quoteDepth >= MAX_BLOCKQUOTE_DEPTH
+        ? `<p>${renderTextBlock(quote.text.replace(/^[ \t]*(?:>[ \t]?)+/gm, ""), options)}</p>`
+        : renderBlocks(quote.tokens, options, quoteDepth + 1);
+      return `<blockquote>${body}</blockquote>`;
+    }
+    case "list":
+      return renderList(token as Tokens.List, options, quoteDepth);
+    case "table":
+      return renderTable(token as Tokens.Table, options);
+    case "paragraph":
+      return `<p>${renderTextBlock((token as Tokens.Paragraph).text, options)}</p>`;
+    case "text":
+      return renderTextBlock((token as Tokens.Text).text, options);
+    default:
+      // html, def and any unknown block: show the source as text.
+      return token.raw.trim() ? `<p>${renderTextBlock(token.raw, options)}</p>` : "";
+  }
+}
+
+function renderList(list: Tokens.List, options: DesktopMarkdownOptions, quoteDepth: number): string {
+  const tag = list.ordered ? "ol" : "ul";
+  const startNumber = Number(list.start);
+  const start = list.ordered && Number.isInteger(startNumber) && startNumber !== 1 ? ` start="${startNumber}"` : "";
+  const items = list.items.map((item) => `<li>${renderListItem(item, options, quoteDepth)}</li>`).join("");
+  return `<${tag}${start}>${items}</${tag}>`;
+}
+
+function renderListItem(item: Tokens.ListItem, options: DesktopMarkdownOptions, quoteDepth: number): string {
+  const blocks = item.tokens.filter((token) => token.type !== "space" && token.type !== "checkbox");
+  const checkbox = item.task
+    ? `<input class="markdown-task-checkbox" type="checkbox" disabled${item.checked ? " checked" : ""}>`
+    : "";
+  return blocks.map((block, index) => {
+    const isTextBlock = block.type === "paragraph" || block.type === "text";
+    if (!isTextBlock) return renderBlock(block, options, quoteDepth);
+    const text = (block as Tokens.Paragraph | Tokens.Text).text;
+    const prefix = index === 0 ? checkbox : "";
+    const inline = renderTextBlock(index === 0 && item.task ? text.replace(/^\s*\[[ xX]\][ \t]*/, "") : text, options);
+    // A list item with one paragraph stays compact, as in a tight list.
+    if (block.type === "text" || blocks.length === 1) return prefix + inline;
+    return `<p>${prefix}${inline}</p>`;
+  }).join("") || checkbox;
+}
+
+function renderTable(table: Tokens.Table, options: DesktopMarkdownOptions): string {
+  const cell = (tag: "th" | "td", value: Tokens.TableCell) => {
+    const align = value.align ? ` class="markdown-align-${value.align}"` : "";
+    return `<${tag}${align}>${renderTextBlock(value.text, options)}</${tag}>`;
+  };
+  const head = `<thead><tr>${table.header.map((value) => cell("th", value)).join("")}</tr></thead>`;
+  const body = table.rows.length
+    ? `<tbody>${table.rows.map((row) => `<tr>${row.map((value) => cell("td", value)).join("")}</tr>`).join("")}</tbody>`
+    : "";
+  return `<div class="markdown-table-scroll"><table>${head}${body}</table></div>`;
+}
+
+/** Inline-render one block of source text: drop indentation, keep single newlines as breaks. */
+function renderTextBlock(value: string, options: DesktopMarkdownOptions): string {
+  const text = value
+    .replace(/[ \t]+$/gm, "")
+    .replace(/^[ \t]+/gm, "")
+    .replace(/\n+$/, "");
+  return renderInlineMarkdown(text, options).replace(/\n/g, "<br>");
 }
 
 function markdownToken(tokens: string[], html: string): string {

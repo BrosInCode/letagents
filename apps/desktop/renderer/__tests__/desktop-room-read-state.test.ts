@@ -248,6 +248,49 @@ describe("unread message counts", () => {
     }), /did not advance/);
   });
 
+  it("excludes hidden GitHub events and recounts when their visibility changes", async () => {
+    const messages = [
+      unreadMessage(22375, { source: "github", sender: "github", text: "PR #1600 opened" }),
+      unreadMessage(22376, { source: "agent", sender: "GitHub", text: "PR #1600 merged" }),
+    ];
+    const cursors: Array<string | null> = [];
+    const input = {
+      readMessageId: "msg_22374", latestMessageId: "msg_22376", ownSenderNames: [], isCurrent: () => true,
+      loadPage: async (after: string | null) => {
+        cursors.push(after);
+        return { messages, hasMore: false };
+      },
+    };
+    const hidden = await countUnreadRoomMessages(input);
+    assert.equal(hidden?.count, 0, "the two GitHub events must not create unread messages");
+    const shown = await countUnreadRoomMessages({ ...input, githubEventsVisible: true, previous: hidden! });
+    assert.equal(shown?.count, 2, "explicitly visible GitHub events still count");
+    const hiddenAgain = await countUnreadRoomMessages({ ...input, githubEventsVisible: false, previous: shown! });
+    assert.equal(hiddenAgain?.count, 0, "a cached visible count cannot survive hiding events");
+    assert.deepEqual(cursors, ["msg_22374", "msg_22374", "msg_22374"]);
+  });
+
+  it("advances over pages of hidden GitHub checks and still counts subsequent replies", async () => {
+    const cursors: Array<string | null> = [];
+    const result = await countUnreadRoomMessages({
+      readMessageId: "msg_1", latestMessageId: "msg_6", ownSenderNames: [], githubEventsVisible: true, isCurrent: () => true,
+      loadPage: async (after) => {
+        cursors.push(after);
+        return after === "msg_1"
+          ? {
+            messages: ["success", "skipped", "neutral"].map((conclusion, index) => unreadMessage(index + 2, {
+              source: "github", sender: "github",
+              text: `Check "build" (GitHub Actions) ${conclusion} in BrosInCode/letagents https://github.com/BrosInCode/letagents/actions/runs/1`,
+            })),
+            hasMore: true,
+          }
+          : { messages: [unreadMessage(6, { threadRootId: "msg_1" })], hasMore: false };
+      },
+    });
+    assert.equal(result?.count, 1, "checks that chat always hides never count, even with GitHub events enabled");
+    assert.deepEqual(cursors, ["msg_1", "msg_4"]);
+  });
+
   it("only treats a loaded, focused and visible room as being read", () => {
     const reading = { hidden: false, focused: true, activeRoomIdentifier: "ROOM_A", snapshotRoomIdentifier: "room_a" };
     assert.equal(isRoomBeingRead(reading), true);

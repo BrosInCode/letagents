@@ -42,6 +42,7 @@
       :github-events-available="githubEventsAvailable"
       :github-events-visible="githubEventsVisible"
       :storage-busy="storageBusy"
+      :storage-feedback="storageFeedback"
       :search-summary="searchSummary"
       :search-results-count="searchResults.length" @show-search-result="revealRoomMessage"
       @copy-room-link="copyRoomLink"
@@ -103,7 +104,7 @@
       :sending="sendingMessage"
       :send-error="sendError"
       :participants="roomParticipants"
-      :presence="roomPresence"
+      :presence="presence"
       v-bind="{ roomAgentWork, roomAgentWorkStatus, roomAgentWorkTruncated, hasOlderMessages, loadingOlderMessages, olderMessagesError }"
       :local-agent-work="localAgentWork"
       :delivery-receipts-by-message="deliveryReceiptsByMessage"
@@ -114,16 +115,13 @@
       :continuation-repair-keys="continuationRepairingKeys"
       :room-delivery-skip-keys="roomDeliverySkippingKeys"
       :revealed-message-id="revealedMessageId"
-      :permission-approvals="pendingPermissionApprovals"
-      :permission-error="composerPermissionError"
-      :resolving-permission-ids="resolvingComposerPermissionIds"
       :reasoning-sessions="reasoningSessions"
       :tasks="tasks"
       :supervisor-entries="supervisorEntries"
       :correctable-agents="correctableAgents"
       :search-query="searchQuery"
       :active-search-message-id="activeSearchMessageId"
-      :initial-scroll-top="initialChatScrollTop ?? null"
+      :initial-scroll-position="initialChatScrollPosition ?? null"
       @send-message="sendRoomMessage"
       @discard-attachment="discardAttachment"
       @load-older="loadOlderMessages"
@@ -132,13 +130,11 @@
       @open-agent-detail="openAgentDetailFromParticipant"
       @open-agent-correction="openAgentCorrectionFromComposer"
       @open-add-agent="openAddAgentModal"
-      @open-permission-detail="openComposerPermissionDetail"
       @restore-conversation="restoreAgentConversation"
       @skip-delivery="skipRoomDelivery"
       @retry-delivery="retryRoomAgentDelivery"
       @reveal-message="revealRoomMessage"
       @message-reveal-unavailable="emit('message-reveal-unavailable', $event)"
-      @resolve-permission="resolveComposerPermission"
       @stop-agent-turn="stopAgentTurnForApproval"
       @post-agent-answer-now="postAgentAnswerNow"
       @open-events="openEventsTab"
@@ -157,7 +153,7 @@
         :tasks="tasks"
         :board-settings="boardSettings"
         :can-edit-tasks="canManageRoomBoard(room.role)"
-        :presence="roomPresence"
+        :presence="presence"
         :workers="workers"
         :supervisor-entries="supervisorEntries"
         :selected-task-id="boardSelectedTaskId"
@@ -200,7 +196,7 @@
         :recent-activity="recentActivity"
         :participants="roomParticipants"
         :live-cleared-count="participantHiddenCount"
-        :presence="roomPresence"
+        :presence="presence"
         :reasoning-sessions="reasoningSessions"
         :room-git-room="room.gitRoom"
         :room-identifier="room.identifier"
@@ -215,11 +211,12 @@
         :workers="workers"
         :supervisor-entries="supervisorEntries"
         :agent-projections="agentInspectorProjections"
+        :agent-roster-state="agentRosterState"
         @open-reasoning="openReasoningInspector"
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetailRequest"
         @open-agent-correction="openAgentCorrectionOrInspector"
-        @refresh-room="emit('refresh-room')"
+        @refresh-room="refreshRoomAgents"
         @reveal-message="revealRecordedWorkMessage"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
       />
@@ -275,7 +272,6 @@
       :room-display-name="room.displayName || room.name"
       :request-version="selectedAgentDetailRequestVersion"
       :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId }"
-      :managed-sessions="roomManagedAgentSessions"
       :reasoning-sessions="reasoningSessions"
       :correction-request="agentInspectorCorrectionRequest"
       @close="closeAgentDetail"
@@ -283,7 +279,6 @@
       @live-selected="openAgentInspectorLive"
       @live-dismissed="stopAgentInspectorLive"
       @action="runAgentInspectorAction"
-      @session-updated="applyAgentInspectorParticipantSessionUpdate"
       @open-reasoning="openReasoningFromAgentDetail"
       @presentation-change="agentInspectorCompact = $event"
       @work-selected="openAgentInspectorWork"
@@ -312,15 +307,17 @@
       :repo-status="managedAgentRepoStatus"
       @close="addAgentModalOpen = false"
       @choose-worktree="openAgentWorktree"
-      @managed-session-started="upsertManagedAgentSession"
     />
   </section>
 </template>
 
 <script setup lang="ts">
+import type { ChatScrollPosition } from "../../../domain/chat-scroll";
+import { mergeRoomResponseParticipants } from "../../../domain/room-response-participants";
+import { useRoomResponseParticipants } from "../../../composables/useRoomResponseParticipants";
 import { roomAgentRecoveryAction } from "../../../domain/room-agent-delivery";
 import { GitBranch } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowReadonly, toRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, readonly, ref, shallowReadonly, toRef, watch } from "vue";
 import type {
   DesktopActivityEntry,
   DesktopAgentProvider,
@@ -328,8 +325,6 @@ import type {
   DesktopBoardSettingsSummary,
   DesktopFocusRoomInfo,
   DesktopGitHubEventsPage,
-  DesktopManagedAgentPermissionDecisionBehavior,
-  DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopRoomInfo,
   DesktopRoomAgentDeliveryAttention,
@@ -355,20 +350,11 @@ import { useDesktopActionToasts } from "../../../composables/useDesktopActionToa
 import type { FocusRoomConcludedEvent } from "../../../domain/focus-room-conclusion";
 import { isLocalGitRoom } from "../../../domain/git-rooms";
 import {
-  activeManagedAgentWorkIndicators,
-  managedAgentSessionDisplayName,
-  managedAgentSessionMatchesRoom,
   managedAgentRepoStatusForRoom,
-  mergeDesktopManagedAgentParticipants,
   mergeDesktopSupervisorAgentParticipants,
-  mergeDesktopManagedAgentPresence,
   mergeReachableAgentPresenceParticipants,
-  pendingManagedAgentPermissionApprovals,
-  supervisedAgentWorkIndicators,
+  supervisedAgentWorkIndicators, remoteAgentWorkIndicators,
   managedAgentRootPathForRoom,
-  type ManagedAgentPermissionApproval,
-  managedAgentSessionListsEqual,
-  withUpsertedManagedAgentSession,
 } from "../../../domain/managed-agents";
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
@@ -390,11 +376,7 @@ import {
   type AgentInspectorSupervisorEntryUpdate,
   type SupervisorEntriesResource,
 } from "../../../domain/agent-inspector-identity";
-import {
-  isCurrentAgentInspectorParticipantSessionUpdate,
-  type AgentInspectorParticipantSessionUpdate,
-} from "../../../domain/agent-inspector-participant";
-import { agentInspectorActionErrorMessage } from "../../../domain/agent-inspector-presentation";
+import { agentInspectorActionErrorMessage, actionProgressMessage, actionSuccessMessage } from "../../../domain/agent-inspector-presentation";
 import {
   agentInspectorActionStateForEntry,
   clearAgentInspectorActionStateIfMatching,
@@ -449,7 +431,7 @@ import {
 } from "../../../domain/supervisor-entries-resource";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
-import { managedAgentSessionsKey } from "./add-agent/managed-agent-sessions-context";
+import { supervisorEntriesKey } from "./add-agent/supervisor-entries-context";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
@@ -495,7 +477,6 @@ import { desktopIpc } from "../../../ipc/index.js";
 import { hostApprovalStopsTurn } from "./room-chat/host-approval-presentation";
 import { hostApprovalIdentity, hostApprovalRoom, refreshHostApprovals } from "./room-chat/host-approvals";
 import { provideRoomWakeRules, useRoomWakeRules } from "../../../composables/useRoomWakeRules";
-
 const props = defineProps<{
   viewerLogin?: string | null;
   sidebarMode: SidebarMode;
@@ -527,12 +508,10 @@ const props = defineProps<{
   notificationRevealNonce?: number;
   attentionIntent?: AttentionNavigationIntent | null;
   attention?: { count: number; pulse: boolean };
-  initialChatScrollTop?: number | null;
+  initialChatScrollPosition?: ChatScrollPosition | null;
   onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
 const { pushActionToast } = useDesktopActionToasts();
-const notifiedManagedAgentFailures = new Set<string>();
-
 const emit = defineEmits<{
   "attention-opened": [];
   "cycle-sidebar": [];
@@ -542,7 +521,7 @@ const emit = defineEmits<{
   "refresh-room": [snapshot?: DesktopRoomSnapshot];
   "open-focus-room": [roomIdentifier: string];
   "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
-  "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
+  "chat-scroll-position": [roomIdentifier: string, scrollTop: ChatScrollPosition];
   "connect-project": [];
   "choose-worktree": [rootPath: string];
   "open-repo-root": [rootPath: string];
@@ -552,7 +531,6 @@ const emit = defineEmits<{
   "message-reveal-unavailable": [messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"];
   "open-inbox": [];
 }>();
-
 const roomRef = toRef(props, "room");
 const messagesRef = toRef(props, "messages");
 const reasoningSessionsRef = toRef(props, "reasoningSessions");
@@ -601,15 +579,21 @@ const boardGovernanceSection = ref<"pending" | null>(null);
 const activityHistoryRequest = ref(0);
 const artifactTimelineTaskFilterId = ref<string | null>(null);
 const storageBusy = ref(false);
+const storageFeedback = ref<{ message: string; error: boolean } | null>(null);
+watch(() => props.room.identifier, () => { storageFeedback.value = null; });
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const environmentPanelOpen = ref(readEnvironmentPanelOpen(props.room.identifier));
 const refreshedEnvironmentRepoStatus = ref<RepoStatus | null>(null);
-const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
 const agentPauseRequests = useAgentPauseRequests(supervisorEntries);
 const supervisorEntriesState = ref<SupervisorEntriesResource["state"]>("loading");
 const supervisorEntriesError = ref<string | null>(null);
 const supervisorEntriesHaveLoaded = ref(false);
+const agentRosterState = computed(() => {
+  if (supervisorEntriesState.value === "error" || props.sourceStates?.presence.status === "error") return "error";
+  if (props.roomLoading || supervisorEntriesState.value === "loading") return "loading";
+  return supervisorEntriesState.value;
+});
 const supervisorEntriesUpdatedAt = ref<string | null>(null);
 const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
 let supervisorStatusRequestToken = 0;
@@ -668,6 +652,8 @@ const agentInspectorProjections = computed(() => {
     continuationRepairAvailable: continuationRepairAvailable.value,
     roomDeliverySkipAvailable: roomDeliverySkipAvailable.value,
     resourceFreshness: supervisorEntriesResourceFreshness(supervisorEntriesState.value),
+    workResource: agentInspectorWorkResource.value,
+    daemonGeneration: supervisorStatus.value?.generation ?? null,
     mentionInsertTextByEntryId: agentMentionInsertTextByEntryId.value,
     deliveryRetryingKeys: deliveryRetryingKeys.value,
     pauseRequestedEntryIds: agentPauseRequests.entryIds.value,
@@ -715,21 +701,18 @@ const selectedAgentInspectorWorkArtifacts = computed(() => {
   return projection ? agentInspectorWorkArtifacts(projection.assignedWork, props.roomArtifacts) : [];
 });
 const deliveryReceiptsByMessage = computed(() => roomMessageDeliveryReceipts(supervisorEntries.value));
-provide(managedAgentSessionsKey, {
-  sessions: shallowReadonly(managedAgentSessions),
-  refresh: refreshManagedAgentSessions,
-  upsert: upsertManagedAgentSession,
+provide(supervisorEntriesKey, {
+  entries: shallowReadonly(supervisorEntries),
+  state: readonly(supervisorEntriesState),
+  error: readonly(supervisorEntriesError),
+  refresh: refreshSupervisorEntries,
 });
-const composerPermissionError = ref<string | null>(null);
-const resolvingComposerPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
-let managedAgentSessionsRefreshTimer: number | null = null;
-let managedAgentSessionsRefreshRequestId = 0;
-let managedAgentSessionsMutationVersion = 0;
+let supervisorEntriesRefreshTimer: number | null = null;
+let supervisorEntriesRefreshRequestId = 0;
 let supervisorEntriesMutationVersion = 0;
-let managedAgentSessionsRefreshInFlight: Promise<void> | null = null;
-let managedAgentSessionsRefreshQueued = false;
-let managedAgentSessionsRefreshOwnerActive = true;
-let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
+let supervisorEntriesRefreshInFlight: Promise<void> | null = null;
+let supervisorEntriesRefreshQueued = false;
+let supervisorEntriesRefreshOwnerActive = true;
 let unsubscribeSupervisorActivity: (() => void) | null = null;
 let unsubscribeSupervisorAgentStream: (() => void) | null = null;
 let unsubscribeSupervisorRetirement: (() => void) | null = null;
@@ -769,7 +752,6 @@ const {
   showRoomNotification,
   watchRoomNotifications,
 } = useDesktopRoomPreferences(() => props.room.identifier);
-
 const {
   sendingMessage,
   sendError,
@@ -874,11 +856,6 @@ const effectiveEnvironmentRepoStatus = computed(() => {
   if (!refreshed || refreshed.rootPath !== props.repoStatus.rootPath) return props.repoStatus;
   return refreshed;
 });
-const roomManagedAgentSessions = computed(() =>
-  managedAgentSessions.value.filter((session) =>
-    managedAgentSessionMatchesRoom(session, props.room.identifier)
-  )
-);
 const managedAgentRepoStatus = computed(() =>
   managedAgentRepoStatusForRoom(props.repoStatus, props.room, props.gitRoomMatchesActiveRepo)
 );
@@ -892,20 +869,13 @@ const managedAgentRepoRootPath = computed(() =>
 );
 // Room agents by Needs-you answer handle, for surfaces outside the chat view.
 const roomAttentionResponseNames = computed(() =>
-  attentionResponseAgentNames([...roomParticipants.value, ...roomPresence.value])
-);
-const roomPresence = computed(() =>
-  mergeDesktopManagedAgentPresence(props.presence, roomManagedAgentSessions.value, props.room.identifier)
+  attentionResponseAgentNames([...roomParticipants.value, ...props.presence])
 );
 const roomParticipants = computed(() =>
   mergeDesktopSupervisorAgentParticipants(
-    mergeDesktopManagedAgentParticipants(
-      // Message history can lack canonical agent keys. Enrich its identities
-      // before adding local projections, otherwise one agent becomes two rows.
-      mergeReachableAgentPresenceParticipants(props.participants, roomPresence.value, props.room.identifier),
-      roomManagedAgentSessions.value,
-      props.room.identifier,
-    ),
+    // Message history can lack canonical agent keys. Enrich its identities
+    // before adding local projections, otherwise one agent becomes two rows.
+    mergeReachableAgentPresenceParticipants(props.participants, props.presence, props.room.identifier),
     supervisorEntries.value,
     props.room.identifier,
   )
@@ -932,19 +902,18 @@ const agentMentionInsertTextByEntryId = computed(() => {
   }
   return result;
 });
+const pendingResponseParticipants = useRoomResponseParticipants(() => ({
+  roomIdentifier: props.room.identifier, loading: props.roomLoading, messages: props.messages,
+  entries: supervisorEntries.value, presence: props.presence,
+  fresh: supervisorEntriesResourceFreshness(supervisorEntriesState.value) === "fresh",
+}));
 const localAgentWork = computed(() =>
-  [
+  mergeRoomResponseParticipants([
     ...waitingAgentIndicators(supervisorEntries.value, props.room.identifier),
-    ...activeManagedAgentWorkIndicators(
-      roomManagedAgentSessions.value.filter((session) => !session.supervisorEntryId),
-      props.room.identifier,
-    ),
-    ...supervisedAgentWorkIndicators(supervisorEntries.value, roomPresence.value, props.room.identifier,
+    ...supervisedAgentWorkIndicators(supervisorEntries.value, props.presence, props.room.identifier,
       supervisorEntriesResourceFreshness(supervisorEntriesState.value)),
-  ]
-);
-const pendingPermissionApprovals = computed(() =>
-  pendingManagedAgentPermissionApprovals(roomManagedAgentSessions.value, props.room.identifier)
+  ], [...pendingResponseParticipants.value, /* other members' agents, last */ ...remoteAgentWorkIndicators(props.presence,
+    supervisorEntries.value)], props.messages)
 );
 function openBoardTask(taskId: string): void {
   boardSelectedTaskId.value = taskId;
@@ -962,20 +931,17 @@ watch(() => props.room.identifier, () => {
   agentInspectorWorkSourceMessageId.value = null;
   activeTab.value = readRoomActiveTab(props.room.identifier);
   refreshedEnvironmentRepoStatus.value = null;
-  managedAgentSessions.value = [];
   supervisorEntries.value = [];
   supervisorEntriesState.value = "loading";
   supervisorEntriesError.value = null;
   supervisorEntriesHaveLoaded.value = false;
   supervisorEntriesUpdatedAt.value = null;
-  composerPermissionError.value = null;
-  resolvingComposerPermissionIds.value = {};
   boardSelectedTaskId.value = null; boardGovernanceSection.value = null;
   githubEventsVisible.value = readGitHubEventsVisible(props.room.identifier);
   environmentPanelOpen.value = readEnvironmentPanelOpen(props.room.identifier);
   supervisorStateLastRepairAtMs = null;
-  void refreshManagedAgentSessions();
-  scheduleManagedAgentSessionsRepair();
+  void refreshSupervisorEntries();
+  scheduleSupervisorEntriesRepair();
 }, { immediate: true });
 
 watch(() => props.room.identifier, supervisorStateSubscription.sync, { flush: "sync" });
@@ -986,7 +952,7 @@ watch(() => props.repoStatus, () => {
 
 watch(addAgentModalOpen, (open) => {
   if (open) {
-    void refreshManagedAgentSessions();
+    void refreshSupervisorEntries();
   }
 });
 
@@ -1070,10 +1036,10 @@ onBeforeUnmount(() => {
   agentInspectorWorkRequestToken += 1;
   agentInspectorDetailRequest.reset();
   agentInspectorBackgroundRefresh.reset();
-  managedAgentSessionsRefreshOwnerActive = false;
-  managedAgentSessionsRefreshQueued = false;
-  managedAgentSessionsRefreshRequestId += 1;
-  stopManagedAgentSessionsRefreshTimer();
+  supervisorEntriesRefreshOwnerActive = false;
+  supervisorEntriesRefreshQueued = false;
+  supervisorEntriesRefreshRequestId += 1;
+  stopSupervisorEntriesRefreshTimer();
   supervisorStatusRequestToken += 1;
   agentInspectorSettingsRequestToken += 1;
   agentInspectorRoomMoveRequestToken += 1;
@@ -1081,9 +1047,7 @@ onBeforeUnmount(() => {
     window.clearTimeout(agentInspectorRoomMoveRecoveryTimer);
     agentInspectorRoomMoveRecoveryTimer = null;
   }
-  document.removeEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
-  unsubscribeManagedAgentSessionUpdate?.();
-  unsubscribeManagedAgentSessionUpdate = null;
+  document.removeEventListener("visibilitychange", handleSupervisorEntriesVisibilityChange);
   unsubscribeSupervisorActivity?.();
   unsubscribeSupervisorActivity = null;
   unsubscribeSupervisorAgentStream?.();
@@ -1096,24 +1060,7 @@ onBeforeUnmount(() => {
 });
 
 onMounted(() => {
-  document.addEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
-  unsubscribeManagedAgentSessionUpdate = desktopIpc.workers?.onManagedAgentSessionUpdate?.((session) => {
-    if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
-      return;
-    }
-    upsertManagedAgentSession(session);
-    if (session.failure) {
-      const failureKey = `${session.id}:${session.failure.occurredAt}:${session.failure.code}`;
-      if (!notifiedManagedAgentFailures.has(failureKey)) {
-        notifiedManagedAgentFailures.add(failureKey);
-        pushActionToast(
-          `${managedAgentSessionDisplayName(session)} could not reply: ${session.failure.message}`,
-          "error",
-          8_000,
-        );
-      }
-    }
-  }) || null;
+  document.addEventListener("visibilitychange", handleSupervisorEntriesVisibilityChange);
   unsubscribeSupervisorActivity = desktopIpc.supervisor?.onActivity?.((push) => {
     const next = foldSupervisorActivityPush(supervisorEntries.value, props.room.identifier, push);
     if (next === supervisorEntries.value) return;
@@ -1178,7 +1125,7 @@ function acceptSupervisorRetirementEvent(event: DesktopSupervisorRetirementEvent
   if (settled === action) return;
   retirementStatusCheckOperationId = null;
   agentInspectorActionState.value = settled;
-  void refreshManagedAgentSessions();
+  void refreshSupervisorEntries();
 }
 
 /** State pushes are the missed-event/reconnect fallback. Completion is checked
@@ -1207,7 +1154,7 @@ async function reconcilePendingRetirementFromDurableState(snapshot: DesktopSuper
         entryId: action.entryId,
         daemonGeneration: snapshot.daemonGeneration,
       });
-      void refreshManagedAgentSessions();
+      void refreshSupervisorEntries();
     }
   } catch {
     // The explicit completion/failure event remains primary. A status read can
@@ -1218,7 +1165,7 @@ async function reconcilePendingRetirementFromDurableState(snapshot: DesktopSuper
   }
 }
 
-function rememberChatScrollPosition(scrollTop: number): void {
+function rememberChatScrollPosition(scrollTop: ChatScrollPosition): void {
   emit("chat-scroll-position", props.room.identifier, scrollTop);
 }
 
@@ -1236,7 +1183,7 @@ const tabs = computed<RoomTab[]>(() => {
   if (showEventsTab.value) {
     nextTabs.push({
       id: "events",
-      label: "Events",
+      label: "Activity",
       count: null,
       indicator: eventsUnseenCount.value > 0 && activeTab.value !== "events"
         ? {
@@ -1294,7 +1241,6 @@ function openArtifactsForTask(taskId: string): void {
   activityHistoryRequest.value += 1;
   activeTab.value = "activity";
 }
-
 
 function toggleGitHubEventsVisible(): void {
   githubEventsVisible.value = !githubEventsVisible.value;
@@ -1356,10 +1302,23 @@ async function publishLocalRoom(): Promise<void> {
   const bridge = desktopIpc.chatStorage;
   if (!bridge?.publishLocalRoom || storageBusy.value) return;
   storageBusy.value = true;
+  storageFeedback.value = null;
+  const roomIdentifier = props.room.identifier;
   try {
-    await bridge.publishLocalRoom(props.room.identifier);
-    const snapshot = await desktopIpc.room?.getSnapshot?.(props.room.identifier);
+    const result = await bridge.publishLocalRoom(roomIdentifier);
+    if (props.room.identifier !== roomIdentifier) return;
+    const snapshot = await desktopIpc.room?.getSnapshot?.(roomIdentifier);
+    if (props.room.identifier !== roomIdentifier) return;
     emit("refresh-room", snapshot);
+    await nextTick();
+    if (props.room.identifier !== roomIdentifier && props.room.identifier !== snapshot?.roomIdentifier) return;
+    const skipped = result.skippedCount + result.skippedTaskCount;
+    storageFeedback.value = { error: false, message: `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks.${skipped ? ` ${skipped} items remain local and can be retried.` : ""} Storage remains Local until you choose Cloud.` };
+  } catch (error) {
+    if (props.room.identifier === roomIdentifier) storageFeedback.value = {
+      error: true,
+      message: error instanceof Error ? error.message : "Local chat could not be published. Your history is still on this device.",
+    };
   } finally {
     storageBusy.value = false;
   }
@@ -1416,7 +1375,7 @@ async function retryRoomAgentDelivery(agentId: string, sourceMessageId: string):
       executionGenerationId,
       agentSessionId,
     });
-    await refreshManagedAgentSessions();
+    await refreshSupervisorEntries();
     const refreshed = supervisorEntries.value.find((candidate) => candidate.id === agentId);
     return refreshed?.deliveryReceipts?.find((candidate) => candidate.sourceMessageId === sourceMessageId);
   });
@@ -1610,7 +1569,7 @@ function refreshSupervisorStatus(requiredGeneration = 0): Promise<DesktopSupervi
   const tracked = refresh.finally(() => {
     if (supervisorStatusRefreshInFlight === tracked) supervisorStatusRefreshInFlight = null;
     const trailingGeneration = supervisorStatusTrailingRefreshGeneration({
-      ownerActive: managedAgentSessionsRefreshOwnerActive,
+      ownerActive: supervisorEntriesRefreshOwnerActive,
       settledGeneration: supervisorStatus.value?.generation ?? 0,
       requiredGeneration: supervisorStatusRequiredGeneration,
       lastAttemptedGeneration: supervisorStatusTrailingRefreshAttemptGeneration,
@@ -1629,38 +1588,47 @@ function refreshSupervisorStatus(requiredGeneration = 0): Promise<DesktopSupervi
   return tracked;
 }
 
-function refreshManagedAgentSessions(): Promise<void> {
-  if (!managedAgentSessionsRefreshOwnerActive) return Promise.resolve();
-  if (managedAgentSessionsRefreshInFlight) {
-    managedAgentSessionsRefreshQueued = true;
-    return managedAgentSessionsRefreshInFlight;
+function refreshSupervisorEntries(): Promise<void> {
+  if (!supervisorEntriesRefreshOwnerActive) return Promise.resolve();
+  if (supervisorEntriesRefreshInFlight) {
+    supervisorEntriesRefreshQueued = true;
+    return supervisorEntriesRefreshInFlight;
   }
-  const refresh = performManagedAgentSessionsRefresh();
-  managedAgentSessionsRefreshInFlight = refresh.finally(() => {
+  const refresh = performSupervisorEntriesRefresh();
+  supervisorEntriesRefreshInFlight = refresh.finally(() => {
     supervisorStateLastRepairAtMs = Date.now();
-    managedAgentSessionsRefreshInFlight = null;
-    if (managedAgentSessionsRefreshOwnerActive && managedAgentSessionsRefreshQueued) {
-      managedAgentSessionsRefreshQueued = false;
-      void refreshManagedAgentSessions();
+    supervisorEntriesRefreshInFlight = null;
+    if (supervisorEntriesRefreshOwnerActive && supervisorEntriesRefreshQueued) {
+      supervisorEntriesRefreshQueued = false;
+      void refreshSupervisorEntries();
     } else {
-      scheduleManagedAgentSessionsRepair();
+      scheduleSupervisorEntriesRepair();
     }
   });
-  return managedAgentSessionsRefreshInFlight;
+  return supervisorEntriesRefreshInFlight;
 }
 
 function retryAgentInspectorState(): void {
   if (!selectedAgentDetailRequest.value) return;
   supervisorEntriesState.value = supervisorEntriesHaveLoaded.value ? "refreshing" : "loading";
   supervisorEntriesError.value = null;
-  void refreshManagedAgentSessions();
+  void refreshSupervisorEntries();
 }
 
-async function performManagedAgentSessionsRefresh(): Promise<void> {
-  if (!managedAgentSessionsRefreshOwnerActive || !props.room.identifier) return;
+function refreshRoomAgents(): void {
+  supervisorEntriesState.value = supervisorEntriesHaveLoaded.value ? "refreshing" : "loading";
+  supervisorEntriesError.value = null;
+  // Renew the existing subscription so Retry also repairs a failed daemon
+  // read, even when its previous subscription still appeared fresh.
+  supervisorStateSubscription.sync();
+  void refreshSupervisorEntries();
+  emit("refresh-room");
+}
+
+async function performSupervisorEntriesRefresh(): Promise<void> {
+  if (!supervisorEntriesRefreshOwnerActive || !props.room.identifier) return;
   const roomIdentifier = props.room.identifier;
-  const requestId = ++managedAgentSessionsRefreshRequestId;
-  const mutationVersion = managedAgentSessionsMutationVersion;
+  const requestId = ++supervisorEntriesRefreshRequestId;
   const supervisorMutationVersion = supervisorEntriesMutationVersion;
   if (!supervisorEntriesHaveLoaded.value) {
     supervisorEntriesState.value = "loading";
@@ -1671,10 +1639,7 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
     lastSnapshotAtMs: supervisorStateSubscription.state().lastSnapshotAtMs,
     nowMs: Date.now(),
   });
-  const [sessions, entriesResult] = await Promise.all([
-    desktopIpc.workers?.listManagedAgentSessions
-      ? desktopIpc.workers.listManagedAgentSessions(roomIdentifier).catch(() => null)
-      : Promise.resolve(null),
+  const [entriesResult] = await Promise.all([
     pollSupervisor && desktopIpc.supervisor?.listAgents
       ? desktopIpc.supervisor.listAgents(roomIdentifier)
         .then((entries) => ({ ok: true as const, entries }))
@@ -1688,24 +1653,10 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
       : Promise.resolve(supervisorStatus.value),
   ]);
   if (
-    !managedAgentSessionsRefreshOwnerActive
+    !supervisorEntriesRefreshOwnerActive
     || props.room.identifier !== roomIdentifier
-    || requestId !== managedAgentSessionsRefreshRequestId
+    || requestId !== supervisorEntriesRefreshRequestId
   ) return;
-  if (sessions && mutationVersion === managedAgentSessionsMutationVersion) {
-    if (!managedAgentSessionListsEqual(managedAgentSessions.value, sessions)) {
-      managedAgentSessions.value = sessions;
-    }
-  } else if (!sessions && mutationVersion === managedAgentSessionsMutationVersion) {
-    const scoped = managedAgentSessions.value.filter((session) =>
-      managedAgentSessionMatchesRoom(session, roomIdentifier)
-    );
-    // Identity-stable like the success path: repeated poll errors must not
-    // re-render the shell every tick.
-    if (scoped.length !== managedAgentSessions.value.length) {
-      managedAgentSessions.value = scoped;
-    }
-  }
   if (entriesResult.ok) {
     if (supervisorMutationVersion === supervisorEntriesMutationVersion) {
       if (JSON.stringify(entriesResult.entries) !== JSON.stringify(supervisorEntries.value)) {
@@ -1723,33 +1674,17 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
     supervisorEntriesUpdatedAt.value = new Date().toISOString();
     supervisorEntriesState.value = "ready";
     supervisorEntriesError.value = null;
-  } else if (!supervisorStateSubscription.state().active || !supervisorEntriesHaveLoaded.value) {
+  } else if (!supervisorEntriesHaveLoaded.value || supervisorStateSubscriptionNeedsRepair({
+    active: supervisorStateSubscription.state().active,
+    lastSnapshotAtMs: supervisorStateSubscription.state().lastSnapshotAtMs,
+    nowMs: Date.now(),
+  })) {
     // Keep the last successfully loaded entries. Consumers receive an error
     // resource instead of an empty list, so supervised identity cannot be
     // reclassified as external during a transient daemon failure.
     supervisorEntriesState.value = "error";
     supervisorEntriesError.value = entriesResult.error;
   }
-}
-
-function upsertManagedAgentSession(session: DesktopManagedAgentSession): void {
-  managedAgentSessionsMutationVersion += 1;
-  managedAgentSessions.value = withUpsertedManagedAgentSession(
-    managedAgentSessions.value,
-    session,
-  );
-}
-
-function applyAgentInspectorParticipantSessionUpdate(
-  update: AgentInspectorParticipantSessionUpdate,
-): void {
-  if (!isCurrentAgentInspectorParticipantSessionUpdate(update, {
-    roomIdentifier: props.room.identifier,
-    inspectorRequestVersion: selectedAgentDetailRequestVersion.value,
-    selection: selectedAgentDetailTarget.value,
-    sessions: roomManagedAgentSessions.value,
-  })) return;
-  upsertManagedAgentSession(update.session);
 }
 
 function upsertSupervisorEntry(update: AgentInspectorSupervisorEntryUpdate): void {
@@ -1767,38 +1702,6 @@ function upsertSupervisorEntry(update: AgentInspectorSupervisorEntryUpdate): voi
   supervisorEntriesUpdatedAt.value = new Date().toISOString();
   supervisorEntriesState.value = "ready";
   supervisorEntriesError.value = null;
-}
-
-async function resolveComposerPermission(
-  approval: ManagedAgentPermissionApproval,
-  behavior: DesktopManagedAgentPermissionDecisionBehavior,
-): Promise<void> {
-  if (resolvingComposerPermissionIds.value[approval.id]) return;
-  resolvingComposerPermissionIds.value = {
-    ...resolvingComposerPermissionIds.value,
-    [approval.id]: behavior,
-  };
-  composerPermissionError.value = null;
-  try {
-    const result = await desktopIpc.workers.resolveManagedAgentPermission({
-      requestId: approval.request.id,
-      sessionId: approval.request.sessionId,
-      behavior,
-      message: behavior === "deny" ? "Denied from LetAgents Desktop." : null,
-    });
-    if (result.session) {
-      upsertManagedAgentSession(result.session);
-    } else {
-      await refreshManagedAgentSessions();
-    }
-  } catch (error) {
-    composerPermissionError.value = error instanceof Error
-      ? error.message
-      : "Could not resolve this permission request.";
-  } finally {
-    const { [approval.id]: _ignored, ...remaining } = resolvingComposerPermissionIds.value;
-    resolvingComposerPermissionIds.value = remaining;
-  }
 }
 
 /**
@@ -1833,64 +1736,33 @@ function postAgentAnswerNow(entryId: string, sourceMessageId: string | null): vo
   void runAgentInspectorAction({ entryId, roomId: entry.roomId, kind: "stop_turn" });
 }
 
-function openComposerPermissionDetail(approval: ManagedAgentPermissionApproval): void {
-  const target = agentTargetForManagedSession(approval.session);
-  if (approval.session.supervisorEntryId) {
-    openAgentDetailRequest({
-      kind: "supervised",
-      supervisorEntryId: approval.session.supervisorEntryId,
-      target,
-    });
-    return;
-  }
-  openAgentDetailFromParticipant(target);
-}
-
-function agentTargetForManagedSession(session: DesktopManagedAgentSession): AgentModalTarget {
-  const displayName = managedAgentSessionDisplayName(session);
-  return {
-    messageId: null,
-    clientMessageId: null,
-    messageSource: null,
-    actorLabel: session.actorLabel,
-    displayName,
-    ownerAttribution: ownerAttributionLabel(session.ownerLabel),
-    ideLabel: session.ideLabel,
-    sender: session.actorLabel || displayName,
-    agentKey: session.agentKey,
-    agentSessionId: session.agentSessionId,
-  };
-}
-
-function scheduleManagedAgentSessionsRepair(): void {
-  stopManagedAgentSessionsRefreshTimer();
-  if (!props.room.identifier || (!desktopIpc.workers?.listManagedAgentSessions && !desktopIpc.supervisor?.listAgents)) return;
+function scheduleSupervisorEntriesRepair(): void {
+  stopSupervisorEntriesRefreshTimer();
+  if (!props.room.identifier || !desktopIpc.supervisor?.listAgents) return;
   const delayMs = supervisorStateRepairDelayMs({
     lastRepairAtMs: supervisorStateLastRepairAtMs,
     nowMs: Date.now(),
   });
-  managedAgentSessionsRefreshTimer = window.setTimeout(() => {
-    managedAgentSessionsRefreshTimer = null;
+  supervisorEntriesRefreshTimer = window.setTimeout(() => {
+    supervisorEntriesRefreshTimer = null;
     // A hidden window has no observer that needs repaired projections. Foreground
     // transition performs the repair and establishes the next deadline.
     if (shouldSkipPollTick({ hidden: document.hidden })) return;
-    // Managed-session pushes are a different channel from daemon state
-    // snapshots. Always repair that population on the bounded cadence;
-    // performManagedAgentSessionsRefresh polls daemon entries/status only if
-    // their own subscription heartbeat is stale.
-    void refreshManagedAgentSessions();
+    // performSupervisorEntriesRefresh polls daemon entries and status only
+    // when their own subscription heartbeat is stale.
+    void refreshSupervisorEntries();
   }, delayMs);
 }
 
-function handleManagedAgentSessionsVisibilityChange(): void {
+function handleSupervisorEntriesVisibilityChange(): void {
   if (document.hidden) return;
-  void refreshManagedAgentSessions();
+  void refreshSupervisorEntries();
 }
 
-function stopManagedAgentSessionsRefreshTimer(): void {
-  if (managedAgentSessionsRefreshTimer !== null) {
-    window.clearTimeout(managedAgentSessionsRefreshTimer);
-    managedAgentSessionsRefreshTimer = null;
+function stopSupervisorEntriesRefreshTimer(): void {
+  if (supervisorEntriesRefreshTimer !== null) {
+    window.clearTimeout(supervisorEntriesRefreshTimer);
+    supervisorEntriesRefreshTimer = null;
   }
 }
 
@@ -2137,7 +2009,7 @@ function agentInspectorRoomMoveCurrent(fence: AgentInspectorSettingsFence): bool
 async function applyDiscoveredAgentInspectorRoomMove(move: DesktopSupervisorRoomMove | null): Promise<void> {
   const recovered = recoveredRoomMoveState(move);
   agentInspectorRoomMoveResource.value = recovered.resource;
-  if (recovered.refreshAgents) await refreshManagedAgentSessions();
+  if (recovered.refreshAgents) await refreshSupervisorEntries();
   if (recovered.shouldPoll) scheduleAgentInspectorMoveRecovery();
 }
 
@@ -2460,7 +2332,7 @@ async function purgeAgentInspectorAgent(): Promise<void> {
     }
     if (result.outcome !== "purged") throw new Error(result.error || "Purge could not be completed.");
     agentInspectorActionState.value = { operationId: operation.operationId, entryId: operation.entryId, kind: "purge_agent", status: "success", message: "Durable agent records purged. The worktree was preserved." };
-    await refreshManagedAgentSessions();
+    await refreshSupervisorEntries();
     if (agentInspectorOperationIdentityCurrent(operation)) closeAgentDetail();
   } catch (error) {
     if (!agentInspectorOperationIdentityCurrent(operation)) return;
@@ -2845,7 +2717,7 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
           executionGenerationId,
           agentSessionId,
         });
-        await refreshManagedAgentSessions();
+        await refreshSupervisorEntries();
         refreshedDuringOperation = true;
       });
       if (!retryResult.started) {
@@ -2898,7 +2770,7 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         inspectorRequestVersion: requestVersion,
       });
     } else if (!refreshedDuringOperation) {
-      await refreshManagedAgentSessions();
+      await refreshSupervisorEntries();
     }
     if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
     agentInspectorActionState.value = {
@@ -2910,6 +2782,12 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
     };
   } catch (error) {
     if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
+    if (intent.kind === "reconnect" || intent.kind === "reconnect_runtime") {
+      // A failed credential reconnect may reveal a stopped runtime. Read the
+      // existing fenced diagnostics so Overview offers the correct recovery.
+      await refreshAgentInspectorDiagnostics().catch(() => false);
+      if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
+    }
     const refreshed = intent.kind === "retire_agent" ? await refreshSupervisorStatus() : supervisorStatus.value;
     agentInspectorActionState.value = {
       operationId,
@@ -2922,56 +2800,6 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         : agentInspectorActionErrorMessage(intent.kind, error),
     };
   }
-}
-
-function actionProgressMessage(kind: Exclude<AgentInspectorActionIntent["kind"], "recovery_options">): string {
-  return ({
-    mention: "Opening the room composer…",
-    pause: "Pausing this agent…",
-    resume: "Resuming this agent…",
-    reconnect: "Restoring the existing agent connection…",
-    recover: "Restarting the agent app…",
-    reconnect_runtime: "Reconnecting the agent and its room messages…",
-    restart_runtime: "Restarting the agent app with its saved conversation…",
-    fresh_runtime: "Restarting the agent app with a new conversation…",
-    stop_turn: "Stopping the current turn…",
-    steer_turn: "Applying correction to this session…",
-    retry_turn_control: "Retrying the previous stop or correction…",
-    resolve_turn_control: "Saving the confirmed result…",
-    retry_delivery: "Retrying this delivery…",
-    restore_conversation: "Restoring this agent’s conversation…",
-    skip_message: "Skipping this blocked message…",
-    retire_agent: "Retiring this saved agent…",
-    save_settings: "Saving settings…",
-    apply_settings: "Restarting with saved settings…",
-    move_room: "Moving room…",
-    purge_agent: "Deleting history and settings…",
-  } as const)[kind];
-}
-
-function actionSuccessMessage(kind: Exclude<AgentInspectorActionIntent["kind"], "recovery_options">): string {
-  return ({
-    mention: "Composer ready.",
-    pause: "Agent paused.",
-    resume: "Agent resumed.",
-    reconnect: "Reconnection requested.",
-    recover: "The agent app is restarting. Its name and project files are kept.",
-    reconnect_runtime: "Reconnection requested. Check the agent and room connection status.",
-    restart_runtime: "Restart requested with the saved conversation. Wait for the agent to be ready before continuing.",
-    fresh_runtime: "A new conversation was requested. Your project files and history are kept. Wait for the agent to be ready before continuing.",
-    stop_turn: "Current turn stopped.",
-    steer_turn: "Correction applied to the same agent session.",
-    retry_turn_control: "Previous stop or correction completed.",
-    resolve_turn_control: "Confirmed result saved.",
-    retry_delivery: "Delivery retry started.",
-    restore_conversation: "Conversation restoration started.",
-    skip_message: "Message skipped. Later room work can continue.",
-    retire_agent: "Agent retired. Its project files and history are kept.",
-    save_settings: "Settings saved.",
-    apply_settings: "Restart requested to apply your settings.",
-    move_room: "Room move started.",
-    purge_agent: "History and settings deleted. Project files are kept.",
-  } as const)[kind];
 }
 
 function openReasoningFromAgentDetail(sessionId: string): void {

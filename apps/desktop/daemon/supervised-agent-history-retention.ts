@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { PENDING_PEER_REPORT_SQL, settleQueuedPeers } from "./queued-peer-deliveries.js";
 
 type Row = Record<string, unknown>;
 
@@ -211,6 +212,7 @@ export function settleSupervisedTerminalItem(
   },
   timestamp: string,
 ): void {
+  settleQueuedPeers(database, item.inboxItemId, timestamp);
   if (!item.providerTurnId) return;
   const binding = database.prepare(`SELECT origin_execution_generation_id
     FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?`)
@@ -285,7 +287,7 @@ export function pruneSupervisedAgentHistory(
     FROM supervised_agent_inbox i
     WHERE i.agent_id=?
       AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
-      AND (EXISTS (
+      AND ((${PENDING_PEER_REPORT_SQL}) OR EXISTS (
         SELECT 1 FROM turn_control_journals j
         WHERE j.agent_id=i.agent_id AND j.turn_control_present=1
           AND j.inbox_item_id=i.inbox_item_id
@@ -304,6 +306,7 @@ export function pruneSupervisedAgentHistory(
     LEFT JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
     WHERE i.agent_id=?
       AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+      AND NOT (${PENDING_PEER_REPORT_SQL})
       AND NOT EXISTS (
         SELECT 1 FROM turn_control_journals j
         WHERE j.agent_id=i.agent_id AND j.turn_control_present=1
@@ -445,7 +448,9 @@ export function compactSupervisedTerminalHistory(database: DatabaseSync, agentId
       ORDER BY event_sequence DESC LIMIT 1 OFFSET ?)
     AND event_sequence > (SELECT event_sequence FROM supervised_agent_inbox_events WHERE inbox_item_id=?
       ORDER BY event_sequence LIMIT 1 OFFSET 1)
-    AND (? IS NULL OR idempotency_key<>?)`);
+    AND (? IS NULL OR idempotency_key<>?)
+    AND idempotency_key NOT IN ('peer_batch:members','peer_batch_report:pending','peer_batch_report:resolved')
+    AND idempotency_key NOT GLOB 'peer_batch_assigned:*'`);
   const trimRepairs = database.prepare(`DELETE FROM provider_continuation_repairs
     WHERE inbox_item_id=? AND phase IN ('committed','failed') AND rowid NOT IN (
       SELECT rowid FROM provider_continuation_repairs WHERE inbox_item_id=?
