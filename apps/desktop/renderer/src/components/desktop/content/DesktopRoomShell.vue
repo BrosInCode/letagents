@@ -273,6 +273,7 @@
       :request-version="selectedAgentDetailRequestVersion"
       :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId }"
       :reasoning-sessions="reasoningSessions"
+      :live-activity-sessions="liveActivitySessions ?? []"
       :correction-request="agentInspectorCorrectionRequest"
       @close="closeAgentDetail"
       @retry="retryAgentInspectorState"
@@ -285,6 +286,7 @@
       @work-retry="loadAgentInspectorWorkDetail(agentInspectorWorkSourceMessageId, true)"
       @work-source-select="selectAgentInspectorWorkSource"
       @reveal-message="revealAgentInspectorWorkMessage"
+      @reveal-live-request="revealSharedLiveRequest"
       @settings-selected="openAgentInspectorSettings"
       @settings-patch="patchAgentInspectorSettings"
       @settings-save="saveAgentInspectorSettings"
@@ -490,6 +492,8 @@ const props = defineProps<{
   participantHiddenCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
+  /** Agents' turns their owners share with the room. Absent: none. */
+  liveActivitySessions?: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   roomArtifacts: DesktopRoomSharedArtifact[];
   roomAgentWork: DesktopRoomAgentWork[];
@@ -2432,6 +2436,13 @@ async function loadAgentInspectorWorkDetail(
 
 /** A wake message is an ordinary room message: show it in the chat. */
 async function revealWakeMessage(messageId: string): Promise<void> {
+  activeTab.value = "chat";
+  await revealRoomMessage(messageId);
+  if (agentInspectorCompact.value) closeAgentDetail();
+}
+
+/** The room message a shared live view says the agent is answering. */
+async function revealSharedLiveRequest(messageId: string): Promise<void> {
   activeTab.value = "chat";
   await revealRoomMessage(messageId);
   if (agentInspectorCompact.value) closeAgentDetail();
