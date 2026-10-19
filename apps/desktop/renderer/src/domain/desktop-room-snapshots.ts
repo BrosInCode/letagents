@@ -258,7 +258,8 @@ export function applyRoomLiveMetadata(
   if (!snapshotMatchesRoom(snapshot, metadata.roomIdentifier)) return snapshot;
   const states = metadata.sourceStates;
   const errored = (key: keyof typeof states): boolean => states[key]?.status === "error";
-  // Unwrap any Vue proxy so reused sections stay plain data in the new snapshot.
+  // Unwrap the top-level Vue proxy. Nested sections read from it are then raw
+  // objects, so reused sections stay plain data in the new snapshot.
   const current = toRaw(snapshot);
   // Sections equal to what the snapshot already holds keep their old reference,
   // so a tick that changed nothing changes no reference at all.

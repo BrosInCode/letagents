@@ -2742,6 +2742,9 @@ watch(
     () => settingsAccountRooms.value,
     () => selectedRootRoomIdentifier.value,
     () => rootRoomSnapshot.value?.roomIdentifier || null,
+    // The room list keeps its identity when a poll finds no change, so opening
+    // an already-archived room must re-run the check by itself.
+    () => activeEntry.value.type === "room" ? [...currentActiveRoomAliases()].sort().join("|") : "",
   ],
   () => {
     void leaveArchivedSelectedRoomFromSettingsList();
