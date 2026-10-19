@@ -3,8 +3,8 @@
 import type { ProviderTerminalPayload } from "../provider-adapter.js";
 import { CursorRoomTurnRecoveryError } from "../cursor-turn-settlement.js";
 import { delay, sameProcessBirthIdentity, type ProviderProcessExit } from "../provider-evidence.js";
-import type { CursorProviderAdapter } from "../cursor-provider-adapter.js";
 import { CursorProviderHandle, type LiveTurn } from "./lane-state.js";
+import type { CursorProviderAdapter } from "./provider-adapter.js";
 
 export async function terminateTurnChild(
   adapter: CursorProviderAdapter,

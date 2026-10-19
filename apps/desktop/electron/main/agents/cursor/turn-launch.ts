@@ -32,7 +32,6 @@ import { cursorMcpInspectionEnv } from "../cursor-mcp-authority.js";
 import { buildCursorChildEnv, cursorDaemonChildEnv } from "../cursor-runner.js";
 import { managedCommitEnvironmentFor } from "../managed-agent-commit-identity.js";
 import type { SupervisedWorkspaceGenerationHandle } from "../supervised-workspace-generation.js";
-import type { CursorProviderAdapter } from "../cursor-provider-adapter.js";
 import {
   CursorPostDispatchCheckpointError,
   CursorProviderHandle,
@@ -48,6 +47,7 @@ import {
   requireCursorSessionId,
   usesExactScratchWorkspace,
 } from "./launch-arguments.js";
+import type { CursorProviderAdapter } from "./provider-adapter.js";
 
 function throwIfCursorTurnLaunchAborted(signal?: AbortSignal, roomTurnId?: string | null): void {
   if (signal?.aborted) {

@@ -15,7 +15,6 @@ import { dirname, join, resolve } from "node:path";
 import { MAX_DURABLE_TURN_TERMINAL_BYTES } from "../cursor-provider-constants.js";
 import { CursorRoomTurnRecoveryError, readBoundedCursorTurnFile } from "../cursor-turn-settlement.js";
 import type { SupervisedWorkspaceGenerationHandle } from "../supervised-workspace-generation.js";
-import type { CursorProviderAdapter } from "../cursor-provider-adapter.js";
 import {
   CursorProviderHandle,
   type CursorGenerationSettlement,
@@ -23,6 +22,7 @@ import {
   type LiveTurn,
 } from "./lane-state.js";
 import { CURSOR_PENDING_CONTINUATION_PREFIX } from "./launch-arguments.js";
+import type { CursorProviderAdapter } from "./provider-adapter.js";
 
 /**
  * Filesystem authority ends only after the private generation is renamed out

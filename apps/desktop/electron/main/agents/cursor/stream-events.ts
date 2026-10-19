@@ -10,9 +10,9 @@ import {
   cursorNativeToolTerminalResult,
 } from "../cursor-native-tool.js";
 import { safeStreamPayload, type ProviderProcessExit } from "../provider-evidence.js";
-import type { CursorProviderAdapter } from "../cursor-provider-adapter.js";
 import { CursorProviderHandle, type CursorStreamMessage, type LiveTurn } from "./lane-state.js";
 import { CURSOR_PENDING_CONTINUATION_PREFIX } from "./launch-arguments.js";
+import type { CursorProviderAdapter } from "./provider-adapter.js";
 
 function cursorStreamKind(message: CursorStreamMessage): ProviderStreamEventKind {
   const type = typeof message.type === "string" ? message.type : "";

@@ -16,7 +16,6 @@ import {
   CursorRoomTurnRecoveryError,
 } from "../cursor-turn-settlement.js";
 import { redactCredentialText, type ProviderProcessExit } from "../provider-evidence.js";
-import type { CursorProviderAdapter } from "../cursor-provider-adapter.js";
 import {
   CursorPostDispatchCheckpointError,
   CursorProviderHandle,
@@ -25,6 +24,7 @@ import {
   type LiveTurn,
 } from "./lane-state.js";
 import { boundedCursorRoomTurnPrompt, CURSOR_NO_ROOM_REPLY_SENTINEL } from "./launch-arguments.js";
+import type { CursorProviderAdapter } from "./provider-adapter.js";
 
 export async function runRoomTurn(
   adapter: CursorProviderAdapter,

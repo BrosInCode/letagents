@@ -4,8 +4,8 @@ import { synthesizeTerminalPayload, type ProviderTerminalPayload } from "../prov
 import { safeCursorTerminalErrorDetail } from "../cursor-provider-evidence.js";
 import { CursorTerminalAuthorityUnprovenError } from "../cursor-turn-settlement.js";
 import type { ProviderProcessExit } from "../provider-evidence.js";
-import type { CursorProviderAdapter } from "../cursor-provider-adapter.js";
 import { CursorProviderHandle, type CursorTurnTerminal, type LiveTurn } from "./lane-state.js";
+import type { CursorProviderAdapter } from "./provider-adapter.js";
 
 // The empirically proven usage-limit signature (task_38 spike, msg_1708):
 // init observed, the stream stops with NO result event, the process exits

@@ -21,7 +21,6 @@ import {
   readBoundedCursorTurnFile,
 } from "../cursor-turn-settlement.js";
 import { sameProcessBirthIdentity, type ProviderProcessExit } from "../provider-evidence.js";
-import type { CursorProviderAdapter } from "../cursor-provider-adapter.js";
 import {
   CursorProviderHandle,
   CursorRecordedTurnInProgressError,
@@ -32,6 +31,7 @@ import {
   type LiveTurn,
 } from "./lane-state.js";
 import { CURSOR_PENDING_CONTINUATION_PREFIX, requireCursorSessionId } from "./launch-arguments.js";
+import type { CursorProviderAdapter } from "./provider-adapter.js";
 import { sessionIdOf } from "./stream-events.js";
 
 export async function recoverRoomTurn(

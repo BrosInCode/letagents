@@ -12,7 +12,7 @@ import {
 } from "../provider-adapter.js";
 import { CursorRoomTurnRecoveryError } from "../cursor-turn-settlement.js";
 import { delay, sameProcessBirthIdentity } from "../provider-evidence.js";
-import type { CursorProviderAdapter } from "../cursor-provider-adapter.js";
+import type { CursorProviderAdapter } from "./provider-adapter.js";
 
 export async function stopRef(
   adapter: CursorProviderAdapter,
