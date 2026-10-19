@@ -288,7 +288,7 @@ export class SupervisorDaemon {
     });
     this.stateWatch = new DaemonStateWatch({
       ...daemonAuthority, coalesceMs: STATE_WATCH_NOTIFICATION_COALESCE_MS,
-      entries: async () => this.entriesWithDerivedLiveness((await this.store.load("summary")).entries),
+      entries: async () => this.readModel.entriesWithDerivedLiveness((await this.store.load("summary")).entries, { reuseUnchangedInboxInputs: true }),
     });
     this.agentStreamRegistry = new AgentStreamRegistry({
       isHandoffScheduled: () => this.handoffScheduled,

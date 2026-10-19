@@ -59,15 +59,35 @@ export type DaemonReadModelPorts = {
   inbox: Pick<
     SupervisedAgentInboxStore,
     "detail" | "ingressHealth" | "latestContinuationRepair" | "receiptProjection"
-  > & Partial<Pick<SupervisedAgentInboxStore, "blockedHeadSkip">>;
+  > & Partial<Pick<SupervisedAgentInboxStore, "blockedHeadSkip" | "committedStateVersion">>;
   durability: Pick<WorkDurabilityStore, "getAttempt">;
   workerAuthority: Pick<WorkerAuthorityCoordinator, "currentHostGrant" | "pollingContract">;
   liveHandles: Map<string, ProviderActionHandle>;
   delivery: Pick<SupervisedAgentDelivery, "activeTurn"> | null;
 };
 
+/**
+ * The inputs of one entry's view that are read from the inbox tables, on the
+ * inbox store's connection, and from nothing else: no clock, no memory.
+ */
+type StoredInboxInputs = {
+  receipts: Awaited<ReturnType<SupervisedAgentInboxStore["receiptProjection"]>>;
+  blockedHeadSkip: Awaited<ReturnType<SupervisedAgentInboxStore["blockedHeadSkip"]>>;
+  continuationRepair: Awaited<ReturnType<SupervisedAgentInboxStore["latestContinuationRepair"]>>;
+  ingressHealth: Awaited<ReturnType<SupervisedAgentInboxStore["ingressHealth"]>>;
+};
+
 /** Owns read-only control-surface projections over daemon authority state. */
 export class DaemonReadModel {
+  /**
+   * The inbox inputs of the last projection that asked to keep them, and the
+   * database version read before any of them. They are used again only while
+   * that version is unchanged, that is while no row of the database has been
+   * written since. They hold one item per entry of that projection, and
+   * nothing reads or changes them in place.
+   */
+  private keptInboxInputs: { version: string; inputs: Map<string, StoredInboxInputs> } | null = null;
+
   constructor(private readonly ports: DaemonReadModelPorts) {}
 
   status() {
@@ -152,35 +172,60 @@ export class DaemonReadModel {
     catch { return null; }
   }
 
+  /**
+   * With `reuseUnchangedInboxInputs`, an entry's inbox inputs (its delivery
+   * receipts, blocked-head skip, latest continuation repair and ingress health)
+   * are read again only when the database has changed since the last such
+   * projection. Every view is still derived again: liveness depends on the
+   * clock, and the authority facts (binding, credential, host grant, live
+   * handle, lifecycle admission) and every other stored input are read each time.
+   */
   async entriesWithDerivedLiveness(
     entries: DaemonManifestEntry[],
+    options: { reuseUnchangedInboxInputs?: boolean } = {},
   ): Promise<DaemonManifestEntryView[]> {
+    // Read before every input: an input kept under it was read after it.
+    const version = options.reuseUnchangedInboxInputs
+      ? await this.ports.inbox.committedStateVersion?.().catch(() => null) ?? null
+      : null;
+    const kept = version !== null && this.keptInboxInputs?.version === version ? this.keptInboxInputs.inputs : undefined;
+    const keep = version !== null ? new Map<string, StoredInboxInputs>() : undefined;
     const bindings = new Map(
       (await this.ports.bindings.list()).map((binding) => [binding.entry_id, binding]),
     );
-    return Promise.all(entries.map((entry) =>
-      this.entryWithDerivedLiveness(entry, bindings.get(entry.id) ?? null)));
+    const views = await Promise.all(entries.map((entry) =>
+      this.entryWithDerivedLiveness(entry, bindings.get(entry.id) ?? null, keep && { kept: kept?.get(entry.id), keep })));
+    if (version !== null && keep) this.keptInboxInputs = { version, inputs: keep };
+    return views;
+  }
+
+  private async inboxInputs(entryId: string): Promise<StoredInboxInputs> {
+    const receipts = await this.ports.inbox.receiptProjection(entryId);
+    const blockedHeadSkip = receipts.some((receipt) => receipt.receipt_state === "blocked")
+      ? await this.ports.inbox.blockedHeadSkip?.(entryId) ?? null
+      : null;
+    const continuationRepair = await this.ports.inbox.latestContinuationRepair(entryId);
+    const ingressHealth = await this.ports.inbox.ingressHealth(entryId);
+    return { receipts, blockedHeadSkip, continuationRepair, ingressHealth };
   }
 
   async entryWithDerivedLiveness(
     entry: DaemonManifestEntry,
     projectedBinding?: WorkerSessionBinding | null,
+    inboxInputs?: { kept: StoredInboxInputs | undefined; keep: Map<string, StoredInboxInputs> },
   ): Promise<DaemonManifestEntryView> {
     const projectionNowMs = this.ports.nowMs();
     const binding = projectedBinding === undefined
       ? await this.ports.bindings.get(entry.id)
       : projectedBinding;
-    const receipts = await this.ports.inbox.receiptProjection(entry.id);
-    const blockedHeadSkip = receipts.some((receipt) => receipt.receipt_state === "blocked")
-      ? await this.ports.inbox.blockedHeadSkip?.(entry.id) ?? null
-      : null;
+    const stored = inboxInputs?.kept ?? await this.inboxInputs(entry.id);
+    inboxInputs?.keep.set(entry.id, stored);
+    const { receipts, blockedHeadSkip, continuationRepair, ingressHealth: persistedIngress } = stored;
     const credential = bindingMatchesRoomAgentGeneration(entry, binding)
       ? await this.ports.bindings.credentialFor(binding)
       : null;
-    const continuationRepair = await this.ports.inbox.latestContinuationRepair(entry.id);
     const currentHostGrantAvailable = Boolean(this.ports.workerAuthority.currentHostGrant(entry));
     const liveHandle = this.ports.liveHandles.get(entry.id);
-    const persistedIngress = await this.ports.inbox.ingressHealth(entry.id);
     const authorityFacts = {
       entry,
       binding,
