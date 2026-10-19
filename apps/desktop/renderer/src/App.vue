@@ -407,7 +407,7 @@ import { invalidateRoomMessageLinkPreviews, setMessageLinkPreviewViewer } from "
 import { invalidateRoomMessagePins, setMessagePinViewer } from "./composables/useRoomMessagePins";
 import { receiveRoomTyping, setTypingAccount } from "./composables/useRoomTyping";
 import { invalidateRoomMessageReactions, setMessageReactionViewer } from "./composables/useRoomMessageReactions";
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppAgentActionMetadata,
@@ -438,6 +438,7 @@ import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRo
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount } from "./domain/desktop-message-drafts";
 import { preserveRoomRepoStatistics } from "./domain/repo-status";
+import { reuseUnchanged } from "./domain/reuse-unchanged";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
@@ -1242,7 +1243,7 @@ async function refreshSidebarLatestMessages(): Promise<void> {
 
   if (generation !== sessionGeneration.value || !authStatus.value?.authenticated) return;
   if (storageSettings !== JSON.stringify(chatStorageSettings.value)) return;
-  sidebarLatestMessages.value = nextLatestMessages;
+  sidebarLatestMessages.value = reuseUnchanged(toRaw(sidebarLatestMessages.value), nextLatestMessages);
   seedReadMarkersForKnownRooms();
   markActiveRoomRead();
   void refreshUnreadCounts();

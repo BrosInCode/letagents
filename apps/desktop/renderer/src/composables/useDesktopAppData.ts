@@ -1,4 +1,4 @@
-import { computed, getCurrentScope, onScopeDispose, ref, watch, type ComputedRef, type Ref } from "vue";
+import { computed, getCurrentScope, onScopeDispose, ref, toRaw, watch, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
@@ -16,6 +16,7 @@ import type {
   WorkerSnapshot,
 } from "../../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
+import { reuseUnchanged } from "../domain/reuse-unchanged";
 import {
   appendSnapshotMessage,
   mergeDesktopRoomMessages,
@@ -433,8 +434,13 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     const allAccountRooms =
       (await desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => [])) || [];
     if (!sessionIsCurrent(sessionGeneration)) return;
-    options.settingsAccountRooms.value = allAccountRooms;
-    options.accountRooms.value = allAccountRooms.filter((room) => !room.archived);
+    // An unchanged poll keeps the previous references, so the sidebar and
+    // Settings do not recompute when the room list did not change.
+    options.settingsAccountRooms.value = reuseUnchanged(toRaw(options.settingsAccountRooms.value), allAccountRooms);
+    options.accountRooms.value = reuseUnchanged(
+      toRaw(options.accountRooms.value),
+      allAccountRooms.filter((room) => !room.archived),
+    );
   }
 
   function selectedRootPath(): string | null {
