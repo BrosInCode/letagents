@@ -1,6 +1,6 @@
 import { openDaemonMaintenance, registerDaemonBoardAccess, maintenanceStatus, type DaemonMaintenanceService } from "./maintenance-service.js";
 import { settleRuntimeApprovalRequests } from "./execution-approval-journal.js";
-import { restoreLocalRoomAuthorities, localRoomRuntime } from "./local-room-runtime.js";
+import { restoreLocalRoomAuthorities, localRoomRuntime, isLocalRoomApi } from "./local-room-runtime.js";
 import { dirname, join } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
@@ -9,8 +9,11 @@ import { ReplyAttachmentSpool } from "./reply-attachment-spool.js";
 import { BoundedEffectCoordinator } from "./bounded-effect-coordinator.js";
 import { ContinuationRepairCoordinator } from "./continuation-repair-coordinator.js";
 import {
+  createLiveActivitySession,
   productionSupervisedDeliveryHttp,
   productionSupervisorGrantHttp,
+  updateLiveActivitySession,
+  withdrawLiveActivity,
   type SupervisorGrantHttp,
 } from "./cloud-http.js";
 import { DaemonControlSocket } from "./control-socket.js";
@@ -41,6 +44,7 @@ import { withProtectedStateUpgrade, reportStateRecoveryReady, type StateRecovery
 import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator.js";
 import { startDaemonLifecycleDiagnostics, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { NativeActivityPublicationCoordinator } from "./native-activity-publication-coordinator.js";
+import { LiveRoomSharePublisher } from "./live-room-share-publisher.js";
 import { ConvergencePacer } from "./convergence-pacer.js";
 import { recordedRemote, RoomWorkPublisher } from "./room-work-publisher.js";
 import { assertMacOS } from "./platform.js";
@@ -178,6 +182,7 @@ export class SupervisorDaemon {
   private readonly nowMs: () => number;
   private readonly startedAt = new Date().toISOString();
   private readonly agentStreamRegistry: AgentStreamRegistry;
+  private readonly liveRoomShare: LiveRoomSharePublisher;
   private handoffScheduled = false;
   private handoffDraining = false;
   private readonly handoff: ProviderHandoffCoordinator;
@@ -268,6 +273,9 @@ export class SupervisorDaemon {
         pendingState: (entryId) => this.activityWrites.pendingState(entryId),
         admit: (item) => this.activityWrites.admit(item),
       },
+      liveSharing: {
+        changed: (entryId, saved) => this.liveRoomShare.setSharing(entryId, saved),
+      },
     });
     this.audit = new AuditLog(paths.auditPath);
     this.manifestTransitions = new ManifestTransitionCoordinator({
@@ -318,6 +326,31 @@ export class SupervisorDaemon {
     this.agentStreamRegistry = new AgentStreamRegistry({
       isHandoffScheduled: () => this.handoffScheduled,
     });
+    // The room's view of each agent's turn, published only while its owner shares it.
+    this.liveRoomShare = new LiveRoomSharePublisher({
+      sharing: async (entryId) => (await this.store.getAgentConfiguration(entryId))?.live_sharing ?? "off",
+      withdrawn: async (entryId) => {
+        await this.serializeManifestMutation(async () => {
+          await this.singleton.assertCurrent();
+          await this.store.markLiveSharingWithdrawn(entryId, (commit) => this.fenceDaemonCommit(commit));
+        });
+      },
+      target: async (entryId) => {
+        const binding = await this.workerBindings.get(entryId);
+        if (!binding || isLocalRoomApi(binding.api_url)) return null;
+        const bearer = await this.workerBindings.credentialFor(binding);
+        return bearer ? { apiUrl: binding.api_url, roomId: binding.room_id, bearer } : null;
+      },
+      feed: {
+        highWater: (entryId) => this.agentStreamRegistry.highWater(entryId),
+        retainedAfter: (entryId, afterSequence) => this.agentStreamRegistry.retainedAfter(entryId, afterSequence),
+      },
+      http: {
+        create: (target, body) => createLiveActivitySession({ ...target, body }),
+        update: (target, sessionId, body) => updateLiveActivitySession({ ...target, sessionId, body }),
+        withdraw: (target) => withdrawLiveActivity(target),
+      },
+    });
     this.lifecycleAdministration = new LifecycleAdministrationCoordinator({
       store: this.store,
       bindings: this.workerBindings,
@@ -339,7 +372,7 @@ export class SupervisorDaemon {
       hasLiveHandle: (entryId) => this.liveHandles.has(entryId),
       ...(providerPort ? { provider: providerPort } : {}),
       runtimeCustody: this.workerRuntimeCustody,
-      deleteAgentStream: (entryId) => this.agentStreamRegistry.delete(entryId),
+      deleteAgentStream: (entryId) => { this.agentStreamRegistry.delete(entryId); this.liveRoomShare.forget(entryId); },
       ephemeralProvisioner: this.ephemeralProvisioner,
       nowMs: () => this.nowMs(),
     });
@@ -375,6 +408,9 @@ export class SupervisorDaemon {
       delivery: {
         stop: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
         start: (entryId) => this.startSupervisedDelivery(entryId),
+        holdIngressForBearerRotation: (entryId) => this.supervisedDelivery?.holdIngressForBearerRotation(entryId) ?? (() => {}),
+        bearerSuccessorBinding: (entryId) => this.supervisedDelivery?.bearerSuccessorBinding(entryId),
+        bearerSuccessorAbandoned: (entryId) => this.supervisedDelivery?.bearerSuccessorAbandoned(entryId),
       },
       convergence: {
         request: (entryId, kind) => this.requestConvergence(entryId, kind),
@@ -681,6 +717,10 @@ export class SupervisorDaemon {
         async (agentId) => { await this.providerExecution?.archiveEndedRuntimes(agentId); },
         this.replyAttachmentSpool,
         this.roomTurnAttachments,
+        (agentId, change) => {
+          if ("ended" in change) this.liveRoomShare.turnEnded(agentId, change.ended);
+          else this.liveRoomShare.turnStarted(agentId, change.inboxItemId, change.sourceMessageId);
+        },
       ) : null;
     this.readModel = new DaemonReadModel({
       readUsage: (handle) => this.providerPort?.readUsage?.(handle) ?? Promise.resolve(null),
@@ -991,6 +1031,7 @@ export class SupervisorDaemon {
       rollbackInspectorRoomMove: (input) => this.roomMoves.rollbackInspector(input),
       setDesiredState: (id, desired) => this.userAction(id, () => this.desiredStates.set(id, desired)),
       setDisplayName: this.setDisplayName.bind(this),
+      setLiveSharing: (input) => this.manifestAdministration.setLiveSharing(input),
       skipRoomDelivery: this.skipRoomDelivery.bind(this),
       status: this.status.bind(this),
       syncExecutionDelegations: (input) => {
@@ -1104,6 +1145,8 @@ export class SupervisorDaemon {
       for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id, "rehydration");
     }
     void this.workerBindings.compactRetainedPublications().catch(() => undefined);
+    // Earlier turns that a stopped process could not remove from a room are removed now.
+    this.liveRoomShare.resume(await this.store.liveSharingByAgent());
   }
 
   async stop(): Promise<void> {
@@ -1116,6 +1159,7 @@ export class SupervisorDaemon {
     if (this.replyAttachmentSweep) clearInterval(this.replyAttachmentSweep);
     await runEveryStopStep([
       () => this.convergencePacer.close(), () => this.providerTerminals.close(), () => this.hostApprovals.close(),
+      () => this.liveRoomShare.dispose(),
       () => { executionDelegationDrain = this.executionDelegations.fenceAndDrain(); },
       () => this.roomWorkPublisher?.close(), () => this.executionCapture?.close(), () => this.supervisedDelivery?.fence(),
       () => this.typedLifecycleEffects?.close(),
@@ -1381,7 +1425,7 @@ export class SupervisorDaemon {
   }
 
   private pushAgentStreamEvent(entryId: string, event: DaemonActivityEvent): void {
-    this.agentStreamRegistry.push(entryId, event);
+    this.liveRoomShare.observe(entryId, this.agentStreamRegistry.push(entryId, event));
   }
 
   private resetAgentStream(entryId: string): void {

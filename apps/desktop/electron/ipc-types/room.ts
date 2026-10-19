@@ -513,6 +513,8 @@ export interface DesktopRoomSnapshot {
   participantHiddenCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
+  /** Agents' turns their owners share with the room, one per agent at most. */
+  liveActivitySessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   roomArtifacts: DesktopRoomSharedArtifact[];
   messages: DesktopRoomMessage[];
@@ -718,6 +720,16 @@ export type DesktopRoomStreamEvent =
     }
   | {
       type: "reasoning_remove";
+      roomIdentifier: string;
+      sessionId: string;
+    }
+  | {
+      type: "live_activity_update";
+      roomIdentifier: string;
+      session: DesktopReasoningSession;
+    }
+  | {
+      type: "live_activity_remove";
       roomIdentifier: string;
       sessionId: string;
     }

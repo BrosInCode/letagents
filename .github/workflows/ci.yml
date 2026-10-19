@@ -297,6 +297,9 @@ jobs:
       - name: Test agent wake rules and room resource invalidation
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wake-rules-contract.test.ts src/api/__tests__/wake-rules-evaluate.test.ts src/api/__tests__/wake-rules-db.test.ts src/api/__tests__/room-event-broker.test.ts
 
+      - name: Test shared live activity sessions
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-reasoning-routes.test.ts src/api/__tests__/live-activity-routes.test.ts src/api/__tests__/live-activity-db.test.ts
+
       - name: Test message link previews
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-link-previews.test.ts src/api/__tests__/message-link-previews-routes.test.ts src/api/__tests__/message-link-previews-db.test.ts src/api/__tests__/room-message-routes.test.ts
 
@@ -355,6 +358,12 @@ jobs:
           --test
           src/api/__tests__/repo-room-access-integration.test.ts
           src/api/__tests__/github-repo-access.test.ts
+
+      # Own step: DB-backed files in one node --test run start in parallel
+      # processes and drop the same schema.
+      - name: Test live room rechecks and leases after a credential is revoked
+        timeout-minutes: 5
+        run: node --import tsx --test src/api/__tests__/room-access-live-recheck-db.test.ts src/api/__tests__/live-room-authorization.test.ts
 
       - name: Run repo migration tests
         run: >-

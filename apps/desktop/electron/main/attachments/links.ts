@@ -71,7 +71,8 @@ function relativeInsideLocalFiles(filePath: string): string | null {
   return insideFolder(resolve(localFilesPath), resolve(filePath));
 }
 
-function insideFolder(folder: string, filePath: string): string | null {
+/** The path of `filePath` relative to `folder`, or null when it is not strictly inside it. */
+export function insideFolder(folder: string, filePath: string): string | null {
   const relativePath = relative(folder, filePath);
   if (!relativePath || relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) return null;
   return relativePath;

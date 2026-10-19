@@ -21,10 +21,12 @@ import {
   mergeDesktopRoomMessages,
   mergeRoomSnapshotMessages,
   messageReferencesMissingThreadContext,
+  removeSnapshotLiveActivitySession,
   removeSnapshotReasoningSession,
   replaceSnapshotRoomArtifacts,
   roomSnapshotsMatch,
   snapshotMatchesRoom,
+  upsertSnapshotLiveActivitySession,
   upsertSnapshotReasoningSession,
   upsertSnapshotGitHubEvent,
   upsertSnapshotRoomArtifact,
@@ -774,6 +776,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       return;
     }
 
+    if (event.type === "live_activity_update") {
+      setSelectedSnapshot(upsertSnapshotLiveActivitySession(options.selectedSnapshot.value, event.session));
+      return;
+    }
+
+    if (event.type === "live_activity_remove") {
+      setSelectedSnapshot(removeSnapshotLiveActivitySession(options.selectedSnapshot.value, event.sessionId));
+      return;
+    }
+
     if (
       event.type === "rental_activity" ||
       event.type === "rental_patch" ||
@@ -1111,6 +1123,7 @@ function createOptimisticSelectedSnapshot(
     participantHiddenCount: 0,
     presence: [],
     reasoningSessions: [],
+    liveActivitySessions: [],
     recentActivity: [],
     roomArtifacts: [],
     boardSettings: baseRootSnapshot.boardSettings,
