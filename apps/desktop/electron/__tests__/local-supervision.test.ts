@@ -758,6 +758,12 @@ test("a local room's image reaches the daemon from its stored file, bounded and 
   await symlink(outside, linked);
   const file = (id: string, path: string) => ({ id, file_name: `${id}.png`, mime_type: "image/png", size_bytes: png.byteLength,
     url: pathToFileURL(path).toString(), download_url: pathToFileURL(path).toString() });
+  const otherRoomDir = join(process.env.LETAGENTS_LOCAL_FILES_DIR!, "local_images_other");
+  await mkdir(otherRoomDir, { recursive: true });
+  const otherRoomFile = join(otherRoomDir, "theirs.png");
+  await writeFile(otherRoomFile, png);
+  const big = join(filesDir, "big.png");
+  await writeFile(big, Buffer.concat([png, Buffer.alloc(11 * 1024 * 1024)]));
   const fifo = join(filesDir, "pipe.png");
   (await import("node:child_process")).execFileSync("mkfifo", [fifo]);
   const wrapped = png.toString("base64").replace(/(.{8})/g, "$1\r\n");
@@ -768,6 +774,8 @@ test("a local room's image reaches the daemon from its stored file, bounded and 
     file("local:pipe", fifo),
     { id: "messages", file_name: "reserved.png", mime_type: "image/png", content_base64: wrapped },
     { ...file("local:gone", join(filesDir, "gone.png")), data_url: `data:image/png;base64,${png.toString("base64")}` },
+    file("local:other-room", otherRoomFile),
+    { ...file("local:big", big), size_bytes: png.byteLength + 11 * 1024 * 1024 },
   ] });
   const polled = (await oak.request("messages")).messages.find((item: { id: string }) => item.id === message.id);
   assert.equal(polled.attachments[0].data_url, null, "a file row's message page carries no inline copy");
@@ -785,7 +793,8 @@ test("a local room's image reaches the daemon from its stored file, bounded and 
   assert.deepEqual(Buffer.from(await download("messages", { maxBytes: png.byteLength })), png,
     "an id that is a route word, and wrapped base64 that just fits, still read");
   // A named pipe is refused at once instead of waiting for a writer; a file row never falls back to its old inline copy.
-  for (const id of ["local:outside", "local:linked", "legacy-text", "local:missing", "local:pipe", "local:gone"]) {
+  // A file in another room's folder is not this room's, even inside the local files folder.
+  for (const id of ["local:outside", "local:linked", "legacy-text", "local:missing", "local:pipe", "local:gone", "local:other-room"]) {
     await assert.rejects(download(id), unavailable, id);
   }
   await assert.rejects(download("local:stored", { messageId: "msg_999" }), unavailable);
@@ -797,6 +806,8 @@ test("a local room's image reaches the daemon from its stored file, bounded and 
   assert.equal((await route("attachments/local%3Astored/extra?max_bytes=1024")).status, 200, "an extra part is a messages read, not a file");
   assert.equal((await route("attachments/local%3Astored/extra?max_bytes=1024")).headers.get("content-type")?.startsWith("application/json"), true);
   assert.equal((await route("attachments/local%3Astored?max_bytes=1024")).headers.get("content-type"), "application/octet-stream");
+  assert.equal((await route("attachments/local%3Abig?max_bytes=999999999999")).status, 413, "no caller reads more than the 10 MB image limit");
+  await assert.rejects(download("local:big", { maxBytes: 20 * 1024 * 1024 }), tooLarge);
 
   // A tool read of an older inline row gives the agent metadata, not base64.
   const read = await oak.tool("read_messages", {});
@@ -816,7 +827,7 @@ test("a local room's image reaches the daemon from its stored file, bounded and 
   const prepared = await stager.prepare({ delivery: "memory", localRoom: true, sourceMessage: polled, sourceMessageId: message.id,
     roomId, apiUrl: origin, bearer: oak.session.worker_bearer, http: productionSupervisedDeliveryHttp, signal: AbortSignal.timeout(10_000) });
   assert.deepEqual(prepared.attachments.map((item: { status: string }) => item.status),
-    ["image", "unavailable", "unavailable", "image", "unavailable", "unavailable", "image", "unavailable"]);
+    ["image", "unavailable", "unavailable", "image", "unavailable", "unavailable", "image", "unavailable", "unavailable", "too_large"]);
   assert.deepEqual(Buffer.from(prepared.attachments[0].image.data), png);
   await prepared.release();
 });

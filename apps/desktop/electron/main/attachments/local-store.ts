@@ -1,12 +1,12 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { localFilesPath } from "../chat-storage/settings.js";
-import { localAttachmentRelativePath, realLocalAttachmentPath } from "./links.js";
+import { insideFolder, localAttachmentRelativePath, realLocalAttachmentPath } from "./links.js";
 import type { RoomMessageAttachmentPayload } from "./mappers.js";
 import { stagedAttachment, type AttachmentFile, type AttachmentStore } from "./store.js";
 
@@ -112,33 +112,47 @@ export async function readLocalAttachmentBytes(attachment: RoomMessageAttachment
 const AGENT_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g|gif|webp);base64,/i;
 
 /**
- * A local attachment's bytes for an agent's turn, read only when they fit in
- * `maxBytes`. A row with a file URL is read from that file alone, and only
- * inside the local files folder, both as written and after symlinks; an
- * older row without one may hold an inline copy (a base64 image data URL, or
- * bare base64). Only a regular file is read, and opening never waits (a named
- * pipe is refused, not opened for a writer). The caller still decides from
- * the bytes whether they are an image.
+ * A local attachment's bytes for an agent's turn in `roomIdentifier`, read
+ * only when they fit in `maxBytes`. A row with a file URL is read from that
+ * file alone, and only inside that room's own folder of the local files
+ * folder, both as written and after symlinks; an older row without one may
+ * hold an inline copy (a base64 image data URL, or bare base64). Only a
+ * regular file is read, whole, and opening never waits (a named pipe is
+ * refused, not opened for a writer). The caller still decides from the bytes
+ * whether they are an image.
  */
 export async function readLocalAttachmentBytesWithin(
   attachment: RoomMessageAttachmentPayload,
   maxBytes: number,
+  roomIdentifier: string,
 ): Promise<{ bytes: Buffer } | "too_large" | "unavailable"> {
   if (attachment.url?.startsWith("file:")) {
     // The written path is checked first, so a row naming a path elsewhere
     // (an automounted network folder, say) is never touched.
-    if (localAttachmentRelativePath(attachment.url) === null) return "unavailable";
-    const realPath = await realLocalAttachmentPath(fileURLToPath(attachment.url));
-    if (!realPath) return "unavailable";
+    const roomFolder = join(localFilesPath, safePathSegment(roomIdentifier));
+    if (localAttachmentRelativePath(attachment.url) === null
+      || insideFolder(resolve(roomFolder), resolve(fileURLToPath(attachment.url))) === null) return "unavailable";
+    const [realPath, realRoomFolder] = await Promise.all([
+      realLocalAttachmentPath(fileURLToPath(attachment.url)),
+      realpath(roomFolder).catch(() => null),
+    ]);
+    if (!realPath || !realRoomFolder || insideFolder(realRoomFolder, realPath) === null) return "unavailable";
     const handle = await open(realPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => null);
     if (!handle) return "unavailable";
     try {
       const info = await handle.stat();
       if (!info.isFile()) return "unavailable";
       if (info.size > maxBytes) return "too_large";
+      // One read may return less than asked (a network home folder, say); a
+      // file that ends early has changed under the read and is not given.
       const bytes = Buffer.alloc(info.size);
-      const { bytesRead } = await handle.read(bytes, 0, info.size, 0);
-      return { bytes: bytes.subarray(0, bytesRead) };
+      let filled = 0;
+      while (filled < info.size) {
+        const { bytesRead } = await handle.read(bytes, filled, info.size - filled, filled);
+        if (bytesRead === 0) return "unavailable";
+        filled += bytesRead;
+      }
+      return { bytes };
     } catch {
       return "unavailable";
     } finally {

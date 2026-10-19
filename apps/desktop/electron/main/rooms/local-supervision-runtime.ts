@@ -20,6 +20,9 @@ import { localSupervisionDatabase, authorizeLocalHost, authorizeLocalWorker,
 export { prepareLocalSupervisorGrant } from "./local-supervision-authority.js";
 export { executeLocalBoardMutation, watchLocalBoard } from "./local-board-service.js";
 
+/** The daemon's per-image limit; no caller of the local attachment route reads more. */
+const LOCAL_AGENT_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+
 type ObjectValue = Record<string, unknown>;
 const object = (value: unknown): ObjectValue => value && typeof value === "object" && !Array.isArray(value) ? value as ObjectValue : {};
 function required(value: unknown, name: string): string {
@@ -134,7 +137,9 @@ export async function requestLocalSupervisor(rawUrl: string, init: RequestInit =
     if ((init.method ?? "GET") !== "GET") return json({ error: "Unknown local room operation." }, 404);
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) return json({ error: "max_bytes must be a positive integer." }, 400);
     const attachment = await getLocalMessageAttachment(roomId, operation[1]!, operation[3]!);
-    const read = attachment ? await readLocalAttachmentBytesWithin(attachment, maxBytes) : "unavailable";
+    const read = attachment
+      ? await readLocalAttachmentBytesWithin(attachment, Math.min(maxBytes, LOCAL_AGENT_ATTACHMENT_MAX_BYTES), roomId)
+      : "unavailable";
     if (read === "too_large") return json({ error: "The attachment is larger than the requested limit." }, 413);
     if (read === "unavailable") return json({ error: "This attachment is not available." }, 404);
     return new Response(new Uint8Array(read.bytes), { headers: {
