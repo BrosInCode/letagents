@@ -34,13 +34,13 @@
           :compact-with-previous="entry.type === 'message' && entry.compactWithPrevious"
           :thread-summary="threadIndicatorSummary(message)"
           :active-thread-root="message.id === activeThreadParentId"
-          :highlight-query="searchQuery"
+          :highlight-query="highlightQuery"
           :room-identifier="roomIdentifier"
           :message-reference-ids="messageReferenceIds"
           :task-reference-ids="taskReferenceIds"
           :search-active="message.id === activeSearchMessageId"
           :animate-arrival="arrivingMessageIds.has(message.id)"
-          :delivery-receipts="deliveryReceiptsByMessage[message.id] || []"
+          :delivery-receipts="deliveryReceiptsByMessage[message.id] || noDeliveryReceipts"
           :delivery-recovery-available="deliveryRecoveryAvailable"
           :continuation-repair-available="continuationRepairAvailable"
           :room-delivery-skip-available="roomDeliverySkipAvailable"
@@ -245,8 +245,9 @@ import type { PersonTarget } from "../../../../domain/person-target";
 import type { PersonMenuPosition } from "../../../../domain/person-context-menu";
 import { compareRoomMessages } from "../room-shell/messages";
 import { createMessageProviderLabelResolver } from "../../../../domain/agent-provider";
+import { useStableIdSet } from "../../../../composables/useStableIdSet";
 import { getAppendedMessageIds } from "./message-arrival";
-import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
+import { buildThreadIndicatorSummary, buildThreadSummaries, createThreadIndicatorMemo, threadParentId, threadQuotePreview } from "./thread-utils";
 import { buildMessageTimelineEntries, type MessageTimelineEntry } from "./timeline";
 
 interface ThreadActivityNotice {
@@ -415,9 +416,21 @@ const resolveProviderLabel = computed(() => createMessageProviderLabelResolver(
 const buildGroupedTimeline = createGitHubTimeline<MessageTimelineEntry, DesktopRoomMessage>();
 const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork),
   entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
-const messageReferenceIds = computed(() =>
-  new Set(props.messages.map((message) => message.id))
-);
+// One set, edited in place: a new Set per update re-rendered every message.
+const threadIndicatorMemo = createThreadIndicatorMemo();
+// Highlighting re-scans every mounted message, so typing waits for a short
+// pause. Clearing the query applies at once.
+const highlightQuery = ref(props.searchQuery);
+let highlightQueryTimer: ReturnType<typeof setTimeout> | null = null;
+watch(() => props.searchQuery, (query) => {
+  if (highlightQueryTimer !== null) clearTimeout(highlightQueryTimer);
+  highlightQueryTimer = null;
+  if (!query.trim()) { highlightQuery.value = query; return; }
+  highlightQueryTimer = setTimeout(() => { highlightQueryTimer = null; highlightQuery.value = query; }, 120);
+});
+onBeforeUnmount(() => { if (highlightQueryTimer !== null) clearTimeout(highlightQueryTimer); });
+watch(() => props.messages, (messages) => threadIndicatorMemo.retain(messages));
+const messageReferenceIds = useStableIdSet(() => props.messages.map((message) => message.id));
 
 watch(
   () => props.messages,
@@ -1145,8 +1158,12 @@ function setInstantScrollTop(element: HTMLElement, scrollTop: number): void {
   element.style.scrollBehavior = previousScrollBehavior;
 }
 
+const noDeliveryReceipts: never[] = [];
 function threadIndicatorSummary(message: DesktopRoomMessage) {
-  return buildThreadIndicatorSummary(message, threadSummaries.value.get(message.id) || null, attentionResponseAgentNames?.value);
+  return threadIndicatorMemo.stable(
+    message.id,
+    buildThreadIndicatorSummary(message, threadSummaries.value.get(message.id) || null, attentionResponseAgentNames?.value),
+  );
 }
 
 defineExpose({

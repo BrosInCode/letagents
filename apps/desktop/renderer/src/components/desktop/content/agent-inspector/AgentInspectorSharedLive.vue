@@ -51,6 +51,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatDate } from "../../../../domain/formatters";
 import { computed, type Component } from "vue";
 import { useNow } from "../../../../composables/useNow";
 import { Bot, Check, CircleAlert, FilePenLine, FileText, Globe, Hourglass, ListChecks, MessageSquare, NotebookPen, Search, SquareTerminal, Wrench } from "@lucide/vue";
@@ -92,7 +93,7 @@ const actionCount = computed(() => props.view.snapshot.entries.reduce((count, en
 const lastUpdateLabel = computed(() => {
   const value = props.view.updatedAt;
   if (!value || !Number.isFinite(Date.parse(value))) return null;
-  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatDate("clockTime", value);
 });
 
 function ongoing(status: string): boolean {

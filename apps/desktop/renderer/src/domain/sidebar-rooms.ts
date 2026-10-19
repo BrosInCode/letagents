@@ -1,3 +1,4 @@
+import { compareText } from "./formatters";
 import type {
   DesktopAccountRoomEntry,
   DesktopGitRoomInfo,
@@ -587,7 +588,7 @@ function compareGitAccountRooms(left: DesktopAccountRoomEntry, right: DesktopAcc
   const leftDefault = isDefaultGitRoom(left.gitRoom);
   const rightDefault = isDefaultGitRoom(right.gitRoom);
   if (leftDefault !== rightDefault) return leftDefault ? -1 : 1;
-  return gitRoomRefLabel(left.gitRoom).localeCompare(gitRoomRefLabel(right.gitRoom));
+  return compareText(gitRoomRefLabel(left.gitRoom), gitRoomRefLabel(right.gitRoom));
 }
 
 function sortSidebarProjectGroups(groups: ProjectGroup[]): ProjectGroup[] {

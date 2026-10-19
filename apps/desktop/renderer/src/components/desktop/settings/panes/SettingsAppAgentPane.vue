@@ -141,6 +141,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatDate } from "../../../../domain/formatters";
 import { Save } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
 import type {
@@ -215,12 +216,7 @@ const appAgentSavedLabel = computed(() => {
   if (!props.appAgentSettings?.savedAt) return "never";
   const timestamp = new Date(props.appAgentSettings.savedAt);
   if (Number.isNaN(timestamp.getTime())) return "recently";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp);
+  return formatDate("monthDayTime", timestamp);
 });
 
 const appAgentKeyDescription = computed(() => {

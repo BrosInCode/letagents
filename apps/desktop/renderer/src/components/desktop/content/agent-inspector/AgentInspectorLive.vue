@@ -47,6 +47,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatDate } from "../../../../domain/formatters";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useNow } from "../../../../composables/useNow";
 import { ArrowDown, MessageSquare, NotebookPen } from "@lucide/vue";
@@ -113,7 +114,7 @@ const actionCount = computed(() => transcript.value.items.filter(item => item.ki
 const lastUpdateLabel = computed(() => {
   const value = transcript.value.lastActivityAt;
   if (!value || !Number.isFinite(Date.parse(value))) return null;
-  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatDate("clockTime", value);
 });
 
 const workDurationLabel = computed(() => {

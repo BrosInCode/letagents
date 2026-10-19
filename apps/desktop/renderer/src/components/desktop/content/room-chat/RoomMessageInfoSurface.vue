@@ -136,6 +136,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatDate } from "../../../../domain/formatters";
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 import type { DesktopMessageInfo, DesktopRoomAgentWork, DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
@@ -225,7 +226,7 @@ function receiptTone(state: string, observed: boolean): string {
 }
 
 function formatTime(timestamp: string): string {
-  return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatDate("clockTime", timestamp);
 }
 
 async function refresh(): Promise<void> {

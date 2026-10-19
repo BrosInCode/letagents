@@ -32,6 +32,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatDecimalNumber } from "../../../domain/formatters";
 import { computed, ref } from "vue";
 
 import MessageReader from "../../../../../../../shared/ui/MessageReader.vue";
@@ -69,7 +70,7 @@ const safeMessageId = computed(() => props.messageId.replace(/[^A-Za-z0-9_-]/g, 
 const contentId = computed(() => `desktop-message-content-${safeMessageId.value}`);
 const statsLabel = computed(() => {
   const lines = lineCount.value;
-  const chars = new Intl.NumberFormat().format(characterCount.value);
+  const chars = formatDecimalNumber(characterCount.value);
   return `${lines} ${lines === 1 ? "line" : "lines"} / ${chars} chars`;
 });
 
