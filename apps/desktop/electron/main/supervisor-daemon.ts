@@ -60,9 +60,9 @@ import { mapAgentConfiguration, mapRoomMove, mapAgentInspectorDetail } from "./s
 export { mapAgentInspectorDetail } from "./supervisor-daemon/agent-mapping.js";
 import { mapEntry, mapActivity } from "./supervisor-daemon/entry-mapping.js";
 export { mapEntry } from "./supervisor-daemon/entry-mapping.js";
+import { STATE_WATCH_RETRY_BASE_MS, supervisorStateWatchRetryDelay, supervisorStateWatchAcceptsStatus } from "./supervisor-daemon/state-watch-policy.js";
+export { supervisorStateWatchRetryDelay, supervisorStateWatchAcceptsStatus } from "./supervisor-daemon/state-watch-policy.js";
 
-const STATE_WATCH_RETRY_BASE_MS = 1_000;
-const STATE_WATCH_RETRY_MAX_MS = 30_000;
 /**
  * While a focused agent's feed sits ended, re-poll at this cadence. The daemon
  * ends the feed when a provider generation exits but keeps the entry so the next
@@ -1920,20 +1920,6 @@ function ensureSupervisorStateWatch(): void {
   stateWatchOperation = runSupervisorStateWatch().finally(() => {
     stateWatchOperation = null;
   });
-}
-
-export function supervisorStateWatchRetryDelay(failureCount: number): number {
-  const boundedFailureCount = Math.max(1, Math.min(31, Math.trunc(failureCount)));
-  return Math.min(
-    STATE_WATCH_RETRY_MAX_MS,
-    STATE_WATCH_RETRY_BASE_MS * (2 ** (boundedFailureCount - 1)),
-  );
-}
-
-export function supervisorStateWatchAcceptsStatus(
-  status: Pick<DesktopSupervisorDaemonStatus, "implementationVersion">,
-): boolean {
-  return status.implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION;
 }
 
 async function runSupervisorStateWatch(): Promise<void> {
