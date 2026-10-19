@@ -47,7 +47,7 @@ import {
   type SelectDelegatedApproval,
 } from "./execution-delegated-approval.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
-import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, archiveExitedRuntimes, exitedRuntimesToArchive, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, pendingRuntimeRecovery, readRuntimeRecovery, recordInterruptedCursorRecovery,
+import { prepareRetiredRuntimePlan, archiveRetiredRuntimes, archiveExitedRuntimes, exitedRuntimesToArchive, type RetiredRuntimeEvidence, type RetiredRuntimePlan, prepareRuntimeRecovery, checkpointRuntimeStopped, PENDING_RUNTIME_RECOVERY_SQL, readRuntimeRecovery, recordInterruptedCursorRecovery,
   type RuntimeRestartRequest, type RuntimeRecoveryRecord } from "./runtime-recovery-journal.js";
 import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
@@ -317,6 +317,8 @@ const MANIFEST_READS = {
     WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?`,
   exitTimestamps: "SELECT timestamp_ms FROM reconciliation_exit_timestamps WHERE agent_id = ? ORDER BY sort_order",
   notices: "SELECT * FROM reconciliation_notices WHERE agent_id = ? ORDER BY sort_order",
+  agentConfiguration: `SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract,delivery_mode,image_input,live_sharing FROM agent_configurations WHERE agent_id=?`,
+  pendingRuntimeRecovery: PENDING_RUNTIME_RECOVERY_SQL,
 } as const;
 
 /**
@@ -934,7 +936,7 @@ export class ManifestStore {
 
   async getAgentConfiguration(agentId: string): Promise<StoredAgentConfiguration | undefined> {
     const database = await this.getDatabase();
-    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract,delivery_mode,image_input,live_sharing FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
+    const row = this.reads.get(database, "agentConfiguration").get(agentId) as Row | undefined;
     if (!row) return undefined;
     return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"], delivery_mode: String(row.delivery_mode), image_input: bool(row.image_input), live_sharing: liveSharingState(row.live_sharing) };
   }
@@ -1685,7 +1687,7 @@ export class ManifestStore {
   }
 
   async pendingRuntimeRecovery(agentId: string): Promise<RuntimeRecoveryRecord | null> {
-    return pendingRuntimeRecovery(await this.getDatabase(), agentId);
+    return this.reads.get(await this.getDatabase(), "pendingRuntimeRecovery").get(agentId) as RuntimeRecoveryRecord | undefined ?? null;
   }
 
   async prepareRuntimeRecovery(expectedGeneration: number, input: RuntimeRestartRequest,

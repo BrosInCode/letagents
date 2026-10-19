@@ -85,6 +85,16 @@ export class WorkerBindingStore {
     list: "SELECT * FROM worker_session_bindings ORDER BY entry_id",
     binding: "SELECT * FROM worker_session_bindings WHERE entry_id=?",
     epoch: "SELECT binding_epoch FROM worker_session_bindings WHERE entry_id=?",
+    // Run on every publication (each heartbeat). Statements finish synchronously.
+    watermark: "SELECT binding_epoch, last_sequence, last_observed_at_ms FROM worker_binding_watermarks WHERE entry_id=?",
+    advanceBinding: "UPDATE worker_session_bindings SET last_sequence=?, last_observed_at_ms=?, updated_at=? WHERE entry_id=? AND binding_epoch=?",
+    upsertWatermark: `INSERT INTO worker_binding_watermarks (entry_id, binding_epoch, last_sequence, last_observed_at_ms, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(entry_id) DO UPDATE SET binding_epoch=MAX(worker_binding_watermarks.binding_epoch, excluded.binding_epoch),
+        last_sequence=MAX(worker_binding_watermarks.last_sequence, excluded.last_sequence),
+        last_observed_at_ms=MAX(worker_binding_watermarks.last_observed_at_ms, excluded.last_observed_at_ms),
+        updated_at=CASE WHEN excluded.last_observed_at_ms >= worker_binding_watermarks.last_observed_at_ms THEN excluded.updated_at ELSE worker_binding_watermarks.updated_at END`,
+    reservePublication: "INSERT INTO worker_binding_publications (reservation_id, entry_id, binding_epoch, execution_generation_id, agent_session_id, sequence, observed_at, observed_at_ms, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)",
+    finalizePublication: "UPDATE worker_binding_publications SET state=?, finalized_at=? WHERE reservation_id=? AND state='reserved'",
   });
   /** Publications finalized for an entry since its journal was last compacted. */
   private readonly publicationsSinceCompaction = new Map<string, number>();
@@ -515,9 +525,9 @@ export class WorkerBindingStore {
       const epoch = this.readBindingEpoch(database, entryId);
       const now = Date.now(); const candidate = Number.isFinite(observedAtMs) ? Math.min(Math.floor(observedAtMs), now) : now;
       const effective = Math.max(candidate, prior.last_observed_at_ms + 1); const sequence = Math.max(prior.last_sequence + 1, effective); const observedAt = new Date(effective).toISOString(); const id = randomUUID();
-      run(database.prepare("UPDATE worker_session_bindings SET last_sequence=?, last_observed_at_ms=?, updated_at=? WHERE entry_id=? AND binding_epoch=?"), sequence, effective, observedAt, entryId, epoch);
+      run(this.reads.get(database, "advanceBinding"),sequence, effective, observedAt, entryId, epoch);
       this.upsertWatermark(database, entryId, epoch, sequence, effective, observedAt);
-      run(database.prepare("INSERT INTO worker_binding_publications (reservation_id, entry_id, binding_epoch, execution_generation_id, agent_session_id, sequence, observed_at, observed_at_ms, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)"), id, entryId, epoch, prior.execution_generation_id, prior.agent_session_id, sequence, observedAt, effective, observedAt);
+      run(this.reads.get(database, "reservePublication"), id, entryId, epoch, prior.execution_generation_id, prior.agent_session_id, sequence, observedAt, effective, observedAt);
       return { reservationId: id, binding: { ...prior, last_sequence: sequence, last_observed_at_ms: effective, updated_at: observedAt }, bindingEpoch: epoch, sequence, observedAt, observedAtMs: effective };
     }, { captureAgentId: false }));
   }
@@ -528,7 +538,7 @@ export class WorkerBindingStore {
       // durable failed reservation, but only an explicit server rejection may
       // revoke authority; timeout/throw must leave it usable.
       const state = outcome === "accepted" ? "accepted" : "failed"; const now = new Date().toISOString();
-      run(database.prepare("UPDATE worker_binding_publications SET state=?, finalized_at=? WHERE reservation_id=? AND state='reserved'"), state, now, reservation.reservationId);
+      run(this.reads.get(database, "finalizePublication"), state, now, reservation.reservationId);
       // Rejection revokes only the exact still-current authority and only if no
       // later reservation exists. A delayed N response can never erase N+1.
       if (outcome === "rejected") {
@@ -554,7 +564,7 @@ export class WorkerBindingStore {
       if (prior.execution_generation_id !== input.fromExecutionGenerationId) throw new Error("Worker binding generation rollover does not match its terminal predecessor.");
       const epoch = this.readBindingEpoch(database, input.entryId);
       const effective = Math.max(Date.now(), prior.last_observed_at_ms + 1); const sequence = Math.max(prior.last_sequence + 1, effective); const observedAt = new Date(effective).toISOString(); const id = randomUUID();
-      run(database.prepare("UPDATE worker_session_bindings SET last_sequence=?, last_observed_at_ms=?, updated_at=? WHERE entry_id=? AND binding_epoch=?"), sequence, effective, observedAt, input.entryId, epoch);
+      run(this.reads.get(database, "advanceBinding"),sequence, effective, observedAt, input.entryId, epoch);
       this.upsertWatermark(database, input.entryId, epoch, sequence, effective, observedAt);
       run(database.prepare("INSERT INTO worker_generation_verifications (reservation_id, entry_id, binding_epoch, from_execution_generation_id, to_execution_generation_id, agent_session_id, sequence, observed_at, observed_at_ms, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)"), id, input.entryId, epoch, input.fromExecutionGenerationId, input.toExecutionGenerationId, input.agentSessionId, sequence, observedAt, effective, observedAt);
       return { kind: "reserved", reservation: { reservationId: id, binding: { ...prior, last_sequence: sequence, last_observed_at_ms: effective, updated_at: observedAt }, bindingEpoch: epoch, sequence, observedAt, observedAtMs: effective } };
@@ -604,15 +614,11 @@ export class WorkerBindingStore {
   private read(database: DatabaseSync, entryId: string): WorkerSessionBinding | null { const row = this.reads.get(database, "binding").get(entryId) as Row | undefined; return row ? rowToBinding(row) : null; }
   private readBindingEpoch(database: DatabaseSync, entryId: string): number { return Number((this.reads.get(database, "epoch").get(entryId) as Row).binding_epoch); }
   private readWatermark(database: DatabaseSync, entryId: string): { binding_epoch: number; last_sequence: number; last_observed_at_ms: number } | null {
-    const row = database.prepare("SELECT binding_epoch, last_sequence, last_observed_at_ms FROM worker_binding_watermarks WHERE entry_id=?").get(entryId) as Row | undefined;
+    const row = this.reads.get(database, "watermark").get(entryId) as Row | undefined;
     return row ? { binding_epoch: Number(row.binding_epoch), last_sequence: Number(row.last_sequence), last_observed_at_ms: Number(row.last_observed_at_ms) } : null;
   }
   private upsertWatermark(database: DatabaseSync, entryId: string, bindingEpoch: number, lastSequence: number, lastObservedAtMs: number, updatedAt: string): void {
-    run(database.prepare(`INSERT INTO worker_binding_watermarks (entry_id, binding_epoch, last_sequence, last_observed_at_ms, updated_at) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(entry_id) DO UPDATE SET binding_epoch=MAX(worker_binding_watermarks.binding_epoch, excluded.binding_epoch),
-        last_sequence=MAX(worker_binding_watermarks.last_sequence, excluded.last_sequence),
-        last_observed_at_ms=MAX(worker_binding_watermarks.last_observed_at_ms, excluded.last_observed_at_ms),
-        updated_at=CASE WHEN excluded.last_observed_at_ms >= worker_binding_watermarks.last_observed_at_ms THEN excluded.updated_at ELSE worker_binding_watermarks.updated_at END`), entryId, bindingEpoch, lastSequence, lastObservedAtMs, updatedAt);
+    run(this.reads.get(database, "upsertWatermark"), entryId, bindingEpoch, lastSequence, lastObservedAtMs, updatedAt);
   }
   private readSupervisedWorkerMintState(database: DatabaseSync, agentId: string): SupervisedWorkerMintState | null {
     const row = database.prepare("SELECT * FROM supervised_worker_mint_states WHERE agent_id=?").get(agentId) as Row | undefined;

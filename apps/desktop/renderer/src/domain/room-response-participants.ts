@@ -4,6 +4,37 @@ import { normalizeManagedAgentRoomIdentifier, workIndicatorSupersededByAgentMess
 
 type Message = Pick<DesktopRoomMessage, "id" | "timestamp" | "accountAgentRouting" | "outgoing" | "liveArrival">;
 type Exchange = { finished: Set<string> };
+type UpdateInput = Parameters<RoomResponseParticipants["update"]>[0];
+
+/**
+ * Everything `RoomResponseParticipants.update` reads from its input, flattened to one
+ * string. The text, attachments and other fields of a message do not change the result,
+ * so a deep watcher over the whole input (every message in the room) is not needed:
+ * watch this key and call `update` again only when it changes. Keep it in step with
+ * `update`: a field that `update` reads must be in the key.
+ */
+export function roomResponseParticipantsKey(input: UpdateInput): string {
+  const messages = input.messages.map(message => {
+    const routing = message.accountAgentRouting;
+    return [
+      message.id, message.timestamp, message.outgoing ? 1 : 0, message.liveArrival ?? 0,
+      routing?.authority === "receipts"
+        ? routing.recipientSessions.map(target => [target.agentKey, target.agentSessionId, target.successorAgentSessionId])
+        : null,
+    ];
+  });
+  const entries = input.entries.map(entry => [
+    entry.id, entry.roomId, entry.agentKey, entry.agentSessionId, entry.displayName,
+    entry.agentSessionBindingState, entry.desiredState, entry.condition, entry.deliveryAttention ? 1 : 0,
+    entry.roomAgentState && [
+      entry.roomAgentState.connection.state, entry.roomAgentState.ingress.state,
+      entry.roomAgentState.inbox.state, entry.roomAgentState.turn.state,
+    ],
+    entry.deliveryReceipts?.map(receipt => [receipt.sourceMessageId, receipt.state]),
+  ]);
+  const presence = input.presence.map(person => [person.agentSessionId, person.displayName, person.actorLabel]);
+  return JSON.stringify([input.roomIdentifier, input.loading ? 1 : 0, input.fresh ? 1 : 0, messages, entries, presence]);
+}
 
 /** UI-only participation, not a claim that a native provider has started.
  * Admit appended live messages, never missing receipts in historical messages.
