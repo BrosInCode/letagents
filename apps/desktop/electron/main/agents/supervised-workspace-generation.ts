@@ -2,8 +2,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants as fsConstants, type BigIntStats, type Stats } from "node:fs";
 import { access, chmod, link, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, rmdir, stat, symlink, unlink } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { AUTHORITY_NAME, BASELINE_FILES_NAME, BASELINE_INDEX_NAME, type CreateSupervisedWorkspaceGenerationOptions, DEFAULT_LIMITS, type ExactFileState, FINAL_INDEX_NAME, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, RETIRED_NAME, type ReconcileOperation, type RecoverSupervisedWorkspaceGenerationOptions, type RegularFileInfo, STAGING_NAME, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, SupervisedWorkspaceConflictError, SupervisedWorkspaceGenerationError, type SupervisedWorkspaceGenerationFailpoint, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationHandle, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationPhase, type SupervisedWorkspaceGenerationResult, type SupervisedWorkspaceGenerationSupport, type SupervisedWorkspaceReadOnlyRoot, type TreeEntry } from "./supervised-workspace-generation/types.js";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { AUTHORITY_NAME, BASELINE_FILES_NAME, BASELINE_INDEX_NAME, type CreateSupervisedWorkspaceGenerationOptions, DEFAULT_LIMITS, type ExactFileState, FINAL_INDEX_NAME, type GenerationManifest, LIVE_NAME, MANIFEST_NAME, MANIFEST_VERSION, RETIRED_NAME, type ReconcileOperation, type RecoverSupervisedWorkspaceGenerationOptions, type RegularFileInfo, STAGING_NAME, SUPERVISED_WORKSPACE_GENERATION_LIMITATION, type SourceGitAuthority, SupervisedWorkspaceConflictError, SupervisedWorkspaceGenerationError, type SupervisedWorkspaceGenerationFailpointHandler, type SupervisedWorkspaceGenerationHandle, type SupervisedWorkspaceGenerationLimits, type SupervisedWorkspaceGenerationPhase, type SupervisedWorkspaceGenerationResult, type SupervisedWorkspaceGenerationSupport, type SupervisedWorkspaceReadOnlyRoot, type TreeEntry } from "./supervised-workspace-generation/types.js";
+import { assertClonePlatform, assertSafeRelativePath, compareUtf8, decodeGitPath, fileVersionKey, fsyncDirectory, generationDirectoryName, generationError, generationIdFor, invokeFailpoint, isErrno, isProtectedPath, limitError, manifestPathOf, normalizeLimits, operationId, pathExists, projectRelativePath, resultFor, safeRelative, splitNul, splitNulBuffer, treeEntryEqual } from "./supervised-workspace-generation/helpers.js";
 export { SUPERVISED_WORKSPACE_GENERATION_LIMITATION } from "./supervised-workspace-generation/types.js";
 export type { SupervisedWorkspaceGenerationPhase } from "./supervised-workspace-generation/types.js";
 export type { SupervisedWorkspaceGenerationFailpoint } from "./supervised-workspace-generation/types.js";
@@ -924,13 +925,6 @@ class FileInspectionSession {
   }
 }
 
-function fileVersionKey(info: BigIntStats): string {
-  return [
-    info.dev, info.ino, info.birthtimeNs, info.ctimeNs, info.mtimeNs,
-    info.size, info.mode, info.uid, info.gid, info.nlink,
-  ].join(":");
-}
-
 async function inspectExactFile(
   manifest: GenerationManifest,
   target: string,
@@ -1835,19 +1829,6 @@ async function cleanupTrees(manifest: GenerationManifest, preserveReconciliation
   }
 }
 
-function projectRelativePath(sourcePath: string, prefix: string): string | null {
-  if (prefix === "") return sourcePath;
-  if (sourcePath === prefix) return "";
-  return sourcePath.startsWith(`${prefix}${sep}`) ? sourcePath.slice(prefix.length + 1) : null;
-}
-
-function isProtectedPath(relativePath: string): boolean {
-  const protectedComponents = new Set([".git", ".cursor", ".claude", ".letagents-fence"]);
-  return relativePath.split(sep).some((component) =>
-    protectedComponents.has(component.normalize("NFC").toLowerCase()),
-  );
-}
-
 async function prepareOperationStages(
   manifest: GenerationManifest,
   operations: ReconcileOperation[],
@@ -1912,46 +1893,6 @@ async function freezeDesiredStages(
   await fsyncDirectory(manifest.generationRoot);
 }
 
-function generationIdFor(sourceRoot: string, turnIdentity: string): string {
-  return createHash("sha256").update(sourceRoot).update("\0").update(turnIdentity).digest("hex").slice(0, 32);
-}
-
-function generationDirectoryName(sourceRoot: string, generationId: string): string {
-  return `.${basename(sourceRoot)}.letagents-generation-${generationId}`;
-}
-
-function manifestPathOf(manifest: GenerationManifest): string {
-  return join(manifest.generationRoot, MANIFEST_NAME);
-}
-
-function resultFor(manifest: GenerationManifest): SupervisedWorkspaceGenerationResult {
-  return {
-    phase: manifest.phase,
-    appliedPaths: manifest.operationJournal.filter((entry) => entry.status === "applied").map((entry) => entry.relativePath),
-    manifestPath: manifestPathOf(manifest),
-  };
-}
-
-function treeEntryEqual(a: TreeEntry | null | undefined, b: TreeEntry | null | undefined): boolean {
-  if (!a || !b) return !a && !b;
-  return a.mode === b.mode && a.oid === b.oid;
-}
-
-function operationId(sourceRelativePath: string, before: TreeEntry | null, after: TreeEntry | null): string {
-  return createHash("sha256")
-    .update(sourceRelativePath).update("\0")
-    .update(before?.mode ?? "missing").update("\0").update(before?.oid ?? "missing").update("\0")
-    .update(after?.mode ?? "missing").update("\0").update(after?.oid ?? "missing")
-    .digest("hex").slice(0, 24);
-}
-
-function safeRelative(parent: string, child: string): string {
-  const result = relative(resolve(parent), resolve(child));
-  if (result === "") return "";
-  if (result === ".." || result.startsWith(`..${sep}`) || isAbsolute(result)) throw generationError("Path escapes its supervised root.", "PATH_ESCAPE");
-  return result;
-}
-
 async function readStableGitControlFile(path: string): Promise<string> {
   const descriptor = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW).catch((error) => {
     throw generationError(
@@ -2003,88 +1944,10 @@ async function canonicalGitControlTarget(path: string, unavailableMessage: strin
   }
 }
 
-function assertSafeRelativePath(relativePath: string, limits: SupervisedWorkspaceGenerationLimits): void {
-  if (!relativePath || isAbsolute(relativePath) || relativePath.split(sep).includes("..") || relativePath.includes("\0")) {
-    throw generationError("Unsafe relative path.", "PATH_ESCAPE");
-  }
-  if (Buffer.byteLength(relativePath) > limits.maxRelativePathBytes) throw limitError("relative path bytes", limits.maxRelativePathBytes);
-}
-
-function normalizeLimits(input: Partial<SupervisedWorkspaceGenerationLimits> | undefined): SupervisedWorkspaceGenerationLimits {
-  const result = { ...DEFAULT_LIMITS, ...input };
-  for (const [key, value] of Object.entries(result)) {
-    if (!Number.isSafeInteger(value) || value <= 0) throw generationError(`Invalid ${key} limit.`, "INVALID_LIMIT");
-  }
-  return result;
-}
-
-function assertClonePlatform(): void {
-  if (process.platform !== "darwin") {
-    throw generationError("Writable supervised generations require macOS clonefile support; no ordinary-copy fallback is allowed.", "CLONE_PLATFORM_UNSUPPORTED");
-  }
-}
-
 async function cloneRegularFile(source: string, destination: string, maxBytes: number): Promise<void> {
   // BSD cp(1) -c is clonefile-only on macOS. A filesystem without clone support
   // returns a non-zero exit; deliberately do not retry as an ordinary copy.
   await runProcess("/bin/cp", ["-c", "-p", "-P", source, destination], dirname(destination), undefined, Math.min(maxBytes, 1024 * 1024), GIT_ENV);
-}
-
-function generationError(message: string, code: string): SupervisedWorkspaceGenerationError {
-  return new SupervisedWorkspaceGenerationError(message, code);
-}
-
-function limitError(kind: string, value: number): SupervisedWorkspaceGenerationError {
-  return generationError(`Supervised generation ${kind} exceeded its limit (${value}).`, "GENERATION_LIMIT_EXCEEDED");
-}
-
-function compareUtf8(a: string, b: string): number {
-  return Buffer.from(a).compare(Buffer.from(b));
-}
-
-function splitNul(buffer: Buffer): string[] {
-  return splitNulBuffer(buffer).map(decodeGitPath);
-}
-
-function decodeGitPath(value: Buffer): string {
-  const decoded = value.toString("utf8");
-  if (!Buffer.from(decoded, "utf8").equals(value)) {
-    throw generationError("Git returned a path that is not valid UTF-8.", "UNSUPPORTED_GIT_PATH_ENCODING");
-  }
-  return decoded;
-}
-
-function splitNulBuffer(buffer: Buffer): Buffer[] {
-  const result: Buffer[] = [];
-  let start = 0;
-  for (let index = 0; index < buffer.length; index += 1) {
-    if (buffer[index] !== 0) continue;
-    if (index > start) result.push(buffer.subarray(start, index));
-    start = index + 1;
-  }
-  if (start < buffer.length) result.push(buffer.subarray(start));
-  return result;
-}
-
-async function fsyncDirectory(directory: string): Promise<void> {
-  const descriptor = await open(directory, fsConstants.O_RDONLY);
-  try { await descriptor.sync(); } finally { await descriptor.close(); }
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try { await lstat(path); return true; } catch (error) { if (isErrno(error, "ENOENT")) return false; throw error; }
-}
-
-async function invokeFailpoint(
-  handler: SupervisedWorkspaceGenerationFailpointHandler | undefined,
-  point: SupervisedWorkspaceGenerationFailpoint,
-  manifestPath: string,
-): Promise<void> {
-  await handler?.(point, manifestPath);
-}
-
-function isErrno(error: unknown, code: string): boolean {
-  return !!error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
 const PHASES = new Set<SupervisedWorkspaceGenerationPhase>([
