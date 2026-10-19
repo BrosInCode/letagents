@@ -9,6 +9,7 @@ import { providerAcquisitionIdentity, retainProviderAcquisitionEvidence } from "
 import { validatedNativeRuntimeDeath } from "../provider-action-port.js";
 import { advanceReconciliationState } from "../reconciler-state.js";
 import { RETIREMENT_SETTLEMENT_WAIT_MS } from "../provider-execution-coordinator.js";
+import { ActivityWriteBatcher } from "../activity-write-batcher.js";
 import { SupervisedAgentDelivery, SupervisedRoomAuthorizationError } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 
@@ -1593,6 +1594,40 @@ test("handoff during native dispatch journals the exact returned provider withou
   );
   assert.equal(runtime.installed.length, 0, "retiring daemon never owns returned-handle callbacks");
   await runtime.coordinator.drainDispatches();
+});
+
+test("the handoff birth checkpoint retires the entry's pending activity right after it commits, inside the commit lane", async () => {
+  let runtime!: ReturnType<typeof harness>;
+  const port = provider({
+    spawn: async () => {
+      runtime.setHandoff(true);
+      return { ...returnedHandle, custodyLaunchAgentSessionId: "launched-worker" };
+    },
+  });
+  runtime = harness({ provider: port });
+  const batcher = new ActivityWriteBatcher({ serialize: (operation) => operation(), commit: async () => {} });
+  batcher.admit({ agentId: "agent-1", event: { observed_at: "2026-08-26T00:00:00.000Z", sequence: 9, provider: "codex", kind: "tool",
+    method: "m", summary: "late", status: "working", payload: {}, payload_truncated: false, payload_redacted: false, durable_payload_ref: null },
+  runtimeUpdate: null, limit: 200 });
+  const calls: { entryId: string; birthCommitted: boolean; inCommitLane: boolean }[] = [];
+  let inCommitLane = false;
+  const serializeCommit = runtime.options.authority.serializeManifestCommit;
+  runtime.options.authority.serializeManifestCommit = async (operation) => serializeCommit(async () => {
+    inCommitLane = true;
+    try { return await operation(); } finally { inCommitLane = false; }
+  });
+  runtime.options.retirePendingActivity = (entryId) => {
+    calls.push({ entryId, birthCommitted: runtime.entry().provider_ref?.provider_continuation_id === "continuation-1", inCommitLane });
+    batcher.retireEntry(entryId);
+  };
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.deepEqual(calls, [{ entryId: "agent-1", birthCommitted: true, inCommitLane: true }]);
+  assert.equal(batcher.mayWrite("agent-1"), false, "no later batch may write this entry's activity");
+  assert.equal(batcher.pendingState("agent-1"), null, "its pending events are dropped");
+  await runtime.coordinator.drainDispatches();
+  await batcher.close();
 });
 
 test("ordinary persistence keeps only the worker identity receipted by the native launch", async () => {
