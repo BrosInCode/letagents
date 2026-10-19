@@ -45,6 +45,8 @@ import { SUPERVISOR_DAEMON_PROTOCOL_VERSION, SUPERVISOR_DAEMON_IMPLEMENTATION_VE
 export { SUPERVISOR_DAEMON_PROTOCOL_VERSION, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT, BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS } from "./supervisor-daemon/constants.js";
 import type { WireResponse, WireEntry, WireActivityEvent, DaemonProcessState, DaemonProcessIdentity, DaemonIdentityInspection, RetiredDaemonObservation, DaemonHandoffDiagnostic, SupervisorDaemonLifecycleOptions } from "./supervisor-daemon/types.js";
 export type { DaemonProcessState, DaemonProcessIdentity, DaemonHandoffDiagnostic, SupervisorDaemonLifecycleOptions } from "./supervisor-daemon/types.js";
+import { SupervisorDaemonProtocolMismatchError, SupervisorDaemonRequestTimeoutError, isConnectionUnavailable } from "./supervisor-daemon/errors.js";
+export { SupervisorDaemonProtocolMismatchError } from "./supervisor-daemon/errors.js";
 
 const STATE_WATCH_RETRY_BASE_MS = 1_000;
 const STATE_WATCH_RETRY_MAX_MS = 30_000;
@@ -142,18 +144,6 @@ export function defaultInspectDaemonProcess(pid: number): DaemonIdentityInspecti
     } catch (error) {
       return (error as NodeJS.ErrnoException).code === "ESRCH" ? null : undefined;
     }
-  }
-}
-
-export class SupervisorDaemonProtocolMismatchError extends Error {
-  constructor(readonly clientVersion: number, readonly daemonVersion: number, message: string) {
-    super(message);
-  }
-}
-
-class SupervisorDaemonRequestTimeoutError extends Error {
-  constructor(readonly method: string) {
-    super(`Supervisor daemon request timed out: ${method}`);
   }
 }
 
@@ -2664,10 +2654,6 @@ function sanitizeDesktopActivityEvent(event: DesktopSupervisorActivityEvent): De
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isConnectionUnavailable(error: unknown): boolean {
-  return ["ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE"].includes((error as NodeJS.ErrnoException)?.code ?? "");
 }
 
 export const supervisorDaemonClient = new SupervisorDaemonClient();
