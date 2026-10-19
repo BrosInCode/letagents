@@ -293,6 +293,7 @@ export class ManifestStore {
   private initializing: Promise<DatabaseSync> | null = null;
   private writes: Promise<void> = Promise.resolve();
   private closed = false;
+  private pendingActivityState: ((agentId: string) => { observedState: DaemonManifestEntry["observed_state"] | null } | null) | null = null;
 
   constructor(
     readonly path: string,
@@ -594,6 +595,15 @@ export class ManifestStore {
       LIMIT 1`).get(input.agentId, input.executionGenerationId, runtimeId));
   }
 
+  /**
+   * The daemon's batched activity: the newest runtime state of an entry's
+   * admitted but uncommitted events. Durable-idle checks consult it, since a
+   * pending working event is newer than the committed idle state.
+   */
+  setPendingActivityState(probe: ((agentId: string) => { observedState: DaemonManifestEntry["observed_state"] | null } | null) | null): void {
+    this.pendingActivityState = probe;
+  }
+
   /** Re-read durable authority synchronously at the native signal boundary. */
   async validateManagedRuntimeReplacement(input: {
     agentId: string; executionGenerationId: string; providerConnection: DaemonProviderConnection;
@@ -610,6 +620,7 @@ export class ManifestStore {
       if (!entry || entry.room_id !== snapshot.roomId || entry.work_attempt_id !== snapshot.workAttemptId
         || entry.provider !== "codex" || entry.desired_state !== "running"
         || entry.delivery_mode !== "daemon_inbox" || entry.condition !== "none" || entry.observed_state !== "idle"
+        || (this.pendingActivityState?.(snapshot.agentId)?.observedState ?? "idle") !== "idle"
         || (entry.turn_control && entry.turn_control.status !== "completed")
         || entry.provider_ref?.provider_continuation_id !== snapshot.providerContinuationId
         || entry.provider_ref?.execution_generation_id !== snapshot.executionGenerationId
@@ -2685,11 +2696,14 @@ export class ManifestStore {
     expectedGeneration: number,
     items: readonly ActivityWrite[],
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
+    /** Checked inside the transaction; an event of an entry it refuses is skipped. */
+    mayWrite?: (agentId: string) => boolean,
   ): Promise<{ generation: number; written: number; skipped: number }> {
     const normalized = items.map((item) => ({ ...item, event: parseJson<DaemonActivityEvent>(json(item.event)) }));
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       let written = 0;
       for (const item of normalized) {
+        if (mayWrite && !mayWrite(item.agentId)) continue;
         const latest = this.reads.get(database, "lastSequence").get(item.agentId) as Row | undefined;
         if (latest && item.event.sequence <= Number(latest.sequence)) continue;
         if (!this.applyActivityRuntime(database, item.agentId, item.runtimeUpdate)) continue;

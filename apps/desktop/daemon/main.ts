@@ -221,19 +221,22 @@ export class SupervisorDaemon {
         // owns the singleton, even if a handoff began while it waited for the
         // commit lane, and never once the singleton is lost.
         const next = await this.store.recordActivityBatch(this.manifestGeneration, items,
-          (commit) => this.fenceAdmittedTransitionCommit(commit));
+          (commit) => this.fenceAdmittedTransitionCommit(commit),
+          // A retiring daemon's provider birth record is never overwritten by older activity.
+          (agentId) => this.activityWrites.mayWrite(agentId));
         this.manifestGeneration = next.generation;
         if (next.skipped > 0) {
           console.warn("[activity_batch]", JSON.stringify({ skipped: next.skipped, written: next.written,
             reason: "entry gone or sequence no longer newer" }));
         }
       },
-      retryable: (error) => !(error instanceof DaemonFenceLostError),
       diagnostic: (error, dropped) => console.warn("[activity_batch]", JSON.stringify({ dropped, error: String(error) })),
     });
     // Every other manifest mutation writes pending activity first, so it reads
     // and orders after every event admitted before it.
     this.authority.setPendingWriteFlush(() => this.activityWrites.flushInLane());
+    // A durable-idle check must not pass while a newer working event is pending.
+    this.store.setPendingActivityState((agentId) => this.activityWrites.pendingState(agentId));
     this.manifestAdministration = new ManifestAdministrationCoordinator({
       store: this.store,
       authority: {
@@ -461,6 +464,7 @@ export class SupervisorDaemon {
     this.providerExecution = providerPort
       ? new ProviderExecutionCoordinator({
         notifyProgressChanged: () => this.notifyStateChanged(),
+        retirePendingActivity: (entryId) => this.activityWrites.retireEntry(entryId),
         refreshManagedRuntime: (entryId) => this.runtimeConfigurationApply.refreshManaged(entryId),
         exitSettling: (entryId) => this.providerTerminals.settling(entryId),
         settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),

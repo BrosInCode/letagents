@@ -5,13 +5,14 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { ActivityWriteBatcher, ACTIVITY_BATCH_MAX_EVENTS } from "../activity-write-batcher.js";
+import { ActivityWriteBatcher, ACTIVITY_BATCH_MAX_EVENTS, isSingleEventActivityError } from "../activity-write-batcher.js";
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { schedulerErrorDetail } from "../daemon-error-policy.js";
 import { ManifestAdministrationCoordinator } from "../manifest-administration-coordinator.js";
 import { projectDaemonCreateRequestReplayParameters } from "../manifest-entry-projection.js";
-import { ManifestStore } from "../manifest-store.js";
+import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
+import { DaemonFenceLostError } from "../singleton.js";
 import { deriveProviderConfigurationSnapshot } from "../provider-configuration.js";
 import { supervisedPermissionProfilesForProvider } from "../supervised-permission-profiles.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
@@ -46,6 +47,8 @@ function event(sequence: number, status: DaemonActivityEvent["status"] = "workin
 /** Real store, real authority lanes and coordinator; the batch timer is driven by hand. */
 async function harness(options: {
   closeTimeoutMs?: number;
+  retryBudgetMs?: number;
+  now?: () => number;
   /** Runs before each commit attempt; may wait or throw. */
   beforeCommit?: (items: readonly { agentId: string; event: DaemonActivityEvent }[]) => Promise<void>;
 } = {}) {
@@ -69,7 +72,8 @@ async function harness(options: {
     commit: async (items) => {
       await options.beforeCommit?.(items);
       commits.push(items.length);
-      const next = await store.recordActivityBatch(authority.generation, items, (commit) => authority.fenceDaemonCommit(commit));
+      const next = await store.recordActivityBatch(authority.generation, items, (commit) => authority.fenceDaemonCommit(commit),
+        (agentId) => batcher.mayWrite(agentId));
       authority.generation = next.generation;
     },
     diagnostic: (error, dropped) => diagnostics.push({ error, dropped }),
@@ -80,6 +84,8 @@ async function harness(options: {
     },
     clearTimeout: (handle) => { (handle as { cleared: boolean }).cleared = true; },
     ...(options.closeTimeoutMs === undefined ? {} : { closeTimeoutMs: options.closeTimeoutMs }),
+    ...(options.retryBudgetMs === undefined ? {} : { retryBudgetMs: options.retryBudgetMs }),
+    ...(options.now ? { now: options.now } : {}),
   });
   authority.setPendingWriteFlush(() => batcher.flushInLane());
   const coordinator = new ManifestAdministrationCoordinator({
@@ -339,14 +345,18 @@ test("a window flush after authority is lost drops the batch and never rejects",
   } finally { await h.cleanup(); }
 });
 
+function sqliteError(errcode: number, errstr: string): Error {
+  return Object.assign(new Error(errstr), { code: "ERR_SQLITE_ERROR", errcode, errstr });
+}
+
 test("a failed batch is retried event by event, so one bad event costs only itself", async () => {
   let failBatches = true;
   const h = await harness({
     beforeCommit: async (items) => {
-      // A batch-wide failure (as SQLITE_BUSY or a constraint would cause), and
-      // one event that fails even on its own.
-      if (failBatches && items.length > 1) throw new Error("database is busy");
-      if (items.some((item) => item.agentId === "b" && item.event.sequence === 2)) throw new Error("constraint failed");
+        // A batch-wide failure caused by one event's content (a constraint), and
+      // that event failing again on its own.
+      if (failBatches && items.length > 1) throw sqliteError(1555, "UNIQUE constraint failed");
+      if (items.some((item) => item.agentId === "b" && item.event.sequence === 2)) throw sqliteError(275, "CHECK constraint failed");
     },
   });
   try {
@@ -387,4 +397,71 @@ test("close waits for a batch already in flight inside another mutation", async 
     assert.deepEqual(h.committedActivity("a"), [1], "the in-flight batch committed before close returned");
     assert.deepEqual(h.diagnostics, []);
   } finally { releaseCommit?.(); await h.cleanup(); }
+});
+
+test("only failures that belong to one event are retried event by event", () => {
+  assert.equal(isSingleEventActivityError(sqliteError(1555, "UNIQUE constraint failed")), true);
+  assert.equal(isSingleEventActivityError(sqliteError(18, "string or blob too big")), true);
+  assert.equal(isSingleEventActivityError(new TypeError("Do not know how to serialize a BigInt")), true);
+  assert.equal(isSingleEventActivityError(sqliteError(5, "database is locked")), false);
+  assert.equal(isSingleEventActivityError(sqliteError(517, "database is locked")), false);
+  assert.equal(isSingleEventActivityError(sqliteError(10, "disk I/O error")), false);
+  assert.equal(isSingleEventActivityError(new ManifestConflictError("Manifest generation 9 does not match expected 8.")), false);
+  assert.equal(isSingleEventActivityError(new DaemonFenceLostError("fence lost")), false);
+});
+
+for (const [name, failure] of [
+  ["a busy database", () => sqliteError(5, "database is locked")],
+  ["a generation conflict", () => new ManifestConflictError("Manifest generation 9 does not match expected 8.")],
+] as const) {
+  test(`${name} drops the batch at once, with no per-event retry`, async () => {
+    let attempts = 0;
+    const h = await harness({ beforeCommit: async () => { attempts += 1; throw failure(); } });
+    try {
+      for (let sequence = 1; sequence <= 10; sequence += 1) await h.coordinator.appendNativeActivity("a", event(sequence), false);
+      const started = Date.now();
+      await h.fireWindow();
+      assert.equal(attempts, 1, "one attempt for the whole batch");
+      assert.ok(Date.now() - started < 1_000, "the lane is released quickly");
+      assert.deepEqual(h.diagnostics.map((entry) => entry.dropped), [10]);
+      assert.deepEqual(h.committedActivity("a"), []);
+      // The lane is free for the next mutation.
+      assert.equal(await h.authority.serializeManifestMutation(async () => "next"), "next");
+    } finally { await h.cleanup(); }
+  });
+}
+
+test("the per-event retry stops when its time budget is spent", async () => {
+  let clock = 0;
+  let attempts = 0;
+  const h = await harness({
+    retryBudgetMs: 250,
+    now: () => clock,
+    beforeCommit: async () => { attempts += 1; clock += 100; throw sqliteError(1555, "UNIQUE constraint failed"); },
+  });
+  try {
+    for (let sequence = 1; sequence <= 10; sequence += 1) await h.coordinator.appendNativeActivity("a", event(sequence), false);
+    await h.fireWindow();
+    assert.ok(attempts <= 5, `attempts ${attempts}`);
+    assert.equal(h.diagnostics.reduce((sum, entry) => sum + entry.dropped, 0), 10, "every event is accounted for");
+  } finally { await h.cleanup(); }
+});
+
+test("activity of an entry whose provider birth was checkpointed is never written after it", async () => {
+  const h = await harness();
+  try {
+    await h.coordinator.appendNativeActivity("a", event(1, "working"), false);
+    await h.coordinator.appendNativeActivity("b", event(1, "working"), false);
+    // An in-flight batch skips the entry inside its transaction too.
+    const result = await h.store.recordActivityBatch(h.authority.generation,
+      [{ agentId: "a", event: event(5), runtimeUpdate: null, limit: 200 }], undefined, () => false);
+    h.authority.generation = result.generation;
+    assert.equal(result.skipped, 1);
+    h.batcher.retireEntry("a");
+    assert.equal(h.batcher.mayWrite("a"), false);
+    assert.equal(h.batcher.pendingState("a"), null, "its pending events are dropped");
+    await h.fireWindow();
+    assert.deepEqual(h.committedActivity("a"), []);
+    assert.deepEqual(h.committedActivity("b"), [1], "other entries are unaffected");
+  } finally { await h.cleanup(); }
 });

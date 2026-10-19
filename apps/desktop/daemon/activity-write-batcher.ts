@@ -20,6 +20,36 @@ export const ACTIVITY_BATCH_MAX_EVENTS = 64;
 /** How long close() waits for the manifest lane before it gives up a batch. */
 export const ACTIVITY_BATCH_CLOSE_TIMEOUT_MS = 2_000;
 
+/**
+ * The longest one lane turn may spend retrying a failed batch event by event.
+ * The lane also carries transitions, admissions and the desktop view.
+ */
+export const ACTIVITY_BATCH_RETRY_BUDGET_MS = 250;
+
+// SQLite primary result codes that belong to one row's content.
+const SQLITE_TOOBIG = 18;
+const SQLITE_CONSTRAINT = 19;
+const SQLITE_MISMATCH = 20;
+const SQLITE_RANGE = 25;
+
+/**
+ * True for an error caused by one event's own content: a constraint, size or
+ * type failure, or a payload that cannot be encoded. Only these make a
+ * per-event retry useful. A busy or locked database, an I/O error, a
+ * generation conflict (another writer committed first) or lost authority
+ * would fail every event the same way, or could reorder an older event over
+ * a newer write, so the batch is dropped instead.
+ */
+export function isSingleEventActivityError(error: unknown): boolean {
+  const candidate = error as { code?: unknown; errcode?: unknown } | null;
+  if (candidate && candidate.code === "ERR_SQLITE_ERROR" && typeof candidate.errcode === "number") {
+    const primary = candidate.errcode & 0xff;
+    return primary === SQLITE_CONSTRAINT || primary === SQLITE_TOOBIG
+      || primary === SQLITE_MISMATCH || primary === SQLITE_RANGE;
+  }
+  return error instanceof TypeError || error instanceof SyntaxError || error instanceof RangeError;
+}
+
 export type ActivityWriteBatcherOptions = {
   /**
    * The manifest mutation lane, entered without the activity flush that every
@@ -30,16 +60,17 @@ export type ActivityWriteBatcherOptions = {
   /** Write one batch in one transaction and accept its manifest generation. */
   commit(items: readonly ActivityWrite[]): Promise<void>;
   /**
-   * Events that could not be written. After a failed batch each event is
-   * retried once on its own, so one bad event costs only itself, as a failed
-   * single write did; what still fails is dropped and reported here.
+   * Events that could not be written. A batch that failed because of one
+   * event's content is retried event by event, so that event costs only
+   * itself, as a failed single write did; what still fails is dropped and
+   * reported here. Any other failure drops the batch.
    */
   diagnostic?(error: unknown, dropped: number): void;
-  /**
-   * False for an error that no retry can fix, such as lost authority: the
-   * batch is then dropped without per-event retries. Default: retry.
-   */
-  retryable?(error: unknown): boolean;
+  /** Whether a batch failure is worth a per-event retry. Default: isSingleEventActivityError. */
+  retryPerEvent?(error: unknown): boolean;
+  /** Total time a per-event retry may take in one lane turn. */
+  retryBudgetMs?: number;
+  now?: () => number;
   windowMs?: number;
   maxEvents?: number;
   closeTimeoutMs?: number;
@@ -73,6 +104,8 @@ export class ActivityWriteBatcher {
   private closed = false;
   /** The flush running now, possibly inside another mutation's lane turn. */
   private current: Promise<void> | null = null;
+  /** Entries whose provider birth a retiring daemon checkpointed; their activity is never written after it. */
+  private readonly retired = new Set<string>();
   private readonly windowMs: number;
   private readonly maxEvents: number;
   private readonly closeTimeoutMs: number;
@@ -85,6 +118,25 @@ export class ActivityWriteBatcher {
     this.closeTimeoutMs = options.closeTimeoutMs ?? ACTIVITY_BATCH_CLOSE_TIMEOUT_MS;
     this.setTimer = options.setTimeout ?? ((callback, ms) => setTimeout(callback, ms));
     this.clearTimer = options.clearTimeout ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
+  }
+
+  /**
+   * A retiring daemon wrote this entry's provider birth outside the manifest
+   * lane. Call inside the commit lane right after that commit: pending events
+   * for the entry are dropped, and a batch that commits later skips them, so
+   * older activity can never overwrite the birth record.
+   */
+  retireEntry(entryId: string): void {
+    this.retired.add(entryId);
+    const before = this.pending.length;
+    this.pending = this.pending.filter((item) => item.agentId !== entryId);
+    const dropped = before - this.pending.length;
+    if (dropped) this.options.diagnostic?.(new Error(`Provider birth for ${entryId} was checkpointed during handoff.`), dropped);
+  }
+
+  /** Whether an event for this entry may still be written. Checked inside the batch transaction. */
+  mayWrite(entryId: string): boolean {
+    return !this.retired.has(entryId);
   }
 
   get size(): number {
@@ -189,23 +241,33 @@ export class ActivityWriteBatcher {
     }
   }
 
-  /** Still inside the lane, with the same commit (and fence) as the batch. */
+  /**
+   * Still inside the lane, with the same commit (and fence) as the batch, and
+   * only for a failure that belongs to one event. Stops at the first failure
+   * of any other kind, and when the retry budget is spent.
+   */
   private async retryEachOnce(batch: ActivityWrite[], batchError: unknown): Promise<void> {
-    if (batch.length === 1 || this.options.retryable?.(batchError) === false) {
+    const perEvent = this.options.retryPerEvent ?? isSingleEventActivityError;
+    if (batch.length === 1 || !perEvent(batchError)) {
       this.options.diagnostic?.(batchError, batch.length);
       return;
     }
+    const now = this.options.now ?? Date.now;
+    const deadline = now() + (this.options.retryBudgetMs ?? ACTIVITY_BATCH_RETRY_BUDGET_MS);
     let failed = 0;
     let lastError: unknown = batchError;
-    for (const item of batch) {
+    for (const [index, item] of batch.entries()) {
+      if (now() > deadline) {
+        this.options.diagnostic?.(new Error("The per-event activity retry ran out of time."), failed + batch.length - index);
+        return;
+      }
       try {
         await this.options.commit([item]);
       } catch (error) {
         failed += 1;
         lastError = error;
-        if (this.options.retryable?.(error) === false) {
-          const rest = batch.length - batch.indexOf(item) - 1;
-          this.options.diagnostic?.(error, failed + rest);
+        if (!perEvent(error)) {
+          this.options.diagnostic?.(error, failed + batch.length - index - 1);
           return;
         }
       }

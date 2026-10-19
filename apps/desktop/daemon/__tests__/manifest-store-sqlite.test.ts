@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { ActivityWriteBatcher } from "../activity-write-batcher.js";
+import { DaemonAuthority } from "../daemon-authority.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { projectStateWatchActivity } from "../state-watch-projection.js";
@@ -6912,6 +6914,82 @@ test("managed launch receipts survive reopening, reject relabeling, and legacy m
   } finally { await bindings.close(); await store.close(); await env.cleanup(); }
 });
 
+
+test("batched activity admitted before a handoff never overwrites the retiring daemon's provider birth", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "handoff-birth" };
+  const agent: DaemonManifestEntry = { ...entry, condition: "none", observed_state: "idle", delivery_mode: "daemon_inbox",
+    turn_control: undefined, work_attempt_id: "attempt_1", provider_ref: { work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      provider_continuation_id: "thread_1", provider_connection: connection } };
+  const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => true, notifyStateChanged: () => {} });
+  const diagnostics: number[] = [];
+  const batcher = new ActivityWriteBatcher({
+    serialize: (operation) => authority.serializeManifestMutationWithoutFlush(operation),
+    // As main.ts: the admitted-state fence and the retired-entry filter.
+    commit: async (items) => {
+      const next = await store.recordActivityBatch(authority.generation, items,
+        (commit) => authority.fenceAdmittedTransitionCommit(commit), (agentId) => batcher.mayWrite(agentId));
+      authority.generation = next.generation;
+    },
+    diagnostic: (_error, dropped) => diagnostics.push(dropped),
+  });
+  try {
+    authority.generation = (await store.write(0, [agent])).generation;
+    seedTerminalExecution(env.databasePath, "attempt_1", "run_1");
+    // Admitted just before retirement began: a working event still in the window.
+    await batcher.serializeAdmission(async () => batcher.admit({ agentId: agent.id,
+      event: { ...entry.activity![0]!, sequence: 50, status: "working", summary: "late event" },
+      runtimeUpdate: { observedState: "working", nativeLiveness: { state: "active", observed_at: "2026-07-19T00:05:00.000Z", detail: "late event" } },
+      limit: 200 }));
+    // The retiring daemon journals the returned birth outside the manifest lane, as
+    // persistReturnedProviderForHandoff does, and retires the entry's pending activity.
+    const birth = await store.checkpointProviderBirth(authority.generation, {
+      entry: { ...agent, observed_state: "idle" }, executionGenerationId: "run_1", providerConnection: connection,
+      appliedRevision: 1, requestedAuthorityMode: "typed_shadow", observedAtMs: 100, managedLaunchContract: "c".repeat(64),
+    }, (commit) => authority.serializeManifestCommit(async () => { await commit(); batcher.retireEntry(agent.id); }));
+    authority.generation = birth.generation;
+    await batcher.flush();
+    await batcher.close();
+    const saved = (await store.getEntry(agent.id))!;
+    assert.equal(saved.observed_state, "idle", "the birth record keeps its state");
+    assert.equal(saved.activity?.some((event) => event.sequence === 50), false, "the older event was not written after the birth");
+    assert.deepEqual(diagnostics, [1], "the dropped event is reported");
+  } finally { await batcher.close(); await store.close(); await env.cleanup(); }
+});
+
+test("a managed runtime replacement is refused while a working event is still pending", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "managed-birth" };
+  const agent: DaemonManifestEntry = { ...entry, condition: "none", observed_state: "idle", delivery_mode: "daemon_inbox",
+    turn_control: undefined, work_attempt_id: "attempt_1", provider_ref: { work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      provider_continuation_id: "thread_1", provider_connection: connection } };
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  let pending: { observedState: DaemonManifestEntry["observed_state"] | null } | null = null;
+  store.setPendingActivityState(() => pending);
+  const input = { agentId: agent.id, executionGenerationId: "run_1", providerConnection: connection, configurationRevision: 1,
+    apiUrl: "https://example.test", roomId: agent.room_id, workAttemptId: "attempt_1", providerContinuationId: "thread_1" };
+  try {
+    const written = await store.write(0, [agent]);
+    seedTerminalExecution(env.databasePath, "attempt_1", "run_1");
+    await store.checkpointProviderBirth(written.generation, { entry: agent, executionGenerationId: "run_1", providerConnection: connection,
+      appliedRevision: 1, requestedAuthorityMode: "typed_shadow", observedAtMs: 100, managedLaunchContract: "a".repeat(64) });
+    await bindings.bind({ entry_id: agent.id, room_id: agent.room_id, work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      agent_session_id: "session", agent_session_token: "test-token", api_url: "https://example.test" });
+    pending = { observedState: "working" };
+    await assert.rejects(store.validateManagedRuntimeReplacement(input), /durable idle authority/,
+      "committed idle is not durable idle while a newer working event is pending");
+    pending = { observedState: null };
+    const assertDurable = await store.validateManagedRuntimeReplacement(input);
+    assertDurable();
+    // A working event admitted between the check and the native signal boundary.
+    pending = { observedState: "working" };
+    assert.throws(assertDurable, /durable idle authority/);
+    pending = null;
+    assertDurable();
+  } finally { await bindings.close(); await store.close(); await env.cleanup(); }
+});
 
 test("scoped manifest reads hydrate only matching entries and prepared reads observe new commits", async () => {
   const env = await fixture();
