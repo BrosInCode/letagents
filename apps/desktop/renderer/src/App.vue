@@ -608,7 +608,8 @@ const accountActivity = useAccountActivity({
     ...room.focusRooms.map((focusRoom) => focusRoom.roomIdentifier),
   ])),
 });
-let lastSidebarMetadataRefreshAt = 0;
+// Shared by the metadata refresh, its watcher, and the periodic room-list tick.
+const sidebarMetadataRefresh = { inFlight: false, lastAt: 0 };
 // While the stream was open the sidebar barely polled, so catch up the moment it drops.
 watch(() => accountActivity.connected.value, (connected, wasConnected) => {
   if (wasConnected && !connected) void refreshSidebarRoomMetadata();
@@ -753,7 +754,6 @@ let unsubscribeNotificationReceived: (() => void) | null = null;
 let unsubscribeNotificationActivation: (() => void) | null = null;
 let unsubscribeRepoStatusChanged: (() => void) | null = null;
 let accountRoomsRefreshInterval: number | null = null;
-let sidebarMetadataRefreshInFlight = false;
 let repoStatusRefreshInFlight = false;
 let repoStatusWatchRootPath: string | null = null;
 let repoStatusWatchRequestId = 0;
@@ -1012,14 +1012,14 @@ function setSidebarWidth(value: number): void {
 }
 
 async function refreshSidebarRoomMetadata(): Promise<void> {
-  if (showFirstRunGate.value || !authStatus.value?.authenticated || sidebarMetadataRefreshInFlight) return;
-  sidebarMetadataRefreshInFlight = true;
-  lastSidebarMetadataRefreshAt = Date.now();
+  if (showFirstRunGate.value || !authStatus.value?.authenticated || sidebarMetadataRefresh.inFlight) return;
+  sidebarMetadataRefresh.inFlight = true;
+  sidebarMetadataRefresh.lastAt = Date.now();
   try {
     await refreshAccountRooms().catch(() => undefined);
     await refreshSidebarLatestMessages();
   } finally {
-    sidebarMetadataRefreshInFlight = false;
+    sidebarMetadataRefresh.inFlight = false;
   }
 }
 
@@ -2736,7 +2736,7 @@ watch(
   [() => projectEntries.value, () => loading.value],
   () => {
     if (loading.value || !rootRoomSnapshot.value) return;
-    if (!sidebarMetadataRefreshInFlight) {
+    if (!sidebarMetadataRefresh.inFlight) {
       void refreshSidebarLatestMessages();
     }
   },
@@ -2846,7 +2846,7 @@ onMounted(() => {
     // happen; the room list is then refreshed only rarely, to pick up rooms
     // that were renamed or created elsewhere.
     if (accountActivity.connected.value
-      && Date.now() - lastSidebarMetadataRefreshAt < ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS) {
+      && Date.now() - sidebarMetadataRefresh.lastAt < ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS) {
       // Local workers do not appear in the cloud activity stream.
       if (sidebarRoomIdentifiers().some((id) => roomHistoryMode(id) === "local")) void refreshSidebarLatestMessages();
       return;
