@@ -10,6 +10,7 @@ export type NativeActivityPublicationPorts = {
   updateEntry(
     entryId: string,
     update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
+    options?: { readsNoActivity?: boolean },
   ): Promise<DaemonManifestEntry>;
   startDelivery(entryId: string): Promise<void>;
 };
@@ -111,7 +112,8 @@ export class NativeActivityPublicationCoordinator {
             detail: "scoped worker bearer verified",
           },
         };
-      });
+        // Reads only scalar fields, so the lock-held read can skip the events.
+      }, { readsNoActivity: true });
       if (recoveredCredentialHandoff) {
         void this.ports.startDelivery(entryId).catch(() => undefined);
       }

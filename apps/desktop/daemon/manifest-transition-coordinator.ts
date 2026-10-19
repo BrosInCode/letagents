@@ -12,7 +12,7 @@ type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
 export type ManifestTransitionPorts = {
   store: {
-    getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+    getEntry(entryId: string, activityMode?: "full" | "summary"): Promise<DaemonManifestEntry | undefined>;
     replaceEntry(
       expectedGeneration: number,
       entry: DaemonManifestEntry,
@@ -46,13 +46,28 @@ export type ManifestTransitionPorts = {
 export class ManifestTransitionCoordinator {
   constructor(private readonly ports: ManifestTransitionPorts) {}
 
+  /**
+   * With `readsNoActivity`, the callback promises to read no activity event and
+   * to depend only on the entry it is given (it may run twice). The entry is
+   * first read without its activity payloads, and the callback runs on that
+   * read; when it returns the entry unchanged, that read is returned (its
+   * activity is the short summary window). When it returns a change, the full
+   * entry is read inside the same lock and the callback runs again on it, so
+   * the committed write always starts from the full committed row.
+   */
   async updateEntry(
     entryId: string,
     update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
     roomMoveCancellation?: { agentId: string; detail: string },
+    options?: { readsNoActivity?: boolean },
   ): Promise<DaemonManifestEntry> {
     return this.ports.authority.serializeMutation(async () => {
       await this.ports.authority.assertCurrent();
+      if (options?.readsNoActivity) {
+        const scalars = await this.ports.store.getEntry(entryId, "summary");
+        if (!scalars) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+        if (update(scalars) === scalars) return scalars;
+      }
       const entry = await this.ports.store.getEntry(entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
       const updated = update(entry);
