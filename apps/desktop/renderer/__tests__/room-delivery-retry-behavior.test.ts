@@ -205,8 +205,7 @@ beforeEach(() => { hostApprovals?.resetHostApprovals(); });
 
 function composerProps() {
   return { attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], participants: [],
-    pendingAttachmentDrafts: [], permissionApprovals: [], permissionError: null, replyTo: null, resolvingPermissionIds: {},
-    roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false };
+    pendingAttachmentDrafts: [], replyTo: null, roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false };
 }
 
 function hostApproval(): DesktopHostApproval {

@@ -7,6 +7,7 @@ import * as Vue from "vue";
 import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 import { projectAgentInspector, type AgentInspectorProjection } from "../src/domain/agent-inspector";
+import { configurationDraft, IMAGE_INPUT_DESCRIPTION, IMAGE_INPUT_TITLE } from "../src/domain/agent-inspector-settings";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../src/domain/agent-inspector-settings";
 
 interface HostNode {
@@ -326,7 +327,7 @@ const provider = {
   id: "codex",
   name: "Codex",
   description: "",
-  capabilities: ["desktop_managed_runtime"],
+  capabilities: ["supervised_runtime"],
   runtimeCommand: null,
   mcpTargetId: "codex",
   permissionProfiles: [{
@@ -401,6 +402,23 @@ test("mounted Settings exposes provider-declared permission profiles as a single
   (radios[0]?.props.onChange as () => void)();
   assert.deepEqual(patches, [{ permissionProfileId: "full_access" }]);
   mounted.app.unmount();
+});
+
+test("mounted Settings lets a supervised agent edit its model, Claude Code included, and says when it is fixed", () => {
+  const modelInput = (root: HostNode) => descendants(root).find((node) => node.type === "input" && node.props.placeholder === "Default model");
+  for (const id of ["codex", "claude-code"]) {
+    const supervised = mount(AgentInspectorSettings, settingsProps({
+      resource: { ...readyResource, configuration: { ...configuration, provider: id } },
+      providers: [{ ...provider, id, capabilities: ["supervised_runtime"] }],
+    }));
+    assert.equal(modelInput(supervised.root)?.props.disabled, false, id);
+    assert.doesNotMatch(textContent(supervised.root), /The model cannot be changed for this agent\./, id);
+    supervised.app.unmount();
+  }
+  const fixed = mount(AgentInspectorSettings, settingsProps({ providers: [{ ...provider, capabilities: ["external_mcp"] }] }));
+  assert.equal(modelInput(fixed.root)?.props.disabled, true);
+  assert.match(textContent(fixed.root), /The model cannot be changed for this agent\./);
+  fixed.app.unmount();
 });
 
 test("mounted Settings honors exact supervised profile gates instead of generic provider availability", () => {
@@ -852,7 +870,6 @@ test("wide Host closes on a primary pointer press outside and stays open for ins
     settingsConflict: false,
     roomIdentifier: "room_a",
     requestVersion: 1,
-    managedSessions: [],
     reasoningSessions: [],
     onClose: () => { closeCount += 1; },
   });
@@ -935,7 +952,6 @@ test("retrying unavailable agent details keeps keyboard focus inside the Inspect
         liveFeed: { events: [], ended: false, droppedEvents: 0 },
         roomIdentifier: "room_a",
         requestVersion: 1,
-        managedSessions: [],
         reasoningSessions: [],
         onRetry: () => {
           selection.value = {
@@ -1122,7 +1138,7 @@ function troubleshootingProps() {
 }
 
 test("primary and Diagnostics recovery choices never dispatch until a restart is confirmed", async () => {
-  for (const route of ["primary", "diagnostics", "unsupported"] as const) {
+  for (const route of ["primary", "diagnostics", "unsupported", "exited"] as const) {
     const state = troubleshootingProps();
     Object.assign(state.projection.entry, {
       displayName: "QuartzMeadow", createdBy: "owner", charter: "Notes", provider: "claude-code", deliveryMode: "daemon_inbox",
@@ -1132,7 +1148,21 @@ test("primary and Diagnostics recovery choices never dispatch until a restart is
     });
     state.projection.entry.roomAgentState.task = { state: "none", taskId: null, title: null };
     state.daemonStatus.capabilities = { agentRuntimeRecovery: true, agentRuntimeRecoveryV2: route !== "unsupported" };
-    state.projection = projectAgentInspector(state.projection.entry, { roomId: "room_a" });
+    if (route === "exited") {
+      state.projection.entry.observedState = "idle";
+      state.projection.entry.condition = "none";
+      state.projection.entry.roomAgentState.inbox.state = "waiting_for_desktop_credentials";
+      state.workResource.detail = { entry_id: "diagnostic_a", room_id: "room_a", availability: "not_loaded",
+        requested_source_message_id: null, inbox_item_id: null, source_message: null, receipt: null, terminal: null,
+        publication: null, continuation_repair: null, timeline: [], items: [], uncertain_effects: [], history_boundary: null,
+        runtime_control: {
+        runtime_state: "exited", control_state: "responsive", runtime_generation_id: "runtime_a",
+        execution_generation_id: "generation_a", daemon_generation_id: "1", observed_at: "2026-10-14T22:45:00Z",
+      } };
+    }
+    state.projection = projectAgentInspector(state.projection.entry, {
+      roomId: "room_a", workResource: state.workResource, daemonGeneration: 1,
+    });
     const actions: unknown[] = [];
     const mounted = mount(AgentInspectorSurface, {
       ...state, compact: false, initialTab: route === "diagnostics" ? "diagnostics" : "overview",
@@ -1237,6 +1267,70 @@ test("diagnostic verification survives live projection updates and waits for a f
   assert.match(textContent(mounted.root), /Check confirmed/);
   assert.doesNotMatch(textContent(mounted.root), /Recovery needs attention|recovery request timed out/);
   assert.match(textContent(mounted.root), /Connected and listening/);
+  assert.ok(buttonByText(mounted.root, "Back to all checks"));
+  state.value = troubleshootingProps();
+  await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/);
+  assert.match(textContent(mounted.root), /state changed after verification/);
+  mounted.app.unmount();
+});
+
+test("runtime recovery refusal can be superseded only by fresh provider and room verification", async () => {
+  const state = Vue.ref(troubleshootingProps());
+  state.value.daemonStatus.capabilities.agentRuntimeRecoveryV2 = true;
+  state.value.projection.entry.runtimeGenerationId = "runtime_a";
+  state.value.projection.actions = [{ kind: "reconnect_runtime", label: "Reconnect", available: true }];
+  const actions: unknown[] = [];
+  let finish: (fresh: boolean) => void = () => undefined;
+  let refreshes = 0;
+  const mounted = mount({ setup: () => () => Vue.h(AgentInspectorDiagnostics, {
+    ...state.value,
+    onAction: (intent: unknown) => actions.push(intent),
+    refreshDiagnostics: () => { refreshes++; return new Promise<boolean>(resolve => { finish = resolve; }); },
+  }) }, {});
+  (buttonByText(mounted.root, "Agent runtime").props.onClick as () => void)();
+  await nextTick();
+  (buttonByText(mounted.root, "Reconnect now").props.onClick as () => void)();
+  await nextTick();
+  assert.deepEqual(actions, [{ entryId: "diagnostic_a", roomId: "room_a", kind: "reconnect_runtime" }]);
+  assert.equal(descendants(mounted.root).filter(node => node.props["data-check"]).length, 4, "all connection checks stay visible during recovery");
+  assert.match(textContent(mounted.root), /accepted request alone does not confirm/);
+  state.value = { ...state.value, actionState: { status: "error", message: "This supervised entry already has an in-flight lifecycle or turn-control action." } };
+  await nextTick();
+  assert.match(textContent(mounted.root), /Recovery needs attention/);
+  const pending = (buttonByText(mounted.root, "Check again").props.onClick as () => Promise<void>)();
+  await nextTick();
+  await nextTick();
+  state.value = { ...state.value, projection: { ...state.value.projection, entry: {
+    ...state.value.projection.entry,
+    roomAgentState: { ...state.value.projection.entry.roomAgentState,
+      connection: { state: "connected" }, ingress: { state: "observing" } },
+  } } };
+  await nextTick();
+  assert.match(textContent(mounted.root), /Recovery needs attention/);
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/);
+  assert.equal(refreshes, 1);
+  finish(true);
+  await pending;
+  await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/, "room connectivity alone cannot verify runtime recovery");
+  const verified = (buttonByText(mounted.root, "Check again").props.onClick as () => Promise<void>)();
+  await nextTick();
+  state.value.workResource = { ...state.value.workResource, detail: {
+    availability: "not_loaded", entry_id: "diagnostic_a", room_id: "room_a", requested_source_message_id: null,
+    inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null,
+    continuation_repair: null, timeline: [], items: [], uncertain_effects: [], history_boundary: null,
+    runtime_control: { control_state: "responsive", runtime_state: "ready", observed_at: "2026-10-14T16:30:00.000Z",
+      execution_generation_id: "generation_a", daemon_generation_id: "1", runtime_generation_id: "runtime_a" },
+  } };
+  await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Check confirmed/, "verification must await the fresh read");
+  finish(true);
+  await verified;
+  await nextTick();
+  assert.match(textContent(mounted.root), /Check confirmed/);
+  assert.doesNotMatch(textContent(mounted.root), /Recovery needs attention|in-flight lifecycle/);
+  assert.match(textContent(mounted.root), /agent is reachable and its room connection is clear/);
   assert.ok(buttonByText(mounted.root, "Back to all checks"));
   state.value = troubleshootingProps();
   await nextTick();
@@ -1716,4 +1810,137 @@ test("the Permissions section says when a new access level reaches the agent, an
     assert.equal(timing(mounted.root).props["data-tone"], tone, JSON.stringify(props));
     mounted.app.unmount();
   }
+});
+
+const imageInputSwitch = (root: HostNode) => descendants(root).find((node) => node.props["data-testid"] === "agent-inspector-image-input");
+const openModelProvider = { ...provider, id: "open-model", name: "Open Model", capabilities: ["supervised_runtime"] };
+
+/** An Open Model agent's saved settings, with a draft that may differ from them. */
+function imageInputResource(saved: boolean | undefined, draftValue: boolean | undefined = saved, overrides: Record<string, unknown> = {}): AgentInspectorConfigurationResource {
+  const savedConfiguration = { ...configuration, provider: "open-model", reasoningEffort: null, ...overrides, ...(saved === undefined ? {} : { imageInput: saved }) };
+  return {
+    status: "ready",
+    configuration: savedConfiguration as never,
+    error: null,
+    draft: { ...configurationDraft(savedConfiguration as never), ...(draftValue === undefined ? {} : { imageInput: draftValue }) } as never,
+  };
+}
+
+test("an Open Model agent gets a labelled image-input switch that shows what its draft says", async () => {
+  for (const draftValue of [false, true]) {
+    const mounted = mount(AgentInspectorSettings, settingsProps({ resource: imageInputResource(draftValue), providers: [openModelProvider] }));
+    await settle();
+    const toggle = imageInputSwitch(mounted.root);
+    assert.ok(toggle, "an agent whose settings carry an image-input choice gets the switch");
+    assert.equal(toggle.type, "button");
+    assert.equal(toggle.props.role, "switch");
+    assert.equal(toggle.props["aria-checked"], draftValue);
+    assert.equal(toggle.props.disabled, false);
+    assert.equal(toggle.props["aria-labelledby"], "agent-inspector-image-input-title");
+    assert.equal(toggle.props["aria-describedby"], "agent-inspector-image-input-description");
+    const title = descendants(mounted.root).find((node) => node.props.id === "agent-inspector-image-input-title");
+    const description = descendants(mounted.root).find((node) => node.props.id === "agent-inspector-image-input-description");
+    assert.equal(title && textContent(title), "This model can read images");
+    assert.equal(title && textContent(title), IMAGE_INPUT_TITLE);
+    assert.equal(description && textContent(description), IMAGE_INPUT_DESCRIPTION);
+    assert.match(textContent(mounted.root), /Turn it on only if your model accepts image input\. It applies the next time the agent starts\./);
+    mounted.app.unmount();
+  }
+  // The switch shows the draft, not the saved value, so an unsaved edit is visible at once.
+  const edited = mount(AgentInspectorSettings, settingsProps({ resource: imageInputResource(false, true), providers: [openModelProvider] }));
+  await settle();
+  assert.equal(imageInputSwitch(edited.root)!.props["aria-checked"], true);
+  edited.app.unmount();
+});
+
+test("the image-input switch is absent for an agent whose settings carry no image-input choice", async () => {
+  const claudeConfiguration = { ...configuration, provider: "claude-code", reasoningEffort: null };
+  for (const [name, resource, providers] of [
+    ["Codex", readyResource, [provider]],
+    ["Claude Code", { ...readyResource, configuration: claudeConfiguration, draft: configurationDraft(claudeConfiguration) }, [{ ...provider, id: "claude-code", name: "Claude Code" }]],
+    // An older background service says nothing about it, even for an Open Model agent.
+    ["Open Model from an older background service", imageInputResource(undefined), [openModelProvider]],
+  ] as const) {
+    const mounted = mount(AgentInspectorSettings, settingsProps({ resource, providers }));
+    await settle();
+    assert.equal(imageInputSwitch(mounted.root), undefined, name);
+    assert.doesNotMatch(textContent(mounted.root), /This model can read images/, name);
+    assert.equal(descendants(mounted.root).some((node) => node.props.role === "switch"), false, `${name} has no switch of this kind`);
+    mounted.app.unmount();
+  }
+});
+
+test("clicking the image-input switch edits the draft with the flipped value and saves nothing", async () => {
+  for (const [shown, flipped] of [[false, true], [true, false]] as const) {
+    const patches: unknown[] = [];
+    const saves: unknown[] = [];
+    const mounted = mount(AgentInspectorSettings, settingsProps({
+      resource: imageInputResource(shown),
+      providers: [openModelProvider],
+      onPatch: (patch: unknown) => patches.push(patch),
+      onSave: (overwrite: unknown) => saves.push(overwrite),
+    }));
+    await settle();
+    (imageInputSwitch(mounted.root)!.props.onClick as () => void)();
+    await settle();
+    assert.deepEqual(patches, [{ imageInput: flipped }], `from ${shown}`);
+    assert.deepEqual(saves, [], "it rides on Save changes like the other settings");
+    mounted.app.unmount();
+  }
+});
+
+test("a draft that differs from the saved image-input choice counts as unsaved, and one that matches does not", async () => {
+  const requests: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: { setAgentHomeHarness: async (input: unknown) => { requests.push(input); } } } });
+  try {
+    // The unsaved-edit check is the same for every setting, so a switch that only appears with it shows the check at work.
+    const withHomeHarness = { homeHarness: { enabled: false, pending: false, availability: "available" as const } };
+    const unsavedNote = /Save or reload your other changes before changing this\./;
+    const homeHarnessSwitch = (root: HostNode) => descendants(root).find((node) => node.props["data-testid"] === "agent-inspector-home-harness");
+    for (const [name, saved, draftValue, unsaved] of [
+      ["turned on and not saved", false, true, true],
+      ["turned off and not saved", true, false, true],
+      ["unchanged and off", false, false, false],
+      ["unchanged and on", true, true, false],
+    ] as const) {
+      const mounted = mount(AgentInspectorSettings, settingsProps({ resource: imageInputResource(saved, draftValue, { ...withHomeHarness, provider: "codex" }) }));
+      await settle();
+      const toggle = homeHarnessSwitch(mounted.root);
+      assert.ok(toggle, name);
+      assert.equal(toggle.props.disabled, unsaved, name);
+      if (unsaved) assert.match(textContent(mounted.root), unsavedNote, name);
+      else assert.doesNotMatch(textContent(mounted.root), unsavedNote, name);
+      mounted.app.unmount();
+    }
+    // Putting the choice back where it was saved leaves nothing unsaved.
+    const saved = imageInputResource(false, true, { ...withHomeHarness, provider: "codex" });
+    const restored = mount(AgentInspectorSettings, settingsProps({ resource: { ...saved, draft: { ...saved.draft!, imageInput: false } } }));
+    await settle();
+    assert.equal(homeHarnessSwitch(restored.root)!.props.disabled, false);
+    restored.app.unmount();
+    assert.deepEqual(requests, []);
+  } finally { delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("the image-input switch does not answer while settings are saving, refreshing, or not ready", async () => {
+  for (const [name, props] of [
+    ["saving", { busy: true, resource: imageInputResource(false) }],
+    ["refreshing", { resource: { ...imageInputResource(false), status: "refreshing" } }],
+    ["showing an error from the last attempt", { resource: { ...imageInputResource(true), status: "error", error: "daemon unavailable" } }],
+  ] as const) {
+    const patches: unknown[] = [];
+    const mounted = mount(AgentInspectorSettings, settingsProps({ ...props, providers: [openModelProvider], onPatch: (patch: unknown) => patches.push(patch) }));
+    await settle();
+    const toggle = imageInputSwitch(mounted.root);
+    assert.ok(toggle, name);
+    assert.equal(toggle.props.disabled, true, name);
+    (toggle.props.onClick as () => void)();
+    await settle();
+    assert.deepEqual(patches, [], `${name}: no edit was made`);
+    mounted.app.unmount();
+  }
+  const ready = mount(AgentInspectorSettings, settingsProps({ resource: imageInputResource(false), providers: [openModelProvider] }));
+  await settle();
+  assert.equal(imageInputSwitch(ready.root)!.props.disabled, false, "it answers once settings are ready and not saving");
+  ready.app.unmount();
 });

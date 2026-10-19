@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +18,8 @@ import {
   supervisedReplyTargetForSourceMessage,
 } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { ReplyAttachmentSpool } from "../reply-attachment-spool.js";
+import { RoomAttachmentDownloadError, RoomTurnAttachmentStager, STAGED_FOLDER_MAX_AGE_MS } from "../room-turn-attachments.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
 import {
   claudeApiFailureClass, defaultFollowUpDelayMs, followUpOrigin, FOLLOW_UP_REASONS, FOLLOW_UP_UNCERTAIN_RESOLVED_DETAIL, MAX_AUTOMATIC_FOLLOW_UPS, NO_REPLY_FOLLOW_UP_DETAIL, OWNERSHIP_UNVERIFIED_BEFORE_START_DETAIL,
@@ -3556,6 +3558,131 @@ async function recordThreadIntent(path: string, store: SupervisedAgentInboxStore
   assert.equal(intent.effect.state, "completed");
 }
 
+async function recordReplyIntent(path: string, store: SupervisedAgentInboxStore, turnId: string, toolName: string, request: unknown): Promise<void> {
+  const manifest = new ManifestStore(path);
+  try {
+    const loaded = await manifest.load();
+    await manifest.write(loaded.generation, [{
+      id: agent.agentId, room_id: agent.roomId, display_name: "Stone", provider: "codex", model: null,
+      charter: "test", desired_state: "running", observed_state: "working", condition: "none",
+      permission_profile_id: null, delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",
+      created_at: new Date().toISOString(), work_attempt_id: agent.workAttemptId,
+      provider_ref: { work_attempt_id: agent.workAttemptId, execution_generation_id: agent.executionGenerationId,
+        provider_continuation_id: agent.providerContinuationId, provider_connection: agent.providerConnection },
+    }]);
+  } finally { await manifest.close(); }
+  const intent = await store.prepareEffect({ agent_id: agent.agentId, room_id: agent.roomId,
+    execution_generation_id: agent.executionGenerationId, current_execution_generation_id: agent.executionGenerationId,
+    provider_turn_id: turnId, provider_continuation_id: agent.providerContinuationId, work_attempt_id: agent.workAttemptId,
+    mcp_request_id: `${toolName}-choice`, tool_name: toolName, request, mutation: true });
+  assert.equal(intent.effect.state, "completed");
+}
+
+test("reply attachments are uploaded with the worker's bearer just before the reply, and a file that cannot be uploaded never blocks it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-reply-attachments-"));
+  const path = join(root, "state.sqlite");
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
+  await writeFile(join(workspace, "result.png"), "png bytes");
+  await writeFile(join(workspace, "build.log"), "log lines");
+  const spool = new ReplyAttachmentSpool(join(root, "spool"));
+  const store = new SupervisedAgentInboxStore(path);
+  const staged: Array<{ fileName: string; mimeType: string; bytes: string; bearer: string }> = [];
+  const publications: Array<{ text: string; attachments: Array<{ upload_id: string }> | null }> = [];
+  const http = {
+    poll: async () => ({}),
+    stageAttachment: async (input: { fileName: string; mimeType: string; bytes: Uint8Array; bearer: string }) => {
+      staged.push({ fileName: input.fileName, mimeType: input.mimeType, bytes: Buffer.from(input.bytes).toString(), bearer: input.bearer });
+      if (input.fileName === "build.log") throw new Error("Supervised attachment staging failed with HTTP 500.");
+      return { uploadId: `upl_${staged.length}` };
+    },
+    publish: async (input: { text: string; roomId: string; attachments?: Array<{ upload_id: string }> }) => {
+      publications.push({ text: input.text, attachments: input.attachments ?? null });
+      return { messageId: "msg_81", roomId: input.roomId };
+    },
+  };
+  let inboxItemId = "";
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    await options?.checkpointTurnStarted?.("native-turn");
+    // What the coordinator journals after it copied the files at call time.
+    const recorded = await spool.snapshot({ workspacePath: workspace, inboxItemId, agentId: agent.agentId,
+      providerTurnId: "native-turn", mcpRequestId: "set_reply_attachments-choice", files: ["result.png", "build.log"] });
+    await recordReplyIntent(path, store, "native-turn", "set_reply_attachments", recorded);
+    await writeFile(join(workspace, "result.png"), "edited after the call");
+    return { turnId: "native-turn", outcome: "reply", text: "Here is the new layout." };
+  }), http, currentAuthority, 0,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  undefined, undefined, undefined, undefined, undefined, undefined, spool);
+  try {
+    const [item] = await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "msg_80",
+      messages: [{ source_message_id: "msg_80", source_message: { id: "msg_80", text: "Show me the layout" }, activation: {} }] });
+    inboxItemId = item!.inbox_item_id;
+    await delivery.pump(agent);
+    assert.deepEqual(staged, [
+      { fileName: "result.png", mimeType: "image/png", bytes: "png bytes", bearer: agent.bearer },
+      { fileName: "build.log", mimeType: "application/octet-stream", bytes: "log lines", bearer: agent.bearer },
+      { fileName: "build.log", mimeType: "application/octet-stream", bytes: "log lines", bearer: agent.bearer },
+    ], "a failed upload is retried once");
+    assert.deepEqual(publications, [{
+      text: "Here is the new layout.\n\n(Could not attach: build.log)",
+      attachments: [{ upload_id: "upl_1" }],
+    }]);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+    assert.deepEqual(await readdir(join(root, "spool")), [], "a published reply's copies are removed");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("staged reply attachments are discarded when the post fails or the lane loses the reply, and retried uploads still attach", async () => {
+  for (const ending of ["post_fails", "authority_lost"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-reply-attachment-discard-"));
+    const path = join(root, "state.sqlite");
+    const workspace = join(root, "workspace");
+    await mkdir(workspace);
+    await writeFile(join(workspace, "result.png"), "png bytes");
+    const spool = new ReplyAttachmentSpool(join(root, "spool"));
+    const store = new SupervisedAgentInboxStore(path);
+    let stageCalls = 0;
+    let ownsLane = true;
+    const discarded: string[] = [];
+    const posted: Array<Array<{ upload_id: string }> | null> = [];
+    const http = {
+      poll: async () => ({}),
+      stageAttachment: async () => {
+        stageCalls++;
+        if (stageCalls === 1) throw new Error("Supervised attachment staging failed with HTTP 503.");
+        if (ending === "authority_lost") ownsLane = false;
+        return { uploadId: `upl_${stageCalls}` };
+      },
+      discardAttachment: async (input: { uploadId: string }) => { discarded.push(input.uploadId); },
+      publish: async (input: { roomId: string; attachments?: Array<{ upload_id: string }> }) => {
+        posted.push(input.attachments ?? null);
+        if (ending === "post_fails") throw new Error("Room publication failed with HTTP 500.");
+        return { messageId: "msg_91", roomId: input.roomId };
+      },
+    };
+    let inboxItemId = "";
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      await options?.checkpointTurnStarted?.("native-turn");
+      const recorded = await spool.snapshot({ workspacePath: workspace, inboxItemId, agentId: agent.agentId,
+        providerTurnId: "native-turn", mcpRequestId: "set_reply_attachments-choice", files: ["result.png"] });
+      await recordReplyIntent(path, store, "native-turn", "set_reply_attachments", recorded);
+      return { turnId: "native-turn", outcome: "reply", text: "Done." };
+    }), http, async () => ownsLane, 0,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, spool);
+    try {
+      const [item] = await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "msg_90",
+        messages: [{ source_message_id: "msg_90", source_message: { id: "msg_90", text: "Show me" }, activation: {} }] });
+      inboxItemId = item!.inbox_item_id;
+      await delivery.pump(agent);
+      assert.equal(stageCalls >= 2, true, ending);
+      assert.equal(discarded.includes("upl_2"), true, `${ending}: the unused upload is discarded`);
+      if (ending === "post_fails") assert.deepEqual(posted[0], [{ upload_id: "upl_2" }], "the retried upload was attached");
+      else assert.deepEqual(posted, [], "a lane that lost the reply posts nothing");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
 test("an intercepted thread choice survives publication failure and restart without another provider turn", async () => {
   for (const { toolName, effectState, existingRoot } of [
     ...["send_thread_message", "send_message"].flatMap(toolName => ["prepared", "failed"].map(effectState => ({ toolName, effectState, existingRoot: null }))),
@@ -3952,7 +4079,7 @@ test("each re-block of a still unreadable turn is recorded, including after Retr
     assert.equal(receipt.state, "blocked");
     assert.deepEqual(receipt.timeline.slice(-4).map((event) => event.phase),
       ["blocked", "queued", "result_unreadable", "blocked"]);
-    assert.match(receipt.timeline.at(-1)!.detail ?? "", /re-read and was not rerun/);
+    assert.match(receipt.timeline.at(-1)!.detail ?? "", /No new model turn was started/);
     assert.equal(runs, 1, "Retry re-reads the completed turn and never reruns it");
     assert.equal(recoveries, 3);
     assert.deepEqual(saidSavedAsUnreadable, [true, undefined, true],
@@ -4003,6 +4130,164 @@ test("a fresh agent observes history at the tail, advances across silent message
     await delivery.fenceAndDrain();
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a sequenced turn sees a held correction as context without consuming its later activation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-fresh-context-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const source = { id: "msg_183", text: "Original borrowing proposal", activation: { for_current_agent: {
+    decision: "activate", reason: "broadcast", turn: { position: 2, count: 2, prior_speakers: [] } } } };
+  const correction = { id: "msg_189", text: "Browse only. Do not collect contact details." };
+  const fresh = [{ id: "msg_183", text: "Edited original question" }, correction];
+  const dispatched: string[] = [];
+  let released = false;
+  let reads = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    dispatched.push(request.sourceMessage.id as string);
+    if (request.sourceMessage.id === "msg_183") {
+      assert.equal(request.sourceMessage.text, source.text, "the admitted source remains immutable");
+      assert.deepEqual(request.observedContext, fresh, "fresh context retains the newer edit and correction");
+      assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "msg_183");
+      assert.deepEqual((await store.receipts(agent.agentId)).map(row => row.source_message_id), ["msg_183"]);
+    }
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), {
+    context: async () => { reads++; return fresh; },
+    poll: async ({ afterMessageId }) => ({ messages: !afterMessageId ? [source]
+      : released && afterMessageId === "msg_183" ? [{ ...correction, activation: source.activation }] : [] }),
+    publish: async () => { throw new Error("no reply expected"); },
+  }, currentAuthority, 0);
+  try {
+    await delivery.poll(agent);
+    assert.deepEqual(dispatched, ["msg_183"]);
+    assert.equal(reads, 1);
+    assert.deepEqual((await store.detail(agent.agentId, agent.roomId, "msg_183")).prepared_context?.messages.map(row => row.id), ["msg_183", "msg_189"]);
+    await delivery.poll(agent);
+    assert.deepEqual(dispatched, ["msg_183"], "observation did not authorize another turn");
+    released = true;
+    await delivery.poll(agent);
+    await delivery.poll(agent);
+    assert.deepEqual(dispatched, ["msg_183", "msg_189"], "normal activation still runs exactly once");
+    assert.equal(reads, 2);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("fresh context is not fetched again while recovering an existing native result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-context-recovery-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let reads = 0;
+  let runs = 0;
+  let recoveries = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs++;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("saved-turn");
+    return { turnId: "saved-turn", outcome: "unreadable", text: null, evidence: "none" };
+  }, async () => {
+    recoveries++;
+    return { turnId: "saved-turn", outcome: "no_reply", text: null, evidence: "transcript" };
+  }), {
+    context: async () => { reads++; assert.equal(reads, 1); return [{ id: "msg_189", text: "A correction" }]; },
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [{ id: "msg_183", text: "Question",
+      activation: { for_current_agent: { decision: "activate", reason: "broadcast",
+        turn: { position: 1, count: 2, prior_speakers: [] } } } }] }),
+    publish: async () => { throw new Error("no reply expected"); },
+  }, currentAuthority, 0);
+  try {
+    await delivery.poll(agent);
+    assert.equal(reads, 1);
+    assert.equal(runs, 1);
+    assert.equal(recoveries, 1);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const mode of ["failure", "authority-lost", "stop", "unsupported", "independent"] as const) test(`fresh context: ${mode} before provider admission`, async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-context-boundary-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let allowed = true;
+  let runs = 0;
+  let reads = 0;
+  let yields = 0;
+  let yieldObservation: unknown;
+  const entered = deferred<void>();
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    runs++;
+    assert.equal(request.observedContext?.[0]?.text, "Existing observation");
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), {
+    context: async ({ signal }) => {
+      reads++;
+      if (mode === "failure") throw new Error("Context temporarily unavailable");
+      if (mode === "authority-lost") allowed = false;
+      if (mode === "stop") {
+        entered.resolve();
+        await new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      }
+      return mode === "unsupported" ? null : [];
+    },
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [{ id: "msg_183", text: "Existing observation",
+      activation: { for_current_agent: { decision: "activate", reason: "broadcast",
+        ...(mode === "independent" ? {} : { turn: { position: 1, count: 2, prior_speakers: [] } }) } } }] }),
+    publish: async () => { throw new Error("no reply expected"); },
+    yieldReplyTurn: async input => {
+      yields++;
+      const row = await store.getBySourceMessage(agent.agentId, agent.roomId, input.sourceMessageId);
+      yieldObservation = { state: row?.state, providerTurnId: row?.provider_turn_id,
+        outcome: row?.outcome, bearer: input.bearer, source: input.sourceMessageId };
+      throw new Error("yield upload unavailable");
+    },
+  }, async () => allowed, 60_000);
+  try {
+    const pending = delivery.poll(agent);
+    if (mode === "stop") { await entered.promise; await delivery.fenceAndDrain(); }
+    await pending;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reads, mode === "independent" ? 0 : mode === "failure" ? 3 : 1, "uses the existing bounded pre-dispatch retry budget");
+    assert.equal(runs, mode === "unsupported" || mode === "independent" ? 1 : 0);
+    assert.equal(yields, mode === "failure" ? 1 : 0, "only exhausted unstarted work yields; transport failure is not a provider retry");
+    if (mode === "failure") {
+      assert.deepEqual(yieldObservation, { state: "blocked", providerTurnId: null,
+        outcome: null, bearer: agent.bearer, source: "msg_183" });
+      const row = (await store.receipts(agent.agentId))[0]!;
+      assert.equal(row.provider_turn_id, null);
+      assert.equal(row.attempt_count, 0, "a failed read did not spend a model attempt");
+      assert.match(row.last_error ?? "", /Context temporarily unavailable/);
+    }
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a blocked preparation yield stays tracked through Stop and preserves retryable work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-yield-drain-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const reporting = deferred<void>(), aborted = deferred<void>(), cleanup = deferred<void>();
+  let runs = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+    runs++; throw new Error("no model should start");
+  }), {
+    context: async () => { throw new Error("offline"); }, poll: async () => ({}), publish: async () => {},
+    yieldReplyTurn: async ({ signal }) => {
+      reporting.resolve();
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => { aborted.resolve(); resolve(); }, { once: true }));
+      await cleanup.promise;
+    },
+  }, currentAuthority, 0);
+  try {
+    await ingest(store, "msg_81", { turn: { position: 1, count: 2, prior_speakers: [] } });
+    await delivery.pump(agent);
+    await reporting.promise;
+    let drained = false;
+    const stopping = delivery.fenceAndDrain().then(() => { drained = true; });
+    await aborted.promise;
+    assert.equal(drained, false, "handoff waits for the tracked request cleanup");
+    cleanup.resolve(); await stopping;
+    const row = await store.getBySourceMessage(agent.agentId, agent.roomId, "msg_81");
+    assert.equal(row?.state, "blocked");
+    assert.equal(row.attempt_count, 0);
+    assert.equal(runs, 0);
+  } finally { cleanup.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("production delivery never establishes a first cursor lazily after activation", async () => {
@@ -5535,9 +5820,9 @@ test("a credential-only rebind clears recovery ownership for the successor conte
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     let normalizations = 0;
     const normalize = store.normalizeStartupRecovery.bind(store);
-    (store as unknown as { normalizeStartupRecovery(agentId: string): Promise<void> }).normalizeStartupRecovery = async (agentId) => {
+    store.normalizeStartupRecovery = async (agentId) => {
       normalizations += 1;
-      await normalize(agentId);
+      return normalize(agentId);
     };
     const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
       poll: ({ signal }) => new Promise((resolve) => signal.addEventListener("abort", () => resolve({}), { once: true })),
@@ -6271,7 +6556,7 @@ test("retry acknowledges durable scheduling without waiting for a long provider 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("daemon socket retry accepts only the exact blocked binding and leaves other rows isolated", async () => {
+test("daemon socket retry accepts only the exact blocked binding and reports committed no-reply settlement", async t => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-socket-"));
   let daemon: SupervisorDaemon | null = null;
   let release: ReturnType<typeof deferred<{ turnId: string; outcome: "no_reply"; text: null }>> | null = null;
@@ -6290,9 +6575,19 @@ test("daemon socket retry accepts only the exact blocked binding and leaves othe
     const internals = daemon as unknown as {
       liveHandles: Map<string, typeof agent.handle>;
       supervisedInbox: SupervisedAgentInboxStore;
+      roomWorkPublisher: { settled(agentId: string): void };
       workerBindings: { bind(input: Record<string, string>): Promise<unknown>; unbind(entryId: string): Promise<void> };
     };
     await daemon.start();
+    const observed = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    t.after(() => observed.close());
+    const completionHints: string[] = [];
+    const settled = internals.roomWorkPublisher.settled.bind(internals.roomWorkPublisher);
+    t.mock.method(internals.roomWorkPublisher, "settled", (agentId: string) => {
+      const row = observed.prepare("SELECT state FROM supervised_agent_inbox WHERE agent_id=? AND source_message_id='msg_1'").get(agentId);
+      if (row?.state === "acknowledged_no_reply") completionHints.push(agentId);
+      settled(agentId);
+    });
     const identities = {
       stone: { attempt: "00000000-0000-4000-8000-000000000001", execution: "00000000-0000-4000-8000-000000000011", session: "00000000-0000-4000-8000-000000000021" },
       other: { attempt: "00000000-0000-4000-8000-000000000002", execution: "00000000-0000-4000-8000-000000000012", session: "00000000-0000-4000-8000-000000000022" },
@@ -6347,6 +6642,8 @@ test("daemon socket retry accepts only the exact blocked binding and leaves othe
     assert.equal((otherReceipts[1] as { blocked_by_message_id?: string }).blocked_by_message_id, "msg_1", "projection exposes the public source ID, not a private inbox ID");
     release.resolve({ turnId: "turn", outcome: "no_reply", text: null });
     await waitForAsync(async () => (await internals.supervisedInbox.receipts("stone"))[0]?.state === "acknowledged_no_reply");
+    await waitForAsync(async () => completionHints.includes("stone"));
+    assert.deepEqual([...new Set(completionHints)], ["stone"], "the publisher is notified after the real terminal commit, without another native event");
     const completed = (await daemonRequest(paths.socketPath, "manifest.list")).result as Array<{ id: string; delivery_receipts?: Array<{ state: string; timeline?: Array<{ phase: string }> }> }>;
     assert.equal(completed.find((entry) => entry.id === "stone")?.delivery_receipts?.[0]?.state, "acknowledged_no_reply");
     assert.equal(completed.find((entry) => entry.id === "stone")?.delivery_receipts?.[0]?.timeline?.at(-1)?.phase, "no_reply");
@@ -6774,6 +7071,31 @@ test("startup recovery treats a dispatching durable terminal outcome as republis
     assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("startup recovery reports a saved no-reply completion without running the provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-no-reply-report-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery: SupervisedAgentDelivery | undefined;
+  try {
+    const item = await enqueue(store);
+    await store.checkpointTerminalOutcome(item.inbox_item_id, JSON.stringify({ kind: "no_reply", text: null }));
+    const hints: string[] = [];
+    const unexpected = async (): Promise<never> => { assert.fail("saved no-reply must not run, recover or publish a model reply"); };
+    delivery = new SupervisedAgentDelivery(store, provider(unexpected, unexpected),
+      { poll: async () => ({}), publish: unexpected }, currentAuthority,
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, id => { hints.push(id); });
+    await delivery.pump(agent);
+    assert.equal((await store.get(item.inbox_item_id))?.state, "acknowledged_no_reply");
+    assert.deepEqual(hints, [agent.agentId]);
+    await delivery.pump(agent);
+    assert.deepEqual(hints, [agent.agentId], "unchanged idle pumping does not repeat the hint");
+  } finally {
+    await delivery?.fenceAndDrain();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("startup recovery blocks ambiguous awaiting and retryable work instead of acknowledging it", async () => {
@@ -7955,6 +8277,425 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("silence yields at its first durable checkpoint before the adapter returns", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-silent-checkpoint-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const checkpointed = deferred<void>(), adapterDone = deferred<void>();
+  let yields = 0, captures = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+    const result = { turnId: request.inboxItemId, outcome: "no_reply" as const, text: null };
+    await options?.checkpointTerminalResult?.(result);
+    await options?.checkpointTerminalResult?.(result);
+    checkpointed.resolve(); await adapterDone.promise;
+    return result;
+  }), { poll: async () => ({}), publish: async () => {}, yieldReplyTurn: async () => { yields++; } }, currentAuthority,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  async () => { captures++; });
+  try {
+    await ingest(store, "msg_81", { turn: { position: 1, count: 2, prior_speakers: [] } });
+    const pumping = delivery.pump(agent);
+    await checkpointed.promise;
+    await waitForAsync(async () => yields === 1, 1_000);
+    assert.equal(captures, 0, "the slot does not wait for the duplicate outer authority/checkpoint path");
+    assert.notEqual((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+    adapterDone.resolve(); await pumping;
+    assert.equal(yields, 1); assert.equal(captures, 1);
+  } finally { adapterDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a busy older native turn yields only the new human speaking position", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-busy-human-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const nativeStarted = deferred<void>(), nativeDone = deferred<void>();
+  const captureStarted = deferred<void>(), captureDone = deferred<void>();
+  const yielded: string[] = [], nativeSources: string[] = [];
+  const message = { id: "msg_82", source: "browser", agent_identity: null, text: "Change of plan",
+    activation: { for_current_agent: { decision: "activate", reason: "broadcast", turn: { position: 1, count: 2, prior_speakers: [] } } } };
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    nativeSources.push(String(request.sourceMessage.id));
+    await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+    if (request.sourceMessage.id === "msg_81") { nativeStarted.resolve(); await nativeDone.promise; }
+    return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+  }), { poll: async () => ({ messages: [message] }), publish: async () => {},
+    yieldReplyTurn: async input => { yielded.push(input.sourceMessageId); } }, currentAuthority,
+  undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  async (_agent, source) => { if (source === "msg_81") { captureStarted.resolve(); await captureDone.promise; } });
+  try {
+    await ingest(store, "msg_81");
+    const pumping = delivery.pump(agent); await nativeStarted.promise;
+    const intake = delivery as unknown as { pollOnce(worker: typeof agent): Promise<void> };
+    await intake.pollOnce(agent);
+    await waitForAsync(async () => yielded.includes("msg_82"), 1_000);
+    await intake.pollOnce(agent);
+    assert.deepEqual(yielded, ["msg_82"], "replaying the poll cannot repeat the optional hint");
+    const next = await store.getBySourceMessage(agent.agentId, agent.roomId, "msg_82");
+    assert.equal(next?.state, "pending"); assert.equal(next?.provider_turn_id, null); assert.equal(next?.outcome, null);
+    assert.deepEqual(nativeSources, ["msg_81"]);
+    nativeDone.resolve(); await captureStarted.promise;
+    assert.deepEqual(nativeSources, ["msg_81"], "the new native turn still waits for local capture");
+    captureDone.resolve(); await pumping;
+    assert.deepEqual(nativeSources, ["msg_81", "msg_82"]);
+    assert.ok((await store.receipts(agent.agentId)).every(row => row.state === "acknowledged_no_reply"));
+  } finally { nativeDone.resolve(); captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const mode of ["agent-source", "spoofed-human", "unordered", "single-recipient", "control-history", "old-completed",
+  "stop-before-http", "authority-lost", "handle-replaced", "http-failure", "stop-during-http", "handoff-during-http"] as const) {
+  test(`busy human scheduling yield preserves both inbox items: ${mode}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-busy-human-fence-"));
+    const path = join(root, "state.sqlite"), store = new SupervisedAgentInboxStore(path);
+    const started = deferred<void>(), nativeDone = deferred<void>();
+    const capturing = deferred<void>(), captureDone = deferred<void>();
+    const checking = deferred<void>(), checkDone = deferred<void>();
+    const reporting = deferred<void>(), aborted = deferred<void>(), cleanup = deferred<void>();
+    let allowed = true, yields = 0, polls = 0, calls = 0, publications = 0, historyAdded = false;
+    const current = { ...agent, handle: { ...agent.handle } };
+    const waitAtBinding = ["old-completed", "stop-before-http", "authority-lost", "handle-replaced"].includes(mode);
+    const originalBinding = store.providerTurnBinding.bind(store);
+    store.providerTurnBinding = async id => {
+      const binding = await originalBinding(id);
+      if (polls && waitAtBinding) { checking.resolve(); await checkDone.promise; }
+      return binding;
+    };
+    const untouched = store.untouchedPending.bind(store);
+    store.untouchedPending = async id => {
+      if (mode === "control-history" && !historyAdded) {
+        historyAdded = true;
+        const db = new DatabaseSync(path);
+        try { db.prepare(`INSERT INTO supervised_agent_inbox_events
+          (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+          SELECT ?,COALESCE(MAX(event_sequence),0)+1,'retry:test','queued',?,NULL FROM supervised_agent_inbox_events WHERE inbox_item_id=?`)
+          .run(id, new Date().toISOString(), id); } finally { db.close(); }
+      }
+      return untouched(id);
+    };
+    const activation = { decision: "activate", reason: "broadcast",
+      ...(mode === "unordered" ? {} : { turn: { position: 1, count: mode === "single-recipient" ? 1 : 2, prior_speakers: [] } }) };
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      calls++;
+      await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+      if (request.sourceMessage.id === "msg_81") { started.resolve(); await nativeDone.promise; }
+      return { turnId: request.inboxItemId, outcome: mode === "old-completed" ? "no_reply" : "reply",
+        text: mode === "old-completed" ? null : `my contribution to ${request.sourceMessage.id}` };
+    }), {
+      poll: async () => { polls++; return { messages: [{ id: "msg_82", text: "New human direction",
+        source: mode === "agent-source" ? "agent" : "browser",
+        agent_identity: mode === "spoofed-human" ? { agent_key: "other-agent" } : null,
+        activation: { for_current_agent: activation } }] }; },
+      publish: async input => { publications++; return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
+      yieldReplyTurn: async ({ sourceMessageId, signal }) => {
+        assert.equal(sourceMessageId, "msg_82"); yields++; reporting.resolve();
+        if (mode === "http-failure") throw new Error("optional scheduling hint failed");
+        if (mode === "stop-during-http" || mode === "handoff-during-http") {
+          await new Promise<void>(resolve => signal.addEventListener("abort", () => { aborted.resolve(); resolve(); }, { once: true }));
+          await cleanup.promise;
+        }
+      },
+    }, async () => allowed, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    async (_agent, source) => { if (source === "msg_81") { capturing.resolve(); await captureDone.promise; } });
+    let draining: Promise<void> | undefined;
+    try {
+      await ingest(store, "msg_81");
+      const pumping = delivery.pump(current); await started.promise;
+      const intake = delivery as unknown as { pollOnce(agent: typeof current): Promise<void>; auxiliaryControllers: Map<string, Set<AbortController>> };
+      await intake.pollOnce(current);
+      if (waitAtBinding) {
+        await checking.promise;
+        if (mode === "old-completed") { nativeDone.resolve(); await capturing.promise; }
+        if (mode === "stop-before-http") assert.equal(await delivery.interruptActiveDelivery(current), "settled");
+        if (mode === "authority-lost") allowed = false;
+        if (mode === "handle-replaced") current.handle = { ...current.handle };
+        checkDone.resolve();
+      }
+      if (mode.endsWith("during-http")) {
+        await reporting.promise;
+        if (mode === "stop-during-http") assert.equal(await delivery.interruptActiveDelivery(current), "settled");
+        let drained = false; draining = delivery.fenceAndDrain().then(() => { drained = true; });
+        await aborted.promise; await new Promise(resolve => setImmediate(resolve));
+        assert.equal(drained, false, "handoff joins the cancelled HTTP request's cleanup");
+        cleanup.resolve(); nativeDone.resolve(); captureDone.resolve();
+        await pumping; await draining;
+      } else {
+        await waitForAsync(async () => !intake.auxiliaryControllers.get(current.agentId)?.size);
+        assert.equal(yields, mode === "http-failure" ? 1 : 0);
+        if (mode === "http-failure") {
+          nativeDone.resolve(); await capturing.promise;
+          assert.equal((await store.getBySourceMessage(current.agentId, current.roomId, "msg_82"))?.state, "pending");
+          assert.equal(calls, 1); captureDone.resolve(); await pumping;
+          assert.equal(calls, 2); assert.equal(publications, 2, "a failed hint does not suppress either agent contribution");
+        } else {
+          draining = delivery.fenceAndDrain(); nativeDone.resolve(); captureDone.resolve(); await pumping; await draining;
+        }
+      }
+      if (mode.startsWith("stop-")) assert.equal((await store.getBySourceMessage(current.agentId, current.roomId, "msg_81"))?.state, "cancelled_by_user");
+    } finally {
+      checkDone.resolve(); nativeDone.resolve(); captureDone.resolve(); cleanup.resolve();
+      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("durable silence yields the remote speaking slot while capture still owns local settlement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-silent-slot-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const capturing = deferred<void>(), captureDone = deferred<void>();
+  let turns = 0, yields = 0, reports = 0;
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+    turns++;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.(request.inboxItemId);
+    const result = { turnId: request.inboxItemId, outcome: "no_reply" as const, text: null,
+      publicationContract: "legacy_cursor_aggregate_v0" as const };
+    await options?.checkpointTerminalResult?.(result);
+    await options?.checkpointTerminalResult?.(result);
+    return result;
+  }), {
+    poll: async () => ({}), publish: async () => { throw new Error("no reply"); },
+    yieldReplyTurn: async () => { yields++; },
+    reportNoReply: async () => { reports++; },
+  }, currentAuthority, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+  async (_agent, source) => { if (source === "msg_81") { capturing.resolve(); await captureDone.promise; } });
+  try {
+    await ingest(store, "msg_81", { turn: { position: 1, count: 2, prior_speakers: [] } });
+    await ingest(store, "msg_82");
+    const pumping = delivery.pump(agent);
+    await capturing.promise;
+    await waitForAsync(async () => yields === 1, 1_000);
+    const [head, next] = await store.receipts(agent.agentId);
+    assert.equal(JSON.parse(head!.outcome!).kind, "no_reply");
+    assert.notEqual(head!.state, "acknowledged_no_reply", "yield is scheduling progress, not a receipt ACK");
+    assert.equal(next!.state, "pending");
+    assert.equal(turns, 1, "the same agent cannot start its next native turn during capture");
+    assert.equal(reports, 0, "no_reply receipt still waits for capture and Stop arbitration");
+    captureDone.resolve(); await pumping;
+    await waitForAsync(async () => reports === 2);
+    assert.equal(yields, 1, "duplicate native checkpoints and an unsequenced successor cannot duplicate the hint");
+    assert.equal(turns, 2);
+    assert.ok((await store.receipts(agent.agentId)).every(row => row.state === "acknowledged_no_reply"));
+  } finally { captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+for (const mode of ["stop-before-dispatch", "replacement-before-dispatch", "handle-replaced", "connection-mutated",
+  "foreign-origin", "foreign-continuation", "foreign-turn", "http-failure", "stop-during-http", "handoff-during-http",
+  "reply", "unreadable", "failed", "unsequenced", "local", "synthetic"] as const) {
+  test(`silent scheduling yield preserves settlement and authority: ${mode}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "letagents-silent-yield-fence-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const capturing = deferred<void>(), captureDone = deferred<void>();
+    const checking = deferred<void>(), checkDone = deferred<void>();
+    const reporting = deferred<void>(), aborted = deferred<void>(), httpCleanup = deferred<void>();
+    const liveAgent = { ...agent, handle: { ...agent.handle, providerConnection: { ...agent.handle.providerConnection } },
+      providerConnection: { ...agent.providerConnection }, apiUrl: mode === "local" ? "letagents-local://rooms" : agent.apiUrl };
+    let terminalCommitted = false, ownsLane = true, yields = 0, nativeCalls = 0;
+    const checkpoint = store.checkpointNormalizedTerminal.bind(store);
+    store.checkpointNormalizedTerminal = async input => { const saved = await checkpoint(input); terminalCommitted = true; return saved; };
+    const binding = store.providerTurnBinding.bind(store);
+    store.providerTurnBinding = async id => {
+      const saved = await binding(id);
+      if (!terminalCommitted) return saved;
+      checking.resolve();
+      if (["stop-before-dispatch", "replacement-before-dispatch", "handle-replaced", "connection-mutated", "foreign-origin", "foreign-continuation", "foreign-turn"].includes(mode)) await capturing.promise;
+      if (mode === "stop-before-dispatch" || mode === "replacement-before-dispatch") await checkDone.promise;
+      if (mode === "handle-replaced") liveAgent.handle = { ...liveAgent.handle };
+      if (mode === "connection-mutated") liveAgent.handle.providerConnection.processIdentity = "replacement-process";
+      if (saved && mode === "foreign-origin") return { ...saved, origin_execution_generation_id: "old-generation" };
+      if (saved && mode === "foreign-continuation") return { ...saved, provider_continuation_id: "other-thread" };
+      if (saved && mode === "foreign-turn") return { ...saved, provider_turn_id: "other-turn" };
+      return saved;
+    };
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      nativeCalls++;
+      await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+      const outcome = mode === "reply" || mode === "unreadable" || mode === "failed" ? mode : "no_reply";
+      return { turnId: request.inboxItemId, providerContinuationId: "thread", outcome, text: outcome === "reply" ? "my answer" : null,
+        evidence: "stream", publicationContract: "legacy_cursor_aggregate_v0", ...(outcome === "failed" ? { error: "provider failure" } : {}) };
+    }), {
+      poll: async () => ({}), publish: async input => ({ messageId: "msg_99", roomId: input.roomId }),
+      yieldReplyTurn: async ({ signal }) => {
+        yields++; reporting.resolve();
+        if (mode === "http-failure") throw new Error("optional yield unavailable");
+        if (mode === "stop-during-http" || mode === "handoff-during-http") {
+          await new Promise<void>(resolve => signal.addEventListener("abort", () => { aborted.resolve(); resolve(); }, { once: true }));
+          await httpCleanup.promise;
+        }
+      },
+    }, async () => ownsLane, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { capturing.resolve(); await captureDone.promise; });
+    let draining: Promise<void> | undefined;
+    try {
+      const activation = mode === "unsequenced" ? {} : { turn: { position: 1, count: 2, prior_speakers: [] } };
+      if (mode === "synthetic") await store.enqueueInitialMessage({ agent_id: liveAgent.agentId, room_id: liveAgent.roomId,
+        source_message_id: "initial:1", source_message: { id: "initial:1", text: "start" }, activation });
+      else await ingest(store, "msg_81", activation);
+      const pumping = delivery.pump(liveAgent);
+      await capturing.promise;
+      if (mode === "stop-before-dispatch" || mode === "replacement-before-dispatch") {
+        await checking.promise;
+        if (mode === "stop-before-dispatch") assert.equal(await delivery.interruptActiveDelivery(liveAgent), "settled");
+        else ownsLane = false;
+        checkDone.resolve();
+      }
+      if (mode === "http-failure" || mode === "stop-during-http" || mode === "handoff-during-http") await reporting.promise;
+      if (mode === "stop-during-http" || mode === "handoff-during-http") {
+        if (mode === "stop-during-http") assert.equal(await delivery.interruptActiveDelivery(liveAgent), "settled");
+        let drained = false;
+        draining = delivery.fenceAndDrain().then(() => { drained = true; });
+        await aborted.promise;
+        captureDone.resolve(); await pumping;
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(drained, false, "retirement joins the aborted optional request's cleanup");
+        httpCleanup.resolve(); await draining;
+      } else {
+        if (["handle-replaced", "connection-mutated", "foreign-origin", "foreign-continuation", "foreign-turn"].includes(mode)) {
+          await checking.promise;
+        }
+        // Registration precedes capture. Observe its tracked completion before
+        // asserting negatives; fencing early could otherwise hide a late hint.
+        const tracked = delivery as unknown as { auxiliaryControllers: Map<string, Set<AbortController>> };
+        await waitForAsync(async () => !tracked.auxiliaryControllers.get(agent.agentId)?.size);
+        assert.equal(yields, mode === "http-failure" ? 1 : 0);
+        // Prevent unreadable recovery and invalidated proof fixtures from retrying native work.
+        if (!["http-failure", "reply", "unsequenced", "local", "synthetic"].includes(mode)) {
+          draining = delivery.fenceAndDrain();
+        }
+        captureDone.resolve(); await pumping; await draining;
+      }
+      assert.equal(nativeCalls, 1, "optional scheduling transport cannot rerun a completed native turn");
+      if (mode === "http-failure") assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+      if (mode.startsWith("stop-")) assert.equal((await store.receipts(agent.agentId))[0]?.state, "cancelled_by_user");
+    } finally {
+      checkDone.resolve(); captureDone.resolve(); httpCleanup.resolve();
+      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("settled no-reply hints do not wait for report upload or retry a provider after transport failure", async () => {
+  for (const candidate of ["codex", "claude-code"]) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-no-reply-hint-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const capturing = deferred<void>(), captureDone = deferred<void>();
+    const reporting = deferred<void>(), reportDone = deferred<void>();
+    let turns = 0, reports = 0, settled = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.(request.inboxItemId);
+      turns++;
+      return { turnId: request.inboxItemId, outcome: "no_reply", text: null, publicationContract: "legacy_cursor_aggregate_v0" };
+    }), {
+      poll: async () => ({}), publish: async () => { throw new Error("no reply"); },
+      reportNoReply: async input => {
+        reports++;
+        assert.equal((await store.getBySourceMessage(agent.agentId, agent.roomId, input.sourceMessageId))?.state, "acknowledged_no_reply");
+        assert.equal(input.bearer, agent.bearer);
+        assert.equal(input.apiUrl, agent.apiUrl);
+        assert.equal(input.roomId, agent.roomId);
+        reporting.resolve();
+        await reportDone.promise;
+      },
+    }, currentAuthority, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { capturing.resolve(); await captureDone.promise; }, undefined, undefined, () => { settled++; });
+    try {
+      await ingest(store, "msg_81");
+      const pumping = delivery.pump({ ...agent, provider: candidate });
+      await capturing.promise;
+      assert.equal(reports, 0, "native checkpoint alone cannot bypass capture/Stop arbitration");
+      captureDone.resolve();
+      await reporting.promise;
+      await pumping;
+      assert.equal(settled, 1, "normal work publication is still notified without awaiting receipt transport");
+      reportDone.reject(new Error("receipt upload unavailable"));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(turns, 1);
+      assert.equal(reports, 1);
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+    } finally {
+      captureDone.resolve(); reportDone.resolve();
+      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("settled no-reply requests remain cancellable and joined after their pump finishes", async () => {
+  for (const action of ["stop", "fence"]) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-no-reply-drain-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const reporting = deferred<void>(), aborted = deferred<void>(), cleanup = deferred<void>();
+    let requestSignal: AbortSignal | undefined;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+      return { turnId: request.inboxItemId, outcome: "no_reply", text: null, publicationContract: "legacy_cursor_aggregate_v0" };
+    }), { poll: async () => ({}), publish: async () => {}, reportNoReply: async input => {
+      requestSignal = input.signal;
+      input.signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+      reporting.resolve();
+      await aborted.promise;
+      await cleanup.promise;
+    } }, currentAuthority);
+    try {
+      await ingest(store, "msg_84");
+      await delivery.pump(agent);
+      await reporting.promise;
+      assert.equal(requestSignal?.aborted, false);
+      let drained = false;
+      const draining = (action === "stop" ? delivery.stop(agent.agentId) : delivery.fenceAndDrain()).then(() => { drained = true; });
+      await aborted.promise;
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(requestSignal?.aborted, true);
+      assert.equal(drained, false, "drain must join request cleanup after abort");
+      cleanup.resolve(); await draining;
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+    } finally { aborted.resolve(); cleanup.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test("no-reply hint is suppressed when Stop or authority replacement wins during capture", async () => {
+  for (const action of ["stop", "replace"]) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-no-reply-stop-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const capturing = deferred<void>(), captureDone = deferred<void>();
+    let current = true, reports = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+      return { turnId: request.inboxItemId, outcome: "no_reply", text: null, publicationContract: "legacy_cursor_aggregate_v0" };
+    }), { poll: async () => ({}), publish: async () => {}, reportNoReply: async () => { reports++; } }, async () => current,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    async () => { capturing.resolve(); await captureDone.promise; });
+    try {
+      await ingest(store, "msg_82");
+      const pumping = delivery.pump(agent);
+      await capturing.promise;
+      if (action === "stop") assert.equal(await delivery.interruptActiveDelivery(agent), "settled");
+      else current = false;
+      captureDone.resolve(); await pumping;
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(reports, 0);
+      if (action === "stop") assert.equal((await store.receipts(agent.agentId))[0]?.state, "cancelled_by_user");
+    } finally { captureDone.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test("no-reply hints skip synthetic messages and local-room transport", async () => {
+  for (const variant of ["synthetic", "local"]) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-no-reply-skip-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    let reports = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+      return { turnId: request.inboxItemId, outcome: "no_reply", text: null, publicationContract: "legacy_cursor_aggregate_v0" };
+    }), { poll: async () => ({}), publish: async () => {}, reportNoReply: async () => { reports++; } }, currentAuthority);
+    try {
+      if (variant === "synthetic") await store.enqueueInitialMessage({ agent_id: agent.agentId, room_id: agent.roomId,
+        source_message_id: "initial:1", source_message: { id: "initial:1", text: "start" }, activation: {} });
+      else await ingest(store, "msg_83");
+      await delivery.pump({ ...agent, apiUrl: variant === "local" ? "letagents-local://rooms" : agent.apiUrl });
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+      assert.equal(reports, 0);
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
 test('every provider waits for the workspace snapshot before advancing to its next turn', async () => {
   const root = await mkdtemp(join(tmpdir(), 'letagents-workspace-boundary-'));
   try {
@@ -7991,6 +8732,101 @@ test('every provider waits for the workspace snapshot before advancing to its ne
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+
+for (const variant of ['success', 'capture_failure', 'http_failure', 'stop', 'authority_loss', 'handoff'] as const) {
+  test(`reply publication overlaps capture but joins its boundary on ${variant}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'letagents-capture-publication-'));
+    const store = new SupervisedAgentInboxStore(join(root, 'state.sqlite'));
+    const captureStarted = deferred<void>(), captureRelease = deferred<void>();
+    const publishStarted = deferred<void>(), publishRelease = deferred<void>();
+    const events: string[] = [];
+    let ownsLane = true, nativeCalls = 0, publications = 0, finished = false;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+      await options?.beforeNativeDispatch?.();
+      nativeCalls++;
+      await options?.checkpointTurnStarted?.(request.inboxItemId);
+      return { turnId: request.inboxItemId, outcome: 'reply', text: `answer ${request.sourceMessage.id}`,
+        publicationContract: 'legacy_cursor_aggregate_v0' };
+    }), {
+      poll: async () => ({}),
+      publish: async input => {
+        publications++;
+        events.push(`publish:${publications}`);
+        if (publications === 1) {
+          publishStarted.resolve();
+          await publishRelease.promise;
+          if (variant === 'http_failure') throw new Error('temporary publication failure');
+        }
+        return { messageId: `published-${input.clientMessageId}`, roomId: agent.roomId };
+      },
+    }, async () => ownsLane, 0,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    async (_agent, source) => {
+      events.push(`capture:${source}`);
+      if (source === '1') {
+        captureStarted.resolve(); await captureRelease.promise;
+        if (variant === 'capture_failure') throw new Error('optional capture unavailable');
+      }
+    }, undefined, async (_agent, source) => { events.push(`release:${source}`); });
+    let draining: Promise<void> | undefined;
+    try {
+      await delivery.pump(agent);
+      await ingest(store, '1'); await ingest(store, '2');
+      const pumping = delivery.pump(agent).finally(() => { finished = true; });
+      await captureStarted.promise;
+      await publishStarted.promise;
+      assert.equal(nativeCalls, 1, 'posting does not start a successor native turn');
+      assert.equal((await store.receipts(agent.agentId))[0]?.state, 'publishing');
+      if (variant === 'stop') {
+        assert.equal(await delivery.interruptActiveDelivery(agent), 'published', 'Stop honestly loses after publishing owns the result');
+      }
+      if (variant === 'authority_loss') ownsLane = false;
+      if (variant === 'handoff') draining = delivery.fenceAndDrain();
+      publishRelease.resolve();
+      // Let HTTP resolve/reject while capture remains deliberately held.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(finished, false, 'delivery still owns capture');
+      assert.equal(publications, 1, 'HTTP failure cannot retry before capture joins');
+      assert.equal(nativeCalls, 1);
+      assert.ok(!events.includes('release:1'), 'capture refs remain retained');
+      assert.notEqual((await store.receipts(agent.agentId))[0]?.state, 'acknowledged');
+      captureRelease.resolve();
+      await pumping; await draining;
+      assert.ok(events.indexOf('release:1') > events.indexOf('publish:1'));
+      const receipts = await store.receipts(agent.agentId);
+      if (variant === 'authority_loss' || variant === 'handoff') {
+        assert.equal(nativeCalls, 1);
+        assert.notEqual(receipts[0]?.state, 'acknowledged', 'lost authority cannot ACK the posted result');
+        const recoveryCalls: string[] = [], recoveryCaptures: string[] = [], recoveryIds: string[] = [];
+        const restored = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
+          recoveryCalls.push(String(request.sourceMessage.id));
+          await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.(request.inboxItemId);
+          return { turnId: request.inboxItemId, outcome: 'reply', text: 'second answer' };
+        }), { poll: async () => ({}), publish: async input => {
+          recoveryIds.push(input.clientMessageId);
+          return { messageId: `published-${input.clientMessageId}`, roomId: agent.roomId };
+        } }, currentAuthority, 0,
+        undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+        async (_agent, source) => { recoveryCaptures.push(source); });
+        try {
+          await restored.pump(agent);
+          assert.deepEqual(recoveryCalls, ['2'], 'recover the saved first answer without rerunning its model');
+          assert.deepEqual(recoveryCaptures, ['2'], 'never reconstruct the old filesystem snapshot');
+          assert.equal(recoveryIds[0], receipts[0]!.reply_client_message_id, 'retry the exact published message identity');
+          assert.deepEqual((await store.receipts(agent.agentId)).map(row => row.state), ['acknowledged', 'acknowledged']);
+        } finally { await restored.fenceAndDrain(); }
+      } else {
+        assert.equal(nativeCalls, 2, 'publication retry never repeats the first native turn');
+        assert.deepEqual(receipts.map(row => row.state), ['acknowledged', 'acknowledged']);
+        assert.equal(publications, variant === 'http_failure' ? 3 : 2);
+      }
+    } finally {
+      captureRelease.resolve(); publishRelease.resolve();
+      await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("recorded reply-thread intent cannot publish a stopped, failed, silent or authority-lost turn", async () => {
   for (const outcome of ["stop", "failed", "no_reply", "authority_lost"] as const) {
@@ -8130,3 +8966,155 @@ for (const race of ["retry", "arrival", "successor"] as const) {
     } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
   });
 }
+
+const STAGED_PNG = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+const imageMessage = (id: string, attachments: unknown[]) => ({ id, text: "What is wrong on this screen?", attachments,
+  activation: { for_current_agent: { decision: "activate", reason: "mention" } } });
+const pngAttachment = (id: string) => ({ id, filename: "screen.png", content_type: "image/png", byte_size: STAGED_PNG.byteLength,
+  download_url: `/rooms/room/messages/msg_5/attachments/${id}` });
+const withAttachmentStager = (store: SupervisedAgentInboxStore, port: ProviderActionPort, http: ConstructorParameters<typeof SupervisedAgentDelivery>[2], stager: RoomTurnAttachmentStager) =>
+  new SupervisedAgentDelivery(store, port, http, currentAuthority, 0, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, stager);
+
+test("the activating message's images reach that turn only, and a staged file stays until the turn ends", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const stagedRoot = join(root, "room-turn-attachments");
+  const downloads: Array<{ messageId: string; attachmentId: string; bearer: string }> = [];
+  const seen: Array<{ status: string; path?: string; existed: boolean }> = [];
+  const finishTurn = deferred<void>();
+  const turnRunning = deferred<void>();
+  const port = { ...provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    for (const file of request.attachments ?? []) {
+      seen.push({ status: file.status, path: file.image?.path,
+        existed: Boolean(file.image?.path && await readFile(file.image.path).then(() => true, () => false)) });
+    }
+    turnRunning.resolve();
+    await finishTurn.promise;
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), roomTurnImageDelivery: async () => "file" as const } satisfies ProviderActionPort;
+  const delivery = withAttachmentStager(store, port, {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1"),
+      { id: "att_2", filename: "log.txt", content_type: "text/plain", byte_size: 4 }])] }),
+    downloadAttachment: async (input) => { downloads.push({ messageId: input.messageId, attachmentId: input.attachmentId, bearer: input.bearer }); return STAGED_PNG; },
+    publish: async () => { throw new Error("no reply expected"); },
+  }, new RoomTurnAttachmentStager(stagedRoot));
+  try {
+    const polled = delivery.poll(agent);
+    await turnRunning.promise;
+    assert.deepEqual(seen.map(file => [file.status, file.existed]), [["image", true], ["not_image", false]]);
+    assert.deepEqual(downloads, [{ messageId: "msg_5", attachmentId: "att_1", bearer: "memory" }], "only the image is downloaded, with the worker bearer");
+    finishTurn.resolve();
+    await polled;
+    for (let attempt = 0; attempt < 50 && (await readdir(stagedRoot)).length; attempt++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(await readdir(stagedRoot), [], "the staged file is removed once the turn has ended");
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+    const detail = await store.detail(agent.agentId, agent.roomId, "msg_5");
+    assert.ok(!JSON.stringify(detail.prepared_context).includes(stagedRoot), "no staged path is saved with the turn");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a refused attachment download leaves the room accepted and the turn runs with a note", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-refused-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const statuses: string[][] = [];
+  const port = { ...provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    statuses.push((request.attachments ?? []).map(file => file.status));
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), roomTurnImageDelivery: async () => "memory" as const } satisfies ProviderActionPort;
+  const delivery = withAttachmentStager(store, port, {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1")])] }),
+    // What an older server that does not grant workers the route answers.
+    downloadAttachment: async () => { throw new RoomAttachmentDownloadError("unavailable"); },
+    publish: async () => { throw new Error("no reply expected"); },
+  }, new RoomTurnAttachmentStager(join(root, "room-turn-attachments")));
+  try {
+    await delivery.poll(agent);
+    assert.deepEqual(statuses, [["unavailable"]]);
+    assert.equal(delivery.roomRefusesAccess(agent.agentId), false);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("an agent whose provider takes no images downloads nothing and is told so", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-unsupported-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const statuses: string[][] = [];
+  let downloads = 0;
+  const delivery = withAttachmentStager(store, provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    statuses.push((request.attachments ?? []).map(file => file.status));
+    return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
+  }), {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1")]), imageMessage("msg_6", [])] }),
+    downloadAttachment: async () => { downloads++; return STAGED_PNG; },
+    publish: async () => { throw new Error("no reply expected"); },
+  }, new RoomTurnAttachmentStager(join(root, "room-turn-attachments")));
+  try {
+    await delivery.poll(agent);
+    await delivery.poll(agent);
+    assert.deepEqual(statuses, [["provider_unsupported"], []]);
+    assert.equal(downloads, 0);
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("recovering a saved turn never downloads its images again", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-recovery-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let downloads = 0;
+  const recoveryRequests: unknown[] = [];
+  const port = { ...provider(async (_handle, request, options) => {
+    assert.equal(request.attachments?.[0]?.status, "image");
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("saved-turn");
+    return { turnId: "saved-turn", outcome: "unreadable", text: null, evidence: "none" };
+  }, async (_handle, request) => {
+    recoveryRequests.push(request);
+    return { turnId: "saved-turn", outcome: "no_reply", text: null, evidence: "transcript" };
+  }), roomTurnImageDelivery: async () => "memory" as const } satisfies ProviderActionPort;
+  const delivery = withAttachmentStager(store, port, {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1")])] }),
+    downloadAttachment: async () => { downloads++; return STAGED_PNG; },
+    publish: async () => { throw new Error("no reply expected"); },
+  }, new RoomTurnAttachmentStager(join(root, "room-turn-attachments")));
+  try {
+    await delivery.poll(agent);
+    assert.equal(downloads, 1, "only the first dispatch downloads");
+    assert.equal(recoveryRequests.length, 1);
+    assert.equal((recoveryRequests[0] as Record<string, unknown>).attachments, undefined);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("a turn whose observation ends early keeps its staged file for the native turn until the sweep", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-turn-images-detached-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  const stagedRoot = join(root, "room-turn-attachments");
+  let now = Date.now();
+  const stager = new RoomTurnAttachmentStager(stagedRoot, () => now);
+  let stagedPath: string | undefined;
+  const port = { ...provider(async (_handle, request, options) => {
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("native-turn");
+    stagedPath = request.attachments?.[0]?.image?.path;
+    // What Codex does when its observation detaches: the native turn goes on.
+    throw new Error("Codex room-turn observation detached.");
+  }, async () => ({ turnId: "native-turn", outcome: "no_reply", text: null, evidence: "transcript" })),
+  roomTurnImageDelivery: async () => "file" as const } satisfies ProviderActionPort;
+  const delivery = withAttachmentStager(store, port, {
+    poll: async ({ afterMessageId }) => ({ messages: afterMessageId ? [] : [imageMessage("msg_5", [pngAttachment("att_1")])] }),
+    downloadAttachment: async () => STAGED_PNG,
+    publish: async () => { throw new Error("no reply expected"); },
+  }, stager);
+  try {
+    await delivery.poll(agent);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.ok(stagedPath, "the provider was given a staged file");
+    assert.deepEqual(await readFile(stagedPath!), Buffer.from(STAGED_PNG), "the file outlives the detached observation");
+    now += STAGED_FOLDER_MAX_AGE_MS + 60_000;
+    await stager.sweep();
+    assert.deepEqual(await readdir(stagedRoot), [], "the age sweep removes it once no turn can still read it");
+  } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});

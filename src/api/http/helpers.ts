@@ -2,7 +2,7 @@ import type express from "express";
 import type { Response } from "express";
 
 import { getPollTimeoutCapMs } from "../../shared/poll-timeout-cap.js";
-import { RequestValidationError } from "../validation-error.js";
+import { MessageRoutingPendingError, RequestValidationError } from "../validation-error.js";
 import type { OwnerTokenAccount, SessionAccount } from "../db.js";
 import type { AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
 import type { SupervisorHostGrant } from "../db.js";
@@ -156,6 +156,11 @@ export function respondWithValidationOrInternalError(
   error: unknown,
   fallbackMessage: string
 ): void {
+  if (error instanceof MessageRoutingPendingError) {
+    res.setHeader("Retry-After", "1");
+    res.status(503).json({ error: error.message, code: "message_routing_pending" });
+    return;
+  }
   if (error instanceof RequestValidationError) {
     res.status(400).json({ error: error.message });
     return;

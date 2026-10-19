@@ -36,12 +36,12 @@
           @click="goToSection(section.id)"
         >
           <component :is="section.icon" aria-hidden="true" />
-          <span>{{ section.title }}</span>
+          <span class="room-settings-nav-title">{{ section.title }}</span>
           <span v-if="section.dot" class="room-settings-nav-value">
             <span class="room-settings-dot" :data-state="section.dot" aria-hidden="true" />
             <span class="sr-only">{{ section.summary }}</span>
           </span>
-          <span v-else-if="section.summary" class="room-settings-nav-value">{{ section.summary }}</span>
+          <span v-else-if="section.summary" class="room-settings-nav-value room-settings-nav-summary">{{ section.summary }}</span>
         </button>
       </div>
     </nav>
@@ -209,6 +209,7 @@
               <Transition name="room-settings-progress">
                 <span v-if="storageBusy" class="room-settings-progress" aria-hidden="true" />
               </Transition>
+              <p v-if="storageFeedback" :role="storageFeedback.error ? 'alert' : 'status'">{{ storageFeedback.message }}</p>
             </div>
           </SmoothHeight>
 
@@ -381,6 +382,7 @@ import {
   isLocalGitRoom,
   roomSupportsGitHubIntegration,
 } from "../../../../domain/git-rooms";
+import { conversationSettingsSummary } from "../../../../domain/room-settings-summary";
 
 const props = defineProps<{
   room: DesktopRoomInfo;
@@ -399,6 +401,7 @@ const props = defineProps<{
   githubEventsAvailable: boolean;
   githubEventsVisible: boolean;
   storageBusy: boolean;
+  storageFeedback?: { message: string; error: boolean } | null;
 }>();
 
 const emit = defineEmits<{
@@ -459,14 +462,14 @@ const notificationShortLabel = computed(() => {
 const localGitRoom = computed(() => isLocalGitRoom(props.room));
 const cloudStorageUnavailableReason = computed(() =>
   localGitRoom.value
-    ? "No Git provider is attached to this room. Add an origin remote, then reopen the repository to use Cloud."
+    ? "Add a GitHub origin remote, then use Publish to cloud to connect this room's history before switching to Cloud."
     : null,
 );
 
 const storageDescription = computed(() => {
   if (props.storage.effectiveMode === "local") {
     if (localGitRoom.value) {
-      return "Connect this project to a repository hosted online before sharing its room.";
+      return "Publishing uploads this room's messages and tasks to its GitHub repository room. Adding a remote or connecting a folder does not upload anything.";
     }
     const target = props.storage.localRoom?.cloudRoomIdentifier;
     return target
@@ -618,7 +621,7 @@ const githubFriendlyError = computed(() => {
 });
 
 const canPublishLocalRoom = computed(() =>
-  props.storage.effectiveMode === "local" && !localGitRoom.value
+  props.storage.effectiveMode === "local"
 );
 const githubIntegrationAvailable = computed(() => roomSupportsGitHubIntegration(props.room));
 
@@ -639,7 +642,7 @@ const sections = computed<SectionLink[]>(() => {
           id: "conversation",
           title: "Conversation",
           icon: MessageSquare,
-          summary: [routingSummary.value, replyOrderSummary.value].filter(Boolean).join(" · ") || null,
+          summary: conversationSettingsSummary(routingSummary.value, replyOrderSummary.value),
         }
       : null,
     { id: "guidelines", title: "Guidelines", icon: FileText, summary: cloudRoom.value ? guidelinesSummary.value : null },

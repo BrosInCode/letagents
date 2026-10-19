@@ -1,5 +1,5 @@
 import { retiredRuntimeEvidenceListSchema } from "./runtime-recovery-journal.js";
-import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
+import type { DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
 import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
 import type { CustodialForwardRequest, DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
 import type { createHostApprovalBridge } from "./host-approval-broker.js";
@@ -49,6 +49,8 @@ export interface DaemonControlOperations {
   applyAgentConfiguration(input: {
     entryId: string; daemonGeneration: number; expectedConfigurationRevision: number;
   }): unknown;
+  /** Only the desktop app's signed request reaches this. */
+  setLiveSharing(input: { entryId: string; daemonGeneration: number; enabled: boolean }): unknown;
   prepareInspectorRoomMove(input: { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }): unknown;
   commitInspectorRoomMove(input: RoomMoveIdentity): unknown;
   acknowledgeInspectorRoomMoveSourceRevocation(input: RoomMoveIdentity & { sourceAgentSessionId: string }): unknown;
@@ -71,14 +73,6 @@ export interface DaemonControlOperations {
   resolveTurnControl(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; actionId: string; resolution: "not_applied" | "applied";
   }): unknown;
-  reserveLegacyLane(input: {
-    reservation_id: string; room_id: string; provider: string; owner_pid: number; owner_process_identity: string;
-  }): unknown;
-  activateLegacyLane(reservationId: string, sessionId: string): unknown;
-  releaseLegacyLane(input: {
-    reservation_id: string | null; session_id: string | null; room_id: string | null; provider: string | null;
-  }): unknown;
-  appendActivity(id: string, event: DaemonActivityEvent): unknown;
   updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null, observedAt: string): unknown;
   bindWorkerSession(input: WorkerSessionCoordinates & { agent_session_token: string; api_url: string }): unknown;
   verifyWorkerSession(input: WorkerSessionCoordinates & { agent_session_token: string; api_url: string }): unknown;
@@ -91,7 +85,7 @@ export interface DaemonControlOperations {
   }): unknown;
   syncExecutionDelegations(input: { room_id: string; daemon_generation: number }): unknown;
   installOpenModelCredential(input: {
-    entry_id: string; api_key: string | null; base_url: string; model: string; daemon_generation: number;
+    entry_id: string; api_key: string | null; base_url: string; model: string; context_window?: number; daemon_generation: number;
   }): unknown;
   bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number; initial_message?: string }): unknown;
   borrowWorkerCredential(input: WorkerSessionCoordinates & { daemon_generation: number; provider_turn_id: string; api_url: string }): unknown;
@@ -124,7 +118,7 @@ export interface DaemonControlContext {
 // retain authority. New owner lifecycle actions wait until the update is deferred.
 const HANDOFF_DRAIN_METHODS = new Set<string>([
   "daemon.negotiate", "daemon.status", "daemon.prepare_handoff",
-  "manifest.list", "manifest.watch_state", "manifest.append_activity", "manifest.update_workplace_liveness",
+  "manifest.list", "manifest.watch_state", "manifest.update_workplace_liveness",
   "local_board.watch", "attempt.read", "supervisor.watch_agent_stream", "supervisor.get_agent_inspector_detail",
   "supervisor.get_agent_configuration", "supervisor.get_room_move", "supervisor.get_current_room_move",
   "supervisor.get_delivery_drain", "supervisor.get_polling_activation",
@@ -280,6 +274,17 @@ export function createDaemonControlRequestHandler(
           // The choice is saved. A restart that failed is reported as not done.
         }
         return { ...result, apply: typeof apply?.outcome === "string" ? apply.outcome : "unavailable" };
+      }
+      if (authenticated.operation === "set_live_sharing") {
+        // The signature proves the desktop app sent this: no agent or other
+        // local caller of this socket can share an agent's activity with its room.
+        const error = "Sharing an agent's live activity requires an exact agent, the current daemon generation and a choice.";
+        if (!input || Object.keys(input).length !== 3 || typeof input.enabled !== "boolean") throw new Error(error);
+        return operations.setLiveSharing({
+          entryId: requiredStringParam(input, "entryId", error),
+          daemonGeneration: positiveIntegerParam(input, "daemonGeneration", error),
+          enabled: input.enabled,
+        });
       }
       if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
       return operations.hostApprovals.decide(input);
@@ -623,33 +628,6 @@ export function createDaemonControlRequestHandler(
         resolution: String(params.resolution ?? "") as "not_applied" | "applied",
       });
     }
-    if (request.method === "lane.reserve_legacy") {
-      const params = paramsRecord(request.params);
-      return operations.reserveLegacyLane({
-        reservation_id: String(params.reservation_id ?? ""),
-        room_id: String(params.room_id ?? ""),
-        provider: String(params.provider ?? ""),
-        owner_pid: Number(params.owner_pid ?? 0),
-        owner_process_identity: String(params.owner_process_identity ?? ""),
-      });
-    }
-    if (request.method === "lane.activate_legacy") {
-      const params = paramsRecord(request.params);
-      return operations.activateLegacyLane(String(params.reservation_id ?? ""), String(params.session_id ?? ""));
-    }
-    if (request.method === "lane.release_legacy") {
-      const params = paramsRecord(request.params);
-      return operations.releaseLegacyLane({
-        reservation_id: typeof params.reservation_id === "string" ? params.reservation_id : null,
-        session_id: typeof params.session_id === "string" ? params.session_id : null,
-        room_id: typeof params.room_id === "string" ? params.room_id : null,
-        provider: typeof params.provider === "string" ? params.provider : null,
-      });
-    }
-    if (request.method === "manifest.append_activity") {
-      const params = paramsRecord(request.params);
-      return operations.appendActivity(String(params.id ?? ""), params.event as DaemonActivityEvent);
-    }
     if (request.method === "manifest.update_workplace_liveness") {
       const params = paramsRecord(request.params);
       return operations.updateWorkplaceLiveness(
@@ -721,6 +699,7 @@ export function createDaemonControlRequestHandler(
         api_key: params.api_key === null ? null : String(params.api_key ?? ""),
         base_url: String(params.base_url ?? ""),
         model: String(params.model ?? ""),
+        ...(params.context_window !== undefined ? { context_window: positiveIntegerParam(params, "context_window", "The model context window must be a positive whole number.") } : {}),
         daemon_generation: Number(params.daemon_generation ?? NaN),
       });
     }

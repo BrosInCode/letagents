@@ -7,7 +7,10 @@ import {
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
-import { normalizeMessageAttachmentReferences } from "../../../messages/attachments.js";
+import {
+  normalizeMessageAttachmentReferences,
+  resolveMessageAttachmentUploader,
+} from "../../../messages/attachments.js";
 import { parseCreateMessageBody } from "../../../messages/inputs.js";
 import {
   hasAgentSessionCredentials,
@@ -78,6 +81,7 @@ export function registerCreateMessageRoute(
         reply_to: replyToMessageId,
         thread_root_id: threadRootMessageId,
         attachments,
+        attachment_uploader: resolveMessageAttachmentUploader(req),
         ...(gif ? { gif } : {}),
         ...(body.client_message_id ? { client_message_id: body.client_message_id } : {}),
         ...(workerIdentity ? {

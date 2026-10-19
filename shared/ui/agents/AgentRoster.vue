@@ -9,7 +9,7 @@
           :aria-pressed="filter === option.id"
           @click="filter = option.id"
         >
-          {{ option.label }} <span>{{ option.count }}</span>
+          {{ option.label }} <span v-if="rows.length || state === 'ready'">{{ option.count }}</span>
         </button>
       </div>
       <input
@@ -23,6 +23,10 @@
     <div class="agents-columns" aria-hidden="true">
       <span>Agent</span><span>Owner</span><span>Now</span><span />
     </div>
+    <p v-if="rows.length && state !== 'ready'" class="agents-note" role="status">
+      {{ state === 'error' ? 'Agent updates are unavailable. Showing the last loaded agents.' : 'Updating agents…' }}
+      <button v-if="state === 'error'" class="agents-quiet" type="button" @click="emit('refresh')">Retry</button>
+    </p>
     <div
       v-for="row in visible"
       :key="row.id"
@@ -85,7 +89,11 @@
       </button>
       <slot name="action" :row="row" />
     </div>
-    <div v-if="!visible.length" class="agents-empty">
+    <div v-if="!rows.length && state !== 'ready'" class="agents-empty" role="status">
+      <h3>{{ state === 'error' ? 'Agents couldn’t be loaded' : 'Loading agents…' }}</h3>
+      <button v-if="state === 'error'" class="agents-quiet" type="button" @click="emit('refresh')">Retry</button>
+    </div>
+    <div v-else-if="!visible.length" class="agents-empty">
       <h3>{{ rows.length ? "No matching agents" : "No agents here yet" }}</h3>
       <p>
         {{
@@ -111,8 +119,11 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { agentProviderLabel, type AgentRosterRow } from "./types";
-const props = defineProps<{ rows: readonly AgentRosterRow[] }>();
-const emit = defineEmits<{ select: [id: string, event: MouseEvent] }>();
+const props = withDefaults(defineProps<{
+  rows: readonly AgentRosterRow[];
+  state?: "loading" | "refreshing" | "ready" | "error";
+}>(), { state: "ready" });
+const emit = defineEmits<{ select: [id: string, event: MouseEvent]; refresh: [] }>();
 const filter = ref("all");
 const query = ref("");
 const filters = computed(() => [

@@ -11,15 +11,11 @@ import {
   agentAuthCommand,
   agentProviderNeedsDesktopRepo,
   branchScopedGitRoomExpectedBranch,
-  cursorMcpPolicyDescription,
   externalMcpProviderJoinPrompt,
-  hasDesktopManagedRuntime,
   hasSupervisedRuntime,
   isAgentSetupConfirmationActive,
   isExternalMcpProviderReady,
   matchingManagedAgentWorktreesForBranch,
-  shouldShowCursorMcpPolicySelector,
-  shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
   shouldShowOpenModelConfig,
   supervisedPermissionProfilePresentation,
@@ -55,10 +51,7 @@ export function useAddAgentPresentation(
     loadError,
   } = setup;
   const {
-    deliveryMode,
-    launchMode,
     supervisedCharter,
-    selectedCursorMcpPolicy,
     providerModels,
     loadingProviderModels,
     selectedModelMode,
@@ -71,11 +64,13 @@ export function useAddAgentPresentation(
   const selectedProvider = computed(() =>
     providers.value.find((provider) => provider.id === selectedProviderId.value) || null
   );
+  // Secure storage, the first task and the recovery scan belong to a supervised
+  // launch. A provider without a supervised runtime is only handed off.
+  const supervisedProvider = computed(() => hasSupervisedRuntime(selectedProvider.value));
+  const showSecureStorage = computed(() => props.roomStorageMode !== "local" && supervisedProvider.value);
   const selectedPermissionProfiles = computed(() => {
     const profiles = selectedProvider.value?.permissionProfiles ?? [];
-    return launchMode.value === "supervised"
-      ? profiles.map((profile) => supervisedPermissionProfilePresentation(selectedProviderId.value, profile, { hasProject: Boolean(props.repoRootPath?.trim()) }))
-      : profiles;
+    return profiles.map((profile) => supervisedPermissionProfilePresentation(selectedProviderId.value, profile, { hasProject: Boolean(props.repoRootPath?.trim()) }));
   });
   const selectedPermissionProfile = computed(() =>
     selectedPermissionProfiles.value.find((profile) => profile.id === selectedPermissionProfileId.value) ??
@@ -87,14 +82,14 @@ export function useAddAgentPresentation(
   const canStartManagedAgent = computed(() =>
     Boolean(
       preflight.value?.canStart &&
-      (props.roomStorageMode === "local" || launchMode.value !== "supervised" || secureStorageStatus.value?.available === true) &&
+      (props.roomStorageMode === "local" || secureStorageStatus.value?.available === true) &&
       (!loadingPreflight.value || Boolean(preflight.value)) &&
       (selectedModelMode.value !== "option" || !loadingProviderModels.value) &&
       (
         !selectedPermissionProfiles.value.length ||
         selectedPermissionProfile.value?.status === "available"
       ) &&
-      (launchMode.value === "legacy" || Boolean(supervisedCharter.value.trim()))
+      Boolean(supervisedCharter.value.trim())
     )
   );
   const authCommand = computed(() => agentAuthCommand(selectedProvider.value));
@@ -124,7 +119,7 @@ export function useAddAgentPresentation(
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking setup";
     if (loadError.value) return "Could not check the agent app";
     if (!preflight.value) return "Choose an agent app";
-    if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
+    if (showSecureStorage.value && secureStorageStatus.value?.available === false) {
       return "Unlock secure credential storage";
     }
     if (preflight.value.status === "ready") return "Choose how it works here";
@@ -133,7 +128,7 @@ export function useAddAgentPresentation(
   const statusDescription = computed(() => {
     if (loadError.value) return "We couldn't check this agent app. Choose Check again to retry.";
     if (!preflight.value) return "Checking the agent app…";
-    if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
+    if (showSecureStorage.value && secureStorageStatus.value?.available === false) {
       return secureStorageStatus.value.detail;
     }
     if (preflight.value.status !== "ready") {
@@ -142,20 +137,15 @@ export function useAddAgentPresentation(
         "Agent setup needs attention. Check the agent app, then try again.",
       );
     }
-    if (
-      !hasDesktopManagedRuntime(selectedProvider.value)
-      && !hasSupervisedRuntime(selectedProvider.value)
-    ) {
+    if (!supervisedProvider.value) {
       return "Use the handoff below to bring it into this room.";
     }
-    return hasSupervisedRuntime(selectedProvider.value)
-      ? "Choose a model, set its access, and give it something to work on."
-      : "Set its model and access before launch.";
+    return "Choose a model, set its access, and give it something to work on.";
   });
   const preflightStatusLabel = computed(() => {
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking";
     if (loadError.value || preflight.value?.status === "error") return "Needs attention";
-    if (props.roomStorageMode !== "local" && launchMode.value === "supervised" && secureStorageStatus.value?.available === false) return "Needs attention";
+    if (showSecureStorage.value && secureStorageStatus.value?.available === false) return "Needs attention";
     if (preflight.value?.status === "ready") return "Ready";
     if (!preflight.value) return "Not checked";
     return "Setup needed";
@@ -163,17 +153,13 @@ export function useAddAgentPresentation(
   const runtimeLabel = computed(() => {
     if (preflight.value?.version) return preflight.value.version;
     if (preflight.value?.status === "missing_runtime") return "Missing";
-    if (
-      selectedProvider.value?.capabilities.includes("desktop_managed_runtime")
-      || selectedProvider.value?.capabilities.includes("supervised_runtime")
-    ) return "Required";
+    if (supervisedProvider.value) return "Required";
     return "External app";
   });
   const bridgeLabel = computed(() => {
-    if (
-      (selectedProviderId.value === "claude-code" || selectedProviderId.value === "codex") &&
-      launchMode.value === "supervised"
-    ) return "Managed at launch";
+    if (selectedProviderId.value === "claude-code" || selectedProviderId.value === "codex") {
+      return "Managed at launch";
+    }
     if (preflight.value?.mcpStatus === "installed") return "Installed";
     if (preflight.value?.mcpStatus === "needs_attention") return "Needs repair";
     if (preflight.value?.mcpStatus === "not_installed") return "Not installed";
@@ -194,7 +180,6 @@ export function useAddAgentPresentation(
     if (props.roomGitRoom == null) return "Private scratch workspace";
     return "Required before local agents can start";
   });
-  const showSecureStorage = computed(() => props.roomStorageMode !== "local" && launchMode.value === "supervised");
   const secureStorageLabel = computed(() => {
     if (!showSecureStorage.value) return null;
     if (!secureStorageStatus.value) return "Checking";
@@ -233,18 +218,9 @@ export function useAddAgentPresentation(
       : `Open an existing worktree on ${expectedBranch}, then check again.`;
   });
 
-  const deliveryModeDescription = computed(() =>
-    deliveryMode.value === "desktop_events"
-      ? "This desktop app sends room updates to the local agent."
-      : "The agent app joins the room through its LetAgents connection."
-  );
   const lifecycleDescription = computed(() => props.roomStorageMode === "local"
     ? "Runs on this Mac and keeps working after you quit LetAgents. Room history is stored on this Mac."
     : "Runs on this Mac and keeps working after you quit LetAgents. Room messages are shared in the cloud.");
-  const showCursorMcpPolicySelector = computed(() =>
-    launchMode.value === "legacy" && shouldShowCursorMcpPolicySelector(selectedProvider.value)
-  );
-  const showDeliverySelector = computed(() => shouldShowDeliveryModeSelector(selectedProvider.value));
   const showOpenModelConfig = computed(() => shouldShowOpenModelConfig(selectedProvider.value));
   const showModelSelector = computed(() => shouldShowManagedModelSelector(selectedProvider.value));
   const showEffortSelector = computed(() =>
@@ -294,9 +270,6 @@ export function useAddAgentPresentation(
     if (selectedModelMode.value === "custom") return "custom";
     return null;
   });
-  const selectedCursorMcpPolicyDescription = computed(() =>
-    cursorMcpPolicyDescription(selectedCursorMcpPolicy.value)
-  );
   const modelSelectorDescription = computed(() => {
     if (loadingProviderModels.value) return "Loading available models...";
     if (selectedModelMode.value === "default") {
@@ -326,14 +299,11 @@ export function useAddAgentPresentation(
     return `Use ${managedAgentEffortLabel(selectedEffort.value).toLowerCase()} reasoning effort for this agent session.`;
   });
   const selectedPermissionProfileWarning = computed(() => {
-    if (
-      !hasDesktopManagedRuntime(selectedProvider.value)
-      && !hasSupervisedRuntime(selectedProvider.value)
-    ) return null;
+    if (!supervisedProvider.value) return null;
     const profile = selectedPermissionProfile.value;
     if (!profile || profile.status !== "available") return null;
     const providerName = selectedProvider.value?.name?.trim() || "this agent";
-    if (launchMode.value === "supervised" && selectedProviderId.value === "cursor") {
+    if (selectedProviderId.value === "cursor") {
       if (profile.id === "full_access") {
         return "Cursor edits a separate copy of your project with its own command restrictions off. LetAgents checks for conflicts before copying changes back; files ignored by Git and changes to Git history are not copied back. Only LetAgents room tools are available.";
       }
@@ -341,17 +311,9 @@ export function useAddAgentPresentation(
         return "Cursor edits a separate copy of your project with restricted file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, Git history is kept, and LetAgents room tools remain available.";
       }
     }
-    if (launchMode.value === "supervised" && profile.id === "auto_review") return autoReviewNotice(providerName, selectedProviderId.value);
+    if (profile.id === "auto_review") return autoReviewNotice(providerName, selectedProviderId.value);
     if (profile.risk === "high") {
       return `${providerName} can change files and run commands without asking, including outside your project. Use only with projects and connected tools you trust.`;
-    }
-    if (
-      selectedProviderId.value === "cursor" &&
-      launchMode.value === "legacy" &&
-      profile.id === "sandboxed_write" &&
-      selectedCursorMcpPolicy.value !== "none"
-    ) {
-      return "Connected tools remain available and may make changes outside Cursor’s own restrictions.";
     }
     return null;
   });
@@ -384,10 +346,7 @@ export function useAddAgentPresentation(
     canCreateWorktree,
     createWorktreeButtonLabel,
     worktreePickerDescription,
-    deliveryModeDescription,
     lifecycleDescription,
-    showCursorMcpPolicySelector,
-    showDeliverySelector,
     showOpenModelConfig,
     showModelSelector,
     showEffortSelector,
@@ -400,7 +359,6 @@ export function useAddAgentPresentation(
     selectedModelChoice,
     selectedModel,
     selectedModelSource,
-    selectedCursorMcpPolicyDescription,
     modelSelectorDescription,
     effortSelectorDescription,
     selectedPermissionProfileWarning,

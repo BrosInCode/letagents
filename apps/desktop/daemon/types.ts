@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.228";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.263";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -165,10 +165,23 @@ export type DaemonAgentConfiguration = {
   delivery_cutover?: DaemonDeliveryCutover | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;
+  /**
+   * The owner says this agent's model reads images. Only an Open Model agent
+   * uses it; it applies the next time the agent starts. Inspector-owned, like
+   * the revisions, so never taken from the flat manifest.
+   */
+  image_input?: boolean;
+  /**
+   * Whether the owner shares this agent's live activity with the room; while
+   * "withdrawing", the room may still show earlier turns that the daemon must
+   * remove. Off unless the owner turns it on in the desktop app;
+   * database-owned, like the revisions, so never taken from the flat manifest.
+   */
+  live_sharing?: "off" | "on" | "withdrawing";
 };
 
 /** Durable owner of room ingress for one supervised provider execution. */
-export type DaemonAgentDeliveryMode = "mcp_polling" | "desktop_events" | "daemon_inbox";
+export type DaemonAgentDeliveryMode = "mcp_polling" | "daemon_inbox";
 
 /** Durable one-way handoff from legacy polling to daemon-owned ingress. */
 export type DaemonDeliveryCutover = {
@@ -429,25 +442,9 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
   }>;
 };
 
-/** Durable mixed-engine fence for a legacy Electron-owned provider lane. */
-export type LegacyLaneOwner = {
-  reservation_id: string;
-  room_id: string;
-  provider: string;
-  /** Electron process that owns an in-flight reservation. */
-  owner_pid: number;
-  /** Birth identity prevents a recycled PID from preserving an orphan fence. */
-  owner_process_identity: string;
-  state: "reserved" | "active";
-  session_id: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
 export type DaemonManifest = {
   generation: number;
   entries: DaemonManifestEntry[];
-  legacy_lane_owners?: LegacyLaneOwner[];
 };
 
 export type Transition = {

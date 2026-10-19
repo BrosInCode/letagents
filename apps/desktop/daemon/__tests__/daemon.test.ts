@@ -53,7 +53,6 @@ import type { ProviderCheckpointCoordinator } from "../provider-checkpoint-coord
 import type { ProviderRecoveryDiagnostics, ProviderStreamCoordinator } from "../provider-stream-coordinator.js";
 import { unavailableLifecycleProjectionDiagnostics } from "../lifecycle-projection-ledger.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
-import { launchLegacyWithOwnership } from "../../electron/main/supervisor-ownership.js";
 import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
 import { OpenCodeRuntimeGoneError } from "../../electron/main/agents/open-model-provider-adapter.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
@@ -434,11 +433,6 @@ class SupervisorDaemon extends ProductionSupervisorDaemon {
 }
 
 const execFileAsync = promisify(execFile);
-const TEST_PROCESS_IDENTITY = execFileSync(
-  "/bin/ps",
-  ["-p", String(process.pid), "-o", "lstart=", "-o", "command="],
-  { encoding: "utf8" },
-).trim();
 
 test("daemon tool runtime loader requires a sealed package tree outside explicit development", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-tool-runtime-"));
@@ -1398,6 +1392,34 @@ test("GIF publication falls back to text only on a known pre-commit disabled res
   } finally { globalThis.fetch = previousFetch; }
 });
 
+test("a worker stages a reply attachment with its own bearer, and the reply carries the upload id", async () => {
+  const previousFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method: string; authorization: string | null; body: unknown }> = [];
+  try {
+    globalThis.fetch = (async (url, init) => {
+      const headers = new Headers(init?.headers);
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : init?.body ? Buffer.from(init.body as Uint8Array).toString() : null;
+      calls.push({ url: String(url), method: init?.method ?? "GET", authorization: headers.get("authorization"), body });
+      if (String(url).endsWith("/attachments/uploads")) {
+        return new Response(JSON.stringify({ upload_id: "upl_9", upload_url: "https://storage.test/put", method: "PUT", headers: { "Content-Type": "image/png" } }), { status: 201 });
+      }
+      if (String(url).startsWith("https://storage.test/")) return new Response(null, { status: 200 });
+      return new Response(JSON.stringify({ id: "msg_6", room_id: "github.com/org/repo" }), { status: 200 });
+    }) as typeof fetch;
+    const room = { roomId: "github.com/org/repo", apiUrl: "https://letagents.test", bearer: "worker-token", signal: new AbortController().signal };
+    assert.deepEqual(await productionSupervisedDeliveryHttp.stageAttachment!({ ...room, fileName: "shot.png", mimeType: "image/png", bytes: Buffer.from("png") }), { uploadId: "upl_9" });
+    await productionSupervisedDeliveryHttp.publish({ ...room, text: "Done.", clientMessageId: "reply-1", attachments: [{ upload_id: "upl_9" }], replyTo: null, threadRootId: null });
+    assert.deepEqual(calls.map(({ url, method, authorization }) => [url, method, authorization]), [
+      ["https://letagents.test/rooms/github.com/org/repo/attachments/uploads", "POST", "Bearer worker-token"],
+      ["https://storage.test/put", "PUT", null],
+      ["https://letagents.test/rooms/github.com/org/repo/messages", "POST", "Bearer worker-token"],
+    ]);
+    assert.deepEqual(calls[0]!.body, { filename: "shot.png", content_type: "image/png", byte_size: 3 });
+    assert.equal(calls[1]!.body, "png");
+    assert.deepEqual((calls[2]!.body as { attachments: unknown }).attachments, [{ upload_id: "upl_9" }]);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test("production publication requires a nonempty canonical id in the requested room", async () => {
   const previousFetch = globalThis.fetch;
   try {
@@ -1429,11 +1451,10 @@ test("production publication requires a nonempty canonical id in the requested r
   }
 });
 
-test("legacy lane owner liveness compares the stable process birth prefix, not the whole ps line", () => {
-  // Repro of the supervised Start reserve->activate failure: Electron records the
-  // owner identity as start-time only (defaultGetProcessIdentity = `ps -o lstart=`),
-  // but the daemon previously read `lstart + command` and compared whole strings, so
-  // a live owner never matched and its reservation was pruned before activate.
+test("process birth identity compares the stable birth prefix, not the whole ps line", () => {
+  // A recorded identity is start-time only (defaultGetProcessIdentity = `ps -o lstart=`),
+  // while a later read may be `lstart + command`. Comparing whole strings would
+  // never match a live process.
   const recorded = "Wed Jul 16 02:22:00 2026";
   // Same live process, read start-time-only, is the same birth identity -> stays live.
   assert.equal(sameProcessBirthIdentity("Wed Jul 16 02:22:00 2026", recorded), true);
@@ -1448,60 +1469,6 @@ test("legacy lane owner liveness compares the stable process birth prefix, not t
   assert.equal(sameProcessBirthIdentity("Wed Jul 16 02:22:00 2026 node dist-daemon/main.js", recorded), true);
   // A different start time (PID reuse) is a different process and must read dead.
   assert.equal(sameProcessBirthIdentity("Wed Jul 16 09:00:00 2026", recorded), false);
-});
-
-test("a reserved legacy lane owner recorded with a start-time-only identity survives reserve->activate->release", async () => {
-  // Product-sequence regression for the supervised Start reserve->activate failure.
-  // Electron records the owner identity as start-time only (defaultGetProcessIdentity
-  // = `ps -o lstart=`). This live test process is the owner, so liveness is real and
-  // deterministic. Pre-fix, isProcessOwnerLive read `lstart + command` and compared
-  // whole strings, so the start-time-only recorded identity never matched and
-  // liveLegacyLaneOwners pruned the reservation before activate -> activate threw
-  // "Unknown legacy lane reservation". The birth-prefix comparison keeps it live.
-  // Verified to FAIL on ea06a21f and PASS on the fix.
-  const env = await fixture();
-  const paths = {
-    lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"),
-    auditPath: join(env.root, "audit.jsonl"),
-    workerBindingsPath: join(env.root, "worker-bindings.json"),
-  };
-  const daemon = new SupervisorDaemon(paths, "darwin");
-  try {
-    await daemon.start();
-    const ownerIdentity = execFileSync("/bin/ps", ["-p", String(process.pid), "-o", "lstart="], { encoding: "utf8" }).trim();
-    assert.ok(ownerIdentity.length > 0);
-    const reservationId = randomUUID();
-    const reserve = await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: reservationId,
-      room_id: "room_legacy",
-      provider: "codex",
-      owner_pid: process.pid,
-      owner_process_identity: ownerIdentity,
-    });
-    assert.equal(reserve.ok, true);
-    const activate = await daemonRequest(paths.socketPath, "lane.activate_legacy", {
-      reservation_id: reservationId,
-      session_id: "session_legacy",
-    });
-    assert.equal(activate.ok, true, `activate failed: ${activate.error ?? ""}`);
-    const activeOwners = (await new ManifestStore(paths.manifestPath).load()).legacy_lane_owners ?? [];
-    const active = activeOwners.find((candidate) => candidate.reservation_id === reservationId);
-    assert.equal(active?.state, "active");
-    assert.equal(active?.session_id, "session_legacy");
-
-    // Full lifecycle: release must succeed and durably drop the owner so the fix
-    // cannot silently break the release path.
-    const release = await daemonRequest(paths.socketPath, "lane.release_legacy", { reservation_id: reservationId });
-    assert.equal(release.ok, true, `release failed: ${release.error ?? ""}`);
-    assert.equal((release.result as { released?: boolean }).released, true);
-    const afterRelease = (await new ManifestStore(paths.manifestPath).load()).legacy_lane_owners ?? [];
-    assert.equal(afterRelease.some((candidate) => candidate.reservation_id === reservationId), false);
-  } finally {
-    await daemon.stop().catch(() => undefined);
-    await env.cleanup();
-  }
 });
 
 test("supervised native stream extracts only explicit LetAgents wait cursors", () => {
@@ -1766,69 +1733,6 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
   });
 }
 
-function concurrentDaemonRequestBarrier(socketPath: string) {
-  const clients = new Map<string, ReturnType<typeof createConnection>>();
-  const requests = new Map<string, string>();
-  const connected = new Set<string>();
-  let released = false;
-
-  const releaseWhenReady = () => {
-    if (released || connected.size !== 2) return;
-    released = true;
-    for (const [label, client] of clients) client.write(requests.get(label)!);
-  };
-
-  return (label: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string; version: number }> => {
-    if (clients.has(label)) throw new Error(`Duplicate barrier label: ${label}`);
-    const response = new Promise<{ ok: boolean; result?: unknown; error?: string; version: number }>((resolve, reject) => {
-      const client = createConnection(socketPath);
-      clients.set(label, client);
-      requests.set(label, `${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: `ordered_barrier_${label}`, method, params })}\n`);
-      let received = "";
-      client.setEncoding("utf8");
-      client.once("error", reject);
-      client.on("data", (chunk) => {
-        received += chunk;
-        if (!received.includes("\n")) return;
-        client.end();
-        resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
-      });
-      client.on("connect", () => {
-        connected.add(label);
-        releaseWhenReady();
-      });
-    });
-    releaseWhenReady();
-    return response;
-  };
-}
-
-function orderedDaemonMutationBarrier(releaseOrder: readonly ["legacy", "supervised"] | readonly ["supervised", "legacy"]) {
-  const arrived = new Set<"legacy" | "supervised">();
-  const waiting = new Map<"legacy" | "supervised", () => void>();
-  let released = false;
-  return {
-    arrived,
-    gate: (request: DaemonRequest): Promise<void> => {
-      const label = request.method === "lane.reserve_legacy"
-        ? "legacy"
-        : request.method === "manifest.put"
-          ? "supervised"
-          : null;
-      if (!label) return Promise.resolve();
-      if (arrived.has(label)) throw new Error(`Duplicate mutation barrier arrival: ${label}`);
-      arrived.add(label);
-      const blocked = new Promise<void>((resolve) => { waiting.set(label, resolve); });
-      if (!released && arrived.size === 2) {
-        released = true;
-        waiting.get(releaseOrder[0])!();
-        queueMicrotask(() => waiting.get(releaseOrder[1])!());
-      }
-      return blocked;
-    },
-  };
-}
-
 const TEST_OID = "a".repeat(40);
 const TEST_SUPERVISOR = { supervisor_id: "test-daemon", supervisor_generation: 1 };
 async function provisionedWorkspace(root: string, taskId = "task", workAttemptId = randomUUID()): Promise<{ path: string; id: string; bare: string }> {
@@ -1865,6 +1769,27 @@ function fakeGit(root: string): (args: string[]) => Promise<string> {
     if (args.includes("rev-parse")) return TEST_OID;
     return "";
   };
+}
+
+/**
+ * The write a provider stream makes for each activity event. The `manifest.append_activity`
+ * request that once exposed it is retired, so these tests reach it through the daemon itself.
+ */
+async function appendNativeActivity(daemon: SupervisorDaemon, id: string, event: DaemonActivityEvent): Promise<void> {
+  const { manifestAdministration } = daemon as unknown as {
+    manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
+  };
+  await manifestAdministration.appendNativeActivity(id, event, false);
+  await flushActivity(daemon);
+}
+
+/**
+ * Native activity is admitted at once but committed in short batches. Tests
+ * that read stored activity right after a stream event write the batch first,
+ * as the window timer would.
+ */
+function flushActivity(daemon: SupervisorDaemon): Promise<void> {
+  return (daemon as unknown as { activityWrites: { flush(): Promise<void> } }).activityWrites.flush();
 }
 
 const entry: DaemonManifestEntry = {
@@ -2585,6 +2510,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
         },
       },
     });
+    await flushActivity(env.daemon);
     let current = await env.internals.store.getEntry(env.id);
     assert.ok(current);
     assert.equal(current.observed_state, "idle");
@@ -2597,6 +2523,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
       method: "item/agentMessage/delta",
       payload: { threadId: handle.providerContinuationId!, turnId: "turn_exact", itemId: "message_exact", delta: "late evidence" },
     });
+    await flushActivity(env.daemon);
     current = await env.internals.store.getEntry(env.id);
     assert.ok(current);
     assert.equal(current.observed_state, "working", "the same healthy execution continues after a retryable wait failure");
@@ -2616,6 +2543,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
         delta: "Checking the durable room delivery path.",
       },
     });
+    await flushActivity(env.daemon);
     current = await env.internals.store.getEntry(env.id);
     assert.ok(current);
     assert.equal(
@@ -2720,6 +2648,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
       type: "assistant", message: { content: [{ type: "thinking", thinking: "provider-internal handoff" }] },
     }));
     assert.deepEqual(published, ["idle", "idle", "idle"], "empty Claude wait lifecycle never flips room presence to working");
+    await flushActivity(second ?? first);
     let projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "idle");
     assert.deepEqual(projection.activity?.slice(-3).map((activity) => activity.status), ["idle", "idle", "idle"]);
@@ -2727,6 +2656,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     await firstInternals.handleProviderStream(env.id, handle, wait("wait_2"));
     await firstInternals.handleProviderStream(env.id, handle, result("wait_2", [{ id: "msg_12", text: "please review" }]));
     assert.equal(published.at(-1), "working", "a nonempty addressed wait result remains visible work");
+    await flushActivity(second ?? first);
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "working");
 
@@ -2762,6 +2692,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     await firstInternals.handleProviderStream(env.id, handle, codexProgress);
     await firstInternals.handleProviderStream(env.id, handle, codexCompleted);
     assert.deepEqual(published.slice(-3), ["idle", "idle", "idle"], "real Codex start, progress, and empty/silent completion stay idle");
+    await flushActivity(second ?? first);
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.deepEqual(projection.activity?.slice(-3).map((activity) => activity.status), ["idle", "idle", "idle"]);
 
@@ -2783,6 +2714,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     await firstInternals.handleProviderStream(env.id, handle, addressedStarted);
     await firstInternals.handleProviderStream(env.id, handle, addressedCompleted);
     assert.deepEqual(published.slice(-2), ["idle", "working"], "a real addressed Codex completion wakes the work indicator");
+    await flushActivity(second ?? first);
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "working");
     assert.equal(projection.activity?.at(-1)?.status, "working");
@@ -2795,6 +2727,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     const secondInternals = await install(second, afterRestart);
     await secondInternals.handleProviderStream(env.id, handle, result("wait_restart", []));
     assert.deepEqual(afterRestart, ["idle"], "persisted wait correlation survives a daemon restart mid-poll");
+    await flushActivity(second ?? first);
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "idle");
   } finally {
@@ -3284,7 +3217,7 @@ test("stop fences a launch waiting on provider capabilities before generation cr
 test("provider delivery capabilities block mismatches while legacy omissions remain compatible", async () => {
   const runCase = async (
     id: "delivery_mode_mismatch" | "legacy_delivery_capabilities",
-    deliveryModes: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox"> | undefined,
+    deliveryModes: ReadonlyArray<"mcp_polling" | "daemon_inbox"> | undefined,
   ) => {
     const env = await fixture();
     const paths = {
@@ -5790,6 +5723,34 @@ test("daemon lifecycle diagnostics are private, redacted, and strictly bounded",
   } finally { await env.cleanup(); }
 });
 
+test("daemon lifecycle diagnostics rotate repeated samples within one process", async () => {
+  const env = await fixture();
+  const path = join(env.root, "daemon-lifecycle.jsonl");
+  const log = new DaemonLifecycleLog(path, 1);
+  try {
+    for (let i = 0; i < 20; i++) log.append({ event: "room_latency", detail: `sample ${i}` });
+    const files = (await readdir(env.root)).filter(name => name.startsWith("daemon-lifecycle.jsonl")).sort();
+    assert.deepEqual(files, ["daemon-lifecycle.jsonl", "daemon-lifecycle.jsonl.previous"]);
+    assert.equal(JSON.parse((await readFile(path, "utf8")).trim()).detail, "sample 19");
+    assert.equal(JSON.parse((await readFile(`${path}.previous`, "utf8")).trim()).detail, "sample 18");
+    for (const name of files) assert.equal((await stat(join(env.root, name))).mode & 0o777, 0o600);
+  } finally { log.close(); await env.cleanup(); }
+});
+
+test("daemon lifecycle diagnostics fail open when live rotation fails", async () => {
+  const env = await fixture();
+  const path = join(env.root, "daemon-lifecycle.jsonl");
+  const log = new DaemonLifecycleLog(path, 1);
+  try {
+    log.append({ event: "daemon_starting" });
+    await mkdir(`${path}.previous`);
+    assert.doesNotThrow(() => log.append({ event: "room_latency", detail: "rotation blocked" }));
+    assert.doesNotThrow(() => log.append({ event: "daemon_ready" }));
+    assert.match(await readFile(path, "utf8"), /daemon_starting/);
+    assert.doesNotMatch(await readFile(path, "utf8"), /rotation blocked|daemon_ready/);
+  } finally { log.close(); await env.cleanup(); }
+});
+
 test("daemon lifecycle diagnostics never become a startup dependency", async () => {
   const env = await fixture();
   try {
@@ -7203,6 +7164,7 @@ for (const apiUrl of ["https://letagents.test", "http://[::1]:3000"]) {
     }, {
       endWorkerSession: async input => {
         assert.equal(input.sessionId, "retired-worker");
+        assert.equal(input.restarting, true, "recovery starts the agent again in the same room");
         if (recoveryFailure === "end") throw new Error("injected worker retirement failure");
         leaseEvents.push("retire");
       },
@@ -8681,7 +8643,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     await first.start();
     const store = (first as unknown as { store: ManifestStore }).store;
     const originalWrite = store.write.bind(store);
-    store.write = (expected, entries, owners, commitFence) => originalWrite(expected, entries, owners, async (commit) => {
+    store.write = (expected, entries, commitFence) => originalWrite(expected, entries, async (commit) => {
       reachedCommit();
       await commitGate;
       if (commitFence) await commitFence(commit);
@@ -8863,10 +8825,15 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     assert.equal(saved.native_liveness?.state, "unknown");
     const paused = await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "paused" });
     assert.equal((paused.result as DaemonManifestEntry).desired_state, "paused");
-    const event = { observed_at: "2026-01-01T00:00:01.000Z", sequence: 1, provider: "codex", kind: "turn_lifecycle", method: "turn/started", summary: "Working on the task", status: "working", payload: {}, payload_truncated: false, payload_redacted: true, durable_payload_ref: null };
-    const active = await daemonRequest(paths.socketPath, "manifest.append_activity", { id: entry.id, event });
-    assert.equal((active.result as DaemonManifestEntry).observed_state, "working");
-    assert.equal((active.result as DaemonManifestEntry).native_liveness?.state, "active");
+    const event: DaemonActivityEvent = { observed_at: "2026-01-01T00:00:01.000Z", sequence: 1, provider: "codex", kind: "turn_lifecycle", method: "turn/started", summary: "Working on the task", status: "working", payload: {}, payload_truncated: false, payload_redacted: true, durable_payload_ref: null };
+    await appendNativeActivity(daemon, entry.id, event);
+    // The stored axes, not the read model's: an event this old reads back as stale, as the next lines show.
+    const inspection = new ManifestStore(paths.manifestPath);
+    try {
+      const active = (await inspection.getEntry(entry.id))!;
+      assert.equal(active.observed_state, "working");
+      assert.equal(active.native_liveness?.state, "active");
+    } finally { await inspection.close(); }
     await daemonRequest(paths.socketPath, "manifest.update_workplace_liveness", { id: entry.id, state: "reachable", detail: "heartbeat", observed_at: "2026-01-01T00:00:01.000Z" });
     const stale = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0];
     assert.equal(stale.workplace_liveness?.state, "stale");
@@ -8882,6 +8849,105 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
   }
 });
 
+test("daemon stop writes admitted activity before it releases authority, then refuses more", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const { manifestAdministration } = daemon as unknown as {
+    manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
+  };
+  const activity = (sequence: number): DaemonActivityEvent => ({ observed_at: new Date().toISOString(), sequence, provider: "codex", kind: "turn_lifecycle", method: "turn/started", summary: `step ${sequence}`, status: "working", payload: {}, payload_truncated: false, payload_redacted: false, durable_payload_ref: null });
+  let stopped = false;
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, workspace_path: "/tmp/work" } });
+    // Admitted, still inside the batch window: not yet committed.
+    await manifestAdministration.appendNativeActivity(entry.id, activity(1), false);
+    await manifestAdministration.appendNativeActivity(entry.id, activity(2), false);
+    await daemon.stop();
+    stopped = true;
+    const inspection = new ManifestStore(paths.manifestPath);
+    try {
+      const saved = (await inspection.getEntry(entry.id))!;
+      assert.deepEqual(saved.activity?.map((event) => event.sequence), [1, 2], "clean stop drops no admitted activity");
+      assert.equal(saved.observed_state, "working");
+    } finally { await inspection.close(); }
+    await assert.rejects(manifestAdministration.appendNativeActivity(entry.id, activity(3), false), /fence|closed/);
+  } finally {
+    if (!stopped) await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("a handoff fence refuses new activity but still writes activity admitted before it", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const internals = daemon as unknown as {
+    handoffScheduled: boolean;
+    activityWrites: { flush(): Promise<void>; size: number };
+    manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
+  };
+  const activity = (sequence: number): DaemonActivityEvent => ({ observed_at: new Date().toISOString(), sequence, provider: "codex", kind: "turn_lifecycle", method: "turn/started", summary: `step ${sequence}`, status: "working", payload: {}, payload_truncated: false, payload_redacted: false, durable_payload_ref: null });
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, workspace_path: "/tmp/work" } });
+    await internals.manifestAdministration.appendNativeActivity(entry.id, activity(1), false);
+    internals.handoffScheduled = true;
+    await assert.rejects(internals.manifestAdministration.appendNativeActivity(entry.id, activity(2), false), DaemonFenceLostError);
+    assert.equal(internals.activityWrites.size, 1);
+    await internals.activityWrites.flush();
+    const inspection = new ManifestStore(paths.manifestPath);
+    try {
+      assert.deepEqual((await inspection.getEntry(entry.id))!.activity?.map((event) => event.sequence), [1],
+        "admitted activity commits under the admitted-state fence while the singleton is still owned");
+    } finally { await inspection.close(); }
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("a batch waiting for the commit lane when a handoff starts still commits its admitted events", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const internals = daemon as unknown as {
+    handoffScheduled: boolean;
+    authority: { serializeManifestCommit<T>(operation: () => Promise<T>): Promise<T> };
+    activityWrites: { flush(): Promise<void>; size: number };
+    manifestAdministration: { appendNativeActivity(id: string, event: DaemonActivityEvent, activityOnly: boolean): Promise<void> };
+  };
+  const idle: DaemonActivityEvent = { observed_at: new Date().toISOString(), sequence: 1, provider: "codex", kind: "turn_lifecycle", method: "turn/completed", summary: "Turn ended", status: "idle", payload: {}, payload_truncated: false, payload_redacted: false, durable_payload_ref: null };
+  let releaseLane!: () => void;
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, observed_state: "working", workspace_path: "/tmp/work" } });
+    await internals.manifestAdministration.appendNativeActivity(entry.id, idle, false);
+    // Hold the commit lane so the batch waits inside it, then start a handoff.
+    let laneHeld!: () => void;
+    const held = new Promise<void>((resolve) => { laneHeld = resolve; });
+    const lane = internals.authority.serializeManifestCommit(() => new Promise<void>((resolve) => { releaseLane = resolve; laneHeld(); }));
+    await held;
+    const flushed = internals.activityWrites.flush();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    internals.handoffScheduled = true;
+    releaseLane();
+    await lane;
+    await flushed;
+    const inspection = new ManifestStore(paths.manifestPath);
+    try {
+      const saved = (await inspection.getEntry(entry.id))!;
+      assert.deepEqual(saved.activity?.map((event) => event.sequence), [1], "the pre-fence event was not dropped");
+      assert.equal(saved.observed_state, "idle", "the successor does not start from a stale working state");
+    } finally { await inspection.close(); }
+  } finally {
+    releaseLane?.();
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
 test("daemon ingress redacts provider credentials before manifest, DTO, and audit persistence", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
@@ -8892,34 +8958,32 @@ test("daemon ingress redacts provider credentials before manifest, DTO, and audi
   try {
     await daemon.start();
     await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, id: "credential_firewall" } });
-    const response = await daemonRequest(paths.socketPath, "manifest.append_activity", {
-      id: "credential_firewall",
-      event: {
-        observed_at: "2026-01-01T00:00:01.000Z",
-        sequence: 1,
-        provider: "claude-code",
-        kind: "tool_result",
-        method: `tool/result Authorization: Bearer ${canary}`,
-        summary: `LETAGENTS_TOKEN=${canary}`,
-        status: "working",
-        payload: {
-          nested: [{ LETAGENTS_TOKEN: canary }, { api_key: canary }, { clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }],
-          json: JSON.stringify({ LETAGENTS_TOKEN: canary }),
-          header: `Authorization: Bearer ${canary}`,
-          basic: `Authorization: Basic ${canary}`,
-          arbitraryAuthorization: `Authorization: ${canary}`,
-          stringifiedHeaders: JSON.stringify({ bearer: `Authorization: Bearer ${canary}`, basic: `Authorization: Basic ${canary}`, arbitrary: `Authorization: ${canary}` }),
-          stringifiedCamelCase: JSON.stringify({ clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }),
-          standaloneOwnedTokens: `worker=${workerBearer} host=${hostGrant}`,
-          stringifiedOwnedTokens: JSON.stringify({ message: `${workerBearer} ${hostGrant}` }),
-        },
-        payload_truncated: false,
-        payload_redacted: false,
-        durable_payload_ref: `Authorization: Bearer ${canary}`,
+    await appendNativeActivity(daemon, "credential_firewall", {
+      observed_at: "2026-01-01T00:00:01.000Z",
+      sequence: 1,
+      provider: "claude-code",
+      kind: "tool_result",
+      method: `tool/result Authorization: Bearer ${canary}`,
+      summary: `LETAGENTS_TOKEN=${canary}`,
+      status: "working",
+      payload: {
+        nested: [{ LETAGENTS_TOKEN: canary }, { api_key: canary }, { clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }],
+        json: JSON.stringify({ LETAGENTS_TOKEN: canary }),
+        header: `Authorization: Bearer ${canary}`,
+        basic: `Authorization: Basic ${canary}`,
+        arbitraryAuthorization: `Authorization: ${canary}`,
+        stringifiedHeaders: JSON.stringify({ bearer: `Authorization: Bearer ${canary}`, basic: `Authorization: Basic ${canary}`, arbitrary: `Authorization: ${canary}` }),
+        stringifiedCamelCase: JSON.stringify({ clientSecret: canary, dbPassword: canary, privateKey: canary, setCookie: canary }),
+        standaloneOwnedTokens: `worker=${workerBearer} host=${hostGrant}`,
+        stringifiedOwnedTokens: JSON.stringify({ message: `${workerBearer} ${hostGrant}` }),
       },
+      payload_truncated: false,
+      payload_redacted: false,
+      durable_payload_ref: `Authorization: Bearer ${canary}`,
     });
-    assert.equal(response.ok, true, response.error);
-    const dto = response.result as DaemonManifestEntry;
+    const listed = await daemonRequest(paths.socketPath, "manifest.list");
+    assert.equal(listed.ok, true, listed.error);
+    const dto = (listed.result as DaemonManifestEntry[]).find((candidate) => candidate.id === "credential_firewall")!;
     assert.equal(dto.activity?.[0]?.payload_redacted, true);
     assert.doesNotMatch(JSON.stringify(dto), new RegExp(canary));
     assert.doesNotMatch(JSON.stringify(dto), new RegExp(workerBearer));
@@ -9006,16 +9070,13 @@ test("concurrent Claude Code creation ids create independent durable owners", as
     const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     assert.equal(manifest.filter((item) => item.room_id === "focus_37" && item.provider === "claude-code").length, 2);
     assert.ok(manifest.every((item) => item.desired_state === "running"));
-    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_blocked_by_any_supervised", room_id: "focus_37", provider: "claude-code", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    })).ok, false, "any active supervised Claude agent keeps the legacy provider engine fenced out");
   } finally {
     await daemon.stop();
     await env.cleanup();
   }
 });
 
-test("distinct supervised Codex entries coexist in one room without weakening legacy fencing", async () => {
+test("distinct supervised Codex entries coexist in one room", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
   let daemon = new SupervisorDaemon(paths, "darwin");
@@ -9062,11 +9123,6 @@ test("distinct supervised Codex entries coexist in one room without weakening le
     const afterRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     assert.equal(afterRestart.filter((item) => item.room_id === "codex_roundtable" && item.provider === "codex").length, 2);
     assert.ok(afterRestart.every((item) => item.desired_state === "running"), "restart preserves multiple Codex owners instead of quarantining them");
-
-    const blockedLegacy = await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_codex_roundtable", room_id: "codex_roundtable", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    });
-    assert.equal(blockedLegacy.ok, false, "any live supervised Codex entry continues to fence the legacy Electron runtime");
   } finally {
     await daemon.stop();
     await env.cleanup();
@@ -9567,97 +9623,6 @@ test(`two Codex room agents keep independent provider executions across stop, re
 });
 }
 
-test("two supervised Codex claims wait together behind one legacy Codex owner", async () => {
-  const env = await fixture();
-  const paths = {
-    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
-    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
-  };
-  const sources = await Promise.all([
-    committedSourceRepository(env.root, "legacy-handoff-alpha-source"),
-    committedSourceRepository(env.root, "legacy-handoff-bravo-source"),
-  ]);
-  await Promise.all(sources.map((source) => primeDaemonBareRepository(env.root, source)));
-  const spawned: Array<[entryId: string, workAttemptId: string]> = [];
-  let nextPid = 7100;
-  const adapter: NativeProviderAdapter = {
-    capabilities: () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
-    spawn: async (request) => {
-      spawned.push([request.supervisorEntryId ?? "missing-entry", request.workAttemptId]);
-      const pid = ++nextPid;
-      return {
-        workAttemptId: request.workAttemptId,
-        pid,
-        providerContinuationId: `thread_${request.supervisorEntryId}`,
-        providerConnection: { kind: "codex_app_server", url: `ws://127.0.0.1:${pid}`, pid, processIdentity: `fake-codex:${pid}` },
-        observedState: () => "working",
-      };
-    },
-    attach: async () => null,
-    resume: async () => { throw new Error("legacy release activates fresh Codex agents"); },
-    poke: async () => {},
-    controlTurn: async () => ({ capability: "native_interrupt", interrupted: true, resumed: true, state: "working" }),
-    stop: async (handle) => ({
-      endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId,
-    }),
-    onExit: () => () => {},
-    onStream: () => () => {},
-  };
-  const daemon = new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ codex: async () => adapter }), true);
-  const candidate = (id: string): DaemonManifestEntry => ({
-    ...entry,
-    id,
-    room_id: "codex_legacy_handoff",
-    provider: "codex",
-    desired_state: "paused",
-    observed_state: "paused",
-    source_repo_path: id.endsWith("alpha") ? sources[0] : sources[1],
-    workspace_path: null,
-    work_attempt_id: null,
-  });
-  try {
-    await daemon.start();
-    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_codex_owner", room_id: "codex_legacy_handoff", provider: "codex",
-      owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    })).ok, true);
-    const created = await Promise.all(["codex_waiting_alpha", "codex_waiting_bravo"].map((id) =>
-      daemonRequest(paths.socketPath, "manifest.put", { entry: candidate(id) })));
-    assert.ok(created.every((result) => result.ok), "both paused supervised claims may be saved during legacy teardown");
-
-    const blocked = await Promise.all(["codex_waiting_alpha", "codex_waiting_bravo"].map((id) =>
-      daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
-        id, expected_desired_state: "paused", desired_state: "running",
-      })));
-    assert.ok(blocked.every((result) => !result.ok && /legacy reservation/.test(result.error ?? "")));
-    assert.equal((await daemonRequest(paths.socketPath, "lane.release_legacy", { reservation_id: "legacy_codex_owner" })).ok, true);
-
-    const activated = await Promise.all(["codex_waiting_alpha", "codex_waiting_bravo"].map((id) =>
-      daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
-        id, expected_desired_state: "paused", desired_state: "running",
-      })));
-    assert.ok(activated.every((result) => result.ok && (result.result as { applied: boolean }).applied));
-    await eventually(async () => {
-      const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-      return manifest.length === 2 && manifest.every((item) => item.desired_state === "running" && item.observed_state === "working");
-    }, "both Codex providers after legacy release", 5_000);
-    const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-    const alpha = manifest.find((item) => item.id === "codex_waiting_alpha")!;
-    const bravo = manifest.find((item) => item.id === "codex_waiting_bravo")!;
-    assert.equal(spawned.length, 2);
-    assert.deepEqual([...spawned].sort(([left], [right]) => left.localeCompare(right)), [
-      [alpha.id, alpha.work_attempt_id],
-      [bravo.id, bravo.work_attempt_id],
-    ]);
-    assert.notEqual(alpha.work_attempt_id, bravo.work_attempt_id);
-    assert.notEqual(alpha.provider_ref?.execution_generation_id, bravo.provider_ref?.execution_generation_id);
-  } finally {
-    await daemon.stop();
-    await env.cleanup();
-  }
-});
-
 test("daemon restart preserves multiple isolated Cursor owners from older manifests", async () => {
   const env = await fixture();
   const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
@@ -9972,7 +9937,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
 
     const currentEffect = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-current",
-      tool_name: "send_message", input: { text: "allowed" }, mutation: true,
+      tool_name: "send_message", input: { reply_to: "other-message", text: "allowed" }, mutation: true,
     });
     assert.equal(currentEffect.ok, true, currentEffect.error);
     const effectId = String((currentEffect.result as { effect_id: string }).effect_id);
@@ -9983,7 +9948,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     assert.equal(completedEffect.ok, true, completedEffect.error);
     const exactRetry = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-current",
-      tool_name: "send_message", input: { text: "allowed" }, mutation: true,
+      tool_name: "send_message", input: { reply_to: "other-message", text: "allowed" }, mutation: true,
     });
     assert.equal(exactRetry.ok, true, exactRetry.error);
     assert.deepEqual(exactRetry.result, { state: "completed", result: { delivered: true }, room_id: entry.room_id },
@@ -9991,7 +9956,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
 
     const interruptedMutationParams = {
       ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-uncertain",
-      tool_name: "send_message", input: { text: "send at most once" }, mutation: true,
+      tool_name: "send_message", input: { reply_to: "other-message", text: "send at most once" }, mutation: true,
     };
     const interruptedMutation = await daemonRequest(
       paths.socketPath, "supervisor.prepare_bounded_effect", interruptedMutationParams,
@@ -10091,7 +10056,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     };
     const checkpointFailureParams = {
       ...executeParams, mcp_request_id: "effect-success-checkpoint-failure",
-      tool_name: "send_message", input: { text: "external effect succeeds once" },
+      tool_name: "send_message", input: { reply_to: "other-message", text: "external effect succeeds once" },
     };
     const checkpointFailure = await daemonRequest(
       paths.socketPath,
@@ -10587,259 +10552,6 @@ test("concurrent Claude Code creation mints one isolated provider generation per
   }
 });
 
-test("legacy and supervised lanes share one durable linearization point in both flip directions", async () => {
-  const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
-  const daemon = new SupervisorDaemon(paths, "darwin");
-  const candidate = (id: string, roomId: string): DaemonManifestEntry => ({
-    ...entry,
-    id,
-    room_id: roomId,
-    provider: "codex",
-    desired_state: "paused",
-    observed_state: "paused",
-  });
-  try {
-    await daemon.start();
-
-    // Legacy wins the first linearization point. A paused transfer claim may
-    // be recorded, but it cannot activate/spawn until the legacy owner exits.
-    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_first", room_id: "room_legacy_first", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    })).ok, true);
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: candidate("supervised_pending", "room_legacy_first"),
-    })).ok, true);
-    const blockedActivation = await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: "supervised_pending", desired_state: "running",
-    });
-    assert.equal(blockedActivation.ok, false);
-    assert.match(blockedActivation.error ?? "", /legacy reservation/);
-    assert.equal((await daemonRequest(paths.socketPath, "lane.activate_legacy", {
-      reservation_id: "legacy_first", session_id: "legacy_session_first",
-    })).ok, true);
-
-    // After the confirmed legacy stop/release, the pending supervised claim
-    // is the only engine allowed to activate.
-    assert.equal((await daemonRequest(paths.socketPath, "lane.release_legacy", {
-      session_id: "legacy_session_first",
-    })).ok, true);
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: "supervised_pending", desired_state: "running",
-    })).ok, true);
-
-    // Supervised wins the opposite direction before a legacy spawn. The
-    // legacy reservation fails, so its caller cannot enter runtime.start.
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: candidate("supervised_first", "room_supervised_first"),
-    })).ok, true);
-    const blockedLegacy = await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_loser", room_id: "room_supervised_first", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    });
-    assert.equal(blockedLegacy.ok, false);
-    assert.match(blockedLegacy.error ?? "", /supervised entry/);
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: "supervised_first", desired_state: "running",
-    })).ok, true);
-
-    // Barrier edge: the legacy runtime became visible before its reservation
-    // was bound to a session. Supervised teardown releases by lane, so the
-    // pending supervised claim activates and the late legacy bind is fenced.
-    assert.equal((await daemonRequest(paths.socketPath, "lane.reserve_legacy", {
-      reservation_id: "legacy_mid_spawn", room_id: "room_mid_spawn", provider: "codex", owner_pid: process.pid, owner_process_identity: TEST_PROCESS_IDENTITY,
-    })).ok, true);
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: candidate("supervised_mid_spawn", "room_mid_spawn"),
-    })).ok, true);
-    assert.equal((await daemonRequest(paths.socketPath, "lane.release_legacy", {
-      room_id: "room_mid_spawn", provider: "codex",
-    })).ok, true);
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
-      id: "supervised_mid_spawn", desired_state: "running",
-    })).ok, true);
-    const lateLegacyBind = await daemonRequest(paths.socketPath, "lane.activate_legacy", {
-      reservation_id: "legacy_mid_spawn", session_id: "legacy_session_late",
-    });
-    assert.equal(lateLegacyBind.ok, false);
-    assert.match(lateLegacyBind.error ?? "", /Unknown legacy lane reservation/);
-
-    const durable = await new ManifestStore(paths.manifestPath).load();
-    assert.deepEqual(durable.legacy_lane_owners ?? [], []);
-    assert.equal(durable.entries.filter((owner) => owner.desired_state === "running").length, 3);
-  } finally {
-    await daemon.stop();
-    await env.cleanup();
-  }
-});
-
-test("public-socket barrier races observe exactly one real mixed-engine product-path callback in both winner directions", async () => {
-  for (const releaseOrder of [["legacy", "supervised"], ["supervised", "legacy"]] as const) {
-    const env = await fixture();
-    const paths = {
-      lockPath: join(env.root, "daemon.lock"),
-      socketPath: join(env.root, "daemon.sock"),
-      manifestPath: join(env.root, "daemon-state.sqlite"),
-      auditPath: join(env.root, "audit.jsonl"),
-      attemptsPath: join(env.root, "attempts.json"),
-      attemptsRoot: join(env.root, "attempt-data"),
-      workspaceRoot: env.root,
-    };
-    const roomId = `room_product_race_${releaseOrder[0]}`;
-    const supervisedId = `supervised_product_race_${releaseOrder[0]}`;
-    const reservationId = `legacy_product_race_${releaseOrder[0]}`;
-    const workspace = await provisionedWorkspace(env.root, supervisedId);
-    const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
-    const attempt = await durability.createAttempt({
-      taskId: supervisedId,
-      leaseId: supervisedId,
-      leaseEpoch: 0,
-      workspacePath: workspace.path,
-      workAttemptId: workspace.id,
-    });
-    let legacyStarts = 0;
-    let supervisedSpawns = 0;
-    let supervisedStreamDeliveries = 0;
-    const handle = {
-      workAttemptId: attempt.work_attempt_id,
-      pid: 42,
-      providerContinuationId: `continuation_${releaseOrder[0]}`,
-      observedState: "working" as const,
-    };
-    const port: ProviderActionPort = {
-      capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
-      spawn: async (request) => {
-        supervisedSpawns += 1;
-        assert.equal(request.workAttemptId, attempt.work_attempt_id);
-        return handle;
-      },
-      attach: async () => null,
-      attachAction: async () => ({ state: "absent" }),
-      resume: async () => { throw new Error("fresh mixed-engine race must not resume"); },
-      poke: async () => {},
-      stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
-      onExit: async () => () => {},
-      onStream: async (_providerHandle, listener) => {
-        queueMicrotask(() => {
-          supervisedStreamDeliveries += 1;
-          listener({
-            workAttemptId: attempt.work_attempt_id,
-            providerContinuationId: handle.providerContinuationId,
-            observedAt: new Date().toISOString(),
-            sequence: 1,
-            provider: "codex",
-            kind: "turn_lifecycle",
-            method: "turn/product-path-delivery",
-            payload: { releaseOrder },
-            payloadTruncated: false,
-            payloadRedacted: false,
-            durablePayloadRef: null,
-          });
-        });
-        return () => {};
-      },
-    };
-    const mutationBarrier = orderedDaemonMutationBarrier(releaseOrder);
-    const daemon = new SupervisorDaemon(paths, "darwin", port, true, 60_000, mutationBarrier.gate);
-    try {
-      await daemon.start();
-      const barrierRequest = concurrentDaemonRequestBarrier(paths.socketPath);
-      const legacy = launchLegacyWithOwnership({
-        reserve: async () => {
-          const result = await barrierRequest("legacy", "lane.reserve_legacy", {
-            reservation_id: reservationId,
-            room_id: roomId,
-            provider: "codex",
-            owner_pid: process.pid,
-            owner_process_identity: TEST_PROCESS_IDENTITY,
-          });
-          if (!result.ok) throw new Error(result.error);
-        },
-        start: async () => {
-          legacyStarts += 1;
-          return { sessionId: `legacy_session_${releaseOrder[0]}` };
-        },
-        activate: async (started) => {
-          const result = await daemonRequest(paths.socketPath, "lane.activate_legacy", {
-            reservation_id: reservationId,
-            session_id: started.sessionId,
-          });
-          if (!result.ok) throw new Error(result.error);
-        },
-        stop: async () => { legacyStarts -= 1; },
-        release: async () => {
-          await daemonRequest(paths.socketPath, "lane.release_legacy", { reservation_id: reservationId });
-        },
-      });
-      const supervised = barrierRequest("supervised", "manifest.put", {
-        entry: {
-          ...entry,
-          id: supervisedId,
-          room_id: roomId,
-          provider: "codex",
-          desired_state: "running",
-          observed_state: "absent",
-          workspace_path: attempt.workspace_path,
-          work_attempt_id: attempt.work_attempt_id,
-        },
-      });
-      const [legacyResult, supervisedResult] = await Promise.allSettled([legacy, supervised]);
-      assert.deepEqual([...mutationBarrier.arrived].sort(), ["legacy", "supervised"], "both public claim frames reach the daemon before either mutation is released");
-
-      if (releaseOrder[0] === "legacy") {
-        assert.equal(legacyResult.status, "fulfilled");
-        assert.equal(supervisedResult.status, "fulfilled");
-        assert.equal(supervisedResult.value.ok, false);
-        assert.match(supervisedResult.value.error ?? "", /legacy reservation/);
-      } else {
-        assert.equal(supervisedResult.status, "fulfilled");
-        assert.equal(supervisedResult.value.ok, true, supervisedResult.value.error);
-        assert.equal(legacyResult.status, "rejected");
-        assert.match(String(legacyResult.reason), /supervised entry/);
-        await eventually(async () => supervisedSpawns === 1 && supervisedStreamDeliveries === 1, "supervised spawn and stream delivery callbacks");
-        await eventually(async () => {
-          const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-          return manifest.find((candidate) => candidate.id === supervisedId)?.activity?.some((event) => event.method === "turn/product-path-delivery") === true;
-        }, "supervised stream delivery persisted through the daemon product path");
-      }
-
-      const expected = releaseOrder[0] === "legacy" ? [1, 0] : [0, 1];
-      assert.deepEqual([legacyStarts, supervisedSpawns], expected, "real legacy start and ProviderActionPort.spawn callbacks have exactly one winner");
-      assert.equal(supervisedStreamDeliveries, expected[1], "only the supervised winner installs and receives its provider stream delivery");
-    } finally {
-      await daemon.stop();
-      await env.cleanup();
-    }
-  }
-});
-
-test("daemon start deterministically removes crash-orphaned reserved legacy lanes", async () => {
-  const env = await fixture();
-  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"), manifestPath: join(env.root, "manifest.json"), auditPath: join(env.root, "audit.jsonl") };
-  await new ManifestStore(paths.manifestPath).write(0, [], [{
-    reservation_id: "orphaned_reservation",
-    room_id: "room_orphaned",
-    provider: "codex",
-    owner_pid: 2_147_483_647,
-    owner_process_identity: "orphaned-process-identity",
-    state: "reserved",
-    session_id: null,
-    created_at: "2026-01-01T00:00:00.000Z",
-    updated_at: "2026-01-01T00:00:00.000Z",
-  }]);
-  const daemon = new SupervisorDaemon(paths, "darwin");
-  try {
-    await daemon.start();
-    assert.deepEqual((await new ManifestStore(paths.manifestPath).load()).legacy_lane_owners ?? [], []);
-    const claim = await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: { ...entry, id: "supervised_after_orphan", room_id: "room_orphaned", provider: "codex", desired_state: "paused" },
-    });
-    assert.equal(claim.ok, true, claim.error);
-  } finally {
-    await daemon.stop();
-    await env.cleanup();
-  }
-});
-
 test("restart fences a title-mutated orphan, durably closes its generation, and resumes one successor", async () => {
   const env = await fixture();
   const source = join(env.root, "source");
@@ -11208,6 +10920,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
     };
     emitCompatWaitCursor("msg_2818");
     await eventually(async () => (await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).get("supervised_handoff"))?.room_cursor === "msg_2818", "published-runtime native wait cursor checkpoint");
+    await flushActivity(first);
     const pollingProjection = (((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0])!;
     assert.equal(pollingProjection.observed_state, "idle", "Claude room polling is reachable but not projected as active work");
     assert.equal(pollingProjection.activity?.at(-1)?.status, "idle");

@@ -8,7 +8,9 @@ import type {
   DesktopRoomSnapshot,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
+import { toRaw } from "vue";
 import { normalizeRoomIdentifier } from "./sidebar-rooms";
+import { reuseUnchanged } from "./reuse-unchanged";
 
 export function snapshotMatchesRoom(snapshot: DesktopRoomSnapshot | null, roomIdentifier: string | null): boolean {
   if (!roomIdentifier || !snapshot) return false;
@@ -69,14 +71,47 @@ export function removeSnapshotReasoningSession(
   };
 }
 
-export function appendSnapshotMessage(
+/**
+ * The newest shared turn of an agent. A room holds at most one per agent, so
+ * a session for the same agent replaces the one shown before.
+ */
+export function upsertSnapshotLiveActivitySession(
   snapshot: DesktopRoomSnapshot | null,
-  message: DesktopRoomMessage
+  session: DesktopReasoningSession
+): DesktopRoomSnapshot | null {
+  if (!snapshot || session.kind !== "live") return snapshot;
+  const agentKey = session.agentKey?.trim() || null;
+  const kept = (snapshot.liveActivitySessions ?? []).filter((existing) =>
+    existing.id !== session.id && (!agentKey || existing.agentKey?.trim() !== agentKey));
+  return { ...snapshot, liveActivitySessions: [session, ...kept] };
+}
+
+export function removeSnapshotLiveActivitySession(
+  snapshot: DesktopRoomSnapshot | null,
+  sessionId: string
 ): DesktopRoomSnapshot | null {
   if (!snapshot) return snapshot;
   return {
     ...snapshot,
-    messages: appendDesktopRoomMessage(snapshot.messages || [], message),
+    liveActivitySessions: (snapshot.liveActivitySessions ?? []).filter((session) => session.id !== sessionId),
+  };
+}
+
+let liveMessageArrival = 0;
+
+export function appendSnapshotMessage(
+  snapshot: DesktopRoomSnapshot | null,
+  message: DesktopRoomMessage,
+  admitParticipation = false,
+): DesktopRoomSnapshot | null {
+  if (!snapshot) return snapshot;
+  // Only this live-event / successful-send path marks new participation.
+  // Snapshot reconciliation and historical batch merges deliberately do not.
+  const live = admitParticipation && !message.outgoing && !snapshot.messages.some(existing => existing.id === message.id)
+    ? { ...message, liveArrival: ++liveMessageArrival } : message;
+  return {
+    ...snapshot,
+    messages: appendDesktopRoomMessage(snapshot.messages || [], live),
   };
 }
 
@@ -249,24 +284,51 @@ export function applyRoomLiveMetadata(
   if (!snapshotMatchesRoom(snapshot, metadata.roomIdentifier)) return snapshot;
   const states = metadata.sourceStates;
   const errored = (key: keyof typeof states): boolean => states[key]?.status === "error";
+  // Unwrap the top-level Vue proxy. Nested sections read from it are then raw
+  // objects, so reused sections stay plain data in the new snapshot.
+  const current = toRaw(snapshot);
+  // Sections equal to what the snapshot already holds keep their old reference,
+  // so a tick that changed nothing changes no reference at all.
+  const focusRooms = errored("focusRooms") ? current.focusRooms : reuseUnchanged(current.focusRooms, metadata.focusRooms);
+  const participants = errored("participants")
+    ? current.participants
+    : reuseUnchanged(current.participants, metadata.participants);
+  const participantHiddenCount = errored("participants")
+    ? current.participantHiddenCount
+    : metadata.participantHiddenCount;
+  const presence = errored("presence") ? current.presence : reuseUnchanged(current.presence, metadata.presence);
+  const recentActivity = errored("activityHistory")
+    ? current.recentActivity
+    : reuseUnchanged(current.recentActivity, metadata.recentActivity);
+  const boardSettings = errored("boardSettings")
+    ? current.boardSettings
+    : reuseUnchanged(current.boardSettings, metadata.boardSettings);
+  const sourceStates = reuseUnchanged(current.sourceStates, {
+    ...current.sourceStates,
+    focusRooms: states.focusRooms,
+    participants: states.participants,
+    presence: states.presence,
+    activityHistory: states.activityHistory,
+    boardSettings: states.boardSettings,
+  });
+  if (
+    focusRooms === current.focusRooms
+    && participants === current.participants
+    && participantHiddenCount === current.participantHiddenCount
+    && presence === current.presence
+    && recentActivity === current.recentActivity
+    && boardSettings === current.boardSettings
+    && sourceStates === current.sourceStates
+  ) return snapshot;
   return {
-    ...snapshot,
-    focusRooms: errored("focusRooms") ? snapshot.focusRooms : metadata.focusRooms,
-    participants: errored("participants") ? snapshot.participants : metadata.participants,
-    participantHiddenCount: errored("participants")
-      ? snapshot.participantHiddenCount
-      : metadata.participantHiddenCount,
-    presence: errored("presence") ? snapshot.presence : metadata.presence,
-    recentActivity: errored("activityHistory") ? snapshot.recentActivity : metadata.recentActivity,
-    boardSettings: errored("boardSettings") ? snapshot.boardSettings : metadata.boardSettings,
-    sourceStates: {
-      ...snapshot.sourceStates,
-      focusRooms: states.focusRooms,
-      participants: states.participants,
-      presence: states.presence,
-      activityHistory: states.activityHistory,
-      boardSettings: states.boardSettings,
-    },
+    ...current,
+    focusRooms,
+    participants,
+    participantHiddenCount,
+    presence,
+    recentActivity,
+    boardSettings,
+    sourceStates,
   };
 }
 
@@ -294,7 +356,8 @@ export function mergeDesktopRoomMessages(
   for (const message of current) byId.set(message.id, message);
   for (const message of incoming) {
     if (!isPromptOnlyDesktopMessage(message)) {
-      byId.set(message.id, message);
+      const arrival = byId.get(message.id)?.liveArrival;
+      byId.set(message.id, arrival === undefined ? message : { ...message, liveArrival: arrival });
     }
   }
   return [...byId.values()].sort(compareDesktopRoomMessages);

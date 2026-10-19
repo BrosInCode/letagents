@@ -333,3 +333,93 @@ test("a mention sent while Jev is still deciding is not hidden behind the Jev tu
   assert.ok((await read(3)).includes(mention.message.id), "the mention reaches Agent3 at once");
   assert.ok((await read(3)).includes(asked.message.id));
 });
+
+async function turnRows(room: string, number: number) {
+  return (await client!.pool.query(`SELECT agent_key,turn_position,receipt_state,
+    hold_released_at IS NOT NULL AS released FROM message_agent_receipts
+    WHERE message_room_id=$1 AND message_number=$2 ORDER BY turn_position NULLS LAST,agent_key`, [room,number])).rows;
+}
+async function orderedDeferred(name: string) {
+  const a=await seed(name); await connect(a);
+  const settings=await import("../db/room-settings.js"); await settings.setRoomAgentReplyOrder(a.room.id,"sequential");
+  await a.enable(true); await a.send("Who can help with the programme?");
+  const [job]=await worker!.claimJevRoutingJobs(); assert.ok(job);
+  return {...a,job};
+}
+for (const electedCount of [1,3]) {
+  test(`an older deferred ${electedCount}-agent election cannot flatten a newer human sequence`,skip,async()=>{
+    const a=await orderedDeferred(`older-${electedCount}`);
+    const newer=await a.send("@everyone pause while I decide");
+    const before=await turnRows(a.room.id,Number(newer.message.id.slice(4)));
+    await worker!.completeJevRoutingJob(a.job,hint(a.sessions.slice(0,electedCount).map(s=>s.agent_key)));
+    assert.deepEqual(await turnRows(a.room.id,Number(newer.message.id.slice(4))),before);
+    const older=await turnRows(a.room.id,a.job.message_number);
+    assert.equal(older.length,electedCount);
+    assert.ok(older.every(row=>row.turn_position===null || row.released),"late older holds cannot conceal the newer human");
+    assert.ok(older.every(row=>row.receipt_state==="queued"));
+    await worker!.completeJevRoutingJob(a.job,hint([]));
+    assert.deepEqual(await turnRows(a.room.id,Number(newer.message.id.slice(4))),before,"replay changes no sequence");
+  });
+}
+
+test("a newer deferred human releases only its elected recipients' older holds",skip,async()=>{
+  const a=await seed("overlap"); await connect(a);
+  const settings=await import("../db/room-settings.js"); await settings.setRoomAgentReplyOrder(a.room.id,"sequential");
+  const older=await a.send("@everyone discuss this");
+  const before=await turnRows(a.room.id,Number(older.message.id.slice(4)));
+  const held=before.filter(row=>!row.released); assert.equal(held.length,3);
+  const elected=held.slice(0,2).map(row=>row.agent_key);
+  await a.enable(true); const newer=await a.send("What should we change?");
+  const [job]=await worker!.claimJevRoutingJobs(); await worker!.completeJevRoutingJob(job!,hint(elected));
+  const after=await turnRows(a.room.id,Number(older.message.id.slice(4)));
+  for(const row of after) assert.equal(row.released, before.find(old=>old.agent_key===row.agent_key)!.released || elected.includes(row.agent_key));
+  assert.deepEqual((await turnRows(a.room.id,Number(newer.message.id.slice(4)))).map(row=>[row.turn_position,row.released]),[[1,true],[2,false]]);
+});
+
+for(const first of ["newer_send","older_election"] as const){
+ test(`concurrent human send and deferred election share the room fence: ${first} first`,skip,async()=>{
+  const a=await orderedDeferred(`concurrent-${first}`);
+  let release!:()=>void,entered!:()=>void,ownerPid=0;
+  const gate=new Promise<void>(resolve=>{release=resolve;}),ready=new Promise<void>(resolve=>{entered=resolve;});
+  let primary:Promise<unknown>,secondary:Promise<unknown>|undefined;
+  if(first==="newer_send") primary=a.send("@everyone pause before continuing",{
+   with_created_message_in_transaction:async(tx: import("../db/messages/create.js").MessageCreateTransaction)=>{
+    const {sql}=await import("drizzle-orm");ownerPid=Number((await tx.execute(sql`SELECT pg_backend_pid() AS pid`)).rows[0]!.pid);entered();await gate;
+   },
+  });
+  else primary=client!.db.transaction(async tx=>{
+   const {sql}=await import("drizzle-orm");ownerPid=Number((await tx.execute(sql`SELECT pg_backend_pid() AS pid`)).rows[0]!.pid);
+   await routing!.applyDeferredJevReceipts(tx,a.job.plan,{reason:"jev_routed",agentKeys:a.sessions.map(s=>s.agent_key)});entered();await gate;
+  });
+  try{
+   await ready;
+   let secondaryDone=false;
+   secondary=(first==="newer_send"?worker!.completeJevRoutingJob(a.job,hint(a.sessions.map(s=>s.agent_key))):a.send("@everyone pause before continuing"))
+    .finally(()=>{secondaryDone=true;});
+   let blocked=false;
+   for(let i=0;i<200 && !secondaryDone && !blocked;i++){
+    blocked=(await client!.pool.query("SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))",[ownerPid])).rowCount!>0;
+    if(!blocked)await new Promise(resolve=>setTimeout(resolve,10));
+   }
+   assert.ok(blocked && !secondaryDone,"the competing operation must reach the actual room row lock");
+  }finally{release();await Promise.allSettled([primary,secondary]);}
+  await primary;await secondary;
+  const newest=(await client!.pool.query("SELECT MAX(number) AS number FROM messages WHERE room_id=$1",[a.room.id])).rows[0].number;
+  assert.deepEqual((await turnRows(a.room.id,Number(newest))).map(row=>[row.turn_position,row.released]),[[1,true],[2,false],[3,false],[4,false]]);
+  assert.ok((await turnRows(a.room.id,a.job.message_number)).every(row=>row.released),"neither commit order resurrects an older hold");
+ });
+}
+
+for (const text of ["\t\n", "\u00a0\ufeff"]) {
+ test(`late election does not treat whitespace-only auto prompt ${JSON.stringify(text)} as human priority`,skip,async()=>{
+  const a=await orderedDeferred(`hidden-${text.codePointAt(0)}`);
+  await a.send("@everyone temporary routing text",{
+   with_created_message_in_transaction:async(tx: import("../db/messages/create.js").MessageCreateTransaction,message:{number:number})=>{
+    const {sql}=await import("drizzle-orm");
+    await tx.execute(sql`UPDATE messages SET text=${text},agent_prompt_kind='auto' WHERE room_id=${a.room.id} AND number=${message.number}`);
+   },
+  });
+  await worker!.completeJevRoutingJob(a.job,hint(a.sessions.slice(0,3).map(s=>s.agent_key)));
+  assert.deepEqual((await turnRows(a.room.id,a.job.message_number)).map(row=>row.released),[true,false,false]);
+ });
+}

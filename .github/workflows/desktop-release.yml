@@ -44,8 +44,9 @@ jobs:
           set -euo pipefail
           version=$(node -p "require('./apps/desktop/package.json').version")
           expected_tag="desktop-v${version}"
-          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
-            echo "Run this workflow from tag ${expected_tag}; received ${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}." >&2
+          # Manual runs validate signed candidates without publishing anything.
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" && ( "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${expected_tag}" ) ]]; then
+            echo "Push tag ${expected_tag}, or manually dispatch a candidate build; received ${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}." >&2
             exit 1
           fi
           actual_arch=$(node -p "process.arch")
@@ -199,6 +200,8 @@ jobs:
   publish:
     name: Publish macOS release
     needs: build-macos
+    # A manual run, including one on a tag, must never advance public feeds.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: ubuntu-latest
     permissions:
       contents: write

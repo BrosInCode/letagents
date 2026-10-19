@@ -60,10 +60,11 @@ export function viewerReactedWith(
   reaction: Pick<MessageReaction, "reactors"> | null | undefined,
   viewerLogin: string | null | undefined,
 ): boolean;
-/** "You, Ada and 3 others reacted with 👍" */
+/** Name every supplied reactor, including agents and the viewer. */
 export function describeMessageReaction(
   reaction: MessageReaction,
   viewerLogin: string | null | undefined,
+  viewerHasReacted?: boolean,
 ): string;
 /** The reaction list after the viewer toggles one emoji, for an optimistic update. */
 export function toggleViewerMessageReaction(

@@ -114,58 +114,6 @@
     <p v-if="hostApprovalError" class="desktop-composer-permission-error" role="status">
       {{ hostApprovalError }} <button type="button" :disabled="hostApprovalLoading" @click="refreshRoomHostApprovals">Refresh approvals</button>
     </p>
-    <div
-      v-if="primaryPermissionApproval"
-      class="desktop-composer-permission-tray"
-      data-testid="desktop-composer-permission-tray"
-      aria-live="polite"
-    >
-      <div class="desktop-composer-permission-main">
-        <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
-        <div class="desktop-composer-permission-copy">
-          <strong>{{ primaryPermissionApproval.displayName }} needs approval</strong>
-          <span>
-            {{ primaryPermissionApproval.title }}
-            <template v-if="permissionOverflowCount > 0">
-              / {{ permissionOverflowCount }} more waiting
-            </template>
-          </span>
-        </div>
-      </div>
-      <p>
-        <span>{{ primaryPermissionApproval.providerLabel }}</span>
-        <span>{{ primaryPermissionApproval.toolName }}</span>
-        <span v-if="primaryPermissionApproval.targetLabel">{{ primaryPermissionApproval.targetLabel }}</span>
-      </p>
-      <div class="desktop-composer-permission-actions">
-        <button
-          type="button"
-          class="desktop-composer-permission-detail"
-          @click="$emit('open-permission-detail', primaryPermissionApproval)"
-        >
-          Details
-        </button>
-        <button
-          type="button"
-          class="desktop-composer-permission-deny"
-          :disabled="Boolean(resolvingPermissionIds[primaryPermissionApproval.id])"
-          @click="$emit('resolve-permission', primaryPermissionApproval, 'deny')"
-        >
-          {{ resolvingPermissionIds[primaryPermissionApproval.id] === 'deny' ? "Denying..." : "Deny" }}
-        </button>
-        <button
-          type="button"
-          class="desktop-composer-permission-allow"
-          :disabled="Boolean(resolvingPermissionIds[primaryPermissionApproval.id])"
-          @click="$emit('resolve-permission', primaryPermissionApproval, 'allow')"
-        >
-          {{ resolvingPermissionIds[primaryPermissionApproval.id] === 'allow' ? "Allowing..." : "Allow" }}
-        </button>
-      </div>
-    </div>
-    <div v-if="permissionError" class="desktop-composer-permission-error" role="alert">
-      {{ permissionError }}
-    </div>
     <div v-if="replyTo" class="desktop-composer-reply" data-testid="desktop-composer-reply">
       <div>
         <strong>{{ replyHeading }}</strong>
@@ -201,32 +149,34 @@
         @input="handleDraftInput"
         @keydown="handleComposerKey"
       />
-      <button
-        class="desktop-composer-attach"
-        type="button"
-        :disabled="roomLoading || sending || !roomIdentifier || attaching"
-        :title="attaching ? 'Attaching' : 'Attach files'"
-        :aria-label="attaching ? 'Attaching files' : 'Attach files'"
-        data-testid="desktop-composer-attach"
-        @click="$emit('pick-attachments')"
-      >
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.8-8.8a4 4 0 1 1 5.7 5.7l-8.9 8.9a2 2 0 0 1-2.8-2.8l8.1-8.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-        <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
-      </button>
-      <RoomGifPicker :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending" @select="selectedGif = $event" />
-      <button
-        class="desktop-composer-send"
-        type="submit"
-        :aria-label="sending ? 'Sending message' : 'Send message'"
-        :title="sending ? 'Sending message' : 'Send message'"
-        :disabled="roomLoading || sending || slash.busy.value || !canSend"
-        data-testid="desktop-composer-send"
-      >
-        <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
-        <ArrowUp v-else :size="17" aria-hidden="true" />
-      </button>
+      <div class="desktop-composer-actions" data-testid="desktop-composer-actions">
+        <button
+          class="desktop-composer-attach"
+          type="button"
+          :disabled="roomLoading || sending || !roomIdentifier || attaching"
+          :title="attaching ? 'Attaching' : 'Attach files'"
+          :aria-label="attaching ? 'Attaching files' : 'Attach files'"
+          data-testid="desktop-composer-attach"
+          @click="$emit('pick-attachments')"
+        >
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m21.4 11.6-8.5 8.5a6 6 0 0 1-8.5-8.5l8.8-8.8a4 4 0 1 1 5.7 5.7l-8.9 8.9a2 2 0 0 1-2.8-2.8l8.1-8.1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span class="sr-only">{{ attaching ? "Attaching files" : "Attach files" }}</span>
+        </button>
+        <RoomGifPicker :room-identifier="roomIdentifier ?? ''" :disabled="roomLoading || sending" @select="selectedGif = $event" />
+        <button
+          class="desktop-composer-send"
+          type="submit"
+          :aria-label="sending ? 'Sending message' : 'Send message'"
+          :title="sending ? 'Sending message' : 'Send message'"
+          :disabled="roomLoading || sending || slash.busy.value || !canSend"
+          data-testid="desktop-composer-send"
+        >
+          <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
+          <ArrowUp v-else :size="17" aria-hidden="true" />
+        </button>
+      </div>
     </div>
     <div v-if="selectedGif" class="desktop-composer-gif-draft">GIF · {{ selectedGif.title }} <button type="button" aria-label="Remove selected GIF" @click="selectedGif = null">×</button></div>
     <DesktopAttachmentDrafts
@@ -281,11 +231,9 @@ import { useRoomTyping } from "../../../../composables/useRoomTyping";
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { ArrowUp, ChevronLeft, ChevronRight, LoaderCircle, Plus, X } from "@lucide/vue";
 import type {
-  DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
-import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
 import type { DesktopHostApproval, HostApprovalSelection } from "../../../../../../shared/host-approvals";
 import { HOST_APPROVAL_ALWAYS_ALLOW_HINT, HOST_APPROVAL_ARM_MS, hostApprovalActionKey, hostApprovalAllowLabel, hostApprovalAlwaysAllowLabel, hostApprovalBlocksTurn, hostApprovalDecisionsArmed, hostApprovalFields, hostApprovalHeading, hostApprovalHistoryCount, hostApprovalHistoryLabel, hostApprovalSummary, hostApprovalTrayOrder } from "./host-approval-presentation";
 import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "./host-approval-dismissals";
@@ -325,10 +273,7 @@ const props = defineProps<{
   participants: DesktopParticipantSummary[];
   presenceChips?: PresenceChip[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
-  permissionApprovals: ManagedAgentPermissionApproval[];
-  permissionError: string | null;
   replyTo: RoomComposerReplyTarget | null;
-  resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
   roomIdentifier: string | null;
   roomLoading: boolean;
   sendError: string | null;
@@ -343,12 +288,7 @@ const emit = defineEmits<{
   "clear-reply": [];
   "pick-attachments": [];
   "open-add-agent": [];
-  "open-permission-detail": [approval: ManagedAgentPermissionApproval];
   "remove-attachment": [uploadId: string];
-  "resolve-permission": [
-    approval: ManagedAgentPermissionApproval,
-    behavior: DesktopManagedAgentPermissionDecisionBehavior,
-  ];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "open-event-preview": [event: ComposerEventPreview];
   "dismiss-event-preview": [messageId: string];
@@ -540,8 +480,6 @@ const correctionOffer = computed(() =>
     && props.attachmentDrafts.length === 0 && props.pendingAttachmentDrafts.length === 0
     ? mentionedCorrectionTarget(draft.value, props.correctableAgents)
     : null);
-const primaryPermissionApproval = computed(() => props.permissionApprovals[0] ?? null);
-const permissionOverflowCount = computed(() => Math.max(0, props.permissionApprovals.length - 1));
 const composerInputLabel = computed(() => {
   if (props.roomLoading) return "Room messages are loading";
   return props.roomIdentifier ? "Message room" : "Choose a room before writing";

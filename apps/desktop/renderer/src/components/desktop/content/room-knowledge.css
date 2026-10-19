@@ -70,6 +70,7 @@
 .knowledge-response > * { flex-shrink: 0; }
 .knowledge-response label { font-size: 12px; font-weight: 580; }
 .knowledge-response-footer small { max-width: 28ch; color: var(--text-tertiary); font-size: 10px; line-height: 1.5; }
+.knowledge-response-footer .knowledge-close-request { margin-left: auto; }
 .knowledge-answer { flex-shrink: 0; max-height: 250px; overflow-y: auto; margin: 0 28px 20px; padding: 18px; border: 1px solid color-mix(in srgb, var(--green-text) 25%, var(--border)); border-radius: var(--radius-md); background: var(--green-dim); }
 .knowledge-answer > span, .knowledge-success { display: flex; align-items: center; gap: 7px; color: var(--green-text); font-size: 12px; }
 .knowledge-success { margin: 0; }

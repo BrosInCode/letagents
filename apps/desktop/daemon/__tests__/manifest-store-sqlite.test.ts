@@ -6,13 +6,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { ActivityWriteBatcher, commitActivityBatch } from "../activity-write-batcher.js";
+import { DaemonAuthority } from "../daemon-authority.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { projectStateWatchActivity } from "../state-watch-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection, LegacyLaneOwner } from "../types.js";
+import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
+import type { DaemonActivityEvent, DaemonManifest, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
@@ -43,10 +46,12 @@ function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync):
     DELETE FROM lifecycle_projection_totals WHERE provider='open-model';
     ${noDelete}`);
   const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.enableDefensive?.(false); // Only the disposable three-provider legacy fixture.
   database.exec("PRAGMA writable_schema=ON");
   database.prepare(`UPDATE sqlite_master SET sql=replace(sql, ?, '')
     WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+  database.enableDefensive?.(true);
   validateLegacyLifecycleProjectionLedgerSchema(database);
 }
 
@@ -2463,7 +2468,7 @@ test("reverse delivery stop intent refuses absent cursors, active boundaries, qu
     const generation = (await store.load()).generation;
     await assert.rejects(store.updateAgentConfiguration(generation, { agentId: agent.id, expectedRevision: config.config_revision,
       model: config.model, reasoningEffort: config.reasoning_effort, charter: "changed", permissionProfileId: config.permission_profile_id,
-      providerLaunchPolicy: config.provider_launch_policy }), /unresolved delivery drain/);
+      providerLaunchPolicy: config.provider_launch_policy, imageInput: config.image_input }), /unresolved delivery drain/);
     assert.equal((await store.load()).generation, generation);
     assert.deepEqual(await store.getAgentConfiguration(agent.id), config);
     // Poll completion wins the SQLite boundary before stop intent. B is kept,
@@ -3701,6 +3706,54 @@ test("a native reply winning Stop preserves its intercepted thread choice across
   }
 });
 
+test("a durable grouped no-reply winning Stop settles its exact members through shared terminal recovery", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const controlled: DaemonManifestEntry = { ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined,
+    last_turn_control_sequence: 0, provider_ref: { ...entry.provider_ref!, provider_connection: {
+      kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex:4311" } } };
+  try {
+    const initial = await store.write(0, [controlled]);
+    const messages = [72, 73].map(n => ({ source_message_id: `msg_${n}`,
+      source_message: { id: `msg_${n}`, text: `My view ${n}.`, source: "agent", sender: `Peer ${n}`, thread_root_id: "msg_1",
+        agent_identity: { actor_label: `Peer ${n}`, agent_key: `owner/peer${n}` } },
+      activation: { decision: "activate", reason: "thread_participant" } }));
+    await inbox.ingestPoll({ agent_id: controlled.id, room_id: controlled.room_id, last_observed_message_id: "msg_73", messages });
+    const db = new DatabaseSync(env.databasePath);
+    try {
+      new RoomWorkPublicationStore(db).pin({ agentId: controlled.id, roomId: controlled.room_id, apiOrigin: "https://letagents.test",
+        agentKey: "owner/self", agentInstanceId: `daemon:${controlled.id}`, hostId: "host", installationId: "installation", sourceSessionId: "session" }, ["msg_72", "msg_73"]);
+    } finally { db.close(); }
+    const head = (await inbox.claimHead(controlled.id))!;
+    assert.ok(head.activation.queued_peer_messages);
+    await inbox.checkpointTurnStarted(head.inbox_item_id, "turn-A", TEST_PROVIDER_TURN_AUTHORITY);
+    const control = await store.prepareTurnControlState(initial.generation, {
+      agentId: controlled.id, roomId: controlled.room_id, expectedInboxItemId: head.inbox_item_id, expectedSourceMessageId: "msg_72",
+      expectedProviderTurnId: "turn-A", actionId: "stop", actionSequence: 1, workAttemptId: "attempt_1", executionGenerationId: "run_1",
+      providerContinuationId: "thread_1", providerConnection: controlled.provider_ref!.provider_connection, deliveryMode: "daemon_inbox",
+      hasCorrection: false, correctionText: null, correctionStrategy: null, capability: "native_interrupt", recordedAt: new Date().toISOString(),
+    });
+    await inbox.checkpointNormalizedTerminal({ inbox_item_id: head.inbox_item_id, agent_id: controlled.id, execution_generation_id: "run_1",
+      provider_turn_id: "turn-A", outcome: "no_reply", text: null, evidence: "stream",
+      terminal_evidence: { turnId: "turn-A", providerContinuationId: "thread_1", outcome: "no_reply", text: null, evidence: "stream" } });
+    const dispatching = await store.replaceEntry(control.generation, { ...control.entry,
+      turn_control: { ...control.entry.turn_control!, status: "dispatching", stages: ["interrupting"] } });
+    await store.commitTurnControlState(dispatching.generation, { agentId: controlled.id, roomId: controlled.room_id, actionId: "stop",
+      workAttemptId: "attempt_1", executionGenerationId: "run_1", mode: "native_applied", settleOriginal: true, activateCorrection: false,
+      observedAt: new Date().toISOString(),
+    }, current => ({ ...current, turn_control: { ...current.turn_control!, status: "completed", interrupted: false, resumed: false, state: "idle", stages: ["applied"] } }));
+    assert.equal((await inbox.get(head.inbox_item_id))!.state, "acknowledged_no_reply");
+    const child = (await inbox.getBySourceMessage(controlled.id, controlled.room_id, "msg_73"))!;
+    assert.equal(child.state, "acknowledged_no_reply"); assert.equal(child.attempt_count, 0); assert.equal(child.provider_turn_id, null);
+    const proof = new DatabaseSync(env.databasePath);
+    try {
+      assert.ok(proof.prepare("SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key='peer_batch_report:pending'").get(child.inbox_item_id));
+      assert.equal(proof.prepare("SELECT 1 FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(child.inbox_item_id), undefined);
+    } finally { proof.close(); }
+  } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
 test("exact native failure wins every Stop resolution and admits only the new correction", async () => {
   for (const outcome of ["failed", "interrupted"] as const) {
     for (const mode of ["native_applied", "operator_applied", "operator_not_applied"] as const) {
@@ -4620,7 +4673,7 @@ test("polling custody is internal, survives every manifest replacement and does 
     assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
     const updated = await store.updateAgentConfiguration(4, {
       agentId: entry.id, expectedRevision: 1, model: "new-model", reasoningEffort: null,
-      charter: "Updated charter", permissionProfileId: "full_access", providerLaunchPolicy: { approvalPolicy: "never" },
+      charter: "Updated charter", permissionProfileId: "full_access", providerLaunchPolicy: { approvalPolicy: "never" }, imageInput: false,
     });
     assert.equal(updated.outcome, "updated");
     assert.equal(updated.configuration?.polling_contract, "custodial_polling_v1");
@@ -4654,14 +4707,14 @@ test("Inspector configuration revisions are optimistic, durable, and do not alte
     assert.equal(original?.runtime_configuration_revision, 1);
     const updated = await store.updateAgentConfiguration(1, {
       agentId: entry.id, expectedRevision: 1, model: "gpt-next", reasoningEffort: "high",
-      charter: "Use the new charter on future turns.", permissionProfileId: "read_only", providerLaunchPolicy: { approvalPolicy: "ask" },
+      charter: "Use the new charter on future turns.", permissionProfileId: "read_only", providerLaunchPolicy: { approvalPolicy: "ask" }, imageInput: false,
     });
     assert.equal(updated.outcome, "updated");
     assert.equal(updated.configuration?.config_revision, 2);
     assert.equal(updated.configuration?.runtime_configuration_revision, 1);
     const conflict = await store.updateAgentConfiguration(2, {
       agentId: entry.id, expectedRevision: 1, model: "ignored", reasoningEffort: null,
-      charter: "ignored", permissionProfileId: null, providerLaunchPolicy: {},
+      charter: "ignored", permissionProfileId: null, providerLaunchPolicy: {}, imageInput: false,
     });
     assert.equal(conflict.outcome, "conflict");
     assert.equal((await store.load()).generation, 2, "a revision conflict must not advance manifest generation");
@@ -4678,6 +4731,149 @@ test("Inspector configuration revisions are optimistic, durable, and do not alte
     await store.close();
     await env.cleanup();
   }
+});
+
+const IMAGE_INPUT_UPDATE = (revision: number, imageInput: boolean) => ({
+  agentId: entry.id, expectedRevision: revision, model: "model-a", reasoningEffort: null,
+  charter: "Image input charter.", permissionProfileId: "read_only", providerLaunchPolicy: { approvalPolicy: "ask" }, imageInput,
+});
+
+test("a new database stores image input as off and the flat manifest cannot turn it on", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [{ ...entry, image_input: true } as DaemonManifestEntry]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, false,
+      "a flat manifest entry cannot create the owner's image input choice");
+    const inspection = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal(inspection.prepare("SELECT image_input FROM agent_configurations WHERE agent_id=?").get(entry.id)?.image_input, 0);
+      assert.deepEqual({ ...inspection.prepare("SELECT type,\"notnull\" AS required,dflt_value FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get() },
+        { type: "INTEGER", required: 1, dflt_value: "0" });
+      inspection.exec("PRAGMA foreign_keys=OFF");
+      assert.throws(() => inspection.prepare("UPDATE agent_configurations SET image_input=2").run(), /CHECK/,
+        "only 0 and 1 are accepted by the column itself");
+      assert.throws(() => inspection.prepare("UPDATE agent_configurations SET image_input=NULL").run(), /NOT NULL/);
+    } finally { inspection.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("a schema 49 database without image input migrates to schema 50 with every agent off", async () => {
+  const env = await fixture();
+  const original = new ManifestStore(env.databasePath);
+  try {
+    const expected = await original.write(0, [entry, { ...entry, id: "agent_2", display_name: "SecondAgent", work_attempt_id: undefined, provider_ref: undefined, turn_control: undefined, reconciliation: undefined }]);
+    await original.close();
+    const old = new DatabaseSync(env.databasePath);
+    old.exec("ALTER TABLE agent_configurations DROP COLUMN image_input; UPDATE manifest_metadata SET schema_version=49; PRAGMA user_version=49");
+    assert.equal(old.prepare("SELECT 1 FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get(), undefined);
+    old.close();
+    const migrated = new ManifestStore(env.databasePath);
+    try {
+      assert.equal((await migrated.getAgentConfiguration(entry.id))?.image_input, false);
+      assert.equal((await migrated.getAgentConfiguration("agent_2"))?.image_input, false);
+      assert.deepEqual((await migrated.load()).entries.map((agent) => agent.id), expected.entries.map((agent) => agent.id),
+        "the migration keeps every agent");
+      const inspection = new DatabaseSync(env.databasePath);
+      try {
+        assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert.equal(inspection.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get()?.schema_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert.deepEqual(inspection.prepare("SELECT agent_id,image_input FROM agent_configurations ORDER BY agent_id").all().map((row) => ({ ...row })),
+          [{ agent_id: "agent_1", image_input: 0 }, { agent_id: "agent_2", image_input: 0 }]);
+      } finally { inspection.close(); }
+      const generation = (await migrated.load()).generation;
+      const updated = await migrated.updateAgentConfiguration(generation, IMAGE_INPUT_UPDATE(1, true));
+      assert.equal(updated.outcome, "updated");
+      assert.equal(updated.configuration?.image_input, true, "the added column takes the owner's choice");
+      assert.equal((await migrated.getAgentConfiguration("agent_2"))?.image_input, false);
+    } finally { await migrated.close(); }
+  } finally { await original.close(); await env.cleanup(); }
+});
+
+test("a schema 39 database without image input gains the column through the older migration path", async () => {
+  const env = await fixture();
+  const original = new ManifestStore(env.databasePath);
+  try {
+    await original.write(0, [entry]);
+    await original.close();
+    const old = new DatabaseSync(env.databasePath);
+    old.exec("ALTER TABLE agent_configurations DROP COLUMN image_input; ALTER TABLE agent_room_memberships DROP COLUMN local_room_id; UPDATE manifest_metadata SET schema_version=39; PRAGMA user_version=39");
+    old.close();
+    const migrated = new ManifestStore(env.databasePath);
+    try {
+      assert.equal((await migrated.getAgentConfiguration(entry.id))?.image_input, false);
+      const inspection = new DatabaseSync(env.databasePath);
+      try {
+        assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert.equal(inspection.prepare("SELECT image_input FROM agent_configurations WHERE agent_id=?").get(entry.id)?.image_input, 0);
+      } finally { inspection.close(); }
+    } finally { await migrated.close(); }
+  } finally { await original.close(); await env.cleanup(); }
+});
+
+test("a current database refuses an image input column that is missing, weakened or holds an invalid value", async () => {
+  const cases: Array<{ name: string; sql: string; refusal: RegExp }> = [
+    { name: "missing column", sql: "ALTER TABLE agent_configurations DROP COLUMN image_input", refusal: /invalid image input column/ },
+    { name: "column that allows null", sql: "ALTER TABLE agent_configurations DROP COLUMN image_input; ALTER TABLE agent_configurations ADD COLUMN image_input INTEGER DEFAULT 0", refusal: /invalid image input column/ },
+    { name: "column that defaults to on", sql: "ALTER TABLE agent_configurations DROP COLUMN image_input; ALTER TABLE agent_configurations ADD COLUMN image_input INTEGER NOT NULL DEFAULT 1", refusal: /invalid image input column/ },
+    // SQLite's own integrity check sees the broken CHECK constraint first, so the open fails either way.
+    { name: "value outside 0 and 1", sql: "PRAGMA ignore_check_constraints=ON; UPDATE agent_configurations SET image_input=2; PRAGMA ignore_check_constraints=OFF", refusal: /invalid image input column|failed SQLite integrity validation/ },
+  ];
+  for (const { name, sql, refusal } of cases) {
+    const env = await fixture();
+    const original = new ManifestStore(env.databasePath);
+    try {
+      await original.write(0, [entry]);
+      await original.close();
+      const damaged = new DatabaseSync(env.databasePath);
+      damaged.exec(sql);
+      assert.equal(damaged.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION, name);
+      damaged.close();
+      const reopened = new ManifestStore(env.databasePath);
+      try {
+        await assert.rejects(() => reopened.load(), refusal, name);
+      } finally { await reopened.close(); }
+      const inspection = new DatabaseSync(env.databasePath);
+      try {
+        assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION,
+          `${name}: a refused open must not advance or repair the schema version`);
+      } finally { inspection.close(); }
+    } finally { await original.close(); await env.cleanup(); }
+  }
+});
+
+test("image input is saved with the Inspector configuration and survives every manifest replacement", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    await store.write(0, [entry]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, false);
+    const updated = await store.updateAgentConfiguration(1, IMAGE_INPUT_UPDATE(1, true));
+    assert.equal(updated.outcome, "updated");
+    assert.equal(updated.configuration?.image_input, true);
+    assert.equal(updated.configuration?.config_revision, 2, "turning the choice on is a configuration change like any other");
+    assert.equal(updated.configuration?.runtime_configuration_revision, 1);
+    const stale = { ...entry, observed_state: "idle" as const };
+    await store.replaceEntry(2, stale);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, true, "a lifecycle replacement keeps the choice");
+    await store.replaceEntriesBatch(3, [stale]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, true, "a batch replacement keeps the choice");
+    await store.write(4, [stale]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, true, "a full manifest write keeps the choice");
+    assert.equal(Object.hasOwn((await store.load()).entries[0]!, "image_input"), false, "the flat manifest never carries the choice");
+    const conflict = await store.updateAgentConfiguration(5, IMAGE_INPUT_UPDATE(1, false));
+    assert.equal(conflict.outcome, "conflict");
+    assert.equal((await store.getAgentConfiguration(entry.id))?.image_input, true, "a conflicting edit does not change the choice");
+    await store.close();
+    const reopened = new ManifestStore(env.databasePath);
+    try {
+      assert.equal((await reopened.getAgentConfiguration(entry.id))?.image_input, true, "the choice survives a restart");
+      const generation = (await reopened.load()).generation;
+      const off = await reopened.updateAgentConfiguration(generation, IMAGE_INPUT_UPDATE(2, false));
+      assert.equal(off.outcome, "updated");
+      assert.equal(off.configuration?.image_input, false, "the owner can turn the choice off again");
+    } finally { await reopened.close(); }
+  } finally { await store.close(); await env.cleanup(); }
 });
 
 test("room-move journal is request-idempotent and exact-generation phase fenced", async () => {
@@ -5681,18 +5877,6 @@ const entry: DaemonManifestEntry = {
   }],
 };
 
-const owner: LegacyLaneOwner = {
-  reservation_id: "reservation_1",
-  room_id: "room_1",
-  provider: "codex",
-  owner_pid: 123,
-  owner_process_identity: "birth-123",
-  state: "active",
-  session_id: "session_legacy",
-  created_at: "2026-07-19T00:00:00.000Z",
-  updated_at: "2026-07-19T00:00:01.000Z",
-};
-
 async function fixture(): Promise<{ root: string; databasePath: string; legacyPath: string; cleanup: () => Promise<void> }> {
   const root = await mkdtemp(join(tmpdir(), "letagents-manifest-sqlite-"));
   return {
@@ -5842,7 +6026,7 @@ test("SQLite manifest round-trips the flat wire projection from relational domai
   const store = new ManifestStore(env.databasePath);
   try {
     const undefinedPolicyEntry = { ...entry, id: "agent_2", provider_launch_policy: undefined };
-    const saved = await store.write(0, [entry, undefinedPolicyEntry], [owner]);
+    const saved = await store.write(0, [entry, undefinedPolicyEntry]);
     assert.deepEqual(await store.load(), saved);
     assert.equal(Object.hasOwn(saved.entries[1]!, "provider_launch_policy"), false);
 
@@ -5963,7 +6147,7 @@ test("SQLite manifest generation CAS serializes independent connections without 
 
 test("legacy JSON imports once after checksum validation and is retained as a backup", async () => {
   const env = await fixture();
-  const manifest: DaemonManifest = { generation: 41, entries: [entry], legacy_lane_owners: [owner] };
+  const manifest: DaemonManifest = { generation: 41, entries: [entry] };
   const imported = { ...manifest, entries: manifest.entries.map(withImportedRuntimeIdentity) };
   await writeFile(env.legacyPath, storedManifest(manifest), { mode: 0o600 });
   const store = new ManifestStore(env.databasePath, env.legacyPath);
@@ -6360,11 +6544,15 @@ test("targeted activity writes keep presentation-only events out of lifecycle fi
     raw.replaceEntries = () => { throw new Error("full replacement must not run on the activity path"); };
 
     const nextEvent = { ...entry.activity![0]!, sequence: 5, observed_at: "2026-07-19T00:04:00.000Z", summary: "Targeted event" };
-    const result = await store.appendActivity(1, entry.id, nextEvent, "idle", {
-      state: "idle", observed_at: nextEvent.observed_at, detail: nextEvent.summary,
+    const recorded = await store.recordActivity(1, entry.id, nextEvent, {
+      observedState: "idle",
+      nativeLiveness: { state: "idle", observed_at: nextEvent.observed_at, detail: nextEvent.summary },
     }, 1);
-    assert.equal(result.generation, 2);
+    assert.equal(recorded.generation, 2);
+    const result = { entry: (await store.getEntry(entry.id))! };
     assert.deepEqual(result.entry.activity, [nextEvent]);
+    assert.equal(result.entry.observed_state, "idle");
+    assert.equal(result.entry.native_liveness?.state, "idle");
     assert.deepEqual(snapshot(), before);
     assert.deepEqual(await store.getEntry(other.id), created.entries.find((candidate) => candidate.id === other.id));
 
@@ -6489,7 +6677,7 @@ test("targeted writes return their committed projection without any post-commit 
     assert.equal(replaced.generation, 2);
     assert.equal(replaced.entry.observed_state, "idle");
     const event = { ...entry.activity![0]!, sequence: 5, observed_at: "2026-07-19T01:00:00.000Z" };
-    const appended = await store.appendActivity(2, entry.id, event, "working", { state: "active", observed_at: event.observed_at, detail: "working" });
+    const appended = await store.appendActivityOnly(2, entry.id, event);
     assert.equal(appended.generation, 3);
     assert.equal(appended.entry.activity?.at(-1)?.sequence, 5);
     const live = await store.updateWorkplaceLiveness(3, entry.id, { state: "reachable", observed_at: event.observed_at, detail: "online" });
@@ -6526,7 +6714,7 @@ test("targeted projection failure occurs before commit and rolls back generation
   }
 });
 
-test("detached deployment identity survives lane-owner full writes and restart", async () => {
+test("detached deployment identity survives full manifest writes and restart", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   try {
@@ -6548,8 +6736,8 @@ test("detached deployment identity survives lane-owner full writes and restart",
     assert.equal(detached.entry.run_id, launched.run_id);
     assert.equal(detached.entry.deployment_id, launched.deployment_id);
 
-    const beforeLaneChange = await store.load();
-    await store.write(2, beforeLaneChange.entries, [owner]);
+    const beforeFullWrite = await store.load();
+    await store.write(2, beforeFullWrite.entries);
     await store.close();
 
     const reopened = new ManifestStore(env.databasePath);
@@ -6727,6 +6915,161 @@ test("managed launch receipts survive reopening, reject relabeling, and legacy m
 });
 
 
+test("a birth committed while a two-entry batch is in flight keeps the other entry's events and skips the retired one", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "handoff-birth" };
+  const agent: DaemonManifestEntry = { ...entry, condition: "none", observed_state: "idle", delivery_mode: "daemon_inbox",
+    turn_control: undefined, work_attempt_id: "attempt_1", provider_ref: { work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      provider_continuation_id: "thread_1", provider_connection: connection } };
+  const peer: DaemonManifestEntry = { ...entry, id: "agent_2", display_name: "Peer", observed_state: "working", turn_control: undefined,
+    reconciliation: undefined, reconciliation_notices: undefined, activity: [] };
+  const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => true, notifyStateChanged: () => {} });
+  const diagnostics: number[] = [];
+  const results: { skipped: number; written: number; retriedAfterConflict: boolean }[] = [];
+  const batcher = new ActivityWriteBatcher({
+    serialize: (operation) => authority.serializeManifestMutationWithoutFlush(operation),
+    // Exactly as main.ts commits a batch.
+    commit: async (items) => {
+      const next = await commitActivityBatch({ store, items, expectedGeneration: authority.generation,
+        fence: (commit) => authority.fenceAdmittedTransitionCommit(commit), mayWrite: (agentId) => batcher.mayWrite(agentId) });
+      results.push({ skipped: next.skipped, written: next.written, retriedAfterConflict: next.retriedAfterConflict });
+      authority.generation = next.generation;
+    },
+    diagnostic: (_error, dropped) => diagnostics.push(dropped),
+  });
+  // The retiring daemon's birth path: persistReturnedProviderForHandoff's commit
+  // fence, which calls retirePendingActivity right after its commit.
+  const retirePendingActivity = (entryId: string) => batcher.retireEntry(entryId);
+  const late = (id: string, sequence: number, status: DaemonActivityEvent["status"]) => ({ agentId: id,
+    event: { ...entry.activity![0]!, sequence, status, summary: `${id} ${status}` },
+    runtimeUpdate: { observedState: status === "idle" ? "idle" as const : "working" as const,
+      nativeLiveness: { state: status === "idle" ? "idle" as const : "active" as const, observed_at: "2026-07-19T00:05:00.000Z", detail: `${id} ${status}` } },
+    limit: 200 });
+  let releaseBirth!: () => void;
+  const birthGate = new Promise<void>((resolve) => { releaseBirth = resolve; });
+  let birthHoldsStore!: () => void;
+  const birthStarted = new Promise<void>((resolve) => { birthHoldsStore = resolve; });
+  try {
+    authority.generation = (await store.write(0, [agent, peer])).generation;
+    seedTerminalExecution(env.databasePath, "attempt_1", "run_1");
+    // Admitted just before retirement began: a late working event for the
+    // retiring entry, and the peer's final idle state.
+    await batcher.serializeAdmission(async () => {
+      batcher.admit(late(agent.id, 50, "working"));
+      batcher.admit(late(peer.id, 60, "idle"));
+    });
+    const birth = store.checkpointProviderBirth(authority.generation, {
+      entry: { ...agent, observed_state: "idle" }, executionGenerationId: "run_1", providerConnection: connection,
+      appliedRevision: 1, requestedAuthorityMode: "typed_shadow", observedAtMs: 100, managedLaunchContract: "c".repeat(64),
+    }, async (commit) => {
+      birthHoldsStore();
+      await birthGate;
+      await authority.serializeManifestCommit(async () => { await commit(); retirePendingActivity(agent.id); });
+    });
+    await birthStarted;
+    // The batch reads generation G and waits behind the birth on the store.
+    const flushed = batcher.flush();
+    for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(results.length, 0, "the batch is in flight, not yet committed");
+    releaseBirth();
+    authority.generation = (await birth).generation;
+    await flushed;
+    assert.deepEqual(results, [{ skipped: 1, written: 1, retriedAfterConflict: true }],
+      "one whole-batch retry after the conflict; mayWrite skipped the retired entry inside the transaction");
+    assert.deepEqual(diagnostics, []);
+    const saved = (await store.getEntry(agent.id))!;
+    assert.equal(saved.observed_state, "idle", "the birth record keeps its state");
+    assert.equal(saved.activity?.some((event) => event.sequence === 50), false, "the older event was not written after the birth");
+    const savedPeer = (await store.getEntry(peer.id))!;
+    assert.equal(savedPeer.observed_state, "idle", "the peer's final idle state survived the conflict");
+    assert.equal(savedPeer.activity?.at(-1)?.sequence, 60);
+  } finally { releaseBirth?.(); await batcher.close(); await store.close(); await env.cleanup(); }
+});
+
+test("a second generation conflict on the retry drops and reports the batch", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const peer: DaemonManifestEntry = { ...entry, turn_control: undefined, reconciliation: undefined, reconciliation_notices: undefined, activity: [] };
+  try {
+    const written = await store.write(0, [peer]);
+    let conflicts = 0;
+    // An out-of-lane writer that commits before every attempt.
+    const racing = {
+      readGeneration: () => store.readGeneration(),
+      recordActivityBatch: async (...args: Parameters<ManifestStore["recordActivityBatch"]>) => {
+        conflicts += 1;
+        const current = await store.getEntry(peer.id);
+        await store.replaceEntry(await store.readGeneration(), { ...current!, display_name: `Peer ${conflicts}` });
+        return store.recordActivityBatch(...args);
+      },
+    };
+    await assert.rejects(commitActivityBatch({ store: racing, expectedGeneration: written.generation,
+      items: [{ agentId: peer.id, event: { ...entry.activity![0]!, sequence: 70 }, runtimeUpdate: null, limit: 200 }],
+      fence: (commit) => commit(), mayWrite: () => true }), ManifestConflictError);
+    assert.equal(conflicts, 2, "one whole-batch retry, then the conflict is final");
+    assert.equal((await store.getEntry(peer.id))!.activity?.some((event) => event.sequence === 70), false);
+
+    // In the batcher the final conflict drops the whole batch, with no per-event retry.
+    const authority = new DaemonAuthority({ assertCurrent: async () => {}, isHandoffScheduled: () => false, notifyStateChanged: () => {} },
+      await store.readGeneration());
+    const dropped: { error: unknown; count: number }[] = [];
+    let attempts = 0;
+    const batcher = new ActivityWriteBatcher({
+      serialize: (operation) => authority.serializeManifestMutationWithoutFlush(operation),
+      commit: async (items) => {
+        attempts += 1;
+        const next = await commitActivityBatch({ store: racing, items, expectedGeneration: authority.generation,
+          fence: (commit) => authority.fenceAdmittedTransitionCommit(commit), mayWrite: () => true });
+        authority.generation = next.generation;
+      },
+      diagnostic: (error, count) => dropped.push({ error, count }),
+    });
+    await batcher.serializeAdmission(async () => {
+      batcher.admit({ agentId: peer.id, event: { ...entry.activity![0]!, sequence: 80 }, runtimeUpdate: null, limit: 200 });
+      batcher.admit({ agentId: peer.id, event: { ...entry.activity![0]!, sequence: 81 }, runtimeUpdate: null, limit: 200 });
+    });
+    await batcher.close();
+    assert.equal(attempts, 1, "no per-event retry after a conflict");
+    assert.equal(dropped.length, 1);
+    assert.equal(dropped[0]!.count, 2);
+    assert.ok(dropped[0]!.error instanceof ManifestConflictError);
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("a managed runtime replacement is refused while a working event is still pending", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "managed-birth" };
+  const agent: DaemonManifestEntry = { ...entry, condition: "none", observed_state: "idle", delivery_mode: "daemon_inbox",
+    turn_control: undefined, work_attempt_id: "attempt_1", provider_ref: { work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      provider_continuation_id: "thread_1", provider_connection: connection } };
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  let pending: { observedState: DaemonManifestEntry["observed_state"] | null } | null = null;
+  store.setPendingActivityState(() => pending);
+  const input = { agentId: agent.id, executionGenerationId: "run_1", providerConnection: connection, configurationRevision: 1,
+    apiUrl: "https://example.test", roomId: agent.room_id, workAttemptId: "attempt_1", providerContinuationId: "thread_1" };
+  try {
+    const written = await store.write(0, [agent]);
+    seedTerminalExecution(env.databasePath, "attempt_1", "run_1");
+    await store.checkpointProviderBirth(written.generation, { entry: agent, executionGenerationId: "run_1", providerConnection: connection,
+      appliedRevision: 1, requestedAuthorityMode: "typed_shadow", observedAtMs: 100, managedLaunchContract: "a".repeat(64) });
+    await bindings.bind({ entry_id: agent.id, room_id: agent.room_id, work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+      agent_session_id: "session", agent_session_token: "test-token", api_url: "https://example.test" });
+    pending = { observedState: "working" };
+    await assert.rejects(store.validateManagedRuntimeReplacement(input), /durable idle authority/,
+      "committed idle is not durable idle while a newer working event is pending");
+    pending = { observedState: null };
+    const assertDurable = await store.validateManagedRuntimeReplacement(input);
+    assertDurable();
+    // A working event admitted between the check and the native signal boundary.
+    pending = { observedState: "working" };
+    assert.throws(assertDurable, /durable idle authority/);
+    pending = null;
+    assertDurable();
+  } finally { await bindings.close(); await store.close(); await env.cleanup(); }
+});
+
 test("scoped manifest reads hydrate only matching entries and prepared reads observe new commits", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
@@ -6809,12 +7152,16 @@ test("state summary loads only the newest payload-free activity without changing
     assert.equal(summary.entries[0]!.activity!.length, 16);
     assert.equal(full.entries[0]!.activity!.length, 200);
     assert.deepEqual(await store.getEntry(entry.id), full.entries[0]);
+    assert.deepEqual(await store.getEntry(entry.id, "summary"), summary.entries[0]);
+    assert.equal(await store.getEntry("missing", "summary"), undefined);
     const database = new DatabaseSync(env.databasePath);
     try {
       // Invalid raw JSON proves the summary path never parses discarded payloads.
       database.exec("UPDATE activity_events SET payload_json='invalid-json'");
       assert.deepEqual(await store.load("summary"), summary);
+      assert.deepEqual(await store.getEntry(entry.id, "summary"), summary.entries[0]);
       await assert.rejects(store.load(), /JSON/);
+      await assert.rejects(store.getEntry(entry.id), /JSON/);
       const plan = database.prepare(`EXPLAIN QUERY PLAN SELECT sequence,summary FROM activity_events
         WHERE agent_id=? ORDER BY sequence DESC,sort_order DESC LIMIT 16`).all(entry.id);
       assert.match(JSON.stringify(plan), /activity_events_summary/);

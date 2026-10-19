@@ -6,9 +6,6 @@ import {
   claimBoardIntentEscalationTx,
   countBoardIntents,
   countRecentAutoApprovedIntents,
-  getRoomAgentPresence,
-  listStalledRoomCandidates,
-  markRoomStallNudgedTx,
   getActiveBoardManager,
   getLivenessAnnouncementCandidate,
   getReachableWorkerDeliverySessionForAgentSession,
@@ -34,7 +31,6 @@ import {
   rescheduleActiveBoardManagerAssignment,
 } from "../db/coordination/board-manager-failover.js";
 import { rescheduleEscalationCandidateBoardIntent } from "../db/coordination/board-intents.js";
-import { rescheduleStalledRoomCandidate } from "../db/coordination/room-stall.js";
 import {
   createBoardManagerFailoverSweeper,
   type BoardManagerFailoverResult,
@@ -44,10 +40,6 @@ import {
   INTENT_AUTO_APPROVE_MAX_PER_WINDOW,
   INTENT_AUTO_APPROVE_WINDOW_MS,
 } from "../rooms/board-intent-escalation-sweep.js";
-import {
-  createRoomStallSweeper,
-  selectRoomStallNudgeWorkerLabels,
-} from "../rooms/room-stall-sweep.js";
 import { emitProjectMessage } from "./events.js";
 import { workflowEffectBroker } from "../workflow-effects/runtime.js";
 
@@ -312,58 +304,6 @@ const intentEscalationSweeper = createIntentEscalationSweeper({
   },
 });
 
-/** Fence lost inside the stall-nudge transaction: roll the announcement back quietly. */
-class RoomStallNudgeLostRace extends Error {
-  constructor() {
-    super("room stall nudge lost the fence");
-    this.name = "RoomStallNudgeLostRace";
-  }
-}
-
-const roomStallSweeper = createRoomStallSweeper({
-  listStalledRooms: (options) => listStalledRoomCandidates(options),
-  rescheduleRoom: rescheduleStalledRoomCandidate,
-  hasReachableManager,
-  getRoomContexts: getDueRoomOperationalContext,
-  listLiveWorkerLabels: async (roomId) => {
-    const presence = await getRoomAgentPresence(roomId, {
-      limit: 20,
-      excludeSupervisorManaged: true,
-    });
-    return selectRoomStallNudgeWorkerLabels({
-      presence,
-    });
-  },
-  announceStall: async (input) => {
-    let nudged = false;
-    try {
-      await emitProjectMessage(input.room_id, "letagents", input.text, {
-        source: "agent_liveness",
-        agent_prompt_kind: "auto",
-        client_message_id: input.client_message_id,
-        with_created_message_in_transaction: async (tx) => {
-          nudged = await markRoomStallNudgedTx(tx, {
-            room_id: input.room_id,
-            epoch: input.epoch,
-          });
-          if (!nudged) {
-            throw new RoomStallNudgeLostRace();
-          }
-        },
-      });
-    } catch (error) {
-      if (error instanceof RoomStallNudgeLostRace) {
-        return false;
-      }
-      throw error;
-    }
-    return nudged;
-  },
-  onError: (roomId, error) => {
-    console.error(`Room stall sweep failed for room ${roomId}:`, error);
-  },
-});
-
 /** Cadence of the shared background sweeps below. */
 const LIVENESS_SWEEP_INTERVAL_MS = 60 * 1000;
 
@@ -399,11 +339,6 @@ export function startLivenessSweep(): void {
       await intentEscalationSweeper.sweepOnce();
       } catch (error) {
       console.error("Intent escalation sweep failed:", error);
-      }
-      try {
-      await roomStallSweeper.sweepOnce();
-      } catch (error) {
-      console.error("Room stall sweep failed:", error);
       }
       try {
       await workflowEffectBroker.sweepOnce();

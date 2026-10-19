@@ -336,3 +336,46 @@ test("answering one of several requests stays in Needs you and selects the next 
     assert.ok(descendants(root).some(node => node.props.role === "status" && /Answer sent: Pick a launch date/.test(text(node))));
   } finally { app.unmount(); }
 });
+
+test("closing a request without answering sends no draft, moves on, and shows it as Closed", async () => {
+  const { createKnowledgeRecord } = await import("../../../../shared/room-knowledge.mjs");
+  const ask = (id: string, title: string, createdAt: string) => ({ ...createKnowledgeRecord("room-a", "attention",
+    { client_id: `request-${id}`, category: "decision", title, body: "Choose one." }, { id: "agent", label: "HarborMarsh", kind: "agent" }, createdAt), id });
+  const records = [ask("rec_1", "Pick a launch date", "2026-09-30T10:00:00.000Z"), ask("rec_2", "Name the release", "2026-09-30T09:00:00.000Z")];
+  const revisions: unknown[] = [];
+  Object.assign(globalThis, { Document: class Document {}, ShadowRoot: class ShadowRoot {} });
+  Object.assign(globalThis, { window: { matchMedia: () => ({ matches: false }), letagentsDesktop: { room: {
+    reviseKnowledge: async (_room: string, _type: string, id: string, input: Record<string, unknown>) => {
+      revisions.push({ id, ...input });
+      const record = records.find(item => item.id === id)!;
+      return { ...record, version: record.version + 1, response: { body: "Closed without an answer.", actor: { id: "owner", label: "Owner", kind: "human" }, at: "2026-09-30T11:00:00.000Z", closed: true } };
+    },
+  } } } });
+  const section = ref<"needs-you" | "updates" | "answered">("needs-you");
+  const Harness = defineComponent(() => () => h(InboxView, { data: { ...data, rooms: [{ ...data.rooms[0]!, records }] }, loading: false, error: "",
+    section: section.value, "onUpdate:section": (next: typeof section.value) => { section.value = next; } }));
+  const root = hostNode("root");
+  const app = renderer.createApp(Harness);
+  app.provide(ssrContextKey, { modules: new Set<string>() });
+  app.mount(root);
+  try {
+    await nextTick();
+    assert.equal(detailTitle(root), "Pick a launch date");
+    const textarea = descendants(root).find(node => node.type === "textarea")!;
+    (textarea.props["onUpdate:modelValue"] as (value: string) => void)("Half-written answer");
+    await nextTick();
+    const close = descendants(root).find(node => node.type === "button" && text(node) === "Close without answering")!;
+    assert.equal(close.props.type, "button", "closing never submits the response form");
+    await (close.props.onClick as () => Promise<void>)();
+    await new Promise(resolve => setImmediate(resolve)); await nextTick(); await nextTick();
+    assert.deepEqual(revisions, [{ id: "rec_1", expected_version: 1, close: true }], "the draft is not sent");
+    assert.equal(section.value, "needs-you", "the view stays on the remaining requests");
+    assert.equal(detailTitle(root), "Name the release");
+    assert.deepEqual(queueTitles(root), ["Name the release"], "the closed request leaves Needs you at once");
+    assert.ok(descendants(root).some(node => node.props.role === "status" && /Closed: Pick a launch date/.test(text(node))));
+    section.value = "answered"; await nextTick();
+    assert.equal(detailTitle(root), "Pick a launch date");
+    assert.ok(descendants(root).some(node => node.props.role === "status" && /Closed\s*Closed without an answer\./.test(text(node))), "the detail reads Closed, not Answer recorded");
+    assert.ok(descendants(root).some(node => node.props["data-kind"] === "closed" && text(node) === "Closed"), "its category reads Closed");
+  } finally { app.unmount(); }
+});

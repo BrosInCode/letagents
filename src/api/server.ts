@@ -4,6 +4,8 @@ import { startRoomEventBridge, stopRoomEventBridge } from "./server/event-bridge
 import { startLivenessSweep, stopLivenessSweep } from "./server/liveness.js";
 import { startJevRoutingWorker } from "./messages/jev-routing-worker.js";
 import { startReplyTurnHoldSweep, stopReplyTurnHoldSweep } from "./server/reply-turn-holds.js";
+import { startAttachmentUploadCleanup, stopAttachmentUploadCleanup } from "./server/attachment-upload-cleanup.js";
+import { startLiveActivityCleanup, stopLiveActivityCleanup } from "./server/live-activity-cleanup.js";
 import { startDesktopPushWorker } from "./notifications/worker.js";
 import { startWakeRuleScheduler } from "./wake-rules/scheduler.js";
 import { githubRoomEvents, taskEvents, wakeRuleEvents } from "./server/events.js";
@@ -33,6 +35,10 @@ startRoomEventBridge();
 startLivenessSweep();
 // Releases sequential reply turns whose deadline passed (same opt-in rule).
 startReplyTurnHoldSweep();
+// Removes staged attachment uploads that expired unclaimed (same opt-in rule).
+startAttachmentUploadCleanup();
+// Removes live sessions whose agent stopped publishing (same opt-in rule).
+startLiveActivityCleanup();
 const stopDesktopPushWorker = startDesktopPushWorker();
 const stopJevRoutingWorker = startJevRoutingWorker();
 const stopWakeRuleScheduler = startWakeRuleScheduler({ taskEvents, githubRoomEvents, wakeRuleEvents });
@@ -54,7 +60,7 @@ const stopIntake = () => closeHttpServerIntake(server);
 const shutdown = createGracefulShutdownController({
   stopIntake,
   stopWorkers: async () => {
-    await Promise.all([stopLivenessSweep(), stopReplyTurnHoldSweep(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopWakeRuleScheduler()]);
+    await Promise.all([stopLivenessSweep(), stopReplyTurnHoldSweep(), stopAttachmentUploadCleanup(), stopLiveActivityCleanup(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopWakeRuleScheduler()]);
   },
   stopBridge: stopRoomEventBridge,
   closeBroker: async () => {

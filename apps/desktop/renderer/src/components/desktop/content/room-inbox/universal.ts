@@ -2,9 +2,9 @@ import type { DesktopRentalRequest } from '../../../../../../electron/ipc-types.
 import type { DesktopNeedsYou } from '../../../../../../electron/ipc-types/knowledge.js';
 import type { KnowledgeRecord } from '../../../../../../../../shared/room-knowledge.mjs';
 import { buildDesktopInboxItems, desktopInboxItemFingerprint, type DesktopInboxItem } from './items';
+import { claimGitHubEvents } from './github-event-claims';
 import type { AgentAttentionItem } from './agent-attention';
 import type { AttentionNavigationIntent } from '../room-shell/types';
-import { mergeDesktopManagedAgentPresence } from '../../../../domain/managed-agents';
 import { hostApprovalHeading, hostApprovalSummary } from '../room-chat/host-approval-presentation';
 import { readableIntentBody } from '../room-board/governance-presentation';
 
@@ -32,10 +32,12 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
   for (const item of attention) result.push({ key: item.key, roomIdentifier: item.roomIdentifier,
     roomName: roomNames.get(item.roomIdentifier) || item.roomIdentifier, section: 'needs-you', category: item.kind,
     timestamp: item.timestamp, attention: item, fingerprint: item.timestamp, ...agentAttentionText(item) });
+  // Rooms that share a GitHub event lane show each event once.
+  const githubEvents = claimGitHubEvents(data?.rooms ?? []);
   for (const room of data?.rooms ?? []) {
     const scope = { roomIdentifier: room.roomIdentifier, roomName: room.displayName };
     for (const record of room.records) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, record.id]),
-      section: record.response ? 'answered' : 'needs-you', category: record.category,
+      section: record.response ? 'answered' : 'needs-you', category: attentionRecordCategory(record),
       title: record.title, body: record.body, timestamp: record.response?.at || record.created_at,
       actor: record.author.label, record, fingerprint: String(record.version) });
     const tasks = new Map(room.tasks.map(task => [task.id, { id: task.id, title: task.title, description: task.description, status: task.status, updatedAt: task.updated_at }]));
@@ -45,8 +47,8 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
       timestamp: task.updatedAt || '', actor: 'Task board', taskId: task.id, fingerprint: `${task.status}:${task.updatedAt}` });
     if (!room.updates) continue;
     for (const activity of buildDesktopInboxItems({ filter: 'actionable', threadPage: room.updates.threads, tasks: [],
-      githubEvents: room.updates.githubEvents?.events ?? [], reasoningSessions: room.updates.reasoningSessions,
-      presence: mergeDesktopManagedAgentPresence(room.updates.presence, data?.managedSessions ?? [], room.roomIdentifier) })) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, activity.id]),
+      githubEvents: githubEvents.get(room.roomIdentifier) ?? [], reasoningSessions: room.updates.reasoningSessions,
+      presence: room.updates.presence })) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, activity.id]),
         section: 'updates', category: activity.kind, title: activity.title, body: activity.preview || '', timestamp: activity.timestamp || '',
         actor: activity.context || 'Room activity', activity, fingerprint: desktopInboxItemFingerprint(activity) });
   }
@@ -153,8 +155,13 @@ export function searchInboxRooms<T extends { roomIdentifier: string; displayName
   return needle ? rooms.filter(room => room.displayName.toLocaleLowerCase().includes(needle) || room.roomIdentifier.toLocaleLowerCase().includes(needle)) : [...rooms];
 }
 
+/** A request closed without an answer reads as Closed, whatever it asked. */
+export function attentionRecordCategory(record: KnowledgeRecord): string {
+  return record.response?.closed ? 'closed' : record.category;
+}
+
 export function inboxCategoryLabel(category: string): string {
-  return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', blocked: 'Blocked task',
+  return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', closed: 'Closed', blocked: 'Blocked task',
     in_review: 'Task review', done: 'Completed', merged: 'Merged', thread: 'Unread replies', github_failure: 'Failed check',
     agent_blocked: 'Blocked agent', agent_offline: 'Agent offline', rental_request: 'Rental request',
     tool_approval: 'Tool approval', agent_attention: 'Stuck agent', board_intent: 'Board request' } as Record<string, string>)[category] || category;
@@ -177,7 +184,7 @@ export function inboxSourceFailureKey(data: DesktopNeedsYou | null, rooms: strin
     (data?.rooms ?? []).filter(room => (!rooms.length || rooms.includes(room.roomIdentifier)) && room.updates?.unavailable.length)
       .map(room => [room.roomIdentifier, [...room.updates!.unavailable].sort()] as const)
       .sort((a, b) => a[0].localeCompare(b[0])),
-    Boolean(data?.managedSessionsUnavailable), Boolean(data?.cloudUnavailable), rentalError,
+    Boolean(data?.cloudUnavailable), rentalError,
   ]);
 }
 

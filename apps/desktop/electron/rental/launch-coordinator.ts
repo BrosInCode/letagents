@@ -192,7 +192,6 @@ export class RentalLaunchCoordinator {
     }
     const readiness = await this.preflight(configuration.providerId, {
       repoRootPath: process.cwd(),
-      launchMode: "supervised",
       model: configuration.model,
       permissionProfileId,
     }).catch(() => null);

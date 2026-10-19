@@ -83,7 +83,7 @@
       {{ matchingWorktreeCount ? "Choose a worktree above" : "No matching worktree found" }}
     </button>
     <button
-      v-else-if="hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider)"
+      v-else-if="supervisedProvider"
       type="button"
       class="desktop-add-agent-primary"
       :disabled="!canStart || startingAgent"
@@ -121,10 +121,10 @@
     <span v-else-if="externalInstruction" class="desktop-add-agent-confirmation">
       {{ externalInstruction }}
     </span>
-    <span v-else-if="launchMode === 'supervised' && charterMissing" class="desktop-add-agent-confirmation">
-      Add a first task to start the agent.
+    <span v-else-if="supervisedProvider && charterMissing" class="desktop-add-agent-confirmation">
+      Add a first message to start the agent.
     </span>
-    <span v-else-if="launchMode === 'supervised' && recoveryScanStatus !== 'ready'" class="desktop-add-agent-confirmation">
+    <span v-else-if="supervisedProvider && recoveryScanStatus !== 'ready'" class="desktop-add-agent-confirmation">
       {{ recoveryScanStatus === "error"
         ? "Previous launches could not be checked. Starting now creates a new agent."
         : "Checking for a previous agent before enabling Start..." }}
@@ -132,11 +132,8 @@
     <span v-else-if="permissionWarning" class="desktop-add-agent-confirmation">
       {{ permissionWarning }}
     </span>
-    <span v-else-if="activeSessions.length" class="desktop-add-agent-confirmation">
-      Each start creates a separate local agent session.
-    </span>
     <span
-      v-else-if="preflight?.status === 'ready' && (hasDesktopManagedRuntime(provider) || hasSupervisedRuntime(provider))"
+      v-else-if="preflight?.status === 'ready' && supervisedProvider"
       class="desktop-add-agent-confirmation"
     >
       Starts a {{ provider?.name || "local" }} agent for this room.
@@ -152,20 +149,15 @@ import type {
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
   DesktopAgentProviderSetupAction,
-  DesktopManagedAgentPermissionProfile,
 } from "../../../../../../electron/ipc-types";
-import { hasDesktopManagedRuntime, hasSupervisedRuntime } from "../../../../domain/managed-agents";
-import { useStableManagedAgentSessionViews } from "./managed-agent-sessions-context";
+import { hasSupervisedRuntime } from "../../../../domain/managed-agents";
 import type { AddAgentSupervisedUi } from "./useAddAgentController";
 import { canStartNewSupervisedLaunch } from "./useSupervisedLaunchRecovery";
 
 const props = defineProps<{
-  roomIdentifier: string;
   providerId: DesktopAgentProviderId | null;
   provider: DesktopAgentProvider | null;
   preflight: DesktopAgentProviderPreflight | null;
-  permissionProfile: DesktopManagedAgentPermissionProfile | null;
-  launchMode: "legacy" | "supervised";
   setupBusy: boolean;
   setupActionLabel: string;
   copyingAuthCommand: boolean;
@@ -195,40 +187,23 @@ const emit = defineEmits<{
   "recover-launch": [];
 }>();
 
-const activeSessions = useStableManagedAgentSessionViews(
-  () => props.roomIdentifier,
-  () => props.providerId,
-);
+const supervisedProvider = computed(() => hasSupervisedRuntime(props.provider));
 const recoverableProviderName = computed(() => props.supervised.recoverableProviderName.value);
 const recoveringLaunch = computed(() => props.supervised.launch.recoveringCandidate.value);
 const recoveryScanStatus = computed(() => props.supervised.launch.recoveryScanStatus.value);
-// A launch card owns this footer until it is explicitly dismissed. Tying
-// ownership to the editable lifecycle toggle lets stale setup actions reappear
-// underneath a live, failed, or stopped supervised launch.
+// A launch card owns this footer until it is explicitly dismissed, so stale
+// setup actions never reappear underneath a live, failed, or stopped launch.
 const activeSupervisedLaunch = computed(() => props.supervised.launch.view.value);
 const canStart = computed(() => props.canStartBase
-  && (props.launchMode !== "supervised" || canStartNewSupervisedLaunch({
+  && canStartNewSupervisedLaunch({
     providerId: props.providerId,
     scanStatus: recoveryScanStatus.value,
     hasActiveLaunch: Boolean(props.supervised.launch.view.value),
-    hasRecoveryCandidate: Boolean(props.supervised.launch.recoveryCandidate.value),
     recoveringCandidate: props.supervised.launch.recoveringCandidate.value,
-    supportsConcurrentAgents: props.provider?.capabilities.includes("concurrent_supervised_agents") === true,
-  })));
+  }));
 const startButtonLabel = computed(() => {
   if (props.startingAgent) return "Starting...";
-  if (props.launchMode === "supervised") {
-    return recoveryScanStatus.value === "error"
-      ? "Start new agent"
-      : "Start agent";
-  }
-  if (!hasDesktopManagedRuntime(props.provider)) return "Start agent";
-  const providerName = props.provider?.name?.trim() || "agent";
-  const profileLabel = props.permissionProfile?.label?.trim();
-  const prefix = activeSessions.value.length ? "Start another" : "Start";
-  return profileLabel
-    ? `${prefix} ${providerName} - ${profileLabel}`
-    : `${prefix} ${providerName}`;
+  return recoveryScanStatus.value === "error" ? "Start new agent" : "Start agent";
 });
 </script>
 <style scoped src="./AddAgentActionBar.css"></style>

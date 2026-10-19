@@ -5,7 +5,8 @@
   display: grid;
   gap: 7px;
   justify-self: center;
-  width: min(calc(100% - 48px), 840px);
+  /* Same max as --room-chat-content-max so the column, live strip and composer line up. */
+  width: min(calc(100% - 48px), 960px);
   margin: 0 auto 16px;
   padding: 7px;
   border: 1px solid rgba(255, 255, 255, 0.105);

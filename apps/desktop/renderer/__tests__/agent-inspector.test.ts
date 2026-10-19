@@ -19,6 +19,8 @@ import {
 import type { AgentInspectorActionState } from "../src/domain/agent-inspector";
 import { useAgentPauseRequests } from "../src/domain/agent-pause-requests";
 import { ref } from "vue";
+import type { AgentInspectorWorkResource } from "../src/domain/agent-inspector-work";
+import { agentInspectorActionErrorMessage, agentInspectorSignal } from "../src/domain/agent-inspector-presentation";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
 import { projectAgentInspectorDiagnostics } from "../src/domain/agent-inspector-diagnostics";
 import {
@@ -148,6 +150,64 @@ function task(id: string, status: string, overrides: Partial<DesktopTaskSummary>
     ...overrides,
   };
 }
+
+test("stopped runtime evidence gives Overview the same confirmed recovery path as Diagnostics", () => {
+  const stopped = entry({ observedState: "idle", runtimeGenerationId: "runtime_1" });
+  stopped.roomAgentState!.inbox.state = "waiting_for_desktop_credentials";
+  const workResource: AgentInspectorWorkResource = {
+    status: "ready", error: null, sourceMessageId: null,
+    detail: {
+      availability: "not_loaded", entry_id: stopped.id, room_id: stopped.roomId,
+      requested_source_message_id: null, inbox_item_id: null, source_message: null,
+      receipt: null, terminal: null, publication: null, continuation_repair: null,
+      timeline: [], items: [], uncertain_effects: [], history_boundary: null,
+      runtime_control: { runtime_generation_id: "runtime_1", execution_generation_id: stopped.executionGenerationId!,
+        daemon_generation_id: "7", runtime_state: "exited", control_state: "responsive", observed_at: "2026-10-14T22:45:00Z" },
+    },
+  };
+  const options = { roomId: stopped.roomId, workResource, daemonGeneration: 7 };
+  const actions = (overrides: Partial<typeof options> = {}, candidate = stopped) =>
+    projectAgentInspector(candidate, { ...options, ...overrides })!.actions.filter(action => action.available).map(action => action.kind);
+  assert.ok(actions().includes("recovery_options"));
+  assert.ok(!actions().includes("reconnect"));
+  assert.ok(!actions().includes("reconnect_runtime"));
+  assert.equal(projectAgentInspector(stopped, options)!.now?.label, "Agent stopped");
+  const retainedCompaction = projectAgentInspector({ ...stopped,
+    provider: "claude-code",
+    providerProgress: { state: "compacting", startedAt: "2026-10-14T22:44:00Z" },
+  }, options)!;
+  assert.doesNotMatch(retainedCompaction.overallDetail, /compacting/i);
+  assert.equal(agentInspectorSignal(retainedCompaction).state, "needs_attention");
+  assert.equal(agentInspectorSignal(retainedCompaction).moving, false);
+  assert.ok(!actions({}, { ...stopped, desiredState: "stopped" }).includes("recovery_options"));
+  assert.ok(!actions({}, { ...stopped, deliveryMode: "mcp_polling" }).includes("recovery_options"));
+  const control = workResource.detail!.runtime_control!;
+  for (const change of [
+    { runtime_state: "ready" as const, control_state: "responsive" as const },
+    { runtime_state: "ready" as const, control_state: "lost" as const },
+    { runtime_state: "ready" as const, control_state: "degraded" as const },
+    { execution_generation_id: "old_execution" }, { runtime_generation_id: "old_runtime" },
+    { daemon_generation_id: "6" },
+  ]) {
+    const resource = { ...workResource, detail: { ...workResource.detail!, runtime_control: { ...control, ...change } } };
+    assert.ok(actions({ workResource: resource }).includes("reconnect"), "only exact exited evidence suppresses credential reconnect");
+    assert.ok(!actions({ workResource: resource }).includes("recovery_options"));
+  }
+  for (const resource of [
+    { ...workResource, status: "error" as const }, { ...workResource, status: "refreshing" as const },
+    { ...workResource, detail: { ...workResource.detail!, entry_id: "another_agent" } },
+    { ...workResource, detail: { ...workResource.detail!, room_id: "another_room" } },
+  ]) assert.ok(actions({ workResource: resource }).includes("reconnect"));
+  assert.ok(!projectAgentInspector(stopped, { ...options, resourceFreshness: "stale" })!.actions.some(action =>
+    action.available && ["reconnect", "recovery_options"].includes(action.kind)));
+  const terminal = { ...stopped, nativeLiveness: { ...stopped.nativeLiveness, state: "terminal" as const } };
+  assert.ok(projectAgentInspector(terminal, { roomId: stopped.roomId })!.actions.some(action => action.kind === "recovery_options" && action.available));
+  for (const kind of ["reconnect", "reconnect_runtime"] as const) {
+    const message = agentInspectorActionErrorMessage(kind, new Error("Error invoking remote method: Error: The previous provider runtime is unavailable."));
+    assert.match(message, /Diagnostics → Agent runtime/);
+    assert.doesNotMatch(message, /remote method/);
+  }
+});
 
 test("truthful online state requires the exact delivery connection and preserves reconnecting", () => {
   assert.equal(agentInspectorOverallState(entry()), "online");
@@ -311,6 +371,55 @@ test("a start refused over the owner's own setup leads with the reason and the w
   }), { roomId: "focus_1" });
   assert.equal(projection?.now?.summary, reason);
   assert.doesNotMatch(projection?.now?.summary ?? "", /convergence scheduler failure/);
+});
+
+test("a refused Codex sandbox startup offers confirmed recovery despite retained PID and idle evidence", () => {
+  const lastError = "convergence scheduler failure: Codex did not answer when LetAgents asked for its settings "
+    + "(Codex did not answer in time), so LetAgents will not start it at a sandboxed access level. Start the agent again.";
+  const refused = entry({
+    observedState: "recovering", condition: "coordination_blocked", lastError,
+    runtimeGenerationId: "runtime_1",
+    nativeLiveness: { state: "idle", observedAt: "2026-07-23T09:00:00.000Z", detail: "Retained old observation." },
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: "2026-07-23T10:00:00.000Z", detail: lastError },
+      ingress: { state: "stopped", observedAt: "2026-07-23T10:00:00.000Z", detail: null },
+      inbox: { state: "waiting_for_desktop_credentials", pendingCount: 0, blockedByMessageId: null, detail: null },
+    },
+  });
+  const projection = projectAgentInspector(refused, { roomId: "focus_1" });
+  const action = (kind: string) => projection?.actions.find(candidate => candidate.kind === kind);
+  assert.equal(projection?.overallState, "needs_attention");
+  assert.equal(projection?.now?.summary,
+    "Agent startup needs attention. Review the startup error. Use Recovery options to restart and resume.");
+  assert.equal(projection?.runtimeExited, false, "a refused startup is not proof that a retained process exited");
+  assert.equal(action("reconnect")?.available, false);
+  assert.equal(action("reconnect_runtime")?.available, false);
+  assert.equal(action("recovery_options")?.available, true);
+  assert.equal(action("restart_runtime")?.available, true);
+  assert.equal(action("restart_runtime")?.danger, true, "restart still uses the confirmed recovery flow");
+  assert.equal(projectAgentInspectorDiagnostics(projection!).recovery.lastError, lastError);
+
+  const stale = projectAgentInspector(refused, { roomId: "focus_1", resourceFreshness: "stale" });
+  for (const kind of ["reconnect", "reconnect_runtime", "recovery_options", "restart_runtime"]) {
+    assert.equal(stale?.actions.find(candidate => candidate.kind === kind)?.available, false);
+  }
+  const credentialsOnly = projectAgentInspector({ ...refused,
+    lastError: "The provider is running, but room access could not be restored after 3 attempts.",
+    nativeLiveness: { state: "healthy", observedAt: "2026-07-23T10:00:00.000Z", detail: null },
+  }, { roomId: "focus_1" });
+  assert.equal(credentialsOnly?.actions.find(candidate => candidate.kind === "reconnect")?.available, true);
+  assert.equal(credentialsOnly?.actions.find(candidate => candidate.kind === "reconnect_runtime")?.available, true);
+
+  for (const change of [
+    { desiredState: "paused" }, { desiredState: "stopped" }, { observedState: "idle", condition: "none", providerPid: 456 },
+    { runtimeRecovery: { operationId: "recovery_1", roomId: refused.roomId,
+      executionGenerationId: refused.executionGenerationId!, runtimeGenerationId: "runtime_1", mode: "resume", phase: "prepared" } },
+  ] satisfies Partial<DesktopSupervisorManifestEntry>[]) {
+    const changed = projectAgentInspector({ ...refused, ...change }, { roomId: "focus_1" });
+    assert.doesNotMatch(changed?.now?.summary ?? "", /Agent startup needs attention/,
+      "old startup errors do not override a paused, recovered or actively restarting agent");
+  }
 });
 
 test("only a trailing startup observation list is left out of the Now summary", () => {
@@ -886,6 +995,8 @@ test("turn control is available only for the exact responding provider turn", ()
   });
   assert.equal(openModelControl?.capability, "native_interrupt");
   assert.equal(openModelControl?.canStop, true);
+  assert.equal(projectAgentInspectorTurnControl({ ...responding, provider: "open-model",
+    roomAgentState: { ...responding.roomAgentState!, turn: { ...responding.roomAgentState!.turn, state: "retrying" } } }), null);
   assert.equal(openModelControl?.canCorrect, true);
 
   const uncheckpointed = projectAgentInspectorTurnControl(entry({
@@ -1667,15 +1778,17 @@ test("duplicate supervised names resolve to exact canonical agent mentions", () 
 
 
 test("inspector shows current compaction during startup and work, hiding it after failure or stale reads", () => {
-  const compacting = entry({ provider: "claude-code", providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
-  for (const observedState of ["starting", "working"] as const) {
-    const result = projectAgentInspector({ ...compacting, observedState }, { roomId: "focus_1" });
-    assert.equal(result?.now?.summary, "Compacting conversation");
-    assert.equal(result?.overallDetail, "Compacting conversation", "agent list shows the same current progress");
+  for (const provider of ["claude-code", "open-model"] as const) {
+    const compacting = entry({ provider, providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+    for (const observedState of ["starting", "working"] as const) {
+      const result = projectAgentInspector({ ...compacting, observedState }, { roomId: "focus_1" });
+      assert.equal(result?.now?.summary, "Compacting conversation");
+      assert.equal(result?.overallDetail, "Compacting conversation", "agent list shows the same current progress");
+    }
+    assert.notEqual(projectAgentInspector(compacting, { roomId: "focus_1", resourceFreshness: "stale" })?.now?.summary, "Compacting conversation");
+    assert.notEqual(projectAgentInspector({ ...compacting, condition: "coordination_blocked" }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
+    assert.notEqual(projectAgentInspector({ ...compacting, providerProgress: null }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
   }
-  assert.notEqual(projectAgentInspector(compacting, { roomId: "focus_1", resourceFreshness: "stale" })?.now?.summary, "Compacting conversation");
-  assert.notEqual(projectAgentInspector({ ...compacting, condition: "coordination_blocked" }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
-  assert.notEqual(projectAgentInspector({ ...compacting, providerProgress: null }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
 });
 
 test('Overview signal distinguishes responding, compaction and stale observations', async () => {

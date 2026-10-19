@@ -275,16 +275,14 @@ export interface DesktopRoomMessageThreadSummary {
   lastReadMessageId: string | null;
 }
 
+/** One shape for every attachment the screen shows, whatever room storage it came from. */
 export interface DesktopRoomMessageAttachment {
   id: string | null;
-  name: string | null;
-  fileName: string | null;
-  mimeType: string | null;
+  fileName: string;
+  mimeType: string;
   sizeBytes: number | null;
-  url: string | null;
-  downloadUrl: string | null;
-  dataUrl: string | null;
-  contentBase64: string | null;
+  /** The one link the screen loads, or null when the file is gone. */
+  href: string | null;
 }
 
 /** Public Message-info projection (cloud rooms). Mirrors GET /rooms/:room/messages/:id/info. */
@@ -319,6 +317,8 @@ export interface DesktopRoomMessage {
   clientMessageId?: string | null;
   /** Renderer-only submission state; never a server message identity. */
   outgoing?: { status: "pending" | "uncertain"; attachmentCount: number; error: string | null };
+  /** Renderer-only arrival sequence from a live event/send, never history backfill. */
+  liveArrival?: number;
   sender: string;
   text: string;
   displayText?: string | null;
@@ -513,6 +513,8 @@ export interface DesktopRoomSnapshot {
   participantHiddenCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
+  /** Agents' turns their owners share with the room, one per agent at most. */
+  liveActivitySessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   roomArtifacts: DesktopRoomSharedArtifact[];
   messages: DesktopRoomMessage[];
@@ -526,11 +528,12 @@ export interface DesktopRoomSnapshot {
   sourceStates: DesktopSnapshotSourceStates;
 }
 
-/** Durable snapshot deltas replayed only to managed agents after a live gap. */
+/**
+ * The renderer's acknowledgement that its authoritative snapshot landed after
+ * a live gap. The stream's event cursor may advance once it arrives.
+ */
 export interface DesktopRoomDeliveryRepair {
   token: number;
-  messages: DesktopRoomMessage[];
-  tasks: DesktopTaskSummary[];
 }
 
 /**
@@ -674,6 +677,8 @@ export type DesktopRoomStreamEvent =
       type: "message";
       roomIdentifier: string;
       message: DesktopRoomMessage;
+      /** Genuine live delivery, not a fetched history/catch-up event. */
+      live?: true;
     }
   | {
       /** Bounded authoritative tail used after a very large durable catch-up. */
@@ -715,6 +720,16 @@ export type DesktopRoomStreamEvent =
     }
   | {
       type: "reasoning_remove";
+      roomIdentifier: string;
+      sessionId: string;
+    }
+  | {
+      type: "live_activity_update";
+      roomIdentifier: string;
+      session: DesktopReasoningSession;
+    }
+  | {
+      type: "live_activity_remove";
       roomIdentifier: string;
       sessionId: string;
     }

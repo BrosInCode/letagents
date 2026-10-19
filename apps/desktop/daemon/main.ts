@@ -1,15 +1,19 @@
 import { openDaemonMaintenance, registerDaemonBoardAccess, maintenanceStatus, type DaemonMaintenanceService } from "./maintenance-service.js";
 import { settleRuntimeApprovalRequests } from "./execution-approval-journal.js";
-import { restoreLocalRoomAuthorities, localRoomRuntime } from "./local-room-runtime.js";
-import { dirname } from "node:path";
+import { restoreLocalRoomAuthorities, localRoomRuntime, isLocalRoomApi } from "./local-room-runtime.js";
+import { dirname, join } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
 import { AgentStreamRegistry } from "./agent-stream-registry.js";
+import { ReplyAttachmentSpool } from "./reply-attachment-spool.js";
 import { BoundedEffectCoordinator } from "./bounded-effect-coordinator.js";
 import { ContinuationRepairCoordinator } from "./continuation-repair-coordinator.js";
 import {
+  createLiveActivitySession,
   productionSupervisedDeliveryHttp,
   productionSupervisorGrantHttp,
+  updateLiveActivitySession,
+  withdrawLiveActivity,
   type SupervisorGrantHttp,
 } from "./cloud-http.js";
 import { DaemonControlSocket } from "./control-socket.js";
@@ -35,11 +39,12 @@ import { LifecycleAdministrationCoordinator } from "./lifecycle-administration-c
 import { projectDaemonCreateRequestReplayParameters } from "./manifest-entry-projection.js";
 import { ManifestAdministrationCoordinator } from "./manifest-administration-coordinator.js";
 import { ManifestStore } from "./manifest-store.js";
+import { DaemonActivityWrites } from "./activity-write-batcher.js";
 import { withProtectedStateUpgrade, reportStateRecoveryReady, type StateRecoveryBootstrap } from "./state-recovery-key.js";
 import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator.js";
-import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
-import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
+import { startDaemonLifecycleDiagnostics, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { NativeActivityPublicationCoordinator } from "./native-activity-publication-coordinator.js";
+import { LiveRoomSharePublisher } from "./live-room-share-publisher.js";
 import { ConvergencePacer } from "./convergence-pacer.js";
 import { recordedRemote, RoomWorkPublisher } from "./room-work-publisher.js";
 import { assertMacOS } from "./platform.js";
@@ -60,10 +65,9 @@ import { RuntimeConfigurationApplyCoordinator } from "./runtime-configuration-ap
 import { RuntimeRecoveryCoordinator } from "./runtime-recovery-coordinator.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { runEveryStopStep } from "./stop-steps.js";
-import { type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
+import { type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type ExecutionTerminalPayload, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import {
   deriveProviderConfigurationSnapshot,
-  providerSupportsConcurrentSupervisedAgents,
 } from "./provider-configuration.js";
 import {
   supervisedPermissionProfilesForProvider,
@@ -74,6 +78,7 @@ import { WorkerAuthorityCoordinator, type BootstrapOperation } from "./worker-au
 import { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
+import { RoomTurnAttachmentStager } from "./room-turn-attachments.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "./supervised-delivery-lifecycle-coordinator.js";
 import { supervisedToolRuntime, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 import { TurnControlCoordinator } from "./turn-control-coordinator.js";
@@ -98,6 +103,7 @@ export {
   continuationRepairExhaustionNeedsPersistence,
   continuationRepairMissingContinuation,
 } from "./continuation-repair-policy.js";
+
 export type { DaemonReconcileInput } from "./provider-reconciliation-coordinator.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
@@ -106,13 +112,17 @@ type RecoveryClock = {
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout; sleep?: (delayMs: number) => Promise<void>; random?: () => number;
 };
+/** Copies for replies that never published are removed after this long. */
+const REPLY_ATTACHMENT_RETENTION_MS = 2 * 24 * 60 * 60 * 1000;
+
 export class SupervisorDaemon {
   private readonly stateDatabasePath: string;
   private readonly singleton: DaemonSingleton;
   private maintenance: DaemonMaintenanceService | null = null;
   private readonly authority: DaemonAuthority;
   private readonly store: ManifestStore;
-  private readonly legacyLanes: LegacyLaneCoordinator;
+  /** Native activity events wait here briefly and are written in batches. */
+  private readonly activityWrites: DaemonActivityWrites;
   private readonly manifestAdministration: ManifestAdministrationCoordinator;
   private readonly manifestTransitions: ManifestTransitionCoordinator;
   private readonly readModel: DaemonReadModel;
@@ -130,9 +140,14 @@ export class SupervisorDaemon {
   private readonly executionDelegations: ExecutionDelegationCoordinator;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
   private readonly supervisedInbox: SupervisedAgentInboxStore;
+  /** Daemon-owned copies of files agents attach to their final replies. */
+  private readonly replyAttachmentSpool: ReplyAttachmentSpool;
+  private replyAttachmentSweep: NodeJS.Timeout | null = null;
   private readonly continuationRepairs: ContinuationRepairCoordinator;
   private readonly roomMoves: RoomMoveCoordinator;
   private readonly supervisedDelivery: SupervisedAgentDelivery | null;
+  /** Images on the message that wakes an agent, staged for one turn under the daemon's own folder. */
+  private readonly roomTurnAttachments: RoomTurnAttachmentStager;
   private readonly supervisedDeliveryLifecycle: SupervisedDeliveryLifecycleCoordinator;
   private readonly turnControls: TurnControlCoordinator;
   private readonly roomDeliveryControl: RoomDeliveryControl;
@@ -167,6 +182,7 @@ export class SupervisorDaemon {
   private readonly nowMs: () => number;
   private readonly startedAt = new Date().toISOString();
   private readonly agentStreamRegistry: AgentStreamRegistry;
+  private readonly liveRoomShare: LiveRoomSharePublisher;
   private handoffScheduled = false;
   private handoffDraining = false;
   private readonly handoff: ProviderHandoffCoordinator;
@@ -201,19 +217,8 @@ export class SupervisorDaemon {
       drive: (entryId, signal) => this.deliveryCutoverExecution.drive(entryId, signal),
     });
     this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath, undefined, undefined, /* schemaPrepared */ true);
-    this.legacyLanes = new LegacyLaneCoordinator({
-      storage: { load: () => this.store.load() },
-      commit: {
-        currentGeneration: () => this.manifestGeneration,
-        write: (expectedGeneration, entries, owners) => this.writeManifest(expectedGeneration, entries, owners),
-        acceptGeneration: (generation) => { this.manifestGeneration = generation; },
-      },
-      authority: {
-        serialize: (operation) => this.serializeManifestMutation(operation),
-        assertCurrent: () => this.singleton.assertCurrent(),
-      },
-      isSupervisedLaneOwner: (entry) => this.isSupervisedLaneOwner(entry),
-    });
+    this.activityWrites = new DaemonActivityWrites({ authority: this.authority, store: this.store,
+      isHandoffScheduled: () => this.handoffScheduled, admittedFence: (commit) => this.fenceAdmittedTransitionCommit(commit) });
     this.manifestAdministration = new ManifestAdministrationCoordinator({
       store: this.store,
       authority: {
@@ -226,17 +231,17 @@ export class SupervisorDaemon {
       },
       policies: {
         projectCreateReplayParameters: projectDaemonCreateRequestReplayParameters,
-        providerSupportsConcurrentAgents: providerSupportsConcurrentSupervisedAgents,
         deriveProviderConfiguration: deriveProviderConfigurationSnapshot,
         permissionProfilesForProvider: supervisedPermissionProfilesForProvider,
         sanitizeActivity: sanitizeDaemonActivityEvent,
         safeErrorDetail: schedulerErrorDetail,
       },
-      lanes: {
-        liveOwners: (owners) => this.legacyLanes.liveOwners(owners),
-      },
       convergence: {
         request: (entryId) => this.requestConvergence(entryId),
+      },
+      activity: this.activityWrites.admission,
+      liveSharing: {
+        changed: (entryId, saved) => this.liveRoomShare.setSharing(entryId, saved),
       },
     });
     this.audit = new AuditLog(paths.auditPath);
@@ -254,6 +259,7 @@ export class SupervisorDaemon {
       nowMs: () => this.nowMs(),
     });
     const root = paths.workspaceRoot ?? dirname(paths.manifestPath);
+    this.roomTurnAttachments = new RoomTurnAttachmentStager(join(root, "room-turn-attachments"));
     const gitCommand = createGitCommand(root);
     this.gitCommand = gitCommand;
     this.durability = new WorkDurabilityStore(
@@ -287,6 +293,31 @@ export class SupervisorDaemon {
     this.agentStreamRegistry = new AgentStreamRegistry({
       isHandoffScheduled: () => this.handoffScheduled,
     });
+    // The room's view of each agent's turn, published only while its owner shares it.
+    this.liveRoomShare = new LiveRoomSharePublisher({
+      sharing: async (entryId) => (await this.store.getAgentConfiguration(entryId))?.live_sharing ?? "off",
+      withdrawn: async (entryId) => {
+        await this.serializeManifestMutation(async () => {
+          await this.singleton.assertCurrent();
+          await this.store.markLiveSharingWithdrawn(entryId, (commit) => this.fenceDaemonCommit(commit));
+        });
+      },
+      target: async (entryId) => {
+        const binding = await this.workerBindings.get(entryId);
+        if (!binding || isLocalRoomApi(binding.api_url)) return null;
+        const bearer = await this.workerBindings.credentialFor(binding);
+        return bearer ? { apiUrl: binding.api_url, roomId: binding.room_id, bearer } : null;
+      },
+      feed: {
+        highWater: (entryId) => this.agentStreamRegistry.highWater(entryId),
+        retainedAfter: (entryId, afterSequence) => this.agentStreamRegistry.retainedAfter(entryId, afterSequence),
+      },
+      http: {
+        create: (target, body) => createLiveActivitySession({ ...target, body }),
+        update: (target, sessionId, body) => updateLiveActivitySession({ ...target, sessionId, body }),
+        withdraw: (target) => withdrawLiveActivity(target),
+      },
+    });
     this.lifecycleAdministration = new LifecycleAdministrationCoordinator({
       store: this.store,
       bindings: this.workerBindings,
@@ -308,7 +339,7 @@ export class SupervisorDaemon {
       hasLiveHandle: (entryId) => this.liveHandles.has(entryId),
       ...(providerPort ? { provider: providerPort } : {}),
       runtimeCustody: this.workerRuntimeCustody,
-      deleteAgentStream: (entryId) => this.agentStreamRegistry.delete(entryId),
+      deleteAgentStream: (entryId) => { this.agentStreamRegistry.delete(entryId); this.liveRoomShare.forget(entryId); },
       ephemeralProvisioner: this.ephemeralProvisioner,
       nowMs: () => this.nowMs(),
     });
@@ -318,6 +349,7 @@ export class SupervisorDaemon {
     this.supervisedInbox = new SupervisedAgentInboxStore(
       paths.manifestPath, undefined, (agentId) => this.notifyStateChanged(agentId), /* schemaPrepared */ true,
     );
+    this.replyAttachmentSpool = new ReplyAttachmentSpool(join(dirname(paths.manifestPath), "reply-attachments"));
     this.convergencePacer = new ConvergencePacer({ nowMs: recoveryClock.nowMs, random: recoveryClock.random,
       hasPendingWork: async (entryId) => { const head = await this.supervisedInbox.head(entryId); return Boolean(head && head.state !== "blocked"); },
     });
@@ -343,6 +375,9 @@ export class SupervisorDaemon {
       delivery: {
         stop: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
         start: (entryId) => this.startSupervisedDelivery(entryId),
+        holdIngressForBearerRotation: (entryId) => this.supervisedDelivery?.holdIngressForBearerRotation(entryId) ?? (() => {}),
+        bearerSuccessorBinding: (entryId) => this.supervisedDelivery?.bearerSuccessorBinding(entryId),
+        bearerSuccessorAbandoned: (entryId) => this.supervisedDelivery?.bearerSuccessorAbandoned(entryId),
       },
       convergence: {
         request: (entryId, kind) => this.requestConvergence(entryId, kind),
@@ -378,8 +413,8 @@ export class SupervisorDaemon {
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
-        getEntry: (entryId) => this.store.getEntry(entryId),
-        load: () => this.store.load(),
+        getEntry: (entryId) => this.activityWrites.overlayEntry(this.store.getEntry(entryId)),
+        load: () => this.activityWrites.overlayManifest(this.store.load()),
         updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
         readRuntimeLifecycleAuthority: (input) => this.store.readRuntimeLifecycleAuthority(input),
       },
@@ -391,6 +426,7 @@ export class SupervisorDaemon {
       transition: (entryId, state, condition, detail, actor) => this.transition(entryId, state, condition, detail, actor),
       appendNativeActivity: (entryId, event, activityOnly, position) => this.manifestAdministration.appendNativeActivity(entryId, event, activityOnly, position),
       publishNativeActivity: (entryId, method, status, observedAt) => this.publishNativeActivity(entryId, method, status, observedAt),
+      observeActivitySummary: (entryId, summary, status) => this.nativeActivity.observeActivitySummary(entryId, summary, status),
       handleTerminal: (installation, _bindingIdentity, terminal) =>
         this.providerTerminals.handleTerminal(installation, terminal),
       streams: {
@@ -429,6 +465,7 @@ export class SupervisorDaemon {
     this.providerExecution = providerPort
       ? new ProviderExecutionCoordinator({
         notifyProgressChanged: () => this.notifyStateChanged(),
+        retirePendingActivity: (entryId) => this.activityWrites.retireEntry(entryId),
         refreshManagedRuntime: (entryId) => this.runtimeConfigurationApply.refreshManaged(entryId),
         exitSettling: (entryId) => this.providerTerminals.settling(entryId),
         settleRuntimeApprovals: (entryId) => this.settleRuntimeApprovals(entryId),
@@ -634,9 +671,18 @@ export class SupervisorDaemon {
         },
         async (agent, source, inbox) => this.roomWorkPublisher?.beginWorkspace(agent, source, inbox),
         async (agent, source, inbox) => { await this.roomWorkPublisher?.releaseWorkspace(agent, source, inbox); },
-        (agentId) => this.requestConvergence(agentId),
+        (agentId) => {
+          this.roomWorkPublisher?.settled(agentId);
+          this.requestConvergence(agentId);
+        },
         (agent, demand) => this.runtimeConfigurationApply.canAdmitManagedDelivery(agent, demand),
         async (agentId) => { await this.providerExecution?.archiveEndedRuntimes(agentId); },
+        this.replyAttachmentSpool,
+        this.roomTurnAttachments,
+        (agentId, change) => {
+          if ("ended" in change) this.liveRoomShare.turnEnded(agentId, change.ended);
+          else this.liveRoomShare.turnStarted(agentId, change.inboxItemId, change.sourceMessageId);
+        },
       ) : null;
     this.readModel = new DaemonReadModel({
       readUsage: (handle) => this.providerPort?.readUsage?.(handle) ?? Promise.resolve(null),
@@ -744,8 +790,6 @@ export class SupervisorDaemon {
     this.desiredStates = new DesiredStateCoordinator({
       store: this.store,
       entryConcurrency: this.entryConcurrency,
-      legacyLanes: this.legacyLanes,
-      manifestAdministration: this.manifestAdministration,
       delivery: this.supervisedDelivery,
       authority: {
         currentManifestGeneration: () => this.manifestGeneration,
@@ -854,6 +898,10 @@ export class SupervisorDaemon {
         fenceAdmittedTransitionCommit: (commit) => this.fenceAdmittedTransitionCommit(commit),
       },
       policy: { structuredRoomTurnCompletion },
+      replyAttachments: {
+        snapshot: (input) => this.replyAttachmentSpool.snapshot(input),
+        keepOnly: (inboxItemId, spoolIds) => this.replyAttachmentSpool.keepOnly(inboxItemId, spoolIds),
+      },
     });
     this.hostApprovals = createHostApprovalBridge({
       store: this.store, inbox: this.supervisedInbox, provider: this.providerPort,
@@ -909,8 +957,6 @@ export class SupervisorDaemon {
       cancelDeliveryDrain: (input) => this.deliveryCutoverExecution.cancelDrain(input),
       acknowledgeInspectorRoomMoveSourceRevocation: (input) => this.roomMoves.acknowledgeSourceRevocation(input),
       applyAgentConfiguration: (input) => this.runtimeConfigurationApply.apply(input),
-      activateLegacyLane: this.activateLegacyLane.bind(this),
-      appendActivity: this.appendActivity.bind(this),
       bindWorkerSession: this.workerAuthority.bindWorkerSession.bind(this.workerAuthority),
       bootstrapRoomIngress: (input) => this.userAction(input.initial_message === undefined ? null : input.entry_id,
         () => this.beginBootstrap(this.workerAuthority.bootstrapRoomIngress.bind(this.workerAuthority), input)),
@@ -940,8 +986,6 @@ export class SupervisorDaemon {
       putManifestEntry: (entry) => this.userAction(entry.id, () => this.putManifestEntry(entry)),
       readAttempt: this.readAttempt.bind(this),
       recoverAgentRuntime: (id, generation, recovery) => this.userAction(id, () => this.runtimeRecovery.recoverAgentRuntime(id, generation, recovery)),
-      releaseLegacyLane: this.releaseLegacyLane.bind(this),
-      reserveLegacyLane: this.reserveLegacyLane.bind(this),
       resolveTurnControl: (input) => this.turnControls.resolve(input),
       restoreAgentConversation: this.restoreAgentConversation.bind(this),
       retireAgent: this.lifecycleAdministration.retireAgent.bind(this.lifecycleAdministration),
@@ -949,6 +993,7 @@ export class SupervisorDaemon {
       rollbackInspectorRoomMove: (input) => this.roomMoves.rollbackInspector(input),
       setDesiredState: (id, desired) => this.userAction(id, () => this.desiredStates.set(id, desired)),
       setDisplayName: this.setDisplayName.bind(this),
+      setLiveSharing: (input) => this.manifestAdministration.setLiveSharing(input),
       skipRoomDelivery: this.skipRoomDelivery.bind(this),
       status: this.status.bind(this),
       syncExecutionDelegations: (input) => {
@@ -986,6 +1031,11 @@ export class SupervisorDaemon {
   async start(storage: StateRecoveryBootstrap = {}): Promise<void> {
     assertMacOS(this.platform);
     await this.singleton.acquire();
+    // Copies for replies that never published (no_reply, a lost or refused turn) are not needed after two days.
+    const sweepReplyAttachments = () => void this.replyAttachmentSpool.sweep(REPLY_ATTACHMENT_RETENTION_MS).catch(() => undefined);
+    sweepReplyAttachments();
+    this.replyAttachmentSweep = setInterval(sweepReplyAttachments, 60 * 60 * 1000);
+    this.replyAttachmentSweep.unref();
     try {
       this.maintenance = await openDaemonMaintenance({
         singleton: this.singleton, store: this.store, socket: this.socket,
@@ -1039,14 +1089,14 @@ export class SupervisorDaemon {
       this.executionDelegations.start();
     }
     await this.supervisedInbox.normalizeInterruptedEffects();
-    await this.quarantineDuplicateSupervisedLaneOwners();
     await this.runtimeRecovery.recoverTurnControls();
-    await this.recoverOrphanedLegacyReservations();
     await this.roomMoves.reconcilePrepared();
     await this.lifecycleAdministration.recoverPreparedPurges();
     await this.lifecycleAdministration.recoverEphemeralWorkspaces();
     await restoreLocalRoomAuthorities((await this.store.load()).entries, this.singleton.currentGeneration, this.workerRuntimeCustody);
     await this.socket.start();
+    // Images an earlier process staged for turns that have long ended.
+    void this.roomTurnAttachments.sweep();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
       if (await this.store.unresolvedDeliveryDrain(entry.id) || await this.store.unresolvedPollingActivation(entry.id)) {
@@ -1057,6 +1107,8 @@ export class SupervisorDaemon {
       for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id, "rehydration");
     }
     void this.workerBindings.compactRetainedPublications().catch(() => undefined);
+    // Earlier turns that a stopped process could not remove from a room are removed now.
+    this.liveRoomShare.resume(await this.store.liveSharingByAgent());
   }
 
   async stop(): Promise<void> {
@@ -1066,8 +1118,10 @@ export class SupervisorDaemon {
     // open socket would keep the process alive.
     this.handoffScheduled = true;
     let executionDelegationDrain: Promise<void> | undefined;
+    if (this.replyAttachmentSweep) clearInterval(this.replyAttachmentSweep);
     await runEveryStopStep([
       () => this.convergencePacer.close(), () => this.providerTerminals.close(), () => this.hostApprovals.close(),
+      () => this.liveRoomShare.dispose(),
       () => { executionDelegationDrain = this.executionDelegations.fenceAndDrain(); },
       () => this.roomWorkPublisher?.close(), () => this.executionCapture?.close(), () => this.supervisedDelivery?.fence(),
       () => this.typedLifecycleEffects?.close(),
@@ -1081,6 +1135,7 @@ export class SupervisorDaemon {
       () => this.providerReconciliation?.disposeAll(),
       () => this.providerExecution?.drainConvergence(),
       () => this.providerStreams.disposeAll(),
+      () => this.activityWrites.close(),
       () => this.socket.stop(),
       () => this.serializeManifestCommit(() => this.singleton.release()),
       () => this.store.close(),
@@ -1107,10 +1162,12 @@ export class SupervisorDaemon {
   private async stopForHandoff(): Promise<void> {
     // Fence first. Any callbacks that outlive this method are prevented from
     // committing daemon-owned state by fenceDaemonCommit().
+    if (this.replyAttachmentSweep) clearInterval(this.replyAttachmentSweep);
     this.workerRuntimeCustody.destroyAllCredentials();
     this.convergencePacer.close();
     this.wakeRoomMoveReconciliationWaiters();
     const failures: unknown[] = [...this.handoffCleanupFailures];
+    try { await this.activityWrites.close(); } catch (error) { failures.push(error); }
     try { await this.deliveryCutovers.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.fenceAndDrainRoomMoveReconciliations(); } catch (error) { failures.push(error); }
@@ -1286,27 +1343,6 @@ export class SupervisorDaemon {
     return result;
   }
 
-  private isSupervisedLaneOwner(entry: DaemonManifestEntry): boolean {
-    return this.manifestAdministration.isSupervisedLaneOwner(entry);
-  }
-
-  /**
-   * Providers whose entries own independently addressable runtimes may have
-   * multiple supervised participants in one room. This only relaxes
-   * supervised-vs-supervised admission; a live supervised entry still fences
-   * an Electron-owned legacy runtime for that provider below.
-   */
-  private competingSupervisedLaneOwner(
-    entries: readonly DaemonManifestEntry[],
-    entry: DaemonManifestEntry,
-  ): DaemonManifestEntry | undefined {
-    return this.manifestAdministration.competingSupervisedLaneOwner(entries, entry);
-  }
-
-  private async quarantineDuplicateSupervisedLaneOwners(): Promise<void> {
-    await this.manifestAdministration.quarantineDuplicateSupervisedLaneOwners();
-  }
-
   /** Inspector configuration is a durable optimistic-concurrency resource. */
   private async getAgentConfiguration(entryId: string, daemonGeneration: number) {
     return this.manifestAdministration.getAgentConfiguration(entryId, daemonGeneration);
@@ -1332,30 +1368,6 @@ export class SupervisorDaemon {
     this.turnControls.admitNew(entryId);
   }
 
-  private async reserveLegacyLane(input: { reservation_id: string; room_id: string; provider: string; owner_pid: number; owner_process_identity: string }): Promise<LegacyLaneOwner> {
-    return this.legacyLanes.reserve(input);
-  }
-
-  private liveLegacyLaneOwners(owners: readonly LegacyLaneOwner[]): LegacyLaneOwner[] {
-    return this.legacyLanes.liveOwners(owners);
-  }
-
-  private async recoverOrphanedLegacyReservations(): Promise<void> {
-    await this.legacyLanes.recoverOrphanedReservations();
-  }
-
-  private async activateLegacyLane(reservationId: string, sessionId: string): Promise<LegacyLaneOwner> {
-    return this.legacyLanes.activate(reservationId, sessionId);
-  }
-
-  private async releaseLegacyLane(input: { reservation_id: string | null; session_id: string | null; room_id: string | null; provider: string | null }): Promise<{ released: boolean }> {
-    return this.legacyLanes.release(input);
-  }
-
-  private async appendActivity(id: string, event: DaemonActivityEvent): Promise<DaemonManifestEntry> {
-    return this.manifestAdministration.appendActivity(id, event);
-  }
-
   private async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null, observedAt: string): Promise<DaemonManifestEntry> {
     return this.manifestAdministration.updateWorkplaceLiveness(id, state, detail, observedAt);
   }
@@ -1371,7 +1383,7 @@ export class SupervisorDaemon {
   }
 
   private pushAgentStreamEvent(entryId: string, event: DaemonActivityEvent): void {
-    this.agentStreamRegistry.push(entryId, event);
+    this.liveRoomShare.observe(entryId, this.agentStreamRegistry.push(entryId, event));
   }
 
   private resetAgentStream(entryId: string): void {
@@ -1593,13 +1605,11 @@ export class SupervisorDaemon {
   private writeManifest(
     expectedGeneration: number,
     entries: DaemonManifestEntry[],
-    legacyOwners?: LegacyLaneOwner[],
     roomMoveCancellation?: { agentId: string; detail: string },
   ) {
     return this.store.write(
       expectedGeneration,
       entries,
-      legacyOwners,
       (commit) => this.fenceDaemonCommit(commit),
       roomMoveCancellation,
     );
@@ -1646,15 +1656,7 @@ export class SupervisorDaemon {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const paths = defaultDaemonPaths();
-  const lifecycle = new DaemonLifecycleLog(paths.lifecycleLogPath);
-  lifecycle.append({ event: "daemon_starting" });
-  process.on("uncaughtExceptionMonitor", (error) => {
-    lifecycle.append({ event: "fatal_exception", detail: daemonLifecycleErrorDetail(error) });
-  });
-  process.on("exit", (exitCode) => {
-    lifecycle.append({ event: "process_exit", exitCode });
-    lifecycle.close();
-  });
+  const lifecycle = startDaemonLifecycleDiagnostics(paths.lifecycleLogPath);
   void (async () => {
     const { ProviderActionPortRouter } = await import("./provider-action-port-router.js");
     const daemon = new SupervisorDaemon(paths, process.platform, new ProviderActionPortRouter(), true);

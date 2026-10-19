@@ -46,7 +46,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.228";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.263";
 /**
  * The room-level state channel carries activity summaries, not history. Keep in
  * sync with STATE_WATCH_ACTIVITY_SUMMARY_LIMIT in daemon/state-watch-projection.ts;
@@ -148,7 +148,6 @@ const AGENT_STREAM_REOPEN_POLL_MS = 1_000;
 const activityEmitter = new EventEmitter();
 const stateEmitter = new EventEmitter();
 const agentStreamEmitter = new EventEmitter();
-const activitySequences = new Map<string, number>();
 let stateWatchOperation: Promise<void> | null = null;
 let stateWatchUnsupportedGeneration: number | null = null;
 /** Newest pushed manifest state; absent until the watch delivers one. */
@@ -186,7 +185,7 @@ type WireEntry = {
   condition: DesktopSupervisorManifestEntry["condition"];
   last_error?: string | null;
   permission_profile_id: string | null;
-  delivery_mode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
+  delivery_mode?: "mcp_polling" | "daemon_inbox";
   polling_contract?: "custodial_polling_v1" | null;
   home_harness?: string;
   permission_pending?: boolean;
@@ -274,17 +273,6 @@ type WireActivityEvent = {
   payload_redacted: boolean;
   durable_payload_ref: string | null;
 };
-type WireLegacyLaneOwner = {
-  reservation_id: string;
-  room_id: string;
-  provider: string;
-  owner_pid: number;
-  owner_process_identity: string;
-  state: "reserved" | "active";
-  session_id: string | null;
-  created_at: string;
-  updated_at: string;
-};
 
 export type DaemonProcessState = "live" | "zombie";
 export type DaemonProcessIdentity = {
@@ -342,6 +330,12 @@ export function defaultInspectDaemonProcess(pid: number): DaemonIdentityInspecti
 export class SupervisorDaemonProtocolMismatchError extends Error {
   constructor(readonly clientVersion: number, readonly daemonVersion: number, message: string) {
     super(message);
+  }
+}
+
+class SupervisorDaemonRequestTimeoutError extends Error {
+  constructor(readonly method: string) {
+    super(`Supervisor daemon request timed out: ${method}`);
   }
 }
 
@@ -1064,7 +1058,17 @@ export class SupervisorDaemonClient {
     };
   }
 
-  async create(input: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> {
+  /**
+   * Save a new supervised entry. A normal launch is saved as `running`: the
+   * daemon starts the provider only once owner authority and room delivery
+   * are installed, so the entry waits durably without a separate claim step.
+   * A rental launch is saved `paused` and activated after the rental server
+   * acknowledges provisioning.
+   */
+  async create(
+    input: DesktopSupervisorCreateInput,
+    options: { desiredState?: "running" | "paused" } = {},
+  ): Promise<DesktopSupervisorManifestEntry> {
     if (!input.charter.trim()) throw new Error("A supervised agent initial message is required.");
     const creationRequestId = input.creationRequestId?.trim() || randomUUID();
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(creationRequestId)) {
@@ -1079,9 +1083,7 @@ export class SupervisorDaemonClient {
       provider: input.providerId,
       model: input.model?.trim() || null,
       charter: input.charter.trim(),
-      // This durable paused claim is the engine-ownership fence. Electron
-      // stops any legacy owner only after this CAS succeeds, then activates it.
-      desired_state: "paused",
+      desired_state: options.desiredState ?? "running",
       observed_state: "absent",
       condition: "none",
       permission_profile_id: input.permissionProfileId ?? null,
@@ -1111,47 +1113,6 @@ export class SupervisorDaemonClient {
     };
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.put", { entry }));
-  }
-
-  async assertLegacyStartAllowed(roomIdentifier: string, provider: string): Promise<void> {
-    const owner = (await this.list(roomIdentifier)).find((entry) => entry.provider === provider && entry.desiredState !== "stopped");
-    if (owner) {
-      throw new Error(`${owner.displayName} already owns the ${provider} lane through the supervised engine. Stop it before starting a legacy agent.`);
-    }
-  }
-
-  async reserveLegacyLane(roomIdentifier: string, provider: string, reservationId: string): Promise<WireLegacyLaneOwner> {
-    await this.ensureRunning();
-    const ownerProcessIdentity = defaultGetProcessIdentity(process.pid);
-    if (typeof ownerProcessIdentity !== "string" || !ownerProcessIdentity) {
-      throw new Error("Could not prove the Electron process birth identity for a legacy lane reservation.");
-    }
-    return this.request<WireLegacyLaneOwner>("lane.reserve_legacy", {
-      reservation_id: reservationId,
-      room_id: roomIdentifier,
-      provider,
-      owner_pid: process.pid,
-      owner_process_identity: ownerProcessIdentity,
-    });
-  }
-
-  async activateLegacyLane(reservationId: string, sessionId: string): Promise<WireLegacyLaneOwner> {
-    await this.ensureRunning();
-    return this.request<WireLegacyLaneOwner>("lane.activate_legacy", {
-      reservation_id: reservationId,
-      session_id: sessionId,
-    });
-  }
-
-  async releaseLegacyLane(input: { reservationId?: string | null; sessionId?: string | null; roomIdentifier?: string | null; provider?: string | null }): Promise<boolean> {
-    await this.ensureRunning();
-    const result = await this.request<{ released: boolean }>("lane.release_legacy", {
-      reservation_id: input.reservationId ?? null,
-      session_id: input.sessionId ?? null,
-      room_id: input.roomIdentifier ?? null,
-      provider: input.provider ?? null,
-    });
-    return result.released;
   }
 
   async setDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> {
@@ -1342,6 +1303,7 @@ export class SupervisorDaemonClient {
     const result = await this.request<Record<string, unknown>>("supervisor.update_agent_configuration", { entry_id: input.entryId, daemon_generation: input.daemonGeneration, expected_revision: input.expectedRevision, configuration: {
       model: input.configuration.model, reasoning_effort: input.configuration.reasoningEffort, charter: input.configuration.charter,
       permission_profile_id: input.configuration.permissionProfileId,
+      ...(typeof input.configuration.imageInput === "boolean" ? { image_input: input.configuration.imageInput } : {}),
     } });
     if (result.outcome === "invalid") {
       if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
@@ -1385,6 +1347,37 @@ export class SupervisorDaemonClient {
     const restart = !Object.hasOwn(result, "apply") ? {}
       : { restart: result.apply === "restarting" ? "restarting" as const : result.apply === "busy_active_turn" ? "busy" as const : "not_restarted" as const };
     return { outcome: result.outcome, configuration: mapAgentConfiguration(record(result.configuration) ?? {}, value.entryId, value.daemonGeneration), ...restart };
+  }
+
+  /**
+   * Share one agent's live activity with its room, or stop. Signed like the
+   * owner's-setup choice, so nothing else that reaches the daemon's socket,
+   * an agent included, can share an agent's work with its room.
+   */
+  async setAgentLiveSharing(
+    input: import("../ipc-types/agents.js").DesktopSupervisorAgentLiveSharingInput,
+    assertCaller?: () => void,
+  ): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationUpdateResult> {
+    const value = z.strictObject({
+      entryId: approvalId, daemonGeneration: z.number().int().positive().safe(), enabled: z.boolean(),
+    }).parse(input);
+    assertCaller?.();
+    await this.waitForStartup();
+    const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+    if (rawChallenge === null) {
+      return { outcome: "invalid", error: "This app could not prove the change came from you. Unlock secure storage and restart the background service, then try again." };
+    }
+    const challenge = approvalChallenge.parse(rawChallenge);
+    const signer = await this.signerForApproval(challenge);
+    assertCaller?.();
+    const result = record(await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "set_live_sharing", value),
+      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller)) ?? {};
+    if (result.outcome === "invalid") {
+      if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
+      return { outcome: "invalid", error: result.error };
+    }
+    if (result.outcome !== "updated") throw new Error("Supervisor returned an invalid configuration update result.");
+    return { outcome: "updated", configuration: mapAgentConfiguration(record(result.configuration) ?? {}, value.entryId, value.daemonGeneration) };
   }
 
   async applyAgentConfiguration(input: import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyResult> {
@@ -1557,11 +1550,6 @@ export class SupervisorDaemonClient {
     throw new Error("Supervisor returned an invalid purge result.");
   }
 
-  async appendActivity(id: string, event: DesktopSupervisorActivityEvent): Promise<DesktopSupervisorManifestEntry> {
-    await this.ensureRunning();
-    return mapEntry(await this.request<WireEntry>("manifest.append_activity", { id, event: wireActivity(event) }));
-  }
-
   async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null): Promise<DesktopSupervisorManifestEntry> {
     await this.ensureRunning();
     return mapEntry(await this.request<WireEntry>("manifest.update_workplace_liveness", {
@@ -1596,6 +1584,7 @@ export class SupervisorDaemonClient {
     apiKey: string | null;
     baseUrl: string;
     model: string;
+    contextWindow?: number | null;
     daemonGeneration: number;
   }): Promise<"installed" | "stale"> {
     if (!input.baseUrl.trim() || !input.model.trim()) {
@@ -1610,6 +1599,7 @@ export class SupervisorDaemonClient {
         api_key: input.apiKey,
         base_url: input.baseUrl,
         model: input.model,
+        ...(input.contextWindow != null ? { context_window: input.contextWindow } : {}),
         daemon_generation: input.daemonGeneration,
       },
     );
@@ -1699,7 +1689,16 @@ export class SupervisorDaemonClient {
     const expectedRuntimeEnvironmentFingerprint = spawnEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT!;
     let retiredGeneration: number | undefined;
     try {
-      const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION);
+      const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION)
+        .catch((error: unknown) => {
+          if (!(error instanceof SupervisorDaemonRequestTimeoutError) || error.method !== "daemon.negotiate") throw error;
+          this.assertNotRestarting();
+          // Sibling provider starts can briefly delay the service. Retry only
+          // this read, once, with the existing rich-read bound. A timeout is
+          // never evidence that another daemon may be spawned.
+          return this.request<Record<string, unknown>>("daemon.negotiate", undefined,
+            SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+        });
       this.assertNotRestarting();
       if (hold && negotiated.maintenance_hold_id !== hold.id) throw new Error("Service maintenance is pending. Use Force restart service in Settings → Updates.");
       const daemonVersion = Number(negotiated.protocol_version ?? 0);
@@ -1734,13 +1733,23 @@ export class SupervisorDaemonClient {
     await access(this.daemonScriptPath);
     this.stopAttachedDaemonObservation();
     await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
+    // OS-backed signing may wait for disk or a Keychain dialog. Finish that
+    // before the child starts its bounded verifier handshake, rather than
+    // racing secure storage against the child's one-second IPC deadline.
+    const signer = hold ? null : await this.loadApprovalSigner().catch(() => null);
+    const approvalPublicKey = signer?.publicKey ?? null;
     this.assertNotRestarting();
+    if (signer) this.approvalSigner = {
+      fingerprint: createHash("sha256").update(Buffer.from(signer.publicKey, "base64")).digest("hex"),
+      promise: Promise.resolve(signer),
+    };
     const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory, spawnEnvironment);
     if (child.pid) {
       const identity = this.safeInspectDaemon(child.pid);
       if (identity?.state === "live" && identity.pid === child.pid) this.maintenanceTarget = { ...identity, expectedScriptPath: this.daemonScriptPath };
     }
-    const statePreparation = prepareSupervisorState(child, undefined, this.statePreparationWaitMs);
+    const statePreparation = prepareSupervisorState(child, undefined, this.statePreparationWaitMs,
+      async () => approvalPublicKey);
     const childPid = Number.isSafeInteger(child.pid) && (child.pid ?? 0) > 0 ? child.pid! : null;
     const owned = {
       pid: childPid,
@@ -2126,7 +2135,7 @@ export class SupervisorDaemonClient {
       }
       signal?.addEventListener("abort", onAbort, { once: true });
       socket.setEncoding("utf8");
-      socket.setTimeout(timeoutMs, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
+      socket.setTimeout(timeoutMs, () => finish(new SupervisorDaemonRequestTimeoutError(method)));
       socket.once("error", (error) => finish(error));
       socket.once("close", () => finish(new Error(`Supervisor daemon disconnected before replying: ${method}`)));
       socket.on("data", (chunk: string) => {
@@ -2307,7 +2316,16 @@ function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, 
     permissionProfileId: value.permission_profile_id as string | null,
     supervisedPermissionProfiles: value.supervised_permission_profiles.map((profile) => mapSupervisedPermissionProfile(profile)),
     providerLaunchPolicy: value.provider_launch_policy, configRevision: value.config_revision as number, runtimeConfigurationRevision: value.runtime_configuration_revision as number,
-    ...mapHomeHarness(value) };
+    ...mapHomeHarness(value),
+    // Only an agent app that asks has the choice; anything unreadable is off.
+    ...(value.image_input_available === true ? { imageInput: value.image_input === true } : {}), ...mapLiveSharing(value) };
+}
+
+/** Absent from an older background service, and anything unreadable is off. */
+function mapLiveSharing(value: Record<string, unknown>): Pick<import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration, "liveSharing"> {
+  const availability = value.live_sharing_availability;
+  if (availability !== "available" && availability !== "rental" && availability !== "polling") return {};
+  return { liveSharing: { enabled: value.share_live_activity === true, availability } };
 }
 
 /** Absent from an older background service, and anything unreadable is off. */
@@ -2751,23 +2769,6 @@ function mapActivity(event: WireActivityEvent): DesktopSupervisorActivityEvent {
   });
 }
 
-function wireActivity(event: DesktopSupervisorActivityEvent): WireActivityEvent {
-  const safe = sanitizeDesktopActivityEvent(event);
-  return {
-    observed_at: safe.observedAt,
-    sequence: safe.sequence,
-    provider: safe.provider,
-    kind: safe.kind,
-    method: safe.method,
-    summary: safe.summary,
-    status: safe.status,
-    payload: safe.payload,
-    payload_truncated: safe.payloadTruncated,
-    payload_redacted: safe.payloadRedacted,
-    durable_payload_ref: safe.durablePayloadRef,
-  };
-}
-
 function sanitizeDesktopActivityEvent(event: DesktopSupervisorActivityEvent): DesktopSupervisorActivityEvent {
   const payload = safeStreamPayload(event.payload);
   const provider = redactCredentialText(event.provider);
@@ -3033,62 +3034,3 @@ async function runAgentStreamWatch(): Promise<void> {
   }
 }
 
-export async function publishSupervisorActivity(input: {
-  entryId: string;
-  provider: string;
-  kind: string;
-  method: string;
-  summary: string;
-  status: DesktopSupervisorActivityEvent["status"];
-  payload?: unknown;
-}): Promise<DesktopSupervisorManifestEntry> {
-  const sequence = Math.max((activitySequences.get(input.entryId) ?? 0) + 1, Date.now());
-  activitySequences.set(input.entryId, sequence);
-  const { value: redactedPayload, redacted } = redactActivityPayload(input.payload ?? { summary: input.summary });
-  const serialized = safeJson(redactedPayload);
-  const truncated = serialized.length > 8_192;
-  const event = sanitizeDesktopActivityEvent({
-    observedAt: new Date().toISOString(),
-    sequence,
-    provider: input.provider,
-    kind: input.kind,
-    method: input.method,
-    summary: input.summary,
-    status: input.status,
-    payload: truncated ? `${serialized.slice(0, 8_192)}…` : redactedPayload,
-    payloadTruncated: truncated,
-    payloadRedacted: redacted,
-    durablePayloadRef: null,
-  });
-  const entry = await supervisorDaemonClient.appendActivity(input.entryId, event);
-  activityEmitter.emit("activity", { entryId: input.entryId, event });
-  return entry;
-}
-
-function redactActivityPayload(payload: unknown): { value: unknown; redacted: boolean } {
-  let redacted = false;
-  const seen = new WeakSet<object>();
-  const walk = (value: unknown, key = "", depth = 0): unknown => {
-    if (/token|secret|password|authorization|api[_-]?key|credential/i.test(key)) {
-      redacted = true;
-      return "[redacted]";
-    }
-    if (depth > 8) { redacted = true; return "[truncated-depth]"; }
-    if (typeof value === "string") {
-      const safe = redactCredentialText(value);
-      redacted ||= safe.redacted;
-      return safe.value.length > 4_096 ? (redacted = true, `${safe.value.slice(0, 4_096)}…`) : safe.value;
-    }
-    if (typeof value === "bigint") return value.toString();
-    if (!value || typeof value !== "object") return value;
-    if (seen.has(value)) { redacted = true; return "[circular]"; }
-    seen.add(value);
-    if (Array.isArray(value)) return value.slice(0, 100).map((item) => walk(item, key, depth + 1));
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 100).map(([nextKey, nextValue]) => [nextKey, walk(nextValue, nextKey, depth + 1)]));
-  };
-  return { value: walk(payload), redacted };
-}
-
-function safeJson(value: unknown): string {
-  try { return JSON.stringify(value); } catch { return JSON.stringify("[unserializable]"); }
-}

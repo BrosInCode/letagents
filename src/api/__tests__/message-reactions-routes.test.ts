@@ -144,9 +144,11 @@ test('shared rules: the label names the viewer first and counts the rest', () =>
   assert.equal(describeMessageReaction(reaction(2, reactor('ada', 'Ada'), reactor('emmy')), 'emmy'), 'You and Ada reacted with 👍');
   assert.equal(
     describeMessageReaction(reaction(6, reactor('a', 'Ada'), reactor('b', 'Bea'), reactor('c', 'Cy'), reactor('d', 'Di')), null),
-    'Ada, Bea, Cy and 3 others reacted with 👍',
+    'Ada, Bea, Cy, Di and 2 others reacted with 👍',
   );
   assert.equal(describeMessageReaction(reaction(4, reactor('a', 'Ada'), reactor('b', 'Bea'), reactor('c', 'Cy')), null), 'Ada, Bea, Cy and 1 other reacted with 👍');
+  assert.equal(describeMessageReaction(reaction(5, reactor('a', 'Ada'), reactor('agent:b', 'GroveSage (agent)'), reactor('agent:c', 'CrestBay (agent)'), reactor('d', 'Di')), 'emmy', true),
+    'You, Ada, GroveSage (agent), CrestBay (agent) and Di reacted with 👍', 'a viewer outside the supplied list does not hide the human or agent names');
   assert.equal(viewerReactedWith(reaction(1, reactor('ada')), ''), false);
   assert.equal(viewerReactedWith(null, 'ada'), false);
 });

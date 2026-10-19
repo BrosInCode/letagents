@@ -155,11 +155,12 @@
         />
 
         <DesktopLongMessageContent
-          v-else-if="(!message.gif || visibleText) && !(message.gif?.text_fallback_only && gifAvailable)"
+          v-else-if="(!message.gif || visibleText) && !(message.gif?.text_fallback_only && gifState !== 'unavailable')"
           :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
           :room-identifier="roomIdentifier"
+          :sender="readerSender"
           @message-reference-click="$emit('scroll-to-message', $event)"
           @task-reference-click="$emit('open-task', $event)"
         />
@@ -170,7 +171,7 @@
           :event="linkPreviewPresentation(preview)"
           compact
         />
-        <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @available="gifAvailable = $event" />
+        <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @state="gifState = $event" />
         <DesktopMessageAttachments
           v-if="message.attachments.length"
           :message-id="message.id"
@@ -637,7 +638,7 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   return `Waiting for ${receipt.agentName}`;
 }
 
-const gifAvailable = ref(false);
+const gifState = ref<'loading' | 'ready' | 'unavailable'>('loading');
 const remindable = computed(() => Boolean(reminderAccount.value && props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier) && isValidMessageId(props.message.id) && !props.message.outgoing));
 const { pushActionToast } = useDesktopActionToasts();
 function reminderScheduled(dueAt: string) {
@@ -676,6 +677,16 @@ const viewer = useMessageViewer();
 const senderRole = computed(() => chatSenderRole({ human: ownerKind.value === 'human', agent: ownerKind.value === 'agent',
   viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey, outgoing: Boolean(props.message.outgoing) }));
 const avatarUrl = computed(() => props.message.senderProfile?.avatarUrl || (props.message.outgoing ? viewer.value?.avatar_url : null));
+const readerSender = computed(() => ({
+  name: displayName.value,
+  context: senderRole.value === 'own-agent' ? 'Your agent' : senderRole.value === 'self' ? 'You'
+    : ownerKind.value === 'agent' ? ownerAttribution.value || 'Agent' : ownerKind.value === 'human' ? 'Human' : 'Room',
+  timestamp: props.message.timestamp,
+  avatarUrl: avatarUrl.value,
+  agent: ownerKind.value === 'agent',
+  provider: ideLabel.value,
+  agentKey: props.message.agentIdentity?.agentKey,
+}));
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source));
 const ownerKind = computed(() => {
   if (isSystem.value) return "system";
@@ -995,11 +1006,11 @@ function messageCopyText(): string {
   const text = visibleText.value.trim();
   if (text) return text;
   if (props.message.attachments.length === 1) {
-    return props.message.attachments[0]?.fileName || props.message.attachments[0]?.name || "1 attachment";
+    return props.message.attachments[0]?.fileName || "1 attachment";
   }
   if (props.message.attachments.length > 1) {
     return props.message.attachments
-      .map((attachment) => attachment.fileName || attachment.name || "attachment")
+      .map((attachment) => attachment.fileName)
       .join("\n");
   }
   return "";

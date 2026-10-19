@@ -8,6 +8,7 @@ import {
   formatAttachmentContentDisposition,
   normalizeAttachmentUploadRequest,
   normalizeMessageAttachmentReferences,
+  resolveMessageAttachmentUploader,
 } from "../messages/attachments.js";
 
 test("attachment staging requires an authenticated human or scoped worker", () => {
@@ -16,8 +17,31 @@ test("attachment staging requires an authenticated human or scoped worker", () =
     authKind: "session",
     sessionAccount: { account_id: "acct_1" } as never,
   }), true);
-  assert.equal(canStageMessageAttachment({ authKind: "agent_session", sessionAccount: null }), true);
+  assert.equal(canStageMessageAttachment({
+    authKind: "agent_session",
+    sessionAccount: null,
+    agentSession: { agent_session_id: "sess_1" },
+  }), true);
+  assert.equal(canStageMessageAttachment({ authKind: "agent_session", sessionAccount: null }), false);
   assert.equal(canStageMessageAttachment({ authKind: "supervisor_grant", sessionAccount: null }), false);
+});
+
+test("attachment uploads belong to the worker session or the account, never both", () => {
+  assert.deepEqual(resolveMessageAttachmentUploader({
+    authKind: "agent_session",
+    sessionAccount: { account_id: "acct_owner" },
+    agentSession: { agent_session_id: "sess_1" },
+  }), { account_id: null, agent_session_id: "sess_1" });
+  assert.deepEqual(resolveMessageAttachmentUploader({
+    authKind: "owner_token",
+    sessionAccount: { account_id: "acct_1" },
+    agentSession: null,
+  }), { account_id: "acct_1", agent_session_id: null });
+  assert.deepEqual(resolveMessageAttachmentUploader({
+    authKind: "session",
+    sessionAccount: { account_id: "acct_2" },
+  }), { account_id: "acct_2", agent_session_id: null });
+  assert.equal(resolveMessageAttachmentUploader({ authKind: "session", sessionAccount: { account_id: " " } }), null);
 });
 
 test("normalizeAttachmentUploadRequest accepts frontend metadata aliases", () => {

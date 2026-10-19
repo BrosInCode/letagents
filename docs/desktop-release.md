@@ -121,6 +121,20 @@ turn-scoped attachment intent; the normal final publisher remains the only
 publisher. `no_reply` still sends nothing. GIFs and reactions are sparse optional
 expressions, not work completion, approval, or agreement records.
 
+A supervised `set_reply_attachments` call attaches up to 4 workspace files (25 MB
+each) to the same final answer. The daemon copies them into
+`~/.letagents/reply-attachments` at call time. Each file must be a regular,
+singly linked file inside the agent's workspace, opened with `O_NOFOLLOW_ANY` so
+no symlink anywhere in its path is followed, and not a credential or agent-tool
+configuration file (`.env*`, keys, `.git`, `.ssh`, `.cursor`, `.claude`, `.mcp.json`
+and similar). Just before it publishes, the daemon stages the copies with the
+worker bearer through `shared/message-attachments.mjs`, retries a failed upload
+once, and names in the reply any file it still could not upload, so an attachment
+never blocks the answer. It discards staged uploads when the post fails, and it
+removes copies after the post, or after two days. Local rooms and Read-only Codex
+agents do not offer the tool. Worker bearers need the server's `POST`/`DELETE
+/rooms/:room/attachments/uploads` routes, which ship with the tool.
+
 If GIPHY is unavailable, normal agent work and text replies continue. A lost
 reaction acknowledgment is reported as unconfirmed, never falsely as failure or
 success. Human drafts stay in the composer during search failure. After an

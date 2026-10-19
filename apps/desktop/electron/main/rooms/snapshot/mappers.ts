@@ -41,6 +41,7 @@ export function mapSnapshotData(data: RoomSnapshotData) {
     participantHiddenCount: Number(data.participantsData.hidden_count || 0),
     presence: mapPresence(data.presenceData),
     reasoningSessions: mapReasoningSessions(data.reasoningData),
+    liveActivitySessions: mapReasoningSessions(data.liveActivityData).filter((session) => session.kind === "live"),
     recentActivity: mapRecentActivity(data.activityHistoryData),
     roomArtifacts: mapRoomArtifacts(data.roomArtifactsData),
     boardSettings: mapBoardSettings(data.boardSettingsData),

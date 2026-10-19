@@ -162,12 +162,15 @@ async function closeTurnsBeforeDeadlineReleasesTx(
  * A new activation that the agent must see now (any receipt that is not a
  * held turn) ends every open hold of that agent in the room. Otherwise the
  * frontier, which hides everything after a held message, would also hide
- * the mention, reply, thread or task that was just addressed to it.
+ * the mention, reply, thread or task that was just addressed to it. When a
+ * shared human thread request has its own sequence, beforeMessageNumber
+ * releases only older holds and preserves that new sequence.
  */
 export async function releaseAgentReplyTurnHoldsTx(
   tx: ReplyTurnExecutor,
   roomId: string,
   agentKeys: readonly string[],
+  beforeMessageNumber?: number,
 ): Promise<ReleasedReplyTurn[]> {
   const keys = [...new Set(agentKeys)];
   if (keys.length === 0) return [];
@@ -180,6 +183,7 @@ export async function releaseAgentReplyTurnHoldsTx(
        )
        AND receipt.hold_released_at IS NULL
        AND receipt.hold_release_after IS NOT NULL
+       AND ${beforeMessageNumber === undefined ? sql`TRUE` : sql`receipt.message_number < ${beforeMessageNumber}`}
     RETURNING receipt.message_number, receipt.agent_key
   `);
   return releasedRows(roomId, released.rows);

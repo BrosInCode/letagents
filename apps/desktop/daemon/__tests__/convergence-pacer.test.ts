@@ -46,7 +46,7 @@ async function settle(): Promise<void> {
   for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
-function harness(pendingWork: ReadonlySet<string> = new Set(), random = () => 0) {
+function harness(pendingWork: ReadonlySet<string> = new Set(), random = () => 0, totalMemoryBytes = 16 * 1024 ** 3) {
   const clock = fakeClock();
   const pacer = new ConvergencePacer({
     hasPendingWork: async (entryId) => pendingWork.has(entryId),
@@ -54,6 +54,7 @@ function harness(pendingWork: ReadonlySet<string> = new Set(), random = () => 0)
     random,
     setTimeout: clock.setTimeout,
     clearTimeout: clock.clearTimeout,
+    totalMemoryBytes,
   });
   const started: string[] = [];
   const gates = new Map<string, ReturnType<typeof deferred>>();
@@ -104,6 +105,45 @@ test("a handoff of 33 agents runs at most the named number of authority requests
   assert.equal(SERVER_AUTHORITY_CONCURRENCY, 4);
   assert.equal(INTERACTIVE_RESERVED_AUTHORITY_SLOTS, 1);
   assert.equal(PROVIDER_LAUNCH_CONCURRENCY, 3);
+});
+
+test("small hosts serialize native launches while retaining priority, cancellation and release", async () => {
+  for (const memory of [4 * 1024 ** 3, 8 * 1024 ** 3]) {
+    const runtime = harness(new Set(), () => 0, memory);
+    const first = runtime.run("launch", "first");
+    const background = runtime.run("launch", "background");
+    runtime.pacer.markInteractive("interactive");
+    const interactive = runtime.run("launch", "interactive");
+    const controller = new AbortController();
+    const cancelled = runtime.pacer.acquire("launch", "cancelled", controller.signal);
+    await settle();
+    assert.deepEqual(runtime.started, ["first"]);
+    controller.abort(new Error("cancelled"));
+    await assert.rejects(cancelled, /cancelled/);
+    await runtime.finish("first");
+    assert.deepEqual(runtime.started, ["first", "interactive"]);
+    await runtime.finish("interactive");
+    assert.deepEqual(runtime.started, ["first", "interactive", "background"]);
+    await runtime.finish("background");
+    await Promise.all([first, background, interactive]);
+    assert.equal(runtime.maxActive, 1);
+    const authority = Array.from({ length: BACKGROUND_AUTHORITY }, (_, i) => runtime.run("authority", `authority-${i}`));
+    await settle();
+    assert.equal(runtime.active, BACKGROUND_AUTHORITY, "authority budget is unchanged");
+    for (let i = 0; i < BACKGROUND_AUTHORITY; i++) await runtime.finish(`authority-${i}`);
+    await Promise.all(authority);
+    runtime.pacer.close();
+  }
+});
+
+test("hosts above 8 GiB retain the default launch budget", async () => {
+  const runtime = harness(new Set(), () => 0, 8 * 1024 ** 3 + 1);
+  const launches = Array.from({ length: PROVIDER_LAUNCH_CONCURRENCY }, (_, i) => runtime.run("launch", `launch-${i}`));
+  await settle();
+  assert.equal(runtime.active, PROVIDER_LAUNCH_CONCURRENCY);
+  for (let i = 0; i < PROVIDER_LAUNCH_CONCURRENCY; i++) await runtime.finish(`launch-${i}`);
+  await Promise.all(launches);
+  runtime.pacer.close();
 });
 
 test("a user action takes the reserved authority slot while background convergence fills the rest", async () => {

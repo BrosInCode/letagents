@@ -5,10 +5,7 @@ import {
   getActiveTaskLocks,
   getAgentIdentityByCanonicalKey,
   getFocusRoomsForParent,
-  getOpenTasks,
   getProjectById,
-  getRoomAgentPresence,
-  getStaleTaskPromptMutes,
   getTasks,
   hasMessagesFromSender,
   shouldRequireBoardIntent,
@@ -20,7 +17,6 @@ import {
 import { createGitHubFocusIsolationResolver } from "../github/focus-isolation.js";
 import { createFocusParentBoardWriteIsolationEnforcer } from "../focus-rooms/task-write-isolation.js";
 import { createRoomParticipantRecorder } from "../rooms/participants.js";
-import { createStaleWorkPromptEmitter } from "../tasks/stale-work.js";
 import { createTaskActivityMessageEmitters } from "../tasks/activity-messages.js";
 import { createTaskCoordinationEnforcement } from "../tasks/coordination-enforcement.js";
 import { emitProjectMessage } from "./events.js";
@@ -50,14 +46,6 @@ export const {
 } = createGitHubFocusIsolationResolver({
   getActiveTaskFocusRoom,
   getProjectById: async (projectId) => (await getProjectById(projectId)) ?? null,
-});
-
-export const { maybeEmitStaleWorkPrompt } = createStaleWorkPromptEmitter({
-  getOpenTasks,
-  getRoomAgentPresence,
-  getStaleTaskPromptMutes: async (projectId, options) =>
-    getStaleTaskPromptMutes(projectId, options.taskIds),
-  emitTaskAnchoredMessage,
 });
 
 export const enforceFocusParentBoardWriteIsolation =

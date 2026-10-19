@@ -60,10 +60,14 @@ export interface DesktopReasoningSnapshot {
   milestone?: string | null;
   status?: string | null;
   confidence?: number | null;
+  /** Only on a live session: the room's view of the agent's turn, as the server stored it. */
+  live?: unknown;
 }
 
 export interface DesktopReasoningSession {
   id: string;
+  /** A live session is an agent's turn its owner shares; absent from an older server. */
+  kind?: "reasoning" | "live";
   roomId: string | null;
   actorLabel: string | null;
   agentKey: string | null;

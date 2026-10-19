@@ -229,6 +229,8 @@ export interface RoomSnapshotData {
   participantsData: ParticipantsResponse;
   presenceData: PresenceResponse;
   reasoningData: ReasoningResponse;
+  /** Live sessions; an older server answers with reasoning sessions, which the mapper leaves out. */
+  liveActivityData: ReasoningResponse;
   activityHistoryData: ActivityHistoryResponse;
   roomArtifactsData: RoomArtifactsResponse;
   boardSettingsData: BoardSettingsResponse;

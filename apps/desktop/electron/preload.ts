@@ -343,6 +343,8 @@ const api: DesktopApi = {
     },
     openRoom: (rootPath, options) => ipcRenderer.invoke("desktop:repos:open-room", rootPath, options ?? null),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
+    pickProjectParent: () => ipcRenderer.invoke("desktop:repos:pick-project-parent"),
+    createProject: (parentPath, name) => ipcRenderer.invoke("desktop:repos:create-project", parentPath, name),
     listProjectBindings: () => ipcRenderer.invoke("desktop:repos:list-project-bindings"),
     migrateProjectBindings: (candidates) =>
       ipcRenderer.invoke("desktop:repos:migrate-project-bindings", candidates),
@@ -353,27 +355,6 @@ const api: DesktopApi = {
   },
   workers: {
     list: () => ipcRenderer.invoke("desktop:workers:list"),
-    listManagedAgentSessions: (roomIdentifier) =>
-      ipcRenderer.invoke("desktop:workers:list-managed-agent-sessions", roomIdentifier || null),
-    onManagedAgentSessionUpdate: (callback) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
-      ipcRenderer.on("desktop:workers:managed-agent-session", listener);
-      return () => {
-        ipcRenderer.off("desktop:workers:managed-agent-session", listener);
-      };
-    },
-    startManagedAgent: (input) =>
-      ipcRenderer.invoke("desktop:workers:start-managed-agent", input),
-    stopManagedAgent: (input = {}) =>
-      ipcRenderer.invoke("desktop:workers:stop-managed-agent", input),
-    retryManagedAgent: (input) =>
-      ipcRenderer.invoke("desktop:workers:retry-managed-agent", input),
-    inspectManagedAgent: (sessionId = null, roomIdentifier = null) =>
-      ipcRenderer.invoke("desktop:workers:inspect-managed-agent", sessionId, roomIdentifier),
-    getManagedAgentChangeSummary: (sessionId = null, roomIdentifier = null) =>
-      ipcRenderer.invoke("desktop:workers:get-managed-agent-change-summary", sessionId, roomIdentifier),
-    resolveManagedAgentPermission: (input) =>
-      ipcRenderer.invoke("desktop:workers:resolve-managed-agent-permission", input),
     listAgentProviders: () => ipcRenderer.invoke("desktop:workers:list-agent-providers"),
     listAgentProviderModels: (providerId, input = {}) =>
       ipcRenderer.invoke("desktop:workers:list-agent-provider-models", providerId, input),
@@ -395,7 +376,6 @@ const api: DesktopApi = {
     getServiceSnapshot: () => ipcRenderer.invoke("desktop:supervisor:get-service-snapshot"),
     listAgents: (roomIdentifier) => ipcRenderer.invoke("desktop:supervisor:list-agents", roomIdentifier ?? null),
     createAgent: (input) => ipcRenderer.invoke("desktop:supervisor:create-agent", input),
-    resumeOwnershipTransfer: (id) => ipcRenderer.invoke("desktop:supervisor:resume-ownership-transfer", id),
     setDesiredState: (id, desiredState) => ipcRenderer.invoke("desktop:supervisor:set-desired-state", id, desiredState),
     reconnectAgent: (input) => ipcRenderer.invoke("desktop:supervisor:reconnect-agent", input),
     recoverAgentRuntime: (input) => ipcRenderer.invoke("desktop:supervisor:recover-agent-runtime", input),
@@ -409,6 +389,7 @@ const api: DesktopApi = {
     getAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-configuration", input),
     updateAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:update-agent-configuration", input),
     setAgentHomeHarness: (input) => ipcRenderer.invoke("desktop:supervisor:set-agent-home-harness", input),
+    setAgentLiveSharing: (input) => ipcRenderer.invoke("desktop:supervisor:set-agent-live-sharing", input),
     applyAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:apply-agent-configuration", input),
     prepareRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:prepare-room-move", input),
     commitRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:commit-room-move", input),

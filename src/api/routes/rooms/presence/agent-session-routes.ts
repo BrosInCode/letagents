@@ -29,11 +29,13 @@ import {
   upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat,
   upsertRoomAgentPresence,
 } from "../../../db.js";
+import { parseNativeActivitySummary } from "../../../db/presence/liveness.js";
 import {
   respondWithInternalError,
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { disconnectRoomAgentDeliverySession } from "../../../rooms/agent-delivery.js";
+import { closeRequestsOfRetiredAgent } from "../../../rooms/attention-answers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import {
   requireWorkerRequestAgentIdentity,
@@ -887,6 +889,16 @@ export function registerAgentSessionRoutes(
         room_id: project.id,
         agent_session_id: targetSessionId,
       });
+      // The agent will not read answers to its open requests, so the admin
+      // closes them. An agent leaving by itself keeps them for its return.
+      if (!hasSelfCredentials && req.sessionAccount) {
+        await closeRequestsOfRetiredAgent({
+          room_id: project.id,
+          agent_key: endedSession.agent_key,
+          session_id: endedSession.session_id,
+          person: { id: req.sessionAccount.account_id, label: req.sessionAccount.login, kind: "human" },
+        });
+      }
 
       res.json({
         room_id: project.id,
@@ -1031,6 +1043,7 @@ export function registerAgentSessionRoutes(
       sequence?: unknown;
       method?: unknown;
       status?: unknown;
+      activity_summary?: unknown;
     };
     let identity: ResolvedRequestAgentIdentity | null = null;
     if (req.authKind === "agent_session") {
@@ -1097,6 +1110,11 @@ export function registerAgentSessionRoutes(
       res.status(400).json({ error: "observed_at, positive integer sequence, native method, and a valid native status are required." });
       return;
     }
+    const activitySummary = parseNativeActivitySummary(body.activity_summary);
+    if (!activitySummary.ok) {
+      res.status(400).json({ error: activitySummary.error });
+      return;
+    }
     try {
       const result = await recordNativeHarnessActivity({
         room_id: project.id,
@@ -1113,6 +1131,7 @@ export function registerAgentSessionRoutes(
         sequence,
         method,
         status,
+        activity_summary: activitySummary.summary,
       });
       res.json({ room_id: project.id, axis: "execution_activity", ...result });
     } catch (error) {

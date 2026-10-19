@@ -5,8 +5,10 @@ import { randomUUID } from "node:crypto";
 
 import {
   assertAttachmentTotalByteSize,
+  type MessageAttachmentUploader,
   type NormalizedMessageAttachmentReference,
 } from "../../messages/attachments.js";
+import { messageAttachmentUploadUsableBy } from "./attachments.js";
 import {
   isPromptOnlyAgentMessage,
   normalizeAgentPromptKind,
@@ -53,6 +55,7 @@ import {
   createAccountRoutingTargetBudget,
   getBoundedActiveWorkLeaseOwners,
   getRecentHumanConversationRecipient,
+  getHumanThreadRootRecipientOwners,
   getMessageAccountAgentRouting,
   MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES,
   MAX_ACCOUNT_ROUTING_TARGETS,
@@ -73,7 +76,7 @@ import {
   planReplyTurns,
   queueReplyTurnWakes,
   releaseAgentReplyTurnHoldsTx,
-  SEQUENTIAL_REPLY_REASONS,
+  sequentialReplyReason,
   type ReleasedReplyTurn,
   type ReplyTurnFields,
 } from "./reply-turns.js";
@@ -150,6 +153,8 @@ export interface AddMessageOptions {
   reply_to_message_id?: string | null;
   thread_root_message_id?: string | null;
   attachments?: NormalizedMessageAttachmentReference[];
+  /** The request credential; only its own (or unowned legacy) uploads attach. */
+  attachment_uploader?: MessageAttachmentUploader | null;
   gif?: RoomGif | null;
   client_message_id?: string | null;
   publisher_agent_key?: string | null;
@@ -405,6 +410,7 @@ export async function addMessageWithCreateStatus(
             inArray(message_attachment_uploads.upload_id, uploadIds),
             eq(message_attachment_uploads.status, "pending"),
             sql`${message_attachment_uploads.expires_at} > ${createdMessage.timestamp}`,
+            messageAttachmentUploadUsableBy(options?.attachment_uploader),
           ),
         )
         .returning(messageAttachmentUploadSelection);
@@ -480,6 +486,8 @@ export async function addMessageWithCreateStatus(
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;
       publisher_account_id?: string | null;
+      visibility?: string | null;
+      rental_session_id?: string | null;
     } | null = null;
     if (replyToNumber) {
       const [foundReply] = await tx
@@ -490,6 +498,8 @@ export async function addMessageWithCreateStatus(
           publisher_agent_key: messages.publisher_agent_key,
           publisher_agent_session_id: messages.publisher_agent_session_id,
           publisher_account_id: messages.publisher_account_id,
+          visibility: messages.visibility,
+          rental_session_id: messages.rental_session_id,
         })
         .from(messages)
         .where(and(eq(messages.room_id, roomId), eq(messages.number, replyToNumber)))
@@ -501,6 +511,8 @@ export async function addMessageWithCreateStatus(
         publisher_agent_key: foundReply.publisher_agent_key,
         publisher_agent_session_id: foundReply.publisher_agent_session_id,
         publisher_account_id: foundReply.publisher_account_id,
+        visibility: foundReply.visibility,
+        rental_session_id: foundReply.rental_session_id,
       };
     }
 
@@ -761,6 +773,24 @@ export async function addMessageWithCreateStatus(
         }
       }
 
+      // Top-level answers do not make an agent a thread participant. Let a
+      // human's first unaddressed thread follow-up reach the root's captured
+      // audience without making every subsequent peer reply a broadcast.
+      if (createdMessage.source === "browser" && createdMessage.publisher_account_id
+        && !createdMessage.publisher_agent_key && !createdMessageIsPromptOnly
+        && createdMessage.thread_root_number !== null && threadMembership.size === 0
+        && !globalAddresses.broadcast && !globalAddresses.hasMention
+        && !replyToMessage?.publisher_agent_key && replyToMessage?.source !== "agent"
+        && replyToMessage?.visibility == null && replyToMessage?.rental_session_id == null
+        && !(taskOwnerFollowUp && leases.length > 0)) {
+        const rootRecipients = await getHumanThreadRootRecipientOwners(
+          tx, roomId, routingThreadRootNumber, createdMessage.number, ownedSessionGroups.map(([key]) => key),
+        );
+        for (const [key, capturedOwner] of rootRecipients) {
+          if (ownerScopeByAgentKey.get(key) === capturedOwner) threadMembership.add(key);
+        }
+      }
+
       const recentRecipient = humanConversationEligible && sessionsByAgentKey.size > 2
         ? await getRecentHumanConversationRecipient(tx, roomId, {
             number: createdMessage.number, timestamp: createdMessage.timestamp,
@@ -818,6 +848,7 @@ export async function addMessageWithCreateStatus(
         agent_session_id: string; agent_key: string; actor_label: string;
         activation_reason: string; receipt_state: string; created_at: string; updated_at: string;
       }>();
+      const taskOwnerThreadRecipients = new Set<string>();
 
       for (const [agentKey, group] of ownedSessionGroups) {
         if (
@@ -891,6 +922,21 @@ export async function addMessageWithCreateStatus(
         }
 
         if (selectedActivation) {
+          // Thread membership wins the receipt reason above, but a genuine
+          // task follow-up must still reach its existing lease owner promptly.
+          // Reuse the task routing check: expired or ambiguous owners do not
+          // gain priority merely because the text says "continue".
+          if (createdMessage.source === "agent"
+            && selectedActivation.activation.reason === "thread_participant"
+            && taskOwnerFollowUp
+            && group.identities.some(identity => {
+              const ownerActivation = decideAgentMessageActivation(messageForRouting, identity, {
+                activeTaskLeases: leases, threadParticipantRootIds: new Set<string>(),
+              });
+              return ownerActivation.reason === "task_owner" && ownerActivation.decision === "activate";
+            })) {
+            taskOwnerThreadRecipients.add(agentKey);
+          }
           const receiptSession = selectedActivation.activation.reason === "task_owner"
             ? selectedActivation.session
             : selectedActivation.activation.reason === "reply_target"
@@ -918,12 +964,38 @@ export async function addMessageWithCreateStatus(
       }
 
       const routedReceipts = [...receiptsByAgentKey.values()];
+      // An unaddressed human question to a thread is still a shared conversation.
+      // Keep mentions, quoted agents, task follow-ups and all peer messages in
+      // their existing lanes; only this verified human shape can sequence
+      // thread_participant receipts. No recipient selection changes here.
+      const sharedHumanThreadCandidate = routedReceipts.length >= 2
+        && createdMessage.source === "browser" && !createdMessageIsPromptOnly
+        && Boolean(createdMessage.publisher_account_id) && !createdMessage.publisher_agent_key
+        && createdMessage.thread_root_number !== null && !taskOwnerFollowUp
+        && !globalAddresses.broadcast && !globalAddresses.hasMention
+        && (replyToMessage === null || (replyToMessage.source === "browser"
+          && Boolean(replyToMessage.publisher_account_id) && !replyToMessage.publisher_agent_key
+          && replyToMessage.visibility === null && replyToMessage.rental_session_id === null));
+      // The transaction hook may restrict the persisted message. MessageRow
+      // deliberately omits these fields, so inspect the row after that hook
+      // rather than treating absent projection fields as public visibility.
+      const [visibleHumanRequest] = createdMessage.source === "browser"
+        ? await tx.select({ text: messages.text, promptKind: messages.agent_prompt_kind, account: messages.publisher_account_id }).from(messages).where(and(
+          eq(messages.room_id, roomId), eq(messages.number, createdMessage.number),
+          eq(messages.source, "browser"),
+          sql`${messages.publisher_account_id} IS NOT NULL`,
+          sql`${messages.publisher_agent_key} IS NULL`, sql`${messages.publisher_agent_session_id} IS NULL`,
+          sql`${messages.visibility} IS NULL`, sql`${messages.rental_session_id} IS NULL`,
+        )).limit(1) : [];
+      const freshHumanRequest = Boolean(visibleHumanRequest?.account?.trim()
+        && !isPromptOnlyAgentMessage(visibleHumanRequest.text, visibleHumanRequest.promptKind));
+      const sharedHumanThread = sharedHumanThreadCandidate && freshHumanRequest;
       // Several agents woken by one broadcast or small-room message answer
       // one after another only in a room whose admin turned sequential replies
       // on (NULL is parallel). The setting is read only when the receipts
       // could be sequenced at all.
       const sequenceCandidate = routedReceipts.length >= 2
-        && routedReceipts.every((receipt) => SEQUENTIAL_REPLY_REASONS.has(receipt.activation_reason));
+        && routedReceipts.every((receipt) => sequentialReplyReason(receipt.activation_reason, sharedHumanThread));
       const [replyOrder] = sequenceCandidate
         ? await tx.select({ order: room_settings.agent_reply_order })
           .from(room_settings).where(eq(room_settings.room_id, roomId)).for("share")
@@ -932,6 +1004,7 @@ export async function addMessageWithCreateStatus(
         messageNumber: createdMessage.number,
         timestamp: createdMessage.timestamp,
         sequential: sequenceCandidate && replyOrder?.order === "sequential",
+        sharedHumanThread,
         readySessionIds: replyOrder?.order === "sequential"
           ? await getReplyTurnReadySessions(tx, roomId, routedReceipts.map(receipt => receipt.agent_session_id))
           : undefined,
@@ -968,15 +1041,26 @@ export async function addMessageWithCreateStatus(
           .find((session) => session.session_id === receipt.agent_session_id)!.owner_account_id,
       }));
       await insertMessageReceiptRows(tx, receiptRowsToInsert);
-      // A direct activation (mention, reply target, thread, task owner) must
-      // not stay behind an earlier held turn: the frontier would hide it too.
-      // Sequenced receipts never release, not even position 1: a quick
-      // follow-up broadcast must not let an agent answer the previous message
-      // out of turn. It waits behind that hold like everything else.
+      // A newer human correction must get past older holds, while retaining
+      // its own reply order. The bound is essential: releasing all holds after
+      // insertion would also release the sequence just created above.
+      if (freshHumanRequest) releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
+        tx, roomId, receiptRowsToInsert.filter(receipt => receipt.turn_position !== null)
+          .map(receipt => receipt.agent_key), createdMessage.number,
+      ));
+      // A direct activation (mention, reply target, human thread, task owner)
+      // must not stay behind an earlier held turn: the frontier would hide it
+      // too. Automatic participation in a peer's thread reply is different:
+      // keep that receipt, but do not let it release unrelated queued turns.
+      // Public human sequences released only older holds above. Their new
+      // sequence stays intact; peer/system sequences gain no such bypass.
       releasedReplyTurns.push(...await releaseAgentReplyTurnHoldsTx(
         tx,
         roomId,
-        receiptRowsToInsert.filter((receipt) => receipt.turn_position === null).map((receipt) => receipt.agent_key),
+        receiptRowsToInsert.filter((receipt) => receipt.turn_position === null
+          && (!(createdMessage.source === "agent" && receipt.activation_reason === "thread_participant")
+            || taskOwnerThreadRecipients.has(receipt.agent_key)))
+          .map((receipt) => receipt.agent_key),
       ));
     }
 

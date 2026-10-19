@@ -60,11 +60,13 @@ const expectedDirectChannels = [
   "desktop:open-model:get-settings-status",
   "desktop:open-model:save-settings",
   "desktop:repos:connect-project",
+  "desktop:repos:create-project",
   "desktop:repos:create-worktree",
   "desktop:repos:get-status",
   "desktop:repos:list-project-bindings",
   "desktop:repos:migrate-project-bindings",
   "desktop:repos:open-room",
+  "desktop:repos:pick-project-parent",
   "desktop:repos:pick-room",
   "desktop:repos:start-status-watch",
   "desktop:repos:stop-status-watch",
@@ -182,11 +184,11 @@ const expectedDirectChannels = [
   "desktop:supervisor:recover-agent-runtime",
   "desktop:supervisor:resolve-turn-control",
   "desktop:supervisor:restore-agent-conversation",
-  "desktop:supervisor:resume-ownership-transfer",
   "desktop:supervisor:retire-agent",
   "desktop:supervisor:retry-room-delivery",
   "desktop:supervisor:revoke-host-tool-rule",
   "desktop:supervisor:set-agent-home-harness",
+  "desktop:supervisor:set-agent-live-sharing",
   "desktop:supervisor:set-desired-state",
   "desktop:supervisor:skip-room-delivery",
   "desktop:supervisor:update-agent-configuration",
@@ -194,18 +196,11 @@ const expectedDirectChannels = [
   "desktop:updates:check",
   "desktop:updates:get-status",
   "desktop:updates:install",
-  "desktop:workers:get-managed-agent-change-summary",
-  "desktop:workers:inspect-managed-agent",
   "desktop:workers:list",
   "desktop:workers:list-agent-provider-models",
   "desktop:workers:list-agent-providers",
-  "desktop:workers:list-managed-agent-sessions",
-  "desktop:workers:resolve-managed-agent-permission",
-  "desktop:workers:retry-managed-agent",
   "desktop:workers:run-agent-provider-preflight",
   "desktop:workers:run-agent-provider-setup",
-  "desktop:workers:start-managed-agent",
-  "desktop:workers:stop-managed-agent",
 ] as const;
 
 function readDomainSource(domain: string): string {
@@ -328,9 +323,6 @@ test("application registers startup preparation before rental recovery without d
     mock.module("../main/desktop-shell-environment.js", { namedExports: {
       startDesktopShellEnvironmentHydration: () => preparation,
     } }),
-    mock.module("../main/agents/legacy-open-model-retirement.js", { namedExports: {
-      retireLegacyCodexBackedOpenModelSessions: async () => { calls.push("prepared"); },
-    } }),
     mock.module("../main/supervisor-daemon.js", { namedExports: { supervisorDaemonClient: {
       async isMaintenanceHeld() { return false; },
       async ensureRunning(prerequisite: Promise<void>) {
@@ -375,7 +367,7 @@ test("application registers startup preparation before rental recovery without d
     releaseDaemon();
     if (process.platform === "darwin") {
       await reconciled;
-      assert.deepEqual(calls.slice(-3), ["prepared", "native-start", "grants"]);
+      assert.deepEqual(calls.slice(-2), ["native-start", "grants"]);
     }
   } finally {
     releasePreparation(); releaseDaemon();
@@ -424,6 +416,7 @@ test("host approval sender accepts only the live trusted main frame", async () =
   let destroyed = false;
   let closeWindow: ((event: { preventDefault(): void }) => void) | undefined;
   let hidden = false;
+  let shown = 0;
   let contentsDestroyed = false;
   const frame = { url: "http://127.0.0.1:4310/room" };
   const contents = { mainFrame: frame, isDestroyed: () => contentsDestroyed,
@@ -435,13 +428,15 @@ test("host approval sender accepts only the live trusted main frame", async () =
       async loadURL() {}
       on(event: string, listener: typeof closeWindow) { if (event === "close") closeWindow = listener; }
       hide() { hidden = true; }
+      show() { if (destroyed) throw new Error("Object has been destroyed"); shown += 1; }
+      focus() { if (destroyed) throw new Error("Object has been destroyed"); }
     } } }),
     mock.module("../main/paths.js", { namedExports: { devServerUrl: "http://127.0.0.1:4310",
       electronMainDir: "/test", rendererDistPath: "/test/index.html" } }),
     mock.module("../main/external-url.js", { namedExports: { openExternalWebUrl: async () => {} } }),
   ];
   try {
-    const { assertHostApprovalSender, createWindow, allowMainWindowQuit } = await import("../main/window.js");
+    const { assertHostApprovalSender, createWindow, allowMainWindowQuit, focusMainWindow } = await import("../main/window.js");
     const event = { sender: contents, senderFrame: frame } as never;
     assert.throws(() => assertHostApprovalSender(event), /main application window/);
     createWindow();
@@ -464,8 +459,13 @@ test("host approval sender accepts only the live trusted main frame", async () =
     frame.url = "http://127.0.0.1:4310/room";
     contentsDestroyed = true;
     assert.throws(() => assertHostApprovalSender(event), /main application window/);
-    contentsDestroyed = false; destroyed = true;
+    contentsDestroyed = false;
+    focusMainWindow();
+    assert.equal(shown, 1, "a live main window is shown");
+    destroyed = true;
     assert.throws(() => assertHostApprovalSender(event), /main application window/);
+    assert.doesNotThrow(() => focusMainWindow(), "a destroyed main window is skipped, not shown");
+    assert.equal(shown, 1);
   } finally { for (const stub of mocks.reverse()) stub.restore(); }
 });
 

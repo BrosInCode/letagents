@@ -65,6 +65,10 @@ import {
   getStoredAgentSession,
   type StoredAgentSessionState,
 } from "../agents/state.js";
+import { activeGitHubRoomIdentifier, resolveRoomIdentifierFromPath } from "../../repo-status.js";
+import { canonicalProjectRoomIdentifier, findProjectBinding } from "../../project-bindings.js";
+import { bindProjectRoot, listProjectBindings } from "../project-bindings-store.js";
+import { getJoinedRoomInfo, mapDesktopRoomInfoPayload, roomInfoCacheKey } from "./room-info.js";
 
 export { mapCloudRoomMessagePayload, mapRoomMessagePayload, type RoomMessagePayload };
 
@@ -871,6 +875,48 @@ async function ensureLocalRoomPublishTarget(
   }
   if (!localRoom) {
     throw new Error("Only local rooms can be published.");
+  }
+  if (localRoom.gitRoom?.accessMode === "local" || /^local-[a-z0-9-]+-[a-f0-9]{10}$/.test(localRoom.roomIdentifier)) {
+    // Adding origin or reconnecting a folder never uploads local history. Only
+    // this explicit Publish action may attach its existing SQLite history to
+    // the authenticated provider room.
+    const context = { roomIdentifier: localRoom.roomIdentifier, gitRoom: localRoom.gitRoom };
+    const binding = findProjectBinding(await listProjectBindings(), context);
+    if (!binding) throw new Error("Connect this room to its project folder before publishing.");
+    const resolved = await resolveRoomIdentifierFromPath(binding.rootPath, { ignoreConfiguredRoom: true });
+    const repositoryRoom = canonicalProjectRoomIdentifier(resolved.roomIdentifier);
+    if (resolved.source !== "git_remote" || !/^github\.com\/[^/]+\/[^/]+$/.test(repositoryRoom || "")) {
+      throw new Error("Add this project's GitHub origin remote, then publish again. Your history is still local.");
+    }
+    const repository = mapDesktopRoomInfoPayload(repositoryRoom!, await getJoinedRoomInfo(repositoryRoom!));
+    if (!repository.authenticated || repository.gitRoom?.host !== "github.com" || !repository.gitRoom.repository.id
+      || roomInfoCacheKey(repository.identifier) !== roomInfoCacheKey(repositoryRoom)) {
+      throw new Error("Sign in with access to this project's GitHub room before publishing.");
+    }
+    // A first push may not have created origin/HEAD. Use GitHub's default
+    // branch, and the original room's ref rather than today's checkout.
+    const defaultBranch = repository.gitRoom.ref.defaultBranch || repository.gitRoom.ref.name;
+    if (localRoom.gitRoom?.ref.name && !defaultBranch) throw new Error("The repository's default branch could not be confirmed. Your history is still local.");
+    const target = activeGitHubRoomIdentifier({
+      repoRoom: repositoryRoom,
+      currentBranch: localRoom.gitRoom?.ref.name ?? null,
+      defaultBranch,
+    })!;
+    const hosted = target === repositoryRoom ? repository : mapDesktopRoomInfoPayload(target, await getJoinedRoomInfo(target));
+    if (!hosted.authenticated || hosted.gitRoom?.host !== "github.com" || hosted.gitRoom.repository.id !== repository.gitRoom.repository.id
+      || roomInfoCacheKey(hosted.identifier) !== roomInfoCacheKey(target)) {
+      throw new Error("Sign in with access to this project's GitHub room before publishing.");
+    }
+    // Do not attach history if the folder or its origin changed during join.
+    const currentBinding = findProjectBinding(await listProjectBindings(), context);
+    const current = currentBinding && await resolveRoomIdentifierFromPath(currentBinding.rootPath, { ignoreConfiguredRoom: true });
+    if (!currentBinding || currentBinding.id !== binding.id || currentBinding.rootPath !== binding.rootPath
+      || current?.source !== "git_remote" || canonicalProjectRoomIdentifier(current.roomIdentifier) !== repositoryRoom) {
+      throw new Error("The project changed while publishing. Reconnect the project and try again.");
+    }
+    await bindProjectRoot({ context: { roomIdentifier: hosted.identifier, gitRoom: hosted.gitRoom }, rootPath: currentBinding.rootPath, source: "git_remote" });
+    await linkLocalRoomToCloud({ roomIdentifier, cloudRoomIdentifier: hosted.identifier, gitRoom: hosted.gitRoom });
+    return hosted.identifier;
   }
   assertLocalRoomPublishable(localRoom);
 

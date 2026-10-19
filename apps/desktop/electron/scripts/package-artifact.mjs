@@ -7,6 +7,11 @@ import { promisify } from "node:util";
 
 import { assertSquareImageDimensions, parseSipsDimensions } from "./packaging-validation.mjs";
 import {
+  assertInstalledMcpPackage,
+  assertLockedMcpRuntimeContract,
+  installLockedMcpRuntime,
+} from "./mcp-runtime-install.mjs";
+import {
   assertDesktopArchitecture,
   createDesktopUpdaterConfig,
 } from "./release-metadata.mjs";
@@ -146,49 +151,17 @@ await rm(join(app, "node_modules", ".bin"), { recursive: true, force: true });
 // and uses its absolute entrypoint directly.
 const letAgentsRuntime = join(app, "runtime", "letagents");
 const letAgentsRuntimeSource = join(root, "electron", "runtime", "letagents");
-await mkdir(letAgentsRuntime, { recursive: true });
-const runtimeUserConfig = join(letAgentsRuntime, "npm-userconfig");
-const runtimeGlobalConfig = join(letAgentsRuntime, "npm-globalconfig");
-await writeFile(runtimeUserConfig, "");
-await writeFile(runtimeGlobalConfig, "");
-const runtimePackage = JSON.parse(await readFile(join(letAgentsRuntimeSource, "package.json"), "utf8"));
-if (runtimePackage.dependencies?.letagents !== mcpVersion) {
-  throw new Error(`The locked desktop MCP runtime must depend on letagents@${mcpVersion}.`);
-}
-if (JSON.stringify(runtimePackage.overrides ?? {}) !== JSON.stringify(workspacePackageJson.overrides ?? {})) {
-  throw new Error("The locked desktop MCP runtime must inherit the workspace dependency overrides exactly.");
-}
-await cp(join(letAgentsRuntimeSource, "package.json"), join(letAgentsRuntime, "package.json"));
-await cp(join(letAgentsRuntimeSource, "package-lock.json"), join(letAgentsRuntime, "package-lock.json"));
-await execFileAsync("npm", [
-  "ci",
-  "--omit=dev",
-  "--ignore-scripts",
-  "--no-audit",
-  "--no-fund",
-  "--registry=https://registry.npmjs.org/",
-], {
-  cwd: letAgentsRuntime,
-  env: {
-    ...process.env,
-    NPM_CONFIG_GLOBALCONFIG: runtimeGlobalConfig,
-    NPM_CONFIG_USERCONFIG: runtimeUserConfig,
-  },
-  maxBuffer: 8 * 1024 * 1024,
+assertLockedMcpRuntimeContract({
+  runtimePackage: JSON.parse(await readFile(join(letAgentsRuntimeSource, "package.json"), "utf8")),
+  workspacePackage: workspacePackageJson,
+  mcpVersion,
 });
-const runtimeNodeModules = join(letAgentsRuntime, "node_modules");
-// npm's command shims and installation metadata are not required by the
-// direct runtime entry and contain symlinks/version-dependent noise. The
-// remaining complete tree is deterministic and sealed into the desktop code.
-await rm(join(runtimeNodeModules, ".bin"), { recursive: true, force: true });
-await rm(join(runtimeNodeModules, ".package-lock.json"), { force: true });
-const installedMcpPackage = JSON.parse(await readFile(
-  join(letAgentsRuntime, "node_modules", "letagents", "package.json"),
-  "utf8",
-));
-if (installedMcpPackage.name !== "letagents" || installedMcpPackage.version !== mcpVersion) {
-  throw new Error(`Packaging requires letagents@${mcpVersion}; found '${installedMcpPackage.name ?? "unknown"}@${installedMcpPackage.version ?? "unknown"}'.`);
-}
+// The same install CI verifies against the sealed digest on every change.
+const runtimeNodeModules = await installLockedMcpRuntime({
+  runtimeSource: letAgentsRuntimeSource,
+  destination: letAgentsRuntime,
+});
+await assertInstalledMcpPackage(runtimeNodeModules, mcpVersion);
 const runtimeIntegrity = await import(pathToFileURL(join(
   root,
   "dist-electron",
@@ -246,8 +219,11 @@ const required = [
   ...[
     "shared/agent-branch.mjs",
     "shared/agent-codenames.mjs",
+    "shared/agent-live-trace.mjs",
     "shared/codex-owner-isolation.mjs",
     "shared/codex-read-only-room-tools.mjs",
+    "shared/live-activity-summary.mjs",
+    "shared/message-attachments.mjs",
     "shared/message-contracts.mjs",
     "shared/message-link-previews.mjs",
     "shared/message-pins.mjs",
@@ -255,12 +231,15 @@ const required = [
     "shared/message-search.mjs",
     "shared/paced-queue.mjs",
     "shared/permission-review.mjs",
+    "shared/room-expressions.mjs",
     "shared/room-turn-no-reply.mjs",
     "shared/room-typing.mjs",
     "shared/routing-aliases.mjs",
     "shared/scratch-workspace-repository.mjs",
     "shared/sqlite-thread-routing.mjs",
     "shared/supervised-read-tools.mjs",
+    "shared/workspace-turn-capture.mjs",
+    "shared/workspace-turn-capture-worker.mjs",
   ].map((relative) => ({
     absolutePath: join(contents, relative),
     manifestPath: `Contents/${relative}`,

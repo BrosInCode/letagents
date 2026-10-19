@@ -2,7 +2,7 @@
   <section ref="surface" class="room-tab-page room-agents-page agents-ui" data-testid="room-activity-tab-view">
     <div v-show="activeView === 'live'">
       <header class="agents-heading"><h2>Agents</h2><span class="agents-heading-actions"><button v-if="viewerLogin" class="agents-quiet" type="button" data-testid="desktop-activity-your-work" @click="openOwnWork($event)">Your work</button><button class="agents-primary" type="button" data-testid="desktop-activity-add-agent" @click="emit('open-add-agent')">+ Add agent</button></span></header>
-      <AgentRoster :rows="rosterRows" @select="selectRosterAgent">
+      <AgentRoster :rows="rosterRows" :state="agentRosterState" @select="selectRosterAgent" @refresh="refreshActivity">
         <template #provider="{ row }"><ProviderBadge :label="row.provider" :agent-key="nativeById.get(row.id)?.agentKey" /></template>
         <template #detail="{ row }"><WakeRuleLine v-if="waitingRules(rosterAgentKey(row.id)).length && row.state === 'Online'" :rules="waitingRules(rosterAgentKey(row.id))" /><template v-else>{{ row.detail }}</template></template>
         <template #badges="{ row }"><template v-for="agent in nativeById.has(row.id) ? [nativeById.get(row.id)!] : []" :key="agent.entryId">
@@ -104,6 +104,7 @@ const props = defineProps<{
   supervisorEntries: DesktopSupervisorManifestEntry[];
   agentProjections: AgentInspectorProjection[];
   viewerLogin?: string | null;
+  agentRosterState?: "loading" | "refreshing" | "ready" | "error";
 }>();
 
 const emit = defineEmits<{

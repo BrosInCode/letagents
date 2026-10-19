@@ -48,7 +48,7 @@ export interface CursorCliChild {
 
 /**
  * v10 §3: the child sees the user's own environment; nothing is scrubbed or
- * curated here. This deliberately DIVERGES from the legacy engine's
+ * curated here. This deliberately DIVERGES from
  * CURSOR_CHILD_ENV_ALLOWLIST (cursor-runner.ts), which is a LetAgents-imposed
  * curation of exactly the kind v10 prohibits. If TrailDelta's task_38 spike
  * proves a real launch blocker (a CLAUDECODE-analogue), add that single

@@ -1,7 +1,4 @@
-import type {
-  DesktopManagedAgentSession,
-  DesktopSupervisorManifestEntry,
-} from "../../../electron/ipc-types";
+import type { DesktopSupervisorManifestEntry } from "../../../electron/ipc-types";
 import type {
   AgentInspectorSelection,
   AgentInspectorRequest,
@@ -52,31 +49,6 @@ export function isCurrentAgentInspectorOperation(
     && context.modalStateVersion === expected.context.modalStateVersion
     && context.roomIdentifier === expected.context.roomIdentifier
     && context.inspectorRequestVersion === expected.context.inspectorRequestVersion;
-}
-
-/**
- * The shell request version is authoritative. Two requests may intentionally
- * have identical presentation/session fields, so those fields alone cannot
- * decide whether modal-local operations should survive.
- */
-export function agentInspectorRequestResetKey(
-  selection: AgentInspectorSelection | null,
-  inspectorRequestVersion: number,
-): string {
-  return JSON.stringify([
-    inspectorRequestVersion,
-    selection?.kind ?? null,
-    selection?.kind === "supervised" ? selection.supervisorEntryId : null,
-    selection?.kind === "unavailable" ? selection.unavailableReason : null,
-    selection?.messageId ?? null,
-    selection?.clientMessageId ?? null,
-    selection?.messageSource ?? null,
-    selection?.agentSessionId ?? null,
-    selection?.agentKey ?? null,
-    selection?.actorLabel ?? null,
-    selection?.displayName ?? null,
-    selection?.sender ?? null,
-  ]);
 }
 
 export function isCurrentAgentInspectorSupervisorUpdate(
@@ -228,70 +200,6 @@ export function workIndicatorAgentTarget(work: ManagedAgentWorkIndicator): Agent
     agentSessionId: work.agentSessionId ?? null,
     initialTab: "live",
   };
-}
-
-/**
- * Resolve control-bearing local sessions using only exact durable identity.
- * Presentation and reasoning relationships are intentionally excluded: they
- * may help render context, but they must never grant stop/retry/permission
- * controls. Duplicates and disagreeing session/key identities fail closed.
- */
-export function resolveAgentInspectorManagedSessions(
-  sessions: readonly DesktopManagedAgentSession[],
-  selection: AgentInspectorSelection | null,
-): DesktopManagedAgentSession[] {
-  const resolution = resolveAgentInspectorManagedSession(sessions, selection);
-  return resolution.state === "matched" ? [resolution.session] : [];
-}
-
-export type AgentInspectorManagedSessionResolution =
-  | { state: "matched"; session: DesktopManagedAgentSession }
-  | { state: "unmatched" }
-  | { state: "ambiguous" };
-
-/**
- * Resolve one control-bearing local session without collapsing ambiguity into
- * "external". Display labels and provider labels are deliberately excluded.
- */
-export function resolveAgentInspectorManagedSession(
-  sessions: readonly DesktopManagedAgentSession[],
-  selection: AgentInspectorSelection | null,
-): AgentInspectorManagedSessionResolution {
-  if (!selection) return { state: "unmatched" };
-  if (selection.kind === "supervised") {
-    const matches = sessions.filter((session) => session.supervisorEntryId === selection.supervisorEntryId);
-    if (matches.length > 1) return { state: "ambiguous" };
-    return matches.length === 1 ? { state: "matched", session: matches[0]! } : { state: "unmatched" };
-  }
-  if (selection.kind !== "external") return { state: "unmatched" };
-
-  const sessionId = exactIdentity(selection.agentSessionId);
-  const agentKey = exactIdentity(selection.agentKey);
-  const specificAgentKey = agentKey && /[/:]/.test(agentKey) ? agentKey : null;
-  if (!sessionId && !specificAgentKey) return { state: "unmatched" };
-
-  const sessionMatches = sessionId
-    ? sessions.filter((session) => exactIdentity(session.agentSessionId) === sessionId)
-    : [];
-  const keyMatches = specificAgentKey
-    ? sessions.filter((session) => exactIdentity(session.agentKey) === specificAgentKey)
-    : [];
-  if (sessionMatches.length > 1 || keyMatches.length > 1) return { state: "ambiguous" };
-  if (sessionId && specificAgentKey) {
-    if (sessionMatches.length === 0 && keyMatches.length === 0) return { state: "unmatched" };
-    if (sessionMatches.length !== 1 || keyMatches.length !== 1) return { state: "ambiguous" };
-    return sessionMatches[0]!.id === keyMatches[0]!.id
-      ? { state: "matched", session: sessionMatches[0]! }
-      : { state: "ambiguous" };
-  }
-  if (sessionId) {
-    return sessionMatches.length === 1
-      ? { state: "matched", session: sessionMatches[0]! }
-      : { state: "unmatched" };
-  }
-  return keyMatches.length === 1
-    ? { state: "matched", session: keyMatches[0]! }
-    : { state: "unmatched" };
 }
 
 export function resolveAgentInspectorSelection(

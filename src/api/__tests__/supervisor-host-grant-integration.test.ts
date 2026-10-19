@@ -971,6 +971,271 @@ test("supervisor worker end is idempotent after a committed response is lost", {
   );
 });
 
+test("an owner retiring a supervised worker closes its open requests; ending it otherwise keeps them", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const { createKnowledgeRecord } = await import("../../../shared/room-knowledge.mjs");
+  const knowledge = await import("../db/room-knowledge.js");
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const end = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end"); assert.ok(end);
+  const ask = (id: string, authorId: string) => knowledge.createRoomKnowledge(createKnowledgeRecord(room.id, "attention",
+    { client_id: id, category: "question", title: "Which port?", body: "Pick one." }, { id: authorId, label: "Route Agent", kind: "agent" }));
+  const startWorker = async (instance: string) => {
+    const minted = recorder();
+    await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: agent.canonical_key, agent_instance_id: instance } }, minted);
+    assert.equal(minted.statusCode, 201, JSON.stringify(minted.body));
+    return (minted.body as any).session_id as string;
+  };
+  await ask("route-open-1", agent.canonical_key);
+  await ask("other-open-1", "owner/other-agent");
+  // A move or rotation ends the session without `retired`: the request stays open.
+  const moved = recorder();
+  await end({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: await startWorker("rotated-worker") }, body: { generation: 1 } }, moved);
+  assert.equal(moved.statusCode, 200);
+  assert.equal((await knowledge.getRoomKnowledge(room.id, "route-open-1"))!.response, null);
+  const retired = recorder();
+  await end({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId: await startWorker("retired-worker") }, body: { generation: 1, retired: true } }, retired);
+  assert.equal(retired.statusCode, 200);
+  const closed = (await knowledge.getRoomKnowledge(room.id, "route-open-1"))!.response!;
+  assert.deepEqual([closed.body, closed.closed, closed.actor.id, closed.actor.kind], ["Agent retired.", true, "owner_route", "human"]);
+  assert.equal((await knowledge.getRoomKnowledge(room.id, "other-open-1"))!.response, null, "another agent keeps its requests");
+});
+
+// The supervised agent of setupLifecycle shares its turns with the room.
+// Collects every live session the room is told is gone.
+async function liveSharingHarness(lifecycle: Awaited<ReturnType<typeof setupLifecycle>>) {
+  const { room, agent, handlers, reqBase, grantResult } = lifecycle;
+  const reasoning = await import("../db/reasoning.js");
+  const { reasoningEvents } = await import("../server/events.js");
+  const removed: unknown[] = [];
+  const onRemoved = (payload: unknown) => removed.push(payload);
+  reasoningEvents.on("reasoning:removed", onRemoved);
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const end = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/end"); assert.ok(end);
+  const rotate = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/rotate"); assert.ok(rotate);
+  const asGrant = (grant: { grant_id: string; current_generation: number }) => ({
+    ...reqBase, supervisorGrant: grant, params: { grantId: grant.grant_id },
+  });
+  return {
+    removed,
+    dispose: () => { reasoningEvents.off("reasoning:removed", onRemoved); },
+    asGrant,
+    async start(instance: string, roomId = room.id, request: Record<string, any> = reqBase) {
+      const minted = recorder();
+      await mint({ ...request, body: { generation: 1, room_id: roomId, agent_key: agent.canonical_key, agent_instance_id: instance } }, minted);
+      assert.equal(minted.statusCode, 201, JSON.stringify(minted.body));
+      return minted.body as { session_id: string; worker_bearer_id: string };
+    },
+    async end(sessionId: string, body: Record<string, unknown> = {}, request: Record<string, any> = reqBase) {
+      const ended = recorder();
+      await end({ ...request, params: { ...request.params, grantId: request.params?.grantId ?? grantResult.grant.grant_id, sessionId }, body: { generation: 1, ...body } }, ended);
+      assert.equal(ended.statusCode, 200, JSON.stringify(ended.body));
+    },
+    async rotate(sessionId: string, bearerId: string) {
+      const rotated = recorder();
+      await rotate({ ...reqBase, params: { grantId: grantResult.grant.grant_id, sessionId }, body: { generation: 1, bearer_id: bearerId } }, rotated);
+      assert.equal(rotated.statusCode, 200, JSON.stringify(rotated.body));
+    },
+    async share(sessionId: string, summary: string, roomId = room.id, agentKey = agent.canonical_key) {
+      const created = await reasoning.createLiveActivitySession({
+        room_id: roomId, actor_label: "Route Agent", agent_key: agentKey, agent_session_id: sessionId,
+        snapshot: {
+          summary, status: "working",
+          live: {
+            version: 1, state: "working", started_at: new Date().toISOString(), ended_at: null,
+            request_message_id: null, omitted_earlier: false,
+            entries: [{ kind: "action", id: "e1", headline: summary, status: "completed", tool: "shell", count: 1 }],
+          },
+        },
+      });
+      return created.session.id;
+    },
+    async shared(roomId = room.id) {
+      return (await authDb!.getReasoningSessions(roomId, { open_only: true, kind: "live" })).map((session) => session.id).sort();
+    },
+    /** Another agent of the same owner, sharing in the same room. */
+    async otherAgentShares(summary: string) {
+      const other = await authDb!.createRoomAgentSession({
+        room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Other Agent",
+        agent_key: "owner/other-agent", agent_instance_id: "other-instance", display_name: "Other Agent",
+        owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Agent",
+      });
+      return this.share(other.session_id, summary, room.id, "owner/other-agent");
+    },
+    LiveActivityWorkerEndedError: reasoning.LiveActivityWorkerEndedError,
+  };
+}
+
+test("retiring a supervised agent removes the turn it shared from the room at once", { skip: requiresDatabase }, async (t) => {
+  const lifecycle = await setupLifecycle();
+  const { room, agent } = lifecycle;
+  const live = await liveSharingHarness(lifecycle);
+  t.after(live.dispose);
+  const worker = await live.start("daemon:entry-retired");
+  const turn = await live.share(worker.session_id, "Ran the tests");
+  const otherTurn = await live.otherAgentShares("Edited a file");
+  const reasoning = await authDb!.createReasoningSession({ room_id: room.id, actor_label: "Route Agent", agent_key: agent.canonical_key, snapshot: { summary: "Plan" } });
+
+  await live.end(worker.session_id, { retired: true });
+  assert.deepEqual(await live.shared(), [otherTurn], "another agent's turn stays");
+  assert.deepEqual(live.removed, [{ projectId: room.id, session_id: turn, kind: "live" }]);
+  assert.ok(await authDb!.getReasoningSessionById(room.id, reasoning.session.id), "a reasoning session is not live activity");
+  // A snapshot still in flight when the agent retired does not bring the turn back.
+  await assert.rejects(live.share(worker.session_id, "Late snapshot"), live.LiveActivityWorkerEndedError);
+  assert.deepEqual(await live.shared(), [otherTurn]);
+});
+
+test("purging a supervised agent removes the turn it shared from the room at once", { skip: requiresDatabase }, async (t) => {
+  const lifecycle = await setupLifecycle();
+  const { room, grantResult } = lifecycle;
+  const live = await liveSharingHarness(lifecycle);
+  t.after(live.dispose);
+  const worker = await live.start("daemon:entry-purged");
+  const turn = await live.share(worker.session_id, "Ran the tests");
+
+  // The desktop's purge ends the exact worker session as retired, then revokes its grant.
+  await live.end(worker.session_id, { retired: true });
+  await authDb!.revokeSupervisorGrantAuthority({ grant_id: grantResult.grant.grant_id, owner_account_id: "owner_route" });
+  assert.deepEqual(await live.shared(), []);
+  assert.deepEqual(live.removed, [{ projectId: room.id, session_id: turn, kind: "live" }], "the room is told once");
+});
+
+test("an owner's grant revocation that ends the worker removes the turn it shared", { skip: requiresDatabase }, async (t) => {
+  const lifecycle = await setupLifecycle();
+  const { room, grantResult } = lifecycle;
+  const live = await liveSharingHarness(lifecycle);
+  t.after(live.dispose);
+  const worker = await live.start("daemon:entry-revoked");
+  const turn = await live.share(worker.session_id, "Ran the tests");
+
+  // A retire or purge whose session end is refused (the host grant expired) revokes the grant instead.
+  const revoked = await authDb!.revokeSupervisorGrantAuthority({ grant_id: grantResult.grant.grant_id, owner_account_id: "owner_route" });
+  assert.deepEqual(revoked?.ended_session_ids, [worker.session_id]);
+  assert.deepEqual(await live.shared(), []);
+  assert.deepEqual(live.removed, [{ projectId: room.id, session_id: turn, kind: "live" }]);
+});
+
+test("retiring an agent whose restart never came back removes the turn it shared", { skip: requiresDatabase }, async (t) => {
+  const lifecycle = await setupLifecycle();
+  const { room, grantResult } = lifecycle;
+  const live = await liveSharingHarness(lifecycle);
+  t.after(live.dispose);
+  const worker = await live.start("daemon:entry-stuck");
+  const turn = await live.share(worker.session_id, "Ran the tests");
+  const otherTurn = await live.otherAgentShares("Edited a file");
+  await live.end(worker.session_id, { restarting: true });
+  assert.deepEqual(await live.shared(), [otherTurn, turn].sort());
+
+  // The new runtime never minted a session, so the retire has only the grant to revoke.
+  const revoked = await authDb!.revokeSupervisorGrantAuthority({ grant_id: grantResult.grant.grant_id, owner_account_id: "owner_route" });
+  assert.deepEqual(revoked?.ended_session_ids, []);
+  assert.deepEqual(await live.shared(), [otherTurn], "an agent outside the grant keeps its turn");
+  assert.deepEqual(live.removed, [{ projectId: room.id, session_id: turn, kind: "live" }]);
+});
+
+test("a repository revocation revokes every grant even when one cannot remove its agent's turn", { skip: requiresDatabase }, async (t) => {
+  const lifecycle = await setupLifecycle();
+  const { room, agent, grantResult } = lifecycle;
+  const live = await liveSharingHarness(lifecycle);
+  t.after(live.dispose);
+  const now = new Date().toISOString();
+  await client!.db.insert(schema!.room_git_bindings).values({
+    room_id: room.id, provider: "github", host: "github.com", repository_id: "repo_live_sweep",
+    repository_full_name: "BrosInCode/live-sweep", repository_owner: "BrosInCode", repository_name: "live-sweep",
+    ref_type: "default_branch", ref_name: "main", default_branch: "main", base_ref: null, head_ref: null,
+    head_repository_id: null, head_repository_full_name: null, head_repository_owner: null, head_repository_name: null,
+    visibility: "private", is_default: true, source: "webhook", created_at: now, updated_at: now,
+  });
+  // The first agent restarted and never came back; its turn waits for a sweep.
+  const stuck = await live.start("daemon:entry-stuck");
+  const stuckTurn = await live.share(stuck.session_id, "Ran the tests");
+  await live.end(stuck.session_id, { restarting: true });
+  // A second agent of the owner works in the room under its own grant.
+  const second = await authDb!.registerAgentIdentity({ canonical_key: "owner/second-agent", name: "second-agent", display_name: "Second Agent", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
+  const secondGrant = await authDb!.createSupervisorHostGrant({
+    owner_account_id: "owner_route", host_id: "host_route", installation_id: "install_route_second",
+    allowed_room_ids: [room.id], allowed_agent_keys: [second.canonical_key],
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const mint = lifecycle.handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions");
+  const minted = recorder();
+  await mint({ ...live.asGrant(secondGrant.grant), body: { generation: 1, room_id: room.id, agent_key: second.canonical_key, agent_instance_id: "daemon:entry-second" } }, minted);
+  assert.equal(minted.statusCode, 201, JSON.stringify(minted.body));
+  const secondTurn = await live.share((minted.body as any).session_id, "Edited a file", room.id, second.canonical_key);
+
+  // Another transaction holds the first agent's live-activity lock, so its sweep times out.
+  const holder = await client!.pool.connect();
+  try {
+    await holder.query("BEGIN");
+    await holder.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [JSON.stringify(["live_activity", room.id, agent.canonical_key])]);
+    const revoked = await authDb!.revokeSupervisorGrantsForRepositoryAccessChange({
+      repository_full_name: "BrosInCode/live-sweep",
+      canonical_room_id: "github.com/brosincode/live-sweep",
+      owner_login: "owner_route",
+    });
+    assert.deepEqual(new Set(revoked.revoked_grant_ids), new Set([grantResult.grant.grant_id, secondGrant.grant.grant_id]));
+    assert.deepEqual(revoked.ended_session_ids, [(minted.body as any).session_id]);
+  } finally {
+    await holder.query("ROLLBACK");
+    holder.release();
+  }
+  // The second agent's turn went with its session; the first keeps its turn until retention.
+  assert.deepEqual(await live.shared(), [stuckTurn]);
+  assert.deepEqual(live.removed, [{ projectId: room.id, session_id: secondTurn, kind: "live" }]);
+});
+
+test("moving a supervised agent removes the turn it shared from the room it left", { skip: requiresDatabase }, async (t) => {
+  const lifecycle = await setupLifecycle();
+  const { room, agent } = lifecycle;
+  const live = await liveSharingHarness(lifecycle);
+  t.after(live.dispose);
+  const destination = await authDb!.createProjectWithName("supervisor-move-destination");
+  const source = await live.start("daemon:entry-moved");
+  const sourceTurn = await live.share(source.session_id, "Ran the tests");
+
+  // The desktop's move ends the source session with no flag, then mints in the destination under a new grant.
+  await live.end(source.session_id);
+  assert.deepEqual(await live.shared(), []);
+  assert.deepEqual(live.removed, [{ projectId: room.id, session_id: sourceTurn, kind: "live" }]);
+  const destinationGrant = await authDb!.createSupervisorHostGrant({
+    owner_account_id: "owner_route", host_id: "host_route", installation_id: "install_route_destination",
+    allowed_room_ids: [destination.id], allowed_agent_keys: [agent.canonical_key],
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const moved = await live.start("daemon:entry-moved", destination.id, live.asGrant(destinationGrant.grant));
+  const destinationTurn = await live.share(moved.session_id, "Read a file", destination.id);
+  await assert.rejects(live.share(source.session_id, "Late snapshot"), live.LiveActivityWorkerEndedError);
+  assert.deepEqual(await live.shared(), [], "the room it left shows nothing");
+  assert.deepEqual(await live.shared(destination.id), [destinationTurn]);
+});
+
+test("a bearer rotation or a restart in the same room keeps the turn the agent shared", { skip: requiresDatabase }, async (t) => {
+  const lifecycle = await setupLifecycle();
+  const { room, agent } = lifecycle;
+  const live = await liveSharingHarness(lifecycle);
+  t.after(live.dispose);
+  const worker = await live.start("daemon:entry-restarted");
+  const turn = await live.share(worker.session_id, "Ran the tests");
+
+  await live.rotate(worker.session_id, worker.worker_bearer_id);
+  // Minting again for the live session rotates its bearer in place.
+  const rotated = await live.start("daemon:entry-restarted");
+  assert.equal(rotated.session_id, worker.session_id);
+  assert.deepEqual(await live.shared(), [turn]);
+
+  // Runtime recovery ends the session and starts the agent again in this room.
+  await live.end(worker.session_id, { restarting: true });
+  assert.deepEqual(await live.shared(), [turn]);
+  const restarted = await live.start("daemon:entry-restarted");
+  assert.notEqual(restarted.session_id, worker.session_id);
+  const reasoning = await import("../db/reasoning.js");
+  assert.ok(await reasoning.updateLiveActivitySession({
+    room_id: room.id, session_id: turn, agent_key: agent.canonical_key,
+    snapshot: { summary: "Ran the tests again", status: "working", live: (await authDb!.getReasoningSessionById(room.id, turn))!.latest_payload.live! },
+  }), "the restarted agent keeps updating its turn");
+  assert.deepEqual(await live.shared(), [turn]);
+  assert.deepEqual(live.removed, []);
+});
+
 test("supervisor worker retry collapses all historical active duplicates before rotating the retained session", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const common = {

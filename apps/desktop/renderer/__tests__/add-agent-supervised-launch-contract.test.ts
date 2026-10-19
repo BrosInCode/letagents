@@ -143,7 +143,7 @@ test("Try again converges a durable launch entry instead of creating a second ag
   assert.match(retryBody, /if \(!entry\) \{[\s\S]*?view\.value\?\.failed[\s\S]*?await startManagedAgent\(\{ retryingPreDurableLaunch: true \}\)/);
   assert.match(retryBody, /supervisor\.setDesiredState\(entry\.id, "running"\)/);
   assert.match(retryBody, /supervisedLaunch\.complete\(updated\)/);
-  assert.match(retryBody, /managedSessionsContext\.refresh\(\)/);
+  assert.match(retryBody, /supervisorEntries\.refresh\(\)/);
   assert.match(controllerSource, /const retryingSamePreDurableLaunch = \([\s\S]*?supervisedLaunchView\.value\.durable === false[\s\S]*?!supervisedConflict\.value/);
   assert.match(controllerSource, /hasActiveLaunch: Boolean\([\s\S]*?supervisedConflict\.value[\s\S]*?!retryingSamePreDurableLaunch/);
 });
@@ -174,7 +174,7 @@ test("Add Agent modal requires first recovery consent and restores previously at
     launchRecoverySource.indexOf("async function recover"),
     launchRecoverySource.indexOf("function offer"),
   );
-  assert.match(recoveryBody, /supervisor\.resumeOwnershipTransfer\(entry\.id\)/);
+  assert.doesNotMatch(recoveryBody, /resumeOwnershipTransfer/);
   assert.doesNotMatch(recoveryBody, /supervisor\.setDesiredState\(entry\.id,\s*"running"\)/);
   assert.match(recoveryBody, /options\.rememberLaunch\(roomIdentifier, entry\.id\)/);
   assert.match(recoveryBody, /options\.activate\(entry\)/);
@@ -187,18 +187,18 @@ test("Add Agent modal requires first recovery consent and restores previously at
   assert.match(launchComponentSource, /<AddAgentRecoveryNotice/);
   assert.match(modalSource, /@recover-launch="handleRecoverSupervisedLaunch"/);
   assert.match(actionBarSource, /props\.canStartBase[\s\S]*?canStartNewSupervisedLaunch\(\{/);
-  assert.match(controllerSource, /canStartNewSupervisedLaunch\(\{[\s\S]*?hasRecoveryCandidate: Boolean\(supervisedRecoveryCandidate\.value\)/);
+  assert.match(controllerSource, /canStartNewSupervisedLaunch\(\{[\s\S]*?recoveringCandidate: recoveringSupervisedCandidate\.value/);
+  assert.doesNotMatch(controllerSource, /hasRecoveryCandidate|supportsConcurrentAgents|concurrent_supervised_agents/);
+  assert.doesNotMatch(actionBarSource, /hasRecoveryCandidate|supportsConcurrentAgents|concurrent_supervised_agents/);
   assert.match(controllerSource, /supervisedLaunch\.offerRecoveryCandidate\(entry\)/);
   assert.match(controllerSource, /supervisedLaunch\.offerAmbiguousCreationCandidate\(/);
   assert.match(controllerSource, /candidate\.provider !== selectedProviderId\.value/);
-  assert.match(controllerSource, /watch\(\[supervisedRecoveryCandidate, supervisedConflict, selectedProvider\]/);
-  assert.match(controllerSource, /provider\?\.id === recoveryEntry\.provider[\s\S]*?launchMode\.value = "supervised"/);
 });
 
 test("failed recovery scans allow a new launch without hiding real setup blockers", () => {
   assert.match(actionBarSource, /recoveryScanStatus\.value === "error"[\s\S]*?"Start new agent"/);
   assert.ok(
-    actionBarSource.indexOf('v-else-if="launchMode === \'supervised\' && charterMissing"')
+    actionBarSource.indexOf('v-else-if="supervisedProvider && charterMissing"')
       < actionBarSource.indexOf('recoveryScanStatus !== \'ready\''),
     "charter guidance must precede the non-blocking recovery error copy",
   );
@@ -210,7 +210,7 @@ test("an active supervised launch owns the action bar instead of stale preflight
   assert.match(actionBarSource, /v-if="!activeSupervisedLaunch" class="desktop-add-agent-action-buttons"/);
   assert.match(actionBarSource, /activeSupervisedLaunch\.ready[\s\S]*?is active in this room/);
   assert.match(actionBarSource, /activeSupervisedLaunch = computed\(\(\) => props\.supervised\.launch\.view\.value\)/);
-  assert.doesNotMatch(actionBarSource, /if \(props\.launchMode !== "supervised"\) return null/);
+  assert.doesNotMatch(actionBarSource, /launchMode/);
   assert.doesNotMatch(actionBarSource, /progress && !progress\.failed && !progress\.stopped/);
   assert.match(actionBarSource, /activeSupervisedLaunch\.agentName \|\| activeSupervisedLaunch\.providerLabel/);
   assert.match(actionBarSource, /activeSupervisedLaunch\.status === "stopping"[\s\S]*?is stopping/);
@@ -240,17 +240,18 @@ test("bounded supervised defaults never tell providers to own polling and Claude
   assert.match(presentationSource, /return "Managed at launch"/);
   assert.match(
     configurationSource,
-    /Join the room, check the board, and help move the available work forward/,
+    /You are part of this room's team\. Work on the tasks assigned to you/,
   );
   assert.match(presentationSource, /showEffortSelector = computed\(\(\) =>\s*selectedProviderId\.value === "codex"\s*\)/);
   assert.doesNotMatch(presentationSource, /showEffortSelector[\s\S]{0,160}claude-code/);
 });
 
-test("supervised creation presents the first task as a one-time message", () => {
-  assert.match(runtimeSettingsSource, /<small>First task<\/small>/);
+test("supervised creation presents the first message as a one-time message, not a task", () => {
+  assert.match(runtimeSettingsSource, /<small>First message<\/small>/);
+  assert.doesNotMatch(runtimeSettingsSource, /<small>First task<\/small>/);
   assert.match(runtimeSettingsSource, /It is sent once/);
   assert.doesNotMatch(runtimeSettingsSource, /<small>Charter<\/small>/);
-  assert.match(actionBarSource, /Add a first task to start the agent/);
+  assert.match(actionBarSource, /Add a first message to start the agent/);
 });
 
 test("supervised providers expose their supervised permission presentation instead of forcing read-only", () => {
@@ -275,9 +276,23 @@ test("the supervised action island owns complete responsive interaction styles",
 });
 
 test("new launches cannot call the desktop-owned execution path", () => {
-  assert.doesNotMatch(controllerSource, /managedLaunch\.start|useManagedAgentLaunch/);
-  assert.match(controllerSource, /const requestLaunchMode = launchMode\.value;/);
+  assert.doesNotMatch(controllerSource, /managedLaunch\.start|useManagedAgentLaunch|launchMode/);
+  assert.match(controllerSource, /if \(!hasSupervisedRuntime\(selectedProvider\.value\)\) return;/);
   assert.match(setupSource, /onBeforeUnmount\(resetTransientState\)/);
+});
+
+test("the Add Agent flow has no desktop-owned launch path left", () => {
+  const legacy = /launchMode|launch-mode|deliveryMode|cursorMcp|CursorMcp|DesktopManagedRuntime|desktop_managed_runtime|desktop_events|ManagedAgentSession|managed-session-started|managed-agent-sessions-context/;
+  for (const source of [
+    modalSource,
+    actionBarSource,
+    controllerSource,
+    configurationSource,
+    presentationSource,
+    setupSource,
+  ]) {
+    assert.doesNotMatch(source, legacy);
+  }
 });
 
 test("supervised start rechecks secure storage before creating a launch", () => {

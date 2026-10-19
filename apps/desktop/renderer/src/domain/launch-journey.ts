@@ -270,15 +270,47 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
     const manifest = supervisedLaunchProgress(entry);
     const agentName = manifest.agentName;
     const ctx = { providerLabel, roomLabel, agentName };
+    // A stop of an agent that already reached ready is a lifecycle stop, not a
+    // cancelled launch — the launch succeeded and was later retired. Uses the
+    // durable ready stamp, consistent with the electron cancel gate.
+    const everReady = entry.readyReachedAt != null;
+    // A saved entry whose desktop-side setup failed is a failed launch, not a
+    // cancelled one. The daemon never hears why; this session's terminal
+    // launch event does. The entry is normally stopped by then (or still
+    // converging to stopped); when that stop itself could not be applied the
+    // entry stays running but nothing has started, and it is still a failure.
+    const neverStarted = entry.desiredState === "running" && entry.observedState === "absent";
+    const failedAfterSave = (manifest.stopped || manifest.stopping || neverStarted)
+      && !everReady
+      && terminal !== null
+      && terminal.type !== "launch.cancelled";
+    if (failedAfterSave) {
+      const status: LaunchJourneyStatus = terminal.type === "launch.blocked" ? "blocked" : "failed";
+      const keychainBlocked = terminal.recovery === "open_keychain";
+      return {
+        phases: buildPhases({ activeIndex: SAVING, failedIndex: SAVING, ready: false, settled: false }, ctx),
+        currentPhaseId: JOURNEY_PHASE_ORDER[SAVING]!,
+        status,
+        durable: true,
+        ready: false,
+        failed: true,
+        stopped: false,
+        stopFailed: false,
+        agentName: null,
+        providerLabel,
+        headline: keychainBlocked ? "Unlock Keychain to finish setup" : headlineFor("failed", ctx),
+        failureDetail: terminal.detail ?? "LetAgents saved this agent but couldn’t finish setting it up.",
+        failureImpact: "The saved agent was stopped. Your room and project are unchanged.",
+        failureDiagnostic: terminal.diagnostic ?? null,
+        recovery: terminal.recovery ?? "retry",
+        joinHint: null,
+      };
+    }
     const manifestActiveOffset = manifest.phases.findIndex((phase) => phase.state === "active" || phase.state === "failed");
     const activeIndex = manifest.ready
       ? JOURNEY_PHASE_ORDER.length - 1
       : PREPARING + Math.max(manifestActiveOffset, 0);
     const failedIndex = manifest.failed ? activeIndex : null;
-    // A stop of an agent that already reached ready is a lifecycle stop, not a
-    // cancelled launch — the launch succeeded and was later retired. Uses the
-    // durable ready stamp, consistent with the electron cancel gate.
-    const everReady = entry.readyReachedAt != null;
 
     const phases = buildPhases(
       {
@@ -321,12 +353,11 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
         : headlineFor(status, ctx, { stoppedAfterReady: everReady }),
       failureDetail: manifest.failed ? manifest.failureDetail : null,
       failureImpact: null,
-      // The durable entry cannot store why a pre-activation step threw — the
-      // daemon never hears about it. The terminal launch event from this
-      // session can; surface it as the progressively disclosed diagnostic
-      // instead of leaving only the generic ownership-transfer copy.
+      // The durable entry cannot store why an Electron-side setup step threw;
+      // the daemon never hears about it. The terminal launch event from this
+      // session can, so surface it as the progressively disclosed diagnostic.
       failureDiagnostic: manifest.failed ? terminal?.diagnostic ?? null : null,
-      recovery: manifest.failed && !manifest.recoverableBlocked && !manifest.stopFailed && !manifest.ownershipPaused
+      recovery: manifest.failed && !manifest.recoverableBlocked && !manifest.stopFailed
         ? manifestRecovery(entry, input.hasSignInCommand ?? false)
         : null,
       joinHint: status === "in_progress" ? manifest.compacting ? manifest.joinHint : JOIN_HINT : null,

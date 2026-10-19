@@ -130,9 +130,34 @@
         class="room-local-agent-work-list"
         data-testid="room-local-agent-work-list"
       >
-        <template v-for="work in collapsedAgentWork.visible" :key="work.id">
+        <div v-for="work in collapsedAgentWork.visible" :key="work.id" class="room-local-agent-work-group">
+          <!-- Another member's agent, known from room presence only: a label, since this desktop has no live stream to open. -->
+          <div
+            v-if="work.remote"
+            data-motion-work=""
+            :data-motion-session="work.agentSessionId"
+            :data-motion-agent="work.agentKey"
+            data-remote="true"
+            role="group"
+            class="room-local-agent-work"
+            :aria-label="`${work.displayName} is working: ${work.summary}`"
+            data-testid="room-local-agent-work"
+          >
+            <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
+            <span class="room-local-agent-work-copy" aria-hidden="true">
+              <strong>{{ work.displayName }}</strong>
+              <span>·</span>
+              <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
+            </span>
+            <span class="room-local-agent-work-dots" aria-hidden="true">
+              <i></i>
+              <i></i>
+              <i></i>
+            </span>
+          </div>
           <button
-            data-motion-work
+            v-else
+            :data-motion-work="work.awaitingRoomTurn ? undefined : ''"
             :data-motion-session="work.agentSessionId"
             :data-motion-agent="work.agentKey"
             :data-motion-after="work.sourceMessageId"
@@ -164,7 +189,7 @@
           >
             Post answer now
           </button>
-        </template>
+        </div>
         <p
           v-if="collapsedAgentWork.hiddenCount > 0"
           class="room-local-agent-work-overflow"
@@ -521,7 +546,7 @@ const currentLocalAgentWork = computed(() => {
 const workHandoff = useRoomWorkHandoff({
   work: () => currentLocalAgentWork.value,
   identity: work => ({ session: work.agentSessionId, key: work.agentKey }),
-  after: work => work.sourceMessageId,
+  after: work => work.awaitingRoomTurn ? null : work.sourceMessageId,
   // A thread reply retires its source work just like a main-timeline reply.
   // Keep the animation watcher above restricted to rows rendered in this list.
   messages: () => [...props.messages, ...props.threadMessages].sort(compareRoomMessages).map(toMotionMessage),
@@ -553,7 +578,7 @@ watch(
   { immediate: true, deep: true },
 );
 
-const collapsedAgentWork = computed(() => collapseWorkIndicators(displayedAgentWork.value));
+const collapsedAgentWork = computed(() => collapseWorkIndicators(displayedAgentWork.value, 0));
 
 watch(
   // Key off the rate-limited displayed set (not raw props) so scroll effects

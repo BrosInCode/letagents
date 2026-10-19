@@ -1,9 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { DesktopCodexJoinedVia } from "./state.js";
-import type { DesktopManagedAgentDeliveryMode } from "../../ipc-types.js";
 import { LETAGENTS_CODENAME_EXAMPLES } from "./codenames.js";
-import { DESKTOP_EVENTS_NO_ROOM_REPLY } from "./codex-event-prompt.js";
 
 export const DEFAULT_CODEX_STOP_PHRASE = "/stop-codex-room";
 
@@ -29,17 +27,6 @@ export function makeCodexStopToken(): string {
   return `LOCAL_CODEX_ROOM_${randomUUID()}`;
 }
 
-export function formatCodexDeadline(minutes: number): { utc: string | null } {
-  if (minutes <= 0) {
-    return { utc: null };
-  }
-
-  const deadline = new Date(Date.now() + minutes * 60 * 1000);
-  return {
-    utc: deadline.toISOString().replace("T", " ").replace(".000Z", " UTC"),
-  };
-}
-
 function buildJoinInstruction(joinedVia: DesktopCodexJoinedVia, roomIdentifier: string): string {
   if (joinedVia === "join_code") {
     return `Call the LetAgents MCP tool join_code with ${JSON.stringify({ code: roomIdentifier, session_mode: "current" })}.`;
@@ -61,7 +48,6 @@ export function buildCodexStartPrompt(input: {
   roomIdentifier: string;
   joinedVia: DesktopCodexJoinedVia;
   cwd: string;
-  deliveryMode: DesktopManagedAgentDeliveryMode;
   stopPhrase: string;
   token: string;
   suggestedDisplayName: string;
@@ -83,36 +69,13 @@ export function buildCodexStartPrompt(input: {
     ? [
       "Codex room activation policy: every observed message remains shared transcript context, and you must advance the cursor for every observed message (including last_observed_message_id when no visible messages are returned).",
       "Only reply or start work for a direct @mention of your exact ID/name, a literal @everyone broadcast, a task assigned or actively leased to your exact worker, or a reply/thread where you were directly addressed or are already a participant.",
-      "Remain silent for plain untagged top-level human or peer messages and unassigned task updates. Never react to your own output, and never answer another agent merely because it spoke; a routing signal is still required.",
+      "Remain silent for plain untagged top-level human or peer messages and unassigned task updates. Do not claim unassigned tasks on your own; work starts when a task is assigned to you. Never react to your own output, and never answer another agent merely because it spoke; a routing signal is still required.",
     ]
     : [];
   const deadlineInstruction =
     input.maxMinutes > 0 && input.deadlineUtc
       ? `Hard stop deadline: ${input.deadlineUtc}. Stop when the stop phrase appears or when that deadline is reached, whichever comes first.`
       : "There is no hard deadline. Stop only when the stop phrase appears or when you are interrupted.";
-
-  if (input.deliveryMode === "desktop_events") {
-    return [
-      "Start as a desktop-supervised local Codex worker for a LetAgents room.",
-      `Primary working directory: ${input.cwd}. Use this repository/worktree when future room events ask for implementation or repo work.`,
-      deadlineInstruction,
-      "",
-      "Bootstrap instructions:",
-      `1. The LetAgents desktop app has already registered this room worker as ${input.suggestedDisplayName}.`,
-      "2. Do not call LetAgents MCP room tools during bootstrap. This app-server surface may not expose them.",
-      "3. Do not call wait_for_messages. The desktop app will send room events into this same Codex thread as future turns.",
-      `4. Finish this bootstrap turn with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
-      "",
-      "Future event turns:",
-      "- When the desktop sends a room event, decide whether action is needed.",
-      "- If action is useful, do the local work and make your final answer the public room reply the desktop should publish as you.",
-      `- If no public room reply is needed, finish with exactly ${DESKTOP_EVENTS_NO_ROOM_REPLY}.`,
-      "- The room transcript is shared context; an activation decision never limits what earlier room or thread context you may read.",
-      "- Be concise, avoid duplicate responses, and do not narrate hidden chain-of-thought.",
-      `- Stop immediately if a future room message text exactly equals: ${input.stopPhrase}`,
-      `- When stopping, finish with exactly: ${input.token}_DONE`,
-    ].join("\n");
-  }
 
   if (input.resumeWorker) {
     const cursorInstruction = input.resumeWorker.roomCursor
@@ -156,17 +119,16 @@ export function buildCodexStartPrompt(input: {
     `6. Call register_agent_session with session_kind="worker", runtime=${JSON.stringify(`${runtimeKey}:${input.token}`)}, the same chosen display_name, and cwd=${JSON.stringify(input.cwd)}. Keep the returned agent_session_id.`,
     "7. Do not continue into the room loop until register_agent_session succeeds. If LetAgents MCP auth is required, call get_onboarding_status and finish with a short public setup-needed note instead of claiming availability.",
     "8. Pass that agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, post_reasoning, and task tools whenever the tool accepts it.",
-    "9. If get_board shows accepted unassigned work that is appropriate for you, claim it with claim_task using the registered agent_session_id before entering the wait loop.",
-    "10. Do not start another live session. Join the room inline in this worker only.",
-    "11. Keep polling with wait_for_messages using a 30000 ms timeout and track the latest seen message id.",
+    "9. Do not start another live session. Join the room inline in this worker only.",
+    "10. Keep polling with wait_for_messages using a 30000 ms timeout and track the latest seen message id.",
     ...(codexActivationRules.length
       ? codexActivationRules
-      : ["12. When new messages arrive, contribute when useful. Be concise, thoughtful, and non-repetitive."]),
-    "13. When the room asks for coding work, do the work locally in this repository: inspect files, edit code, run checks, commit when asked, and push only when explicitly requested.",
-    "14. Post short status updates to the room when you start meaningful work, when you are blocked, and when you finish meaningful work.",
-    "15. Also call post_reasoning for concise public progress summaries when you start meaningful work, become blocked, make a useful checkpoint, or finish useful work. This is readable progress for the desktop UI, not hidden chain-of-thought.",
-    `16. Stop immediately if a browser/user room message text exactly equals: ${input.stopPhrase}`,
-    `17. When stopping, reply in this thread with exactly: ${input.token}_DONE`,
+      : ["11. When new messages arrive, contribute when useful. Be concise, thoughtful, and non-repetitive. Act on work assigned to you and on messages addressed to you; do not claim unassigned tasks on your own."]),
+    "12. When the room asks for coding work, do the work locally in this repository: inspect files, edit code, run checks, commit when asked, and push only when explicitly requested.",
+    "13. Post short status updates to the room when you start meaningful work, when you are blocked, and when you finish meaningful work.",
+    "14. Also call post_reasoning for concise public progress summaries when you start meaningful work, become blocked, make a useful checkpoint, or finish useful work. This is readable progress for the desktop UI, not hidden chain-of-thought.",
+    `15. Stop immediately if a browser/user room message text exactly equals: ${input.stopPhrase}`,
+    `16. When stopping, reply in this thread with exactly: ${input.token}_DONE`,
     "",
     "Constraints:",
     "- Do not narrate hidden chain-of-thought.",

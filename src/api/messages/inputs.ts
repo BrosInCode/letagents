@@ -69,9 +69,10 @@ export function parseCreateMessageBody(body: unknown): CreateMessageBody {
   }
   const record = body as Record<string, unknown>;
   const clientMessageId = optionalStringField(record, "client_message_id");
-  // Human answers commit their record and message together. Ordinary messages
-  // must not claim the key first and bypass that transaction on deduplication.
-  if (clientMessageId?.trim().startsWith("internal:attention-response:")) {
+  // Requests and human answers commit their record and message together.
+  // Ordinary messages must not claim the key first and bypass that
+  // transaction on deduplication.
+  if (/^internal:attention-(?:request|response):/.test(clientMessageId?.trim() ?? "")) {
     throw new RequestValidationError("client_message_id uses a reserved namespace");
   }
   return {

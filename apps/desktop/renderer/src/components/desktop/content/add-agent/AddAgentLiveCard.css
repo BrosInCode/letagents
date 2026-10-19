@@ -84,15 +84,6 @@
   white-space: nowrap;
 }
 
-.desktop-add-agent-managed-session-actions {
-  grid-column: 2;
-  grid-row: 1 / span 3;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
 .desktop-add-agent-managed-session > .desktop-add-agent-feedback {
   grid-column: 1 / -1;
 }
@@ -112,11 +103,6 @@
 
 @media (max-width: 680px) {
   .desktop-add-agent-managed-session { grid-template-columns: minmax(0, 1fr); }
-  .desktop-add-agent-managed-session-actions {
-    grid-column: 1;
-    grid-row: auto;
-    justify-content: flex-start;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -131,12 +117,6 @@
   .desktop-add-agent-managed-session button:hover:not(:disabled) {
     border-color: rgba(255, 255, 255, 0.18);
     color: var(--text);
-  }
-
-  .desktop-add-agent-managed-session-danger:hover:not(:disabled) {
-    border-color: rgba(248, 113, 113, 0.32);
-    background: rgba(248, 113, 113, 0.12);
-    color: #fca5a5;
   }
 }
 

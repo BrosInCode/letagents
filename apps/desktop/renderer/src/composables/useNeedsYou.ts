@@ -1,9 +1,10 @@
-import { computed, onBeforeUnmount, onScopeDispose, ref, watch, type Ref } from 'vue';
+import { computed, onBeforeUnmount, onScopeDispose, ref, toRaw, watch, type Ref } from 'vue';
 import type { DesktopAccountActivityState } from '../../../electron/ipc-types';
 import type { DesktopAttentionRoom, DesktopNeedsYou } from '../../../electron/ipc-types/knowledge.js';
 import type { DesktopRoomThreadInboxPage } from '../../../electron/ipc-types.js';
 import { desktopBridgeUpgradeMessage, desktopIpc } from '../ipc/index.js';
 import { roomReadKey } from '../domain/desktop-room-read-state';
+import { reuseUnchanged } from '../domain/reuse-unchanged';
 
 export function useNeedsYou() {
   const data = ref<DesktopNeedsYou | null>(null);
@@ -26,22 +27,15 @@ export function useNeedsYou() {
     loading.value = true;
     try {
       if (!desktopIpc.room?.getNeedsYou) throw new Error(desktopBridgeUpgradeMessage());
-      const [result, sessions] = await Promise.all([
-        desktopIpc.room.getNeedsYou(includeUpdates),
-        includeUpdates
-          ? (desktopIpc.workers?.listManagedAgentSessions?.() ?? Promise.reject(new Error('Agent sessions unavailable')))
-            .then(managedSessions => ({ managedSessions, managedSessionsUnavailable: false }))
-            .catch(() => ({ managedSessions: [], managedSessionsUnavailable: true }))
-          : Promise.resolve({}),
-      ]);
-      Object.assign(result, sessions);
+      const result = await desktopIpc.room.getNeedsYou(includeUpdates);
       if (current === generation) {
         for (const room of result.rooms) {
           const newer = (roomReadAt.get(room.roomIdentifier) ?? 0) > startedAt
             ? data.value?.rooms.find(item => item.roomIdentifier === room.roomIdentifier) : undefined;
           if (newer) Object.assign(room, requestsOf(newer)); else roomReadAt.set(room.roomIdentifier, startedAt);
         }
-        data.value = result; error.value = '';
+        // A poll that found nothing new keeps every reference, so Inbox does not re-render.
+        data.value = reuseUnchanged(toRaw(data.value), result); error.value = '';
       }
     } catch (cause) { if (current === generation) error.value = cause instanceof Error ? cause.message : 'Unable to load Inbox.'; }
     finally {

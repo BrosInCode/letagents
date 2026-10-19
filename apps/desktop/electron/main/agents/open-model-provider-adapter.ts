@@ -1,4 +1,4 @@
-import { formatRoomTurnContext, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
+import { formatRoomTurnContext, includedRoomTurnImages, MANAGED_ROOM_WORK_INSTRUCTIONS } from "./desktop-event-prompt-format.js";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -28,6 +28,7 @@ import {
   type ProviderRoomTurnOptions,
   type ProviderRoomTurnRecoveryRequest,
   type ProviderRoomTurnRequest,
+  type RoomTurnImageDelivery,
   type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
@@ -58,6 +59,7 @@ import {
   openCodeAuthContent,
   openCodeConfig,
   parseConfiguredOpenModel,
+  parseConfiguredOpenModelImageInput,
   seedOpenCodeConfigHome,
   shieldOwnerInstructions,
   supervisedOpenCodeMcpEnvironment,
@@ -65,6 +67,7 @@ import {
   supervisedOpenCodePermissionProfileId,
 } from "./opencode-launch-contract.js";
 import { managedCommitEnvironmentFor } from "./managed-agent-commit-identity.js";
+import { resolveOpenModelLimits } from "./open-model-limits.js";
 import { OPENCODE_RUNTIME_VERSION, resolveOpenCodeBinary } from "./opencode-runtime.js";
 import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
@@ -154,6 +157,18 @@ export type OpenCodePermissionObservation =
   | { type: "snapshot"; requests: OpenCodePermissionRequest[] }
   | { type: "degraded" }
   | { type: "unavailable"; reason: HardControlEvidence | "handle_replaced" };
+
+/**
+ * OpenCode takes an image as a file part with a data URL, and resizes a large
+ * one before it is saved with the session. Each image follows a short label.
+ */
+function roomTurnImageParts(request: ProviderRoomTurnRequest): Array<Record<string, unknown>> {
+  return includedRoomTurnImages(request.attachments).flatMap(image => image.data ? [
+    { type: "text", text: `Image ${image.number}: ${JSON.stringify(image.fileName)}` },
+    { type: "file", mime: image.mimeType, filename: image.fileName,
+      url: `data:${image.mimeType};base64,${Buffer.from(image.data.buffer, image.data.byteOffset, image.data.byteLength).toString("base64")}` },
+  ] : []);
+}
 
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
@@ -486,18 +501,18 @@ function safeProviderErrorMessage(message: OpenCodeMessage | null): string | nul
   const failure = messageError(message);
   if (!failure) return null;
   const status = failure.statusCode ? ` (HTTP ${failure.statusCode})` : "";
-  if (failure.statusCode === 402) {
-    return `Open Model request was rejected because the model provider account could not cover this turn's output budget${status}. Add provider credit or choose another model, then retry the unfinished work in LetAgents.`;
-  }
-  if (failure.statusCode === 403) {
-    // A forbidden response can require account attestation or model access,
-    // not a different API key. Preserve the provider's actionable explanation
-    // without publishing credentials or arbitrary provider-supplied URLs.
+  if (failure.statusCode === 402 || failure.statusCode === 403) {
+    // A 402 can announce a promotion ending rather than insufficient credit;
+    // a 403 can require account attestation or model access. Preserve the
+    // explanation without credentials or arbitrary provider-supplied URLs.
     const detail = redactCredentialText(failure.message ?? "").value
       .replace(/https?:\/\/\S+/gi, "provider settings")
       .replace(/\s+/g, " ")
       .trim()
       .slice(0, 320);
+    if (failure.statusCode === 402) {
+      return `Open Model request was rejected by the provider${status}${detail ? `: ${detail}` : ". The provider did not include an explanation."}`;
+    }
     return `Open Model access was denied by the provider${status}${detail ? `: ${detail}` : ". Check the provider's account requirements and model permissions, then retry the unfinished work in LetAgents."}`;
   }
   if (failure.statusCode === 401) {
@@ -506,8 +521,8 @@ function safeProviderErrorMessage(message: OpenCodeMessage | null): string | nul
   if (failure.statusCode === 429) {
     return `Open Model was rate-limited by the model provider${status}. Wait for the provider limit to reset, then retry the unfinished work in LetAgents.`;
   }
-  const detail = failure.message
-    ?.replace(/https?:\/\/\S+/gi, "provider settings")
+  const detail = redactCredentialText(failure.message ?? "").value
+    .replace(/https?:\/\/\S+/gi, "provider settings")
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 320);
@@ -534,12 +549,15 @@ class OpenModelHandle implements ProviderHandle {
   sequence = 0;
   terminal: ProviderTerminalPayload | null = null;
   activeRoomTurnId: string | null = null;
+  compaction: { messageId: string; startedAt: string } | null = null;
   /** True once every user message in the session is known to use OpenCode's ascending ID scheme. */
   nativeOrderingVerified = false;
   readonly execution: ProviderExecutionObserver;
   controlLoss: HardControlEvidence | null = null;
   observedTurn: { id: string; terminal: TurnOutcome | "lost" | null } | null = null;
   launchNotices: readonly string[] = [];
+  /** This runtime was started with image input for its model, so it takes the activating message's images. */
+  imageInput = false;
 
   constructor(
     readonly workAttemptId: string,
@@ -589,6 +607,27 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   }
 
   capabilities(): ProviderAdapterCapabilities { return { ...CAPABILITIES }; }
+
+  compactionProgress(workAttemptId: string): { state: "compacting"; startedAt: string } | null {
+    const handle = this.handles.get(workAttemptId);
+    return handle?.activeRoomTurnId && !handle.terminal && handle.compaction
+      ? { state: "compacting", startedAt: handle.compaction.startedAt } : null;
+  }
+
+  private observeCompaction(handle: OpenModelHandle, info: JsonRecord | null): void {
+    if (!info || info.sessionID !== undefined && info.sessionID !== handle.providerContinuationId) return;
+    const active = info.summary === true && typeof info.id === "string" && !messageCompleted({ info });
+    const previous = handle.compaction;
+    if (active) {
+      const created = record(info.time)?.created;
+      handle.compaction = { messageId: info.id as string, startedAt: previous && previous.messageId === info.id ? previous.startedAt
+        : typeof created === "number" && Number.isFinite(created) && Math.abs(created) < 8.64e15 ? new Date(created).toISOString() : this.deps.now() };
+    } else handle.compaction = null;
+    if (Boolean(previous) === Boolean(handle.compaction)) return;
+    this.emitStream(handle, { kind: "provider_event", method: "letagents/compaction",
+      summary: active ? "Compacting conversation" : "Conversation compaction ended",
+      payload: { state: active ? "compacting" : "ended" } });
+  }
 
   private async assertPriorStartupProcessGone(authPath: string): Promise<void> {
     let control: OpenCodeRuntimeControl;
@@ -689,14 +728,17 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       req,
       process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat",
     );
+    const limits = await resolveOpenModelLimits(credential, this.deps.fetch);
     const config = openCodeConfig({
       model: credential.model,
+      limits,
       baseUrl: credential.baseUrl,
       pluginUrl: pathToFileURL(pluginPath).href,
       cwd: req.cwd,
       mcpCommand,
       mcpEnvironment,
       permissionProfileId: supervisedOpenCodePermissionProfileId(req.permissionProfileId),
+      imageInput: req.imageInput === true,
     });
     const port = await this.deps.allocatePort();
     const url = `http://127.0.0.1:${port}`;
@@ -836,6 +878,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       this.deps.now,
     );
     handle.nativeOrderingVerified = true;
+    handle.imageInput = req.imageInput === true;
     if (launchNotice) handle.launchNotices = [launchNotice];
     this.handles.set(req.workAttemptId, handle);
     this.observeTerminal(handle, launch.exited);
@@ -884,7 +927,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     if (!sessions.some((session) => session.id === ref.providerContinuationId)) {
       throw new ProviderContinuationMissingError(ref.providerContinuationId);
     }
-    const configuredModel = parseConfiguredOpenModel(await client.config());
+    const runtimeConfig = await client.config();
+    const configuredModel = parseConfiguredOpenModel(runtimeConfig);
     if (!configuredModel) throw new Error("The attached OpenCode runtime has no configured Open Model.");
     // OpenCode looks for its instruction files again on every turn, so a
     // runtime launched before the shield existed gains it here. Unlike a
@@ -907,6 +951,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       "idle",
       this.deps.now,
     );
+    // The runtime keeps the configuration it started with, whatever was saved since.
+    handle.imageInput = parseConfiguredOpenModelImageInput(runtimeConfig);
     this.handles.set(ref.workAttemptId, handle);
     this.observeTerminal(handle, this.deps.observeProcessExit(connection.pid, connection.processIdentity));
     if (recoveredLegacyConnection) {
@@ -1003,6 +1049,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     throw new Error("Open Model does not support mid-turn message injection.");
   }
 
+  /** Only a runtime started with image input for its model takes images. */
+  roomTurnImageDelivery(rawHandle: ProviderHandle): RoomTurnImageDelivery {
+    try { return this.required(rawHandle).imageInput ? "memory" : null; } catch { return null; }
+  }
+
   async runRoomTurn(
     rawHandle: ProviderHandle,
     request: ProviderRoomTurnRequest,
@@ -1023,7 +1074,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         providerID: OPEN_MODEL_OPENCODE_PROVIDER_ID,
         modelID: handle.configuredModel,
       },
-      parts: [{ type: "text", text: boundedRoomTurnPrompt(request) }],
+      parts: [{ type: "text", text: boundedRoomTurnPrompt(request) }, ...(handle.imageInput ? roomTurnImageParts(request) : [])],
     }).catch((error) => {
       handle.setState("idle");
       throw error;
@@ -1731,6 +1782,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         this.emitMessageEvidence(handle, assistant, emittedLengths, toolStatuses,
           exactSession ? turnId : undefined);
       }
+      this.observeCompaction(handle, record(assistants.at(-1)?.info));
       enforceStepBound(assistants.length);
       const finalAssistant = finalAssistantFor(messages, turnId, turnUserIds);
       const finalInfo = record(finalAssistant?.info);
@@ -1844,6 +1896,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           && typeof info.id === "string") {
           assistantIds.add(info.id);
           if (info.summary === true) summaryIds.add(info.id);
+          this.observeCompaction(handle, info);
           if (info.sessionID === handle.providerContinuationId) typedAssistantIds.add(info.id);
           noteStep(info);
           enforceStepBound(assistantIds.size);
@@ -1903,8 +1956,25 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         if (event.type === "session.idle") {
           return resultAtSessionBoundary(await snapshot(), true);
         }
+        if (event.type === "session.compacted") {
+          this.observeCompaction(handle, {});
+          continue;
+        }
         if (event.type === "session.error") {
+          const error = record(properties?.error);
+          if (error) {
+            const summary = error.name === "ContextOverflowError"
+              ? "Model context limit reached. OpenCode is recovering the conversation."
+              : safeProviderErrorMessage({ info: { error } });
+            this.emitStream(handle, { kind: "provider_event", method: "letagents/providerNotice",
+              summary, payload: { kind: "provider_error" } });
+          }
           await snapshot();
+          // Context overflow is a recoverable OpenCode step: it emits session.error
+          // before creating its compaction message. A busy session can still answer.
+          if (await handle.client.status(handle.providerContinuationId) === "busy") continue;
+          // Native errors can precede the failed assistant's durable update. An
+          // earlier completed step is not evidence that this turn succeeded.
           return { turnId, outcome: "unreadable", text: null, evidence: "none" };
         }
       }
@@ -1915,6 +1985,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       }
       throw error;
     } finally {
+      this.observeCompaction(handle, {});
       controller.abort();
       signal?.removeEventListener("abort", detach);
       await events.return?.(undefined).catch(() => undefined);

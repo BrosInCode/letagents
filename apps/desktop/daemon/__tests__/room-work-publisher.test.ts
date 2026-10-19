@@ -16,6 +16,8 @@ import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult 
 import { captureRecordedRemoteTips } from "../../../../shared/workspace-turn-capture.mjs";
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
+import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
 
 async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex") {
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
@@ -540,6 +542,192 @@ test("capture hints expedite an existing retry timer and singleton loss never di
   assert.deepEqual(delays, [1000], "new evidence replaces the30s retry wake with a1s coalescing wake");
   f.operation(1); f.options.assertCurrent = async () => { throw new Error("stale singleton"); };
   await f.publisher.flush(); assert.equal(f.sent.length, 1); assert.equal(f.row().revision, 1);
+});
+
+test("settled delivery hints publish promptly without accelerating ordinary progress", async t => {
+  const f = await fixture(t); const attempt = f.captureMessage(); f.restart(); await f.publisher.flush();
+  const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+  const realTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
+  });
+  f.publisher.changed("agent");
+  assert.deepEqual(timers.map(timer => timer.delay), [1000]);
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  f.publisher.settled("agent");
+  assert.deepEqual(timers.map(timer => timer.delay), [1000, 0]);
+  clearTimeout(timers[1].timer); timers[1].fire();
+  for (let i = 0; i < 30 && f.row().acknowledgedRevision < 2; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.row().acknowledgedRevision, 2);
+  assert.equal(f.sent[1].summary.recorded_state, "completed_no_reply");
+  assert.equal(timers.at(-1)!.delay, 1000, "normal recovery sweep keeps its batching interval");
+});
+
+test("a settled hint survives its timer firing during an existing upload", async t => {
+  const f = await fixture(t); const attempt = f.captureMessage(); f.restart();
+  let release!: (result: RoomWorkPublishResult) => void;
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  f.options.publish = async input => { f.sent.push(input); started(); return new Promise(resolve => { release = resolve; }); };
+  const uploading = f.publisher.flush(); await ready;
+  const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+  const realTimeout = globalThis.setTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
+  });
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  f.publisher.settled("agent");
+  clearTimeout(timers[0].timer); timers[0].fire();
+  release("acknowledged"); await uploading;
+  assert.deepEqual(timers.map(timer => timer.delay), [0, 0], "the busy flush preserves an immediate next wake");
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  clearTimeout(timers[1].timer); timers[1].fire();
+  for (let i = 0; i < 30 && f.row().acknowledgedRevision < 2; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(f.row().acknowledgedRevision, 2);
+  assert.equal(f.sent[1].summary.recorded_state, "completed_no_reply");
+});
+
+for (const provider of ["codex", "claude-code"] as const) {
+  test(`${provider} completed silence is published ahead of the same agent's history after restart`, async t => {
+    const f = await fixture(t, provider);
+    for (let id = 1; id <= 12; id++) {
+      const oldAttempt = f.captureMessage(id);
+      f.fact(id, { state: "terminal", turnOutcome: "completed" });
+      f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(oldAttempt);
+      f.receipts.stage(f.row(id), f.summary(id));
+      f.receipts.acknowledge(f.row(id));
+    }
+    const attempt = f.captureMessage(99);
+    // The server already knows the live turn is active. Older records still
+    // need recovery work, as on a busy Room with many prior thread messages.
+    f.receipts.stage(f.row(99), f.summary(99));
+    f.receipts.acknowledge(f.row(99));
+    f.restart();
+    f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+    f.publisher.settled("agent");
+    await f.publisher.flush();
+    assert.equal(f.sent[0]?.sourceMessageId, "msg_99", "completed silence must not sit behind older records of the same agent");
+    assert.equal(f.sent[0]?.summary.recorded_state, "completed_no_reply");
+    assert.equal(f.row(99).acknowledgedRevision, 2);
+    assert.equal(f.sent.length, 1, "unchanged historical evidence does not get re-uploaded");
+  });
+}
+
+test("completion reserves one bounded upload slot without skipping retry backoff or starving older progress", async t => {
+  const f = await fixture(t);
+  let now = Date.parse("2026-08-31T00:00:00Z"); f.options.now = () => now;
+  for (let id = 1; id <= 8; id++) {
+    f.captureMessage(id);
+    f.fact(id, { state: "terminal", turnOutcome: "completed" });
+    // A native terminal alone does not authorize delivery completion.
+    f.receipts.stage(f.row(id), f.summary(id));
+  }
+  const attempt = f.captureMessage(99);
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  f.receipts.stage(f.row(99), f.summary(99));
+  f.restart();
+  f.options.publish = async input => {
+    f.sent.push(input);
+    if (input.sourceMessageId === "msg_99") throw new Error("temporary offline");
+    return "acknowledged";
+  };
+  f.publisher.settled("agent"); await f.publisher.flush();
+  assert.deepEqual(f.sent.map(item => item.sourceMessageId), ["msg_99", "msg_1", "msg_2", "msg_3"]);
+  assert.equal(f.row(99).acknowledgedRevision, 0);
+  await f.publisher.flush();
+  assert.deepEqual(f.sent.slice(4).map(item => item.sourceMessageId), ["msg_4", "msg_5", "msg_6", "msg_7"]);
+  assert.equal(f.sent.filter(item => item.sourceMessageId === "msg_99").length, 1, "a completion hint does not waive failed-publication backoff");
+  now += 30_000;
+  f.options.publish = async input => { f.sent.push(input); return "acknowledged"; };
+  await f.publisher.flush();
+  assert.deepEqual(f.sent.slice(8).map(item => item.sourceMessageId), ["msg_99", "msg_8"]);
+  assert.equal(f.row(99).acknowledgedRevision, 1);
+});
+
+test("settled hints retain bounded retries when authority fails before consumption", async t => {
+  const f = await fixture(t); f.captureMessage(); f.restart();
+  const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
+  const cleared = new Set<ReturnType<typeof setTimeout>>();
+  const realTimeout = globalThis.setTimeout;
+  const realClear = globalThis.clearTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
+  });
+  t.mock.method(globalThis, "clearTimeout", (timer: ReturnType<typeof setTimeout>) => {
+    cleared.add(timer); realClear(timer);
+  });
+  f.options.assertCurrent = async () => {
+    f.publisher.settled("agent"); // A fresh hint can arrive while the pass awaits authority.
+    throw new Error("singleton lost");
+  };
+  f.publisher.settled("agent");
+  clearTimeout(timers[0].timer); timers[0].fire();
+  for (let i = 0; i < 10; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.deepEqual(timers.map(timer => timer.delay), [0, 0, 30_000]);
+  assert.ok(cleared.has(timers[1].timer), "the failure replaces the in-flight immediate wake");
+  assert.equal(f.sent.length, 0);
+  clearTimeout(timers[2].timer); timers[2].fire();
+  for (let i = 0; i < 10; i++) await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(timers.at(-1)!.delay, 30_000, "persistent loss never creates an immediate retry loop");
+  f.options.assertCurrent = async () => {};
+  await f.publisher.flush();
+  assert.equal(f.sent.length, 1, "the retained hint is recoverable when authority returns");
+});
+
+for (const provider of ["codex", "claude-code"] as const) {
+  test(`${provider} no-reply completion bypasses historical agents in the recovery sweep`, async t => {
+    const f = await fixture(t, provider);
+    const attempt = f.captureMessage();
+    await f.publisher.flush();
+    assert.equal(f.sent[0].summary.recorded_state, "active");
+    // Model a desktop with old Room participants on both sides of this agent.
+    for (let id = 0; id < 14; id++) {
+      f.receipts.pin({ ...f.row(), agentId: `${id < 7 ? "aaa" : "zzz"}-${id}` }, ["msg_1"]);
+    }
+    f.restart();
+    await f.publisher.flush(); // Recovery cursor is now on aaa-0.
+    f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+    f.publisher.changed("agent");
+    f.publisher.changed("agent"); // Native capture/workspace hints coalesce.
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 2, "the very next pass publishes the changed agent, not aaa-1");
+    assert.equal(f.sent[1].summary.recorded_state, "completed_no_reply");
+    assert.equal(f.row().acknowledgedRevision, 2);
+    await f.publisher.flush();
+    assert.equal(f.sent.length, 2, "duplicate hints do not repeat the publication");
+  });
+}
+
+test("live hints preserve recovery progress and a hint arriving during upload", async t => {
+  const f = await fixture(t);
+  const attempt = f.captureMessage();
+  const oldId = "aaa-old-agent";
+  const oldOrigin = { ...f.row(), agentId: oldId, agentKey: "owner/old-agent", agentInstanceId: `daemon:${oldId}` };
+  f.receipts.pin(oldOrigin, ["msg_1"]);
+  const oldRecord = f.receipts.get(oldId, "room", "msg_1")!;
+  f.capture.registerRuntime({ agentId: oldId, executionGenerationId: "old-generation", runtimeGenerationId: "old-runtime",
+    provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
+  const oldAttempt = f.capture.trackMessage({ agentId: oldId, roomId: "room", sourceMessageId: "msg_1",
+    executionGenerationId: "old-generation", workspaceId: "old-workspace", createdAtMs: 100 });
+  f.receipts.stage(oldRecord, { ...f.summary(), attemptId: oldAttempt });
+  f.custody.installHostGrant({ ...f.grant, entryId: oldId, agentKey: oldOrigin.agentKey });
+  f.custody.installWorkerAuthorization({ ...f.worker, entryId: oldId, agentKey: oldOrigin.agentKey,
+    agentSession: { ...f.worker.agentSession!, agent_key: oldOrigin.agentKey, agent_instance_id: oldOrigin.agentInstanceId } });
+  f.options.publish = async input => {
+    f.sent.push(input);
+    if (input.agentKey === "owner/agent" && input.revision === 1) {
+      f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+      f.publisher.changed("agent");
+    }
+    return "acknowledged";
+  };
+  await f.publisher.flush();
+  assert.equal(f.sent[0].agentKey, "owner/agent", "live hint is first");
+  await f.publisher.flush();
+  assert.equal(f.sent[1].agentKey, "owner/old-agent", "recovery is not starved by another live hint");
+  await f.publisher.flush();
+  assert.equal(f.sent[2].summary.recorded_state, "completed_no_reply", "the in-flight hint survives the recovery pass");
+  assert.equal(f.sent[2].agentKey, "owner/agent");
 });
 
 test("a hint timer firing during an upload remains pending until a new flush can run", async t => {
@@ -1121,6 +1309,11 @@ test('a second dispatch never reuses an ambiguous first baseline', async t => {
 test('authority replacement during a workspace read cannot attribute successor edits', async t => {
   const f = await fixture(t);
   f.captureMessage();
+  // Stage ordinary execution evidence explicitly: slow Git capture can allow
+  // the background timer to do this too, before authority is replaced.
+  await f.publisher.flush();
+  const before = f.row().summary;
+  assert.equal(before?.recorded_state, 'active');
   f.options.workspaceLocation = async () => f.location;
   await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
   f.options.workspaceLocation = async () => {
@@ -1128,7 +1321,9 @@ test('authority replacement during a workspace read cannot attribute successor e
     return f.location;
   };
   await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
-  assert.equal(f.row().summary, null);
+  assert.deepEqual(f.row().summary, before, 'replacement cannot add workspace attribution');
+  assert.equal(f.db.prepare('SELECT settled_json FROM room_workspace_captures').get()?.settled_json, null);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM room_workspace_reviews').get()?.count, 0);
 });
 
 test('failed retry invalidation cannot revive a baseline from an earlier invocation', async t => {
@@ -1171,13 +1366,15 @@ test('complete review pages resume after restart without recapturing or bloating
   f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
   await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', 'Large change', baseline);
   await f.publisher.flush();
-  const first = f.sent.at(-1)!.reviewPage!;
+  // The timer may already upload a page while workspace capture yields.
+  const first = f.sent.find(value => value.reviewPage)!.reviewPage!;
   assert.ok(first.total > 1); assert.equal(first.index, 0);
   assert.ok(JSON.stringify(f.sent.at(-1)!.summary).length < 128 * 1024);
   await rm(join(f.location.path, 'app.ts'));
   f.options.workspaceLocation = async () => { throw new Error('Cannot recapture'); };
   f.restart();
-  for (let i = 1; i < first.total; i++) await f.publisher.flush();
+  const uploaded = Number(f.db.prepare('SELECT uploaded_pages FROM room_workspace_reviews').get()!.uploaded_pages);
+  for (let i = uploaded; i < first.total; i++) await f.publisher.flush();
   const pages = f.sent.flatMap(value => value.reviewPage ? [value.reviewPage] : []);
   assert.deepEqual(pages.map(page => page.index), Array.from({ length: first.total }, (_, index) => index));
   const review = decodeWorkspaceReview(pages.map(page => page.data).join(''), first.digest);
@@ -1212,4 +1409,94 @@ test('optional full-review capacity cannot discard a valid compact receipt', asy
   store.settle(key, summary, { version: 1, workspace: full, contribution: full });
   assert.deepEqual(store.settled('agent', 'room', 'msg_1'), summary);
   assert.equal(store.pendingPage('agent', 'room', 'msg_1'), null);
+});
+
+async function settledPeerGroup(f: Awaited<ReturnType<typeof fixture>>, roomId = "room", start = 10) {
+  const inbox = new SupervisedAgentInboxStore(f.path);
+  try {
+    const messages = [start, start + 1].map(n => ({ source_message_id: `msg_${n}`,
+      source_message: { id: `msg_${n}`, source: "agent", sender: `Peer ${n}`, text: `My own argument ${n}.`,
+        agent_identity: { agent_key: `owner/peer${n}`, actor_label: `Peer ${n}` }, thread_root_id: "msg_1" },
+      activation: { decision: "activate", reason: "thread_participant" } }));
+    await inbox.ingestPoll({ agent_id: "agent", room_id: roomId, messages, last_observed_message_id: `msg_${start + 1}` });
+    f.receipts.pin({ agentId: "agent", roomId, apiOrigin: f.grant.apiUrl, agentKey: f.grant.agentKey,
+      agentInstanceId: "daemon:agent", hostId: f.grant.hostId, installationId: f.grant.installationId,
+      sourceSessionId: f.worker.agentSessionId }, messages.map(row => row.source_message_id));
+    const head = (await inbox.claimHead("agent"))!;
+    assert.equal(head.source_message_id, `msg_${start}`);
+    await inbox.checkpointTurnStarted(head.inbox_item_id, `turn-${start}`, { work_attempt_id: "workspace",
+      origin_execution_generation_id: "generation", provider_continuation_id: "conversation" });
+    await inbox.checkpointNormalizedTerminal({ inbox_item_id: head.inbox_item_id, agent_id: "agent", execution_generation_id: "generation",
+      provider_turn_id: `turn-${start}`, outcome: "no_reply", text: null, evidence: "stream",
+      terminal_evidence: { turnId: `turn-${start}`, providerContinuationId: "conversation", outcome: "no_reply", text: null, evidence: "stream" } });
+    await inbox.transition(head.inbox_item_id, "awaiting_result");
+    await inbox.transition(head.inbox_item_id, "acknowledged_no_reply");
+    return (await inbox.getBySourceMessage("agent", roomId, `msg_${start + 1}`))!;
+  } finally { await inbox.close(); }
+}
+const pendingGrouped = (db: DatabaseSync) => db.prepare(`SELECT room_id,source_message_id FROM supervised_agent_inbox i
+  WHERE ${PENDING_PEER_REPORT_SQL} ORDER BY fifo_sequence`).all();
+
+test("grouped report failure survives restart and retries through an authorized successor without fake execution", async t => {
+  const f = await fixture(t);
+  const child = await settledPeerGroup(f);
+  let calls = 0, now = Date.parse("2026-10-01T00:00:00Z");
+  f.options.now = () => now;
+  f.options.reportGroupedNoReply = async input => {
+    calls++;
+    assert.equal(input.sourceMessageId, "msg_11");
+    if (calls === 1) throw new Error("lost successful response");
+    assert.equal(input.bearer, "successor-bearer");
+    return "no_reply";
+  };
+  await f.publisher.flush();
+  assert.equal(calls, 1); assert.equal(pendingGrouped(f.db).length, 1);
+  await f.publisher.flush(); assert.equal(calls, 1, "existing cooldown prevents a retry loop");
+  f.restart();
+  f.custody.installWorkerAuthorization({ ...f.worker, agentSessionId: "successor", bearer: "successor-bearer",
+    agentSession: { ...f.worker.agentSession!, session_id: "successor" } });
+  now += 30_001;
+  await f.publisher.flush();
+  assert.equal(calls, 2); assert.deepEqual(pendingGrouped(f.db), []);
+  assert.equal(f.row(11).revision, 0);
+  assert.equal(f.db.prepare("SELECT 1 FROM execution_message_attempts WHERE source_message_id='msg_11'").get(), undefined);
+  assert.match(String(f.db.prepare("SELECT detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key='peer_batch_report:resolved'").get(child.inbox_item_id)?.detail), /no_reply/);
+});
+
+test("old-room pending grouped reports do not use current-room custody or starve the current Room", async t => {
+  const f = await fixture(t);
+  await settledPeerGroup(f, "old-room", 100);
+  const moving = new SupervisedAgentInboxStore(f.path);
+  try {
+    await moving.commitRoomMoveCursor({ agent_id: "agent", source_room_id: "old-room", destination_room_id: "room", last_observed_message_id: "msg_9" });
+  } finally { await moving.close(); }
+  await settledPeerGroup(f);
+  const reported: string[] = [];
+  f.options.reportGroupedNoReply = async input => { reported.push(`${input.roomId}/${input.sourceMessageId}`); return "replied"; };
+  await f.publisher.flush();
+  assert.deepEqual(reported, ["room/msg_11"]);
+  assert.deepEqual(pendingGrouped(f.db).map(row => `${row.room_id}/${row.source_message_id}`), ["old-room/msg_101"]);
+});
+
+test("ordinary completed work uploads before an awaited grouped receipt and each pass remains bounded", async t => {
+  const f = await fixture(t);
+  await settledPeerGroup(f);
+  await settledPeerGroup(f, "room", 20);
+  const attempt = f.captureMessage(1);
+  f.fact(1, { state: "terminal", turnOutcome: "completed" });
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attempt);
+  const order: string[] = [];
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  let reportEntered!: () => void;
+  const entered = new Promise<void>(resolve => { reportEntered = resolve; });
+  f.options.publish = async () => { order.push("work"); return "acknowledged"; };
+  f.options.reportGroupedNoReply = async () => { order.push("receipt"); reportEntered(); await pending; return "cancelled"; };
+  const flushing = f.publisher.flush();
+  try {
+    await entered;
+    assert.deepEqual(order, ["work", "receipt"], "a slow optional report cannot precede ready ordinary publication");
+    assert.equal(f.row(1).acknowledgedRevision, f.row(1).revision);
+  } finally { release(); await flushing; }
+  assert.equal(pendingGrouped(f.db).length, 1, "only one grouped report was attempted in this pass");
 });

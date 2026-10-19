@@ -47,7 +47,7 @@ test("validateJoinRoomInput rejects foreign absolute URLs", () => {
   assert.equal(validateJoinRoomInput("/in/focus_31").normalized, "focus_31");
 });
 
-test("new room modal starts on chooser and navigates intents", () => {
+test("new room modal starts with a new project and navigates tabs", () => {
   const modal = useDesktopNewRoomModal({
     openRoomSnapshot: () => undefined,
     setRepoStatus: () => undefined,
@@ -56,7 +56,7 @@ test("new room modal starts on chooser and navigates intents", () => {
 
   modal.selectNewRoomEntry();
   assert.equal(modal.newRoomModalOpen.value, true);
-  assert.equal(modal.newRoomStep.value, "chooser");
+  assert.equal(modal.newRoomStep.value, "new_project");
   assert.equal(modal.newRoomStorage.value, "cloud");
   assert.ok(modal.newRoomName.value.length > 0);
 
@@ -64,10 +64,21 @@ test("new room modal starts on chooser and navigates intents", () => {
   assert.equal(modal.newRoomStep.value, "standalone");
 
   modal.backFromSubstep();
-  assert.equal(modal.newRoomStep.value, "chooser");
+  assert.equal(modal.newRoomStep.value, "new_project");
 
   modal.chooseJoinIntent();
   assert.equal(modal.newRoomStep.value, "join");
+});
+
+test("blank room storage choice survives tab changes even when the app defaults to local", () => {
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: () => undefined, setRepoStatus: () => undefined, getDefaultStorageMode: () => "local" });
+  modal.selectNewRoomEntry();
+  modal.chooseStandaloneIntent();
+  assert.equal(modal.newRoomStorage.value, "local");
+  modal.newRoomStorage.value = "cloud";
+  modal.chooseProjectIntent();
+  modal.chooseStandaloneIntent();
+  assert.equal(modal.newRoomStorage.value, "cloud");
 });
 
 test("shared create patches stale snapshot name after successful rename", async () => {
@@ -144,9 +155,9 @@ test("shared create keeps invite code when rename fails and surfaces warning", a
   assert.equal(modal.newRoomFeedbackState.value, "info");
   assert.equal(modal.newRoomBusy.value, false);
 
-  // Success with naming warning is not an error-step retry trap; Back returns to chooser.
+  // Success with naming warning is not an error-step retry trap; Back returns to Project.
   modal.backFromSubstep();
-  assert.equal(modal.newRoomStep.value, "chooser");
+  assert.equal(modal.newRoomStep.value, "new_project");
   assert.equal(modal.newRoomSuccess.value, null);
 });
 
@@ -317,6 +328,89 @@ test("project cancel returns to project step without losing modal", async () => 
   assert.equal(modal.newRoomStep.value, "project");
   assert.equal(modal.newRoomModalOpen.value, true);
   assert.equal(modal.newRoomProjectSelection.value, null);
+  assert.equal(modal.newRoomBusy.value, false);
+  modal.closeNewRoomModal();
+  assert.equal(modal.newRoomModalOpen.value, false);
+});
+
+test("a pending picker can be dismissed and its late reply cannot change a reopened modal", async () => {
+  let resolvePicker!: (value: unknown) => void;
+  let resolveParent!: (value: string | null) => void;
+  stubDesktopBridge({
+    pickRoom: () => new Promise((resolve) => { resolvePicker = resolve; }),
+    pickProjectParent: () => new Promise((resolve) => { resolveParent = resolve; }),
+  });
+  const opened: unknown[] = [];
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: (snapshot) => opened.push(snapshot), setRepoStatus: () => undefined });
+  modal.selectNewRoomEntry();
+  modal.chooseProjectIntent();
+  const oldPicker = modal.openProjectRoomFromModal();
+  assert.equal(modal.newRoomStep.value, "project", "The usable project view stays in place");
+  assert.equal(modal.newRoomCanDismiss.value, true);
+  modal.closeNewRoomModal();
+  assert.equal(modal.newRoomModalOpen.value, false);
+  assert.equal(modal.newRoomBusy.value, false);
+  modal.selectNewRoomEntry();
+  modal.chooseNewProjectIntent();
+  modal.newRoomProjectName.value = "New work";
+  const newPicker = modal.pickNewProjectParent();
+  resolvePicker({ canceled: false, repoPath: "/old", repoStatus: null, source: "local_folder",
+    snapshot: snapshotFixture("old-room", "Old room"), error: null, warning: null });
+  await oldPicker;
+  assert.equal(modal.newRoomStep.value, "new_project");
+  assert.equal(modal.newRoomBusy.value, true, "The old finally block cannot clear a newer request");
+  assert.equal(modal.newRoomProjectSelection.value, null);
+  assert.equal(opened.length, 0);
+  resolveParent("/Users/test/Projects");
+  await newPicker;
+  assert.equal(modal.newRoomProjectParent.value, "/Users/test/Projects");
+  assert.equal(modal.newRoomBusy.value, false);
+});
+
+test("new project parent cancellation preserves inputs and permits retry, creation opens the exact folder", async () => {
+  let picks = 0;
+  const opened: unknown[] = [];
+  const creations: unknown[] = [];
+  stubDesktopBridge({
+    pickProjectParent: async () => ++picks === 1 ? null : "/Users/test/Projects",
+    createProject: async (parent: string, name: string) => {
+      creations.push({ parent, name });
+      return { canceled: false, repoPath: `${parent}/${name}`, repoStatus: null, source: "local_folder",
+        snapshot: snapshotFixture("local-new-work", name), error: null, warning: null };
+    },
+  });
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: (snapshot, options) => opened.push({ snapshot, options }), setRepoStatus: () => undefined });
+  modal.selectNewRoomEntry();
+  modal.chooseNewProjectIntent();
+  modal.newRoomProjectName.value = "New work";
+  modal.newRoomProjectParent.value = "/previous";
+  await modal.pickNewProjectParent();
+  assert.equal(modal.newRoomProjectName.value, "New work");
+  assert.equal(modal.newRoomProjectParent.value, "/previous");
+  assert.equal(modal.newRoomStep.value, "new_project");
+  assert.equal(modal.newRoomBusy.value, false);
+  await modal.pickNewProjectParent();
+  await modal.createProjectRoomFromModal();
+  assert.deepEqual(creations, [{ parent: "/Users/test/Projects", name: "New work" }]);
+  assert.equal(modal.newRoomModalOpen.value, false);
+  assert.equal((opened[0] as { options: { rootPath: string } }).options.rootPath, "/Users/test/Projects/New work");
+});
+
+test("a rejected new project keeps both inputs and allows correction", async () => {
+  stubDesktopBridge({ createProject: async () => ({ error: "A file or folder with that name already exists.", snapshot: null }) });
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: () => assert.fail("Must not navigate on failure"), setRepoStatus: () => undefined });
+  modal.selectNewRoomEntry();
+  modal.chooseNewProjectIntent();
+  await modal.createProjectRoomFromModal();
+  assert.match(modal.newRoomProjectCreationError.value || "", /name and choose/);
+  modal.newRoomProjectName.value = "Keep me";
+  modal.newRoomProjectParent.value = "/Users/test/Projects";
+  await modal.createProjectRoomFromModal();
+  assert.match(modal.newRoomProjectCreationError.value || "", /already exists/);
+  assert.equal(modal.newRoomProjectName.value, "Keep me");
+  assert.equal(modal.newRoomProjectParent.value, "/Users/test/Projects");
+  assert.equal(modal.newRoomBusy.value, false);
+  assert.equal(modal.newRoomStep.value, "new_project");
 });
 
 test("a typed project path opens the same preview as the folder picker", async () => {
@@ -353,6 +447,23 @@ test("a typed project path opens the same preview as the folder picker", async (
   assert.equal(modal.newRoomStep.value, "project");
   assert.equal(modal.newRoomProjectSelection.value?.folderLabel, "project");
   assert.equal(modal.newRoomProjectSelection.value?.sourceLabel, "Git remote");
+
+  // Switching room types or project modes must not discard a selected folder or drafts.
+  const selection = modal.newRoomProjectSelection.value;
+  modal.chooseNewProjectIntent();
+  modal.newRoomProjectName.value = "Draft project";
+  modal.newRoomProjectParent.value = "/Users/test/Projects";
+  modal.chooseJoinIntent();
+  modal.newRoomJoinCode.value = "ABCD-1234";
+  modal.chooseStandaloneIntent();
+  modal.newRoomName.value = "Planning";
+  modal.chooseProjectIntent();
+  assert.equal(modal.newRoomProjectSelection.value, selection);
+  assert.equal(modal.newRoomProjectPath.value, "  ~/code/project ");
+  assert.equal(modal.newRoomProjectName.value, "Draft project");
+  assert.equal(modal.newRoomProjectParent.value, "/Users/test/Projects");
+  assert.equal(modal.newRoomJoinCode.value, "ABCD-1234");
+  assert.equal(modal.newRoomName.value, "Planning");
 
   // A recent folder fills the field with its path and opens it the same way.
   await modal.openProjectRoomFromPath("/Users/test/code/other");
@@ -440,6 +551,8 @@ function stubDesktopBridge(input: {
   createLocalRoom?: (input?: { displayName?: string | null }) => Promise<unknown>;
   getSnapshot?: (code: string) => Promise<DesktopRoomSnapshot>;
   pickRoom?: () => Promise<unknown>;
+  pickProjectParent?: () => Promise<string | null>;
+  createProject?: (parent: string, name: string) => Promise<unknown>;
   openRoom?: (path: string, options?: unknown) => Promise<unknown>;
   rename?: (roomIdentifier: string, displayName: string) => Promise<unknown>;
 }): void {
@@ -461,6 +574,8 @@ function stubDesktopBridge(input: {
   desktop.repos = {
     ...((desktop.repos as object) || {}),
     pickRoom: input.pickRoom,
+    pickProjectParent: input.pickProjectParent,
+    createProject: input.createProject,
     openRoom: input.openRoom,
   };
   root.letagentsDesktop = desktop;

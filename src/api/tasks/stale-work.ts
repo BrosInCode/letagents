@@ -1,65 +1,22 @@
-import type { Message, RoomAgentPresence, StaleTaskPromptMute, Task } from "../db.js";
-import { getAgentPrimaryLabel } from "../../shared/agent-identity.js";
+import type { StaleTaskPromptMute, Task } from "../db.js";
 
+/**
+ * Stale-task state shown on boards. The automatic "[status] Stale work
+ * detected" room prompts that used to ask an idle agent to pick up unassigned,
+ * in-review, or blocked tasks were removed: agents act on work assigned to
+ * them and on messages addressed to them, so the server no longer nudges
+ * them toward open tasks. Mutes stay honored for the state badges.
+ */
 export type StaleTaskReason =
   | "accepted_unclaimed"
   | "in_review_no_follow_up"
   | "blocked_no_follow_up";
-
-export interface StaleTaskAutoPrompt {
-  task: Task;
-  away_agent: RoomAgentPresence;
-  reason: StaleTaskReason;
-  stale_for_ms: number;
-  prompt_text: string;
-  cache_key: string;
-}
 
 export const STALE_TASK_THRESHOLD_MS: Record<StaleTaskReason, number> = {
   accepted_unclaimed: 15 * 60 * 1000,
   in_review_no_follow_up: 30 * 60 * 1000,
   blocked_no_follow_up: 30 * 60 * 1000,
 };
-
-export const STALE_WORK_PROMPT_COOLDOWN_MS = 15 * 60 * 1000;
-
-export interface StaleWorkPromptEmitterDeps {
-  getOpenTasks(
-    projectId: string,
-    options: { limit: number }
-  ): Promise<{ tasks: Task[] }>;
-  getRoomAgentPresence(
-    projectId: string,
-    options: { limit: number; excludeSupervisorManaged?: boolean }
-  ): Promise<RoomAgentPresence[]>;
-  getStaleTaskPromptMutes(
-    projectId: string,
-    options: { taskIds: string[] }
-  ): Promise<StaleTaskPromptMute[]>;
-  emitTaskAnchoredMessage(
-    projectId: string,
-    sender: string,
-    text: string,
-    task: { id: string; title: string },
-    options: {
-      agent_prompt_kind: "auto";
-      parent_activity: string;
-      parent_event_kind: "all_activity";
-    }
-  ): Promise<Message>;
-  now?(): number;
-}
-
-function formatStaleDuration(ms: number): string {
-  const totalMinutes = Math.max(1, Math.floor(ms / 60_000));
-  if (totalMinutes < 60) {
-    return `${totalMinutes}m`;
-  }
-
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
-}
 
 function getStaleTaskReason(task: Task, now: number): { reason: StaleTaskReason; stale_for_ms: number } | null {
   const updatedAt = Date.parse(task.updated_at);
@@ -115,157 +72,5 @@ export function getTaskStalePromptState(input: {
     muted,
     muted_by: muted ? input.mute?.muted_by ?? null : null,
     muted_at: muted ? input.mute?.updated_at ?? input.mute?.created_at ?? null : null,
-  };
-}
-
-function getReasonPriority(reason: StaleTaskReason): number {
-  switch (reason) {
-    case "accepted_unclaimed":
-      return 0;
-    case "in_review_no_follow_up":
-      return 1;
-    case "blocked_no_follow_up":
-      return 2;
-  }
-}
-
-function buildPromptText(
-  task: Task,
-  awayAgent: RoomAgentPresence,
-  reason: StaleTaskReason,
-  staleForMs: number
-): string {
-  const awayAgentLabel = getAgentPrimaryLabel(awayAgent.actor_label);
-  const staleFor = formatStaleDuration(staleForMs);
-
-  switch (reason) {
-    case "accepted_unclaimed":
-      return `[status] Stale work detected on ${task.id}: ${task.title}. It has been accepted and unclaimed for ${staleFor}. ${awayAgentLabel}, please pick it up if you're available.`;
-    case "in_review_no_follow_up":
-      return `[status] Stale review detected on ${task.id}: ${task.title}. It has been in review for ${staleFor} with no follow-up. ${awayAgentLabel}, please review it or move it forward if you're available.`;
-    case "blocked_no_follow_up":
-      return `[status] Stale blocked task detected on ${task.id}: ${task.title}. It has been blocked for ${staleFor} with no follow-up. ${awayAgentLabel}, please help unblock it if you're available.`;
-  }
-}
-
-function buildPromptCacheKey(task: Task, reason: StaleTaskReason): string {
-  return JSON.stringify([task.id, reason, task.updated_at]);
-}
-
-export function selectStaleTaskAutoPrompt(input: {
-  tasks: Task[];
-  presence: RoomAgentPresence[];
-  stalePromptMutes?: readonly StaleTaskPromptMute[];
-  now?: number;
-}): StaleTaskAutoPrompt | null {
-  const awayAgent = input.presence.find(
-    (entry) => entry.activity_state === "away"
-      && entry.status === "idle"
-  );
-  if (!awayAgent) {
-    return null;
-  }
-
-  const now = input.now ?? Date.now();
-  const mutedByTaskId = new Map(
-    (input.stalePromptMutes ?? []).map((mute) => [mute.task_id, mute] as const)
-  );
-  const staleTasks = input.tasks
-    .map((task) => {
-      const stale = getStaleTaskReason(task, now);
-      if (!stale || isStaleTaskPromptMuted(task, mutedByTaskId.get(task.id))) {
-        return null;
-      }
-      return { task, ...stale };
-    })
-    .filter((value): value is { task: Task; reason: StaleTaskReason; stale_for_ms: number } => Boolean(value))
-    .sort((left, right) => {
-      const priorityDelta = getReasonPriority(left.reason) - getReasonPriority(right.reason);
-      if (priorityDelta !== 0) {
-        return priorityDelta;
-      }
-
-      return right.stale_for_ms - left.stale_for_ms;
-    });
-
-  const selected = staleTasks[0];
-  if (!selected) {
-    return null;
-  }
-
-  return {
-    ...selected,
-    away_agent: awayAgent,
-    prompt_text: buildPromptText(selected.task, awayAgent, selected.reason, selected.stale_for_ms),
-    cache_key: buildPromptCacheKey(selected.task, selected.reason),
-  };
-}
-
-export function createStaleWorkPromptEmitter(deps: StaleWorkPromptEmitterDeps) {
-  const staleWorkPromptTimestamps = new Map<string, number>();
-
-  function pruneStaleWorkPromptTimestamps(now: number): void {
-    for (const [key, timestamp] of staleWorkPromptTimestamps) {
-      if (now - timestamp > STALE_WORK_PROMPT_COOLDOWN_MS) {
-        staleWorkPromptTimestamps.delete(key);
-      }
-    }
-  }
-
-  async function maybeEmitStaleWorkPrompt(projectId: string): Promise<Message | null> {
-    const [taskResult, presence] = await Promise.all([
-      deps.getOpenTasks(projectId, { limit: 200 }),
-      deps.getRoomAgentPresence(projectId, {
-        limit: 50,
-        excludeSupervisorManaged: true,
-      }),
-    ]);
-    const hasAwayIdleAgent = presence.some(
-      (entry) => entry.activity_state === "away" && entry.status === "idle"
-    );
-    if (taskResult.tasks.length === 0 || !hasAwayIdleAgent) {
-      return null;
-    }
-
-    const stalePromptMutes = await deps.getStaleTaskPromptMutes(projectId, {
-      taskIds: taskResult.tasks.map((task) => task.id),
-    });
-
-    const now = deps.now?.() ?? Date.now();
-    const prompt = selectStaleTaskAutoPrompt({
-      tasks: taskResult.tasks,
-      presence,
-      stalePromptMutes,
-      now,
-    });
-    if (!prompt) {
-      return null;
-    }
-
-    pruneStaleWorkPromptTimestamps(now);
-
-    const cacheKey = `${projectId}:${prompt.cache_key}`;
-    const lastPromptAt = staleWorkPromptTimestamps.get(cacheKey);
-    if (lastPromptAt && now - lastPromptAt < STALE_WORK_PROMPT_COOLDOWN_MS) {
-      return null;
-    }
-
-    const message = await deps.emitTaskAnchoredMessage(
-      projectId,
-      "letagents",
-      prompt.prompt_text,
-      prompt.task,
-      {
-        agent_prompt_kind: "auto",
-        parent_activity: "Stale-work prompt",
-        parent_event_kind: "all_activity",
-      }
-    );
-    staleWorkPromptTimestamps.set(cacheKey, now);
-    return message;
-  }
-
-  return {
-    maybeEmitStaleWorkPrompt,
   };
 }

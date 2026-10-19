@@ -146,11 +146,11 @@ test("send-time routing never creates managed-agent recipients for GitHub event 
   );
   assert.match(
     create,
-    /const activeSessions = !untrustedExternalEvent && \(needsCompletePopulation \|\| candidateCondition\)/,
+    /const activeSessions = !untrustedExternalEvent && !addressedTo && \(needsCompletePopulation \|\| candidateCondition\)/,
   );
   assert.match(
     create,
-    /const taskOwnerFollowUp = !untrustedExternalEvent\s+&& isTaskOwnerFollowUpMessageText/,
+    /const taskOwnerFollowUp = !untrustedExternalEvent && !addressedTo\s+&& isTaskOwnerFollowUpMessageText/,
   );
 });
 
@@ -272,8 +272,10 @@ test("the web read reporter and the reads route agree on one wire contract", () 
 
 test("read evidence is room-scoped: switching rooms retires the old reporter", () => {
   const client = routeSource("../../web/src/components/room/MessageList.vue");
-  assert.match(client, /watch\(\(\) => props\.roomIdentifier,[\s\S]{0,600}?createReadEvidenceReporter\(\{ roomIdentifier: nextRoomIdentifier/);
-  assert.match(client, /retiring\.dispose\(\)/);
+  const roomChange = client.match(/watch\(\(\) => props\.roomIdentifier, \(nextRoomIdentifier[^\n]*=> \{([\s\S]*?)^\}\)/m)?.[1];
+  assert.ok(roomChange, "the room-change watcher must exist");
+  assert.match(roomChange, /readReporter = createReadEvidenceReporter\(\{ roomIdentifier: nextRoomIdentifier/);
+  assert.match(roomChange, /retiring\.dispose\(\)/);
 });
 
 test("receipt transitions follow the lifecycle graph and unavailable has no self-reported entry", async () => {
@@ -285,6 +287,8 @@ test("receipt transitions follow the lifecycle graph and unavailable has no self
   assert.equal(canTransitionReceiptState("cancelled", "responding"), false, "cancelled is terminal");
   assert.equal(canTransitionReceiptState("no_reply", "replied"), true, "a late reply upgrades no_reply");
   assert.equal(canTransitionReceiptState("unavailable", "replied"), true, "a successor may revive unavailable");
+  assert.equal(canTransitionReceiptState("unavailable", "no_reply"), true, "a successor may recover a completed silent turn");
+  assert.equal(canTransitionReceiptState("unavailable", "queued"), false, "recovery does not restart queued work");
   assert.equal(canTransitionReceiptState("queued", "unavailable"), false, "unavailable is server-owned");
 });
 
