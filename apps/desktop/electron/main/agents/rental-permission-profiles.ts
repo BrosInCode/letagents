@@ -19,6 +19,10 @@ const RENTAL_SAFE_PROFILE_IDS: Partial<
   // spawn attestation requires the empty tool list and the adapter refuses to
   // start unless Claude itself reports no tool outside LetAgents'.
   "claude-code": ["read_only"],
+  // A guest Codex likewise runs Read-only with its shell, image, web and app
+  // tools switched off (codex-guest-lock.ts); the launch probes this exact
+  // Codex's tool list and refuses to start on anything else.
+  codex: ["read_only"],
 };
 
 export function listRentalSafePermissionProfiles(
@@ -26,7 +30,11 @@ export function listRentalSafePermissionProfiles(
 ): DesktopManagedAgentPermissionProfile[] {
   const allowed = new Set(RENTAL_SAFE_PROFILE_IDS[providerId] ?? []);
   return listManagedAgentPermissionProfiles(providerId)
-    .filter((profile) => profile.status === "available" && allowed.has(profile.id));
+    // Codex Read-only is listed as gated here only because it needs daemon
+    // delivery, and a guest is always daemon-delivered (the daemon's own
+    // fence admits it). It stays out of every other list.
+    .filter((profile) => (profile.status === "available" || (providerId === "codex" && profile.id === "read_only"))
+      && allowed.has(profile.id));
 }
 
 export function isRentalSafePermissionProfile(

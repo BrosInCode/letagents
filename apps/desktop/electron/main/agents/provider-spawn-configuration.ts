@@ -32,6 +32,9 @@ export function attestProviderSpawnPolicy(
   const policy = plainPolicy(request.launchPolicy, provider);
   let ownerSetupPolicy: Record<string, unknown> | null = null;
   if (provider === "codex") {
+    if (request.supervisorEntryId?.startsWith("supervised_rental_") && profile !== "read_only") {
+      throw new Error("codex launch refused: a guest agent runs Read-only with no local tools.");
+    }
     const authority = profile === "auto_review"
       ? {
         approvalPolicy: "on-request",

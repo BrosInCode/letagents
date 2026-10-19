@@ -250,7 +250,9 @@ export function assertSupervisedRentalPermissionProfileAvailable(
   const requested = requestedId?.trim() || null;
   const verified = (provider === "cursor" && requested === "sandboxed_write")
     // Claude as a guest: Read-only with no built-in tools (see rental-permission-profiles.ts).
-    || (provider === "claude-code" && requested === "read_only");
+    || (provider === "claude-code" && requested === "read_only")
+    // Codex as a guest: Read-only with its local tools switched off (codex-guest-lock.ts).
+    || (provider === "codex" && requested === "read_only");
   if (!verified) {
     throw new Error(
       "Rented agents require an explicit verified workspace-rooted permission profile.",

@@ -25,7 +25,8 @@ test("a given agent is always a guest entry, so every rental safeguard applies",
   assert.equal(giftEntryId("ask_1"), giftEntryId("ask_1"));
   assert.equal(giftPermissionProfile("cursor"), "sandboxed_write");
   assert.equal(giftPermissionProfile("claude-code"), "read_only");
-  assert.equal(giftPermissionProfile("codex"), null);
+  assert.equal(giftPermissionProfile("codex"), "read_only");
+  assert.equal(giftPermissionProfile("open-model"), null);
   assert.equal(giftPermissionProfile("unknown"), null);
 });
 
@@ -91,7 +92,7 @@ test("the pre-check refuses to give more than is left", async () => {
 
 test("providers without a verified folder lock can't be given", async () => {
   const { coordinator, calls } = fakes();
-  await assert.rejects(coordinator.give({ ...give, providerId: "codex" }), /can't be given safely yet/);
+  await assert.rejects(coordinator.give({ ...give, providerId: "open-model" }), /can't be given safely yet/);
   assert.deepEqual(calls, []);
 });
 
@@ -107,4 +108,12 @@ test("a guest Claude launches with no built-in tools and refuses to run with any
   assert.equal(guestHasOnlyRoomTools({ tools: ["mcp__letagents__read_messages", "mcp__letagents__ask_read_file"] } as any), true);
   assert.equal(guestHasOnlyRoomTools({ tools: ["mcp__letagents__read_messages", "Read"] } as any), false);
   assert.equal(guestHasOnlyRoomTools({} as any), false);
+});
+
+test("a guest Codex launch must be Read-only", async () => {
+  const { attestProviderSpawnPolicy } = await import("../main/agents/provider-spawn-configuration.js");
+  const request = (permissionProfileId: string, launchPolicy: unknown) => ({ launchPolicy, permissionProfileId,
+    supervisorEntryId: giftEntryId("ask_1"), configurationRevision: 1, deliveryMode: "daemon_inbox" }) as any;
+  assert.throws(() => attestProviderSpawnPolicy("codex", request("full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } })), /guest agent runs Read-only/);
+  assert.equal(attestProviderSpawnPolicy("codex", request("read_only", { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } })).approvalPolicy, "never");
 });

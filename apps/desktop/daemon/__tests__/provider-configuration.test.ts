@@ -412,8 +412,9 @@ test("a supervised Codex agent may be set to Read-only, and nothing else about C
   assert.throws(() => deriveProviderConfigurationSnapshot({
     provider: "open-model", model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 1,
   }, {}), /Read-only is unavailable for supervised open-model/);
-  // A rented agent is never a Codex agent, whatever level it names.
-  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "read_only"), /verified workspace-rooted permission profile/);
+  // A guest Codex is admitted only Read-only, where its launch switches off every local tool.
+  assert.equal(assertSupervisedRentalPermissionProfileAvailable("codex", "read_only"), "read_only");
+  assert.throws(() => assertSupervisedRentalPermissionProfileAvailable("codex", "full_access"), /verified workspace-rooted permission profile/);
 });
 
 test("rental admission rejects trusted-local profiles at the daemon launch boundary", () => {

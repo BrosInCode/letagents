@@ -495,7 +495,7 @@ test("unsafe or implicit native profiles are rejected before provider acceptance
       providerId: "codex",
       permissionProfileId: "full_access",
     }),
-    /verified workspace-rooted rental profile/,
+    /rental-safe permission profile for codex/,
   );
   await assert.rejects(
     coordinator.acceptAndLaunch("rsess_launch", {

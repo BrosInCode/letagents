@@ -60,11 +60,10 @@ Numbers: claim 15 min, offline before notice 5 min (idle agents long-poll for up
 - Giver: `letagents://ask/…` and web links, the giving screen (requested model and amount picked, custom amount, "Can't right now"), one-tap launch as a guest agent, pre-check of the remaining limit, the amount counter across resets, ending on amount used or real limit.
 - Web: `/ask/<token>` page with Open in LetAgents and the download.
 - **Code access (D13):** LetAgents keeps a copy of the room's repo (GitHub App token when connected). The given agent gets `ask_list_files`, `ask_read_file`, `ask_search`, `ask_propose_change`; every read passes the secret firewall and is recorded for "Files seen". The asker reviews proposals and approves them into one stacked PR. No commands run on LetAgents' servers.
-- **Givable providers:** Cursor (its verified sandbox) and **Claude Code** (no built-in tools at all, only LetAgents tools; checked at spawn and against Claude's own startup report).
+- **Givable providers:** Cursor (its verified sandbox), **Claude Code** (no built-in tools at all, only LetAgents tools; checked at spawn and against Claude's own startup report) and **Codex** (Read-only, with shell, image, web, app and owner MCP tools switched off; each launch first asks this exact Codex, with the agent's model, which tools it would offer, via a local fake model server, and refuses on anything else. Confirmed with a real turn on a code-mode model: it could not read a file in the giver's home).
 
 **Not built yet:**
-1. **Codex as a giver.** Commands can be locked with Codex's own sandbox, but Codex also has in-process tools (such as viewing images) that read files outside any sandbox. Turning them off needs config keys confirmed against live Codex turns. Until then Codex is refused everywhere and shows "Can't be given yet".
-2. **Ask for more (D38), Ask again (F6), goodbye summary (F8), first-time explainers (F11), the "Asked and given" inbox list (F5).**
-3. **The 30-minute no-usage pause** and the giver's "Sign in to Claude again" notice.
-4. **Running commands** (tests, builds) for the given agent: a separate decision, since they would run the asker's code on LetAgents' servers.
-5. A full manual run in the app with two accounts.
+1. **Ask for more (D38), Ask again (F6), goodbye summary (F8), first-time explainers (F11), the "Asked and given" inbox list (F5).**
+2. **The 30-minute no-usage pause** and the giver's "Sign in to Claude again" notice.
+3. **Running commands** (tests, builds) for the given agent: a separate decision, since they would run the asker's code on LetAgents' servers.
+4. A full manual run in the app with two accounts.
