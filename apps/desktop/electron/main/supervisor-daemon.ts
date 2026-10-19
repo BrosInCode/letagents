@@ -53,6 +53,8 @@ import { appendDaemonLifecycleEvent } from "./supervisor-daemon/lifecycle-log.js
 import type { DesktopDaemonLifecycleEvent } from "./supervisor-daemon/lifecycle-log.js";
 import { supervisorDaemonSpawnEnvironment, supervisorCompatibilityFingerprint, supervisorRuntimeEnvironmentFingerprint } from "./supervisor-daemon/spawn-environment.js";
 export { supervisorDaemonSpawnEnvironment, supervisorCompatibilityFingerprint, supervisorRuntimeEnvironmentFingerprint } from "./supervisor-daemon/spawn-environment.js";
+import { booleanField, record, nonEmptyString, validTurnControlActionId, nullableString, nullableNonEmptyString, enumValue } from "./supervisor-daemon/wire-values.js";
+import type { UnknownRecord } from "./supervisor-daemon/wire-values.js";
 
 const STATE_WATCH_RETRY_BASE_MS = 1_000;
 const STATE_WATCH_RETRY_MAX_MS = 30_000;
@@ -2065,10 +2067,6 @@ function mapRoomMove(value: Record<string, unknown>, entryId: string, operationI
     remoteRoomId: nullable("remote_room_id"), destinationCursor: nullable("destination_cursor"), sourceCredentialsRevoked: value.source_credentials_revoked as boolean, error: nullable("error"), createdAt: nonEmpty("created_at"), updatedAt: nonEmpty("updated_at") };
 }
 
-function booleanField(value: unknown, key: string): boolean {
-  return value !== null && typeof value === "object" && !Array.isArray(value) && Reflect.get(value, key) === true;
-}
-
 // Host-private, structural evidence only. Reject malformed optional evidence
 // independently so delivery receipts remain usable when capture is unavailable.
 const recordedIdentity = z.string().min(1).max(512).regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/);
@@ -2276,34 +2274,6 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
       updatedAt: entry.turn_control.updated_at,
     } : null,
   };
-}
-
-type UnknownRecord = Record<string, unknown>;
-
-function record(value: unknown): UnknownRecord | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : null;
-}
-
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
-}
-
-function validTurnControlActionId(value: unknown): value is string {
-  return typeof value === "string"
-    && Buffer.byteLength(value, "utf8") <= 256
-    && /^[A-Za-z0-9._:-]+$/.test(value);
-}
-
-function nullableString(value: unknown): string | null | undefined {
-  return value === null || typeof value === "string" ? value : undefined;
-}
-
-function nullableNonEmptyString(value: unknown): string | null | undefined {
-  return value === null || (typeof value === "string" && value.trim().length > 0) ? value : undefined;
-}
-
-function enumValue<T extends string>(value: unknown, allowed: readonly T[]): T | null {
-  return typeof value === "string" && (allowed as readonly string[]).includes(value) ? value as T : null;
 }
 
 function projectRoomAgentState(value: unknown): DesktopSupervisorManifestEntry["roomAgentState"] {
