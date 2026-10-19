@@ -320,6 +320,7 @@ async function attachClientRender(component: object, path: string): Promise<void
 
 let vite: ViteDevServer;
 let RoomMessageViewport: object;
+let roomUnread: { visit: { value: { room: string; dividerId: string | null } } };
 const savedGlobals = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver, HTMLElement: globalThis.HTMLElement };
 const resizeCallbacks: Array<() => void> = [];
 
@@ -338,6 +339,8 @@ before(async () => {
   });
   vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   RoomMessageViewport = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue")).default;
+  // The same module instance the viewport reads its unread divider from.
+  ({ roomUnread } = await vite.ssrLoadModule("/renderer/src/composables/roomUnread.ts"));
   const chatMessage = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue")).default;
   // These tests count mounted rows; the message body itself is covered elsewhere.
   Object.assign(chatMessage, {
@@ -557,6 +560,45 @@ test("an open thread root far from the window stays mounted, hidden, as the same
     await flush();
     assert.equal(view.article("msg_42"), root);
     assert.ok(!hiddenClass(root!), "a jump back shows the same row again");
+  } finally { view.app.unmount(); }
+});
+
+test("the New messages separator of a hidden thread root is hidden with it", async () => {
+  const view = await mountViewport(2000);
+  const separators = () => descendants(view.list).filter(node => String(node.props.class ?? "") === "room-explicit-unread").length;
+  try {
+    roomUnread.visit.value = { ...roomUnread.visit.value, room: "room-a", dividerId: "msg_42" };
+    view.props.activeThreadParentId = "msg_42";
+    await flush();
+    view.viewport().scrollToMessage("msg_42");
+    await flush();
+    assert.equal(separators(), 1, "the separator shows above the visible root");
+    await view.scroll(view.list.scrollTop as number);
+    const pill = descendants(view.root).find(node => node.props["data-testid"] === "desktop-new-messages-pill")!;
+    (pill.props.onClick as () => void)();
+    await flush();
+    assert.ok(hiddenClass(view.article("msg_42")!));
+    assert.equal(separators(), 0, "no lone separator while the root is hidden");
+  } finally {
+    roomUnread.visit.value = { ...roomUnread.visit.value, room: "", dividerId: null };
+    view.app.unmount();
+  }
+});
+
+test("a drag into the gap during a smooth jump is acted on when the jump ends", async () => {
+  const view = await mountViewport(2000);
+  try {
+    view.viewport().scrollToMessage("msg_281"); // smooth: its scroll events are ignored
+    await flush();
+    assert.ok(view.gap());
+    view.list.scrollTop = view.list.scrollHeight as number;
+    (view.list.props.onScroll as () => void)();
+    await flush();
+    assert.ok(view.gap(), "still moving to the target: the drag waits");
+    (view.list.props.onScrollend as () => void)();
+    await flush();
+    assert.ok(!view.gap(), "the end of the jump went to the newest messages");
+    assert.ok(view.atBottom());
   } finally { view.app.unmount(); }
 });
 

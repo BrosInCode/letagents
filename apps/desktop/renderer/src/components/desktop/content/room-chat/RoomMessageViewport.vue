@@ -27,7 +27,7 @@
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
         <RoomGitHubUpdates v-else lazy-history :row-limit="githubGroupRowLimit" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
         <template #default="{ message, history }">
-        <div v-if="message.id === unreadTimeline.dividerId.value" class="room-explicit-unread" role="separator">New messages</div>
+        <div v-if="message.id === unreadTimeline.dividerId.value && !hiddenPinnedIds.has(message.id)" class="room-explicit-unread" role="separator">New messages</div>
         <DesktopChatMessage
           :class="{ 'room-window-pinned-hidden': hiddenPinnedIds.has(message.id) }"
           :message="message"
@@ -1232,6 +1232,9 @@ function beginMessageReveal(): void {
 function finishMessageReveal(): void {
   cancelMessageReveal();
   updateScrollState();
+  // Scroll events during the jump were ignored; act on where it ended.
+  const element = messagesElement.value;
+  if (element && props.active && !windowReachesLatest.value) growWindowDownwardWhenNear(element);
 }
 
 function updateScrollState(): void {
